@@ -21,5 +21,23 @@ services:
       timeout: 3s
       retries: 10
 
+  # Бот (Telegram long-poll + планировщик). Запуск всего: `docker compose up --build`.
+  # Секреты — из .env (env_file), в образ НЕ запекаются. Миграции до старта:
+  #   docker compose run --rm bot alembic upgrade head
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aimash-bot
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # ВНУТРИ сети compose — имя сервиса + порт 5432 (НЕ хостовый 5433!).
+      DATABASE_URL: postgresql+asyncpg://aimash:aimash@postgres:5432/aimash
+    restart: unless-stopped
+
 volumes:
   aimash_pgdata:

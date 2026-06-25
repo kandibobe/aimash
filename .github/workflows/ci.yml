@@ -28,8 +28,16 @@ jobs:
       - name: Ruff (format check)
         run: ruff format --check .
 
-      - name: Pytest (офлайн safety-тесты)
-        run: pytest -q
+      # Типы — advisory (continue-on-error): в bot/main.py есть долг типизации aiogram
+      # (cq.message: Message|InaccessibleMessage|None). Делает долг видимым, но не блокирует
+      # CI и коммиты параллельного процесса. Ужесточить (убрать continue-on-error) — после
+      # чистки типов в bot/main.py. Список пакетов зеркалит Makefile (без scheduler/keywords).
+      - name: Mypy (типы, advisory)
+        continue-on-error: true
+        run: mypy core ads agent confirm bot db
+
+      - name: Pytest + coverage (офлайн safety-тесты)
+        run: pytest -q --cov=. --cov-report=term-missing --cov-report=xml
 
   secret-scan:
     runs-on: ubuntu-latest

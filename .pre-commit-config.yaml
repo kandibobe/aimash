@@ -27,3 +27,16 @@ repos:
       - id: check-yaml
       - id: check-added-large-files
       - id: detect-private-key
+
+  # Типы — manual-стадия (не блокирует обычный коммит из-за долга типов в bot/main.py).
+  # Запуск: `pre-commit run --hook-stage manual mypy` или `make typecheck`.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (manual)
+        entry: mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [manual]
+        args: [core, ads, agent, confirm, bot, db]
