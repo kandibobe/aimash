@@ -11,6 +11,7 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from core.config import settings
+from core.resilience import call_llm  # таймаут+ретрай на rate-limit/timeout OpenRouter
 
 # Назначение → конкретная модель (сменяемо через .env)
 ROLE_MODELS = {
@@ -57,5 +58,6 @@ async def chat(
         kwargs["tool_choice"] = "auto"
     if temperature is not None:
         kwargs["temperature"] = temperature
-    resp = await _client().chat.completions.create(**kwargs)
+    # call_llm: zero-arg фабрика — tenacity создаёт свежую корутину на каждую попытку.
+    resp = await call_llm(lambda: _client().chat.completions.create(**kwargs))
     return resp.choices[0].message

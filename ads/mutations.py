@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Protocol
 
 from google.ads.googleads.errors import GoogleAdsException
@@ -24,6 +23,7 @@ from adcopy.validate import (
 from adcopy.validate import validate as _rsa_validate
 from ads.client import ensure_allowed
 from ads.validation import assert_keyword_ok, normalize_keywords
+from core.resilience import run_ads_call  # таймаут+ретрай на самом SDK-вызове (не на гейтах)
 
 # Длину/форму ключевых слов считает КОД (golden rule #4) — единый источник в ads.validation.
 # Алиас сохранён для обратной совместимости (тесты/вызовы mutations._assert_keyword_ok).
@@ -94,7 +94,7 @@ async def apply_update_budget(
 
     # Реальный вызов SDK (google-ads синхронный → в потоке). _apply_budget_via_sdk вынесен
     # отдельно, чтобы юнит-тест мог подменить его (офлайн, без живого аккаунта).
-    result = await asyncio.to_thread(
+    result = await run_ads_call(
         _apply_budget_via_sdk, ads_client, customer_id, campaign_id, new_budget_micros
     )
     await confirm_store.finalize(confirmation_id, result=result)
@@ -113,7 +113,7 @@ async def apply_pause_campaign(
     ensure_allowed(customer_id)
     await _require_confirmation(confirm_store, confirmation_id, "pause_campaign")
     status = ads_client.enums.CampaignStatusEnum.PAUSED
-    result = await asyncio.to_thread(
+    result = await run_ads_call(
         _set_campaign_status_via_sdk, ads_client, customer_id, campaign_id, status
     )
     await confirm_store.finalize(confirmation_id, result=result)
@@ -132,7 +132,7 @@ async def apply_resume_campaign(
     ensure_allowed(customer_id)
     await _require_confirmation(confirm_store, confirmation_id, "resume_campaign")
     status = ads_client.enums.CampaignStatusEnum.ENABLED
-    result = await asyncio.to_thread(
+    result = await run_ads_call(
         _set_campaign_status_via_sdk, ads_client, customer_id, campaign_id, status
     )
     await confirm_store.finalize(confirmation_id, result=result)
@@ -167,7 +167,7 @@ async def apply_update_bid(
     if not proposal.user_initiated:
         raise PermissionError("изменение ставки должно быть прямой командой пользователя")
 
-    result = await asyncio.to_thread(_apply_bid_via_sdk, ads_client, customer_id, campaign_id, bids)
+    result = await run_ads_call(_apply_bid_via_sdk, ads_client, customer_id, campaign_id, bids)
     await confirm_store.finalize(confirmation_id, result=result)
     return result
 
@@ -189,7 +189,7 @@ async def apply_add_keywords(
         raise ValueError("нет групп объявлений для добавления ключевых слов")
     clean = normalize_keywords(keywords)
     await _require_confirmation(confirm_store, confirmation_id, "add_keywords")
-    result = await asyncio.to_thread(
+    result = await run_ads_call(
         _add_keywords_via_sdk, ads_client, customer_id, ad_group_ids, clean, match_type
     )
     await confirm_store.finalize(confirmation_id, result=result)
@@ -210,7 +210,7 @@ async def apply_add_negative_keywords(
     ensure_allowed(customer_id)
     clean = normalize_keywords(keywords)  # длину/дубли считает КОД — ДО claim
     await _require_confirmation(confirm_store, confirmation_id, "add_negative_keywords")
-    result = await asyncio.to_thread(
+    result = await run_ads_call(
         _add_negative_keywords_via_sdk, ads_client, customer_id, campaign_id, clean, match_type
     )
     await confirm_store.finalize(confirmation_id, result=result)
@@ -232,7 +232,7 @@ async def apply_set_geo_proximity(
     if radius_km <= 0:
         raise ValueError("радиус должен быть > 0")
     await _require_confirmation(confirm_store, confirmation_id, "set_geo_proximity")
-    result = await asyncio.to_thread(
+    result = await run_ads_call(
         _set_geo_proximity_via_sdk, ads_client, customer_id, campaign_id, radius_km, address
     )
     await confirm_store.finalize(confirmation_id, result=result)
@@ -300,7 +300,7 @@ async def apply_create_rsa(
     _validate_rsa_inputs(headlines, descriptions, final_url, path1, path2)
 
     await _require_confirmation(confirm_store, confirmation_id, "create_rsa")  # гейт 2 — claim
-    result = await asyncio.to_thread(
+    result = await run_ads_call(
         _create_rsa_via_sdk,
         ads_client,
         customer_id,
@@ -315,7 +315,7 @@ async def apply_create_rsa(
     return result
 
 
-# ── Реальные SDK-исполнители (синхронные; зовутся через asyncio.to_thread) ───────
+# ── Реальные SDK-исполнители (синхронные; зовутся через core.resilience.run_ads_call) ───
 def _apply_budget_via_sdk(
     client, customer_id: str, campaign_id: str, new_budget_micros: int
 ) -> dict:
