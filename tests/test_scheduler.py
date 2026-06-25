@@ -114,12 +114,16 @@ async def test_anomaly_thresholds_read_from_user_settings(monkeypatch):
     """run_anomaly_check читает UserSettings.alert_thresholds per-chat: чат с высоким личным
     порогом НЕ получает алерт, а чат на дефолте — получает. Метрики аккаунта общие, пороги — нет.
     READ-ONLY (golden rule #3): SDK не зовётся (fetch_totals замокан)."""
+    from sqlalchemy import delete
+
     from db.models import UserSettings
     from db.session import Session, init_db
     from scheduler import jobs
 
     await init_db()
     async with Session() as s:
+        # Идемпотентность: временный SQLite переживает между прогонами → чистим фикс. ключи.
+        await s.execute(delete(UserSettings).where(UserSettings.chat_id.in_([1, 2])))
         # chat 1 — личный высокий порог (200%): рост на 100% его НЕ пробивает.
         s.add(UserSettings(chat_id=1, alert_thresholds={"spend_spike_pct": 200.0}))
         await s.commit()
