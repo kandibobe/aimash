@@ -49,7 +49,7 @@ async def chat(
     Возвращает message ответа (с .content и/или .tool_calls). Тул-исполнение — НЕ здесь:
     mutation-инструменты только предлагают proposal, выполняет код после «да».
     """
-    chosen = model or ROLE_MODELS.get(role, settings.model_parsing)
+    chosen = model or ROLE_MODELS.get(role) or settings.llm_parsing
     kwargs: dict[str, Any] = {"model": chosen, "messages": messages}
     if tools:
         kwargs["tools"] = tools
