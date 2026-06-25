@@ -27,7 +27,8 @@ class Settings(BaseSettings):
     google_ads_client_id: str = ""
     google_ads_client_secret: str = ""
     google_ads_refresh_token: str = ""
-    google_ads_login_customer_id: str = ""
+    google_ads_login_customer_id: str = ""              # менеджерский аккаунт (MCC)
+    google_ads_allowed_customer_ids: str = ""           # БЕЛЫЙ список аккаунтов, что боту можно трогать
     google_ads_api_version: str = "v24"
 
     # Безопасность / БД
@@ -37,6 +38,11 @@ class Settings(BaseSettings):
     @property
     def whitelist(self) -> set[int]:
         return {int(x) for x in self.telegram_whitelist_chat_ids.split(",") if x.strip()}
+
+    @property
+    def allowed_customer_ids(self) -> set[str]:
+        """Аккаунты, которые боту РАЗРЕШЕНО трогать (защита от боевых клиентов в MCC)."""
+        return {x.strip() for x in self.google_ads_allowed_customer_ids.split(",") if x.strip()}
 
     @property
     def is_prod(self) -> bool:
