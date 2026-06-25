@@ -105,6 +105,18 @@ def test_parses_metrics_and_sorts_by_volume():
     assert small.low_bid == 1.0 and small.high_bid == 2.0 and small.avg_cpc == 0.5  # micros→валюта
 
 
+def test_returns_top_by_volume_not_first_n():
+    from ads.keyword_plan import generate_keyword_ideas
+
+    # API отдаёт по релевантности (ёмкие — в конце); limit=2 → вернуться должны 2 самых ёмких,
+    # а не первые два. Это покрывает фикс «сортировать пул, потом обрезать», а не наоборот.
+    rows = [_row("a", 10), _row("b", 20), _row("c", 9000), _row("d", 8000)]
+    client = _Client(rows)
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        ideas = generate_keyword_ideas(client, DRAFT_ACCOUNT_ID, seeds=["s"], limit=2)
+    assert [i.text for i in ideas] == ["c", "d"]  # топ-2 по объёму, не первые два из API
+
+
 def test_rejects_foreign_account_before_any_call():
     from ads.keyword_plan import generate_keyword_ideas
 

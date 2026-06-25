@@ -23,7 +23,8 @@ from core.logging import log
 LANGUAGE_IDS: dict[str, int] = {"ru": 1031, "uk": 1036, "en": 1000}
 DEFAULT_LANGUAGE = "ru"
 DEFAULT_GEO_IDS: tuple[int, ...] = (2804,)  # Украина; переопределяемо вызывающей стороной
-MAX_IDEAS = 200  # потолок выдачи (для Telegram/таблицы); усечение помечаем, не «тихо»
+MAX_IDEAS = 200  # сколько идей ВОЗВРАЩАЕМ (топ по объёму, для Telegram/таблицы)
+_FETCH_CEILING = 500  # сколько максимум тянем из API ДО сортировки (бюджет ~1 запроса)
 _RETRIES = 3  # попыток при rate-limit (~1 QPS), экспоненциальный backoff
 
 
@@ -104,7 +105,7 @@ def generate_keyword_ideas(
             ideas = []
             for r in svc.generate_keyword_ideas(request=_build_request()):
                 ideas.append(_idea(r))
-                if len(ideas) >= limit:
+                if len(ideas) >= _FETCH_CEILING:
                     break
             break
         except Exception as e:  # noqa: BLE001 — backoff только на rate-limit, иначе пробрасываем
@@ -117,5 +118,11 @@ def generate_keyword_ideas(
                 continue
             raise
 
+    # Сортируем ВЕСЬ собранный пул по объёму и берём топ-`limit`: API отдаёт по релевантности,
+    # поэтому обрезка ДО сортировки теряла бы ёмкие ключи на дальних позициях.
     ideas.sort(key=lambda k: k.avg_monthly_searches, reverse=True)
-    return ideas
+    if len(ideas) >= _FETCH_CEILING:
+        log.info(
+            "keyword_plan: достигнут потолок выборки %d → топ-%d по объёму", _FETCH_CEILING, limit
+        )
+    return ideas[:limit]
