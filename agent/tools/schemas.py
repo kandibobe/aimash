@@ -37,7 +37,7 @@ MUTATION_TOOLS = {
     "set_geo_proximity",
     "create_rsa",
 }
-READ_TOOLS = {"get_stats", "generate_rsa"}
+READ_TOOLS = {"get_stats", "generate_rsa", "keyword_research"}
 
 
 # ── Pydantic-схемы (валидация в коде, не на доверии к модели) ───────────────────
@@ -119,6 +119,27 @@ class GetStats(BaseModel):
     period_days: int = Field(default=30, gt=0, le=400)
 
 
+class KeywordResearch(BaseModel):
+    """Read-tool: подбор ключевых слов (advisory). Модель заполняет сиды и/или URL; объём/
+    конкуренцию и кластеризацию считает КОД (ничего в аккаунте не меняется)."""
+
+    seeds: list[str] = Field(default_factory=list, max_length=10)
+    url: str | None = None
+    language: Literal["ru", "uk", "en"] = "ru"
+
+    @field_validator("url")
+    @classmethod
+    def _url(cls, v):
+        if v and not str(v).startswith(("http://", "https://")):
+            raise ValueError("url должен быть http/https")
+        return v
+
+    @field_validator("seeds")
+    @classmethod
+    def _seeds(cls, v):
+        return [s.strip() for s in v if s and s.strip()]
+
+
 def _assert_rsa_len(items: list[str], kind: str) -> list[str]:
     """Длину каждого элемента (кириллица=1) считает КОД — отбраковка ДО кнопок, а не raise после «да»."""
     for t in items:
@@ -194,6 +215,7 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "create_rsa": CreateRsa,
     "get_stats": GetStats,
     "generate_rsa": GenerateRsa,
+    "keyword_research": KeywordResearch,
 }
 
 
@@ -237,6 +259,13 @@ TOOLS: list[dict] = [
         GenerateRsa,
     ),
     _tool("get_stats", "Прочитать статистику (read-only).", GetStats),
+    _tool(
+        "keyword_research",
+        "Подобрать ключевые слова по сид-словам и/или URL (read-only, advisory): объёмы, "
+        "конкуренция, кластеризация по интенту. Ничего не меняет в аккаунте. Укажи seeds "
+        "и/или url; язык ru/uk/en.",
+        KeywordResearch,
+    ),
     {
         "type": "function",
         "function": {

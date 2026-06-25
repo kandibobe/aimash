@@ -79,6 +79,10 @@ class RsaRefine(StatesGroup):
     awaiting_text = State()  # ждём правку для доработки одного элемента
 
 
+class KwWizard(StatesGroup):
+    awaiting_seeds = State()  # ждём сид-слова и/или URL для подбора ключей
+
+
 dp = Dispatcher()
 
 
@@ -205,8 +209,15 @@ async def campaigns_(m: Message) -> None:
 
 
 @dp.message(Command("keywords"))
-async def keywords_(m: Message) -> None:
-    await m.answer(texts.KW_SOON)
+async def keywords_(m: Message, state: FSMContext, command: CommandObject) -> None:
+    """Подбор ключевых слов (read-only, advisory). С аргументами — сразу; иначе спросить."""
+    await state.clear()
+    seeds, url = _parse_kw_input(command.args or "")
+    if seeds or url:
+        await _kw_run(m, m.chat.id, seeds, url, "ru")
+        return
+    await state.set_state(KwWizard.awaiting_seeds)
+    await m.answer(texts.KW_ASK, parse_mode=ParseMode.HTML)
 
 
 @dp.message(Command("cancel"))
@@ -477,6 +488,95 @@ async def _rsa_start_from_intent(m: Message, brief: dict, state: FSMContext) -> 
     )
 
 
+# ── Keyword research (Фаза 3, БЛОК E): подбор + кластеризация + .xlsx ─────────────
+def _parse_kw_input(text: str) -> tuple[list[str], str | None]:
+    """Ввод → (сиды, url): токены через запятую/перенос — сиды; первый http(s)-токен — url."""
+    parts = [p.strip() for p in (text or "").replace("\n", ",").split(",") if p.strip()]
+    url: str | None = None
+    seeds: list[str] = []
+    for p in parts:
+        if url is None and p.startswith(("http://", "https://")):
+            url = p
+        else:
+            seeds.append(p)
+    return seeds, url
+
+
+async def _kw_run(
+    target: Message, chat_id: int, seeds: list[str], url: str | None, language: str
+) -> None:
+    """Подобрать идеи → кластеризовать по интенту → сводка + .xlsx. READ-ONLY (advisory)."""
+    import os
+    import tempfile
+
+    await target.answer(texts.KW_SEARCHING)
+    try:
+        from ads.client import build_client
+        from ads.keyword_plan import generate_keyword_ideas
+
+        client = build_client()
+        ideas = await asyncio.to_thread(
+            generate_keyword_ideas,
+            client,
+            DRAFT_ACCOUNT_ID,
+            seeds=seeds,
+            url=url,
+            language=language,
+        )
+    except Exception as e:  # сеть/доступ/SDK/валидация ввода
+        await target.answer(f"⚠️ Не удалось подобрать ключи: {type(e).__name__}: {e}")
+        return
+    if not ideas:
+        await target.answer(texts.KW_EMPTY)
+        return
+
+    from keywords.cluster import Cluster, cluster_keywords
+
+    try:
+        clusters = await cluster_keywords([i.text for i in ideas], language)
+    except Exception:  # кластеризация не критична — fallback на одну группу
+        clusters = [Cluster(name="Все ключи", keywords=[i.text for i in ideas])]
+
+    by_text = {i.text: i.avg_monthly_searches for i in ideas}
+    src = ", ".join(seeds) or (url or "")
+    await target.answer(
+        texts.fmt_keywords_summary(clusters, by_text, len(ideas), src),
+        parse_mode=ParseMode.HTML,
+    )
+
+    path: str | None = None
+    try:
+        from keywords.export import write_keywords_xlsx
+
+        fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_keywords_")
+        os.close(fd)
+        await asyncio.to_thread(
+            write_keywords_xlsx, clusters, ideas, path, seeds=seeds, url=url, language=language
+        )
+        await target.answer_document(FSInputFile(path, filename="aimash_keywords.xlsx"))
+    except Exception as e:  # openpyxl/IO
+        await target.answer(f"⚠️ Таблицу .xlsx сформировать не удалось: {type(e).__name__}: {e}")
+    finally:
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+async def _kw_start_from_intent(m: Message, brief: dict, state: FSMContext) -> None:
+    """NL-вход: keyword_research-намерение агента. Есть сиды/URL — сразу; иначе спросить."""
+    await state.clear()
+    seeds = [s for s in (brief.get("seeds") or []) if s]
+    url = brief.get("url")
+    language = brief.get("language", "ru")
+    if seeds or url:
+        await _kw_run(m, m.chat.id, seeds, url, language)
+        return
+    await state.set_state(KwWizard.awaiting_seeds)
+    await m.answer(texts.KW_ASK, parse_mode=ParseMode.HTML)
+
+
 @dp.message(Command("rsa"))
 async def rsa_cmd(m: Message, state: FSMContext) -> None:
     """Визард генерации RSA: выбор кампании → группы → бриф → курация → создание."""
@@ -568,6 +668,16 @@ async def rsa_refine_text(m: Message, state: FSMContext) -> None:
     )
 
 
+@dp.message(KwWizard.awaiting_seeds)
+async def kw_seeds(m: Message, state: FSMContext) -> None:
+    seeds, url = _parse_kw_input(m.text or "")
+    if not seeds and not url:
+        await m.answer(texts.KW_BAD_INPUT, parse_mode=ParseMode.HTML)
+        return  # остаёмся в состоянии — пользователь пришлёт сиды/URL ещё раз
+    await state.clear()
+    await _kw_run(m, m.chat.id, seeds, url, "ru")
+
+
 # ── Свободный текст → агент ───────────────────────────────────────────────────────
 @dp.message(F.text)
 async def on_text(m: Message, state: FSMContext) -> None:
@@ -584,6 +694,8 @@ async def on_text(m: Message, state: FSMContext) -> None:
         )
     elif t == "rsa_intent":
         await _rsa_start_from_intent(m, res.get("brief", {}), state)
+    elif t == "keywords_intent":
+        await _kw_start_from_intent(m, res.get("brief", {}), state)
     elif t == "clarify":
         await m.answer("❓ " + res["question"])
     elif t == "read":

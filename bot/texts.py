@@ -47,15 +47,21 @@ HELP = (
     "/report [7|30|90|MTD] — сводка за период (по умолч. 30 дн.)\n"
     "/export [7|30|90|MTD] — глубокий отчёт .xlsx\n"
     "/rsa — сгенерировать тексты объявления (RSA) с поэлементным подтверждением\n"
+    "/keywords — подбор ключевых слов (объём, конкуренция, кластеры) + .xlsx\n"
     "/cancel — отменить текущий черновик\n\n"
-    "<i>Скоро: подбор ключевых слов, отчёты по расписанию.</i>"
+    "<i>Отчёты по расписанию и алерты аномалий работают в фоне.</i>"
 )
 
-KW_SOON = (
-    "🔍 Подбор ключевых слов появится в одной из следующих фаз.\n"
-    "Сейчас доступны: бюджет, ставка, добавление ключей вручную, минус-слова, "
-    "пауза/возобновление кампании."
+# ── Keyword research (Фаза 3, БЛОК E) ────────────────────────────────────────────
+KW_ASK = (
+    "🔍 <b>Подбор ключевых слов</b>\n"
+    "Пришли сид-слова через запятую и/или ссылку одним сообщением.\n"
+    "Например: <code>доставка цветов, букеты, 101 роза</code>\n"
+    "или ссылку <code>https://example.com</code>"
 )
+KW_SEARCHING = "⏳ Подбираю ключевые слова и группирую по интенту…"
+KW_EMPTY = "Ничего не нашлось по этим сидам. Попробуй другие слова или ссылку: /keywords"
+KW_BAD_INPUT = "Нужны сид-слова или ссылка. Пришли, например: <code>купить телефон, смартфон</code>"
 
 PROPOSAL_PENDING = "📝 <b>Черновик изменения</b>\n\n{summary}\n\nПодтвердить?"
 EXECUTING = "⏳ Выполняю…"
@@ -128,6 +134,30 @@ def fmt_rsa_proposal_summary(
         f"Заголовки ({len(headlines)}):\n{h_lines}\n\n"
         f"Описания ({len(descriptions)}):\n{d_lines}"
     )
+
+
+def fmt_keywords_summary(clusters, by_text: dict, total: int, src: str) -> str:
+    """Сводка keyword research: топ-кластеры с топ-ключами и объёмами. Полная таблица — в .xlsx.
+
+    clusters — объекты с .name/.intent/.keywords (duck-typed); by_text — {ключ: объём/мес}.
+    Усечение (кластеров/ключей) помечается явно, без «тихого» обрезания."""
+    max_clusters, max_kw = 8, 6
+    lines = [
+        f"🔍 <b>Ключевые слова</b> — {esc(src)}",
+        f"Идей: <b>{total}</b>, кластеров: {len(clusters)}\n",
+    ]
+    for cl in clusters[:max_clusters]:
+        intent = f" · <i>{esc(cl.intent)}</i>" if cl.intent else ""
+        lines.append(f"<b>{esc(cl.name)}</b>{intent} ({len(cl.keywords)})")
+        ordered = sorted(cl.keywords, key=lambda k: by_text.get(k, 0), reverse=True)
+        for kw in ordered[:max_kw]:
+            lines.append(f"  • {esc(kw)} — {_thou(by_text.get(kw, 0))}/мес")
+        if len(cl.keywords) > max_kw:
+            lines.append(f"  …ещё {len(cl.keywords) - max_kw} — см. .xlsx")
+    if len(clusters) > max_clusters:
+        lines.append(f"\n…ещё {len(clusters) - max_clusters} кластеров — см. .xlsx")
+    lines.append("\n<i>Это подсказка, не действие. Полная таблица — во вложении.</i>")
+    return "\n".join(lines)
 
 
 # ── Рендер с данными ─────────────────────────────────────────────────────────────

@@ -78,6 +78,14 @@ async def handle_command(text: str, *, chat_id: int = 0) -> dict[str, Any]:
             except ValidationError as e:
                 return {"type": "text", "text": f"некорректные аргументы для {name}: {e.errors()}"}
             return {"type": "rsa_intent", "brief": validated.model_dump()}
+        if name == "keyword_research":
+            # Подбор ключей — read-only (advisory). Валидируем бриф и отдаём боту «намерение»:
+            # SDK-запрос идей + кластеризацию + экспорт оркестрирует бот (как и /rsa-визард).
+            try:
+                validated = SCHEMAS[name](**args)
+            except ValidationError as e:
+                return {"type": "text", "text": f"некорректные аргументы для {name}: {e.errors()}"}
+            return {"type": "keywords_intent", "brief": validated.model_dump()}
         return await _do_read(name, args)
 
     if name in MUTATION_TOOLS:
