@@ -2,6 +2,7 @@
 
 Запуск:  python scripts/read_demo.py    (read-only, ничего не меняет)
 """
+
 from __future__ import annotations
 
 import sys
@@ -28,8 +29,10 @@ def main() -> None:
 
     print(f"=== Тестовый аккаунт Aimash {TEST_ACCOUNT} ===")
     st = account_stats(client, TEST_ACCOUNT, days=30)
-    print(f"  Статистика 30 дней: показы={st.impressions} клики={st.clicks} "
-          f"расход={st.cost:.2f} конверсии={st.conversions} ценность={st.conv_value:.2f}")
+    print(
+        f"  Статистика 30 дней: показы={st.impressions} клики={st.clicks} "
+        f"расход={st.cost:.2f} конверсии={st.conversions} ценность={st.conv_value:.2f}"
+    )
     camps = list_campaigns(client, TEST_ACCOUNT)
     print(f"  Кампаний: {len(camps)}")
     for c in camps[:10]:

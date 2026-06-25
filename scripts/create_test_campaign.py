@@ -3,6 +3,7 @@
 Нужна, чтобы было что менять в Фазе 1 (сейчас 0 кампаний). Пауза + тест-аккаунт = денег не тратит.
 Запуск:  python scripts/create_test_campaign.py
 """
+
 from __future__ import annotations
 
 import sys
@@ -33,7 +34,9 @@ def main() -> None:
     b.explicitly_shared = False
 
     try:
-        budget_res = budget_service.mutate_campaign_budgets(customer_id=TEST, operations=[budget_op])
+        budget_res = budget_service.mutate_campaign_budgets(
+            customer_id=TEST, operations=[budget_op]
+        )
         budget_rn = budget_res.results[0].resource_name
         print("✅ бюджет создан:", budget_rn)
     except GoogleAdsException as e:

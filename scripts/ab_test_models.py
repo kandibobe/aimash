@@ -10,6 +10,7 @@
 Нужен только OPENROUTER_API_KEY в .env. Печатает таблицу: автоматический скоринг +
 сэмплы для ручной оценки качества русского (его автоматом не оценить).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -47,7 +48,10 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "campaign": {"type": "string"},
-                    "mode": {"type": "string", "enum": ["increase_by_percent", "increase_by_amount", "set_to"]},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["increase_by_percent", "increase_by_amount", "set_to"],
+                    },
                     "value": {"type": "number"},
                     "currency": {"type": "string", "enum": ["USD", "UAH", "EUR", "percent"]},
                 },
@@ -156,39 +160,74 @@ TOOLS = [
 
 # (команда, ожидаемая функция, проверка аргументов, комментарий)
 SCENARIOS = [
-    ("повысь бюджет кампании Лето на 20%", "update_budget",
-     lambda a: a.get("mode") == "increase_by_percent" and a.get("value") == 20,
-     "на 20% = increase_by_percent, не set_to"),
-    ("смени бюджет кампании X на $50 в день", "update_budget",
-     lambda a: a.get("mode") in ("set_to", "increase_by_amount") and a.get("value") == 50 and a.get("currency") == "USD",
-     "$50 в день, валюта USD"),
-    ("подними ставку до 10 грн", "update_bid",
-     lambda a: a.get("mode") == "set_to" and a.get("value") == 10 and a.get("currency") == "UAH",
-     "'до 10' = set_to, грн = UAH"),
-    ("добавь ключи: купить телефон, цена телефона — фразовое соответствие", "add_keywords",
-     lambda a: a.get("match_type") == "phrase" and len(a.get("keywords", [])) == 2,
-     "фразовое = phrase, 2 ключа"),
-    ("добавь точное соответствие: ремонт обуви киев", "add_keywords",
-     lambda a: a.get("match_type") == "exact",
-     "точное = exact"),
-    ("поставь на паузу кампанию Зима", "pause_campaign",
-     lambda a: "Зима" in (a.get("campaign") or ""),
-     "пауза кампании"),
-    ("добавь минус-слово бесплатно", "add_negative_keywords",
-     lambda a: any("бесплатно" in k for k in a.get("keywords", [])),
-     "минус-слово"),
-    ("измени ГЕО на Киев + радиус 10 км", "set_geo_proximity",
-     lambda a: a.get("radius_km") == 10 and "иев" in (a.get("location") or "").lower(),
-     "радиус 10 км, Киев"),
-    ("покажи статистику по аккаунту 123 за последние 30 дней", "get_stats",
-     lambda a: a.get("period_days") == 30,
-     "read-only, 30 дней"),
-    ("увеличь бюджет", "ask_clarification",
-     lambda a: True,
-     "НЕОДНОЗНАЧНО → должен уточнить, не угадывать"),
-    ("повысь ставку на 15% в кампании Осень", "update_bid",
-     lambda a: a.get("mode") == "increase_by_percent" and a.get("value") == 15,
-     "на 15% = increase_by_percent"),
+    (
+        "повысь бюджет кампании Лето на 20%",
+        "update_budget",
+        lambda a: a.get("mode") == "increase_by_percent" and a.get("value") == 20,
+        "на 20% = increase_by_percent, не set_to",
+    ),
+    (
+        "смени бюджет кампании X на $50 в день",
+        "update_budget",
+        lambda a: a.get("mode") in ("set_to", "increase_by_amount")
+        and a.get("value") == 50
+        and a.get("currency") == "USD",
+        "$50 в день, валюта USD",
+    ),
+    (
+        "подними ставку до 10 грн",
+        "update_bid",
+        lambda a: a.get("mode") == "set_to" and a.get("value") == 10 and a.get("currency") == "UAH",
+        "'до 10' = set_to, грн = UAH",
+    ),
+    (
+        "добавь ключи: купить телефон, цена телефона — фразовое соответствие",
+        "add_keywords",
+        lambda a: a.get("match_type") == "phrase" and len(a.get("keywords", [])) == 2,
+        "фразовое = phrase, 2 ключа",
+    ),
+    (
+        "добавь точное соответствие: ремонт обуви киев",
+        "add_keywords",
+        lambda a: a.get("match_type") == "exact",
+        "точное = exact",
+    ),
+    (
+        "поставь на паузу кампанию Зима",
+        "pause_campaign",
+        lambda a: "Зима" in (a.get("campaign") or ""),
+        "пауза кампании",
+    ),
+    (
+        "добавь минус-слово бесплатно",
+        "add_negative_keywords",
+        lambda a: any("бесплатно" in k for k in a.get("keywords", [])),
+        "минус-слово",
+    ),
+    (
+        "измени ГЕО на Киев + радиус 10 км",
+        "set_geo_proximity",
+        lambda a: a.get("radius_km") == 10 and "иев" in (a.get("location") or "").lower(),
+        "радиус 10 км, Киев",
+    ),
+    (
+        "покажи статистику по аккаунту 123 за последние 30 дней",
+        "get_stats",
+        lambda a: a.get("period_days") == 30,
+        "read-only, 30 дней",
+    ),
+    (
+        "увеличь бюджет",
+        "ask_clarification",
+        lambda a: True,
+        "НЕОДНОЗНАЧНО → должен уточнить, не угадывать",
+    ),
+    (
+        "повысь ставку на 15% в кампании Осень",
+        "update_bid",
+        lambda a: a.get("mode") == "increase_by_percent" and a.get("value") == 15,
+        "на 15% = increase_by_percent",
+    ),
 ]
 
 COPY_PROMPT = (
@@ -203,14 +242,16 @@ def rsa_len(text: str) -> int:
         o = ord(ch)
         cjk = 0x4E00 <= o <= 0x9FFF or 0x3040 <= o <= 0x30FF or 0xAC00 <= o <= 0xD7A3
         return 2 if cjk else 1
+
     return sum(width(c) for c in text)
 
 
 def client() -> AsyncOpenAI:
-    if not settings.openrouter_api_key:
+    key = settings.openrouter_api_key.get_secret_value()
+    if not key:
         print("❌ OPENROUTER_API_KEY не задан в .env — добавь ключ и перезапусти.")
         sys.exit(1)
-    return AsyncOpenAI(api_key=settings.openrouter_api_key, base_url=settings.openrouter_base_url)
+    return AsyncOpenAI(api_key=key, base_url=settings.openrouter_base_url)
 
 
 async def run_scenario(cli: AsyncOpenAI, model: str, command: str) -> tuple[str, dict]:
@@ -289,10 +330,16 @@ async def main() -> None:
     print("\n\n================= ИТОГ =================")
     print(f"{'модель':<32} {'функции':>10} {'длина текстов':>16}")
     for r in sorted(results, key=lambda x: -x["fc_pass"]):
-        print(f"{r['model']:<32} {r['fc_pass']}/{r['fc_total']:>8} {r['copy_len_ok']}/{r['copy_total']:>12}")
-    print("\nПравило выбора: бери САМУЮ ДЕШЁВУЮ модель, что проходит function calling на денежном пути.")
+        print(
+            f"{r['model']:<32} {r['fc_pass']}/{r['fc_total']:>8} {r['copy_len_ok']}/{r['copy_total']:>12}"
+        )
+    print(
+        "\nПравило выбора: бери САМУЮ ДЕШЁВУЮ модель, что проходит function calling на денежном пути."
+    )
     print("Качество русского в текстах оцени глазами по сэмплам — его автоскоринг не ловит.")
-    print("Можно разные модели: дешёвую на парсинг (MODEL_PARSING), посильнее на копирайт (MODEL_COPY).")
+    print(
+        "Можно разные модели: дешёвую на парсинг (MODEL_PARSING), посильнее на копирайт (MODEL_COPY)."
+    )
 
 
 if __name__ == "__main__":

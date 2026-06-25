@@ -3,6 +3,7 @@
 Запуск:  python scripts/check_access.py
 Использует креды из .env. Ничего не меняет (только читает).
 """
+
 from __future__ import annotations
 
 import sys
@@ -13,17 +14,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from google.ads.googleads.client import GoogleAdsClient  # noqa: E402
 from google.ads.googleads.errors import GoogleAdsException  # noqa: E402
 
+from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
 from core.config import settings  # noqa: E402
 
-TARGET_CHILD = "7753643025"  # Aimash (тестовый клиентский аккаунт под менеджером)
+TARGET_CHILD = DRAFT_ACCOUNT_ID  # Aimash (Draft) — единственный разрешённый аккаунт
 
 
 def build_client() -> GoogleAdsClient:
     cfg = {
-        "developer_token": settings.google_ads_developer_token,
+        "developer_token": settings.google_ads_developer_token.get_secret_value(),
         "client_id": settings.google_ads_client_id,
-        "client_secret": settings.google_ads_client_secret,
-        "refresh_token": settings.google_ads_refresh_token,
+        "client_secret": settings.google_ads_client_secret.get_secret_value(),
+        "refresh_token": settings.google_ads_refresh_token.get_secret_value(),
         "use_proto_plus": True,
     }
     if settings.google_ads_login_customer_id:
@@ -39,8 +41,10 @@ def read_account(ga, cid: str, label: str) -> None:
     try:
         for row in ga.search(customer_id=cid, query=query):
             c = row.customer
-            print(f"  ✅ {label}: id={c.id} '{c.descriptive_name}' {c.currency_code} "
-                  f"{c.time_zone} manager={c.manager}")
+            print(
+                f"  ✅ {label}: id={c.id} '{c.descriptive_name}' {c.currency_code} "
+                f"{c.time_zone} manager={c.manager}"
+            )
     except GoogleAdsException as e:
         print(f"  ⚠️ {label} ({cid}) — ошибка:")
         for err in e.failure.errors:
@@ -48,7 +52,7 @@ def read_account(ga, cid: str, label: str) -> None:
 
 
 def main() -> None:
-    if not settings.google_ads_refresh_token:
+    if not settings.google_ads_refresh_token.get_secret_value():
         print("❌ нет refresh token")
         sys.exit(1)
 
@@ -74,8 +78,10 @@ def main() -> None:
     try:
         for row in ga.search(customer_id=login, query=cc_query):
             cc = row.customer_client
-            print(f"  • id={cc.id} '{cc.descriptive_name}' level={cc.level} "
-                  f"manager={cc.manager} {cc.currency_code} status={cc.status}")
+            print(
+                f"  • id={cc.id} '{cc.descriptive_name}' level={cc.level} "
+                f"manager={cc.manager} {cc.currency_code} status={cc.status}"
+            )
     except GoogleAdsException as e:
         print("  ⚠️ обход упал:")
         for err in e.failure.errors:

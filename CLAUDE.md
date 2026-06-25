@@ -20,6 +20,7 @@ Telegram-бот, который по командам на естественн�
 6. **Модель не трогает SDK напрямую.** LLM заполняет типизированную (Pydantic) схему → код валидирует диапазоны → показывает diff → ждёт «да» → вызывает `google-ads` SDK → пишет audit-row.
 7. **Только TEST MCC при разработке.** Никаких боевых аккаунтов, пока всё не проверено на тесте. dev-профиль по умолчанию указывает на test MCC.
 8. **Жёсткий allow-list операций.** Агент может вызывать только заранее перечисленные инструменты; защита от prompt-injection — confirm-гейт + код-level allow-list.
+9. **Замок единственного аккаунта.** Любая операция (чтение per-account + ВСЕ мутации) разрешена ТОЛЬКО на `Aimash (Draft)` = **`7753643025`** (775-364-3025), и нигде больше. Чокпойнт — `ads.client.ensure_allowed(customer_id)`: потолок `ALLOWED_CEILING` зашит в КОДЕ (env не может его расширить), пустой allow-list = **fail-closed** (отказ). Расширение круга аккаунтов = осознанная правка `ads/client.py`, не строка в `.env`.
 
 ## Архитектура (поток)
 ```
@@ -37,7 +38,7 @@ Telegram (aiogram) → handler → агент (model via OpenRouter, tool use)
 - Решение по модели — **по данным теста**, не по бренду.
 
 ## Стек
-Python 3.12 · aiogram 3.x (async; один event loop с APScheduler) · `openai` SDK (→ OpenRouter) · `google-ads` SDK (пин **v24.x**, текущая v24.2; перепроверять ежемесячно) · SQLAlchemy + Alembic + PostgreSQL · openpyxl / google-api-python-client (Sheets, scope `drive.file`) · Docker.
+Python 3.12 · aiogram 3.x (async; один event loop с APScheduler) · `openai` SDK (→ OpenRouter) · `google-ads` SDK — **пин `google-ads>=31.1,<32` → API `v24`** (lib-версия ≠ API-версии!; релизы ежемесячные, v24 сансет ~май 2027; перепроверять ежемесячно — скил `gads-version`, ссылки `docs/gads-api-refs.md`) · SQLAlchemy + Alembic + PostgreSQL · openpyxl / google-api-python-client (Sheets, scope `drive.file`) · Docker.
 
 ## Структура
 - `core/` — config, secrets (шифрование), logging.
@@ -55,7 +56,7 @@ Python 3.12 · aiogram 3.x (async; один event loop с APScheduler) · `opena
 - **Фаза 1:** confirm-гейт + запись по Search (бюджет/ставка/ключи) + audit.
 - **Фаза 2:** отчёты + Sheets/.xlsx + генерация текстов.
 - **Фаза 3:** keyword research + кластеризация + scheduler/алерты.
-- App/UAC — исключено (нет приложения у клиента).
+- **App/UAC — ПОЛНОСТЬЮ исключено из объёма** (нет приложения у клиента). GDN-из-медиа — опционально/позже.
 
 ## Команды для модели разработки (Claude Code)
 - Архитектура/сложное — Opus 4.8; объём (CRUD, отчёты, тесты, бойлерплейт) — Sonnet 4.6.
@@ -64,5 +65,6 @@ Python 3.12 · aiogram 3.x (async; один event loop с APScheduler) · `opena
 ## Что НЕ делать
 - Не вызывать `ads/mutations.py` без `confirmation_id`.
 - Не вставлять секреты в код/логи/промпт.
-- Не работать против боевых аккаунтов.
+- Не работать против боевых аккаунтов. **Любой `customer_id`, кроме `7753643025`, — запрещён** (золотое правило 9).
+- Не ослаблять замок аккаунта через `.env` (потолок — в коде); не делать `ensure_allowed` fail-open.
 - Не доверять готовым write-MCP как бэкенду (экспериментальны, без подтверждений) — write-слой пишем сами.

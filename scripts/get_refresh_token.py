@@ -8,6 +8,7 @@
 
 Секреты (client_id/secret) берутся из .env, не из кода.
 """
+
 from __future__ import annotations
 
 import re
@@ -36,14 +37,17 @@ def save_to_env(token: str) -> None:
 
 
 def main() -> None:
-    if not settings.google_ads_client_id or not settings.google_ads_client_secret:
+    if (
+        not settings.google_ads_client_id
+        or not settings.google_ads_client_secret.get_secret_value()
+    ):
         print("❌ Заполни GOOGLE_ADS_CLIENT_ID и GOOGLE_ADS_CLIENT_SECRET в .env")
         sys.exit(1)
 
     client_config = {
         "installed": {
             "client_id": settings.google_ads_client_id,
-            "client_secret": settings.google_ads_client_secret,
+            "client_secret": settings.google_ads_client_secret.get_secret_value(),
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
             "token_uri": "https://oauth2.googleapis.com/token",
             "redirect_uris": ["http://localhost"],
@@ -59,7 +63,9 @@ def main() -> None:
         sys.exit(1)
 
     save_to_env(creds.refresh_token)
-    print("✅ refresh_token получен и сохранён в .env (GOOGLE_ADS_REFRESH_TOKEN). Токен не печатается.")
+    print(
+        "✅ refresh_token получен и сохранён в .env (GOOGLE_ADS_REFRESH_TOKEN). Токен не печатается."
+    )
 
 
 if __name__ == "__main__":

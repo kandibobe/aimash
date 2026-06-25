@@ -5,6 +5,7 @@
 
 Запуск:  python scripts/agent_demo.py     (нужен OPENROUTER_API_KEY в .env)
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -37,8 +38,10 @@ def render(cmd: str, res: dict) -> str:
         return f"💬 «{cmd}»\n   → ❓ уточнение: {res['question']}"
     if t == "read":
         s = res.get("stats", {})
-        return (f"💬 «{cmd}»\n   → 📊 read аккаунт {res['account']} за {res['days']}д "
-                f"(ЖИВЫЕ данные Google Ads): {s}")
+        return (
+            f"💬 «{cmd}»\n   → 📊 read аккаунт {res['account']} за {res['days']}д "
+            f"(ЖИВЫЕ данные Google Ads): {s}"
+        )
     return f"💬 «{cmd}»\n   → {res.get('text')}"
 
 
