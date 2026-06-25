@@ -49,3 +49,9 @@ class RsaPickCB(CallbackData, prefix="rsap"):
 
     what: str  # "camp" | "ag"
     idx: int
+
+
+class LangCB(CallbackData, prefix="lang"):
+    """Выбор языка интерфейса (RU/EN) через /lang."""
+
+    code: str  # "ru" | "en"

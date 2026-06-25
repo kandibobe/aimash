@@ -10,7 +10,16 @@ from __future__ import annotations
 from aiogram.types import BotCommand, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
-from bot.callbacks import CampCB, ConfirmCB, PeriodCB, RsaCB, RsaPickCB
+from bot.callbacks import CampCB, ConfirmCB, LangCB, PeriodCB, RsaCB, RsaPickCB
+
+_NAME_LIMIT = 40
+
+
+def _ellipsize(s: str, limit: int = _NAME_LIMIT) -> str:
+    """Обрезать имя с видимым многоточием (иначе непонятно, что текст усечён)."""
+    s = s or ""
+    return s if len(s) <= limit else s[: limit - 1].rstrip() + "…"
+
 
 # ── Меню-кнопка Telegram (список команд в «/») ──────────────────────────────────
 # Показываем только то, что бот реально умеет, + честные пометки «скоро» для фаз 2-3.
@@ -24,7 +33,18 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="rsa", description="Сгенерировать тексты объявления (RSA)"),
     BotCommand(command="cancel", description="Отменить текущий черновик"),
     BotCommand(command="keywords", description="Подбор ключевых слов (скоро)"),
+    BotCommand(command="lang", description="Язык интерфейса / interface language"),
 ]
+
+
+def lang_kb() -> InlineKeyboardMarkup:
+    """Выбор языка интерфейса (RU/EN)."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🇷🇺 Русский", callback_data=LangCB(code="ru"))
+    kb.button(text="🇬🇧 English", callback_data=LangCB(code="en"))
+    kb.adjust(2)
+    return kb.as_markup()
+
 
 # ── Reply-меню (постоянное нижнее) — только навигация/чтение, НЕ мутации ─────────
 BTN_STATUS = "📊 Статистика"
@@ -62,7 +82,9 @@ def campaigns_kb(camps: list[dict]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for i, c in enumerate(camps):
         mark = {"ENABLED": "▶️", "PAUSED": "⏸"}.get(c.get("status", ""), "•")
-        kb.button(text=f"{mark} {c['name'][:40]}", callback_data=CampCB(action="menu", idx=i))
+        kb.button(
+            text=f"{mark} {_ellipsize(c['name'])}", callback_data=CampCB(action="menu", idx=i)
+        )
     kb.adjust(1)
     return kb.as_markup()
 
@@ -128,7 +150,9 @@ def rsa_pick_campaigns_kb(camps: list[dict]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for i, c in enumerate(camps):
         mark = {"ENABLED": "▶️", "PAUSED": "⏸"}.get(c.get("status", ""), "•")
-        kb.button(text=f"{mark} {c['name'][:40]}", callback_data=RsaPickCB(what="camp", idx=i))
+        kb.button(
+            text=f"{mark} {_ellipsize(c['name'])}", callback_data=RsaPickCB(what="camp", idx=i)
+        )
     kb.adjust(1)
     return kb.as_markup()
 
@@ -137,6 +161,6 @@ def rsa_pick_adgroups_kb(groups: list[dict]) -> InlineKeyboardMarkup:
     """Визард /rsa: выбор группы объявлений (idx → имя из кэша)."""
     kb = InlineKeyboardBuilder()
     for i, g in enumerate(groups):
-        kb.button(text=f"• {g['name'][:40]}", callback_data=RsaPickCB(what="ag", idx=i))
+        kb.button(text=f"• {_ellipsize(g['name'])}", callback_data=RsaPickCB(what="ag", idx=i))
     kb.adjust(1)
     return kb.as_markup()

@@ -37,8 +37,8 @@ from ads.resolve import find_ad_groups
 from ads.service import execute_confirmed
 from agent.loop import handle_command
 from agent.tools.schemas import SCHEMAS
-from bot import texts
-from bot.callbacks import CampCB, ConfirmCB, PeriodCB, RsaCB, RsaPickCB
+from bot import i18n, texts, ux
+from bot.callbacks import CampCB, ConfirmCB, LangCB, PeriodCB, RsaCB, RsaPickCB
 from bot.keyboards import (
     BOT_COMMANDS,
     BTN_CAMPAIGNS,
@@ -48,6 +48,7 @@ from bot.keyboards import (
     campaign_actions_kb,
     campaigns_kb,
     confirm_kb,
+    lang_kb,
     main_menu,
     period_kb,
     rsa_item_kb,
@@ -112,7 +113,8 @@ async def _send_status(message: Message) -> None:
         from ads.read import account_stats
 
         client = build_client()
-        st = await asyncio.to_thread(account_stats, client, DRAFT_ACCOUNT_ID, 30)
+        async with ux.typing_action(message):  # «печатает…» пока идёт чтение SDK
+            st = await asyncio.to_thread(account_stats, client, DRAFT_ACCOUNT_ID, 30)
     except Exception as e:  # сеть/доступ/SDK
         await message.answer(f"⚠️ Не удалось получить статистику: {type(e).__name__}: {e}")
         return
@@ -139,7 +141,8 @@ async def _send_campaigns(message: Message, chat_id: int) -> None:
         from ads.read import list_campaigns
 
         client = build_client()
-        camps = await asyncio.to_thread(list_campaigns, client, DRAFT_ACCOUNT_ID)
+        async with ux.typing_action(message):
+            camps = await asyncio.to_thread(list_campaigns, client, DRAFT_ACCOUNT_ID)
     except Exception as e:  # сеть/доступ/SDK
         await message.answer(f"⚠️ Не удалось получить кампании: {type(e).__name__}: {e}")
         return
@@ -179,11 +182,19 @@ async def _present_proposal(
         user_initiated=True,
     )
     _LAST_PENDING[chat_id] = cid
-    await message.answer(
-        texts.PROPOSAL_PENDING.format(summary=texts.esc(summary)),
-        reply_markup=confirm_kb(cid),
-        parse_mode=ParseMode.HTML,
-    )
+    rendered = texts.PROPOSAL_PENDING.format(summary=texts.esc(summary))
+    if ux.proposal_fits(rendered):
+        await message.answer(rendered, reply_markup=confirm_kb(cid), parse_mode=ParseMode.HTML)
+    else:
+        # Длинный черновик (напр. RSA с 15 заголовками) не влезает в одно сообщение Telegram →
+        # полный текст .txt-вложением, а кнопки ✅/❌ на коротком сообщении (его правит _do_confirm).
+        await ux.send_proposal_text(
+            message,
+            full_text=summary,
+            header_html="📝 <b>Черновик изменения</b> — полный текст во вложении ⬆️\n\nПодтвердить?",
+            reply_markup=confirm_kb(cid),
+            parse_mode=ParseMode.HTML,
+        )
 
 
 # ── Команды ──────────────────────────────────────────────────────────────────────
@@ -231,6 +242,27 @@ async def cancel_cmd(m: Message) -> None:
     await m.answer(texts.REJECTED)
 
 
+@dp.message(Command("lang"))
+async def lang_cmd(m: Message, command: CommandObject) -> None:
+    """Язык интерфейса RU/EN. С аргументом (/lang en) — сразу; иначе кнопки выбора."""
+    arg = (command.args or "").strip().lower()
+    if arg in i18n.LANGS:
+        lang = i18n.set_lang(m.chat.id, arg)
+        await m.answer(i18n.t("lang_set", lang))
+        return
+    await m.answer(i18n.t("lang_pick", i18n.get_lang(m.chat.id)), reply_markup=lang_kb())
+
+
+@dp.callback_query(LangCB.filter())
+async def on_lang(cq: CallbackQuery, callback_data: LangCB) -> None:
+    lang = i18n.set_lang(_cq_chat_id(cq), callback_data.code)
+    await cq.answer()
+    try:
+        await cq.message.edit_text(i18n.t("lang_set", lang))
+    except TelegramBadRequest:
+        pass
+
+
 def _period_from_arg(arg: str | None):
     """Аргумент команды (7/30/90/MTD) → Period; по умолчанию 30 дн. Бросает ValueError."""
     from reports.period import from_preset
@@ -251,7 +283,8 @@ async def report_(m: Message, command: CommandObject) -> None:
         from reports.service import build_account_report, summary_text
 
         client = build_client()
-        report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
+        async with ux.typing_action(m):
+            report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
     except Exception as e:  # сеть/доступ/SDK
         await m.answer(f"⚠️ Не удалось построить отчёт: {type(e).__name__}: {e}")
         return
@@ -277,10 +310,11 @@ async def export_(m: Message, command: CommandObject) -> None:
         from reports.xlsx import write_report_xlsx
 
         client = build_client()
-        report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
-        fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_report_")
-        os.close(fd)
-        await asyncio.to_thread(write_report_xlsx, report, path)
+        async with ux.upload_action(m):  # «отправляет документ…» пока строим .xlsx
+            report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
+            fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_report_")
+            os.close(fd)
+            await asyncio.to_thread(write_report_xlsx, report, path)
         fname = f"aimash_{DRAFT_ACCOUNT_ID}_{period.date_from}_{period.date_to}.xlsx"
         await m.answer_document(FSInputFile(path, filename=fname))
     except Exception as e:  # сеть/доступ/SDK/openpyxl
@@ -424,11 +458,14 @@ async def _rsa_generate_and_start(target: Message, chat_id: int, state: FSMConte
     )
     await target.answer(texts.RSA_GENERATING)
     try:
-        draft = await _generate_rsa(brief)
+        async with ux.typing_action(target):
+            draft = await _generate_rsa(brief)
     except Exception as e:  # LLM/сеть
         await target.answer(f"⚠️ Генерация не удалась: {type(e).__name__}: {e}")
         await state.clear()
         return
+    # Диагностика: сколько набрано/отброшено КОДОМ за длину (golden rule #4) — раньше терялось.
+    await target.answer(ux.fmt_rsa_diagnostics(draft, brief.n_headlines, brief.n_descriptions))
     if len(draft.headlines) < RSA_MIN_HEADLINES or len(draft.descriptions) < RSA_MIN_DESCRIPTIONS:
         await target.answer(texts.RSA_GEN_EMPTY)
         await state.clear()
@@ -681,7 +718,8 @@ async def kw_seeds(m: Message, state: FSMContext) -> None:
 # ── Свободный текст → агент ───────────────────────────────────────────────────────
 @dp.message(F.text)
 async def on_text(m: Message, state: FSMContext) -> None:
-    res = await handle_command(m.text, chat_id=m.chat.id)
+    async with ux.typing_action(m):  # «печатает…» пока модель парсит команду
+        res = await handle_command(m.text, chat_id=m.chat.id)
     t = res.get("type")
     if t == "proposal":
         await _present_proposal(
@@ -791,7 +829,8 @@ async def period_report(cq: CallbackQuery, callback_data: PeriodCB) -> None:
         from reports.service import build_account_report, summary_text
 
         client = build_client()
-        report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
+        async with ux.typing_action(cq.message):
+            report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
     except Exception as e:  # сеть/доступ/SDK
         await cq.message.answer(f"⚠️ Не удалось построить отчёт: {type(e).__name__}: {e}")
         return
