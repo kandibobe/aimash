@@ -36,7 +36,9 @@ def render(cmd: str, res: dict) -> str:
     if t == "clarify":
         return f"💬 «{cmd}»\n   → ❓ уточнение: {res['question']}"
     if t == "read":
-        return f"💬 «{cmd}»\n   → 📊 read [{res['tool']}] {res['args']}  ({res['note']})"
+        s = res.get("stats", {})
+        return (f"💬 «{cmd}»\n   → 📊 read аккаунт {res['account']} за {res['days']}д "
+                f"(ЖИВЫЕ данные Google Ads): {s}")
     return f"💬 «{cmd}»\n   → {res.get('text')}"
 
 

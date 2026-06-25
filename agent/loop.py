@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -56,8 +57,7 @@ async def handle_command(text: str, *, chat_id: int = 0) -> dict[str, Any]:
         return {"type": "clarify", "question": args.get("question", "Уточните, пожалуйста, команду.")}
 
     if name in READ_TOOLS:
-        # Фаза 0: тут будет вызов ads/read.py (GAQL). Сейчас — заглушка.
-        return {"type": "read", "tool": name, "args": args, "note": "read будет подключён в Фазе 0"}
+        return await _do_read(name, args)
 
     if name in MUTATION_TOOLS:
         # Валидация диапазонов В КОДЕ (не доверяем модели)
@@ -86,3 +86,34 @@ async def handle_command(text: str, *, chat_id: int = 0) -> dict[str, Any]:
         }
 
     return {"type": "text", "text": f"неизвестный инструмент: {name}"}
+
+
+async def _do_read(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Живое чтение Google Ads (read-only). google-ads SDK синхронный → через to_thread.
+
+    Пока белый список = 1 тестовый аккаунт, читаем его. Когда список расширится —
+    добавить резолв 'account' → customer_id из allowed.
+    """
+    from core.config import settings
+
+    allowed = sorted(settings.allowed_customer_ids)
+    if not allowed:
+        return {"type": "text", "text": "нет разрешённых аккаунтов (allowed_customer_ids пуст)"}
+    cid = allowed[0]
+    days = int(args.get("period_days") or 30)
+    try:
+        from ads.client import build_client
+        from ads.read import account_stats
+
+        client = build_client()
+        st = await asyncio.to_thread(account_stats, client, cid, days)
+        return {
+            "type": "read", "tool": name, "account": cid, "days": days,
+            "stats": {
+                "impressions": st.impressions, "clicks": st.clicks,
+                "cost": round(st.cost, 2), "conversions": st.conversions,
+                "conv_value": round(st.conv_value, 2),
+            },
+        }
+    except Exception as e:  # сеть/доступ/SDK
+        return {"type": "text", "text": f"ошибка чтения Google Ads: {type(e).__name__}: {e}"}
