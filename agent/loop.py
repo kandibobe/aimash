@@ -6,6 +6,7 @@
   (сводка «было→станет» + confirmation_id). Выполнение — только после «да» (confirm-гейт);
 - ask_clarification → возвращаем вопрос пользователю (не угадываем).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -21,7 +22,10 @@ from confirm.gate import Proposal, build_summary
 SYSTEM = (
     "Ты — исполнитель команд для Google Ads (агент Aimash). По команде пользователя вызови "
     "ПОДХОДЯЩУЮ функцию с точными аргументами. Различай 'на N%' (изменить НА процент) и "
-    "'до N' (установить В значение). Если не указана кампания, сумма или направление — вызови "
+    "'до N' (установить В значение). Для изменения ставки (update_bid), ключевых слов "
+    "(add_keywords), минус-слов (add_negative_keywords) ВСЕГДА указывай кампанию (campaign); "
+    "ставка применяется к группам объявлений этой кампании. pause_campaign ставит на паузу, "
+    "resume_campaign — возобновляет. Если не указана кампания, сумма или направление — вызови "
     "ask_clarification, НЕ угадывай. Ничего не выполняй сам — только предложи вызов функции. "
     "Деньги/ставки не трогаются без явного подтверждения пользователя."
 )
@@ -37,14 +41,20 @@ async def handle_command(text: str, *, chat_id: int = 0) -> dict[str, Any]:
 
     # Надёжность: если модель не вызвала инструмент и не дала текст — одна повторная попытка.
     if not getattr(msg, "tool_calls", None) and not (msg.content or "").strip():
-        messages.append({
-            "role": "user",
-            "content": "Вызови подходящую функцию для этой команды; если данных не хватает — ask_clarification.",
-        })
+        messages.append(
+            {
+                "role": "user",
+                "content": "Вызови подходящую функцию для этой команды; если данных не хватает — ask_clarification.",
+            }
+        )
         msg = await chat(messages, role="parsing", tools=TOOLS)
 
     if not getattr(msg, "tool_calls", None):
-        return {"type": "text", "text": (msg.content or "").strip() or "Не удалось распознать команду — переформулируй."}
+        return {
+            "type": "text",
+            "text": (msg.content or "").strip()
+            or "Не удалось распознать команду — переформулируй.",
+        }
 
     call = msg.tool_calls[0]
     name = call.function.name
@@ -54,12 +64,31 @@ async def handle_command(text: str, *, chat_id: int = 0) -> dict[str, Any]:
         return {"type": "text", "text": "не удалось разобрать аргументы инструмента"}
 
     if name == "ask_clarification":
-        return {"type": "clarify", "question": args.get("question", "Уточните, пожалуйста, команду.")}
+        return {
+            "type": "clarify",
+            "question": args.get("question", "Уточните, пожалуйста, команду."),
+        }
 
     if name in READ_TOOLS:
         return await _do_read(name, args)
 
     if name in MUTATION_TOOLS:
+        # Capability-guard: операцию, которую код НЕ исполняет, отклоняем ДО показа кнопок.
+        # Иначе пользователь жмёт ✅, а выполнение падает raise — худший момент на денежном пути.
+        # SUPPORTED_OPERATIONS — единый источник истины (ads.service); импорт ленивый,
+        # чтобы парс-путь не тянул google-ads без необходимости.
+        from ads.service import SUPPORTED_OPERATIONS
+
+        if name not in SUPPORTED_OPERATIONS:
+            return {
+                "type": "text",
+                "text": (
+                    f"Операция «{name}» пока не поддерживается — выполнить не смогу, поэтому "
+                    "не предлагаю подтверждение. Доступно: бюджет, ставка (CPC), ключевые слова, "
+                    "минус-слова, пауза и возобновление кампании."
+                ),
+            }
+
         # Валидация диапазонов В КОДЕ (не доверяем модели)
         try:
             validated = SCHEMAS[name](**args)
@@ -80,6 +109,8 @@ async def handle_command(text: str, *, chat_id: int = 0) -> dict[str, Any]:
             "type": "proposal",
             "operation": name,
             "summary": proposal.summary,
+            "params": after,
+            "user_initiated": proposal.user_initiated,
             "confirmation_id": proposal.confirmation_id,
             "confirm_prompt": "Показать в Telegram с кнопками ✅ Подтвердить / ❌ Отмена. "
             "Выполнить только после «да».",
@@ -108,10 +139,15 @@ async def _do_read(name: str, args: dict[str, Any]) -> dict[str, Any]:
         client = build_client()
         st = await asyncio.to_thread(account_stats, client, cid, days)
         return {
-            "type": "read", "tool": name, "account": cid, "days": days,
+            "type": "read",
+            "tool": name,
+            "account": cid,
+            "days": days,
             "stats": {
-                "impressions": st.impressions, "clicks": st.clicks,
-                "cost": round(st.cost, 2), "conversions": st.conversions,
+                "impressions": st.impressions,
+                "clicks": st.clicks,
+                "cost": round(st.cost, 2),
+                "conversions": st.conversions,
                 "conv_value": round(st.conv_value, 2),
             },
         }

@@ -2,6 +2,7 @@
 
 Предпочитаем SearchStream (страница до 10k строк = 1 операция против дневной квоты).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -41,10 +42,16 @@ def list_child_accounts(client: GoogleAdsClient, manager_id: str) -> list[ChildA
     out: list[ChildAccount] = []
     for row in ga.search(customer_id=str(manager_id), query=q):
         cc = row.customer_client
-        out.append(ChildAccount(
-            id=str(cc.id), name=cc.descriptive_name, currency=cc.currency_code,
-            manager=cc.manager, level=cc.level, status=cc.status.name,
-        ))
+        out.append(
+            ChildAccount(
+                id=str(cc.id),
+                name=cc.descriptive_name,
+                currency=cc.currency_code,
+                manager=cc.manager,
+                level=cc.level,
+                status=cc.status.name,
+            )
+        )
     return out
 
 

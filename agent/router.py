@@ -3,6 +3,7 @@
 Смена модели = строка конфига (.env), не переписывание кода. Дефолт — дешёвая.
 Решение по модели принимается по A/B-тесту (scripts/ab_test_models.py), а не по бренду.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -13,8 +14,8 @@ from core.config import settings
 
 # Назначение → конкретная модель (сменяемо через .env)
 ROLE_MODELS = {
-    "parsing": settings.llm_parsing,   # парсинг команд → function calling (денежный путь)
-    "copy": settings.llm_copy,         # генерация RSA-текстов
+    "parsing": settings.llm_parsing,  # парсинг команд → function calling (денежный путь)
+    "copy": settings.llm_copy,  # генерация RSA-текстов
     "fallback": settings.llm_fallback,
 }
 
@@ -28,10 +29,10 @@ AB_CANDIDATES = [
 
 
 def _client() -> AsyncOpenAI:
-    if not settings.openrouter_api_key:
+    if not settings.openrouter_api_key.get_secret_value():
         raise RuntimeError("OPENROUTER_API_KEY не задан в .env")
     return AsyncOpenAI(
-        api_key=settings.openrouter_api_key,
+        api_key=settings.openrouter_api_key.get_secret_value(),
         base_url=settings.openrouter_base_url,
     )
 
