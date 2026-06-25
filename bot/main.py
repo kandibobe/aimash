@@ -11,9 +11,10 @@ from __future__ import annotations
 import asyncio
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     CallbackQuery,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -61,7 +62,9 @@ async def help_(m: Message) -> None:
         "Я читаю Google Ads и предлагаю изменения. Перед любым изменением показываю "
         "«было → станет» и жду подтверждения. Просто пиши текстом.\n"
         "Доступно: бюджет, ставка (CPC), ключевые слова, минус-слова, пауза/возобновление.\n"
-        "/campaigns — список кампаний (точные имена для команд)."
+        "/campaigns — список кампаний (точные имена для команд).\n"
+        "/report [7|30|90|MTD] — сводка по аккаунту за период (по умолчанию 30 дн.).\n"
+        "/export [7|30|90|MTD] — глубокий отчёт .xlsx (разбивки по кампаниям/группам/ключам/…)."
     )
 
 
@@ -82,6 +85,68 @@ async def campaigns_(m: Message) -> None:
         return
     lines = "\n".join(f"• {c['name']} — {c['status']}" for c in camps)
     await m.answer(f"Кампании аккаунта {DRAFT_ACCOUNT_ID}:\n{lines}")
+
+
+def _period_from_arg(arg: str | None):
+    """Аргумент команды (7/30/90/MTD) → Period; по умолчанию 30 дн. Бросает ValueError."""
+    from reports.period import from_preset
+
+    return from_preset((arg or "30").strip() or "30")
+
+
+@dp.message(Command("report"))
+async def report_(m: Message, command: CommandObject) -> None:
+    """Read-only сводка по аккаунту за период (итоги + сравнение + топ-кампании)."""
+    try:
+        period = _period_from_arg(command.args)
+    except ValueError as e:
+        await m.answer(f"⚠️ {e}")
+        return
+    try:
+        from ads.client import build_client
+        from reports.service import build_account_report, summary_text
+
+        client = build_client()
+        report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
+    except Exception as e:  # сеть/доступ/SDK
+        await m.answer(f"⚠️ Не удалось построить отчёт: {type(e).__name__}: {e}")
+        return
+    await m.answer(summary_text(report))
+
+
+@dp.message(Command("export"))
+async def export_(m: Message, command: CommandObject) -> None:
+    """Глубокий отчёт .xlsx (разбивки ТЗ §9) вложением. Read-only."""
+    import os
+    import tempfile
+
+    try:
+        period = _period_from_arg(command.args)
+    except ValueError as e:
+        await m.answer(f"⚠️ {e}")
+        return
+    await m.answer("Готовлю .xlsx-отчёт…")
+    path: str | None = None
+    try:
+        from ads.client import build_client
+        from reports.service import build_account_report
+        from reports.xlsx import write_report_xlsx
+
+        client = build_client()
+        report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
+        fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_report_")
+        os.close(fd)
+        await asyncio.to_thread(write_report_xlsx, report, path)
+        fname = f"aimash_{DRAFT_ACCOUNT_ID}_{period.date_from}_{period.date_to}.xlsx"
+        await m.answer_document(FSInputFile(path, filename=fname))
+    except Exception as e:  # сеть/доступ/SDK/openpyxl
+        await m.answer(f"⚠️ Не удалось сформировать отчёт: {type(e).__name__}: {e}")
+    finally:
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 def _kb(cid: str) -> InlineKeyboardMarkup:
