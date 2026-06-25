@@ -2,9 +2,10 @@
 
 - whitelist по chat_id (TELEGRAM_WHITELIST_CHAT_IDS);
 - свободный текст → агент-цикл (agent.loop.handle_command);
-- read → показывает статистику; mutation → черновик «было→станет» + inline ✅/❌ (выполнение — Фаза 1);
-- ничего не меняется без подтверждения «да».
+- read → показывает статистику; mutation → черновик «было→станет» (в БД) + inline ✅/❌;
+- на «да» → реальное выполнение через ads.service за confirm-гейтом + audit; ничего без «да».
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -19,12 +20,15 @@ from aiogram.types import (
     TelegramObject,
 )
 
+from ads.client import DRAFT_ACCOUNT_ID
+from ads.service import execute_confirmed
 from agent.loop import handle_command
+from confirm.store import ConfirmStore
 from core.config import settings
 from core.logging import log, setup_logging
+from db.session import init_db
 
-# Очередь черновиков в памяти (Фаза 1 заменит на БД proposals + audit_log)
-PENDING: dict[str, dict] = {}
+STORE = ConfirmStore()  # черновики + audit в БД (SQLite dev), вместо очереди в памяти
 
 dp = Dispatcher()
 
@@ -55,15 +59,40 @@ async def start(m: Message) -> None:
 async def help_(m: Message) -> None:
     await m.answer(
         "Я читаю Google Ads и предлагаю изменения. Перед любым изменением показываю "
-        "«было → станет» и жду подтверждения. Просто пиши текстом."
+        "«было → станет» и жду подтверждения. Просто пиши текстом.\n"
+        "Доступно: бюджет, ставка (CPC), ключевые слова, минус-слова, пауза/возобновление.\n"
+        "/campaigns — список кампаний (точные имена для команд)."
     )
 
 
+@dp.message(Command("campaigns"))
+async def campaigns_(m: Message) -> None:
+    """Read-only список кампаний. Полезно: имя кампании теперь обязательно для ставки/ключей."""
+    try:
+        from ads.client import build_client
+        from ads.read import list_campaigns
+
+        client = build_client()
+        camps = await asyncio.to_thread(list_campaigns, client, DRAFT_ACCOUNT_ID)
+    except Exception as e:  # сеть/доступ/SDK
+        await m.answer(f"⚠️ Не удалось получить кампании: {type(e).__name__}: {e}")
+        return
+    if not camps:
+        await m.answer("Кампаний нет.")
+        return
+    lines = "\n".join(f"• {c['name']} — {c['status']}" for c in camps)
+    await m.answer(f"Кампании аккаунта {DRAFT_ACCOUNT_ID}:\n{lines}")
+
+
 def _kb(cid: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"ok:{cid}"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data=f"no:{cid}"),
-    ]])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"ok:{cid}"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data=f"no:{cid}"),
+            ]
+        ]
+    )
 
 
 @dp.message(F.text)
@@ -72,8 +101,18 @@ async def on_text(m: Message) -> None:
     t = res.get("type")
     if t == "proposal":
         cid = res["confirmation_id"]
-        PENDING[cid] = res
-        await m.answer(f"Изменение (черновик):\n{res['summary']}\n\nПодтвердить?", reply_markup=_kb(cid))
+        await STORE.save_proposal(
+            confirmation_id=cid,
+            operation=res["operation"],
+            customer_id=DRAFT_ACCOUNT_ID,
+            params=res.get("params", {}),
+            summary=res["summary"],
+            chat_id=m.chat.id,
+            user_initiated=res.get("user_initiated", True),
+        )
+        await m.answer(
+            f"Изменение (черновик):\n{res['summary']}\n\nПодтвердить?", reply_markup=_kb(cid)
+        )
     elif t == "clarify":
         await m.answer("❓ " + res["question"])
     elif t == "read":
@@ -90,32 +129,41 @@ async def on_text(m: Message) -> None:
 @dp.callback_query(F.data.startswith("ok:"))
 async def confirm(cq: CallbackQuery) -> None:
     cid = cq.data[3:]
-    p = PENDING.pop(cid, None)
-    if not p:
+    chat_id = cq.message.chat.id if cq.message else cq.from_user.id
+    if not await STORE.confirm(cid, chat_id=chat_id):
         await cq.answer("Черновик не найден или устарел")
         return
-    # Фаза 1: реальное выполнение через ads/mutations (с проверкой confirmation_id) + audit_log.
-    await cq.message.edit_text(f"✅ Подтверждено:\n{p['summary']}\n\n(выполнение операции — Фаза 1)")
-    await cq.answer("Подтверждено")
+    await cq.answer("Выполняю…")
+    try:
+        result = await execute_confirmed(STORE, cid)
+        await cq.message.edit_text(f"✅ Выполнено:\n{result}")
+    except Exception as e:  # доступ/резолв/SDK
+        await STORE.record_failure(cid, error=str(e))
+        await cq.message.edit_text(f"⚠️ Не удалось выполнить: {type(e).__name__}: {e}")
 
 
 @dp.callback_query(F.data.startswith("no:"))
 async def cancel(cq: CallbackQuery) -> None:
-    PENDING.pop(cq.data[3:], None)
+    chat_id = cq.message.chat.id if cq.message else cq.from_user.id
+    await STORE.reject(cq.data[3:], chat_id=chat_id)
     await cq.message.edit_text("❌ Отменено")
     await cq.answer("Отменено")
 
 
 async def main() -> None:
     setup_logging()
-    if not settings.telegram_bot_token:
+    token = settings.telegram_bot_token.get_secret_value()
+    if not token:
         log.warning("TELEGRAM_BOT_TOKEN пуст — добавь в .env (токен у @BotFather).")
         return
     if not settings.whitelist:
-        log.warning("whitelist пуст — бот будет отвечать ВСЕМ. Добавь TELEGRAM_WHITELIST_CHAT_IDS в .env.")
+        log.warning(
+            "whitelist пуст — бот будет отвечать ВСЕМ. Добавь TELEGRAM_WHITELIST_CHAT_IDS в .env."
+        )
+    await init_db()
     dp.message.outer_middleware(WhitelistMiddleware())
     dp.callback_query.outer_middleware(WhitelistMiddleware())
-    bot = Bot(settings.telegram_bot_token)
+    bot = Bot(token)
     log.info("Aimash bot запущен (polling).")
     await dp.start_polling(bot)
 
