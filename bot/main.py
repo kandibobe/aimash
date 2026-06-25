@@ -108,7 +108,9 @@ async def on_text(m: Message) -> None:
             params=res.get("params", {}),
             summary=res["summary"],
             chat_id=m.chat.id,
-            user_initiated=res.get("user_initiated", True),
+            # on_text — это входящее сообщение whitelisted-пользователя ⇒ прямая команда человека.
+            # Провенанс проставляет доверенный слой (бот), не агент/модель (golden rule #3).
+            user_initiated=True,
         )
         await m.answer(
             f"Изменение (черновик):\n{res['summary']}\n\nПодтвердить?", reply_markup=_kb(cid)

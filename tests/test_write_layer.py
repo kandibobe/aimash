@@ -51,9 +51,15 @@ class FakeStore:
     def __init__(self, proposal=None):
         self._p = proposal
         self.finalized = False
+        self._claimed = False
 
-    async def get_confirmed(self, confirmation_id):
-        return self._p
+    async def claim(self, confirmation_id, *, operation):
+        # Зеркало ConfirmStore.claim: атомарно/одноразово, только confirmed + совпавшая операция.
+        p = self._p
+        if p is None or p.status != "confirmed" or p.operation != operation or self._claimed:
+            return None
+        self._claimed = True
+        return p
 
     async def finalize(self, confirmation_id, *, result):
         self.finalized = True
@@ -374,7 +380,14 @@ async def test_store_roundtrip_writes_audit():
     assert (await store.get_confirmed(cid)).status == "confirmed"
     assert await store.confirm(cid, chat_id=1) is False  # одноразово
 
+    # claim (как apply_* перед SDK): confirmed → executing, АТОМАРНО и ОДНОРАЗОВО.
+    snap = await store.claim(cid, operation="add_keywords")
+    assert snap is not None and snap.status == "executing"
+    assert await store.claim(cid, operation="add_keywords") is None  # повтор заблокирован (replay)
+    assert (await store.get_confirmed(cid)).status == "executing"
+
     await store.finalize(cid, result={"applied": True, "count": 1})
+    assert (await store.get_confirmed(cid)).status == "applied"  # терминальный статус
 
     async with Session() as s:
         rows = (
@@ -389,3 +402,285 @@ async def test_store_roundtrip_writes_audit():
     statuses = [r.status for r in rows]
     assert "confirmed" in statuses and "applied" in statuses
     assert all(r.customer_id == DRAFT_ACCOUNT_ID for r in rows)
+
+
+# ── FIX 1: replay/double-spend заблокирован на реальном сторе (claim одноразов) ───
+async def test_real_store_apply_is_single_use_replay_blocked():
+    from confirm.store import ConfirmStore
+    from db.session import init_db
+
+    await init_db()
+    store = ConfirmStore()
+    cid = uuid.uuid4().hex
+    await store.save_proposal(
+        confirmation_id=cid,
+        operation="resume_campaign",
+        customer_id=DRAFT_ACCOUNT_ID,
+        params={"campaign": "X"},
+        summary="resume X",
+        chat_id=1,
+        user_initiated=True,
+    )
+    assert await store.confirm(cid, chat_id=1) is True
+
+    calls = {"n": 0}
+
+    def fake(client, customer_id, campaign_id, status):
+        calls["n"] += 1
+        return {"applied": True, "status": getattr(status, "name", status)}
+
+    with patched(mut, "_set_campaign_status_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res1 = await mut.apply_resume_campaign(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_id="5",
+            confirmation_id=cid,
+            confirm_store=store,
+            ads_client=_FakeClient(),
+        )
+        assert res1["applied"] is True
+        # Повтор с тем же confirmation_id — claim вернёт None → PermissionError, SDK НЕ вызван.
+        try:
+            await mut.apply_resume_campaign(
+                customer_id=DRAFT_ACCOUNT_ID,
+                campaign_id="5",
+                confirmation_id=cid,
+                confirm_store=store,
+                ads_client=_FakeClient(),
+            )
+            raise AssertionError("повторное выполнение должно быть заблокировано (replay)")
+        except PermissionError:
+            pass
+    assert calls["n"] == 1  # SDK-исполнитель вызван РОВНО один раз (нет double-spend)
+    assert (await store.get_confirmed(cid)).status == "applied"  # терминальный статус
+
+
+# ── FIX 1: confirmation_id одной операции нельзя «переиграть» в другую (wrong-op) ─
+async def test_apply_rejects_wrong_operation_confirmation():
+    store = FakeStore(FakeProposal("add_keywords", "confirmed", user_initiated=True))
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        try:
+            await mut.apply_update_bid(  # confirmation_id подтверждён для add_keywords, не bid
+                customer_id=DRAFT_ACCOUNT_ID,
+                campaign_id="7",
+                bids=[("42", 1_500_000)],
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=object(),
+            )
+            raise AssertionError("ожидался PermissionError (операция не совпадает)")
+        except PermissionError:
+            pass
+    assert store.finalized is False
+
+
+# ── FIX 2: user_initiated по умолчанию False (fail-closed), деньги — заблокированы ─
+async def test_save_proposal_defaults_user_initiated_false():
+    from confirm.store import ConfirmStore
+    from db.session import init_db
+
+    await init_db()
+    store = ConfirmStore()
+    cid = uuid.uuid4().hex
+    await store.save_proposal(  # БЕЗ user_initiated — должен лечь False
+        confirmation_id=cid,
+        operation="update_budget",
+        customer_id=DRAFT_ACCOUNT_ID,
+        params={"campaign": "X", "mode": "set_to", "value": 10},
+        summary="budget X",
+        chat_id=1,
+    )
+    snap = await store.get_confirmed(cid)
+    assert snap.user_initiated is False
+
+
+async def test_budget_blocked_when_default_user_initiated():
+    # Полный путь: proposal без user_initiated (default False) → бюджет заблокирован гейтом.
+    store = FakeStore(FakeProposal("update_budget", "confirmed", user_initiated=False))
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        try:
+            await mut.apply_update_budget(
+                customer_id=DRAFT_ACCOUNT_ID,
+                campaign_id="1",
+                new_budget_micros=50_000_000,
+                confirmation_id="x",
+                confirm_store=store,
+                ads_client=object(),
+            )
+            raise AssertionError("ожидался PermissionError (бюджет не по команде)")
+        except PermissionError:
+            pass
+    assert store.finalized is False
+
+
+# ── FIX 6: абсолютный потолок суммы у границы SDK (defense-in-depth поверх схемы) ─
+async def test_apply_update_budget_rejects_absurd_amount():
+    store = FakeStore(FakeProposal("update_budget", "confirmed", user_initiated=True))
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        try:
+            await mut.apply_update_budget(
+                customer_id=DRAFT_ACCOUNT_ID,
+                campaign_id="1",
+                new_budget_micros=mut.MAX_AMOUNT_MICROS + 1,
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=object(),
+            )
+            raise AssertionError("ожидался ValueError (сумма за потолком)")
+        except ValueError:
+            pass
+    assert store.finalized is False
+
+
+# ── pause_campaign: happy path (был вообще без теста) ────────────────────────────
+async def test_apply_pause_campaign_happy_path():
+    called = {}
+
+    def fake(client, customer_id, campaign_id, status):
+        called.update(customer_id=customer_id, campaign_id=campaign_id, status=status)
+        return {"applied": True, "status": status}
+
+    store = FakeStore(FakeProposal("pause_campaign", "confirmed", user_initiated=True))
+    with patched(mut, "_set_campaign_status_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_pause_campaign(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_id="23",
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=_FakeClient(),
+        )
+    assert res["applied"] is True
+    assert called["status"] == "PAUSED"  # pause → PAUSED
+    assert store.finalized is True
+
+
+# ── Негатив-матрица: чужой аккаунт / без подтверждения для ВСЕХ apply_* ───────────
+def _apply_case(op):
+    """(apply_fn, kwargs без customer_id/confirm_store) для каждой поддержанной операции."""
+    base = {"confirmation_id": "ok", "ads_client": _FakeClient()}
+    if op == "update_budget":
+        return mut.apply_update_budget, {
+            "campaign_id": "1",
+            "new_budget_micros": 50_000_000,
+            **base,
+        }
+    if op == "update_bid":
+        return mut.apply_update_bid, {"campaign_id": "7", "bids": [("42", 1_500_000)], **base}
+    if op == "add_keywords":
+        return mut.apply_add_keywords, {
+            "ad_group_ids": ["1"],
+            "keywords": ["цветы"],
+            "match_type": "broad",
+            **base,
+        }
+    if op == "add_negative_keywords":
+        return mut.apply_add_negative_keywords, {
+            "campaign_id": "7",
+            "keywords": ["бесплатно"],
+            "match_type": "broad",
+            **base,
+        }
+    if op == "resume_campaign":
+        return mut.apply_resume_campaign, {"campaign_id": "7", **base}
+    if op == "pause_campaign":
+        return mut.apply_pause_campaign, {"campaign_id": "7", **base}
+    raise AssertionError(op)
+
+
+_ALL_OPS = [
+    "update_budget",
+    "update_bid",
+    "add_keywords",
+    "add_negative_keywords",
+    "resume_campaign",
+    "pause_campaign",
+]
+
+
+async def test_all_apply_reject_foreign_account():
+    for op in _ALL_OPS:
+        fn, kw = _apply_case(op)
+        store = FakeStore(FakeProposal(op, "confirmed", user_initiated=True))
+        with allowed_ids(DRAFT_ACCOUNT_ID):
+            try:
+                await fn(customer_id="1234567890", confirm_store=store, **kw)
+                raise AssertionError(f"{op}: чужой аккаунт должен падать PermissionError")
+            except PermissionError:
+                pass
+        assert store.finalized is False, op
+
+
+async def test_all_apply_reject_without_confirmation():
+    for op in _ALL_OPS:
+        fn, kw = _apply_case(op)
+        store = FakeStore(proposal=None)  # нет подтверждённого черновика
+        with allowed_ids(DRAFT_ACCOUNT_ID):
+            try:
+                await fn(customer_id=DRAFT_ACCOUNT_ID, confirm_store=store, **kw)
+                raise AssertionError(f"{op}: без confirmation должен падать PermissionError")
+            except PermissionError:
+                pass
+        assert store.finalized is False, op
+
+
+# ── FIX: account-lock на уровне РЕЗОЛВЕРОВ (find_campaign_by_name / find_ad_groups) ─
+def test_resolvers_reject_foreign_account():
+    from ads.resolve import find_ad_groups, find_campaign_by_name
+
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        for fn in (find_campaign_by_name, find_ad_groups):
+            try:
+                fn(object(), "1234567890", "X")  # ensure_allowed до любого обращения к SDK
+                raise AssertionError(f"{fn.__name__}: чужой аккаунт должен падать")
+            except PermissionError:
+                pass
+
+
+# ── FIX 3: ensure_manager_allowed — обход MCC только настроенного менеджера ───────
+def test_ensure_manager_allowed():
+    from ads.client import ensure_manager_allowed
+
+    prev = settings.google_ads_login_customer_id
+    try:
+        settings.google_ads_login_customer_id = ""  # не задан → fail-closed
+        try:
+            ensure_manager_allowed("123")
+            raise AssertionError("ожидался PermissionError (login_customer_id пуст)")
+        except PermissionError:
+            pass
+
+        settings.google_ads_login_customer_id = "9998887777"
+        ensure_manager_allowed("999-888-7777")  # нормализация → совпало → ок
+        try:
+            ensure_manager_allowed("1112223333")
+            raise AssertionError("ожидался PermissionError (чужой менеджер)")
+        except PermissionError:
+            pass
+    finally:
+        settings.google_ads_login_customer_id = prev
+
+
+# ── execute_confirmed: fail-closed на None и статус != confirmed (defense-in-depth) ─
+async def test_execute_confirmed_rejects_unconfirmed_and_missing():
+    from ads.service import execute_confirmed
+
+    class _S:
+        def __init__(self, p):
+            self._p = p
+
+        async def get_confirmed(self, cid):
+            return self._p
+
+    # status=pending → PermissionError
+    pending = SimpleNamespace(operation="update_budget", status="pending", params={})
+    try:
+        await execute_confirmed(_S(pending), "cid")
+        raise AssertionError("ожидался PermissionError (не confirmed)")
+    except PermissionError:
+        pass
+
+    # None → ValueError
+    try:
+        await execute_confirmed(_S(None), "cid")
+        raise AssertionError("ожидался ValueError (черновик не найден)")
+    except ValueError:
+        pass

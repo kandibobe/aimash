@@ -18,9 +18,12 @@ class Proposal:
     summary: str  # человекочитаемое «было → станет»
     params: dict  # валидируемые параметры (Pydantic на уровне tools)
     chat_id: int
-    user_initiated: bool = True  # пришло прямой командой пользователя?
+    # fail-closed: True ставит ТОЛЬКО доверенный вход (Telegram-команда человека). Дефолт False,
+    # чтобы автоматический создатель (scheduler/anomaly), забывший флаг, был заблокирован гейтом
+    # бюджета/ставки (golden rule #3), а не молча разрешён.
+    user_initiated: bool = False
     confirmation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    status: str = "pending"  # pending | confirmed | rejected
+    status: str = "pending"  # pending | confirmed | executing | applied | failed | rejected
     big_list_attachment: str | None = None  # ключи/минус-слова — ссылкой, не текстом
 
 

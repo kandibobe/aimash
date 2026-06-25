@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from google.ads.googleads.client import GoogleAdsClient
 
-from ads.client import ensure_allowed
+from ads.client import ensure_allowed, ensure_manager_allowed
 
 
 @dataclass
@@ -32,7 +32,9 @@ class AccountStats:
 
 
 def list_child_accounts(client: GoogleAdsClient, manager_id: str) -> list[ChildAccount]:
-    """Обход иерархии MCC через customer_client."""
+    """Обход иерархии MCC через customer_client. Чокпойнт: только настроенный MCC (fail-closed) —
+    перечисление дочерних аккаунтов чужого менеджера запрещено (golden rule #9)."""
+    ensure_manager_allowed(manager_id)
     ga = client.get_service("GoogleAdsService")
     q = (
         "SELECT customer_client.id, customer_client.descriptive_name, "

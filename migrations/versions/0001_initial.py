@@ -51,7 +51,7 @@ def upgrade() -> None:
         sa.Column("summary", sa.Text(), nullable=False),
         sa.Column("params", sa.JSON(), nullable=False),
         sa.Column("chat_id", sa.BigInteger(), nullable=False),
-        sa.Column("user_initiated", sa.Boolean(), nullable=False, server_default=sa.true()),
+        sa.Column("user_initiated", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("status", sa.String(length=16), nullable=False, server_default="pending"),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
         sa.Column("decided_at", sa.DateTime(timezone=True), nullable=True),

@@ -98,19 +98,14 @@ async def handle_command(text: str, *, chat_id: int = 0) -> dict[str, Any]:
         # Черновик: «было» возьмётся из Google Ads в Фазе 1; сейчас плейсхолдер.
         after = validated.model_dump()
         summary = build_summary(name, before="[текущее значение из Google Ads]", after=after)
-        proposal = Proposal(
-            operation=name,
-            summary=summary,
-            params=after,
-            chat_id=chat_id,
-            user_initiated=True,
-        )
+        # user_initiated НЕ выставляем здесь: провенанс «прямая команда человека» проставляет
+        # ТОЛЬКО доверенный вход (bot.main.on_text), а не агент про самого себя (fail-closed).
+        proposal = Proposal(operation=name, summary=summary, params=after, chat_id=chat_id)
         return {
             "type": "proposal",
             "operation": name,
             "summary": proposal.summary,
             "params": after,
-            "user_initiated": proposal.user_initiated,
             "confirmation_id": proposal.confirmation_id,
             "confirm_prompt": "Показать в Telegram с кнопками ✅ Подтвердить / ❌ Отмена. "
             "Выполнить только после «да».",

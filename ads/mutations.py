@@ -16,39 +16,42 @@ from google.ads.googleads.errors import GoogleAdsException
 from google.api_core import protobuf_helpers
 
 from ads.client import ensure_allowed
+from ads.validation import assert_keyword_ok, normalize_keywords
 
+# Длину/форму ключевых слов считает КОД (golden rule #4) — единый источник в ads.validation.
+# Алиас сохранён для обратной совместимости (тесты/вызовы mutations._assert_keyword_ok).
+_assert_keyword_ok = assert_keyword_ok
 
-def _assert_keyword_ok(text: str) -> str:
-    """Длину/форму ключевого слова считает КОД (golden rule #4): ≤80 символов, ≤10 слов.
-    Кириллица = 1 символ (Unicode code points, len()). Это лимит Google Ads для keyword.text,
-    он НЕ равен RSA-лимитам (30/90) — другая сущность. Возвращает обрезанный по краям текст."""
-    t = text.strip()
-    if not t:
-        raise ValueError("пустое ключевое слово")
-    if len(t) > 80:
-        raise ValueError(f"ключевое слово >80 символов ({len(t)}): {t[:30]}…")
-    if len(t.split()) > 10:
-        raise ValueError(f"ключевое слово >10 слов: {t[:40]}…")
-    return t
+# Абсолютный потолок суммы (micros) — защита от галлюцинации/инъекции модели СВЕРХ диапазон-
+# валидации схемы (set_to/increase_by_amount без верхней границы). Это не бизнес-лимит, а
+# «очевидно неверно» граница: 1 000 000 единиц валюты * 1e6. Считает КОД, у самой границы SDK.
+MAX_AMOUNT_MICROS = 1_000_000 * 1_000_000
 
 
 class ConfirmStore(Protocol):
-    async def get_confirmed(self, confirmation_id: str) -> "ConfirmedProposal | None": ...
+    async def claim(
+        self, confirmation_id: str, *, operation: str
+    ) -> "ConfirmedProposal | None": ...
     async def finalize(self, confirmation_id: str, *, result: object) -> None: ...
 
 
 class ConfirmedProposal(Protocol):
     operation: str
-    status: str  # "confirmed" | "rejected" | "pending"
+    status: str  # "confirmed" | "executing" | "applied" | "failed" | "rejected" | "pending"
     user_initiated: bool  # True только если изменение пришло прямой командой пользователя
 
 
 async def _require_confirmation(
     confirm_store: ConfirmStore, confirmation_id: str, operation: str
 ) -> ConfirmedProposal:
-    proposal = await confirm_store.get_confirmed(confirmation_id)
-    if proposal is None or proposal.operation != operation or proposal.status != "confirmed":
-        raise PermissionError(f"мутация '{operation}' без валидного confirmation_id — отклонено")
+    """Authoritative-гейт исполнения: АТОМАРНО столбит подтверждённый черновик (confirmed →
+    executing) под эту операцию. None ⇒ нет/не подтверждён/чужая операция/уже выполнялся
+    (replay) ⇒ PermissionError. Один confirmation_id исполняется не более одного раза."""
+    proposal = await confirm_store.claim(confirmation_id, operation=operation)
+    if proposal is None:
+        raise PermissionError(
+            f"мутация '{operation}' без валидного/одноразового confirmation_id — отклонено"
+        )
     return proposal
 
 
@@ -65,16 +68,19 @@ async def apply_update_budget(
     # Гейт 1 — замок аккаунта (до всего остального): только Aimash Draft.
     ensure_allowed(customer_id)
 
-    # Гейт 2 — confirm-гейт.
+    # Валидация диапазонов В КОДЕ (не доверять модели) — ДО claim, чтобы плохие данные
+    # не «съели» одноразовый черновик.
+    if new_budget_micros <= 0:
+        raise ValueError("бюджет должен быть > 0")
+    if new_budget_micros > MAX_AMOUNT_MICROS:
+        raise ValueError("бюджет подозрительно большой — проверь команду (>1 000 000)")
+
+    # Гейт 2 — confirm-гейт (АТОМАРНО столбит черновик: confirmed → executing).
     proposal = await _require_confirmation(confirm_store, confirmation_id, "update_budget")
 
     # Бюджет — ТОЛЬКО по прямой команде пользователя (никогда из scheduler/anomaly)
     if not proposal.user_initiated:
         raise PermissionError("изменение бюджета должно быть прямой командой пользователя")
-
-    # Валидация диапазонов В КОДЕ (не доверять модели)
-    if new_budget_micros <= 0:
-        raise ValueError("бюджет должен быть > 0")
 
     # Реальный вызов SDK (google-ads синхронный → в потоке). _apply_budget_via_sdk вынесен
     # отдельно, чтобы юнит-тест мог подменить его (офлайн, без живого аккаунта).
@@ -134,19 +140,22 @@ async def apply_update_bid(
     ads_client: object,
 ) -> dict:
     ensure_allowed(customer_id)
+
+    # Валидация диапазонов В КОДЕ (не доверять модели) — ДО claim.
+    if not bids:
+        raise ValueError("нет групп объявлений для изменения ставки")
+    for ad_group_id, micros in bids:
+        if int(micros) <= 0:
+            raise ValueError(f"ставка должна быть > 0 (ad_group {ad_group_id})")
+        if int(micros) > MAX_AMOUNT_MICROS:
+            raise ValueError(f"ставка подозрительно большая (ad_group {ad_group_id})")
+
     proposal = await _require_confirmation(confirm_store, confirmation_id, "update_bid")
 
     # Ставки — деньги: меняем только прямой командой пользователя (defense-in-depth,
     # сверх golden rule #3 о бюджете). Scheduler/anomaly ставки не двигают.
     if not proposal.user_initiated:
         raise PermissionError("изменение ставки должно быть прямой командой пользователя")
-
-    # Валидация диапазонов В КОДЕ (не доверять модели).
-    if not bids:
-        raise ValueError("нет групп объявлений для изменения ставки")
-    for ad_group_id, micros in bids:
-        if int(micros) <= 0:
-            raise ValueError(f"ставка должна быть > 0 (ad_group {ad_group_id})")
 
     result = await asyncio.to_thread(_apply_bid_via_sdk, ads_client, customer_id, campaign_id, bids)
     await confirm_store.finalize(confirmation_id, result=result)
@@ -165,10 +174,11 @@ async def apply_add_keywords(
     ads_client: object,
 ) -> dict:
     ensure_allowed(customer_id)
-    await _require_confirmation(confirm_store, confirmation_id, "add_keywords")
+    # Длину/дубли считает КОД (golden rule #4) — ДО claim.
     if not ad_group_ids:
         raise ValueError("нет групп объявлений для добавления ключевых слов")
-    clean = [_assert_keyword_ok(k) for k in keywords]
+    clean = normalize_keywords(keywords)
+    await _require_confirmation(confirm_store, confirmation_id, "add_keywords")
     result = await asyncio.to_thread(
         _add_keywords_via_sdk, ads_client, customer_id, ad_group_ids, clean, match_type
     )
@@ -188,8 +198,8 @@ async def apply_add_negative_keywords(
     ads_client: object,
 ) -> dict:
     ensure_allowed(customer_id)
+    clean = normalize_keywords(keywords)  # длину/дубли считает КОД — ДО claim
     await _require_confirmation(confirm_store, confirmation_id, "add_negative_keywords")
-    clean = [_assert_keyword_ok(k) for k in keywords]
     result = await asyncio.to_thread(
         _add_negative_keywords_via_sdk, ads_client, customer_id, campaign_id, clean, match_type
     )
@@ -209,9 +219,9 @@ async def apply_set_geo_proximity(
     ads_client: object,
 ) -> dict:
     ensure_allowed(customer_id)
-    await _require_confirmation(confirm_store, confirmation_id, "set_geo_proximity")
     if radius_km <= 0:
         raise ValueError("радиус должен быть > 0")
+    await _require_confirmation(confirm_store, confirmation_id, "set_geo_proximity")
     result = await asyncio.to_thread(
         _set_geo_proximity_via_sdk, ads_client, customer_id, campaign_id, radius_km, address
     )
@@ -309,8 +319,14 @@ def _apply_bid_via_sdk(client, customer_id: str, campaign_id: str, bids: list) -
     try:
         svc.mutate_ad_groups(customer_id=str(customer_id), operations=ops)
     except GoogleAdsException as ex:
-        mismatch = client.enums.AdGroupErrorEnum.BID_TYPE_AND_BIDDING_STRATEGY_MISMATCH
-        if any(err.error_code.ad_group_error == mismatch for err in ex.failure.errors):
+        # Сравниваем по ИМЕНИ enum-значения: AdGroupErrorEnum — это тип ОШИБКИ (v24.errors),
+        # его НЕТ в client.enums (только enums-модуль) → обращение к client.enums.AdGroupErrorEnum
+        # упало бы AttributeError и проглотило исходную ошибку. .name есть у любого enum-поля
+        # (для не-ad_group ошибок вернётся 'UNSPECIFIED'), сравнение версионно-независимо.
+        if any(
+            err.error_code.ad_group_error.name == "BID_TYPE_AND_BIDDING_STRATEGY_MISMATCH"
+            for err in ex.failure.errors
+        ):
             raise ValueError(
                 "ставка несовместима со стратегией кампании (BID_TYPE_AND_BIDDING_STRATEGY_MISMATCH)"
             ) from ex

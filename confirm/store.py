@@ -1,9 +1,13 @@
 """SQLAlchemy-стор черновиков (proposals) + audit-журнал. Реализует протокол confirm_store
-(async get_confirmed/finalize), который ждут ads/mutations.apply_*.
+(async claim/finalize), который ждут ads/mutations.apply_*.
 
-Поток безопасности:
-  save_proposal (pending) → confirm (confirmed) → apply_* проверяет status=confirmed
-  по confirmation_id → выполняет → finalize (audit: applied). Reject/ошибки тоже в audit_log.
+Поток безопасности (жизненный цикл черновика):
+  save_proposal (pending) → confirm (confirmed) → claim (executing, АТОМАРНО и ОДНОРАЗОВО)
+  → выполнить SDK → finalize (applied) | record_failure (failed). Reject → rejected.
+
+`claim` — ключ к защите от ПОВТОРНОГО выполнения (replay/double-spend): перевод
+confirmed→executing идёт одним атомарным UPDATE … WHERE status='confirmed' (compare-and-set),
+поэтому второй вызов (ретрай, гонка, второй воркер) получит rowcount=0 и НЕ выполнит мутацию.
 
 Хранилище — db.models (Proposal/AuditLog) на движке из DATABASE_URL (dev: SQLite). Секретов тут нет.
 """
@@ -12,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from db.models import AuditLog, Proposal
 from db.session import Session
@@ -43,7 +47,7 @@ class ConfirmStore:
         params: dict,
         summary: str,
         chat_id: int,
-        user_initiated: bool = True,
+        user_initiated: bool = False,
     ) -> None:
         async with Session() as s:
             s.add(
@@ -77,6 +81,42 @@ class ConfirmStore:
                 chat_id=p.chat_id,
             )
 
+    async def claim(self, confirmation_id: str, *, operation: str) -> ConfirmedProposal | None:
+        """Атомарно «застолбить» подтверждённый черновик под исполнение: confirmed → executing
+        (одноразово, с проверкой операции). Возвращает снимок, если застолбил, иначе None.
+
+        Это authoritative-гейт исполнения: один UPDATE … WHERE status='confirmed' AND operation=…
+        (compare-and-set). Второй вызов с тем же confirmation_id (повтор/гонка/второй воркер)
+        не совпадёт по WHERE → rowcount=0 → None → мутация не выполнится (защита от double-spend).
+        Несовпадение operation тоже даёт None — confirmation_id привязан к КОНКРЕТНОЙ операции."""
+        async with Session() as s:
+            res = await s.execute(
+                update(Proposal)
+                .where(
+                    Proposal.confirmation_id == confirmation_id,
+                    Proposal.operation == operation,
+                    Proposal.status == "confirmed",
+                )
+                .values(status="executing", decided_at=func.now())
+            )
+            if res.rowcount != 1:  # не застолбили (нет/не confirmed/чужая операция/уже взят)
+                await s.rollback()
+                return None
+            p = (
+                await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
+            ).scalar_one()
+            snap = ConfirmedProposal(
+                operation=p.operation,
+                status=p.status,  # "executing"
+                user_initiated=p.user_initiated,
+                params=p.params,
+                customer_id=p.customer_id,
+                summary=p.summary,
+                chat_id=p.chat_id,
+            )
+            await s.commit()
+            return snap
+
     async def confirm(self, confirmation_id: str, *, chat_id: int) -> bool:
         """pending → confirmed (одноразово). True если перевёл. Пишет audit."""
         async with Session() as s:
@@ -103,21 +143,31 @@ class ConfirmStore:
                 await s.commit()
 
     async def finalize(self, confirmation_id: str, *, result: object) -> None:
-        """Запись результата выполнения в audit (status=applied)."""
+        """Успех: executing → applied (терминальный) + audit applied. Терминальный статус
+        не даёт повторно застолбить черновик (claim требует status='confirmed')."""
         async with Session() as s:
             p = (
                 await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
             ).scalar_one_or_none()
             if p is not None:
+                if p.status == "executing":
+                    p.status = "applied"
+                    p.decided_at = func.now()
                 s.add(_audit(p, p.chat_id, "applied", result=result))
                 await s.commit()
 
     async def record_failure(self, confirmation_id: str, *, error: str) -> None:
+        """Ошибка выполнения: executing → failed (терминальный) + audit failed. Если черновик
+        ещё не был застолблён (ошибка до claim, напр. резолв имени), статус не трогаем — его
+        ещё можно выполнить заново; SDK при этом не вызывался, денег не потрачено."""
         async with Session() as s:
             p = (
                 await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
             ).scalar_one_or_none()
             if p is not None:
+                if p.status == "executing":
+                    p.status = "failed"
+                    p.decided_at = func.now()
                 s.add(_audit(p, p.chat_id, "failed", result={"error": error}))
                 await s.commit()
 

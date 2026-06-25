@@ -99,9 +99,15 @@ class FakeStore:
     def __init__(self, proposal=None):
         self._p = proposal
         self.finalized = False
+        self._claimed = False
 
-    async def get_confirmed(self, confirmation_id):
-        return self._p
+    async def claim(self, confirmation_id, *, operation):
+        # Зеркало ConfirmStore.claim: confirmed + совпавшая операция, одноразово.
+        p = self._p
+        if p is None or p.status != "confirmed" or p.operation != operation or self._claimed:
+            return None
+        self._claimed = True
+        return p
 
     async def finalize(self, confirmation_id, *, result):
         self.finalized = True

@@ -68,3 +68,22 @@ def ensure_allowed(customer_id: str) -> None:
         raise PermissionError(
             f"customer_id {cid} не разрешён (allow-list {sorted(allowed)}) — операция запрещена"
         )
+
+
+def ensure_manager_allowed(manager_id: str) -> None:
+    """Замок для ОБХОДА MCC (чтение customer_client от имени менеджерского аккаунта).
+
+    Отдельный чокпойнт, потому что manager_id (= login_customer_id) — это менеджер, он НЕ входит
+    в ALLOWED_CEILING (тот — потолок per-account операций над дочерним Aimash Draft). Разрешён
+    ТОЛЬКО настроенный login_customer_id из .env; пустой ⇒ fail-closed (обход запрещён).
+    Нормализуем id, поэтому '775-364-3025' и '7753643025' эквивалентны.
+    """
+    mid = normalize_customer_id(manager_id)
+    configured = normalize_customer_id(settings.google_ads_login_customer_id)
+    if not configured:
+        raise PermissionError(
+            "login_customer_id не задан — обход MCC запрещён (fail-closed). "
+            "Задай GOOGLE_ADS_LOGIN_CUSTOMER_ID в .env."
+        )
+    if mid != configured:
+        raise PermissionError(f"manager_id {mid} ≠ настроенного MCC {configured} — обход запрещён")

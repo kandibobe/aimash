@@ -60,10 +60,13 @@ class Proposal(Base):
     summary: Mapped[str] = mapped_column(Text, nullable=False)  # «было → станет»
     params: Mapped[dict] = mapped_column(JSON, nullable=False)
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    user_initiated: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # fail-closed: True ставит ТОЛЬКО доверенный вход (Telegram-команда человека). Любой
+    # автоматический создатель (scheduler/anomaly), забывший флаг, получит False → бюджет/ставка
+    # будут заблокированы гейтом (golden rule #3). Дефолт True был бы fail-open.
+    user_initiated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(
         String(16), default="pending", nullable=False
-    )  # pending|confirmed|rejected
+    )  # pending|confirmed|executing|applied|failed|rejected
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
