@@ -1,0 +1,29 @@
+# Хуки качества + безопасности. Установка: `pre-commit install` (см. Makefile / README).
+# Прогон по всем файлам: `pre-commit run --all-files`.
+minimum_pre_commit_version: "3.8.0"
+
+repos:
+  # Секрет-скан: блокирует коммит с developer/refresh-токенами, ключами (golden rule №5).
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  # Линт + формат Python.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  # Базовая гигиена файлов.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: detect-private-key

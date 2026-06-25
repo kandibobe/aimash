@@ -5,9 +5,19 @@
       "Bash(python -m:*)",
       "Bash(pip install:*)",
       "Bash(uv:*)",
+      "Bash(uvx:*)",
+      "Bash(npx:*)",
+      "Bash(pipx:*)",
       "Bash(pytest:*)",
       "Bash(ruff:*)",
+      "Bash(mypy:*)",
       "Bash(alembic:*)",
+      "Bash(pre-commit:*)",
+      "Bash(gitleaks:*)",
+      "Bash(make:*)",
+      "Bash(docker:*)",
+      "Bash(docker compose:*)",
+      "Bash(claude mcp:*)",
       "Bash(git status)",
       "Bash(git diff:*)",
       "Bash(git log:*)",
@@ -21,6 +31,8 @@
     "deny": [
       "Read(./.env)",
       "Read(./google-ads.yaml)",
+      "Read(./google-ads-oauth*.json)",
+      "Read(./.claude/settings.local.json)",
       "Read(./secrets/**)",
       "Bash(git push:*)"
     ]

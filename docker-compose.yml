@@ -1,0 +1,25 @@
+# Локальная dev-БД. Запуск: `docker compose up -d postgres` (или `make db-up`).
+# Создаёт две роли: aimash (read-write для приложения/Alembic) и aimash_ro (read-only,
+# для Postgres MCP — defense-in-depth поверх --access-mode=restricted).
+services:
+  postgres:
+    image: postgres:16
+    container_name: aimash-pg
+    environment:
+      POSTGRES_USER: aimash
+      POSTGRES_PASSWORD: aimash
+      POSTGRES_DB: aimash
+    ports:
+      # 5433 на хосте (5432 часто занят локальным/нативным Postgres). Внутри контейнера — 5432.
+      - "5433:5432"
+    volumes:
+      - aimash_pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aimash -d aimash"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  aimash_pgdata:
