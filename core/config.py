@@ -7,7 +7,7 @@ SecretStr — это защита от утечки в логи, НЕ шифро
 
 from __future__ import annotations
 
-from pydantic import SecretStr
+from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -65,6 +65,27 @@ class Settings(BaseSettings):
     @property
     def is_prod(self) -> bool:
         return self.env == "prod"
+
+    @model_validator(mode="after")
+    def _require_encryption_key_in_prod(self) -> "Settings":
+        """Fail-fast: в prod пустой/невалидный SECRETS_ENCRYPTION_KEY недопустим (токены
+        шифруются at-rest). В dev/тестах (SQLite, без шифрования) — не требуем, чтобы суйта
+        оставалась зелёной. Срабатывает единообразно для бота, scheduler, скриптов и Alembic."""
+        if self.env == "prod":
+            key = self.secrets_encryption_key.get_secret_value()
+            if not key:
+                raise ValueError(
+                    "SECRETS_ENCRYPTION_KEY обязателен в prod — сгенерируй: Fernet.generate_key()"
+                )
+            try:
+                from cryptography.fernet import Fernet
+
+                Fernet(key.encode())
+            except Exception as e:
+                raise ValueError(
+                    "SECRETS_ENCRYPTION_KEY невалиден (нужен ключ Fernet.generate_key())"
+                ) from e
+        return self
 
 
 settings = Settings()
