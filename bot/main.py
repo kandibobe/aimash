@@ -1,8 +1,10 @@
 """Telegram-бот Aimash (aiogram 3.x).
 
 - whitelist по chat_id (TELEGRAM_WHITELIST_CHAT_IDS);
+- меню-кнопка (set_my_commands) + постоянная reply-клавиатура (bot/keyboards.py);
 - свободный текст → агент-цикл (agent.loop.handle_command);
-- read → показывает статистику; mutation → черновик «было→станет» (в БД) + inline ✅/❌;
+- read → статистика; mutation → черновик «было→станет» (в БД) + inline ✅/❌ (typed CallbackData);
+- кнопки /campaigns (пауза/возобновление) лишь СОЗДАЮТ черновик — исполнение только после «да»;
 - на «да» → реальное выполнение через ads.service за confirm-гейтом + audit; ничего без «да».
 """
 
@@ -11,25 +13,71 @@ from __future__ import annotations
 import asyncio
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    BotCommandScopeAllPrivateChats,
     CallbackQuery,
     FSInputFile,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
     Message,
     TelegramObject,
 )
 
+from adcopy.generate import CopyBrief
+from adcopy.generate import generate_rsa as _generate_rsa
+from adcopy.refine import refine_element
+from adcopy.session import SessionStore
+from adcopy.validate import RSA_MIN_DESCRIPTIONS, RSA_MIN_HEADLINES
+from adcopy.validate import validate as rsa_validate
 from ads.client import DRAFT_ACCOUNT_ID
+from ads.resolve import find_ad_groups
 from ads.service import execute_confirmed
 from agent.loop import handle_command
+from agent.tools.schemas import SCHEMAS
+from bot import texts
+from bot.callbacks import CampCB, ConfirmCB, PeriodCB, RsaCB, RsaPickCB
+from bot.keyboards import (
+    BOT_COMMANDS,
+    BTN_CAMPAIGNS,
+    BTN_HELP,
+    BTN_REPORT,
+    BTN_STATUS,
+    campaign_actions_kb,
+    campaigns_kb,
+    confirm_kb,
+    main_menu,
+    period_kb,
+    rsa_item_kb,
+    rsa_overview_kb,
+    rsa_pick_adgroups_kb,
+    rsa_pick_campaigns_kb,
+)
+from confirm.gate import Proposal, build_summary
 from confirm.store import ConfirmStore
 from core.config import settings
 from core.logging import log, setup_logging
 from db.session import init_db
 
 STORE = ConfirmStore()  # черновики + audit в БД (SQLite dev), вместо очереди в памяти
+SESSIONS = SessionStore()  # сессии курации RSA (фаза 2.C), персист в proposals (rsa_curation)
+
+# Лёгкое in-memory состояние UI (теряется при рестарте — это ок, не источник истины):
+_CAMP_CACHE: dict[int, list[dict]] = {}  # chat_id → последний список кампаний (резолв idx→имя)
+_LAST_PENDING: dict[int, str] = {}  # chat_id → confirmation_id последнего черновика (для /cancel)
+_RSA_CAMP_CACHE: dict[int, list[dict]] = {}  # chat_id → кампании для визарда /rsa
+_RSA_AG_CACHE: dict[int, list[dict]] = {}  # chat_id → группы объявлений для визарда /rsa
+
+
+class RsaWizard(StatesGroup):
+    awaiting_brief = State()  # ждём «тематика | url» для генерации
+
+
+class RsaRefine(StatesGroup):
+    awaiting_text = State()  # ждём правку для доработки одного элемента
+
 
 dp = Dispatcher()
 
@@ -48,29 +96,40 @@ class WhitelistMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
-@dp.message(CommandStart())
-async def start(m: Message) -> None:
-    await m.answer(
-        "Aimash на связи. Пиши команды по-русски: «покажи статистику», "
-        "«повысь бюджет кампании X на 20%». Любое изменение — только после твоего «да»."
+# ── Общие действия (чтобы команда и кнопка делали одно и то же) ─────────────────
+async def _send_help(message: Message) -> None:
+    await message.answer(texts.HELP, parse_mode=ParseMode.HTML)
+
+
+async def _send_status(message: Message) -> None:
+    """Быстрая сводка по аккаунту за 30 дн. (read-only, без подтверждения)."""
+    try:
+        from ads.client import build_client
+        from ads.read import account_stats
+
+        client = build_client()
+        st = await asyncio.to_thread(account_stats, client, DRAFT_ACCOUNT_ID, 30)
+    except Exception as e:  # сеть/доступ/SDK
+        await message.answer(f"⚠️ Не удалось получить статистику: {type(e).__name__}: {e}")
+        return
+    await message.answer(
+        texts.fmt_stats(
+            DRAFT_ACCOUNT_ID,
+            30,
+            {
+                "impressions": st.impressions,
+                "clicks": st.clicks,
+                "cost": round(st.cost, 2),
+                "conversions": st.conversions,
+                "conv_value": round(st.conv_value, 2),
+            },
+        ),
+        parse_mode=ParseMode.HTML,
     )
 
 
-@dp.message(Command("help"))
-async def help_(m: Message) -> None:
-    await m.answer(
-        "Я читаю Google Ads и предлагаю изменения. Перед любым изменением показываю "
-        "«было → станет» и жду подтверждения. Просто пиши текстом.\n"
-        "Доступно: бюджет, ставка (CPC), ключевые слова, минус-слова, пауза/возобновление.\n"
-        "/campaigns — список кампаний (точные имена для команд).\n"
-        "/report [7|30|90|MTD] — сводка по аккаунту за период (по умолчанию 30 дн.).\n"
-        "/export [7|30|90|MTD] — глубокий отчёт .xlsx (разбивки по кампаниям/группам/ключам/…)."
-    )
-
-
-@dp.message(Command("campaigns"))
-async def campaigns_(m: Message) -> None:
-    """Read-only список кампаний. Полезно: имя кампании теперь обязательно для ставки/ключей."""
+async def _send_campaigns(message: Message, chat_id: int) -> None:
+    """Список кампаний + inline-кнопки выбора. Кэшируем список по chat_id для резолва idx→имя."""
     try:
         from ads.client import build_client
         from ads.read import list_campaigns
@@ -78,13 +137,87 @@ async def campaigns_(m: Message) -> None:
         client = build_client()
         camps = await asyncio.to_thread(list_campaigns, client, DRAFT_ACCOUNT_ID)
     except Exception as e:  # сеть/доступ/SDK
-        await m.answer(f"⚠️ Не удалось получить кампании: {type(e).__name__}: {e}")
+        await message.answer(f"⚠️ Не удалось получить кампании: {type(e).__name__}: {e}")
         return
     if not camps:
-        await m.answer("Кампаний нет.")
+        await message.answer(texts.NO_CAMPAIGNS)
         return
-    lines = "\n".join(f"• {c['name']} — {c['status']}" for c in camps)
-    await m.answer(f"Кампании аккаунта {DRAFT_ACCOUNT_ID}:\n{lines}")
+    _CAMP_CACHE[chat_id] = camps
+    await message.answer(
+        texts.campaigns_title(DRAFT_ACCOUNT_ID),
+        reply_markup=campaigns_kb(camps),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+def _build_proposal(operation: str, **args) -> tuple[str, str, dict, str]:
+    """Детерминированно собрать черновик мутации (как agent.loop, но БЕЗ LLM) — для кнопок.
+    Валидация схемой обязательна. Возвращает (confirmation_id, operation, params, summary)."""
+    validated = SCHEMAS[operation](**args)
+    params = validated.model_dump()
+    summary = build_summary(operation, before="[текущее значение из Google Ads]", after=params)
+    p = Proposal(operation=operation, summary=summary, params=params, chat_id=0)
+    return p.confirmation_id, operation, params, summary
+
+
+async def _present_proposal(
+    message: Message, *, chat_id: int, operation: str, params: dict, summary: str, cid: str
+) -> None:
+    """Сохранить черновик и показать с кнопками ✅/❌. user_initiated=True ставит ДОВЕРЕННЫЙ слой
+    (входящее действие whitelisted-человека), НЕ агент про себя (golden rule #3, fail-closed)."""
+    await STORE.save_proposal(
+        confirmation_id=cid,
+        operation=operation,
+        customer_id=DRAFT_ACCOUNT_ID,
+        params=params,
+        summary=summary,
+        chat_id=chat_id,
+        user_initiated=True,
+    )
+    _LAST_PENDING[chat_id] = cid
+    await message.answer(
+        texts.PROPOSAL_PENDING.format(summary=texts.esc(summary)),
+        reply_markup=confirm_kb(cid),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+# ── Команды ──────────────────────────────────────────────────────────────────────
+@dp.message(CommandStart())
+async def start(m: Message) -> None:
+    await m.answer(texts.START, reply_markup=main_menu(), parse_mode=ParseMode.HTML)
+
+
+@dp.message(Command("help"))
+async def help_(m: Message) -> None:
+    await _send_help(m)
+
+
+@dp.message(Command("status"))
+async def status_(m: Message) -> None:
+    await _send_status(m)
+
+
+@dp.message(Command("campaigns"))
+async def campaigns_(m: Message) -> None:
+    """Read-only список кампаний с быстрыми действиями (точные имена нужны для ставки/ключей)."""
+    await _send_campaigns(m, m.chat.id)
+
+
+@dp.message(Command("keywords"))
+async def keywords_(m: Message) -> None:
+    await m.answer(texts.KW_SOON)
+
+
+@dp.message(Command("cancel"))
+async def cancel_cmd(m: Message) -> None:
+    cid = _LAST_PENDING.get(m.chat.id)
+    if not cid:
+        await m.answer(texts.NO_PROPOSAL)
+        return
+    await STORE.reject(cid, chat_id=m.chat.id)
+    _LAST_PENDING.pop(m.chat.id, None)
+    await m.answer(texts.REJECTED)
 
 
 def _period_from_arg(arg: str | None):
@@ -149,72 +282,582 @@ async def export_(m: Message, command: CommandObject) -> None:
                 pass
 
 
-def _kb(cid: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"ok:{cid}"),
-                InlineKeyboardButton(text="❌ Отмена", callback_data=f"no:{cid}"),
-            ]
-        ]
+# ── Reply-кнопки (ОБЯЗАТЕЛЬНО до общего F.text-хендлера — иначе перехватит on_text) ─
+@dp.message(F.text == BTN_STATUS)
+async def btn_status(m: Message) -> None:
+    await _send_status(m)
+
+
+@dp.message(F.text == BTN_CAMPAIGNS)
+async def btn_campaigns(m: Message) -> None:
+    await _send_campaigns(m, m.chat.id)
+
+
+@dp.message(F.text == BTN_HELP)
+async def btn_help(m: Message) -> None:
+    await _send_help(m)
+
+
+@dp.message(F.text == BTN_REPORT)
+async def btn_report(m: Message) -> None:
+    await m.answer("📈 За какой период построить сводку?", reply_markup=period_kb("report"))
+
+
+# ── RSA-генерация (фаза 2.C): /rsa визард → курация → confirm-гейт create_rsa ─────
+def _rsa_render(session) -> tuple[str, object]:
+    """По состоянию сессии: следующий pending-элемент с кнопками либо итоговый экран."""
+    nxt = session.next_pending()
+    if nxt is None:
+        h, d = session.counts()
+        text = texts.fmt_rsa_overview(h, d, len(session.headlines), len(session.descriptions))
+        return text, rsa_overview_kb(session.session_id, session.can_finalize(), has_pending=False)
+    kind, idx = nxt
+    items = session.items(kind)
+    text = texts.fmt_rsa_element(
+        kind, idx, len(items), items[idx], session.campaign, session.ad_group_name
+    )
+    return text, rsa_item_kb(session.session_id, kind, idx)
+
+
+def _rsa_overview(session) -> tuple[str, object]:
+    h, d = session.counts()
+    has_pending = session.next_pending() is not None
+    text = texts.fmt_rsa_overview(h, d, len(session.headlines), len(session.descriptions))
+    return text, rsa_overview_kb(session.session_id, session.can_finalize(), has_pending)
+
+
+def _parse_brief_text(text: str) -> tuple[str, str | None]:
+    """Из «тематика | url» (или «тематика url») вытащить (topic, url)."""
+    import re
+
+    m = re.search(r"https?://\S+", text or "")
+    url = m.group(0).rstrip(".,;)") if m else None
+    topic = text or ""
+    if "|" in topic:
+        topic = topic.split("|", 1)[0]
+    elif url:
+        topic = topic.replace(url, "")
+    return topic.strip(" |"), url
+
+
+def _build_rsa_proposal(session) -> tuple[str, str, dict, str]:
+    """Черновик create_rsa из одобренных элементов (валидация схемой). (cid, op, params, summary)."""
+    headlines = session.approved_texts("h")
+    descriptions = session.approved_texts("d")
+    params = {
+        "ad_group_id": session.ad_group_id,
+        "campaign": session.campaign,
+        "final_url": session.final_url,
+        "headlines": headlines,
+        "descriptions": descriptions,
+    }
+    validated = SCHEMAS["create_rsa"](**params)  # код-валидация мин/макс/длины/URL
+    params = validated.model_dump()
+    summary = texts.fmt_rsa_proposal_summary(
+        session.ad_group_name, headlines, descriptions, session.final_url
+    )
+    p = Proposal(operation="create_rsa", summary=summary, params=params, chat_id=session.chat_id)
+    return p.confirmation_id, "create_rsa", params, summary
+
+
+async def _rsa_after_adgroup(target: Message, chat_id: int, state: FSMContext) -> None:
+    """Группа известна: если есть topic+валидный url — генерим; иначе спрашиваем бриф."""
+    data = await state.get_data()
+    if (data.get("topic") or "").strip() and data.get("final_url"):
+        await _rsa_generate_and_start(target, chat_id, state)
+        return
+    await state.set_state(RsaWizard.awaiting_brief)
+    await target.answer(texts.RSA_ASK_BRIEF, parse_mode=ParseMode.HTML)
+
+
+async def _rsa_resolve_after_campaign(
+    target: Message, chat_id: int, campaign: str, state: FSMContext
+) -> None:
+    """Кампания выбрана/задана: резолвим группы. 1 → дальше; >1 → выбор; 0 → ошибка."""
+    from ads.client import build_client
+
+    await state.update_data(campaign=campaign)
+    try:
+        client = build_client()
+        groups = await asyncio.to_thread(find_ad_groups, client, DRAFT_ACCOUNT_ID, campaign)
+    except Exception as e:  # сеть/доступ/SDK
+        await target.answer(f"⚠️ Не удалось получить группы: {type(e).__name__}: {e}")
+        return
+    if not groups:
+        await target.answer(texts.RSA_NO_ADGROUPS)
+        await state.clear()
+        return
+    if len(groups) == 1:
+        g = groups[0]
+        await state.update_data(ad_group_id=str(g.id), ad_group_name=g.name)
+        await _rsa_after_adgroup(target, chat_id, state)
+        return
+    _RSA_AG_CACHE[chat_id] = [{"id": str(g.id), "name": g.name} for g in groups]
+    await target.answer(
+        texts.RSA_PICK_ADGROUP, reply_markup=rsa_pick_adgroups_kb(_RSA_AG_CACHE[chat_id])
     )
 
 
+async def _rsa_generate_and_start(target: Message, chat_id: int, state: FSMContext) -> None:
+    """Сгенерировать тексты по брифу из state, создать сессию курации, показать итог."""
+    data = await state.get_data()
+    brief = CopyBrief(
+        topic=data.get("topic", ""),
+        keywords=list(data.get("keywords") or []),
+        usp=data.get("usp"),
+        tone=data.get("tone"),
+        geo=data.get("geo"),
+        language=data.get("language", "ru"),
+        n_headlines=int(data.get("n_headlines") or 15),
+        n_descriptions=int(data.get("n_descriptions") or 4),
+    )
+    await target.answer(texts.RSA_GENERATING)
+    try:
+        draft = await _generate_rsa(brief)
+    except Exception as e:  # LLM/сеть
+        await target.answer(f"⚠️ Генерация не удалась: {type(e).__name__}: {e}")
+        await state.clear()
+        return
+    if len(draft.headlines) < RSA_MIN_HEADLINES or len(draft.descriptions) < RSA_MIN_DESCRIPTIONS:
+        await target.answer(texts.RSA_GEN_EMPTY)
+        await state.clear()
+        return
+    session_id = await SESSIONS.create(
+        chat_id=chat_id,
+        customer_id=DRAFT_ACCOUNT_ID,
+        campaign=data.get("campaign", ""),
+        ad_group_id=data.get("ad_group_id", ""),
+        ad_group_name=data.get("ad_group_name", ""),
+        final_url=data.get("final_url", ""),
+        headlines=draft.headlines,
+        descriptions=draft.descriptions,
+        brief=brief.model_dump(),
+    )
+    await state.clear()
+    session = await SESSIONS.get(session_id)
+    text, kb = _rsa_overview(session)  # старт с итога: «Применить все валидные» / «по одному»
+    await target.answer(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+
+
+async def _rsa_start_from_intent(m: Message, brief: dict, state: FSMContext) -> None:
+    """NL-вход: generate_rsa-намерение агента. Доуточняем кампанию/группу/URL визардом."""
+    await state.clear()
+    await state.update_data(
+        topic=brief.get("topic", ""),
+        keywords=list(brief.get("keywords") or []),
+        usp=brief.get("usp"),
+        tone=brief.get("tone"),
+        geo=brief.get("geo"),
+        language=brief.get("language", "ru"),
+        n_headlines=brief.get("n_headlines", 15),
+        n_descriptions=brief.get("n_descriptions", 4),
+    )
+    if brief.get("final_url"):
+        await state.update_data(final_url=brief["final_url"])
+    if brief.get("campaign"):
+        await _rsa_resolve_after_campaign(m, m.chat.id, brief["campaign"], state)
+        return
+    try:  # кампания не указана — показать выбор (бриф уже в state)
+        from ads.client import build_client
+        from ads.read import list_campaigns
+
+        client = build_client()
+        camps = await asyncio.to_thread(list_campaigns, client, DRAFT_ACCOUNT_ID)
+    except Exception as e:  # сеть/доступ/SDK
+        await m.answer(f"⚠️ Не удалось получить кампании: {type(e).__name__}: {e}")
+        return
+    if not camps:
+        await m.answer(texts.NO_CAMPAIGNS)
+        return
+    _RSA_CAMP_CACHE[m.chat.id] = camps
+    await m.answer(
+        texts.RSA_PICK_CAMPAIGN,
+        reply_markup=rsa_pick_campaigns_kb(camps),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@dp.message(Command("rsa"))
+async def rsa_cmd(m: Message, state: FSMContext) -> None:
+    """Визард генерации RSA: выбор кампании → группы → бриф → курация → создание."""
+    await state.clear()
+    try:
+        from ads.client import build_client
+        from ads.read import list_campaigns
+
+        client = build_client()
+        camps = await asyncio.to_thread(list_campaigns, client, DRAFT_ACCOUNT_ID)
+    except Exception as e:  # сеть/доступ/SDK
+        await m.answer(f"⚠️ Не удалось получить кампании: {type(e).__name__}: {e}")
+        return
+    if not camps:
+        await m.answer(texts.NO_CAMPAIGNS)
+        return
+    _RSA_CAMP_CACHE[m.chat.id] = camps
+    await m.answer(
+        texts.RSA_PICK_CAMPAIGN,
+        reply_markup=rsa_pick_campaigns_kb(camps),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@dp.callback_query(RsaPickCB.filter(F.what == "camp"))
+async def rsa_pick_camp(cq: CallbackQuery, callback_data: RsaPickCB, state: FSMContext) -> None:
+    camps = _RSA_CAMP_CACHE.get(_cq_chat_id(cq))
+    if not camps or callback_data.idx >= len(camps):
+        await cq.answer(texts.CAMP_LIST_STALE, show_alert=True)
+        return
+    await cq.answer()
+    await _rsa_resolve_after_campaign(
+        cq.message, _cq_chat_id(cq), camps[callback_data.idx]["name"], state
+    )
+
+
+@dp.callback_query(RsaPickCB.filter(F.what == "ag"))
+async def rsa_pick_ag(cq: CallbackQuery, callback_data: RsaPickCB, state: FSMContext) -> None:
+    groups = _RSA_AG_CACHE.get(_cq_chat_id(cq))
+    if not groups or callback_data.idx >= len(groups):
+        await cq.answer(texts.CAMP_LIST_STALE, show_alert=True)
+        return
+    await cq.answer()
+    g = groups[callback_data.idx]
+    await state.update_data(ad_group_id=str(g["id"]), ad_group_name=g["name"])
+    await _rsa_after_adgroup(cq.message, _cq_chat_id(cq), state)
+
+
+# FSM-хендлеры сообщений — ОБЯЗАТЕЛЬНО до общего on_text (иначе перехватит свободный текст).
+@dp.message(RsaWizard.awaiting_brief)
+async def rsa_brief(m: Message, state: FSMContext) -> None:
+    topic, url = _parse_brief_text(m.text or "")
+    if not url or not topic:
+        await m.answer(texts.RSA_BAD_URL)
+        return
+    await state.update_data(topic=topic, final_url=url)
+    await _rsa_generate_and_start(m, m.chat.id, state)
+
+
+@dp.message(RsaRefine.awaiting_text)
+async def rsa_refine_text(m: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    cid, kind, idx = data.get("cid"), data.get("kind"), data.get("idx")
+    session = await SESSIONS.get(cid) if cid else None
+    if session is None or kind is None or idx is None:
+        await state.clear()
+        await m.answer(texts.RSA_SESSION_STALE)
+        return
+    try:
+        new_text = await refine_element(session.brief, kind, m.text or "")
+    except Exception as e:  # LLM/сеть
+        await m.answer(f"⚠️ Доработка не удалась: {type(e).__name__}: {e}")
+        return
+    valid_kind = "headline" if kind == "h" else "description"
+    ok, n = rsa_validate(new_text, valid_kind)
+    if not ok:
+        limit = 30 if kind == "h" else 90
+        await m.answer(texts.RSA_REFINE_TOO_LONG.format(n=n, limit=limit))
+        return  # остаёмся в состоянии — пользователь пришлёт другую правку
+    await state.clear()
+    session = await SESSIONS.replace_element(cid, kind, idx, new_text)
+    items = session.items(kind)
+    await m.answer(
+        texts.fmt_rsa_element(
+            kind, idx, len(items), items[idx], session.campaign, session.ad_group_name
+        ),
+        reply_markup=rsa_item_kb(cid, kind, idx),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+# ── Свободный текст → агент ───────────────────────────────────────────────────────
 @dp.message(F.text)
-async def on_text(m: Message) -> None:
+async def on_text(m: Message, state: FSMContext) -> None:
     res = await handle_command(m.text, chat_id=m.chat.id)
     t = res.get("type")
     if t == "proposal":
-        cid = res["confirmation_id"]
-        await STORE.save_proposal(
-            confirmation_id=cid,
+        await _present_proposal(
+            m,
+            chat_id=m.chat.id,
             operation=res["operation"],
-            customer_id=DRAFT_ACCOUNT_ID,
             params=res.get("params", {}),
             summary=res["summary"],
-            chat_id=m.chat.id,
-            # on_text — это входящее сообщение whitelisted-пользователя ⇒ прямая команда человека.
-            # Провенанс проставляет доверенный слой (бот), не агент/модель (golden rule #3).
-            user_initiated=True,
+            cid=res["confirmation_id"],
         )
-        await m.answer(
-            f"Изменение (черновик):\n{res['summary']}\n\nПодтвердить?", reply_markup=_kb(cid)
-        )
+    elif t == "rsa_intent":
+        await _rsa_start_from_intent(m, res.get("brief", {}), state)
     elif t == "clarify":
         await m.answer("❓ " + res["question"])
     elif t == "read":
-        s = res.get("stats", {})
         await m.answer(
-            f"📊 Аккаунт {res['account']} за {res['days']} дн.:\n"
-            f"показы {s.get('impressions')}, клики {s.get('clicks')}, "
-            f"расход {s.get('cost')}, конверсии {s.get('conversions')}"
+            texts.fmt_stats(res.get("account", ""), res.get("days", 30), res.get("stats", {})),
+            parse_mode=ParseMode.HTML,
         )
     else:
         await m.answer(res.get("text", "(пусто)"))
 
 
-@dp.callback_query(F.data.startswith("ok:"))
-async def confirm(cq: CallbackQuery) -> None:
-    cid = cq.data[3:]
-    chat_id = cq.message.chat.id if cq.message else cq.from_user.id
-    if not await STORE.confirm(cid, chat_id=chat_id):
-        await cq.answer("Черновик не найден или устарел")
+# ── Inline: выбор кампании и быстрые действия ─────────────────────────────────────
+def _cq_chat_id(cq: CallbackQuery) -> int:
+    return cq.message.chat.id if cq.message else cq.from_user.id
+
+
+@dp.callback_query(CampCB.filter(F.action == "menu"))
+async def camp_menu(cq: CallbackQuery, callback_data: CampCB) -> None:
+    camps = _CAMP_CACHE.get(_cq_chat_id(cq))
+    if not camps or callback_data.idx >= len(camps):
+        await cq.answer(texts.CAMP_LIST_STALE, show_alert=True)
         return
+    await cq.answer()
+    c = camps[callback_data.idx]
+    try:
+        await cq.message.edit_text(
+            texts.fmt_campaign_header(c),
+            reply_markup=campaign_actions_kb(callback_data.idx, c.get("status", "")),
+            parse_mode=ParseMode.HTML,
+        )
+    except TelegramBadRequest:
+        pass
+
+
+@dp.callback_query(CampCB.filter(F.action == "back"))
+async def camp_back(cq: CallbackQuery, callback_data: CampCB) -> None:
+    camps = _CAMP_CACHE.get(_cq_chat_id(cq))
+    if not camps:
+        await cq.answer(texts.CAMP_LIST_STALE, show_alert=True)
+        return
+    await cq.answer()
+    try:
+        await cq.message.edit_text(
+            texts.campaigns_title(DRAFT_ACCOUNT_ID),
+            reply_markup=campaigns_kb(camps),
+            parse_mode=ParseMode.HTML,
+        )
+    except TelegramBadRequest:
+        pass
+
+
+async def _camp_mutate(cq: CallbackQuery, idx: int, operation: str) -> None:
+    """Кнопка пауза/возобновление: СОЗДАЁТ черновик (как текстовая команда) → confirm-гейт.
+    НЕ исполняет мутацию напрямую — только после ✅ через ту же ветку, что и on_text."""
+    chat_id = _cq_chat_id(cq)
+    camps = _CAMP_CACHE.get(chat_id)
+    if not camps or idx >= len(camps):
+        await cq.answer(texts.CAMP_LIST_STALE, show_alert=True)
+        return
+    name = camps[idx]["name"]
+    try:
+        cid, op, params, summary = _build_proposal(operation, campaign=name)
+    except Exception as e:  # валидация схемы
+        await cq.answer(f"Ошибка: {type(e).__name__}", show_alert=True)
+        return
+    await cq.answer()
+    await _present_proposal(
+        cq.message, chat_id=chat_id, operation=op, params=params, summary=summary, cid=cid
+    )
+
+
+@dp.callback_query(CampCB.filter(F.action == "pause"))
+async def camp_pause(cq: CallbackQuery, callback_data: CampCB) -> None:
+    await _camp_mutate(cq, callback_data.idx, "pause_campaign")
+
+
+@dp.callback_query(CampCB.filter(F.action == "resume"))
+async def camp_resume(cq: CallbackQuery, callback_data: CampCB) -> None:
+    await _camp_mutate(cq, callback_data.idx, "resume_campaign")
+
+
+# ── Inline: выбор периода для отчёта ──────────────────────────────────────────────
+@dp.callback_query(PeriodCB.filter(F.target == "report"))
+async def period_report(cq: CallbackQuery, callback_data: PeriodCB) -> None:
+    await cq.answer()
+    try:
+        period = _period_from_arg(callback_data.code)
+    except ValueError as e:
+        await cq.message.answer(f"⚠️ {e}")
+        return
+    try:
+        from ads.client import build_client
+        from reports.service import build_account_report, summary_text
+
+        client = build_client()
+        report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
+    except Exception as e:  # сеть/доступ/SDK
+        await cq.message.answer(f"⚠️ Не удалось построить отчёт: {type(e).__name__}: {e}")
+        return
+    await cq.message.answer(summary_text(report))
+
+
+# ── Inline: подтверждение/отмена черновика (confirm-гейт) ─────────────────────────
+async def _do_confirm(cq: CallbackQuery, cid: str) -> None:
+    chat_id = _cq_chat_id(cq)
+    if not await STORE.confirm(cid, chat_id=chat_id):
+        await cq.answer(texts.STALE, show_alert=True)
+        return
+    _LAST_PENDING.pop(chat_id, None)
     await cq.answer("Выполняю…")
     try:
+        await cq.message.edit_text(texts.EXECUTING)  # убирает кнопки
+    except TelegramBadRequest:
+        pass
+    try:
         result = await execute_confirmed(STORE, cid)
-        await cq.message.edit_text(f"✅ Выполнено:\n{result}")
+        await cq.message.edit_text(
+            texts.APPLIED.format(result=texts.esc(result)), parse_mode=ParseMode.HTML
+        )
     except Exception as e:  # доступ/резолв/SDK
         await STORE.record_failure(cid, error=str(e))
-        await cq.message.edit_text(f"⚠️ Не удалось выполнить: {type(e).__name__}: {e}")
+        try:
+            await cq.message.edit_text(
+                texts.FAILED.format(kind=type(e).__name__, err=texts.esc(e)),
+                parse_mode=ParseMode.HTML,
+            )
+        except TelegramBadRequest:
+            pass
+
+
+async def _do_cancel(cq: CallbackQuery, cid: str) -> None:
+    chat_id = _cq_chat_id(cq)
+    await STORE.reject(cid, chat_id=chat_id)
+    _LAST_PENDING.pop(chat_id, None)
+    try:
+        await cq.message.edit_text(texts.REJECTED)
+    except TelegramBadRequest:
+        pass
+    await cq.answer("Отменено")
+
+
+@dp.callback_query(ConfirmCB.filter(F.action == "ok"))
+async def on_confirm(cq: CallbackQuery, callback_data: ConfirmCB) -> None:
+    await _do_confirm(cq, callback_data.cid)
+
+
+@dp.callback_query(ConfirmCB.filter(F.action == "no"))
+async def on_cancel(cq: CallbackQuery, callback_data: ConfirmCB) -> None:
+    await _do_cancel(cq, callback_data.cid)
+
+
+# Legacy-fallback: старые сообщения с "ok:/no:" (до рестарта). После переходного периода удалить.
+@dp.callback_query(F.data.startswith("ok:"))
+async def on_confirm_legacy(cq: CallbackQuery) -> None:
+    await _do_confirm(cq, cq.data[3:])
 
 
 @dp.callback_query(F.data.startswith("no:"))
-async def cancel(cq: CallbackQuery) -> None:
-    chat_id = cq.message.chat.id if cq.message else cq.from_user.id
-    await STORE.reject(cq.data[3:], chat_id=chat_id)
-    await cq.message.edit_text("❌ Отменено")
+async def on_cancel_legacy(cq: CallbackQuery) -> None:
+    await _do_cancel(cq, cq.data[3:])
+
+
+# ── Inline: курация RSA (поэлементно + массово) ───────────────────────────────────
+async def _rsa_edit(cq: CallbackQuery, session) -> None:
+    """Перерисовать текущий шаг курации в том же сообщении (следующий pending или итог)."""
+    text, kb = _rsa_render(session)
+    try:
+        await cq.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+    except TelegramBadRequest:
+        pass
+
+
+async def _rsa_edit_overview(cq: CallbackQuery, session) -> None:
+    text, kb = _rsa_overview(session)
+    try:
+        await cq.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+    except TelegramBadRequest:
+        pass
+
+
+@dp.callback_query(RsaCB.filter(F.action == "approve"))
+async def rsa_approve(cq: CallbackQuery, callback_data: RsaCB) -> None:
+    session = await SESSIONS.set_state(
+        callback_data.cid, callback_data.kind, callback_data.idx, "approved"
+    )
+    if session is None:
+        await cq.answer(texts.RSA_SESSION_STALE, show_alert=True)
+        return
+    await cq.answer("Одобрено")
+    await _rsa_edit(cq, session)
+
+
+@dp.callback_query(RsaCB.filter(F.action == "reject"))
+async def rsa_reject(cq: CallbackQuery, callback_data: RsaCB) -> None:
+    session = await SESSIONS.set_state(
+        callback_data.cid, callback_data.kind, callback_data.idx, "rejected"
+    )
+    if session is None:
+        await cq.answer(texts.RSA_SESSION_STALE, show_alert=True)
+        return
+    await cq.answer("Отклонено")
+    await _rsa_edit(cq, session)
+
+
+@dp.callback_query(RsaCB.filter(F.action == "approveall"))
+async def rsa_approveall(cq: CallbackQuery, callback_data: RsaCB) -> None:
+    session = await SESSIONS.approve_all_valid(callback_data.cid)
+    if session is None:
+        await cq.answer(texts.RSA_SESSION_STALE, show_alert=True)
+        return
+    await cq.answer("Одобрены все валидные")
+    await _rsa_edit_overview(cq, session)
+
+
+@dp.callback_query(RsaCB.filter(F.action == "review"))
+async def rsa_review(cq: CallbackQuery, callback_data: RsaCB) -> None:
+    session = await SESSIONS.get(callback_data.cid)
+    if session is None:
+        await cq.answer(texts.RSA_SESSION_STALE, show_alert=True)
+        return
+    await cq.answer()
+    await _rsa_edit(cq, session)  # _rsa_render покажет следующий pending
+
+
+@dp.callback_query(RsaCB.filter(F.action == "overview"))
+async def rsa_to_overview(cq: CallbackQuery, callback_data: RsaCB) -> None:
+    session = await SESSIONS.get(callback_data.cid)
+    if session is None:
+        await cq.answer(texts.RSA_SESSION_STALE, show_alert=True)
+        return
+    await cq.answer()
+    await _rsa_edit_overview(cq, session)
+
+
+@dp.callback_query(RsaCB.filter(F.action == "refine"))
+async def rsa_refine(cq: CallbackQuery, callback_data: RsaCB, state: FSMContext) -> None:
+    session = await SESSIONS.get(callback_data.cid)
+    if session is None:
+        await cq.answer(texts.RSA_SESSION_STALE, show_alert=True)
+        return
+    await state.set_state(RsaRefine.awaiting_text)
+    await state.update_data(cid=callback_data.cid, kind=callback_data.kind, idx=callback_data.idx)
+    await cq.answer()
+    await cq.message.answer(texts.RSA_REFINE_PROMPT)
+
+
+@dp.callback_query(RsaCB.filter(F.action == "finalize"))
+async def rsa_finalize(cq: CallbackQuery, callback_data: RsaCB) -> None:
+    session = await SESSIONS.get(callback_data.cid)
+    if session is None:
+        await cq.answer(texts.RSA_SESSION_STALE, show_alert=True)
+        return
+    if not session.can_finalize():
+        h, d = session.counts()
+        await cq.answer(texts.RSA_BELOW_MIN.format(h=h, d=d), show_alert=True)
+        return
+    try:
+        cid, op, params, summary = _build_rsa_proposal(session)
+    except Exception as e:  # валидация схемы
+        await cq.answer(f"Ошибка: {type(e).__name__}", show_alert=True)
+        return
+    await cq.answer()
+    await _present_proposal(
+        cq.message, chat_id=_cq_chat_id(cq), operation=op, params=params, summary=summary, cid=cid
+    )
+
+
+@dp.callback_query(RsaCB.filter(F.action == "cancel"))
+async def rsa_cancel(cq: CallbackQuery, callback_data: RsaCB) -> None:
     await cq.answer("Отменено")
+    try:
+        await cq.message.edit_text(texts.REJECTED)
+    except TelegramBadRequest:
+        pass
 
 
 async def main() -> None:
@@ -231,8 +874,25 @@ async def main() -> None:
     dp.message.outer_middleware(WhitelistMiddleware())
     dp.callback_query.outer_middleware(WhitelistMiddleware())
     bot = Bot(token)
+    try:
+        await bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeAllPrivateChats())
+    except Exception as e:  # не критично — бот поднимется и без меню-команд
+        log.warning("set_my_commands не удалось: %s: %s", type(e).__name__, e)
+    sched = None
+    try:
+        from scheduler.service import setup_scheduler
+
+        # Плановые отчёты/аномалии/очистка просроченных черновиков. READ-ONLY: планировщик
+        # НИКОГДА не меняет аккаунт (golden rule #3) — только чтение и уведомления.
+        sched = setup_scheduler(bot)
+    except Exception as e:  # планировщик опционален — бот работает и без него
+        log.warning("scheduler не запущен: %s: %s", type(e).__name__, e)
     log.info("Aimash bot запущен (polling).")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        if sched is not None:
+            sched.shutdown(wait=False)
 
 
 if __name__ == "__main__":

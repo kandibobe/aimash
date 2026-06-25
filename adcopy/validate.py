@@ -8,6 +8,11 @@ from __future__ import annotations
 
 LIMITS = {"headline": 30, "description": 90, "path": 15}
 
+# Состав RSA-объявления (Google Ads): 3–15 заголовков, 2–4 описания. Единый источник истины
+# для схем (agent.tools.schemas), мутации (ads.mutations) и курации (adcopy.session).
+RSA_MIN_HEADLINES, RSA_MAX_HEADLINES = 3, 15
+RSA_MIN_DESCRIPTIONS, RSA_MAX_DESCRIPTIONS = 2, 4
+
 
 def char_width(ch: str) -> int:
     """1 для латиницы/кириллицы; 2 только для CJK (как считает Google Ads)."""

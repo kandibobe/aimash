@@ -70,6 +70,14 @@ async def handle_command(text: str, *, chat_id: int = 0) -> dict[str, Any]:
         }
 
     if name in READ_TOOLS:
+        if name == "generate_rsa":
+            # Генерация — read-only (только предлагает тексты). Валидируем бриф и отдаём боту
+            # «намерение»: применение идёт через курацию + confirm-гейт (create_rsa), не здесь.
+            try:
+                validated = SCHEMAS[name](**args)
+            except ValidationError as e:
+                return {"type": "text", "text": f"некорректные аргументы для {name}: {e.errors()}"}
+            return {"type": "rsa_intent", "brief": validated.model_dump()}
         return await _do_read(name, args)
 
     if name in MUTATION_TOOLS:

@@ -30,6 +30,7 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
         "add_negative_keywords",
         "pause_campaign",
         "resume_campaign",
+        "create_rsa",
     }
 )
 
@@ -150,6 +151,22 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             campaign_id=ref.id,
             keywords=params["keywords"],
             match_type=params["match_type"],
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
+    if op == "create_rsa":
+        # Группа уже зарезолвлена в курации (ad_group_id в params) → доп. резолв не нужен.
+        # Замок аккаунта и валидацию набора держит сам apply_create_rsa.
+        return await mutations.apply_create_rsa(
+            customer_id=customer_id,
+            ad_group_id=params["ad_group_id"],
+            headlines=params["headlines"],
+            descriptions=params["descriptions"],
+            final_url=params["final_url"],
+            path1=params.get("path1"),
+            path2=params.get("path2"),
             confirmation_id=confirmation_id,
             confirm_store=store,
             ads_client=client,

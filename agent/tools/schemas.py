@@ -10,6 +10,13 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from adcopy.validate import (
+    RSA_MAX_DESCRIPTIONS,
+    RSA_MAX_HEADLINES,
+    RSA_MIN_DESCRIPTIONS,
+    RSA_MIN_HEADLINES,
+)
+from adcopy.validate import validate as _rsa_validate
 from ads.validation import normalize_keywords
 
 Currency = Literal["USD", "UAH", "EUR", "percent"]
@@ -28,8 +35,9 @@ MUTATION_TOOLS = {
     "pause_campaign",
     "resume_campaign",
     "set_geo_proximity",
+    "create_rsa",
 }
-READ_TOOLS = {"get_stats"}
+READ_TOOLS = {"get_stats", "generate_rsa"}
 
 
 # ── Pydantic-схемы (валидация в коде, не на доверии к модели) ───────────────────
@@ -111,6 +119,70 @@ class GetStats(BaseModel):
     period_days: int = Field(default=30, gt=0, le=400)
 
 
+def _assert_rsa_len(items: list[str], kind: str) -> list[str]:
+    """Длину каждого элемента (кириллица=1) считает КОД — отбраковка ДО кнопок, а не raise после «да»."""
+    for t in items:
+        ok, n = _rsa_validate(t, kind)
+        if not ok:
+            raise ValueError(f"{kind} превышает лимит ({n}): «{t}»")
+    return items
+
+
+class GenerateRsa(BaseModel):
+    """Read-tool: попросить сгенерировать тексты RSA. Применение — отдельно, через курацию
+    и confirm-гейт (create_rsa). Кампания/группа/URL уточняются визардом, если не заданы."""
+
+    topic: str
+    keywords: list[str] = Field(default_factory=list, max_length=50)
+    usp: str | None = None
+    tone: str | None = None
+    geo: str | None = None
+    language: str = "ru"
+    campaign: str | None = None
+    final_url: str | None = None
+    n_headlines: int = Field(default=15, ge=3, le=15)
+    n_descriptions: int = Field(default=4, ge=2, le=4)
+
+
+class CreateRsa(BaseModel):
+    """Финальные параметры создания RSA (минтуются ботом после курации, не из LLM напрямую).
+    Минимумы/максимумы и длину считает КОД — зеркалит ads.mutations (defense-in-depth)."""
+
+    ad_group_id: str
+    campaign: str
+    final_url: str
+    headlines: list[str] = Field(min_length=RSA_MIN_HEADLINES, max_length=RSA_MAX_HEADLINES)
+    descriptions: list[str] = Field(
+        min_length=RSA_MIN_DESCRIPTIONS, max_length=RSA_MAX_DESCRIPTIONS
+    )
+    path1: str | None = None
+    path2: str | None = None
+
+    @field_validator("final_url")
+    @classmethod
+    def _url(cls, v):
+        if not v or not str(v).startswith(("http://", "https://")):
+            raise ValueError("нужен валидный final_url (http/https)")
+        return v
+
+    @field_validator("headlines")
+    @classmethod
+    def _h(cls, v):
+        return _assert_rsa_len(v, "headline")
+
+    @field_validator("descriptions")
+    @classmethod
+    def _d(cls, v):
+        return _assert_rsa_len(v, "description")
+
+    @field_validator("path1", "path2")
+    @classmethod
+    def _p(cls, v):
+        if v:
+            _assert_rsa_len([v], "path")
+        return v
+
+
 SCHEMAS: dict[str, type[BaseModel]] = {
     "update_budget": UpdateBudget,
     "update_bid": UpdateBid,
@@ -119,7 +191,9 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "pause_campaign": PauseCampaign,
     "resume_campaign": ResumeCampaign,
     "set_geo_proximity": SetGeoProximity,
+    "create_rsa": CreateRsa,
     "get_stats": GetStats,
+    "generate_rsa": GenerateRsa,
 }
 
 
@@ -155,6 +229,13 @@ TOOLS: list[dict] = [
     _tool("pause_campaign", "Поставить кампанию на паузу.", PauseCampaign),
     _tool("resume_campaign", "Возобновить (включить) кампанию из паузы.", ResumeCampaign),
     _tool("set_geo_proximity", "Таргетинг по точке с радиусом (км).", SetGeoProximity),
+    _tool(
+        "generate_rsa",
+        "Сгенерировать рекламные тексты RSA (заголовки/описания) для кампании. Только "
+        "ПРЕДЛАГАЕТ тексты — применение к объявлению идёт отдельно, после поэлементного "
+        "подтверждения. Укажи topic; campaign/final_url можно уточнить позже.",
+        GenerateRsa,
+    ),
     _tool("get_stats", "Прочитать статистику (read-only).", GetStats),
     {
         "type": "function",

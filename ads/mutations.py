@@ -15,6 +15,13 @@ from typing import Protocol
 from google.ads.googleads.errors import GoogleAdsException
 from google.api_core import protobuf_helpers
 
+from adcopy.validate import (
+    RSA_MAX_DESCRIPTIONS,
+    RSA_MAX_HEADLINES,
+    RSA_MIN_DESCRIPTIONS,
+    RSA_MIN_HEADLINES,
+)
+from adcopy.validate import validate as _rsa_validate
 from ads.client import ensure_allowed
 from ads.validation import assert_keyword_ok, normalize_keywords
 
@@ -26,6 +33,9 @@ _assert_keyword_ok = assert_keyword_ok
 # валидации схемы (set_to/increase_by_amount без верхней границы). Это не бизнес-лимит, а
 # «очевидно неверно» граница: 1 000 000 единиц валюты * 1e6. Считает КОД, у самой границы SDK.
 MAX_AMOUNT_MICROS = 1_000_000 * 1_000_000
+
+# Лимиты состава RSA — единый источник в adcopy.validate; зеркалят agent.tools.schemas.CreateRsa
+# (два независимых гейта: схема + SDK). Длину каждого элемента считает КОД (golden rule #4).
 
 
 class ConfirmStore(Protocol):
@@ -229,6 +239,82 @@ async def apply_set_geo_proximity(
     return result
 
 
+# ── Создание RSA-объявления (фаза 2.C: применение сгенерированных текстов к группе) ─
+def _validate_rsa_inputs(
+    headlines: list[str],
+    descriptions: list[str],
+    final_url: str,
+    path1: str | None,
+    path2: str | None,
+) -> None:
+    """Полная валидация набора RSA В КОДЕ — ДО claim (плохие данные не «съедают» черновик).
+    Длину каждого элемента (кириллица=1) и минимумы/максимумы считает КОД, не модель."""
+    if not RSA_MIN_HEADLINES <= len(headlines) <= RSA_MAX_HEADLINES:
+        raise ValueError(
+            f"RSA требует {RSA_MIN_HEADLINES}–{RSA_MAX_HEADLINES} заголовков "
+            f"(передано: {len(headlines)})"
+        )
+    if not RSA_MIN_DESCRIPTIONS <= len(descriptions) <= RSA_MAX_DESCRIPTIONS:
+        raise ValueError(
+            f"RSA требует {RSA_MIN_DESCRIPTIONS}–{RSA_MAX_DESCRIPTIONS} описаний "
+            f"(передано: {len(descriptions)})"
+        )
+    if not final_url or not str(final_url).startswith(("http://", "https://")):
+        raise ValueError("нужен валидный final_url (http/https)")
+    for h in headlines:
+        ok, n = _rsa_validate(h, "headline")
+        if not ok:
+            raise ValueError(f"заголовок превышает 30 ({n}): «{h}»")
+    for d in descriptions:
+        ok, n = _rsa_validate(d, "description")
+        if not ok:
+            raise ValueError(f"описание превышает 90 ({n}): «{d}»")
+    if path2 and not path1:
+        raise ValueError("path2 нельзя без path1 (ограничение Google Ads)")
+    for p, label in ((path1, "path1"), (path2, "path2")):
+        if p:
+            ok, n = _rsa_validate(p, "path")
+            if not ok:
+                raise ValueError(f"{label} превышает 15 ({n}): «{p}»")
+
+
+async def apply_create_rsa(
+    *,
+    customer_id: str,
+    ad_group_id: str,
+    headlines: list[str],
+    descriptions: list[str],
+    final_url: str,
+    path1: str | None = None,
+    path2: str | None = None,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    ensure_allowed(customer_id)  # гейт 1 — замок аккаунта
+
+    # Валидация набора В КОДЕ (golden rule #4) — ДО claim. Это НЕ денежная операция, поэтому
+    # user_initiated не требуем (как add_keywords): объявление создаётся со статусом PAUSED.
+    if not ad_group_id:
+        raise ValueError("не указана группа объявлений (ad_group_id)")
+    _validate_rsa_inputs(headlines, descriptions, final_url, path1, path2)
+
+    await _require_confirmation(confirm_store, confirmation_id, "create_rsa")  # гейт 2 — claim
+    result = await asyncio.to_thread(
+        _create_rsa_via_sdk,
+        ads_client,
+        customer_id,
+        ad_group_id,
+        headlines,
+        descriptions,
+        final_url,
+        path1,
+        path2,
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
 # ── Реальные SDK-исполнители (синхронные; зовутся через asyncio.to_thread) ───────
 def _apply_budget_via_sdk(
     client, customer_id: str, campaign_id: str, new_budget_micros: int
@@ -421,5 +507,52 @@ def _set_geo_proximity_via_sdk(
         "campaign_id": str(campaign_id),
         "radius_km": float(radius_km),
         "resource_name": resp.results[0].resource_name if resp.results else None,
+        "applied": True,
+    }
+
+
+def _create_rsa_via_sdk(
+    client,
+    customer_id: str,
+    ad_group_id: str,
+    headlines: list,
+    descriptions: list,
+    final_url: str,
+    path1: str | None,
+    path2: str | None,
+) -> dict:
+    """Создаёт RSA-объявление (ad_group_ad с responsive_search_ad). CREATE — БЕЗ update_mask.
+    ВАЖНО (v24): final_urls живёт на .ad (не на responsive_search_ad), обязателен ≥1; каждый
+    заголовок/описание — отдельный AdTextAsset.text; статус PAUSED зашит в КОДЕ (golden rule:
+    безопасность — модель не решает; объявление не показывается до ручного включения)."""
+    ag_svc = client.get_service("AdGroupService")
+    svc = client.get_service("AdGroupAdService")
+    op = client.get_type("AdGroupAdOperation")
+    aga = op.create
+    aga.ad_group = ag_svc.ad_group_path(str(customer_id), str(ad_group_id))
+    aga.status = client.enums.AdGroupAdStatusEnum.PAUSED  # 0 расхода: создаём на паузе
+    aga.ad.final_urls.append(str(final_url))  # обязателен ≥1; поле на .ad
+    rsa = aga.ad.responsive_search_ad
+    for text in headlines:
+        asset = client.get_type("AdTextAsset")
+        asset.text = text
+        rsa.headlines.append(asset)
+    for text in descriptions:
+        asset = client.get_type("AdTextAsset")
+        asset.text = text
+        rsa.descriptions.append(asset)
+    if path1:
+        rsa.path1 = path1
+        if path2:  # path2 допустим только при заданном path1 (прото v24)
+            rsa.path2 = path2
+    resp = svc.mutate_ad_group_ads(customer_id=str(customer_id), operations=[op])
+    return {
+        "customer_id": customer_id,
+        "ad_group_id": str(ad_group_id),
+        "resource_name": resp.results[0].resource_name if resp.results else None,
+        "headlines": len(headlines),
+        "descriptions": len(descriptions),
+        "final_url": str(final_url),
+        "status": "PAUSED",
         "applied": True,
     }
