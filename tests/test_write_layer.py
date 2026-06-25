@@ -454,6 +454,48 @@ async def test_real_store_apply_is_single_use_replay_blocked():
     assert (await store.get_confirmed(cid)).status == "applied"  # терминальный статус
 
 
+# ── record_failure: статус и audit согласованы; терминальный applied не понижается ─
+async def test_record_failure_terminalizes_confirmed_but_not_applied():
+    from confirm.store import ConfirmStore
+    from db.session import init_db
+
+    await init_db()
+    store = ConfirmStore()
+
+    # (1) ошибка ДО claim (резолв имени): confirmed → failed (статус совпал с audit).
+    cid = uuid.uuid4().hex
+    await store.save_proposal(
+        confirmation_id=cid,
+        operation="update_budget",
+        customer_id=DRAFT_ACCOUNT_ID,
+        params={"campaign": "X", "mode": "set_to", "value": 10},
+        summary="b",
+        chat_id=1,
+        user_initiated=True,
+    )
+    await store.confirm(cid, chat_id=1)
+    await store.record_failure(cid, error="resolve failed")
+    assert (await store.get_confirmed(cid)).status == "failed"
+
+    # (2) уже применённый (applied) НЕ понижается поздней записью ошибки.
+    cid2 = uuid.uuid4().hex
+    await store.save_proposal(
+        confirmation_id=cid2,
+        operation="resume_campaign",
+        customer_id=DRAFT_ACCOUNT_ID,
+        params={"campaign": "X"},
+        summary="r",
+        chat_id=1,
+        user_initiated=True,
+    )
+    await store.confirm(cid2, chat_id=1)
+    await store.claim(cid2, operation="resume_campaign")
+    await store.finalize(cid2, result={"applied": True})
+    assert (await store.get_confirmed(cid2)).status == "applied"
+    await store.record_failure(cid2, error="late error")
+    assert (await store.get_confirmed(cid2)).status == "applied"  # терминальный не понижен
+
+
 # ── FIX 1: confirmation_id одной операции нельзя «переиграть» в другую (wrong-op) ─
 async def test_apply_rejects_wrong_operation_confirmation():
     store = FakeStore(FakeProposal("add_keywords", "confirmed", user_initiated=True))

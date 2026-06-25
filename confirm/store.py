@@ -157,15 +157,19 @@ class ConfirmStore:
                 await s.commit()
 
     async def record_failure(self, confirmation_id: str, *, error: str) -> None:
-        """Ошибка выполнения: executing → failed (терминальный) + audit failed. Если черновик
-        ещё не был застолблён (ошибка до claim, напр. резолв имени), статус не трогаем — его
-        ещё можно выполнить заново; SDK при этом не вызывался, денег не потрачено."""
+        """Ошибка выполнения → failed (терминальный) + audit failed.
+
+        Переводим в failed и из 'executing' (упало после claim), и из 'confirmed' (упало ДО claim,
+        напр. резолв имени) — чтобы статус черновика и audit-строка совпадали (без рассинхрона
+        'confirmed' vs audit 'failed'). Уже терминальные applied/failed/rejected НЕ трогаем
+        (нельзя «понизить» успешно применённую операцию). SDK при ошибке до claim не вызывался —
+        повтор = новая команда (тех же кнопок у старого черновика уже нет)."""
         async with Session() as s:
             p = (
                 await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
             ).scalar_one_or_none()
             if p is not None:
-                if p.status == "executing":
+                if p.status in ("confirmed", "executing"):
                     p.status = "failed"
                     p.decided_at = func.now()
                 s.add(_audit(p, p.chat_id, "failed", result={"error": error}))

@@ -9,46 +9,48 @@ description: Скаффолд новой изменяющей (mutation) опе�
 
 ## Жёсткие правила
 1. Mutation-инструмент агента **создаёт proposal** (черновик), но НЕ выполняет изменение.
-2. Реальное выполнение — отдельная функция в `ads/mutations.py`, которая **принимает `confirmation_id`** и проверяет, что он соответствует подтверждённой строке в `audit_log`. Без валидного `confirmation_id` — `raise PermissionError`.
-3. **Бюджетные** мутации дополнительно требуют флага «прямая команда пользователя» (никогда из scheduler/anomaly).
-4. Диапазоны/значения валидируются **в коде** (Pydantic + явные проверки), не на доверии к модели.
-5. Никаких секретов в логи; логировать что/кто/когда/результат.
+2. Каждая операция должна быть в `ads.service.SUPPORTED_OPERATIONS` (единый источник истины). Иначе агент обязан отклонить её ДО показа кнопок (capability-guard в `agent.loop`), а `execute_confirmed` — отвергнуть как defense-in-depth. Так закрывается класс «падает ПОСЛЕ ✅».
+3. Реальное выполнение — отдельная функция `apply_<operation>` в `ads/mutations.py` за **двумя гейтами**: (а) `ads.client.ensure_allowed(customer_id)` — замок аккаунта; (б) `_require_confirmation(...)` — **АТОМАРНО столбит** черновик через `store.claim` (compare-and-set `confirmed → executing`, одноразово, с привязкой к операции). Без успешного claim — `raise PermissionError`. Это и есть защита от replay/double-spend: claim в гейте, не в UI.
+4. **Бюджет и ставки** дополнительно требуют `proposal.user_initiated` (никогда из scheduler/anomaly). Дефолт флага — `False` (fail-closed); `True` ставит только доверенный вход `bot.main.on_text`.
+5. Диапазоны/значения/длины валидируются **в коде** (Pydantic + явные проверки) и **ДО claim**, чтобы плохие данные не «съели» одноразовый черновик. Кириллица = 1 символ (`len()` по code points).
+6. Никаких секретов в логи; логировать что/кто/когда/результат.
 
 ## Шаги
-1. Опиши параметры мутации как Pydantic-модель в `agent/tools/schemas.py`.
-2. Зарегистрируй **propose-инструмент** в `agent/tools/` — он только строит `Proposal` с diff «было→станет» и кладёт в БД.
-3. Реализуй исполнитель в `ads/mutations.py` по шаблону:
+1. Опиши параметры мутации как Pydantic-модель в `agent/tools/schemas.py` (+ валидаторы диапазонов/длин).
+2. Добавь имя операции в `SCHEMAS`/`MUTATION_TOOLS` и в `ads.service.SUPPORTED_OPERATIONS`.
+3. Реализуй исполнитель в `ads/mutations.py` по шаблону (порядок важен):
 
 ```python
-async def apply_<operation>(params: <Params>, *, confirmation_id: str, db, ads_client) -> Result:
-    # 1) Проверка подтверждения — БЕЗ него не выполнять
-    audit = await db.get_confirmed_proposal(confirmation_id)
-    if audit is None or audit.operation != "<operation>" or audit.status != "confirmed":
-        raise PermissionError("mutation without a valid confirmation_id")
+async def apply_<operation>(
+    *, customer_id: str, ..., confirmation_id: str, confirm_store, ads_client
+) -> dict:
+    ensure_allowed(customer_id)                 # Гейт 1: замок аккаунта (ДО всего)
 
-    # 2) (для бюджета) проверка прямой команды
-    if "<operation>" == "update_budget" and not audit.user_initiated:
-        raise PermissionError("budget change must be a direct user command")
+    params_validate_ranges(...)                 # Валидация В КОДЕ — ДО claim
 
-    # 3) Валидация диапазонов в КОДЕ (не доверять модели)
-    params.validate_ranges()
+    # Гейт 2: АТОМАРНО столбит черновик (confirmed → executing, одноразово, с проверкой операции).
+    proposal = await _require_confirmation(confirm_store, confirmation_id, "<operation>")
 
-    # 4) Выполнение через google-ads SDK (только TEST MCC при ENV=dev)
-    result = await ads_client.mutate(...)
+    if not proposal.user_initiated:             # деньги (бюджет/ставка) — только команда человека
+        raise PermissionError("budget/bid change must be a direct user command")
 
-    # 5) Финализировать audit-row (результат)
-    await db.finalize_audit(confirmation_id, result=result)
+    result = await asyncio.to_thread(_<operation>_via_sdk, ads_client, customer_id, ...)
+    await confirm_store.finalize(confirmation_id, result=result)  # executing → applied + audit
     return result
 ```
 
-4. Добавь тест в `tests/`:
-   - вызов `apply_<operation>` **без** `confirmation_id` → `PermissionError`;
-   - с подтверждённым proposal → выполнение + строка в `audit_log`;
-   - (для бюджета) вызов из scheduler-контекста → отклонён.
+4. Добавь ветку резолва+вызова в `ads/service.execute_confirmed` (имя кампании → id, считаем дельты), используя `customer_id = DRAFT_ACCOUNT_ID`.
+5. Добавь тесты в `tests/test_write_layer.py`:
+   - `apply_<operation>` **без** confirmation (FakeStore без proposal) → `PermissionError`;
+   - чужой `customer_id` → `PermissionError` (замок до всего);
+   - happy-path → SDK-исполнитель вызван + `store.finalized`;
+   - **replay**: тот же `confirmation_id` второй раз → `PermissionError`, SDK вызван РОВНО один раз;
+   - (для бюджета/ставки) `user_initiated=False` → отклонён.
 
 ## Чеклист перед готовностью
+- [ ] операция в `SUPPORTED_OPERATIONS` + capability-guard отклоняет неподдержанное ДО кнопок
 - [ ] propose не выполняет изменение, только создаёт diff
-- [ ] исполнитель требует и валидирует `confirmation_id`
-- [ ] диапазоны валидируются в коде
-- [ ] бюджет — только user_initiated
-- [ ] есть audit-row и тест на отказ без подтверждения
+- [ ] `ensure_allowed` первым; `_require_confirmation` (claim) до SDK; finalize после
+- [ ] диапазоны/длины валидируются в коде ДО claim (кириллица = 1)
+- [ ] бюджет/ставка — только `user_initiated`
+- [ ] есть тесты: без подтверждения, чужой аккаунт, happy, **replay (one-shot)**
