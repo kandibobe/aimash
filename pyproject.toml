@@ -1,0 +1,36 @@
+[project]
+name = "aimash"
+version = "0.0.1"
+description = "AI-агент управления Google Ads через Telegram (исполнитель с подтверждением каждого изменения)"
+requires-python = ">=3.12"
+dependencies = [
+    "aiogram>=3.13",
+    "openai>=1.50",            # клиент к OpenRouter (OpenAI-совместимый)
+    "google-ads>=27.0",        # официальный SDK Google Ads API (пин под v24.x)
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "SQLAlchemy>=2.0",
+    "asyncpg>=0.30",
+    "alembic>=1.13",
+    "APScheduler>=3.10",
+    "cryptography>=43.0",      # Fernet для шифрования токенов at-rest
+    "openpyxl>=3.1",           # .xlsx экспорт (фаза 2)
+    "google-api-python-client>=2.140",  # Sheets API (фаза 2)
+    "python-dotenv>=1.0",
+    "tenacity>=9.0",           # ретраи/backoff (rate limits Google Ads)
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

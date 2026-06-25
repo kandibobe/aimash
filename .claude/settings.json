@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(python -m:*)",
+      "Bash(pip install:*)",
+      "Bash(uv:*)",
+      "Bash(pytest:*)",
+      "Bash(ruff:*)",
+      "Bash(alembic:*)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Read(./**)",
+      "Edit(./**)",
+      "Write(./**)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./google-ads.yaml)",
+      "Read(./secrets/**)",
+      "Bash(git push:*)"
+    ]
+  },
+  "env": {
+    "ENV": "dev"
+  }
+}
