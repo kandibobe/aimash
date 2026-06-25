@@ -1,4 +1,5 @@
 """Структурное логирование БЕЗ секретов. Все логи проходят через redact() для токенов."""
+
 from __future__ import annotations
 
 import logging

@@ -3,6 +3,7 @@
 Токены НИКОГДА не хранятся в открытом виде в БД и НИКОГДА не уходят в промпт/логи.
 Ключ — из окружения (SECRETS_ENCRYPTION_KEY), не из кода.
 """
+
 from __future__ import annotations
 
 from cryptography.fernet import Fernet
@@ -11,9 +12,10 @@ from core.config import settings
 
 
 def _fernet() -> Fernet:
-    if not settings.secrets_encryption_key:
+    key = settings.secrets_encryption_key.get_secret_value()
+    if not key:
         raise RuntimeError("SECRETS_ENCRYPTION_KEY не задан — сгенерируй: Fernet.generate_key()")
-    return Fernet(settings.secrets_encryption_key.encode())
+    return Fernet(key.encode())
 
 
 def encrypt(plaintext: str) -> str:
