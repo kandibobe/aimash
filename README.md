@@ -6,7 +6,28 @@ Telegram-бот, который по командам на естественн�
 Мутация и подтверждение **разделены**: агент создаёт черновик изменения (proposal), а выполняет его код — только после явного «да» пользователя, с записью в audit-журнал. Бюджет меняется только по прямой команде. См. золотые правила в `CLAUDE.md`.
 
 ## Статус
-**Фаза −1 (де-риск):** A/B-тест моделей + спайк каркаса. Дальше: read-MVP → confirm-гейт+запись Search → отчёты/тексты → keyword research/scheduler.
+Фазы 0–3 в основном реализованы (точный статус — по коммитам; роадмап в плане может отставать от кода).
+- **Готово:** чтение MCC (GAQL) + whitelist + Postgres/Alembic; confirm-гейт + запись (бюджет, ставка CPC, ключи, минус-слова, пауза/возобновление, ГЕО-радиус) с audit; генерация RSA-текстов с поэлементным подтверждением; глубокие отчёты (`.xlsx` и Google Sheets) + сравнение период-к-периоду; keyword research + AI-кластеризация; планировщик отчётов/аномалий (read-only).
+- **Инфраструктура/безопасность:** Docker + bot-сервис; CI (ruff/mypy/coverage); ретраи+таймауты к Google Ads/OpenRouter; редакция секретов в логах + логирование запросов; анти-спам throttling; prod fail-fast на ключ шифрования.
+- **В работе:** создание кампаний из медиа (GDN, §11).
+
+## Команды бота
+| Команда | Что делает |
+|---|---|
+| `/start`, `/help` | приветствие, меню, справка |
+| `/status` | статистика аккаунта (30 дн.) |
+| `/campaigns` | список кампаний + быстрые действия |
+| `/pause Название`, `/resume Название` | пауза/возобновление кампании (через confirm-гейт) |
+| `/report [7\|30\|90\|MTD]` | сводка за период (итоги + сравнение + топ-кампании) |
+| `/export [...]` | глубокий отчёт `.xlsx` вложением |
+| `/sheets [...]` | глубокий отчёт в Google Sheets (ссылка; нужен OAuth-scope `drive.file`, см. `docs/DEPLOYMENT.md`) |
+| `/rsa` | генерация RSA-текстов с поэлементным подтверждением |
+| `/keywords` | подбор ключевых слов (объём/конкуренция/кластеры) + `.xlsx` |
+| `/lang [ru\|en]` | язык интерфейса |
+| `/cancel` | отменить текущий черновик |
+| свободный текст | NL-команда → агент (бюджет/ставка/ключи/…) |
+
+Любое изменение — только после «да» (показ «было → станет»); анти-спам throttling ограничивает частоту команд. Деплой/OAuth/Sheets-scope — `docs/DEPLOYMENT.md`.
 
 ---
 
@@ -72,10 +93,14 @@ python scripts/ab_test_models.py
 
 ## Структура
 ```
-core/      config, secrets (шифрование), logging
-bot/       aiogram handlers, inline-кнопки, whitelist
+core/      config, secrets (шифрование), logging (редакция секретов), resilience (ретраи/таймауты)
+bot/       aiogram handlers, inline-кнопки, whitelist, ux (typing/диагностика), i18n, throttle
 agent/     router (OpenRouter), system_prompt, tools (Pydantic), loop
-ads/       auth, read (GAQL), mutations (требуют confirmation_id), keyword_plan
+ads/       auth, read (GAQL), mutations (требуют confirmation_id), keyword_plan, assets (§11)
+adcopy/    генерация RSA-текстов + валидация длины (кириллица=1) + курация
+reports/   глубокие отчёты: queries (GAQL), service, xlsx, sheets, period
+keywords/  подбор ключей + AI-кластеризация по интенту + .xlsx
+scheduler/ плановые отчёты/аномалии/очистка (READ-ONLY, golden rule #3)
 confirm/   proposal (diff), gate (логика «да»), audit
 db/        SQLAlchemy модели + Alembic
 scripts/   ab_test_models.py — A/B-тест моделей
