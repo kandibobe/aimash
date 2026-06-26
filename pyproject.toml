@@ -18,6 +18,7 @@ dependencies = [
     "APScheduler>=3.10",
     "cryptography>=43.0",      # Fernet для шифрования токенов at-rest
     "openpyxl>=3.1",           # .xlsx экспорт (фаза 2)
+    "Pillow>=10.0",            # подготовка изображений для GDN-объявлений (§11): кроп 1.91:1 / 1:1
     "google-api-python-client>=2.140",  # Sheets API (фаза 2)
     "python-dotenv>=1.0",
     "tenacity>=9.0",           # ретраи/backoff (rate limits Google Ads)

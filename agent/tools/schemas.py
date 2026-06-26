@@ -36,6 +36,7 @@ MUTATION_TOOLS = {
     "resume_campaign",
     "set_geo_proximity",
     "create_rsa",
+    "create_gdn_campaign",
 }
 READ_TOOLS = {"get_stats", "generate_rsa", "keyword_research"}
 
@@ -219,6 +220,55 @@ class CreateRsa(BaseModel):
         return v
 
 
+class CreateGdnCampaign(BaseModel):
+    """Финальные параметры GDN-кампании из фото (минтуется ботом после визарда, не из LLM).
+    Длину/составы считает КОД — зеркалит ads.mutations._validate_gdn_inputs (defense-in-depth).
+    Бинарь фото НЕ здесь: media_id ссылается на временно сохранённые подготовленные изображения."""
+
+    campaign_name: str = Field(min_length=1, max_length=120)
+    headlines: list[str] = Field(min_length=1, max_length=5)  # каждый ≤30
+    long_headline: str = Field(min_length=1)  # ≤90
+    descriptions: list[str] = Field(min_length=1, max_length=5)  # каждый ≤90
+    business_name: str = Field(min_length=1, max_length=25)
+    final_url: str
+    budget_daily_micros: int = Field(gt=0, le=1_000_000_000_000)  # ≤1e12 micros (=1M единиц валюты)
+    media_id: str = Field(min_length=1, max_length=64)
+
+    @field_validator("headlines")
+    @classmethod
+    def _h(cls, v):
+        for t in v:
+            _assert_rsa_len([t], "headline")
+        return v
+
+    @field_validator("long_headline")
+    @classmethod
+    def _lh(cls, v):
+        _assert_rsa_len([v], "description")  # длинный заголовок ≤90
+        return v
+
+    @field_validator("descriptions")
+    @classmethod
+    def _d(cls, v):
+        for t in v:
+            _assert_rsa_len([t], "description")
+        return v
+
+    @field_validator("final_url")
+    @classmethod
+    def _url(cls, v):
+        if not v or not str(v).startswith(("http://", "https://")):
+            raise ValueError("нужен валидный final_url (http/https)")
+        return v
+
+    @field_validator("media_id")
+    @classmethod
+    def _mid(cls, v):
+        if not str(v).isalnum():  # идёт в имя файла — защита от path-traversal
+            raise ValueError("media_id должен быть буквенно-цифровым")
+        return v
+
+
 SCHEMAS: dict[str, type[BaseModel]] = {
     "update_budget": UpdateBudget,
     "update_bid": UpdateBid,
@@ -228,6 +278,7 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "resume_campaign": ResumeCampaign,
     "set_geo_proximity": SetGeoProximity,
     "create_rsa": CreateRsa,
+    "create_gdn_campaign": CreateGdnCampaign,
     "get_stats": GetStats,
     "generate_rsa": GenerateRsa,
     "keyword_research": KeywordResearch,

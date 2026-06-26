@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Protocol
 
 from google.ads.googleads.errors import GoogleAdsException
@@ -553,6 +555,221 @@ def _create_rsa_via_sdk(
         "headlines": len(headlines),
         "descriptions": len(descriptions),
         "final_url": str(final_url),
+        "status": "PAUSED",
+        "applied": True,
+    }
+
+
+# ── Создание GDN-кампании из фото (§11): фото→Asset→Display→группа→RDA, всё PAUSED ─
+GDN_MAX_HEADLINES = 5
+GDN_MAX_DESCRIPTIONS = 5
+GDN_BUSINESS_NAME_MAX = 25
+
+
+def _validate_gdn_inputs(
+    headlines: list[str],
+    long_headline: str,
+    descriptions: list[str],
+    business_name: str,
+    final_url: str,
+    budget_daily_micros: int,
+) -> None:
+    """Полная валидация В КОДЕ — ДО claim. Длину (кириллица=1), составы, URL и бюджет считает КОД."""
+    if not 1 <= len(headlines) <= GDN_MAX_HEADLINES:
+        raise ValueError(
+            f"GDN требует 1–{GDN_MAX_HEADLINES} заголовков (передано {len(headlines)})"
+        )
+    if not 1 <= len(descriptions) <= GDN_MAX_DESCRIPTIONS:
+        raise ValueError(
+            f"GDN требует 1–{GDN_MAX_DESCRIPTIONS} описаний (передано {len(descriptions)})"
+        )
+    for h in headlines:
+        ok, n = _rsa_validate(h, "headline")  # ≤30, кириллица=1
+        if not ok:
+            raise ValueError(f"заголовок превышает лимит ({n}/30): «{h}»")
+    ok, n = _rsa_validate(long_headline, "description")  # длинный заголовок ≤90
+    if not ok:
+        raise ValueError(f"длинный заголовок превышает лимит ({n}/90)")
+    for d in descriptions:
+        ok, n = _rsa_validate(d, "description")  # ≤90
+        if not ok:
+            raise ValueError(f"описание превышает лимит ({n}/90): «{d}»")
+    if not business_name or len(business_name) > GDN_BUSINESS_NAME_MAX:
+        raise ValueError(f"название бизнеса 1–{GDN_BUSINESS_NAME_MAX} символов")
+    if not final_url or not str(final_url).startswith(("http://", "https://")):
+        raise ValueError("нужен валидный final_url (http/https)")
+    if budget_daily_micros <= 0:
+        raise ValueError("дневной бюджет должен быть > 0")
+    if budget_daily_micros > MAX_AMOUNT_MICROS:
+        raise ValueError("дневной бюджет подозрительно большой — проверь команду")
+
+
+async def apply_create_gdn_campaign(
+    *,
+    customer_id: str,
+    campaign_name: str,
+    landscape_bytes: bytes,
+    square_bytes: bytes,
+    headlines: list[str],
+    long_headline: str,
+    descriptions: list[str],
+    business_name: str,
+    final_url: str,
+    budget_daily_micros: int,
+    cpc_bid_micros: int = 500_000,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """Создать GDN-кампанию (Display) из фото за двойным гейтом. Все сущности — PAUSED (0 расхода).
+
+    НЕ через run_ads_call: цепочка из 5 создающих вызовов НЕ идемпотентна (авто-ретрай породил бы
+    дубли). От повторного исполнения защищает атомарный claim confirm-гейта; при сбое — record_failure,
+    осиротевшие PAUSED-сущности безвредны (0 расхода), пользователь начинает заново."""
+    ensure_allowed(customer_id)  # гейт 1 — замок аккаунта
+    _validate_gdn_inputs(
+        headlines, long_headline, descriptions, business_name, final_url, budget_daily_micros
+    )
+    if not landscape_bytes or not square_bytes:
+        raise ValueError("нужны подготовленные изображения (landscape + square)")
+    proposal = await _require_confirmation(confirm_store, confirmation_id, "create_gdn_campaign")
+    # Создание кампании — ТОЛЬКО прямой командой пользователя (как бюджет): bot ставит флаг, агент нет.
+    if not proposal.user_initiated:
+        raise PermissionError("создание кампании должно быть прямой командой пользователя")
+    result = await asyncio.to_thread(
+        _create_gdn_campaign_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_name=campaign_name,
+        landscape_bytes=landscape_bytes,
+        square_bytes=square_bytes,
+        headlines=headlines,
+        long_headline=long_headline,
+        descriptions=descriptions,
+        business_name=business_name,
+        final_url=final_url,
+        budget_micros=int(budget_daily_micros),
+        cpc_bid_micros=int(cpc_bid_micros),
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+def _create_gdn_campaign_via_sdk(
+    client,
+    customer_id: str,
+    *,
+    campaign_name: str,
+    landscape_bytes: bytes,
+    square_bytes: bytes,
+    headlines: list[str],
+    long_headline: str,
+    descriptions: list[str],
+    business_name: str,
+    final_url: str,
+    budget_micros: int,
+    cpc_bid_micros: int,
+) -> dict:
+    """Синхронная 5-шаговая цепочка v24 (сверено live): asset×2 → budget → campaign(DISPLAY,PAUSED)
+    → ad group(PAUSED) → responsive_display_ad(PAUSED). Статусы PAUSED зашиты в КОДЕ → 0 расхода.
+    Имя кампании — как у пользователя; бюджет/группа получают stamp-суффикс для уникальности."""
+    from ads.assets import upload_image_asset
+
+    cid = str(customer_id)
+    stamp = str(int(time.time()))
+
+    # 1) Image-ассеты (landscape 1.91:1 + square 1:1) — режет КОД из одного фото.
+    land_rn = upload_image_asset(client, cid, landscape_bytes, f"{campaign_name}_land_{stamp}")
+    sq_rn = upload_image_asset(client, cid, square_bytes, f"{campaign_name}_sq_{stamp}")
+
+    # 2) Бюджет.
+    budget_svc = client.get_service("CampaignBudgetService")
+    bop = client.get_type("CampaignBudgetOperation")
+    bop.create.name = f"{campaign_name}_budget_{stamp}"
+    bop.create.amount_micros = int(budget_micros)
+    bop.create.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
+    bop.create.explicitly_shared = False
+    budget_rn = (
+        budget_svc.mutate_campaign_budgets(customer_id=cid, operations=[bop])
+        .results[0]
+        .resource_name
+    )
+
+    # 3) Кампания (DISPLAY, PAUSED, manual CPC, только контентная сеть).
+    camp_svc = client.get_service("CampaignService")
+    cop = client.get_type("CampaignOperation")
+    c = cop.create
+    c.name = campaign_name
+    c.advertising_channel_type = client.enums.AdvertisingChannelTypeEnum.DISPLAY
+    c.status = client.enums.CampaignStatusEnum.PAUSED  # код решает — не показывается до включения
+    c.campaign_budget = budget_rn
+    c.manual_cpc.enhanced_cpc_enabled = False
+    c.network_settings.target_google_search = False
+    c.network_settings.target_search_network = False
+    c.network_settings.target_content_network = True
+    c.network_settings.target_partner_search_network = False
+    try:  # v24 может требовать декларацию EU-политической рекламы при создании
+        c.contains_eu_political_advertising = (
+            client.enums.EuPoliticalAdvertisingStatusEnum.DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
+        )
+    except Exception:  # noqa: BLE001 — поле опционально на части аккаунтов
+        pass
+    campaign_rn = (
+        camp_svc.mutate_campaigns(customer_id=cid, operations=[cop]).results[0].resource_name
+    )
+
+    # 4) Группа объявлений (DISPLAY, PAUSED).
+    ag_svc = client.get_service("AdGroupService")
+    agop = client.get_type("AdGroupOperation")
+    ag = agop.create
+    ag.name = f"{campaign_name}_ag_{stamp}"
+    ag.campaign = campaign_rn
+    ag.status = client.enums.AdGroupStatusEnum.PAUSED
+    ag.type_ = client.enums.AdGroupTypeEnum.DISPLAY_STANDARD
+    ag.cpc_bid_micros = int(cpc_bid_micros)
+    ad_group_rn = (
+        ag_svc.mutate_ad_groups(customer_id=cid, operations=[agop]).results[0].resource_name
+    )
+
+    # 5) Адаптивное медийное объявление (PAUSED).
+    ad_svc = client.get_service("AdGroupAdService")
+    adop = client.get_type("AdGroupAdOperation")
+    aga = adop.create
+    aga.ad_group = ad_group_rn
+    aga.status = client.enums.AdGroupAdStatusEnum.PAUSED
+    aga.ad.final_urls.append(str(final_url))
+    rda = aga.ad.responsive_display_ad
+
+    def _img(asset_rn):
+        a = client.get_type("AdImageAsset")
+        a.asset = asset_rn
+        return a
+
+    def _txt(text):
+        a = client.get_type("AdTextAsset")
+        a.text = text
+        return a
+
+    rda.marketing_images.append(_img(land_rn))
+    rda.square_marketing_images.append(_img(sq_rn))
+    for h in headlines:
+        rda.headlines.append(_txt(h))
+    rda.long_headline.text = long_headline
+    for d in descriptions:
+        rda.descriptions.append(_txt(d))
+    rda.business_name = business_name
+    ad_rn = ad_svc.mutate_ad_group_ads(customer_id=cid, operations=[adop]).results[0].resource_name
+
+    return {
+        "customer_id": cid,
+        "campaign_name": campaign_name,
+        "campaign": campaign_rn,
+        "budget": budget_rn,
+        "ad_group": ad_group_rn,
+        "ad": ad_rn,
+        "image_assets": [land_rn, sq_rn],
+        "headlines": len(headlines),
+        "descriptions": len(descriptions),
         "status": "PAUSED",
         "applied": True,
     }

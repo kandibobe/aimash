@@ -27,6 +27,7 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
         "resume_campaign",
         "set_geo_proximity",
         "create_rsa",
+        "create_gdn_campaign",
     }
 )
 
@@ -175,6 +176,31 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             confirm_store=store,
             ads_client=client,
         )
+
+    if op == "create_gdn_campaign":
+        # Подготовленные изображения (landscape+square) лежат во временном хранилище по media_id
+        # (бинарь НЕ в proposal.params/логах). Резолв кампании не нужен — это создание новой.
+        from ads.assets import clear_pending_media, load_pending_media
+
+        landscape, square = load_pending_media(params["media_id"])
+        try:
+            return await mutations.apply_create_gdn_campaign(
+                customer_id=customer_id,
+                campaign_name=params["campaign_name"],
+                landscape_bytes=landscape,
+                square_bytes=square,
+                headlines=params["headlines"],
+                long_headline=params["long_headline"],
+                descriptions=params["descriptions"],
+                business_name=params["business_name"],
+                final_url=params["final_url"],
+                budget_daily_micros=params["budget_daily_micros"],
+                confirmation_id=confirmation_id,
+                confirm_store=store,
+                ads_client=client,
+            )
+        finally:
+            clear_pending_media(params["media_id"])  # успех или сбой — временные файлы чистим
 
     if op == "create_rsa":
         # Группа уже зарезолвлена в курации (ad_group_id в params) → доп. резолв не нужен.
