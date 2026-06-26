@@ -334,6 +334,33 @@ async def test_apply_set_geo_proximity_rejects_foreign_account():
             pass
 
 
+async def test_apply_set_geo_proximity_validates_address_before_claim():
+    """Пустой city_name → ValueError ДО claim (golden rule #4): SDK не зван, черновик не съеден."""
+    calls = {"n": 0}
+
+    def fake(*a, **k):
+        calls["n"] += 1
+        return {"applied": True}
+
+    store = FakeStore(FakeProposal("set_geo_proximity", "confirmed", user_initiated=True))
+    with patched(mut, "_set_geo_proximity_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        try:
+            await mut.apply_set_geo_proximity(
+                customer_id=DRAFT_ACCOUNT_ID,
+                campaign_id="23",
+                radius_km=5,
+                address={"city_name": "", "country_code": "UA"},  # пустой город
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=object(),
+            )
+            raise AssertionError("ожидался ValueError (пустой city_name)")
+        except ValueError:
+            pass
+    assert calls["n"] == 0  # SDK не вызван
+    assert store.finalized is False  # черновик не финализирован
+
+
 # ── Валидатор длины ключевых слов (golden rule #4: код, кириллица = 1) ───────────
 def test_assert_keyword_ok_counts_cyrillic_as_one():
     assert mut._assert_keyword_ok("  цветы  ") == "цветы"

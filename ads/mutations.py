@@ -219,7 +219,22 @@ async def apply_add_negative_keywords(
     return result
 
 
-# ── Гео-таргетинг по точке с радиусом (A-geo: исполнитель готов, активация — см. service) ─
+# ── Гео-таргетинг по точке с радиусом (A-geo) ────────────────────────────────────
+def _validate_address_fields(address: dict) -> None:
+    """Структурный адрес для proximity — валидирует КОД ДО claim (golden rule #4): минимум
+    city_name + country_code (ISO alpha-2). Плохой адрес не должен «съедать» одноразовый черновик."""
+    city = str(address.get("city_name") or "").strip()
+    cc = str(address.get("country_code") or "").strip()
+    if not city or len(city) > 80:
+        raise ValueError("city_name обязателен (1–80 символов)")
+    if len(cc) != 2 or not cc.isalpha():
+        raise ValueError("country_code — ISO-3166 alpha-2 (напр. UA)")
+    for opt in ("street_address", "postal_code"):
+        val = address.get(opt)
+        if val is not None and len(str(val)) > 80:
+            raise ValueError(f"{opt} слишком длинный (>80)")
+
+
 async def apply_set_geo_proximity(
     *,
     customer_id: str,
@@ -233,6 +248,7 @@ async def apply_set_geo_proximity(
     ensure_allowed(customer_id)
     if radius_km <= 0:
         raise ValueError("радиус должен быть > 0")
+    _validate_address_fields(address)  # ДО claim: плохой адрес не «съедает» черновик
     await _require_confirmation(confirm_store, confirmation_id, "set_geo_proximity")
     result = await run_ads_call(
         _set_geo_proximity_via_sdk, ads_client, customer_id, campaign_id, radius_km, address
@@ -714,9 +730,21 @@ def _create_gdn_campaign_via_sdk(
         )
     except Exception:  # noqa: BLE001 — поле опционально на части аккаунтов
         pass
-    campaign_rn = (
-        camp_svc.mutate_campaigns(customer_id=cid, operations=[cop]).results[0].resource_name
-    )
+    try:
+        campaign_rn = (
+            camp_svc.mutate_campaigns(customer_id=cid, operations=[cop]).results[0].resource_name
+        )
+    except Exception:
+        # Кампания не создалась → удаляем осиротевший бюджет (explicitly_shared=False, иначе копится
+        # мусор). best-effort: ошибку отката глушим. Сбой ПОСЛЕ кампании (шаги 4-5) оставляет
+        # PAUSED-сущности — безопасно (0 расхода), сложный каскадный откат не делаем.
+        try:
+            dop = client.get_type("CampaignBudgetOperation")
+            dop.remove = budget_rn
+            budget_svc.mutate_campaign_budgets(customer_id=cid, operations=[dop])
+        except Exception:  # noqa: BLE001
+            pass
+        raise
 
     # 4) Группа объявлений (DISPLAY, PAUSED).
     ag_svc = client.get_service("AdGroupService")

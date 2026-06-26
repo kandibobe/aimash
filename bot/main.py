@@ -34,8 +34,9 @@ from adcopy.refine import refine_element
 from adcopy.session import SessionStore
 from adcopy.validate import RSA_MIN_DESCRIPTIONS, RSA_MIN_HEADLINES
 from adcopy.validate import validate as rsa_validate
-from ads.assets import prepare_display_images, save_pending_media
+from ads.assets import clear_pending_media, prepare_display_images, save_pending_media
 from ads.client import DRAFT_ACCOUNT_ID
+from ads.mutations import GDN_BUSINESS_NAME_MAX
 from ads.resolve import find_ad_groups
 from ads.service import execute_confirmed
 from agent.loop import handle_command
@@ -797,13 +798,28 @@ def _parse_gdn_brief(text: str) -> tuple[str, str, float] | None:
         budget = float(budget_s.replace(",", "."))
     except ValueError:
         return None
-    return (name, url, budget) if budget > 0 else None
+    # Верхняя граница (1e6 единиц = 1e12 micros, лимит схемы) — отвергаем СРАЗУ, без «1e9» и
+    # путаного Pydantic-сообщения после генерации текстов (golden rule #4: считает КОД).
+    if budget <= 0 or budget > 1_000_000:
+        return None
+    return (name, url, budget)
+
+
+async def _gdn_cleanup(state: FSMContext, media_id: str | None) -> None:
+    """Сброс визарда GDN + удаление временных файлов медиа (без утечки на путях ошибок)."""
+    await state.clear()
+    if media_id:
+        await asyncio.to_thread(clear_pending_media, media_id)
 
 
 @dp.message(F.photo)
 async def on_photo(m: Message, state: FSMContext, bot: Bot) -> None:
     """Приём фото для GDN-кампании (§11): скачиваем, режем в 1.91:1 + 1:1, запускаем визард.
     Бинарь НЕ в proposal/логах — подготовленные кадры кладём во временное хранилище по media_id."""
+    prev = await state.get_data()  # новое фото отменяет прежнее → чистим его медиа (без утечки)
+    old_id = prev.get("gdn_media_id")
+    if old_id:
+        await asyncio.to_thread(clear_pending_media, old_id)
     await state.clear()
     try:
         buf = io.BytesIO()
@@ -836,18 +852,20 @@ async def gdn_brief(m: Message, state: FSMContext) -> None:
     try:
         draft = await _generate_rsa(CopyBrief(topic=name, n_headlines=5, n_descriptions=4))
     except Exception as e:  # LLM/сеть
-        await state.clear()
+        await _gdn_cleanup(state, media_id)
         await m.answer(f"⚠️ Генерация текстов не удалась: {type(e).__name__}: {e}")
         return
-    if not draft.headlines or not draft.descriptions:
-        await state.clear()
+    # Нужно ≥1 заголовка и ≥2 описаний: первое описание идёт в long_headline, остальные — в
+    # descriptions (иначе long_headline дублировал бы единственное описание).
+    if not draft.headlines or len(draft.descriptions) < 2:
+        await _gdn_cleanup(state, media_id)
         await m.answer(texts.GDN_GEN_EMPTY)
         return
     headlines = draft.headlines[:5]
     all_desc = draft.descriptions[:5]
     long_headline = all_desc[0]  # ≤90, уже провалидировано генератором
-    descriptions = all_desc[1:] if len(all_desc) > 1 else all_desc  # не дублируем long_headline
-    business_name = name[:25]
+    descriptions = all_desc[1:]  # ≥1 (len(all_desc) ≥ 2) — без дубля long_headline
+    business_name = name[:GDN_BUSINESS_NAME_MAX]
     budget_micros = int(round(budget_units * 1_000_000))
     params = {
         "campaign_name": name,
@@ -862,7 +880,7 @@ async def gdn_brief(m: Message, state: FSMContext) -> None:
     try:  # defense-in-depth: схема ещё раз проверит длины/составы/URL/бюджет/media_id
         SCHEMAS["create_gdn_campaign"](**params)
     except Exception as e:
-        await state.clear()
+        await _gdn_cleanup(state, media_id)
         await m.answer(f"⚠️ Параметры не прошли валидацию: {e}")
         return
     summary = texts.fmt_gdn_proposal_summary(

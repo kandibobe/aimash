@@ -12,6 +12,7 @@ import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -220,6 +221,78 @@ def test_create_gdn_in_supported_operations():
     from ads.service import SUPPORTED_OPERATIONS
 
     assert "create_gdn_campaign" in SUPPORTED_OPERATIONS
+
+
+# ── Откат бюджета при сбое создания кампании (защита от осиротевших ресурсов) ─────
+class _Auto:
+    """Авто-namespace: любой неустановленный атрибут авто-создаётся (имитирует proto-объект)."""
+
+    def __getattr__(self, k):
+        v = _Auto()
+        object.__setattr__(self, k, v)
+        return v
+
+
+def _resp(rns):
+    return SimpleNamespace(results=[SimpleNamespace(resource_name=rn) for rn in rns])
+
+
+def test_create_gdn_via_sdk_rolls_back_budget_on_campaign_failure():
+    """Если создание кампании падает — осиротевший бюджет удаляется (best-effort), без накопления."""
+    removed: list[str] = []
+
+    class _BudgetSvc:
+        def mutate_campaign_budgets(self, customer_id, operations):
+            op = operations[0]
+            rem = getattr(op, "remove", None)
+            if isinstance(rem, str):  # remove-операция = откат
+                removed.append(rem)
+                return _resp([])
+            return _resp(["customers/x/campaignBudgets/9"])
+
+    class _CampSvc:
+        def mutate_campaigns(self, customer_id, operations):
+            raise RuntimeError("BOOM: DUPLICATE_CAMPAIGN_NAME")
+
+    class _AssetSvc:
+        def mutate_assets(self, customer_id, operations):
+            return _resp(["customers/x/assets/1"])
+
+    services = {
+        "AssetService": _AssetSvc(),
+        "CampaignBudgetService": _BudgetSvc(),
+        "CampaignService": _CampSvc(),
+    }
+
+    class _Client:
+        enums = _Auto()
+
+        def get_service(self, name):
+            return services[name]
+
+        def get_type(self, name):
+            return _Auto()
+
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        try:
+            mut._create_gdn_campaign_via_sdk(
+                _Client(),
+                DRAFT_ACCOUNT_ID,
+                campaign_name="Дубль",
+                landscape_bytes=b"L",
+                square_bytes=b"S",
+                headlines=["Заголовок"],
+                long_headline="Длинный заголовок",
+                descriptions=["Описание"],
+                business_name="Aimash",
+                final_url="https://example.com/",
+                budget_micros=50_000_000,
+                cpc_bid_micros=500_000,
+            )
+            raise AssertionError("ожидался RuntimeError от mutate_campaigns")
+        except RuntimeError:
+            pass
+    assert removed == ["customers/x/campaignBudgets/9"]  # осиротевший бюджет удалён
 
 
 # ── Подготовка изображений (Pillow): кроп в 1.91:1 + 1:1 ─────────────────────────
