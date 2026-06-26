@@ -262,6 +262,78 @@ async def test_apply_resume_campaign_happy_path():
     assert store.finalized is True
 
 
+# ── apply_set_geo_proximity (A-geo): оба гейта, address-driven, без геокодинга ───
+async def test_apply_set_geo_proximity_happy_path():
+    called = {}
+
+    def fake(client, customer_id, campaign_id, radius_km, address):
+        called.update(campaign_id=campaign_id, radius_km=radius_km, address=dict(address))
+        return {"applied": True, "radius_km": radius_km}
+
+    store = FakeStore(FakeProposal("set_geo_proximity", "confirmed", user_initiated=True))
+    with patched(mut, "_set_geo_proximity_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_set_geo_proximity(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_id="23",
+            radius_km=10.0,
+            address={"city_name": "Киев", "country_code": "UA"},
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+        )
+    assert res["applied"] is True
+    assert called["radius_km"] == 10.0
+    assert called["address"]["city_name"] == "Киев"  # структурный адрес дошёл до SDK
+    assert store.finalized is True
+
+
+async def test_apply_set_geo_proximity_rejects_zero_radius_before_sdk():
+    calls = {"n": 0}
+
+    def fake(*a, **k):
+        calls["n"] += 1
+        return {"applied": True}
+
+    store = FakeStore(FakeProposal("set_geo_proximity", "confirmed", user_initiated=True))
+    with patched(mut, "_set_geo_proximity_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        try:
+            await mut.apply_set_geo_proximity(
+                customer_id=DRAFT_ACCOUNT_ID,
+                campaign_id="23",
+                radius_km=0,  # код отклоняет ДО claim
+                address={"city_name": "Киев", "country_code": "UA"},
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=object(),
+            )
+            raise AssertionError("ожидался ValueError (радиус 0)")
+        except ValueError:
+            pass
+    assert calls["n"] == 0  # SDK не вызван
+    assert store.finalized is False
+
+
+async def test_apply_set_geo_proximity_rejects_foreign_account():
+    store = FakeStore(FakeProposal("set_geo_proximity", "confirmed", user_initiated=True))
+    with (
+        patched(mut, "_set_geo_proximity_via_sdk", lambda *a, **k: {"applied": True}),
+        allowed_ids(DRAFT_ACCOUNT_ID),
+    ):
+        try:
+            await mut.apply_set_geo_proximity(
+                customer_id="1234567890",  # чужой → замок отклоняет
+                campaign_id="23",
+                radius_km=5,
+                address={"city_name": "Киев", "country_code": "UA"},
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=object(),
+            )
+            raise AssertionError("ожидался PermissionError (чужой аккаунт)")
+        except PermissionError:
+            pass
+
+
 # ── Валидатор длины ключевых слов (golden rule #4: код, кириллица = 1) ───────────
 def test_assert_keyword_ok_counts_cyrillic_as_one():
     assert mut._assert_keyword_ok("  цветы  ") == "цветы"
@@ -315,12 +387,31 @@ def _fake_chat(name, arguments):
     return _chat
 
 
-async def test_capability_guard_declines_deferred_geo_before_proposal():
+async def test_set_geo_proximity_now_supported_as_proposal():
+    """A-geo активирован: set_geo_proximity со структурным адресом → черновик с кнопками."""
     import agent.loop as L
 
-    fake = _fake_chat("set_geo_proximity", {"campaign": "X", "location": "Киев", "radius_km": 5})
+    fake = _fake_chat(
+        "set_geo_proximity",
+        {"campaign": "X", "city_name": "Киев", "country_code": "UA", "radius_km": 5},
+    )
     with patched(L, "chat", fake):
         res = await L.handle_command("таргет в радиусе 5 км от Киева", chat_id=1)
+    assert res["type"] == "proposal"  # geo поддержан → НЕ отклоняется
+    assert res["operation"] == "set_geo_proximity"
+
+
+async def test_capability_guard_declines_unsupported_mutation(monkeypatch):
+    """Capability-guard (механизм): объявленную в TOOLS, но НЕ в SUPPORTED_OPERATIONS мутацию
+    агент отклоняет ДО кнопок. Симулируем «отложенную» операцию, временно убрав update_bid
+    из SUPPORTED (loop импортирует SUPPORTED_OPERATIONS лениво → monkeypatch виден)."""
+    import agent.loop as L
+    import ads.service as svc
+
+    monkeypatch.setattr(svc, "SUPPORTED_OPERATIONS", svc.SUPPORTED_OPERATIONS - {"update_bid"})
+    fake = _fake_chat("update_bid", {"campaign": "X", "mode": "set_to", "value": 1.5})
+    with patched(L, "chat", fake):
+        res = await L.handle_command("ставка 1.5 в кампании X", chat_id=1)
     assert res["type"] == "text"  # НЕ proposal → кнопок не будет
     assert "не поддерживается" in res["text"]
 
@@ -336,13 +427,15 @@ async def test_capability_guard_allows_supported_bid_as_proposal():
 
 
 # ── Capability-guard / defense-in-depth на уровне execute_confirmed ──────────────
-async def test_execute_confirmed_rejects_deferred_geo():
+async def test_execute_confirmed_rejects_unsupported_op():
+    """Defense-in-depth: операцию вне SUPPORTED_OPERATIONS execute_confirmed отвергает даже при
+    дыре в loop-гейте. set_bidding_strategy — реальная ещё не реализованная операция."""
     from ads.service import execute_confirmed
 
     cp = SimpleNamespace(
-        operation="set_geo_proximity",
+        operation="set_bidding_strategy",
         status="confirmed",
-        params={"campaign": "X", "location": "Киев", "radius_km": 5},
+        params={"campaign": "X"},
     )
 
     class _S:
@@ -351,7 +444,7 @@ async def test_execute_confirmed_rejects_deferred_geo():
 
     try:
         await execute_confirmed(_S(), "cid")
-        raise AssertionError("ожидался PermissionError (geo отложен, A-geo)")
+        raise AssertionError("ожидался PermissionError (операция не поддержана)")
     except PermissionError:
         pass
 

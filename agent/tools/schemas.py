@@ -109,9 +109,24 @@ class ResumeCampaign(BaseModel):
 
 
 class SetGeoProximity(BaseModel):
+    """Радиус-таргетинг кампании (proximity). Адрес — СТРУКТУРНЫЙ (city_name + country_code),
+    Google сам геокодит точку — клиентский геокодинг не нужен. country_code по умолчанию UA
+    (проект ориентирован на Украину)."""
+
     campaign: str  # обязателен: радиус-таргетинг привязывается к кампании
-    location: str
     radius_km: float = Field(gt=0, le=2000)  # лимит Google Ads
+    city_name: str = Field(min_length=1, max_length=80)
+    country_code: str = "UA"  # ISO-3166 alpha-2 (UA, PL, US…)
+    street_address: str | None = None
+    postal_code: str | None = None
+
+    @field_validator("country_code")
+    @classmethod
+    def _cc(cls, v):
+        v = str(v or "UA").strip().upper()
+        if len(v) != 2 or not v.isalpha():
+            raise ValueError("country_code — ISO-3166 alpha-2 (напр. UA)")
+        return v
 
 
 class GetStats(BaseModel):
@@ -250,7 +265,12 @@ TOOLS: list[dict] = [
     ),
     _tool("pause_campaign", "Поставить кампанию на паузу.", PauseCampaign),
     _tool("resume_campaign", "Возобновить (включить) кампанию из паузы.", ResumeCampaign),
-    _tool("set_geo_proximity", "Таргетинг по точке с радиусом (км).", SetGeoProximity),
+    _tool(
+        "set_geo_proximity",
+        "Радиус-таргетинг (км) вокруг города для кампании. Укажи campaign, city_name, "
+        "country_code (ISO alpha-2, по умолчанию UA) и radius_km.",
+        SetGeoProximity,
+    ),
     _tool(
         "generate_rsa",
         "Сгенерировать рекламные тексты RSA (заголовки/описания) для кампании. Только "

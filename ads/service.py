@@ -2,8 +2,8 @@
 
 Вызывается из бота на «да». Чтение SDK (резолв) — синхронное → asyncio.to_thread.
 Аккаунт всегда Aimash Draft (замок в ads.client). Поддержаны (SUPPORTED_OPERATIONS):
-update_budget, update_bid, add_keywords, add_negative_keywords, pause_campaign, resume_campaign.
-set_geo_proximity — отложен (A-geo): исполнитель готов в ads.mutations, но не активирован.
+update_budget, update_bid, add_keywords, add_negative_keywords, pause_campaign, resume_campaign,
+set_geo_proximity, create_rsa.
 """
 
 from __future__ import annotations
@@ -17,11 +17,6 @@ from ads.client import DRAFT_ACCOUNT_ID, build_client
 # Это потолок возможностей: всё, чего тут нет, агент обязан отклонить ДО показа кнопок
 # (capability-guard в agent.loop), а execute_confirmed — отвергнуть как defense-in-depth.
 # Так закрывается класс «падает ПОСЛЕ ✅»: пользователь не подтверждает то, что не сделаем.
-#
-# set_geo_proximity НАМЕРЕННО исключён (подзадача A-geo): код-исполнитель готов
-# (mutations._set_geo_proximity_via_sdk), но address-based точка требует валидации
-# на живом тест-аккаунте (геокодинг). До проверки — не объявляем поддержку.
-# Включение = добавить "set_geo_proximity" сюда (одна строка).
 SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
     {
         "update_budget",
@@ -30,6 +25,7 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
         "add_negative_keywords",
         "pause_campaign",
         "resume_campaign",
+        "set_geo_proximity",
         "create_rsa",
     }
 )
@@ -151,6 +147,30 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             campaign_id=ref.id,
             keywords=params["keywords"],
             match_type=params["match_type"],
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
+    if op == "set_geo_proximity":
+        ref = await asyncio.to_thread(
+            resolve.find_campaign_by_name, client, customer_id, params["campaign"]
+        )
+        if ref is None:
+            raise ValueError(f"кампания '{params['campaign']}' не найдена")
+        # Адаптер: схема даёт структурные поля → собираем address-dict (Google геокодит сам,
+        # клиентский геокодинг не нужен). country_code по умолчанию UA (проект — Украина).
+        address = {
+            "city_name": params["city_name"],
+            "country_code": params.get("country_code", "UA"),
+            "street_address": params.get("street_address"),
+            "postal_code": params.get("postal_code"),
+        }
+        return await mutations.apply_set_geo_proximity(
+            customer_id=customer_id,
+            campaign_id=ref.id,
+            radius_km=params["radius_km"],
+            address=address,
             confirmation_id=confirmation_id,
             confirm_store=store,
             ads_client=client,
