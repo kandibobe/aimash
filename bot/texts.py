@@ -51,6 +51,7 @@ HELP = (
     "/sheets [7|30|90|MTD] — глубокий отчёт в Google Sheets (ссылка)\n"
     "/rsa — сгенерировать тексты объявления (RSA) с поэлементным подтверждением\n"
     "/keywords — подбор ключевых слов (объём, конкуренция, кластеры) + .xlsx\n"
+    "🖼 пришли фото — соберу медийную кампанию (GDN), создам после «да»\n"
     "/cancel — отменить текущий черновик\n\n"
     "<i>Отчёты по расписанию и алерты аномалий работают в фоне.</i>"
 )
@@ -95,6 +96,22 @@ RSA_REFINE_TOO_LONG = (
 RSA_BELOW_MIN = "Нужно ≥3 одобренных заголовка и ≥2 описания. Сейчас: {h} загол. / {d} опис."
 RSA_CREATED = "✅ <b>Объявление создано (на паузе).</b>\n{result}"
 
+# ── GDN из фото (§11) ─────────────────────────────────────────────────────────────
+GDN_ASK_BRIEF = (
+    "🖼 <b>Фото принято.</b> Соберу медийную кампанию (GDN).\n"
+    "Пришли одним сообщением: <b>название | ссылка | дневной бюджет</b>.\n"
+    "Например: <code>Весна 2026 | https://shop.example | 50</code>\n\n"
+    "Тексты сгенерирую сам — покажу черновик «было → станет» перед созданием."
+)
+GDN_BAD_BRIEF = (
+    "Не разобрал. Нужно <b>название | ссылка | бюджет</b> (бюджет — число).\n"
+    "Например: <code>Летняя распродажа | https://shop.example | 30</code>"
+)
+GDN_GENERATING = "⏳ Генерирую тексты объявления…"
+GDN_GEN_EMPTY = "Не удалось сгенерировать валидные тексты. Пришли фото и бриф ещё раз."
+GDN_SESSION_STALE = "Сессия создания кампании устарела — пришли фото заново."
+GDN_CREATED = "✅ <b>Кампания создана (на паузе).</b>\n{result}"
+
 
 def fmt_rsa_element(kind: str, idx: int, total: int, e: dict, campaign: str, ad_group: str) -> str:
     """Карточка одного элемента курации: тип, текст, длина/лимит, кампания/группа."""
@@ -134,6 +151,28 @@ def fmt_rsa_proposal_summary(
     return (
         f"Создать объявление (RSA) в группе «{ad_group}» — на паузе.\n"
         f"Ссылка: {final_url}\n\n"
+        f"Заголовки ({len(headlines)}):\n{h_lines}\n\n"
+        f"Описания ({len(descriptions)}):\n{d_lines}"
+    )
+
+
+def fmt_gdn_proposal_summary(
+    name: str,
+    url: str,
+    budget_units: float,
+    headlines: list[str],
+    descriptions: list[str],
+    business_name: str,
+) -> str:
+    """Плейн-текст сводка create_gdn_campaign для confirm-гейта (esc применяется при показе)."""
+    h_lines = "\n".join(f"  • {h}" for h in headlines)
+    d_lines = "\n".join(f"  • {d}" for d in descriptions)
+    return (
+        f"Создать медийную кампанию (GDN) «{name}» — на паузе.\n"
+        f"Бизнес: {business_name}\n"
+        f"Ссылка: {url}\n"
+        f"Дневной бюджет: {budget_units:g}\n"
+        "Изображение: 1 (обрезано в 1.91:1 и 1:1)\n\n"
         f"Заголовки ({len(headlines)}):\n{h_lines}\n\n"
         f"Описания ({len(descriptions)}):\n{d_lines}"
     )

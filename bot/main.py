@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import uuid
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.enums import ParseMode
@@ -32,6 +34,7 @@ from adcopy.refine import refine_element
 from adcopy.session import SessionStore
 from adcopy.validate import RSA_MIN_DESCRIPTIONS, RSA_MIN_HEADLINES
 from adcopy.validate import validate as rsa_validate
+from ads.assets import prepare_display_images, save_pending_media
 from ads.client import DRAFT_ACCOUNT_ID
 from ads.resolve import find_ad_groups
 from ads.service import execute_confirmed
@@ -83,6 +86,10 @@ class RsaRefine(StatesGroup):
 
 class KwWizard(StatesGroup):
     awaiting_seeds = State()  # ждём сид-слова и/или URL для подбора ключей
+
+
+class GdnWizard(StatesGroup):
+    awaiting_brief = State()  # ждём «название | url | бюджет» после приёма фото
 
 
 dp = Dispatcher()
@@ -775,6 +782,102 @@ async def kw_seeds(m: Message, state: FSMContext) -> None:
         return  # остаёмся в состоянии — пользователь пришлёт сиды/URL ещё раз
     await state.clear()
     await _kw_run(m, m.chat.id, seeds, url, "ru")
+
+
+# ── GDN из фото (§11): приём фото → бриф → черновик за confirm-гейтом ─────────────
+def _parse_gdn_brief(text: str) -> tuple[str, str, float] | None:
+    """«название | url | бюджет» → (name, url, budget_units). None при неверном формате."""
+    parts = [p.strip() for p in (text or "").split("|")]
+    if len(parts) != 3:
+        return None
+    name, url, budget_s = parts
+    if not name or not url.startswith(("http://", "https://")):
+        return None
+    try:
+        budget = float(budget_s.replace(",", "."))
+    except ValueError:
+        return None
+    return (name, url, budget) if budget > 0 else None
+
+
+@dp.message(F.photo)
+async def on_photo(m: Message, state: FSMContext, bot: Bot) -> None:
+    """Приём фото для GDN-кампании (§11): скачиваем, режем в 1.91:1 + 1:1, запускаем визард.
+    Бинарь НЕ в proposal/логах — подготовленные кадры кладём во временное хранилище по media_id."""
+    await state.clear()
+    try:
+        buf = io.BytesIO()
+        await bot.download(m.photo[-1], destination=buf)  # самое большое разрешение
+        landscape, square = await asyncio.to_thread(prepare_display_images, buf.getvalue())
+    except Exception as e:  # сеть/битый файл/не картинка
+        await m.answer(f"⚠️ Не удалось обработать фото: {type(e).__name__}: {e}")
+        return
+    media_id = uuid.uuid4().hex
+    await asyncio.to_thread(save_pending_media, media_id, landscape, square)
+    await state.update_data(gdn_media_id=media_id)
+    await state.set_state(GdnWizard.awaiting_brief)
+    await m.answer(texts.GDN_ASK_BRIEF, parse_mode=ParseMode.HTML)
+
+
+@dp.message(GdnWizard.awaiting_brief)
+async def gdn_brief(m: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    media_id = data.get("gdn_media_id")
+    if not media_id:
+        await state.clear()
+        await m.answer(texts.GDN_SESSION_STALE)
+        return
+    parsed = _parse_gdn_brief(m.text or "")
+    if parsed is None:
+        await m.answer(texts.GDN_BAD_BRIEF, parse_mode=ParseMode.HTML)
+        return  # остаёмся в состоянии — пользователь пришлёт бриф ещё раз
+    name, url, budget_units = parsed
+    await m.answer(texts.GDN_GENERATING)
+    try:
+        draft = await _generate_rsa(CopyBrief(topic=name, n_headlines=5, n_descriptions=4))
+    except Exception as e:  # LLM/сеть
+        await state.clear()
+        await m.answer(f"⚠️ Генерация текстов не удалась: {type(e).__name__}: {e}")
+        return
+    if not draft.headlines or not draft.descriptions:
+        await state.clear()
+        await m.answer(texts.GDN_GEN_EMPTY)
+        return
+    headlines = draft.headlines[:5]
+    all_desc = draft.descriptions[:5]
+    long_headline = all_desc[0]  # ≤90, уже провалидировано генератором
+    descriptions = all_desc[1:] if len(all_desc) > 1 else all_desc  # не дублируем long_headline
+    business_name = name[:25]
+    budget_micros = int(round(budget_units * 1_000_000))
+    params = {
+        "campaign_name": name,
+        "headlines": headlines,
+        "long_headline": long_headline,
+        "descriptions": descriptions,
+        "business_name": business_name,
+        "final_url": url,
+        "budget_daily_micros": budget_micros,
+        "media_id": media_id,
+    }
+    try:  # defense-in-depth: схема ещё раз проверит длины/составы/URL/бюджет/media_id
+        SCHEMAS["create_gdn_campaign"](**params)
+    except Exception as e:
+        await state.clear()
+        await m.answer(f"⚠️ Параметры не прошли валидацию: {e}")
+        return
+    summary = texts.fmt_gdn_proposal_summary(
+        name, url, budget_units, headlines, descriptions, business_name
+    )
+    p = Proposal(operation="create_gdn_campaign", summary=summary, params=params, chat_id=m.chat.id)
+    await state.clear()
+    await _present_proposal(
+        m,
+        chat_id=m.chat.id,
+        operation="create_gdn_campaign",
+        params=params,
+        summary=summary,
+        cid=p.confirmation_id,
+    )
 
 
 # ── Свободный текст → агент ───────────────────────────────────────────────────────
