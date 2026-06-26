@@ -28,6 +28,8 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="help", description="Что я умею"),
     BotCommand(command="status", description="Статистика аккаунта (30 дн.)"),
     BotCommand(command="campaigns", description="Кампании: список и быстрые действия"),
+    BotCommand(command="pause", description="Пауза кампании: /pause Название"),
+    BotCommand(command="resume", description="Возобновить кампанию: /resume Название"),
     BotCommand(command="report", description="Сводка за период (7/30/90/MTD)"),
     BotCommand(command="export", description="Глубокий отчёт .xlsx"),
     BotCommand(command="rsa", description="Сгенерировать тексты объявления (RSA)"),

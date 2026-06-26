@@ -56,6 +56,7 @@ from bot.keyboards import (
     rsa_pick_adgroups_kb,
     rsa_pick_campaigns_kb,
 )
+from bot.throttle import ThrottleMiddleware
 from confirm.gate import Proposal, build_summary
 from confirm.store import ConfirmStore
 from core.config import settings
@@ -261,6 +262,40 @@ async def on_lang(cq: CallbackQuery, callback_data: LangCB) -> None:
         await cq.message.edit_text(i18n.t("lang_set", lang))
     except TelegramBadRequest:
         pass
+
+
+async def _slash_mutate(m: Message, command: CommandObject, operation: str) -> None:
+    """Слэш-команда паузы/возобновления по имени кампании → черновик за confirm-гейтом
+    (тот же путь, что inline-кнопка и текстовая команда). Без имени — подсказка."""
+    name = (command.args or "").strip()
+    if not name:
+        cmd = "pause" if operation == "pause_campaign" else "resume"
+        verb = "приостановить" if operation == "pause_campaign" else "возобновить"
+        await m.answer(
+            f"Укажи кампанию: <code>/{cmd} Название кампании</code> — чтобы {verb}.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    try:
+        cid, op, params, summary = _build_proposal(operation, campaign=name)
+    except Exception as e:  # валидация схемы
+        await m.answer(f"⚠️ {type(e).__name__}: {e}")
+        return
+    await _present_proposal(
+        m, chat_id=m.chat.id, operation=op, params=params, summary=summary, cid=cid
+    )
+
+
+@dp.message(Command("pause"))
+async def pause_(m: Message, command: CommandObject) -> None:
+    """ТЗ §6: /pause <кампания> — поставить на паузу (через confirm-гейт)."""
+    await _slash_mutate(m, command, "pause_campaign")
+
+
+@dp.message(Command("resume"))
+async def resume_(m: Message, command: CommandObject) -> None:
+    """ТЗ §6: /resume <кампания> — возобновить (через confirm-гейт)."""
+    await _slash_mutate(m, command, "resume_campaign")
 
 
 def _period_from_arg(arg: str | None):
@@ -1024,6 +1059,7 @@ async def main() -> None:
     await init_db()
     dp.message.outer_middleware(WhitelistMiddleware())
     dp.callback_query.outer_middleware(WhitelistMiddleware())
+    dp.message.outer_middleware(ThrottleMiddleware())  # анти-спам (ТЗ §12), после whitelist
     bot = Bot(token)
     try:
         await bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeAllPrivateChats())
