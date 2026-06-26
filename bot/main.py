@@ -362,6 +362,33 @@ async def export_(m: Message, command: CommandObject) -> None:
                 pass
 
 
+@dp.message(Command("sheets"))
+async def sheets_(m: Message, command: CommandObject) -> None:
+    """ТЗ §9: глубокий отчёт в Google Sheets (новая таблица + вкладка на разбивку, ссылка). Read-only."""
+    try:
+        period = _period_from_arg(command.args)
+    except ValueError as e:
+        await m.answer(f"⚠️ {e}")
+        return
+    await m.answer("Готовлю Google Sheets-отчёт…")
+    try:
+        from ads.client import build_client
+        from reports.service import build_account_report
+        from reports.sheets import publish_report_to_sheets
+
+        client = build_client()
+        async with ux.typing_action(m):
+            report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
+            url = await asyncio.to_thread(publish_report_to_sheets, report)
+    except Exception as e:  # сеть/доступ/SDK/нет OAuth-scope Sheets
+        await m.answer(
+            f"⚠️ Не удалось выгрузить в Google Sheets: {type(e).__name__}: {e}\n"
+            "Возможно, у OAuth-токена нет scope drive.file — см. docs/DEPLOYMENT.md (Google Sheets)."
+        )
+        return
+    await m.answer(f"✅ Google Sheets готов: {url}")
+
+
 # ── Reply-кнопки (ОБЯЗАТЕЛЬНО до общего F.text-хендлера — иначе перехватит on_text) ─
 @dp.message(F.text == BTN_STATUS)
 async def btn_status(m: Message) -> None:

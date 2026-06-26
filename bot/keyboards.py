@@ -32,6 +32,7 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="resume", description="Возобновить кампанию: /resume Название"),
     BotCommand(command="report", description="Сводка за период (7/30/90/MTD)"),
     BotCommand(command="export", description="Глубокий отчёт .xlsx"),
+    BotCommand(command="sheets", description="Глубокий отчёт в Google Sheets (ссылка)"),
     BotCommand(command="rsa", description="Сгенерировать тексты объявления (RSA)"),
     BotCommand(command="cancel", description="Отменить текущий черновик"),
     BotCommand(command="keywords", description="Подбор ключевых слов (скоро)"),

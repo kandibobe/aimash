@@ -58,6 +58,18 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 `oauth_tokens` через `core.secrets.encrypt`. При утечке: отозвать в Google, выпустить новый,
 передеплоить. Секрет-скан (gitleaks) в pre-commit и CI блокирует коммит токенов.
 
+### Google Sheets-экспорт (команда /sheets, ТЗ §9)
+`/sheets` создаёт новую Google-таблицу с отчётом (лист «Сводка» + лист на каждую разбивку) и
+присылает ссылку. Нужен **отдельный OAuth-scope** `https://www.googleapis.com/auth/drive.file`,
+которого НЕТ у Google Ads токена (scope `adwords`). Чтобы включить live-выгрузку:
+1. Перевыпустить refresh-токен тем же OAuth-клиентом (`GOOGLE_ADS_CLIENT_ID`/`SECRET`), указав при
+   согласии оба scope: `adwords` **и** `drive.file`.
+2. Обновить `GOOGLE_ADS_REFRESH_TOKEN`.
+
+Без scope `/sheets` отвечает понятной ошибкой; `.xlsx` через `/export` работает всегда. Реализация —
+`reports/sheets.py` (`spreadsheets.create` + `values.batchUpdate`, ТЗ §16); сборка вкладок —
+read-only и покрыта тестами офлайн.
+
 ## 4. База и миграции
 ```bash
 docker compose up -d postgres        # поднять только БД (хост-порт 5433)
