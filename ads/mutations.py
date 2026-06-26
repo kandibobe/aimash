@@ -473,6 +473,72 @@ def _add_keywords_via_sdk(
     }
 
 
+# ── Удаление ключевых слов (симметрично add: по тексту+типу из групп кампании) ────
+async def apply_remove_keywords(
+    *,
+    customer_id: str,
+    ad_group_ids: list[str],
+    keywords: list[str],
+    match_type: str,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    ensure_allowed(customer_id)
+    if not ad_group_ids:
+        raise ValueError("нет групп объявлений для удаления ключевых слов")
+    clean = normalize_keywords(keywords)  # длину/форму/дубли считает КОД — ДО claim
+    await _require_confirmation(confirm_store, confirmation_id, "remove_keywords")
+    result = await run_ads_call(
+        _remove_keywords_via_sdk, ads_client, customer_id, ad_group_ids, clean, match_type
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+def _remove_keywords_via_sdk(
+    client, customer_id: str, ad_group_ids: list, keywords: list, match_type: str
+) -> dict:
+    """Удалить criterion по тексту+типу: criterion удаляется ПО resource_name (не по тексту), поэтому
+    сначала GAQL-резолв text→resource_name в нужных группах, затем remove-операции. Тексты фильтруем
+    в Python (по casefold) — без интерполяции в GAQL. Идемпотентно: повтор найдёт лишь оставшиеся."""
+    ga = client.get_service("GoogleAdsService")
+    svc = client.get_service("AdGroupCriterionService")
+    mt = str(match_type).upper()  # из Literal broad/phrase/exact → BROAD/PHRASE/EXACT (безопасно)
+    wanted = {str(k).casefold() for k in keywords}
+    ag_in = ", ".join(str(int(a)) for a in ad_group_ids)
+    q = (
+        "SELECT ad_group_criterion.resource_name, ad_group_criterion.keyword.text "
+        "FROM ad_group_criterion WHERE ad_group_criterion.type = KEYWORD "
+        f"AND ad_group_criterion.keyword.match_type = '{mt}' AND ad_group.id IN ({ag_in})"
+    )
+    to_remove, found = [], set()
+    for row in ga.search(customer_id=str(customer_id), query=q):
+        text = row.ad_group_criterion.keyword.text
+        if text.casefold() in wanted:
+            to_remove.append(row.ad_group_criterion.resource_name)
+            found.add(text.casefold())
+    removed = []
+    if to_remove:
+        ops = []
+        for rn in to_remove:
+            op = client.get_type("AdGroupCriterionOperation")
+            op.remove = rn
+            ops.append(op)
+        resp = svc.mutate_ad_group_criteria(customer_id=str(customer_id), operations=ops)
+        removed = [r.resource_name for r in resp.results]
+    return {
+        "customer_id": str(customer_id),
+        "match_type": mt,
+        "removed": removed,
+        "count": len(removed),
+        "not_found": sorted(
+            k for k in wanted if k not in found
+        ),  # чего не было — явно, без молчания
+        "applied": True,
+    }
+
+
 def _add_negative_keywords_via_sdk(
     client, customer_id: str, campaign_id: str, keywords: list, match_type: str
 ) -> dict:

@@ -31,6 +31,7 @@ MUTATION_TOOLS = {
     "update_budget",
     "update_bid",
     "add_keywords",
+    "remove_keywords",
     "add_negative_keywords",
     "pause_campaign",
     "resume_campaign",
@@ -86,6 +87,17 @@ class AddKeywords(BaseModel):
     @field_validator("keywords")
     @classmethod
     def _kw(cls, v):  # длину/форму/дубли считает КОД ДО кнопок (а не после «да»)
+        return normalize_keywords(v)
+
+
+class RemoveKeywords(BaseModel):
+    campaign: str  # обязателен: ключи удаляются из групп этой кампании (по тексту+типу)
+    keywords: list[str] = Field(min_length=1, max_length=50)
+    match_type: MatchType
+
+    @field_validator("keywords")
+    @classmethod
+    def _kw(cls, v):
         return normalize_keywords(v)
 
 
@@ -273,6 +285,7 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "update_budget": UpdateBudget,
     "update_bid": UpdateBid,
     "add_keywords": AddKeywords,
+    "remove_keywords": RemoveKeywords,
     "add_negative_keywords": AddNegativeKeywords,
     "pause_campaign": PauseCampaign,
     "resume_campaign": ResumeCampaign,
@@ -308,6 +321,12 @@ TOOLS: list[dict] = [
         "Добавить ключевые слова (с типом соответствия) в группы указанной кампании. "
         "Всегда указывай campaign.",
         AddKeywords,
+    ),
+    _tool(
+        "remove_keywords",
+        "Удалить ключевые слова (с типом соответствия) из групп указанной кампании. "
+        "Удаляются по тексту+типу. Всегда указывай campaign.",
+        RemoveKeywords,
     ),
     _tool(
         "add_negative_keywords",

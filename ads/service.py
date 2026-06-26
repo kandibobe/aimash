@@ -2,8 +2,8 @@
 
 Вызывается из бота на «да». Чтение SDK (резолв) — синхронное → asyncio.to_thread.
 Аккаунт всегда Aimash Draft (замок в ads.client). Поддержаны (SUPPORTED_OPERATIONS):
-update_budget, update_bid, add_keywords, add_negative_keywords, pause_campaign, resume_campaign,
-set_geo_proximity, create_rsa.
+update_budget, update_bid, add_keywords, remove_keywords, add_negative_keywords, pause_campaign,
+resume_campaign, set_geo_proximity, create_rsa, create_gdn_campaign.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
         "update_budget",
         "update_bid",
         "add_keywords",
+        "remove_keywords",
         "add_negative_keywords",
         "pause_campaign",
         "resume_campaign",
@@ -43,7 +44,7 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
     op = p.operation
     params = p.params
     # Defense-in-depth: неподдержанную операцию не исполняем даже при дыре в loop-гейте
-    # (зеркало SUPPORTED_OPERATIONS / capability-guard). set_geo_proximity тут отвергается (A-geo).
+    # (зеркало SUPPORTED_OPERATIONS / capability-guard) — op вне списка отвергаем здесь же.
     if op not in SUPPORTED_OPERATIONS:
         raise PermissionError(
             f"операция '{op}' не поддерживается (capability-guard) — выполнение отклонено"
@@ -128,6 +129,25 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
                 f"в кампании '{params['campaign']}' нет групп объявлений (или кампания не найдена)"
             )
         return await mutations.apply_add_keywords(
+            customer_id=customer_id,
+            ad_group_ids=[ag.id for ag in ad_groups],
+            keywords=params["keywords"],
+            match_type=params["match_type"],
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
+    if op == "remove_keywords":
+        # Симметрично add_keywords: удаляем из ВСЕХ групп кампании (по тексту+типу).
+        ad_groups = await asyncio.to_thread(
+            resolve.find_ad_groups, client, customer_id, params["campaign"]
+        )
+        if not ad_groups:
+            raise ValueError(
+                f"в кампании '{params['campaign']}' нет групп объявлений (или кампания не найдена)"
+            )
+        return await mutations.apply_remove_keywords(
             customer_id=customer_id,
             ad_group_ids=[ag.id for ag in ad_groups],
             keywords=params["keywords"],

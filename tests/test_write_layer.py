@@ -240,6 +240,85 @@ async def test_apply_add_negative_keywords_happy_path():
     assert store.finalized is True
 
 
+# ── apply_remove_keywords: симметрично add (по тексту+типу), оба гейта ───────────
+async def test_apply_remove_keywords_happy_path():
+    called = {}
+
+    def fake(client, customer_id, ad_group_ids, keywords, match_type):
+        called.update(
+            ad_group_ids=list(ad_group_ids), keywords=list(keywords), match_type=match_type
+        )
+        return {"applied": True, "removed": ["rn1"], "count": 1, "not_found": []}
+
+    store = FakeStore(FakeProposal("remove_keywords", "confirmed", user_initiated=True))
+    with patched(mut, "_remove_keywords_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_remove_keywords(
+            customer_id=DRAFT_ACCOUNT_ID,
+            ad_group_ids=["1", "2"],
+            keywords=["  цветы  ", "доставка"],
+            match_type="phrase",
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+        )
+    assert res["applied"] is True
+    assert called["match_type"] == "phrase"
+    assert called["keywords"][0] == "цветы"  # normalize_keywords обрезал пробелы
+    assert store.finalized is True
+
+
+def test_remove_keywords_via_sdk_resolves_text_and_removes_only_matched():
+    rows = [
+        SimpleNamespace(
+            ad_group_criterion=SimpleNamespace(
+                resource_name="rn1", keyword=SimpleNamespace(text="цветы")
+            )
+        ),
+        SimpleNamespace(
+            ad_group_criterion=SimpleNamespace(
+                resource_name="rn2", keyword=SimpleNamespace(text="трава")
+            )
+        ),
+    ]
+
+    class _GA:
+        def search(self, customer_id, query):
+            return rows
+
+    class _Crit:
+        def mutate_ad_group_criteria(self, customer_id, operations):
+            return SimpleNamespace(
+                results=[SimpleNamespace(resource_name=o.remove) for o in operations]
+            )
+
+    class _Client:
+        def get_service(self, name):
+            return _GA() if name == "GoogleAdsService" else _Crit()
+
+        def get_type(self, name):
+            return SimpleNamespace(remove=None)
+
+    res = mut._remove_keywords_via_sdk(_Client(), DRAFT_ACCOUNT_ID, ["1"], ["цветы"], "broad")
+    assert res["removed"] == ["rn1"]  # удалён только запрошенный «цветы», не «трава»
+    assert res["count"] == 1 and res["not_found"] == []
+
+
+def test_remove_keywords_via_sdk_reports_not_found():
+    class _GA:
+        def search(self, customer_id, query):
+            return []  # ничего не нашлось
+
+    class _Client:
+        def get_service(self, name):
+            return _GA()
+
+        def get_type(self, name):
+            return SimpleNamespace(remove=None)
+
+    res = mut._remove_keywords_via_sdk(_Client(), DRAFT_ACCOUNT_ID, ["1"], ["нетакого"], "exact")
+    assert res["removed"] == [] and res["not_found"] == ["нетакого"]  # явно, без «тихого» молчания
+
+
 # ── apply_resume_campaign: реюз статус-исполнителя со статусом ENABLED ───────────
 async def test_apply_resume_campaign_happy_path():
     called = {}
