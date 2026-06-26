@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
@@ -121,10 +122,14 @@ def _is_retryable_llm(exc: BaseException) -> bool:
     )
 
 
-async def run_ads_call(fn: Callable[..., T], *args: object, **kwargs: object) -> T:
+async def run_ads_call(
+    fn: Callable[..., T], *args: object, label: str | None = None, **kwargs: object
+) -> T:
     """Замена `asyncio.to_thread(fn, *args)` для синхронных вызовов google-ads SDK:
-    таймаут на попытку + ретрай транзиентных ошибок с backoff+jitter. Сигнатура совместима
-    с to_thread — call-site меняется один-в-один."""
+    таймаут на попытку + ретрай транзиентных ошибок с backoff+jitter. Логирует запрос к
+    Google Ads API (имя, длительность, исход — БЕЗ секретов; ТЗ §15). Сигнатура совместима
+    с to_thread (call-site не меняется); `label` — опц. имя для лога."""
+    name = label or getattr(fn, "__name__", "ads_call")
 
     async def _inner() -> T:
         async with asyncio.timeout(ADS_TIMEOUT_S):
@@ -137,13 +142,26 @@ async def run_ads_call(fn: Callable[..., T], *args: object, **kwargs: object) ->
         before_sleep=before_sleep_log(log, logging.WARNING),
         reraise=True,
     )
-    return await retryer(_inner)
+    start = time.monotonic()
+    try:
+        result: T = await retryer(_inner)
+    except Exception as e:
+        log.warning("ads-call %s: %s за %dмс", name, type(e).__name__, _ms(start))
+        raise
+    log.info("ads-call %s: ok за %dмс", name, _ms(start))
+    return result
 
 
-async def call_llm(coro_factory: Callable[[], Awaitable[T]]) -> T:
-    """Вызов OpenRouter с таймаутом + ретраем (rate-limit/timeout/connection/5xx).
+def _ms(start: float) -> int:
+    return int((time.monotonic() - start) * 1000)
+
+
+async def call_llm(coro_factory: Callable[[], Awaitable[T]], *, label: str | None = None) -> T:
+    """Вызов OpenRouter с таймаутом + ретраем (rate-limit/timeout/connection/5xx). Логирует
+    запрос к LLM (метка модели/роли, длительность, исход — БЕЗ секретов; ТЗ §15).
     `coro_factory` — zero-arg фабрика свежего awaitable: tenacity создаёт корутину заново на
     каждую попытку (одну корутину нельзя await дважды)."""
+    name = label or "llm"
 
     async def _inner() -> T:
         async with asyncio.timeout(LLM_TIMEOUT_S):
@@ -156,4 +174,11 @@ async def call_llm(coro_factory: Callable[[], Awaitable[T]]) -> T:
         before_sleep=before_sleep_log(log, logging.WARNING),
         reraise=True,
     )
-    return await retryer(_inner)
+    start = time.monotonic()
+    try:
+        result: T = await retryer(_inner)
+    except Exception as e:
+        log.warning("llm-call %s: %s за %dмс", name, type(e).__name__, _ms(start))
+        raise
+    log.info("llm-call %s: ok за %dмс", name, _ms(start))
+    return result

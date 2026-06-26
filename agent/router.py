@@ -59,5 +59,8 @@ async def chat(
     if temperature is not None:
         kwargs["temperature"] = temperature
     # call_llm: zero-arg фабрика — tenacity создаёт свежую корутину на каждую попытку.
-    resp = await call_llm(lambda: _client().chat.completions.create(**kwargs))
+    # label → лог запроса к LLM (модель/роль, без секретов; ТЗ §15).
+    resp = await call_llm(
+        lambda: _client().chat.completions.create(**kwargs), label=f"{chosen}/{role}"
+    )
     return resp.choices[0].message
