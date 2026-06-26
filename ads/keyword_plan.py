@@ -28,6 +28,23 @@ _FETCH_CEILING = 500  # сколько максимум тянем из API ДО
 _RETRIES = 3  # попыток при rate-limit (~1 QPS), экспоненциальный backoff
 
 
+# Месяцы (v24 MonthOfYearEnum) → краткое RU для пика сезона.
+_MONTH_RU = {
+    "JANUARY": "янв",
+    "FEBRUARY": "фев",
+    "MARCH": "мар",
+    "APRIL": "апр",
+    "MAY": "май",
+    "JUNE": "июн",
+    "JULY": "июл",
+    "AUGUST": "авг",
+    "SEPTEMBER": "сен",
+    "OCTOBER": "окт",
+    "NOVEMBER": "ноя",
+    "DECEMBER": "дек",
+}
+
+
 @dataclass
 class KeywordIdea:
     text: str
@@ -37,10 +54,27 @@ class KeywordIdea:
     low_bid: float = 0.0  # top-of-page low bid (валюта аккаунта)
     high_bid: float = 0.0  # top-of-page high bid
     avg_cpc: float = 0.0  # средний CPC (валюта)
+    peak_month: str = ""  # сезонность (§7): месяц макс. спроса, напр. «дек 2025»; '' если ряда нет
+
+
+def _peak_month(monthly_volumes) -> str:
+    """Месяц с максимальным объёмом из ряда monthly_search_volumes (сезонность §7) → «дек 2025».
+    Пустая строка, если ряда нет или объёмы нулевые (на тест-аккаунте ряд часто пуст)."""
+    best_searches, best_month, best_year = -1, "", 0
+    for v in monthly_volumes or []:
+        searches = int(getattr(v, "monthly_searches", 0) or 0)
+        if searches > best_searches:
+            best_searches = searches
+            best_month = getattr(getattr(v, "month", None), "name", "") or ""
+            best_year = int(getattr(v, "year", 0) or 0)
+    if best_searches <= 0 or not best_month:
+        return ""
+    name = _MONTH_RU.get(best_month, best_month.title()[:3])
+    return f"{name} {best_year}" if best_year else name
 
 
 def _idea(r) -> KeywordIdea:
-    """Ряд GenerateKeywordIdeaResult → KeywordIdea. micros→валюту считает КОД."""
+    """Ряд GenerateKeywordIdeaResult → KeywordIdea. micros→валюту и пик сезона считает КОД."""
     m = r.keyword_idea_metrics
     return KeywordIdea(
         text=r.text,
@@ -50,6 +84,7 @@ def _idea(r) -> KeywordIdea:
         low_bid=(m.low_top_of_page_bid_micros or 0) / 1_000_000,
         high_bid=(m.high_top_of_page_bid_micros or 0) / 1_000_000,
         avg_cpc=(m.average_cpc_micros or 0) / 1_000_000,
+        peak_month=_peak_month(getattr(m, "monthly_search_volumes", None)),
     )
 
 

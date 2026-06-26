@@ -164,6 +164,38 @@ def test_seed_type_keyword_only_and_url_only():
     assert list(c2.svc.last_req.keyword_seed.keywords) == []
 
 
+# ── Сезонность (§7): пик месяца из monthly_search_volumes ───────────────────────
+def _metrics_with_months(months):
+    return SimpleNamespace(
+        avg_monthly_searches=100,
+        competition=SimpleNamespace(name="HIGH"),
+        competition_index=50,
+        low_top_of_page_bid_micros=0,
+        high_top_of_page_bid_micros=0,
+        average_cpc_micros=0,
+        monthly_search_volumes=months,
+    )
+
+
+def test_seasonality_peak_month_parsed():
+    from ads.keyword_plan import _idea
+
+    months = [
+        SimpleNamespace(year=2025, month=SimpleNamespace(name="JANUARY"), monthly_searches=100),
+        SimpleNamespace(year=2025, month=SimpleNamespace(name="DECEMBER"), monthly_searches=900),
+        SimpleNamespace(year=2025, month=SimpleNamespace(name="JULY"), monthly_searches=300),
+    ]
+    idea = _idea(SimpleNamespace(text="ёлка", keyword_idea_metrics=_metrics_with_months(months)))
+    assert idea.peak_month == "дек 2025"  # макс. объём — декабрь
+
+
+def test_seasonality_empty_when_no_volumes():
+    from ads.keyword_plan import _idea
+
+    idea = _idea(SimpleNamespace(text="x", keyword_idea_metrics=_metrics_with_months([])))
+    assert idea.peak_month == ""  # ряда нет (типично на тест-аккаунте)
+
+
 # ── Кластеризация ─────────────────────────────────────────────────────────────────
 def test_cluster_parse_keeps_only_real_keywords_and_leftover():
     from keywords.cluster import _parse
