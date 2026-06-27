@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import func, select, update
 
+from core.logging import redact_text
 from db.models import AuditLog, Proposal
 from db.session import Session
 
@@ -117,21 +118,53 @@ class ConfirmStore:
             await s.commit()
             return snap
 
-    async def confirm(self, confirmation_id: str, *, chat_id: int) -> bool:
-        """pending → confirmed (одноразово). True если перевёл. Пишет audit."""
+    async def confirm(
+        self,
+        confirmation_id: str,
+        *,
+        chat_id: int,
+        actor_user_id: int | None = None,
+        actor_username: str | None = None,
+    ) -> bool:
+        """pending → confirmed (АТОМАРНО, одноразово). True если перевёл. Пишет audit.
+
+        Compare-and-set (как claim): один UPDATE … WHERE status='pending'. Защита от TOCTOU при
+        двойной доставке ✅ (Telegram может прислать callback дважды): второй параллельный confirm
+        не совпадёт по WHERE → rowcount=0 → False, без второй audit-строки и без второго запуска
+        execute_confirmed. На SQLite (dev) single-writer и так исключает гонку; на Postgres — нет.
+        actor_user_id/username — «кто» нажал ✅ (§12), фиксируется в audit-строке решения."""
         async with Session() as s:
+            res = await s.execute(
+                update(Proposal)
+                .where(Proposal.confirmation_id == confirmation_id, Proposal.status == "pending")
+                .values(status="confirmed", decided_at=func.now())
+            )
+            if res.rowcount != 1:  # нет/не pending/уже подтверждён/гонка → не перевели
+                await s.rollback()
+                return False
             p = (
                 await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
-            ).scalar_one_or_none()
-            if p is None or p.status != "pending":
-                return False
-            p.status = "confirmed"
-            p.decided_at = func.now()
-            s.add(_audit(p, chat_id, "confirmed"))
+            ).scalar_one()
+            s.add(
+                _audit(
+                    p,
+                    chat_id,
+                    "confirmed",
+                    actor_user_id=actor_user_id,
+                    actor_username=actor_username,
+                )
+            )
             await s.commit()
             return True
 
-    async def reject(self, confirmation_id: str, *, chat_id: int) -> None:
+    async def reject(
+        self,
+        confirmation_id: str,
+        *,
+        chat_id: int,
+        actor_user_id: int | None = None,
+        actor_username: str | None = None,
+    ) -> None:
         async with Session() as s:
             p = (
                 await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
@@ -139,7 +172,15 @@ class ConfirmStore:
             if p is not None and p.status == "pending":
                 p.status = "rejected"
                 p.decided_at = func.now()
-                s.add(_audit(p, chat_id, "rejected"))
+                s.add(
+                    _audit(
+                        p,
+                        chat_id,
+                        "rejected",
+                        actor_user_id=actor_user_id,
+                        actor_username=actor_username,
+                    )
+                )
                 await s.commit()
 
     async def finalize(self, confirmation_id: str, *, result: object) -> None:
@@ -172,16 +213,29 @@ class ConfirmStore:
                 if p.status in ("confirmed", "executing"):
                     p.status = "failed"
                     p.decided_at = func.now()
-                s.add(_audit(p, p.chat_id, "failed", result={"error": error}))
+                # Авторитетная редакция на границе БД (golden rule #5): str(e) от SDK/google.auth
+                # может нести креды; редактируем здесь, чтобы НИ один вызывающий (бот, dev-скрипты,
+                # будущий код) не записал секрет в audit_log. redact_text идемпотентен.
+                s.add(_audit(p, p.chat_id, "failed", result={"error": redact_text(str(error))}))
                 await s.commit()
 
 
-def _audit(p: Proposal, chat_id: int, status: str, result: object = None) -> AuditLog:
+def _audit(
+    p: Proposal,
+    chat_id: int,
+    status: str,
+    result: object = None,
+    *,
+    actor_user_id: int | None = None,
+    actor_username: str | None = None,
+) -> AuditLog:
     return AuditLog(
         confirmation_id=p.confirmation_id,
         operation=p.operation,
         customer_id=p.customer_id,
         chat_id=chat_id,
+        actor_user_id=actor_user_id,
+        actor_username=actor_username,
         status=status,
         result=result,
     )

@@ -178,6 +178,140 @@ def fmt_gdn_proposal_summary(
     )
 
 
+# ── Человекочитаемая сводка черновика мутации (ТЗ §5) ────────────────────────────
+KW_INLINE_MAX = 20  # ключей показываем в сводке черновика; больше — во вложении .xlsx
+_CURRENCY_HUMAN = {"USD": "USD", "UAH": "грн", "EUR": "EUR", "percent": "%"}
+
+
+def match_type_human(mt: str) -> str:
+    """broad/phrase/exact → человекочитаемый тип соответствия (RU)."""
+    return {"broad": "широкое", "phrase": "фразовое", "exact": "точное"}.get(
+        str(mt).lower(), str(mt)
+    )
+
+
+def keyword_action_label(operation: str) -> str:
+    return {
+        "add_keywords": "Добавить ключевые слова",
+        "remove_keywords": "Удалить ключевые слова",
+        "add_negative_keywords": "Добавить минус-слова",
+    }.get(operation, operation)
+
+
+def _fmt_micros(micros: int) -> str:
+    """micros (1e6 = единица валюты аккаунта) → «12 480.00» (разделитель тысяч, 2 знака)."""
+    try:
+        return _thou(int(micros) / 1_000_000, 2)
+    except (TypeError, ValueError):
+        return str(micros)
+
+
+def _micros_range(values: list) -> str:
+    """Диапазон ставок групп: одинаковые → одно число, иначе «min–max»."""
+    nums = [int(x) for x in values] if values else []
+    if not nums:
+        return "—"
+    lo, hi = min(nums), max(nums)
+    return _fmt_micros(lo) if lo == hi else f"{_fmt_micros(lo)}–{_fmt_micros(hi)}"
+
+
+def _before(params: dict) -> dict | None:
+    """Снимок текущего значения из proposal.params['_before'] (см. ads.service.read_before)."""
+    b = params.get("_before")
+    return b if isinstance(b, dict) else None
+
+
+def _money_summary(label: str, params: dict) -> str:
+    c = params.get("campaign", "")
+    mode = params.get("mode")
+    cur = _CURRENCY_HUMAN.get(str(params.get("currency", "")), str(params.get("currency", "")))
+    try:
+        v = f"{float(params.get('value')):g}"
+    except (TypeError, ValueError):
+        v = str(params.get("value"))
+    # §5: реальное «было → станет», если снимок прочитан (числа — в валюте аккаунта).
+    b = _before(params)
+    if b and b.get("kind") == "budget" and b.get("before_micros") is not None:
+        before_s, after_s = _fmt_micros(b["before_micros"]), _fmt_micros(b.get("after_micros"))
+        if mode == "increase_by_percent":
+            tail = f" (+{v}%)"
+        elif mode == "increase_by_amount":
+            tail = f" (+{v} {cur})".rstrip()
+        else:
+            tail = ""
+        return f"Кампания «{c}» — {label}: {before_s} → {after_s}{tail}".rstrip()
+    # fallback без «было» (чтение не удалось / старый черновик)
+    if mode == "increase_by_percent":
+        return f"Кампания «{c}» — {label}: +{v}%"
+    if mode == "increase_by_amount":
+        return f"Кампания «{c}» — {label}: +{v} {cur}".rstrip()
+    if mode == "set_to":
+        return f"Кампания «{c}» — {label} → {v} {cur}".rstrip()
+    return f"Кампания «{c}» — {label}: {v} {cur}".rstrip()
+
+
+def _bid_summary(params: dict) -> str:
+    c = params.get("campaign", "")
+    mode = params.get("mode")
+    try:
+        v = f"{float(params.get('value')):g}"
+    except (TypeError, ValueError):
+        v = str(params.get("value"))
+    b = _before(params)
+    if b and b.get("kind") == "bid" and b.get("before_micros"):
+        n = b.get("n_groups") or len(b["before_micros"])
+        rng_b, rng_a = _micros_range(b["before_micros"]), _micros_range(b.get("after_micros") or [])
+        if mode == "increase_by_percent":
+            return f"Кампания «{c}» — ставка CPC: +{v}% (текущие {rng_b} → {rng_a}; групп: {n})"
+        return f"Кампания «{c}» — ставка CPC: {rng_b} → {rng_a} (групп: {n})"
+    return _money_summary("ставка CPC", params)
+
+
+def fmt_mutation_summary(operation: str, params: dict) -> str:
+    """Человекочитаемая сводка черновика «было → станет»/действия (plain text; esc — при показе).
+
+    Для ключей — тип соответствия словами + список (усечён до KW_INLINE_MAX; полный — во вложении).
+    Возвращает '' для операций со своим богатым форматтером (create_rsa/create_gdn_campaign) — тогда
+    вызывающий оставляет собственный summary. Заменяет «сырой dict» из confirm.gate.build_summary."""
+    if not isinstance(params, dict):
+        return ""
+    c = params.get("campaign", "")
+    if operation == "update_budget":
+        return _money_summary("бюджет", params)
+    if operation == "update_bid":
+        return _bid_summary(params)
+    if operation in ("pause_campaign", "resume_campaign"):
+        # §5: показываем текущий статус → новый, если снимок прочитан.
+        b = _before(params)
+        new = "на паузе ⏸" if operation == "pause_campaign" else "включена ▶️"
+        if b and b.get("kind") == "status" and b.get("before_status"):
+            return f"Кампания «{c}»: {status_human(b['before_status'])} → {new}"
+        verb = "поставить на паузу" if operation == "pause_campaign" else "возобновить"
+        return f"Кампания «{c}» — {verb}."
+    if operation == "set_geo_proximity":
+        try:
+            rs = f"{float(params.get('radius_km')):g}"
+        except (TypeError, ValueError):
+            rs = str(params.get("radius_km"))
+        city = params.get("city_name", "")
+        cc = params.get("country_code", "")
+        return (
+            f"Кампания «{c}» — радиус {rs} км вокруг «{city}» ({cc}). Заменит прежний гео-радиус."
+        )
+    if operation in ("add_keywords", "remove_keywords", "add_negative_keywords"):
+        kws = params.get("keywords") or []
+        mt = match_type_human(params.get("match_type", ""))
+        what = "минус-слов" if operation == "add_negative_keywords" else "ключевых слов"
+        verb = "удалить" if operation == "remove_keywords" else "добавить"
+        head = f"Кампания «{c}» — {verb} {len(kws)} {what} (тип соответствия: {mt}):"
+        shown = list(kws)[:KW_INLINE_MAX]
+        lines = "\n".join(f"  • {k}" for k in shown)
+        if len(kws) > KW_INLINE_MAX:
+            lines += f"\n  …ещё {len(kws) - KW_INLINE_MAX} — полный список во вложении .xlsx"
+        return f"{head}\n{lines}"
+    return ""  # create_rsa / create_gdn_campaign / неизвестное — оставить summary вызывающего
+
+
 def fmt_keywords_summary(clusters, by_text: dict, total: int, src: str) -> str:
     """Сводка keyword research: топ-кластеры с топ-ключами и объёмами. Полная таблица — в .xlsx.
 

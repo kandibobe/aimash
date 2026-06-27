@@ -23,6 +23,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     BotCommandScopeAllPrivateChats,
     CallbackQuery,
+    ErrorEvent,
     FSInputFile,
     Message,
     TelegramObject,
@@ -38,7 +39,7 @@ from ads.assets import clear_pending_media, prepare_display_images, save_pending
 from ads.client import DRAFT_ACCOUNT_ID
 from ads.mutations import GDN_BUSINESS_NAME_MAX
 from ads.resolve import find_ad_groups
-from ads.service import execute_confirmed
+from ads.service import execute_confirmed, read_before
 from agent.loop import handle_command
 from agent.tools.schemas import SCHEMAS
 from bot import i18n, texts, ux
@@ -64,11 +65,14 @@ from bot.throttle import ThrottleMiddleware
 from confirm.gate import Proposal, build_summary
 from confirm.store import ConfirmStore
 from core.config import settings
-from core.logging import log, setup_logging
+from core.logging import log, redact_text, setup_logging
 from db.session import init_db
 
 STORE = ConfirmStore()  # черновики + audit в БД (SQLite dev), вместо очереди в памяти
 SESSIONS = SessionStore()  # сессии курации RSA (фаза 2.C), персист в proposals (rsa_curation)
+
+# Операции со списком ключей — большой список в черновике уходит .xlsx-вложением (ТЗ §5).
+_KEYWORD_OPS = frozenset({"add_keywords", "remove_keywords", "add_negative_keywords"})
 
 # Лёгкое in-memory состояние UI (теряется при рестарте — это ок, не источник истины):
 _CAMP_CACHE: dict[int, list[dict]] = {}  # chat_id → последний список кампаний (резолв idx→имя)
@@ -96,15 +100,27 @@ class GdnWizard(StatesGroup):
 dp = Dispatcher()
 
 
+def _event_chat_id(event: object) -> int | None:
+    """chat_id из Message- или CallbackQuery-подобного события (дакт-тайпинг, как bot.throttle —
+    работает и с aiogram-объектами, и с фейками в тестах). None => входа без чата (блокируем)."""
+    chat = getattr(event, "chat", None)  # Message-like
+    if chat is not None:
+        return getattr(chat, "id", None)
+    msg = getattr(event, "message", None)  # CallbackQuery-like
+    if msg is not None:
+        c = getattr(msg, "chat", None)
+        if c is not None:
+            return getattr(c, "id", None)
+    return None
+
+
 class WhitelistMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: TelegramObject, data):
-        uid = None
-        if isinstance(event, Message):
-            uid = event.chat.id
-        elif isinstance(event, CallbackQuery) and event.message:
-            uid = event.message.chat.id
+        # Fail-closed (как ads.client.ensure_allowed): пустой whitelist => блок ВСЕХ, а не fail-open.
+        # uid=None (callback без message / вход без чата) тоже не в наборе => блок. Круг — через .env.
+        uid = _event_chat_id(event)
         wl = settings.whitelist
-        if wl and uid not in wl:
+        if uid not in wl:
             log.warning("заблокирован chat_id %s (не в whitelist)", uid)
             return
         return await handler(event, data)
@@ -125,7 +141,7 @@ async def _send_status(message: Message) -> None:
         async with ux.typing_action(message):  # «печатает…» пока идёт чтение SDK
             st = await asyncio.to_thread(account_stats, client, DRAFT_ACCOUNT_ID, 30)
     except Exception as e:  # сеть/доступ/SDK
-        await message.answer(f"⚠️ Не удалось получить статистику: {type(e).__name__}: {e}")
+        await message.answer(f"⚠️ Не удалось получить статистику: {ux.err_text(e)}")
         return
     await message.answer(
         texts.fmt_stats(
@@ -153,7 +169,7 @@ async def _send_campaigns(message: Message, chat_id: int) -> None:
         async with ux.typing_action(message):
             camps = await asyncio.to_thread(list_campaigns, client, DRAFT_ACCOUNT_ID)
     except Exception as e:  # сеть/доступ/SDK
-        await message.answer(f"⚠️ Не удалось получить кампании: {type(e).__name__}: {e}")
+        await message.answer(f"⚠️ Не удалось получить кампании: {ux.err_text(e)}")
         return
     if not camps:
         await message.answer(texts.NO_CAMPAIGNS)
@@ -181,17 +197,40 @@ async def _present_proposal(
 ) -> None:
     """Сохранить черновик и показать с кнопками ✅/❌. user_initiated=True ставит ДОВЕРЕННЫЙ слой
     (входящее действие whitelisted-человека), НЕ агент про себя (golden rule #3, fail-closed)."""
+    # §5: читаем ТЕКУЩЕЕ значение (бюджет/ставку/статус) ДО показа → реальный diff «было → станет»
+    # и снимок-база для оптимистичной сверки при исполнении (TOCTOU). read_before fail-safe (None).
+    async with ux.typing_action(message):
+        before = await read_before(operation, params)
+    if before is not None:
+        params = {**params, "_before": before}  # инертно для execute (apply_* читают свои ключи)
+    # Человекочитаемая сводка по operation+params (деньги — реальное «40.00 → 48.00 (+20%)»).
+    # Для create_rsa/create_gdn у вызывающего свой богатый summary → fmt вернёт "".
+    display = texts.fmt_mutation_summary(operation, params) or summary
     await STORE.save_proposal(
         confirmation_id=cid,
         operation=operation,
         customer_id=DRAFT_ACCOUNT_ID,
         params=params,
-        summary=summary,
+        summary=display,
         chat_id=chat_id,
         user_initiated=True,
     )
     _LAST_PENDING[chat_id] = cid
-    rendered = texts.PROPOSAL_PENDING.format(summary=texts.esc(summary))
+    # Большой список ключей/минус-слов (ТЗ §5) → полный список .xlsx-вложением, кнопки на коротком
+    # сообщении; в самой сводке список усечён до KW_INLINE_MAX с пометкой «…ещё N во вложении».
+    kws = params.get("keywords") if isinstance(params, dict) else None
+    if operation in _KEYWORD_OPS and isinstance(kws, list) and len(kws) > texts.KW_INLINE_MAX:
+        await ux.send_proposal_keywords_xlsx(
+            message,
+            keywords=kws,
+            match_type=params.get("match_type", ""),
+            action=texts.keyword_action_label(operation),
+            header_html=texts.PROPOSAL_PENDING.format(summary=texts.esc(display)),
+            reply_markup=confirm_kb(cid),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    rendered = texts.PROPOSAL_PENDING.format(summary=texts.esc(display))
     if ux.proposal_fits(rendered):
         await message.answer(rendered, reply_markup=confirm_kb(cid), parse_mode=ParseMode.HTML)
     else:
@@ -199,7 +238,7 @@ async def _present_proposal(
         # полный текст .txt-вложением, а кнопки ✅/❌ на коротком сообщении (его правит _do_confirm).
         await ux.send_proposal_text(
             message,
-            full_text=summary,
+            full_text=display,
             header_html="📝 <b>Черновик изменения</b> — полный текст во вложении ⬆️\n\nПодтвердить?",
             reply_markup=confirm_kb(cid),
             parse_mode=ParseMode.HTML,
@@ -246,7 +285,8 @@ async def cancel_cmd(m: Message) -> None:
     if not cid:
         await m.answer(texts.NO_PROPOSAL)
         return
-    await STORE.reject(cid, chat_id=m.chat.id)
+    actor_id, actor_name = _actor(m)
+    await STORE.reject(cid, chat_id=m.chat.id, actor_user_id=actor_id, actor_username=actor_name)
     _LAST_PENDING.pop(m.chat.id, None)
     await m.answer(texts.REJECTED)
 
@@ -287,7 +327,7 @@ async def _slash_mutate(m: Message, command: CommandObject, operation: str) -> N
     try:
         cid, op, params, summary = _build_proposal(operation, campaign=name)
     except Exception as e:  # валидация схемы
-        await m.answer(f"⚠️ {type(e).__name__}: {e}")
+        await m.answer(f"⚠️ {ux.err_text(e)}")
         return
     await _present_proposal(
         m, chat_id=m.chat.id, operation=op, params=params, summary=summary, cid=cid
@@ -329,7 +369,7 @@ async def report_(m: Message, command: CommandObject) -> None:
         async with ux.typing_action(m):
             report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
     except Exception as e:  # сеть/доступ/SDK
-        await m.answer(f"⚠️ Не удалось построить отчёт: {type(e).__name__}: {e}")
+        await m.answer(f"⚠️ Не удалось построить отчёт: {ux.err_text(e)}")
         return
     await m.answer(summary_text(report))
 
@@ -361,7 +401,7 @@ async def export_(m: Message, command: CommandObject) -> None:
         fname = f"aimash_{DRAFT_ACCOUNT_ID}_{period.date_from}_{period.date_to}.xlsx"
         await m.answer_document(FSInputFile(path, filename=fname))
     except Exception as e:  # сеть/доступ/SDK/openpyxl
-        await m.answer(f"⚠️ Не удалось сформировать отчёт: {type(e).__name__}: {e}")
+        await m.answer(f"⚠️ Не удалось сформировать отчёт: {ux.err_text(e)}")
     finally:
         if path and os.path.exists(path):
             try:
@@ -390,7 +430,7 @@ async def sheets_(m: Message, command: CommandObject) -> None:
             url = await asyncio.to_thread(publish_report_to_sheets, report)
     except Exception as e:  # сеть/доступ/SDK/нет OAuth-scope Sheets
         await m.answer(
-            f"⚠️ Не удалось выгрузить в Google Sheets: {type(e).__name__}: {e}\n"
+            f"⚠️ Не удалось выгрузить в Google Sheets: {ux.err_text(e)}\n"
             "Возможно, у OAuth-токена нет scope drive.file — см. docs/DEPLOYMENT.md (Google Sheets)."
         )
         return
@@ -496,7 +536,7 @@ async def _rsa_resolve_after_campaign(
         client = build_client()
         groups = await asyncio.to_thread(find_ad_groups, client, DRAFT_ACCOUNT_ID, campaign)
     except Exception as e:  # сеть/доступ/SDK
-        await target.answer(f"⚠️ Не удалось получить группы: {type(e).__name__}: {e}")
+        await target.answer(f"⚠️ Не удалось получить группы: {ux.err_text(e)}")
         return
     if not groups:
         await target.answer(texts.RSA_NO_ADGROUPS)
@@ -531,7 +571,7 @@ async def _rsa_generate_and_start(target: Message, chat_id: int, state: FSMConte
         async with ux.typing_action(target):
             draft = await _generate_rsa(brief)
     except Exception as e:  # LLM/сеть
-        await target.answer(f"⚠️ Генерация не удалась: {type(e).__name__}: {e}")
+        await target.answer(f"⚠️ Генерация не удалась: {ux.err_text(e)}")
         await state.clear()
         return
     # Диагностика: сколько набрано/отброшено КОДОМ за длину (golden rule #4) — раньше терялось.
@@ -582,7 +622,7 @@ async def _rsa_start_from_intent(m: Message, brief: dict, state: FSMContext) -> 
         client = build_client()
         camps = await asyncio.to_thread(list_campaigns, client, DRAFT_ACCOUNT_ID)
     except Exception as e:  # сеть/доступ/SDK
-        await m.answer(f"⚠️ Не удалось получить кампании: {type(e).__name__}: {e}")
+        await m.answer(f"⚠️ Не удалось получить кампании: {ux.err_text(e)}")
         return
     if not camps:
         await m.answer(texts.NO_CAMPAIGNS)
@@ -631,7 +671,7 @@ async def _kw_run(
             language=language,
         )
     except Exception as e:  # сеть/доступ/SDK/валидация ввода
-        await target.answer(f"⚠️ Не удалось подобрать ключи: {type(e).__name__}: {e}")
+        await target.answer(f"⚠️ Не удалось подобрать ключи: {ux.err_text(e)}")
         return
     if not ideas:
         await target.answer(texts.KW_EMPTY)
@@ -662,7 +702,7 @@ async def _kw_run(
         )
         await target.answer_document(FSInputFile(path, filename="aimash_keywords.xlsx"))
     except Exception as e:  # openpyxl/IO
-        await target.answer(f"⚠️ Таблицу .xlsx сформировать не удалось: {type(e).__name__}: {e}")
+        await target.answer(f"⚠️ Таблицу .xlsx сформировать не удалось: {ux.err_text(e)}")
     finally:
         if path and os.path.exists(path):
             try:
@@ -695,7 +735,7 @@ async def rsa_cmd(m: Message, state: FSMContext) -> None:
         client = build_client()
         camps = await asyncio.to_thread(list_campaigns, client, DRAFT_ACCOUNT_ID)
     except Exception as e:  # сеть/доступ/SDK
-        await m.answer(f"⚠️ Не удалось получить кампании: {type(e).__name__}: {e}")
+        await m.answer(f"⚠️ Не удалось получить кампании: {ux.err_text(e)}")
         return
     if not camps:
         await m.answer(texts.NO_CAMPAIGNS)
@@ -755,7 +795,7 @@ async def rsa_refine_text(m: Message, state: FSMContext) -> None:
     try:
         new_text = await refine_element(session.brief, kind, m.text or "")
     except Exception as e:  # LLM/сеть
-        await m.answer(f"⚠️ Доработка не удалась: {type(e).__name__}: {e}")
+        await m.answer(f"⚠️ Доработка не удалась: {ux.err_text(e)}")
         return
     valid_kind = "headline" if kind == "h" else "description"
     ok, n = rsa_validate(new_text, valid_kind)
@@ -826,7 +866,7 @@ async def on_photo(m: Message, state: FSMContext, bot: Bot) -> None:
         await bot.download(m.photo[-1], destination=buf)  # самое большое разрешение
         landscape, square = await asyncio.to_thread(prepare_display_images, buf.getvalue())
     except Exception as e:  # сеть/битый файл/не картинка
-        await m.answer(f"⚠️ Не удалось обработать фото: {type(e).__name__}: {e}")
+        await m.answer(f"⚠️ Не удалось обработать фото: {ux.err_text(e)}")
         return
     media_id = uuid.uuid4().hex
     await asyncio.to_thread(save_pending_media, media_id, landscape, square)
@@ -853,7 +893,7 @@ async def gdn_brief(m: Message, state: FSMContext) -> None:
         draft = await _generate_rsa(CopyBrief(topic=name, n_headlines=5, n_descriptions=4))
     except Exception as e:  # LLM/сеть
         await _gdn_cleanup(state, media_id)
-        await m.answer(f"⚠️ Генерация текстов не удалась: {type(e).__name__}: {e}")
+        await m.answer(f"⚠️ Генерация текстов не удалась: {ux.err_text(e)}")
         return
     # Нужно ≥1 заголовка и ≥2 описаний: первое описание идёт в long_headline, остальные — в
     # descriptions (иначе long_headline дублировал бы единственное описание).
@@ -931,6 +971,15 @@ async def on_text(m: Message, state: FSMContext) -> None:
 # ── Inline: выбор кампании и быстрые действия ─────────────────────────────────────
 def _cq_chat_id(cq: CallbackQuery) -> int:
     return cq.message.chat.id if cq.message else cq.from_user.id
+
+
+def _actor(event: object) -> tuple[int | None, str | None]:
+    """(user_id, username) нажавшего/написавшего — «кто» для audit (§12). chat_id в группе —
+    это чат, не человек; актора берём из from_user. None при отсутствии (системный вход)."""
+    fu = getattr(event, "from_user", None)
+    if fu is None:
+        return None, None
+    return getattr(fu, "id", None), getattr(fu, "username", None)
 
 
 @dp.callback_query(CampCB.filter(F.action == "menu"))
@@ -1015,7 +1064,7 @@ async def period_report(cq: CallbackQuery, callback_data: PeriodCB) -> None:
         async with ux.typing_action(cq.message):
             report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
     except Exception as e:  # сеть/доступ/SDK
-        await cq.message.answer(f"⚠️ Не удалось построить отчёт: {type(e).__name__}: {e}")
+        await cq.message.answer(f"⚠️ Не удалось построить отчёт: {ux.err_text(e)}")
         return
     await cq.message.answer(summary_text(report))
 
@@ -1023,7 +1072,10 @@ async def period_report(cq: CallbackQuery, callback_data: PeriodCB) -> None:
 # ── Inline: подтверждение/отмена черновика (confirm-гейт) ─────────────────────────
 async def _do_confirm(cq: CallbackQuery, cid: str) -> None:
     chat_id = _cq_chat_id(cq)
-    if not await STORE.confirm(cid, chat_id=chat_id):
+    actor_id, actor_name = _actor(cq)
+    if not await STORE.confirm(
+        cid, chat_id=chat_id, actor_user_id=actor_id, actor_username=actor_name
+    ):
         await cq.answer(texts.STALE, show_alert=True)
         return
     _LAST_PENDING.pop(chat_id, None)
@@ -1034,14 +1086,24 @@ async def _do_confirm(cq: CallbackQuery, cid: str) -> None:
         pass
     try:
         result = await execute_confirmed(STORE, cid)
+        log.info("мутация применена cid=%s chat=%s", cid, chat_id)  # денежный путь — успех в лог
         await cq.message.edit_text(
             texts.APPLIED.format(result=texts.esc(result)), parse_mode=ParseMode.HTML
         )
     except Exception as e:  # доступ/резолв/SDK
-        await STORE.record_failure(cid, error=str(e))
+        # Денежный путь: пишем в лог С traceback (RedactionFilter чистит секреты) — раньше молчал;
+        # в audit_log кладём УЖЕ редактированный текст (str(e) от SDK/google.auth может нести креды).
+        log.error(
+            "исполнение мутации провалено cid=%s chat=%s: %s",
+            cid,
+            chat_id,
+            type(e).__name__,
+            exc_info=e,
+        )
+        await STORE.record_failure(cid, error=redact_text(str(e)))
         try:
             await cq.message.edit_text(
-                texts.FAILED.format(kind=type(e).__name__, err=texts.esc(e)),
+                texts.FAILED.format(kind=type(e).__name__, err=texts.esc(redact_text(str(e)))),
                 parse_mode=ParseMode.HTML,
             )
         except TelegramBadRequest:
@@ -1050,7 +1112,8 @@ async def _do_confirm(cq: CallbackQuery, cid: str) -> None:
 
 async def _do_cancel(cq: CallbackQuery, cid: str) -> None:
     chat_id = _cq_chat_id(cq)
-    await STORE.reject(cid, chat_id=chat_id)
+    actor_id, actor_name = _actor(cq)
+    await STORE.reject(cid, chat_id=chat_id, actor_user_id=actor_id, actor_username=actor_name)
     _LAST_PENDING.pop(chat_id, None)
     try:
         await cq.message.edit_text(texts.REJECTED)
@@ -1194,6 +1257,19 @@ async def rsa_cancel(cq: CallbackQuery, callback_data: RsaCB) -> None:
         pass
 
 
+@dp.errors()
+async def on_error(event: ErrorEvent) -> bool:
+    """Глобальная сеть безопасности: необработанное исключение в любом хендлере логируется
+    (через RedactionFilter — без секретов в сообщении И в traceback), а не падает молча в stderr.
+    Пользователю сырой текст НЕ шлём (мог бы содержать креды) — только пишем в лог."""
+    log.error(
+        "необработанная ошибка в хендлере: %s",
+        type(event.exception).__name__,
+        exc_info=event.exception,
+    )
+    return True  # «обработано» — aiogram не пробрасывает дальше
+
+
 async def main() -> None:
     setup_logging()
     token = settings.telegram_bot_token.get_secret_value()
@@ -1202,9 +1278,14 @@ async def main() -> None:
         return
     if not settings.whitelist:
         log.warning(
-            "whitelist пуст — бот будет отвечать ВСЕМ. Добавь TELEGRAM_WHITELIST_CHAT_IDS в .env."
+            "whitelist пуст — бот НИКОМУ не ответит (fail-closed). "
+            "Добавь TELEGRAM_WHITELIST_CHAT_IDS в .env (хотя бы свой chat_id)."
         )
-    await init_db()
+    try:
+        await init_db()
+    except Exception as e:  # БД недоступна: НЕ даём дефолтному excepthook напечатать DSN с паролем
+        log.error("init_db не удалось — бот не стартует: %s", type(e).__name__, exc_info=e)
+        return
     dp.message.outer_middleware(WhitelistMiddleware())
     dp.callback_query.outer_middleware(WhitelistMiddleware())
     dp.message.outer_middleware(ThrottleMiddleware())  # анти-спам (ТЗ §12), после whitelist

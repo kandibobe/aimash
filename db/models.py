@@ -79,6 +79,11 @@ class AuditLog(Base):
     operation: Mapped[str] = mapped_column(String(64), nullable=False)
     customer_id: Mapped[str] = mapped_column(String(20), nullable=False)
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # «Кто» (§12): user_id нажавшего ✅/❌. chat_id в группе — это чат, не человек; actor_user_id
+    # точечно атрибутирует решение. Nullable: системные строки (applied/failed/scheduler-reject) —
+    # NULL (актор берётся из связанной по confirmation_id строки confirmed/rejected).
+    actor_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    actor_username: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(
         String(16), nullable=False
     )  # confirmed|rejected|applied|failed

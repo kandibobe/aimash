@@ -35,5 +35,37 @@ def test_dev_without_key_ok():
 
 def test_prod_with_valid_key_ok():
     key = Fernet.generate_key().decode()
-    s = Settings(env="prod", secrets_encryption_key=key, _env_file=None)
+    # whitelist обязателен в prod → передаём, чтобы проверить именно ключ-валидатор
+    s = Settings(
+        env="prod", secrets_encryption_key=key, telegram_whitelist_chat_ids="123", _env_file=None
+    )
     assert s.is_prod is True
+
+
+def _prod_kwargs(**extra):
+    """Валидный prod-ключ по умолчанию — чтобы изолировать проверяемый валидатор."""
+    base = {
+        "env": "prod",
+        "secrets_encryption_key": Fernet.generate_key().decode(),
+        "telegram_whitelist_chat_ids": "123",
+        "_env_file": None,
+    }
+    base.update(extra)
+    return base
+
+
+def test_prod_without_whitelist_raises():
+    # пустой whitelist в prod = fail-open (бот ответил бы всем) → старт должен падать
+    with pytest.raises(ValidationError):
+        Settings(**_prod_kwargs(telegram_whitelist_chat_ids=""))
+
+
+def test_prod_with_whitelist_ok():
+    s = Settings(**_prod_kwargs(telegram_whitelist_chat_ids="123,456"))
+    assert s.whitelist == {123, 456}
+
+
+def test_dev_without_whitelist_ok():
+    # в dev пустой whitelist допустим при конструировании (fail-closed обеспечивает middleware)
+    s = Settings(**_prod_kwargs(env="dev", telegram_whitelist_chat_ids=""))
+    assert s.whitelist == set()

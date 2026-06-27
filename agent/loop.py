@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from agent.router import chat
 from agent.tools.schemas import MUTATION_TOOLS, READ_TOOLS, SCHEMAS, TOOLS
 from confirm.gate import Proposal, build_summary
+from core.logging import redact_text
 
 SYSTEM = (
     "Ты — исполнитель команд для Google Ads (агент Aimash). По команде пользователя вызови "
@@ -163,4 +164,7 @@ async def _do_read(name: str, args: dict[str, Any]) -> dict[str, Any]:
             },
         }
     except Exception as e:  # сеть/доступ/SDK
-        return {"type": "text", "text": f"ошибка чтения Google Ads: {type(e).__name__}: {e}"}
+        return {
+            "type": "text",
+            "text": redact_text(f"ошибка чтения Google Ads: {type(e).__name__}: {e}"),
+        }

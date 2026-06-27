@@ -33,6 +33,88 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
 )
 
 
+# Операции, для которых имеет смысл показать реальное «было» (§5) и сверить дрейф при исполнении.
+_DIFFABLE_OPS = frozenset({"update_budget", "update_bid", "pause_campaign", "resume_campaign"})
+
+
+async def read_before(operation: str, params: dict) -> dict | None:
+    """READ-ONLY снимок ТЕКУЩЕГО значения для показа реального «было→станет» (§5) и как база
+    оптимистичной сверки при исполнении (TOCTOU). None — операция без diff (создание/ключи),
+    кампания не найдена или чтение не удалось (вызывающий честно покажет diff без «было»).
+
+    Возвращаемый dict кладётся в proposals.params['_before'] и сверяется в execute_confirmed."""
+    if operation not in _DIFFABLE_OPS:
+        return None
+    name = params.get("campaign")
+    if not name:
+        return None
+    try:
+        client = build_client()
+        cid = DRAFT_ACCOUNT_ID  # замок: только Aimash Draft
+        if operation == "update_budget":
+            ref = await asyncio.to_thread(resolve.find_campaign_by_name, client, cid, name)
+            if ref is None:
+                return None
+            after = resolve.compute_new_micros(ref.budget_micros, params["mode"], params["value"])
+            return {
+                "kind": "budget",
+                "before_micros": int(ref.budget_micros),
+                "after_micros": int(after),
+            }
+        if operation in ("pause_campaign", "resume_campaign"):
+            ref = await asyncio.to_thread(resolve.find_campaign_by_name, client, cid, name)
+            if ref is None:
+                return None
+            return {"kind": "status", "before_status": ref.status}
+        if operation == "update_bid":
+            ad_groups = await asyncio.to_thread(resolve.find_ad_groups, client, cid, name)
+            if not ad_groups:
+                return None
+            before_list = [int(ag.cpc_bid_micros) for ag in ad_groups]
+            after_list = [
+                int(resolve.compute_new_micros(ag.cpc_bid_micros, params["mode"], params["value"]))
+                for ag in ad_groups
+            ]
+            return {
+                "kind": "bid",
+                "before_micros": before_list,
+                "after_micros": after_list,
+                "n_groups": len(ad_groups),
+            }
+    except Exception:  # сеть/доступ/SDK — не блокируем показ черновика, просто без «было»
+        return None
+    return None
+
+
+def _assert_no_drift(params: dict, current) -> None:
+    """Оптимистичная блокировка (§5/TOCTOU): если текущее значение изменилось с момента показа
+    черновика — НЕ применяем (для относительного режима пересчёт шёл бы от другой базы). Требуем
+    переподтверждения. Для set_to (абсолют) база не влияет на итог → не блокируем."""
+    if params.get("mode") == "set_to":
+        return
+    before = params.get("_before")
+    if not isinstance(before, dict):
+        return  # старый черновик без снимка — сверять нечего (не ломаем обратную совместимость)
+    snap = before.get("before_micros")
+    if snap is None:
+        return
+    if isinstance(
+        snap, list
+    ):  # bid: список ставок групп (порядок — ORDER BY ad_group.id, детерминирован)
+        cur = [int(x) for x in current]
+        if [int(x) for x in snap] != cur:
+            raise ValueError(
+                "ставки групп изменились с момента показа черновика — переподтверди команду "
+                "(создай черновик заново, чтобы увидеть актуальное «было → станет»)"
+            )
+        return
+    if int(snap) != int(current):  # budget
+        raise ValueError(
+            f"бюджет кампании изменился с момента показа ({int(snap) / 1_000_000:.2f} → "
+            f"{int(current) / 1_000_000:.2f}) — переподтверди команду (создай черновик заново)"
+        )
+
+
 async def execute_confirmed(store, confirmation_id: str) -> dict:
     """store — ConfirmStore. Возвращает result операции или бросает ошибку."""
     p = await store.get_confirmed(confirmation_id)
@@ -59,6 +141,7 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
         )
         if ref is None:
             raise ValueError(f"кампания '{params['campaign']}' не найдена")
+        _assert_no_drift(params, ref.budget_micros)  # §5/TOCTOU: бюджет не изменился с показа
         new_micros = resolve.compute_new_micros(ref.budget_micros, params["mode"], params["value"])
         return await mutations.apply_update_budget(
             customer_id=customer_id,
@@ -106,6 +189,8 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             raise ValueError(
                 f"в кампании '{params['campaign']}' нет групп объявлений (или кампания не найдена)"
             )
+        # §5/TOCTOU: ставки групп не изменились с момента показа (иначе % считался бы от иной базы)
+        _assert_no_drift(params, [ag.cpc_bid_micros for ag in ad_groups])
         bids = [
             (ag.id, resolve.compute_new_micros(ag.cpc_bid_micros, params["mode"], params["value"]))
             for ag in ad_groups

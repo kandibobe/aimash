@@ -32,15 +32,5 @@ def build_summary(operation: str, before: object, after: object) -> str:
     return f"{operation}: {before} → {after}"
 
 
-def confirm(proposal: Proposal) -> Proposal:
-    proposal.status = "confirmed"
-    return proposal
-
-
-def reject(proposal: Proposal) -> Proposal:
-    proposal.status = "rejected"
-    return proposal
-
-
-# TODO(фаза 1): персистить Proposal/статус в БД (db.proposals) + писать audit_log
-# (кто/когда/что/результат, без секретов) при confirm и reject.
+# Жизненный цикл черновика (pending→confirmed→executing→applied/failed/rejected) + audit
+# живёт в confirm/store.py (ConfirmStore, БД). Здесь — только транспорт Proposal + build_summary.

@@ -89,6 +89,21 @@ def test_fmt_rsa_diagnostics_en():
     assert "headlines" in s and "12/15" in s and "4/4" in s
 
 
+# ── редакция текста ошибок (golden rule #5) ──────────────────────────────────────
+def test_err_text_redacts_secret_in_exception():
+    # секрето-подобная строка в тексте исключения не должна дойти до пользователя
+    e = RuntimeError("auth failed refresh_token=1//0xSECRETLONGTOKENvalue12345 denied")
+    out = ux.err_text(e)
+    assert "1//0xSECRETLONGTOKENvalue12345" not in out
+    assert "REDACTED" in out
+    assert out.startswith("RuntimeError:")  # формат «ТипОшибки: текст» сохранён
+
+
+def test_err_text_plain_for_clean_message():
+    out = ux.err_text(ValueError("кампания не найдена"))
+    assert out == "ValueError: кампания не найдена"
+
+
 # ── длинные proposal ─────────────────────────────────────────────────────────────
 def test_proposal_fits_threshold():
     assert ux.proposal_fits("short") is True

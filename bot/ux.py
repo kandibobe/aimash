@@ -19,6 +19,8 @@ from contextlib import asynccontextmanager
 from aiogram.enums import ChatAction
 from aiogram.types import FSInputFile
 
+from core.logging import redact_text
+
 ACTION_REFRESH_SEC = 4.0  # Telegram гасит chat action через ~5с → обновляем раньше
 TG_LIMIT = 4096  # лимит длины сообщения Telegram
 SAFE_LIMIT = 3500  # запас под HTML-обёртку/esc-расширение
@@ -70,6 +72,14 @@ async def chat_action(event: object, action: str = ChatAction.TYPING) -> AsyncIt
             await task
         except asyncio.CancelledError:
             pass
+
+
+def err_text(e: BaseException) -> str:
+    """Безопасный текст исключения для показа пользователю (golden rule #5): редактирует
+    секрето-подобные подстроки. str(e) от google-ads/google.auth/OpenAI может нести токен/креды,
+    а отправка в Telegram минует RedactionFilter логов — поэтому редактируем здесь. Plain text
+    (без HTML-escape): для сообщений без parse_mode. Формат сохранён: «ТипОшибки: текст»."""
+    return redact_text(f"{type(e).__name__}: {e}")
 
 
 def typing_action(event: object):  # noqa: ANN201 — возвращает async-CM
@@ -131,6 +141,34 @@ async def send_proposal_text(
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(full_text)
         await message.answer_document(FSInputFile(path, filename="proposal.txt"))  # type: ignore[attr-defined]
+    finally:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    await message.answer(header_html, reply_markup=reply_markup, parse_mode=parse_mode)  # type: ignore[attr-defined]
+
+
+async def send_proposal_keywords_xlsx(
+    message: object,
+    *,
+    keywords: list,
+    match_type: str,
+    action: str,
+    header_html: str,
+    reply_markup: object,
+    parse_mode: object,
+) -> None:
+    """Большой список ключей/минус-слов в черновике (ТЗ §5): полный список — .xlsx-вложением,
+    затем короткое ТЕКСТОВОЕ сообщение с кнопками ✅/❌ (его правит _do_confirm.edit_text)."""
+    from keywords.export import write_keyword_list_xlsx
+
+    fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_kw_proposal_")
+    os.close(fd)
+    try:
+        write_keyword_list_xlsx(list(keywords), str(match_type), action, path)
+        await message.answer_document(FSInputFile(path, filename="keywords.xlsx"))  # type: ignore[attr-defined]
     finally:
         if os.path.exists(path):
             try:

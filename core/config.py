@@ -47,7 +47,9 @@ class Settings(BaseSettings):
 
     # Безопасность / БД
     secrets_encryption_key: SecretStr = SecretStr("")
-    database_url: str = "postgresql+asyncpg://aimash:aimash@localhost:5432/aimash"
+    # SecretStr: DSN несёт пароль БД — маскируем в repr/логах/трейсбеках (golden rule #5).
+    # Реальное значение — только через .get_secret_value() (db.session, migrations.env).
+    database_url: SecretStr = SecretStr("postgresql+asyncpg://aimash:aimash@localhost:5432/aimash")
 
     @property
     def whitelist(self) -> set[int]:
@@ -85,6 +87,18 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "SECRETS_ENCRYPTION_KEY невалиден (нужен ключ Fernet.generate_key())"
                 ) from e
+        return self
+
+    @model_validator(mode="after")
+    def _require_whitelist_in_prod(self) -> "Settings":
+        """Fail-fast: в prod пустой whitelist недопустим — иначе бот отвечал бы ВСЕМ (fail-open).
+        В dev/тестах не требуем (удобство), но WhitelistMiddleware всё равно fail-closed (пустой
+        whitelist => бот никому не отвечает), как и замок аккаунта (ads.client.ensure_allowed)."""
+        if self.env == "prod" and not self.whitelist:
+            raise ValueError(
+                "TELEGRAM_WHITELIST_CHAT_IDS обязателен в prod — пустой whitelist означал бы "
+                "ответы всем (fail-open). Укажи хотя бы один chat_id."
+            )
         return self
 
 

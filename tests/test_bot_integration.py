@@ -212,3 +212,38 @@ async def test_confirm_execute_failure_records_failed():
 
     assert (await store.get_confirmed(cid)).status == "failed"
     assert "failed" in await _audit_statuses(cid)
+
+
+# ── ТЗ §5: большой список ключей в черновике → .xlsx-вложение, маленький → инлайн ──
+async def test_big_keyword_proposal_attaches_xlsx():
+    await init_db()
+    cid = uuid.uuid4().hex
+    msg = FakeMessage(bot=FakeBot())
+    params = {
+        "campaign": "Search",
+        "keywords": [f"kw{i}" for i in range(30)],  # > KW_INLINE_MAX
+        "match_type": "phrase",
+    }
+    await bm._present_proposal(
+        msg, chat_id=201, operation="add_keywords", params=params, summary="raw dict", cid=cid
+    )
+    assert any(a[0] == "<doc>" for a in msg.answers)  # .xlsx вложение
+    assert any(a[1].get("reply_markup") for a in msg.answers)  # сообщение с кнопками ✅/❌
+    snap = await ConfirmStore().get_confirmed(cid)
+    assert snap is not None and "фразовое" in snap.summary and "{" not in snap.summary
+
+
+async def test_small_keyword_proposal_inline_no_doc():
+    await init_db()
+    cid = uuid.uuid4().hex
+    msg = FakeMessage(bot=FakeBot())
+    params = {
+        "campaign": "Search",
+        "keywords": ["купить телефон", "смартфон"],
+        "match_type": "broad",
+    }
+    await bm._present_proposal(
+        msg, chat_id=202, operation="add_keywords", params=params, summary="raw", cid=cid
+    )
+    assert all(a[0] != "<doc>" for a in msg.answers)  # маленький список — без вложения
+    assert any(a[1].get("reply_markup") for a in msg.answers)

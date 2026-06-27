@@ -14,6 +14,9 @@ description: Проверка, что путь изменяющей операц
 4. Proposal содержит человекочитаемый diff «было → станет»; большие списки (ключи/минус-слова) — ссылкой/вложением, не текстом целиком.
 5. Audit-row пишется и при подтверждении, и при отклонении (кто/когда/что/результат). Без секретов.
 6. **Allow-list:** агент может вызвать только перечисленные инструменты; неизвестная операция отклоняется кодом (защита от prompt-injection).
+7. **Fail-closed (golden rule #10):** whitelist при пустом наборе блокирует ВСЕХ (`if uid not in wl`, НЕ `if wl and uid not in wl` — последнее fail-open); `ensure_allowed`/`ensure_manager_allowed` при пустой конфигурации — отказ; `user_initiated` по умолчанию `False`.
+8. **Переход состояний — атомарный (compare-and-set), не read-modify-write:** `ConfirmStore.confirm`/`claim` — один `UPDATE … WHERE status=…` с проверкой `rowcount` (защита от TOCTOU при двойной доставке ✅).
+9. **Редакция перед выходом (golden rule #5):** `apply_*`/хендлеры НЕ шлют сырой `str(e)` пользователю — через `bot.ux.err_text`/`redact_text`.
 
 ## Быстрый поиск дыр
 ```bash
@@ -37,4 +40,6 @@ grep -rn "budget" --include=*.py | grep -i "mutate\|apply"
 - [ ] бюджет только user_initiated
 - [ ] audit пишется без секретов
 - [ ] allow-list операций активен
+- [ ] whitelist fail-closed (пустой = блок всех), переходы статусов атомарны
+- [ ] сырой текст ошибки не уходит пользователю (redact)
 - [ ] есть негативные тесты

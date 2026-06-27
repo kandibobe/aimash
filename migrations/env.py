@@ -23,7 +23,7 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
-DB_URL = settings.database_url  # postgresql+asyncpg://...
+DB_URL = settings.database_url.get_secret_value()  # SecretStr → реальный DSN
 
 
 def run_migrations_offline() -> None:

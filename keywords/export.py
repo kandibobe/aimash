@@ -112,3 +112,29 @@ def write_keywords_xlsx(
     """Сохранить .xlsx по пути path. Возвращает path."""
     build_workbook(clusters, ideas, seeds=seeds, url=url, language=language).save(path)
     return path
+
+
+def write_keyword_list_xlsx(keywords: list[str], match_type: str, action: str, path: str) -> str:
+    """Компактный список ключей/минус-слов для ЧЕРНОВИКА мутации (ТЗ §5: большие списки —
+    вложением, не текстом). Одна вкладка: # / ключ / тип соответствия / действие. Без метрик
+    и секретов. Возвращает path."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Черновик ключей"
+    ws.append([f"{action} — {len(keywords)} шт. (тип соответствия: {match_type})"])
+    ws.cell(row=1, column=1).font = Font(bold=True, size=14)
+    ws.append([])
+
+    header_row = ws.max_row + 1
+    headers = ["#", "Ключевое слово", "Тип соответствия", "Действие"]
+    ws.append(headers)
+    for c in range(1, len(headers) + 1):
+        ws.cell(row=header_row, column=c).fill = _HEADER_FILL
+        ws.cell(row=header_row, column=c).font = _HEADER_FONT
+    ws.freeze_panes = f"A{header_row + 1}"
+
+    for i, kw in enumerate(keywords, 1):
+        ws.append([i, kw, match_type, action])
+    _autosize(ws, len(headers))
+    wb.save(path)
+    return path

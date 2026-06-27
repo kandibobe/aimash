@@ -36,6 +36,10 @@ _assert_keyword_ok = assert_keyword_ok
 # «очевидно неверно» граница: 1 000 000 единиц валюты * 1e6. Считает КОД, у самой границы SDK.
 MAX_AMOUNT_MICROS = 1_000_000 * 1_000_000
 
+# Потолок радиуса proximity (defense-in-depth у границы SDK; зеркалит SetGeoProximity.radius_km le=2000
+# — лимит Google Ads). Если apply_* позовут вне schema-валидированного пути — абсурд не пройдёт.
+MAX_RADIUS_KM = 2000
+
 # Лимиты состава RSA — единый источник в adcopy.validate; зеркалят agent.tools.schemas.CreateRsa
 # (два независимых гейта: схема + SDK). Длину каждого элемента считает КОД (golden rule #4).
 
@@ -248,6 +252,8 @@ async def apply_set_geo_proximity(
     ensure_allowed(customer_id)
     if radius_km <= 0:
         raise ValueError("радиус должен быть > 0")
+    if radius_km > MAX_RADIUS_KM:
+        raise ValueError(f"радиус подозрительно большой (>{MAX_RADIUS_KM} км) — проверь команду")
     _validate_address_fields(address)  # ДО claim: плохой адрес не «съедает» черновик
     await _require_confirmation(confirm_store, confirmation_id, "set_geo_proximity")
     result = await run_ads_call(
@@ -572,12 +578,34 @@ def _set_geo_proximity_via_sdk(
 ) -> dict:
     """A-geo: радиус-таргетинг (campaign_criterion.proximity). Address-driven — Google сам
     вычисляет точку, геокодинг на нашей стороне НЕ нужен. proximity IMMUTABLE (сменить = remove+create).
-    address — структурные поля (минимум city_name + country_code); free-form строка сюда не годится."""
+    address — структурные поля (минимум city_name + country_code); free-form строка сюда не годится.
+
+    REMOVE-BEFORE-CREATE: «сменить гео» = удалить существующие proximity-критерии кампании + создать
+    новый, одним атомарным mutate. Иначе повторный вызов СТЕКАЛ бы несколько радиусов (OR) на кампании
+    вместо замены — не то, что ожидает пользователь от команды «измени ГЕО»."""
     cmp_svc = client.get_service("CampaignService")
     svc = client.get_service("CampaignCriterionService")
+    ga = client.get_service("GoogleAdsService")
+    campaign_rn = cmp_svc.campaign_path(str(customer_id), str(campaign_id))
+
+    ops = []
+    # Существующие proximity-критерии кампании → remove (immutable, заменяем целиком).
+    for row in ga.search(
+        customer_id=str(customer_id),
+        query=(
+            "SELECT campaign_criterion.resource_name FROM campaign_criterion "
+            f"WHERE campaign_criterion.campaign = '{campaign_rn}' "
+            "AND campaign_criterion.type = 'PROXIMITY'"
+        ),
+    ):
+        rm = client.get_type("CampaignCriterionOperation")
+        rm.remove = row.campaign_criterion.resource_name
+        ops.append(rm)
+    removed = len(ops)
+
     op = client.get_type("CampaignCriterionOperation")
     crit = op.create
-    crit.campaign = cmp_svc.campaign_path(str(customer_id), str(campaign_id))
+    crit.campaign = campaign_rn
     prox = crit.proximity
     prox.radius = float(radius_km)
     prox.radius_units = client.enums.ProximityRadiusUnitsEnum.KILOMETERS  # код решает, не модель
@@ -585,12 +613,15 @@ def _set_geo_proximity_via_sdk(
         val = address.get(field)
         if val:
             setattr(prox.address, field, val)
-    resp = svc.mutate_campaign_criteria(customer_id=str(customer_id), operations=[op])
+    ops.append(op)  # create — последней, чтобы resp.results[-1] был новым критерием
+
+    resp = svc.mutate_campaign_criteria(customer_id=str(customer_id), operations=ops)
     return {
         "customer_id": customer_id,
         "campaign_id": str(campaign_id),
         "radius_km": float(radius_km),
-        "resource_name": resp.results[0].resource_name if resp.results else None,
+        "removed_proximity": removed,  # сколько старых proximity заменили
+        "resource_name": resp.results[-1].resource_name if resp.results else None,
         "applied": True,
     }
 

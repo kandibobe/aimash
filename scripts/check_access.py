@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from google.ads.googleads.client import GoogleAdsClient  # noqa: E402
 from google.ads.googleads.errors import GoogleAdsException  # noqa: E402
 
-from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
+from ads.client import DRAFT_ACCOUNT_ID, ensure_allowed, ensure_manager_allowed  # noqa: E402
 from core.config import settings  # noqa: E402
 
 TARGET_CHILD = DRAFT_ACCOUNT_ID  # Aimash (Draft) — единственный разрешённый аккаунт
@@ -58,6 +58,10 @@ def main() -> None:
 
     client = build_client()
     login = settings.google_ads_login_customer_id
+    # Замок (golden rule #9), даже в диагностике: обход MCC — только под настроенным login
+    # (fail-closed), а целевой read — только разрешённый аккаунт. Закрывает env-расширяемое чтение.
+    ensure_manager_allowed(login)
+    ensure_allowed(TARGET_CHILD)
     print(f"login_customer_id = {login}\n")
 
     cs = client.get_service("CustomerService")

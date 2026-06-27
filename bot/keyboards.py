@@ -35,7 +35,7 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="sheets", description="Глубокий отчёт в Google Sheets (ссылка)"),
     BotCommand(command="rsa", description="Сгенерировать тексты объявления (RSA)"),
     BotCommand(command="cancel", description="Отменить текущий черновик"),
-    BotCommand(command="keywords", description="Подбор ключевых слов (скоро)"),
+    BotCommand(command="keywords", description="Подбор ключевых слов"),
     BotCommand(command="lang", description="Язык интерфейса / interface language"),
 ]
 
