@@ -11,7 +11,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from reports.queries import METRIC_HEADERS, Breakdown
+from reports.queries import Breakdown, metric_headers
 from reports.service import ReportData
 
 _HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
@@ -49,11 +49,11 @@ def _autosize(ws, ncols: int, *, cap: int = 48) -> None:
         ws.column_dimensions[letter].width = min(max(width + 2, 10), cap)
 
 
-def _write_breakdown(wb: Workbook, b: Breakdown) -> None:
+def _write_breakdown(wb: Workbook, b: Breakdown, currency: str = "") -> None:
     ws = wb.create_sheet(title=b.title[:31])
     if b.note:
         ws.append([b.note])  # пометка об усечении — первой строкой
-    headers = b.dim_headers + METRIC_HEADERS
+    headers = b.dim_headers + metric_headers(currency)
     header_row = ws.max_row + 1
     ws.append(headers)
     for dims, m in b.rows:
@@ -78,23 +78,27 @@ def _apply_metric_formats_at(ws, dim_count: int, first_data_row: int, ndata: int
 
 def _write_summary(ws, report: ReportData) -> None:
     p = report.period
+    currency = getattr(report, "currency", "") or ""  # defensive: фейк-репорты без поля
     ws.append([f"Отчёт по аккаунту {report.customer_id}"])
     ws.append([f"Период: {p.label} ({p.date_from.isoformat()} — {p.date_to.isoformat()})"])
+    if currency:
+        ws.append([f"Валюта: {currency}"])  # §9: денежные метрики — в валюте аккаунта
     ws.append([])
     # Таблица итогов: шапка + строка «текущий период» (+ «предыдущий», если есть сравнение).
-    ws.append(["Период", *METRIC_HEADERS])
+    headers = metric_headers(currency)
+    ws.append(["Период", *headers])
     header_row = ws.max_row
     ws.append([p.label, *report.totals.as_row()])
     ndata = 1
     if report.prev_totals is not None:
         ws.append([p.previous().label, *report.prev_totals.as_row()])
         ndata = 2
-    for c in range(1, len(METRIC_HEADERS) + 2):
+    for c in range(1, len(headers) + 2):
         ws.cell(row=header_row, column=c).fill = _HEADER_FILL
         ws.cell(row=header_row, column=c).font = _HEADER_FONT
     _apply_metric_formats_at(ws, 1, header_row + 1, ndata)
     ws.cell(row=1, column=1).font = Font(bold=True, size=14)
-    _autosize(ws, len(METRIC_HEADERS) + 1)
+    _autosize(ws, len(headers) + 1)
 
 
 def build_workbook(report: ReportData) -> Workbook:
@@ -102,8 +106,9 @@ def build_workbook(report: ReportData) -> Workbook:
     summary = wb.active
     summary.title = "Сводка"
     _write_summary(summary, report)
+    currency = getattr(report, "currency", "") or ""  # defensive: фейк-репорты без поля
     for b in report.breakdowns:
-        _write_breakdown(wb, b)
+        _write_breakdown(wb, b, currency)
     return wb
 
 

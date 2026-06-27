@@ -79,6 +79,31 @@ def account_stats(client: GoogleAdsClient, customer_id: str, days: int = 30) -> 
     return AccountStats(imp, clk, cost / 1_000_000, conv, cval)
 
 
+_CURRENCY_CACHE: dict[
+    str, str
+] = {}  # customer_id → currency_code (валюта не меняется в рамках сессии)
+
+
+def account_currency(client: GoogleAdsClient, customer_id: str) -> str:
+    """Код валюты аккаунта (§9), напр. 'USD'/'UAH'. Один GAQL FROM customer, кэш по customer_id.
+    Только для белого списка (замок аккаунта). '' если не удалось прочитать (вызывающий покажет
+    метрики без явной валюты)."""
+    ensure_allowed(customer_id)
+    cid = str(customer_id)
+    if cid in _CURRENCY_CACHE:
+        return _CURRENCY_CACHE[cid]
+    ga = client.get_service("GoogleAdsService")
+    code = ""
+    for row in ga.search(
+        customer_id=cid, query="SELECT customer.currency_code FROM customer LIMIT 1"
+    ):
+        code = row.customer.currency_code
+        break
+    if code:
+        _CURRENCY_CACHE[cid] = code  # кэшируем только успешное чтение
+    return code
+
+
 def list_campaigns(client: GoogleAdsClient, customer_id: str) -> list[dict]:
     """Список кампаний аккаунта (id, имя, статус). Только для белого списка."""
     ensure_allowed(customer_id)

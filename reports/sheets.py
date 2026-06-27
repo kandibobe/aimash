@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from reports.queries import METRIC_HEADERS
+from reports.queries import metric_headers
 from reports.service import ReportData
 
 # drive.file — минимально достаточный scope: доступ только к файлам, созданным приложением.
@@ -48,11 +48,18 @@ def build_sheets_data(report: ReportData) -> list[SheetTab]:
     """Чистая сборка вкладок (без сети): «Сводка» + по вкладке на разбивку. Зеркало xlsx."""
     seen: set[str] = set()
     p = report.period
-    summary_rows: list[list[Any]] = [
+    currency = getattr(report, "currency", "") or ""  # defensive: фейк-репорты без поля
+    headers = metric_headers(currency)  # §9: код валюты на денежных колонках
+    summary_meta: list[list[Any]] = [
         [f"Отчёт по аккаунту {report.customer_id}"],
         [f"Период: {p.label} ({p.date_from.isoformat()} — {p.date_to.isoformat()})"],
+    ]
+    if currency:
+        summary_meta.append([f"Валюта: {currency}"])
+    summary_rows: list[list[Any]] = [
+        *summary_meta,
         [],
-        ["Период", *METRIC_HEADERS],
+        ["Период", *headers],
         [p.label, *report.totals.as_row()],
     ]
     if report.prev_totals is not None:
@@ -63,7 +70,7 @@ def build_sheets_data(report: ReportData) -> list[SheetTab]:
         rows: list[list[Any]] = []
         if b.note:
             rows.append([b.note])  # пометка об усечении — первой строкой
-        rows.append([*b.dim_headers, *METRIC_HEADERS])
+        rows.append([*b.dim_headers, *headers])
         for dims, m in b.rows:
             rows.append([*dims, *m.as_row()])
         tabs.append(SheetTab(_sanitize_title(b.title, seen), rows))

@@ -146,15 +146,20 @@ async def _do_read(name: str, args: dict[str, Any]) -> dict[str, Any]:
     days = int(args.get("period_days") or 30)
     try:
         from ads.client import build_client
-        from ads.read import account_stats
+        from ads.read import account_currency, account_stats
 
         client = build_client()
         st = await asyncio.to_thread(account_stats, client, cid, days)
+        try:  # §9: валюта аккаунта (необязательна — без неё показываем метрики без кода валюты)
+            currency = await asyncio.to_thread(account_currency, client, cid)
+        except Exception:  # noqa: BLE001
+            currency = ""
         return {
             "type": "read",
             "tool": name,
             "account": cid,
             "days": days,
+            "currency": currency,
             "stats": {
                 "impressions": st.impressions,
                 "clicks": st.clicks,

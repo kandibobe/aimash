@@ -28,6 +28,19 @@ METRIC_HEADERS = [
     "ROAS",
 ]
 
+# Денежные колонки (значения в валюте аккаунта) — к ним добавляем код валюты в заголовок (§9).
+# ROAS — отношение (conv_value/cost), безразмерное → без валюты.
+_MONEY_HEADERS = frozenset({"Сред. CPC", "Расход", "Ценность", "CPA"})
+
+
+def metric_headers(currency: str = "") -> list[str]:
+    """METRIC_HEADERS с кодом валюты на денежных колонках (§9): «Расход» → «Расход, USD».
+    Пустой currency → без суффикса (обратная совместимость: == METRIC_HEADERS)."""
+    if not currency:
+        return list(METRIC_HEADERS)
+    return [f"{h}, {currency}" if h in _MONEY_HEADERS else h for h in METRIC_HEADERS]
+
+
 _METRICS_SELECT = (
     "metrics.impressions, metrics.clicks, metrics.cost_micros, "
     "metrics.conversions, metrics.conversions_value"

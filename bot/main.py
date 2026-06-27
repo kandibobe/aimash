@@ -140,6 +140,7 @@ async def _send_status(message: Message) -> None:
         client = build_client()
         async with ux.typing_action(message):  # «печатает…» пока идёт чтение SDK
             st = await asyncio.to_thread(account_stats, client, DRAFT_ACCOUNT_ID, 30)
+            cur = await _read_currency(client)  # §9: валюта в денежных строках
     except Exception as e:  # сеть/доступ/SDK
         await message.answer(f"⚠️ Не удалось получить статистику: {ux.err_text(e)}")
         return
@@ -154,6 +155,7 @@ async def _send_status(message: Message) -> None:
                 "conversions": st.conversions,
                 "conv_value": round(st.conv_value, 2),
             },
+            cur,
         ),
         parse_mode=ParseMode.HTML,
     )
@@ -346,11 +348,36 @@ async def resume_(m: Message, command: CommandObject) -> None:
     await _slash_mutate(m, command, "resume_campaign")
 
 
-def _period_from_arg(arg: str | None):
-    """Аргумент команды (7/30/90/MTD) → Period; по умолчанию 30 дн. Бросает ValueError."""
-    from reports.period import from_preset
+async def _read_currency(client) -> str:
+    """Код валюты аккаунта (§9) для денежных метрик. '' при сбое чтения — отчёт/статистику
+    показываем и без валюты (не блокируем). Кэш — в ads.read.account_currency."""
+    from ads.read import account_currency
 
-    return from_preset((arg or "30").strip() or "30")
+    try:
+        return await asyncio.to_thread(account_currency, client, DRAFT_ACCOUNT_ID)
+    except Exception:  # noqa: BLE001 — валюта необязательна, не роняем отчёт
+        return ""
+
+
+def _period_from_arg(arg: str | None):
+    """Аргумент команды → Period (§9). Поддержка: пресет 7/30/90/MTD; произвольный диапазон или
+    день в ISO ГГГГ-ММ-ДД (одна дата → день, две → диапазон). По умолчанию 30 дн. Бросает ValueError."""
+    import re
+    from datetime import date
+
+    from reports.period import custom, from_preset
+
+    s = (arg or "").strip()
+    if not s:
+        return from_preset("30")
+    iso = re.findall(r"\d{4}-\d{2}-\d{2}", s)
+    if iso:
+        try:
+            ds = [date.fromisoformat(d) for d in iso[:2]]
+        except ValueError as e:
+            raise ValueError("дата в формате ГГГГ-ММ-ДД, напр. 2026-06-01") from e
+        return custom(ds[0], ds[0]) if len(ds) == 1 else custom(min(ds), max(ds))
+    return from_preset(s)
 
 
 @dp.message(Command("report"))
@@ -368,6 +395,7 @@ async def report_(m: Message, command: CommandObject) -> None:
         client = build_client()
         async with ux.typing_action(m):
             report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
+            report.currency = await _read_currency(client)  # §9: валюта денежных метрик
     except Exception as e:  # сеть/доступ/SDK
         await m.answer(f"⚠️ Не удалось построить отчёт: {ux.err_text(e)}")
         return
@@ -395,6 +423,7 @@ async def export_(m: Message, command: CommandObject) -> None:
         client = build_client()
         async with ux.upload_action(m):  # «отправляет документ…» пока строим .xlsx
             report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
+            report.currency = await _read_currency(client)  # §9: валюта денежных метрик
             fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_report_")
             os.close(fd)
             await asyncio.to_thread(write_report_xlsx, report, path)
@@ -427,6 +456,7 @@ async def sheets_(m: Message, command: CommandObject) -> None:
         client = build_client()
         async with ux.typing_action(m):
             report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
+            report.currency = await _read_currency(client)  # §9: валюта денежных метрик
             url = await asyncio.to_thread(publish_report_to_sheets, report)
     except Exception as e:  # сеть/доступ/SDK/нет OAuth-scope Sheets
         await m.answer(
@@ -961,7 +991,12 @@ async def on_text(m: Message, state: FSMContext) -> None:
         await m.answer("❓ " + res["question"])
     elif t == "read":
         await m.answer(
-            texts.fmt_stats(res.get("account", ""), res.get("days", 30), res.get("stats", {})),
+            texts.fmt_stats(
+                res.get("account", ""),
+                res.get("days", 30),
+                res.get("stats", {}),
+                res.get("currency", ""),
+            ),
             parse_mode=ParseMode.HTML,
         )
     else:
@@ -1063,6 +1098,7 @@ async def period_report(cq: CallbackQuery, callback_data: PeriodCB) -> None:
         client = build_client()
         async with ux.typing_action(cq.message):
             report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
+            report.currency = await _read_currency(client)  # §9: валюта денежных метрик
     except Exception as e:  # сеть/доступ/SDK
         await cq.message.answer(f"⚠️ Не удалось построить отчёт: {ux.err_text(e)}")
         return

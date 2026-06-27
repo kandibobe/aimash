@@ -21,34 +21,54 @@ class ReportData:
     totals: Metrics
     prev_totals: Metrics | None  # None, если сравнение не запрашивали
     breakdowns: list[Breakdown]
+    currency: str = ""  # код валюты аккаунта (§9), напр. "USD"; "" → не показываем
 
 
 def build_account_report(
-    client, customer_id: str, period: Period, *, with_comparison: bool = True
+    client, customer_id: str, period: Period, *, with_comparison: bool = True, currency: str = ""
 ) -> ReportData:
-    """Собрать отчёт: итоги, (опц.) предыдущий равный период, все разбивки ТЗ §9."""
+    """Собрать отчёт: итоги, (опц.) предыдущий равный период, все разбивки ТЗ §9.
+
+    currency — код валюты аккаунта для денежных метрик (§9); читается вызывающим (bot) через
+    ads.read.account_currency и передаётся сюда. Пустой → отчёт без явной валюты (как раньше)."""
     ensure_allowed(customer_id)  # быстрый отказ; каждый fetch_* проверяет ещё раз
     totals = fetch_totals(client, customer_id, period)
     prev_totals = fetch_totals(client, customer_id, period.previous()) if with_comparison else None
     breakdowns = [f(client, customer_id, period) for f in BREAKDOWN_FETCHERS]
-    return ReportData(str(customer_id), period, totals, prev_totals, breakdowns)
+    return ReportData(str(customer_id), period, totals, prev_totals, breakdowns, currency)
+
+
+def _thou(n: float, dec: int = 0) -> str:
+    """Число с пробелом-разделителем тысяч: 12480 -> '12 480', 4512.3 -> '4 512.30'."""
+    return f"{n:,.{dec}f}".replace(",", " ")
+
+
+def _money(n: float, currency: str) -> str:
+    """Денежное значение с разделителем тысяч и (опц.) кодом валюты: '4 512.30 USD'."""
+    s = _thou(n, 2)
+    return f"{s} {currency}" if currency else s
 
 
 def _delta_pct(now: float, prev: float) -> str:
+    """Дельта период-к-периоду со стрелкой ▲/▼ (направление, без семантики «хорошо/плохо»)."""
     if not prev:
-        return "—" if not now else "+∞"
-    return f"{(now - prev) / prev * 100:+.0f}%"
+        return "—" if not now else "▲ +∞"
+    pct = (now - prev) / prev * 100
+    arrow = "▲" if pct > 0 else ("▼" if pct < 0 else "•")
+    return f"{arrow} {pct:+.0f}%"
 
 
 def summary_text(report: ReportData) -> str:
-    """Короткая сводка для Telegram (/report): период, итоги, сравнение, топ-кампании."""
+    """Короткая сводка для Telegram (/report): период, итоги, сравнение, топ-кампании.
+    Денежные метрики — с разделителем тысяч и кодом валюты (§9); дельты — со стрелками ▲/▼."""
     t = report.totals
     p = report.period
+    cur = report.currency
     lines = [
         f"📊 Аккаунт {report.customer_id} · {p.label} ({p.date_from} — {p.date_to})",
-        f"Показы {t.impressions} · Клики {t.clicks} · CTR {t.ctr * 100:.1f}%",
-        f"Расход {t.cost:.2f} · CPC {t.avg_cpc:.2f} · Конв. {t.conversions:.1f} · "
-        f"CPA {t.cpa:.2f} · ROAS {t.roas:.2f}",
+        f"Показы {_thou(t.impressions)} · Клики {_thou(t.clicks)} · CTR {t.ctr * 100:.1f}%",
+        f"Расход {_money(t.cost, cur)} · CPC {_money(t.avg_cpc, cur)} · Конв. {t.conversions:.1f} · "
+        f"CPA {_money(t.cpa, cur)} · ROAS {t.roas:.2f}",
     ]
     if report.prev_totals is not None:
         pr = report.prev_totals
@@ -61,6 +81,7 @@ def summary_text(report: ReportData) -> str:
         lines.append("Топ кампаний по расходу:")
         for (name, _status), m in camp.rows[:3]:
             lines.append(
-                f"  • {name}: расход {m.cost:.2f}, клики {m.clicks}, конв. {m.conversions:.1f}"
+                f"  • {name}: расход {_money(m.cost, cur)}, клики {_thou(m.clicks)}, "
+                f"конв. {m.conversions:.1f}"
             )
     return "\n".join(lines)

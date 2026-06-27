@@ -46,9 +46,9 @@ HELP = (
     "/campaigns — кампании + быстрые действия\n"
     "/pause Название — поставить кампанию на паузу (с подтверждением)\n"
     "/resume Название — возобновить кампанию (с подтверждением)\n"
-    "/report [7|30|90|MTD] — сводка за период (по умолч. 30 дн.)\n"
-    "/export [7|30|90|MTD] — глубокий отчёт .xlsx\n"
-    "/sheets [7|30|90|MTD] — глубокий отчёт в Google Sheets (ссылка)\n"
+    "/report [7|30|90|MTD | ГГГГ-ММ-ДД [ГГГГ-ММ-ДД]] — сводка за период (по умолч. 30 дн.)\n"
+    "/export [период] — глубокий отчёт .xlsx (пресет или диапазон дат)\n"
+    "/sheets [период] — глубокий отчёт в Google Sheets (ссылка)\n"
     "/rsa — сгенерировать тексты объявления (RSA) с поэлементным подтверждением\n"
     "/keywords — подбор ключевых слов (объём, конкуренция, кластеры) + .xlsx\n"
     "🖼 пришли фото — соберу медийную кампанию (GDN), создам после «да»\n"
@@ -337,8 +337,9 @@ def fmt_keywords_summary(clusters, by_text: dict, total: int, src: str) -> str:
 
 
 # ── Рендер с данными ─────────────────────────────────────────────────────────────
-def fmt_stats(account: str, days: int, st: dict) -> str:
-    """Статистика аккаунта с вычисленными в КОДЕ CTR/CPC (контракт read не трогаем)."""
+def fmt_stats(account: str, days: int, st: dict, currency: str = "") -> str:
+    """Статистика аккаунта с вычисленными в КОДЕ CTR/CPC (контракт read не трогаем).
+    currency (§9) — код валюты аккаунта для денежных строк; пустой → без явной валюты."""
     imp = int(st.get("impressions") or 0)
     clk = int(st.get("clicks") or 0)
     cost = float(st.get("cost") or 0)
@@ -346,14 +347,15 @@ def fmt_stats(account: str, days: int, st: dict) -> str:
     cval = float(st.get("conv_value") or 0)
     ctr = (clk / imp * 100) if imp else 0.0
     cpc = (cost / clk) if clk else 0.0
+    cur = f" {esc(currency)}" if currency else ""
     return (
         f"📊 <b>Аккаунт …{esc(str(account)[-4:])}</b> · {days} дн.\n\n"
         f"Показы:      <b>{_thou(imp)}</b>\n"
         f"Клики:       <b>{_thou(clk)}</b>  (CTR {ctr:.2f}%)\n"
-        f"Расход:      <b>{_thou(cost, 2)}</b>\n"
-        f"Ср. CPC:     <b>{_thou(cpc, 2)}</b>\n"
+        f"Расход:      <b>{_thou(cost, 2)}{cur}</b>\n"
+        f"Ср. CPC:     <b>{_thou(cpc, 2)}{cur}</b>\n"
         f"Конверсии:   <b>{conv:g}</b>\n"
-        f"Ценность:    <b>{_thou(cval, 2)}</b>"
+        f"Ценность:    <b>{_thou(cval, 2)}{cur}</b>"
     )
 
 
