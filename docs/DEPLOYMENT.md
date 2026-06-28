@@ -62,11 +62,15 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 `/sheets` создаёт новую Google-таблицу с отчётом (лист «Сводка» + лист на каждую разбивку) и
 присылает ссылку. Нужен **отдельный OAuth-scope** `https://www.googleapis.com/auth/drive.file`,
 которого НЕТ у Google Ads токена (scope `adwords`). Чтобы включить live-выгрузку:
-1. Перевыпустить refresh-токен тем же OAuth-клиентом (`GOOGLE_ADS_CLIENT_ID`/`SECRET`), указав при
-   согласии оба scope: `adwords` **и** `drive.file`.
-2. Обновить `GOOGLE_ADS_REFRESH_TOKEN`.
+1. **Включить Google Sheets API** в том же Google Cloud-проекте, что и OAuth-клиент:
+   `https://console.developers.google.com/apis/api/sheets.googleapis.com/overview?project=<PROJECT>`
+   (без этого — `HttpError 403 SERVICE_DISABLED`; после включения подождать 1–2 мин на пропагацию).
+2. Перевыпустить refresh-токен тем же OAuth-клиентом (`GOOGLE_ADS_CLIENT_ID`/`SECRET`), указав при
+   согласии оба scope: `adwords` **и** `drive.file` (`make refresh-token` / `scripts/get_refresh_token.py`
+   уже просит оба) → обновить `GOOGLE_ADS_REFRESH_TOKEN` → перезапустить бота.
 
-Без scope `/sheets` отвечает понятной ошибкой; `.xlsx` через `/export` работает всегда. Реализация —
+Типичные ошибки: `invalid_scope` → токен без `drive.file` (шаг 2); `SERVICE_DISABLED` → API не
+включён (шаг 1). `.xlsx` через `/export` работает всегда, без этой настройки. Реализация —
 `reports/sheets.py` (`spreadsheets.create` + `values.batchUpdate`, ТЗ §16); сборка вкладок —
 read-only и покрыта тестами офлайн.
 

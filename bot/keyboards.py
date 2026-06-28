@@ -48,6 +48,7 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="keywords", description="Подбор ключевых слов"),
     BotCommand(command="model", description="Модель ИИ (OpenRouter)"),
     BotCommand(command="balance", description="Бюджет ИИ: баланс OpenRouter и траты"),
+    BotCommand(command="journal", description="Журнал изменений (что/когда/кто)"),
     BotCommand(command="lang", description="Язык интерфейса / interface language"),
 ]
 
@@ -92,6 +93,7 @@ BTN_KEYWORDS = "🔑 Ключевые слова"
 BTN_RSA = "✍️ Тексты (RSA)"
 BTN_MODEL = "🧠 Модель"
 BTN_BALANCE = "💳 Бюджет ИИ"
+BTN_JOURNAL = "📜 Журнал"
 BTN_LANG = "🌐 Язык"
 BTN_HELP = "❓ Помощь"
 
@@ -109,11 +111,12 @@ def main_menu() -> ReplyKeyboardMarkup:
         BTN_RSA,
         BTN_MODEL,
         BTN_BALANCE,
+        BTN_JOURNAL,
         BTN_LANG,
         BTN_HELP,
     ):
         kb.button(text=text)
-    kb.adjust(2, 3, 2, 2, 2)
+    kb.adjust(2, 3, 2, 2, 3)
     return kb.as_markup(
         resize_keyboard=True,
         is_persistent=True,

@@ -66,6 +66,7 @@ from bot.keyboards import (
     BTN_CAMPAIGNS,
     BTN_EXPORT,
     BTN_HELP,
+    BTN_JOURNAL,
     BTN_KEYWORDS,
     BTN_LANG,
     BTN_MODEL,
@@ -229,6 +230,19 @@ async def _send_balance(message: Message) -> None:
     await message.answer(texts.fmt_balance(acct, snapshot()), parse_mode=ParseMode.HTML)
 
 
+async def _send_journal(message: Message) -> None:
+    """Журнал последних изменений (ТЗ §12/§18): что/когда/кто/результат из audit_log. Read-only,
+    без секретов (result редактируется на записи). «Видно, что и когда изменилось» (обещание /start)."""
+    from confirm.store import list_recent_audit
+
+    try:
+        events = await list_recent_audit(15)
+    except Exception as e:  # БД недоступна
+        await message.answer(f"⚠️ Не удалось прочитать журнал: {ux.err_text(e)}")
+        return
+    await message.answer(texts.fmt_journal(events), parse_mode=ParseMode.HTML)
+
+
 async def _send_campaigns(message: Message, chat_id: int) -> None:
     """Список кампаний + inline-кнопки выбора. Кэшируем список по chat_id для резолва idx→имя."""
     try:
@@ -353,6 +367,12 @@ async def status_(m: Message) -> None:
 async def balance_(m: Message) -> None:
     """Бюджет ИИ: баланс OpenRouter + траты (read-only, без подтверждения)."""
     await _send_balance(m)
+
+
+@dp.message(Command("journal"))
+async def journal_(m: Message) -> None:
+    """ТЗ §12/§18: журнал изменений (что/когда/кто/результат). Read-only из audit_log."""
+    await _send_journal(m)
 
 
 @dp.message(Command("campaigns"))
@@ -707,6 +727,11 @@ async def btn_campaigns(m: Message) -> None:
 @dp.message(F.text == BTN_BALANCE)
 async def btn_balance(m: Message) -> None:
     await _send_balance(m)
+
+
+@dp.message(F.text == BTN_JOURNAL)
+async def btn_journal(m: Message) -> None:
+    await _send_journal(m)
 
 
 @dp.message(F.text == BTN_HELP)

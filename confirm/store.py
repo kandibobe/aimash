@@ -15,6 +15,7 @@ confirmed→executing идёт одним атомарным UPDATE … WHERE st
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import func, select, update
 
@@ -239,3 +240,54 @@ def _audit(
         status=status,
         result=result,
     )
+
+
+@dataclass
+class AuditEvent:
+    """Одна строка журнала изменений для показа (ТЗ §12: что/когда/кто/результат). Без секретов."""
+
+    created_at: datetime | None
+    status: str  # applied | failed | rejected
+    operation: str
+    actor_user_id: int | None
+    actor_username: str | None
+    result: dict | None
+    confirmation_id: str
+
+
+async def list_recent_audit(limit: int = 15) -> list[AuditEvent]:
+    """Последние ЗНАЧИМЫЕ события журнала (applied/failed/rejected) — «что и когда изменилось»
+    (ТЗ §12/§18), reverse-chron. «Кто» для applied/failed (там actor=NULL — см. db.models.AuditLog)
+    восстанавливаем из связанной по confirmation_id строки confirmed/rejected, где actor записан.
+    Read-only, секретов нет (result уже отредактирован на записи record_failure)."""
+    limit = max(1, min(int(limit), 50))
+    async with Session() as s:
+        rows = list(
+            (
+                await s.execute(
+                    select(AuditLog)
+                    .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+                    .limit(limit * 4)  # запас, т.к. confirmed-строки отфильтруются
+                )
+            )
+            .scalars()
+            .all()
+        )
+    # actor по confirmation_id из строк, где он есть (confirmed/rejected пишут actor).
+    actor: dict[str, tuple[int | None, str | None]] = {}
+    for r in rows:
+        if (r.actor_user_id is not None or r.actor_username) and r.confirmation_id not in actor:
+            actor[r.confirmation_id] = (r.actor_user_id, r.actor_username)
+    out: list[AuditEvent] = []
+    for r in rows:
+        if r.status not in ("applied", "failed", "rejected"):
+            continue
+        au, an = r.actor_user_id, r.actor_username
+        if au is None and not an:  # applied/failed: actor восстановим из confirmed-строки
+            au, an = actor.get(r.confirmation_id, (None, None))
+        out.append(
+            AuditEvent(r.created_at, r.status, r.operation, au, an, r.result, r.confirmation_id)
+        )
+        if len(out) >= limit:
+            break
+    return out
