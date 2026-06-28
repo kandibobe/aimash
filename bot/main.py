@@ -74,9 +74,11 @@ from bot.keyboards import (
 from bot.throttle import ThrottleMiddleware
 from confirm.gate import Proposal, build_summary
 from confirm.store import ConfirmStore
+from core.ads_errors import humanize_google_ads_error
 from core.config import settings
-from core.logging import log, redact_text, setup_logging
-from db.session import init_db
+from core.logging import log, setup_logging
+from core.resilience import run_ads_read_call
+from db.session import dispose_engine, init_db
 
 STORE = ConfirmStore()  # черновики + audit в БД (SQLite dev), вместо очереди в памяти
 SESSIONS = SessionStore()  # сессии курации RSA (фаза 2.C), персист в proposals (rsa_curation)
@@ -164,7 +166,9 @@ async def _send_status(message: Message) -> None:
 
         client = build_client()
         async with ux.typing_action(message):  # «печатает…» пока идёт чтение SDK
-            st = await asyncio.to_thread(account_stats, client, DRAFT_ACCOUNT_ID, 30)
+            st = await run_ads_read_call(
+                account_stats, client, DRAFT_ACCOUNT_ID, 30, label="account_stats"
+            )
             cur = await _read_currency(client)  # §9: валюта в денежных строках
     except Exception as e:  # сеть/доступ/SDK
         await message.answer(f"⚠️ Не удалось получить статистику: {ux.err_text(e)}")
@@ -210,7 +214,9 @@ async def _send_campaigns(message: Message, chat_id: int) -> None:
 
         client = build_client()
         async with ux.typing_action(message):
-            camps = await asyncio.to_thread(list_campaigns, client, DRAFT_ACCOUNT_ID)
+            camps = await run_ads_read_call(
+                list_campaigns, client, DRAFT_ACCOUNT_ID, label="list_campaigns"
+            )
     except Exception as e:  # сеть/доступ/SDK
         await message.answer(f"⚠️ Не удалось получить кампании: {ux.err_text(e)}")
         return
@@ -533,7 +539,9 @@ async def _read_currency(client) -> str:
     from ads.read import account_currency
 
     try:
-        return await asyncio.to_thread(account_currency, client, DRAFT_ACCOUNT_ID)
+        return await run_ads_read_call(
+            account_currency, client, DRAFT_ACCOUNT_ID, label="account_currency"
+        )
     except Exception:  # noqa: BLE001 — валюта необязательна, не роняем отчёт
         return ""
 
@@ -573,7 +581,9 @@ async def report_(m: Message, command: CommandObject) -> None:
 
         client = build_client()
         async with ux.typing_action(m):
-            report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
+            report = await run_ads_read_call(
+                build_account_report, client, DRAFT_ACCOUNT_ID, period, label="build_account_report"
+            )
             report.currency = await _read_currency(client)  # §9: валюта денежных метрик
     except Exception as e:  # сеть/доступ/SDK
         await m.answer(f"⚠️ Не удалось построить отчёт: {ux.err_text(e)}")
@@ -595,7 +605,9 @@ async def _run_export(m: Message, period) -> None:
 
         client = build_client()
         async with ux.upload_action(m):  # «отправляет документ…» пока строим .xlsx
-            report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
+            report = await run_ads_read_call(
+                build_account_report, client, DRAFT_ACCOUNT_ID, period, label="build_account_report"
+            )
             report.currency = await _read_currency(client)  # §9: валюта денежных метрик
             fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_report_")
             os.close(fd)
@@ -633,7 +645,9 @@ async def _run_sheets(m: Message, period) -> None:
 
         client = build_client()
         async with ux.typing_action(m):
-            report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
+            report = await run_ads_read_call(
+                build_account_report, client, DRAFT_ACCOUNT_ID, period, label="build_account_report"
+            )
             report.currency = await _read_currency(client)  # §9: валюта денежных метрик
             url = await asyncio.to_thread(publish_report_to_sheets, report)
     except Exception as e:  # сеть/доступ/SDK/нет OAuth-scope Sheets
@@ -803,7 +817,9 @@ async def _rsa_resolve_after_campaign(
     await state.update_data(campaign=campaign)
     try:
         client = build_client()
-        groups = await asyncio.to_thread(find_ad_groups, client, DRAFT_ACCOUNT_ID, campaign)
+        groups = await run_ads_read_call(
+            find_ad_groups, client, DRAFT_ACCOUNT_ID, campaign, label="find_ad_groups"
+        )
     except Exception as e:  # сеть/доступ/SDK
         await target.answer(f"⚠️ Не удалось получить группы: {ux.err_text(e)}")
         return
@@ -1348,7 +1364,9 @@ async def period_report(cq: CallbackQuery, callback_data: PeriodCB) -> None:
 
         client = build_client()
         async with ux.typing_action(cq.message):
-            report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
+            report = await run_ads_read_call(
+                build_account_report, client, DRAFT_ACCOUNT_ID, period, label="build_account_report"
+            )
             report.currency = await _read_currency(client)  # §9: валюта денежных метрик
     except Exception as e:  # сеть/доступ/SDK
         await cq.message.answer(f"⚠️ Не удалось построить отчёт: {ux.err_text(e)}")
@@ -1409,10 +1427,13 @@ async def _do_confirm(cq: CallbackQuery, cid: str) -> None:
             type(e).__name__,
             exc_info=e,
         )
-        await STORE.record_failure(cid, error=redact_text(str(e)))
+        # §15: человекочитаемая ошибка Google Ads (сообщения+коды+request_id) вместо «GoogleAdsException».
+        # humanize_google_ads_error сам редактирует секреты (golden rule #5) — кладём в audit И юзеру.
+        human = humanize_google_ads_error(e)
+        await STORE.record_failure(cid, error=human)
         try:
             await cq.message.edit_text(
-                texts.FAILED.format(kind=type(e).__name__, err=texts.esc(redact_text(str(e)))),
+                texts.FAILED.format(kind=type(e).__name__, err=texts.esc(human)),
                 parse_mode=ParseMode.HTML,
             )
         except TelegramBadRequest:
@@ -1624,11 +1645,18 @@ async def main() -> None:
     except Exception as e:  # планировщик опционален — бот работает и без него
         log.warning("scheduler не запущен: %s: %s", type(e).__name__, e)
     log.info("Aimash bot запущен (polling).")
+    # start_polling сам ставит обработчики SIGINT/SIGTERM и завершается штатно по сигналу;
+    # finally гарантирует graceful-освобождение ресурсов (P2 lifecycle), что бы ни остановило polling.
     try:
         await dp.start_polling(bot)
     finally:
         if sched is not None:
-            sched.shutdown(wait=False)
+            sched.shutdown(wait=False)  # остановить плановые задачи (read-only, без потери денег)
+        await (
+            dispose_engine()
+        )  # закрыть пул соединений БД (иначе на остановке висят коннекты asyncpg)
+        await bot.session.close()  # закрыть HTTP-сессию Telegram
+        log.info("Aimash bot остановлен (ресурсы освобождены).")
 
 
 if __name__ == "__main__":
