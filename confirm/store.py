@@ -20,7 +20,7 @@ from typing import cast
 
 from sqlalchemy import CursorResult, func, select, update
 
-from core.logging import redact_text
+from core.logging import log, redact_text
 from db.models import AuditLog, Proposal
 from db.session import Session
 
@@ -189,17 +189,31 @@ class ConfirmStore:
 
     async def finalize(self, confirmation_id: str, *, result: object) -> None:
         """Успех: executing → applied (терминальный) + audit applied. Терминальный статус
-        не даёт повторно застолбить черновик (claim требует status='confirmed')."""
+        не даёт повторно застолбить черновик (claim требует status='confirmed').
+
+        Guard (зеркало record_failure): смену статуса И audit-строку applied пишем ТОЛЬКО из
+        'executing' — нормального состояния после claim+успешного SDK. finalize вызывается лишь
+        после успешного SDK за claim, поэтому любой иной статус здесь = рассинхрон потока: пишем
+        log.warning и НЕ кладём спурьёзную applied-строку в журнал (раньше audit писался всегда,
+        даже при статусе ≠ executing — асимметрия с record_failure)."""
         async with Session() as s:
             p = (
                 await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
             ).scalar_one_or_none()
-            if p is not None:
-                if p.status == "executing":
-                    p.status = "applied"
-                    p.decided_at = func.now()
-                s.add(_audit(p, p.chat_id, "applied", result=result))
-                await s.commit()
+            if p is None:
+                return
+            if p.status != "executing":
+                log.warning(
+                    "finalize() на черновике %s в статусе %s (ожидался executing) — "
+                    "пропускаю запись applied в журнал",
+                    confirmation_id,
+                    p.status,
+                )
+                return
+            p.status = "applied"
+            p.decided_at = func.now()
+            s.add(_audit(p, p.chat_id, "applied", result=result))
+            await s.commit()
 
     async def record_failure(self, confirmation_id: str, *, error: str) -> None:
         """Ошибка выполнения → failed (терминальный) + audit failed.

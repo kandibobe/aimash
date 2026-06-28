@@ -996,6 +996,49 @@ async def test_store_roundtrip_writes_audit():
     assert all(r.customer_id == DRAFT_ACCOUNT_ID for r in rows)
 
 
+# ── W2-хардненинг: finalize() на не-executing черновике не плодит applied-строку ──
+async def test_finalize_on_failed_proposal_is_noop_no_audit():
+    """Хардненинг finalize() (зеркало record_failure): если черновик уже failed (упал в исполнении),
+    finalize НЕ пишет спурьёзную applied-строку в журнал и НЕ понижает терминальный статус."""
+    from confirm.store import ConfirmStore
+    from db.models import AuditLog
+    from db.session import Session, init_db
+
+    await init_db()
+    store = ConfirmStore()
+    cid = uuid.uuid4().hex
+    await store.save_proposal(
+        confirmation_id=cid,
+        operation="pause_campaign",
+        customer_id=DRAFT_ACCOUNT_ID,
+        params={"campaign": "X"},
+        summary="pause X",
+        chat_id=1,
+        user_initiated=True,
+    )
+    await store.confirm(cid, chat_id=1)
+    await store.claim(cid, operation="pause_campaign")  # confirmed → executing
+    await store.record_failure(cid, error="boom")  # executing → failed (+audit failed)
+    assert (await store.get_confirmed(cid)).status == "failed"
+
+    await store.finalize(cid, result={"applied": True})  # не-executing → no-op
+    assert (await store.get_confirmed(cid)).status == "failed"  # терминальный не понижен
+
+    async with Session() as s:
+        rows = (
+            (
+                await s.execute(
+                    select(AuditLog).where(AuditLog.confirmation_id == cid).order_by(AuditLog.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    statuses = [r.status for r in rows]
+    assert "applied" not in statuses  # спурьёзной applied-строки нет
+    assert "failed" in statuses
+
+
 # ── FIX 1: replay/double-spend заблокирован на реальном сторе (claim одноразов) ───
 async def test_real_store_apply_is_single_use_replay_blocked():
     from confirm.store import ConfirmStore
