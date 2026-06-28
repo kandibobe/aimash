@@ -78,7 +78,16 @@ def err_text(e: BaseException) -> str:
     """Безопасный текст исключения для показа пользователю (golden rule #5): редактирует
     секрето-подобные подстроки. str(e) от google-ads/google.auth/OpenAI может нести токен/креды,
     а отправка в Telegram минует RedactionFilter логов — поэтому редактируем здесь. Plain text
-    (без HTML-escape): для сообщений без parse_mode. Формат сохранён: «ТипОшибки: текст»."""
+    (без HTML-escape): для сообщений без parse_mode.
+
+    GoogleAdsException → единый богатый humanize (§15: сообщения+коды+request_id вместо сырого
+    дампа протобуфа), тот же, что на мутационном пути — чтобы read- и write-ошибки выглядели
+    одинаково понятно. Дакт-тайпинг (failure.errors) — без жёсткого импорта google.ads."""
+    failure = getattr(e, "failure", None)
+    if getattr(failure, "errors", None):
+        from core.ads_errors import humanize_google_ads_error  # сам редактирует секреты
+
+        return humanize_google_ads_error(e)
     return redact_text(f"{type(e).__name__}: {e}")
 
 

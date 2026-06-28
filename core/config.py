@@ -136,3 +136,14 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def require_dev_env() -> None:
+    """Гард dev-скриптов прямой записи (минуют confirm-гейт): разрешено ТОЛЬКО при ENV=dev
+    (golden rule #10). Иначе SystemExit — скрипт не стартует вне dev. Единый источник, чтобы гард
+    нельзя было забыть в новом demo-скрипте (вызывать первой строкой main())."""
+    if settings.env != "dev":
+        raise SystemExit(
+            f"Прямая запись мимо confirm-гейта запрещена вне ENV=dev (сейчас ENV={settings.env!r}) "
+            "— golden rule #10."
+        )

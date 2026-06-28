@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import io
 import uuid
+from typing import TypeGuard
 from pathlib import Path
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
@@ -92,6 +93,7 @@ from confirm.gate import Proposal, build_summary
 from confirm.store import ConfirmStore
 from core.ads_errors import humanize_google_ads_error
 from core.config import settings
+from core.limits import MONEY_MAX_UNITS  # единый источник денежного потолка (defense-in-depth)
 from core.logging import log, setup_logging
 from core.observability import init_observability
 from core.resilience import run_ads_read_call
@@ -165,6 +167,15 @@ def _event_chat_id(event: object) -> int | None:
     return None
 
 
+def _event_chat_type(event: object) -> str | None:
+    """Тип чата ('private'|'group'|'supergroup'|'channel') из Message- или CallbackQuery-события."""
+    chat = getattr(event, "chat", None)  # Message-like
+    if chat is None:
+        msg = getattr(event, "message", None)  # CallbackQuery-like
+        chat = getattr(msg, "chat", None)
+    return getattr(chat, "type", None)
+
+
 class WhitelistMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: TelegramObject, data):
         # Fail-closed (как ads.client.ensure_allowed): пустой whitelist => блок ВСЕХ, а не fail-open.
@@ -174,7 +185,22 @@ class WhitelistMiddleware(BaseMiddleware):
         if uid not in wl:
             log.warning("заблокирован chat_id %s (не в whitelist)", uid)
             return
+        # ТОЛЬКО private-чаты: whitelist — по chat_id, а в группе chat_id ОДИН на всех участников →
+        # любой из них нажал бы ✅ и двинул деньги (актор берётся из from_user). В private chat_id ==
+        # user_id, поэтому whitelisted id = конкретный человек. Группу/канал блокируем (golden rule #10).
+        ctype = _event_chat_type(event)
+        if ctype is not None and ctype != "private":
+            log.warning("заблокирован не-private чат %s (тип %s)", uid, ctype)
+            return
         return await handler(event, data)
+
+
+def _valid_idx(seq: list | None, idx: int) -> TypeGuard[list]:
+    """idx из callback_data указывает на реальный элемент кэша. Проверяем И нижнюю границу: дефолт
+    -1 в callback-схемах (AudienceCB и др.) проходил бы `idx >= len` (−1 ≥ len ложно) и через
+    отрицательную индексацию Python выбрал бы ПОСЛЕДНИЙ элемент — не ту кампанию/аудиторию.
+    TypeGuard → mypy сужает seq к list после гарда (сохраняет сужение None, как было у inline-проверки)."""
+    return seq is not None and 0 <= idx < len(seq)
 
 
 # ── Общие действия (чтобы команда и кнопка делали одно и то же) ─────────────────
@@ -1099,7 +1125,7 @@ async def rsa_cmd(m: Message, state: FSMContext) -> None:
 @dp.callback_query(RsaPickCB.filter(F.what == "camp"))
 async def rsa_pick_camp(cq: CallbackQuery, callback_data: RsaPickCB, state: FSMContext) -> None:
     camps = _RSA_CAMP_CACHE.get(_cq_chat_id(cq))
-    if not camps or callback_data.idx >= len(camps):
+    if not _valid_idx(camps, callback_data.idx):
         await cq.answer(texts.CAMP_LIST_STALE, show_alert=True)
         return
     await cq.answer()
@@ -1111,7 +1137,7 @@ async def rsa_pick_camp(cq: CallbackQuery, callback_data: RsaPickCB, state: FSMC
 @dp.callback_query(RsaPickCB.filter(F.what == "ag"))
 async def rsa_pick_ag(cq: CallbackQuery, callback_data: RsaPickCB, state: FSMContext) -> None:
     groups = _RSA_AG_CACHE.get(_cq_chat_id(cq))
-    if not groups or callback_data.idx >= len(groups):
+    if not _valid_idx(groups, callback_data.idx):
         await cq.answer(texts.CAMP_LIST_STALE, show_alert=True)
         return
     await cq.answer()
@@ -1200,7 +1226,7 @@ def _parse_search_brief(text: str) -> tuple[str, str, float, str, list[str]] | N
         budget = float(budget_s.replace(",", "."))
     except ValueError:
         return None
-    if budget <= 0 or budget > 1_000_000:  # потолок схемы (1e6 единиц) — отвергаем сразу
+    if budget <= 0 or budget > MONEY_MAX_UNITS:  # потолок из core.limits — отвергаем сразу
         return None
     topic = parts[3] if len(parts) >= 4 and parts[3] else name
     kw_raw = parts[4] if len(parts) >= 5 else ""
@@ -1289,9 +1315,9 @@ def _parse_gdn_brief(text: str) -> tuple[str, str, float] | None:
         budget = float(budget_s.replace(",", "."))
     except ValueError:
         return None
-    # Верхняя граница (1e6 единиц = 1e12 micros, лимит схемы) — отвергаем СРАЗУ, без «1e9» и
-    # путаного Pydantic-сообщения после генерации текстов (golden rule #4: считает КОД).
-    if budget <= 0 or budget > 1_000_000:
+    # Верхняя граница (core.limits.MONEY_MAX_UNITS) — отвергаем СРАЗУ, без «1e9» и путаного
+    # Pydantic-сообщения после генерации текстов (golden rule #4: считает КОД).
+    if budget <= 0 or budget > MONEY_MAX_UNITS:
         return None
     return (name, url, budget)
 
@@ -1441,7 +1467,7 @@ def _actor(event: object) -> tuple[int | None, str | None]:
 @dp.callback_query(CampCB.filter(F.action == "menu"))
 async def camp_menu(cq: CallbackQuery, callback_data: CampCB) -> None:
     camps = _CAMP_CACHE.get(_cq_chat_id(cq))
-    if not camps or callback_data.idx >= len(camps):
+    if not _valid_idx(camps, callback_data.idx):
         await cq.answer(texts.CAMP_LIST_STALE, show_alert=True)
         return
     await cq.answer()
@@ -1478,7 +1504,7 @@ async def _camp_mutate(cq: CallbackQuery, idx: int, operation: str) -> None:
     НЕ исполняет мутацию напрямую — только после ✅ через ту же ветку, что и on_text."""
     chat_id = _cq_chat_id(cq)
     camps = _CAMP_CACHE.get(chat_id)
-    if not camps or idx >= len(camps):
+    if not _valid_idx(camps, idx):
         await cq.answer(texts.CAMP_LIST_STALE, show_alert=True)
         return
     name = camps[idx]["name"]
@@ -1510,7 +1536,7 @@ async def camp_audience(cq: CallbackQuery, callback_data: CampCB) -> None:
     READ-ONLY: только список; прикрепление — отдельным черновиком после выбора (confirm-гейт)."""
     chat_id = _cq_chat_id(cq)
     camps = _CAMP_CACHE.get(chat_id)
-    if not camps or callback_data.idx >= len(camps):
+    if not _valid_idx(camps, callback_data.idx):
         await cq.answer(texts.CAMP_LIST_STALE, show_alert=True)
         return
     try:
@@ -1547,12 +1573,7 @@ async def on_audience_pick(cq: CallbackQuery, callback_data: AudienceCB) -> None
     chat_id = _cq_chat_id(cq)
     camps = _CAMP_CACHE.get(chat_id)
     auds = _AUD_CACHE.get(chat_id)
-    if (
-        not camps
-        or callback_data.camp_idx >= len(camps)
-        or not auds
-        or callback_data.idx >= len(auds)
-    ):
+    if not _valid_idx(camps, callback_data.camp_idx) or not _valid_idx(auds, callback_data.idx):
         await cq.answer(texts.AUD_LIST_STALE, show_alert=True)
         return
     name = camps[callback_data.camp_idx]["name"]

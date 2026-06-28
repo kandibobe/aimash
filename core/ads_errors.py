@@ -13,8 +13,10 @@ from __future__ import annotations
 from core.logging import redact_text
 
 
-def _error_code_name(code: object) -> str:
-    """Имя enum-кода ошибки. Реальный protobuf — через WhichOneof('error_code'); тест-фейк — .name."""
+def error_code_name(code: object) -> str:
+    """Имя enum-кода ОДНОЙ ошибки. Реальный protobuf — через WhichOneof('error_code'); тест-фейк —
+    .name. ЕДИНЫЙ источник извлечения имени кода (его же зовут core.resilience.error_code_names и
+    проверка bid-mismatch в ads.mutations) — раньше логика была размножена в трёх местах."""
     if code is None:
         return ""
     which = getattr(code, "WhichOneof", None)  # реальный protobuf-oneof
@@ -24,6 +26,22 @@ def _error_code_name(code: object) -> str:
             return str(getattr(getattr(code, field, None), "name", "") or "")
         return ""
     return str(getattr(code, "name", "") or "")  # дакт-фейк в тестах
+
+
+def error_code_names(exc: object) -> set[str]:
+    """Множество имён enum-кодов из GoogleAdsException (реальный protobuf или тест-дакт-фейк).
+    Единый источник для классификации ретраев (core.resilience) и любой логики по коду ошибки."""
+    failure = getattr(exc, "failure", None)
+    names: set[str] = set()
+    for err in getattr(failure, "errors", None) or []:
+        nm = error_code_name(getattr(err, "error_code", None))
+        if nm:
+            names.add(nm)
+    return names
+
+
+# Обратная совместимость: внутреннее имя сохранено как алиас (на него мог ссылаться код/тесты).
+_error_code_name = error_code_name
 
 
 def _request_id(exc: object) -> str:
@@ -40,7 +58,7 @@ def humanize_google_ads_error(exc: BaseException, *, max_errors: int = 3) -> str
     parts: list[str] = []
     for err in errors[:max_errors]:
         msg = str(getattr(err, "message", "") or "").strip()
-        code = _error_code_name(getattr(err, "error_code", None))
+        code = error_code_name(getattr(err, "error_code", None))
         if msg and code:
             parts.append(f"{msg} [{code}]")
         elif msg or code:

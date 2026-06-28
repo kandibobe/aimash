@@ -12,14 +12,20 @@ import sys
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import select  # noqa: E402
 
+import ads.mutations as mut  # noqa: E402
+import ads.resolve as resolve  # noqa: E402
+import ads.service as svc  # noqa: E402
 import bot.main as bm  # noqa: E402
+from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
 from bot.callbacks import ConfirmCB  # noqa: E402
 from confirm.store import ConfirmStore  # noqa: E402
+from core.config import settings  # noqa: E402
 from db.models import AuditLog  # noqa: E402
 from db.session import Session, init_db  # noqa: E402
 
@@ -265,6 +271,92 @@ async def test_big_keyword_proposal_attaches_xlsx():
     assert any(a[1].get("reply_markup") for a in msg.answers)  # сообщение с кнопками ✅/❌
     snap = await ConfirmStore().get_confirmed(cid)
     assert snap is not None and "фразовое" in snap.summary and "{" not in snap.summary
+
+
+@contextmanager
+def _allowed_draft():
+    orig = settings.google_ads_allowed_customer_ids
+    settings.google_ads_allowed_customer_ids = DRAFT_ACCOUNT_ID
+    try:
+        yield
+    finally:
+        settings.google_ads_allowed_customer_ids = orig
+
+
+# ── Шов кнопка → РЕАЛЬНЫЙ execute_confirmed → gated apply_* (раньше всегда мокался) ─
+async def test_on_confirm_runs_real_execute_confirmed_gates():
+    """Интеграция самого важного шва денежного пути: ✅ → реальный execute_confirmed → реальные
+    ensure_allowed/claim/user_initiated/drift → gated apply_update_budget. Патчим ТОЛЬКО нижний
+    SDK-исполнитель и резолв кампании. Находка аудита: execute_confirmed всегда подменялся фейком."""
+    await init_db()
+    cid = uuid.uuid4().hex
+    store = ConfirmStore()
+    # Сохраняем подтверждаемый черновик так же, как доверенный _present_proposal (user_initiated=True).
+    await store.save_proposal(
+        confirmation_id=cid,
+        operation="update_budget",
+        customer_id=DRAFT_ACCOUNT_ID,
+        params={"campaign": "Search", "mode": "set_to", "value": 50},
+        summary="бюджет Search → 50",
+        chat_id=300,
+        user_initiated=True,
+    )
+
+    fake_ref = SimpleNamespace(id="77", budget_micros=40_000_000, status="ENABLED")
+    sdk: dict = {"n": 0}
+
+    def fake_sdk(client, customer_id, campaign_id, micros):  # нижний SDK-исполнитель
+        sdk["n"] += 1
+        sdk["args"] = (customer_id, campaign_id, micros)
+        return {"customer_id": customer_id, "campaign_id": campaign_id, "applied": True}
+
+    cq = FakeCallbackQuery(FakeMessage(chat_id=300, bot=FakeBot()))
+    with (
+        _allowed_draft(),
+        patched(svc, "build_client", lambda: object()),
+        patched(resolve, "find_campaign_by_name", lambda *a, **k: fake_ref),
+        patched(mut, "_apply_budget_via_sdk", fake_sdk),
+    ):
+        await bm.on_confirm(cq, ConfirmCB(action="ok", cid=cid))
+
+    assert sdk["n"] == 1  # реальный нижний SDK-исполнитель вызван ровно раз (replay/гонки нет)
+    # реальный compute_new_micros: set_to 50 → 50e6 micros; замок отдал DRAFT; резолв дал id=77
+    assert sdk["args"] == (DRAFT_ACCOUNT_ID, "77", 50_000_000)
+    assert (await store.get_confirmed(cid)).status == "applied"
+    assert "applied" in await _audit_statuses(cid)
+
+
+# ── ТЗ §5/§10: в create_rsa идут ТОЛЬКО одобренные тексты (отклонённый НЕ попадает) ─
+async def test_rsa_proposal_excludes_rejected_elements():
+    """Поэлементное подтверждение: отклонённый заголовок не должен попасть в объявление. Раньше
+    e2e-инвариант (approved-подмножество → create_rsa) не проверялся (находка аудита)."""
+    from adcopy.session import SessionStore
+
+    await init_db()
+    sstore = SessionStore()
+    sid = await sstore.create(
+        chat_id=400,
+        customer_id=DRAFT_ACCOUNT_ID,
+        campaign="Search",
+        ad_group_id="1",
+        ad_group_name="AG",
+        final_url="https://example.com/",
+        headlines=["Заголовок один", "Заголовок два", "Заголовок три", "Плохой заголовок"],
+        descriptions=["Описание первое достаточно содержательное.", "Описание второе тоже норм."],
+    )
+    for i in range(3):  # одобряем 3 заголовка
+        await sstore.set_state(sid, "h", i, "approved")
+    await sstore.set_state(sid, "h", 3, "rejected")  # ОТКЛОНЯЕМ 4-й
+    for i in range(2):  # одобряем 2 описания
+        await sstore.set_state(sid, "d", i, "approved")
+
+    session = await sstore.get(sid)
+    assert session.can_finalize()
+    _cid, op, params, _summary = bm._build_rsa_proposal(session)
+    assert op == "create_rsa"
+    assert params["headlines"] == ["Заголовок один", "Заголовок два", "Заголовок три"]
+    assert "Плохой заголовок" not in params["headlines"]  # отклонённый НЕ дошёл до объявления
+    assert len(params["descriptions"]) == 2
 
 
 async def test_small_keyword_proposal_inline_no_doc():

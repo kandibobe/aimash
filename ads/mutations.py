@@ -25,9 +25,11 @@ from adcopy.validate import (
 from adcopy.validate import validate as _rsa_validate
 from ads.client import ensure_allowed
 from ads.validation import assert_keyword_ok, normalize_keywords
+from core.ads_errors import error_code_names  # единый источник имён кодов ошибок Google Ads
 from core.limits import (
     MAX_RADIUS_KM,
     MONEY_MAX_MICROS,
+    MONEY_MAX_UNITS,
 )  # единый источник порогов (defense-in-depth)
 from core.resilience import run_ads_call  # таймаут+ретрай на самом SDK-вызове (не на гейтах)
 
@@ -398,8 +400,10 @@ async def apply_set_bidding_strategy(
         raise ValueError(f"неизвестная стратегия ставок: {strategy}")
     target_cpa_micros = None
     if target_cpa is not None:
-        if target_cpa <= 0 or target_cpa > 1_000_000:
-            raise ValueError("target_cpa вне допустимого диапазона (0, 1 000 000]")
+        # target_cpa — деньги (в единицах валюты аккаунта) → тот же «очевидно неверно» потолок,
+        # что у бюджета/ставки (единый источник core.limits, не литерал 1_000_000).
+        if target_cpa <= 0 or target_cpa > MONEY_MAX_UNITS:
+            raise ValueError(f"target_cpa вне допустимого диапазона (0, {MONEY_MAX_UNITS}]")
         target_cpa_micros = int(round(float(target_cpa) * 1_000_000))
     if target_roas is not None and (target_roas <= 0 or target_roas > 1000):
         raise ValueError("target_roas — доля в (0, 1000] (напр. 4.0 = 400%)")
@@ -592,10 +596,9 @@ def _apply_bid_via_sdk(client, customer_id: str, campaign_id: str, bids: list) -
         # его НЕТ в client.enums (только enums-модуль) → обращение к client.enums.AdGroupErrorEnum
         # упало бы AttributeError и проглотило исходную ошибку. .name есть у любого enum-поля
         # (для не-ad_group ошибок вернётся 'UNSPECIFIED'), сравнение версионно-независимо.
-        if any(
-            err.error_code.ad_group_error.name == "BID_TYPE_AND_BIDDING_STRATEGY_MISMATCH"
-            for err in ex.failure.errors
-        ):
+        # error_code_names — единый источник имён кодов (WhichOneof находит активный oneof,
+        # корректно и для не-ad_group ошибок); раньше тут был свой инлайн-разбор.
+        if "BID_TYPE_AND_BIDDING_STRATEGY_MISMATCH" in error_code_names(ex):
             raise ValueError(
                 "ставка несовместима со стратегией кампании (BID_TYPE_AND_BIDDING_STRATEGY_MISMATCH)"
             ) from ex

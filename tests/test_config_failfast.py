@@ -69,3 +69,14 @@ def test_dev_without_whitelist_ok():
     # в dev пустой whitelist допустим при конструировании (fail-closed обеспечивает middleware)
     s = Settings(**_prod_kwargs(env="dev", telegram_whitelist_chat_ids=""))
     assert s.whitelist == set()
+
+
+def test_require_dev_env_blocks_outside_dev(monkeypatch):
+    """Гард dev-скриптов прямой записи (golden rule #10): вне ENV=dev — SystemExit; в dev — ок."""
+    import core.config as cfg
+
+    monkeypatch.setattr(cfg.settings, "env", "prod")
+    with pytest.raises(SystemExit):
+        cfg.require_dev_env()
+    monkeypatch.setattr(cfg.settings, "env", "dev")
+    cfg.require_dev_env()  # в dev не падает

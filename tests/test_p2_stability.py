@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import core.resilience as R  # noqa: E402
-from core.ads_errors import humanize_google_ads_error  # noqa: E402
+from core.ads_errors import error_code_names, humanize_google_ads_error  # noqa: E402
 
 
 # ── humanize_google_ads_error (§15) ──────────────────────────────────────────────
@@ -55,6 +55,21 @@ def test_humanize_truncates_and_counts_extra():
 def test_humanize_fallback_for_non_googleads_error():
     out = humanize_google_ads_error(ValueError("boom"))
     assert "ValueError" in out and "boom" in out
+
+
+def test_error_code_names_single_source():
+    """Единый источник имён кодов (используется и в retry-классификации, и в humanize, и в
+    bid-mismatch). Дакт-фейк error_code.name → множество имён; ретрай-классификатор его потребляет."""
+    exc = _gads_exc(
+        [
+            SimpleNamespace(message="x", error_code=SimpleNamespace(name="RATE_EXCEEDED")),
+            SimpleNamespace(message="y", error_code=SimpleNamespace(name="BUDGET_ERROR")),
+            SimpleNamespace(message="z", error_code=None),  # без кода — пропускаем
+        ]
+    )
+    assert error_code_names(exc) == {"RATE_EXCEEDED", "BUDGET_ERROR"}
+    # тот же набор питает классификацию ретраев (RATE_EXCEEDED ∈ RETRYABLE_ADS_NAMES)
+    assert error_code_names(exc) & R.RETRYABLE_ADS_NAMES == {"RATE_EXCEEDED"}
 
 
 def test_humanize_redacts_secrets():

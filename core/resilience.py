@@ -84,35 +84,17 @@ RETRYABLE_ADS_NAMES: frozenset[str] = frozenset(
 )
 
 
-def _ads_error_names(exc: object) -> set[str]:
-    """Имена enum-кодов из GoogleAdsException (реальный protobuf или тест-дакт-фейк)."""
-    names: set[str] = set()
-    failure = getattr(exc, "failure", None)
-    for err in getattr(failure, "errors", None) or []:
-        code = getattr(err, "error_code", None)
-        if code is None:
-            continue
-        which = getattr(code, "WhichOneof", None)  # реальный protobuf-oneof
-        if callable(which):
-            field = which("error_code")
-            if field:
-                nm = getattr(getattr(code, field, None), "name", None)
-                if nm:
-                    names.add(nm)
-            continue
-        nm = getattr(code, "name", None)  # дакт-фейк в тестах: error_code.name
-        if nm:
-            names.add(nm)
-    return names
-
-
 def _is_retryable_ads(exc: BaseException) -> bool:
     # Импорт внутри — google.ads тяжёлый; держим модуль дешёвым, если ADS-путь не задействован.
+    # Имена кодов извлекает единый источник core.ads_errors.error_code_names (раньше логика
+    # была продублирована здесь как _ads_error_names).
+    from core.ads_errors import error_code_names
+
     try:
         from google.ads.googleads.errors import GoogleAdsException
 
         if isinstance(exc, GoogleAdsException):
-            return bool(_ads_error_names(exc) & RETRYABLE_ADS_NAMES)
+            return bool(error_code_names(exc) & RETRYABLE_ADS_NAMES)
     except Exception:  # pragma: no cover - SDK всегда есть, но не падаем из-за импорта
         pass
     try:

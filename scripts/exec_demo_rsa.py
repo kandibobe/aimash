@@ -28,6 +28,7 @@ from ads.resolve import find_ad_groups  # noqa: E402
 from ads.service import execute_confirmed  # noqa: E402
 from confirm.gate import Proposal  # noqa: E402
 from confirm.store import ConfirmStore  # noqa: E402
+from core.config import require_dev_env  # noqa: E402
 from db.models import AuditLog  # noqa: E402
 from db.session import Session, init_db  # noqa: E402
 
@@ -46,6 +47,7 @@ _FINAL_URL = "https://example.com/"
 
 
 async def main() -> None:
+    require_dev_env()  # golden rule #10: прямая запись (минуя confirm-гейт) только при ENV=dev
     await init_db()
     client = build_client()
 

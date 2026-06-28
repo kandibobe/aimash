@@ -327,7 +327,9 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
         # (бинарь НЕ в proposal.params/логах). Резолв кампании не нужен — это создание новой.
         from ads.assets import clear_pending_media, load_pending_media
 
-        landscape, square = load_pending_media(params["media_id"])
+        # Файловый I/O (чтение JPEG-байтов) — в поток, как и все SDK-вызовы: единый event loop
+        # делит бот с APScheduler, синхронное чтение блокировало бы все хендлеры/джобы.
+        landscape, square = await asyncio.to_thread(load_pending_media, params["media_id"])
         try:
             return await mutations.apply_create_gdn_campaign(
                 customer_id=customer_id,
@@ -345,7 +347,8 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
                 ads_client=client,
             )
         finally:
-            clear_pending_media(params["media_id"])  # успех или сбой — временные файлы чистим
+            # успех или сбой — временные файлы чистим (тоже в потоке: .unlink() — диск-I/O)
+            await asyncio.to_thread(clear_pending_media, params["media_id"])
 
     if op == "attach_audience":
         ref = await asyncio.to_thread(

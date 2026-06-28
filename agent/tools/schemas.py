@@ -18,7 +18,7 @@ from adcopy.validate import (
 )
 from adcopy.validate import validate as _rsa_validate
 from ads.validation import normalize_keywords
-from core.limits import MONEY_MAX_UNITS
+from core.limits import MONEY_MAX_MICROS, MONEY_MAX_UNITS
 
 Currency = Literal["USD", "UAH", "EUR", "percent"]
 MatchType = Literal["broad", "phrase", "exact"]
@@ -352,7 +352,9 @@ class CreateGdnCampaign(BaseModel):
     descriptions: list[str] = Field(min_length=1, max_length=5)  # каждый ≤90
     business_name: str = Field(min_length=1, max_length=25)
     final_url: str
-    budget_daily_micros: int = Field(gt=0, le=1_000_000_000_000)  # ≤1e12 micros (=1M единиц валюты)
+    budget_daily_micros: int = Field(
+        gt=0, le=MONEY_MAX_MICROS
+    )  # потолок из core.limits (=1M единиц)
     media_id: str = Field(min_length=1, max_length=64)
 
     @field_validator("headlines")
@@ -401,10 +403,12 @@ class CreateSearchCampaign(BaseModel):
     descriptions: list[str] = Field(
         min_length=RSA_MIN_DESCRIPTIONS, max_length=RSA_MAX_DESCRIPTIONS
     )
-    budget_daily_micros: int = Field(gt=0, le=1_000_000_000_000)  # ≤1e12 micros (=1M единиц валюты)
+    budget_daily_micros: int = Field(
+        gt=0, le=MONEY_MAX_MICROS
+    )  # потолок из core.limits (=1M единиц)
     keywords: list[str] = Field(default_factory=list, max_length=50)
     match_type: MatchType = "phrase"
-    cpc_bid_micros: int = Field(default=500_000, gt=0, le=1_000_000_000_000)
+    cpc_bid_micros: int = Field(default=500_000, gt=0, le=MONEY_MAX_MICROS)
 
     @field_validator("final_url")
     @classmethod
