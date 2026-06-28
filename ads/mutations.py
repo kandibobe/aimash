@@ -865,13 +865,24 @@ def _set_bidding_strategy_via_sdk(
     op = client.get_type("CampaignOperation")
     c = op.update
     c.resource_name = svc.campaign_path(str(customer_id), str(campaign_id))
+    # mask_path — ЛИСТОВОЕ подполе выбранной стратегии (не само сообщение-стратегию). Два правила
+    # Google Ads, на которых обожглись:
+    #   1) update_mask живёт на ОПЕРАЦИИ (op.update_mask), а НЕ на Campaign (op.update) — иначе
+    #      AttributeError "Unknown field for Campaign: update_mask".
+    #   2) путь в маске должен указывать на ЛИСТ (скаляр), а не на message-поле: bare-имя стратегии
+    #      (напр. "maximize_conversions") API отвергает — FieldMaskError.FIELD_HAS_SUBFIELDS.
+    # При этом ПУСТУЮ стратегию (maximize_conversions без target) protobuf_helpers.field_mask НЕ
+    # увидит (proto3 не маскирует set-but-empty message и default-скаляры), поэтому маску на лист
+    # ставим ЯВНО: лист и переключает oneof стратегии, и задаёт/очищает target (0 = без таргета).
     if strategy == "manual_cpc":
         c.manual_cpc.enhanced_cpc_enabled = bool(enhanced_cpc)
+        mask_path = "manual_cpc.enhanced_cpc_enabled"
     elif strategy == "maximize_conversions":
         if target_cpa_micros:
             c.maximize_conversions.target_cpa_micros = int(target_cpa_micros)
         else:  # пустая стратегия (без таргета) — присваиваем чистое сообщение
             client.copy_from(c.maximize_conversions, client.get_type("MaximizeConversions"))
+        mask_path = "maximize_conversions.target_cpa_micros"
     elif strategy == "maximize_conversion_value":
         if target_roas:
             c.maximize_conversion_value.target_roas = float(target_roas)
@@ -879,14 +890,13 @@ def _set_bidding_strategy_via_sdk(
             client.copy_from(
                 c.maximize_conversion_value, client.get_type("MaximizeConversionValue")
             )
+        mask_path = "maximize_conversion_value.target_roas"
     elif strategy == "target_spend":
         client.copy_from(c.target_spend, client.get_type("TargetSpend"))
+        mask_path = "target_spend.target_spend_micros"
     else:
         raise ValueError(f"неизвестная стратегия ставок: {strategy}")
-    # update_mask живёт на ОПЕРАЦИИ (CampaignOperation.update_mask), а НЕ на Campaign (op.update):
-    # Campaign-сообщение поля update_mask не имеет → иначе AttributeError "Unknown field for
-    # Campaign: update_mask". Сравни с op.update_mask в _set_budget/_set_bid выше.
-    op.update_mask.paths.append(strategy)  # явный путь — надёжно для oneof-переключения
+    op.update_mask.paths.append(mask_path)  # лист — надёжно для oneof-переключения (см. выше)
     svc.mutate_campaigns(customer_id=str(customer_id), operations=[op])
     return {
         "customer_id": str(customer_id),

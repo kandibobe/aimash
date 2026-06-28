@@ -716,7 +716,107 @@ def test_set_bidding_strategy_via_sdk_maximize_conversions_sets_mask():
     assert res["target_cpa_micros"] == 5_000_000
     op = captured["op"]
     assert op.update.maximize_conversions.target_cpa_micros == 5_000_000
-    assert "maximize_conversions" in op.update_mask.paths  # явный mask на ОПЕРАЦИИ (не на Campaign)
+    # маска — на ЛИСТ (подполе), а не bare-имя стратегии: bare-message Google Ads отвергает
+    # (FIELD_HAS_SUBFIELDS), а лист и переключает oneof, и задаёт target. И именно на op.update_mask.
+    assert "maximize_conversions.target_cpa_micros" in op.update_mask.paths
+    assert "maximize_conversions" not in op.update_mask.paths  # bare-имя НЕ должно попадать в маску
+
+
+class _RealProtoClient:
+    """Фейк GoogleAdsClient на РЕАЛЬНЫХ v24-прото (а не SimpleNamespace) — ловит ошибки уровня
+    схемы, которые «всё-принимающие» моки пропускали дважды: update_mask на Campaign и bare-имя
+    стратегии в маске. get_type отдаёт настоящие сообщения, поэтому неверное поле бросит, как SDK."""
+
+    def __init__(self):
+        self.captured: dict = {}
+
+    def get_service(self, name):
+        assert name == "CampaignService"
+        client = self
+
+        class _Svc:
+            def campaign_path(self, cid, campid):
+                return f"customers/{cid}/campaigns/{campid}"
+
+            def mutate_campaigns(self, customer_id, operations):
+                client.captured["op"] = operations[0]
+                return SimpleNamespace(results=[SimpleNamespace(resource_name="rn")])
+
+        return _Svc()
+
+    def get_type(self, name):
+        from google.ads.googleads.v24.common.types import (
+            ManualCpc,
+            MaximizeConversions,
+            MaximizeConversionValue,
+            TargetSpend,
+        )
+        from google.ads.googleads.v24.services.types import CampaignOperation
+
+        return {
+            "CampaignOperation": CampaignOperation,
+            "MaximizeConversions": MaximizeConversions,
+            "MaximizeConversionValue": MaximizeConversionValue,
+            "TargetSpend": TargetSpend,
+            "ManualCpc": ManualCpc,
+        }[name]()
+
+    @staticmethod
+    def copy_from(destination, origin):  # как google.ads…GoogleAdsClient.copy_from
+        import proto
+
+        if isinstance(origin, proto.Message):
+            origin = origin._pb
+        destination._pb.CopyFrom(origin)
+
+
+def _assert_mask_paths_are_leaf(paths):
+    """Эмулирует серверную проверку Google Ads FieldMaskError.FIELD_HAS_SUBFIELDS: каждый путь
+    маски должен заканчиваться на ЛИСТ (скаляр) реального Campaign, а не на message-поле."""
+    from google.protobuf.descriptor import FieldDescriptor
+
+    from google.ads.googleads.v24.resources.types import Campaign
+
+    desc = Campaign.pb(Campaign()).DESCRIPTOR
+    for path in paths:
+        cur, fd = desc, None
+        for part in path.split("."):
+            assert cur is not None, f"{path}: '{part}' за пределами message"
+            fd = cur.fields_by_name.get(part)
+            assert fd is not None, f"{path}: нет поля '{part}' в Campaign"
+            cur = fd.message_type if fd.type == FieldDescriptor.TYPE_MESSAGE else None
+        assert fd.type != FieldDescriptor.TYPE_MESSAGE, (
+            f"маска '{path}' указывает на message-поле (с подполями) → API отвергнет "
+            "FIELD_HAS_SUBFIELDS; нужен ЛИСТ-путь"
+        )
+
+
+def test_set_bidding_strategy_via_sdk_mask_is_leaf_for_all_strategies_real_proto():
+    """Регресс FIELD_HAS_SUBFIELDS: на РЕАЛЬНЫХ прото для всех стратегий (вкл. ПУСТУЮ без target —
+    кейс пользователя) маска указывает на лист-подполе и реально переключает oneof стратегии."""
+    cases = [
+        # strategy, target_cpa_micros, target_roas, enhanced, ожидаемый oneof
+        ("manual_cpc", None, None, True, "manual_cpc"),
+        ("manual_cpc", None, None, False, "manual_cpc"),
+        ("maximize_conversions", 5_000_000, None, False, "maximize_conversions"),
+        ("maximize_conversions", None, None, False, "maximize_conversions"),  # ПУСТАЯ — кейс юзера
+        ("maximize_conversion_value", None, 4.0, False, "maximize_conversion_value"),
+        ("maximize_conversion_value", None, None, False, "maximize_conversion_value"),  # пустая
+        ("target_spend", None, None, False, "target_spend"),
+    ]
+    for strategy, tcpa, troas, enh, oneof in cases:
+        client = _RealProtoClient()
+        res = mut._set_bidding_strategy_via_sdk(
+            client, DRAFT_ACCOUNT_ID, "23", strategy, tcpa, troas, enh
+        )
+        assert res["applied"] and res["strategy"] == strategy
+        op = client.captured["op"]
+        paths = list(op.update_mask.paths)
+        assert paths, f"{strategy}: пустая маска — стратегия не переключится"
+        _assert_mask_paths_are_leaf(paths)  # серверная проверка FIELD_HAS_SUBFIELDS
+        # oneof стратегии реально выставлен, и каждый путь маски — под этой стратегией.
+        assert op.update._pb.WhichOneof("campaign_bidding_strategy") == oneof
+        assert all(p.startswith(oneof + ".") for p in paths), (strategy, paths)
 
 
 async def test_set_bidding_strategy_supported_as_proposal():
