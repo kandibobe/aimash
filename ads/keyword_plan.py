@@ -88,9 +88,16 @@ def _idea(r) -> KeywordIdea:
     )
 
 
-def _is_rate_limit(e: Exception) -> bool:
-    """Грубая, но безопасная проверка rate-limit/квоты по тексту ошибки (~1 QPS Keyword Planner)."""
-    s = str(e).upper()
+def _is_retryable(e: Exception) -> bool:
+    """Транзиентная ошибка Google Ads (rate-limit/квота/internal/deadline) — research read-only
+    и идемпотентен, повтор безопасен. Классификация делегируется core.resilience._is_retryable_ads
+    (по ИМЕНАМ enum-кодов — версионно-безопасно; единый источник истины с мутационным/read путём);
+    текстовый матч — лишь фолбэк для необёрнутых/нестандартных ошибок без структуры кода."""
+    from core.resilience import _is_retryable_ads
+
+    if _is_retryable_ads(e):
+        return True
+    s = str(e).upper()  # фолбэк: ошибка без protobuf-структуры (напр. обёрнута/перепакована)
     return any(t in s for t in ("RESOURCE_EXHAUSTED", "RATE_EXCEEDED", "QUOTA"))
 
 
@@ -143,8 +150,8 @@ def generate_keyword_ideas(
                 if len(ideas) >= _FETCH_CEILING:
                     break
             break
-        except Exception as e:  # noqa: BLE001 — backoff только на rate-limit, иначе пробрасываем
-            if _is_rate_limit(e) and attempt < _RETRIES:
+        except Exception as e:  # noqa: BLE001 — backoff только на транзиентных, иначе пробрасываем
+            if _is_retryable(e) and attempt < _RETRIES:
                 wait = 2**attempt
                 log.warning(
                     "keyword_plan: rate-limit, повтор через %dс (попытка %d)", wait, attempt
