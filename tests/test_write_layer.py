@@ -440,6 +440,176 @@ async def test_apply_set_geo_proximity_validates_address_before_claim():
     assert store.finalized is False  # черновик не финализирован
 
 
+# ── apply_set_geo_location (§3 страна/город): оба гейта, резолв названий → constants ─
+async def test_apply_set_geo_location_happy_path():
+    called = {}
+
+    def fake(client, customer_id, campaign_id, locations, country_code, locale):
+        called.update(
+            campaign_id=campaign_id, locations=list(locations), cc=country_code, locale=locale
+        )
+        return {"applied": True, "count": len(locations)}
+
+    store = FakeStore(FakeProposal("set_geo_location", "confirmed", user_initiated=True))
+    with patched(mut, "_set_geo_location_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_set_geo_location(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_id="23",
+            locations=["Украина", "Киев"],
+            country_code="UA",
+            locale="ru",
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+        )
+    assert res["applied"] is True and called["campaign_id"] == "23"
+    assert called["locations"] == ["Украина", "Киев"] and called["cc"] == "UA"
+    assert store.finalized is True
+
+
+async def test_apply_set_geo_location_validates_empty_before_claim():
+    calls = {"n": 0}
+
+    def fake(*a, **k):
+        calls["n"] += 1
+        return {"applied": True}
+
+    store = FakeStore(FakeProposal("set_geo_location", "confirmed", user_initiated=True))
+    with patched(mut, "_set_geo_location_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        try:
+            await mut.apply_set_geo_location(
+                customer_id=DRAFT_ACCOUNT_ID,
+                campaign_id="23",
+                locations=["   "],  # пустые после strip → ValueError ДО claim
+                country_code="UA",
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=object(),
+            )
+            raise AssertionError("ожидался ValueError (пустые локации)")
+        except ValueError:
+            pass
+    assert calls["n"] == 0 and store.finalized is False
+
+
+def test_set_geo_location_via_sdk_resolves_and_replaces():
+    """Резолв названий → geoTargetConstant (топ-подсказка на термин, дубли не задваиваются) +
+    remove-before-create: 1 старый LOCATION заменён 2 новыми."""
+    captured = {}
+
+    class _Cmp:
+        def campaign_path(self, cid, campid):
+            return f"customers/{cid}/campaigns/{campid}"
+
+    class _GA:
+        def search(self, customer_id, query):
+            return [SimpleNamespace(campaign_criterion=SimpleNamespace(resource_name="old_loc1"))]
+
+    class _GTC:
+        def suggest_geo_target_constants(self, request):
+            sugg = [
+                SimpleNamespace(
+                    search_term="Украина",
+                    geo_target_constant=SimpleNamespace(
+                        resource_name="geoTargetConstants/2804", name="Ukraine"
+                    ),
+                ),
+                SimpleNamespace(
+                    search_term="Киев",
+                    geo_target_constant=SimpleNamespace(
+                        resource_name="geoTargetConstants/1012852", name="Kyiv"
+                    ),
+                ),
+                SimpleNamespace(  # дубль термина — игнорируется (берём первую подсказку)
+                    search_term="Украина",
+                    geo_target_constant=SimpleNamespace(
+                        resource_name="geoTargetConstants/9999", name="Ukraine alt"
+                    ),
+                ),
+            ]
+            return SimpleNamespace(geo_target_constant_suggestions=sugg)
+
+    class _Crit:
+        def mutate_campaign_criteria(self, customer_id, operations):
+            captured["ops"] = list(operations)
+            return SimpleNamespace(results=[SimpleNamespace(resource_name="n") for _ in operations])
+
+    class _Client:
+        def get_service(self, name):
+            return {
+                "CampaignService": _Cmp(),
+                "GoogleAdsService": _GA(),
+                "GeoTargetConstantService": _GTC(),
+                "CampaignCriterionService": _Crit(),
+            }[name]
+
+        def get_type(self, name):
+            if name == "SuggestGeoTargetConstantsRequest":
+                return SimpleNamespace(
+                    locale="", country_code="", location_names=SimpleNamespace(names=[])
+                )
+            if name == "CampaignCriterionOperation":
+                return SimpleNamespace(
+                    create=SimpleNamespace(
+                        campaign=None, location=SimpleNamespace(geo_target_constant=None)
+                    ),
+                    remove=None,
+                )
+            raise AssertionError(name)
+
+    res = mut._set_geo_location_via_sdk(
+        _Client(), DRAFT_ACCOUNT_ID, "23", ["Украина", "Киев"], "UA", "ru"
+    )
+    assert res["applied"] is True
+    assert res["count"] == 2 and res["removed_location"] == 1
+    assert set(res["locations"]) == {"Ukraine", "Kyiv"}
+    ops = captured["ops"]
+    assert sum(1 for o in ops if o.remove is not None) == 1  # один remove (старый LOCATION)
+    assert (
+        sum(1 for o in ops if o.create.location.geo_target_constant) == 2
+    )  # два create (новые гео)
+
+
+def test_set_geo_location_via_sdk_raises_when_nothing_resolved():
+    """Ни одна локация не распознана → НЕ трогаем кампанию (raise), чтобы не стереть гео в пустоту."""
+
+    class _GTC:
+        def suggest_geo_target_constants(self, request):
+            return SimpleNamespace(geo_target_constant_suggestions=[])
+
+    class _Client:
+        def get_service(self, name):
+            if name == "GeoTargetConstantService":
+                return _GTC()
+            return SimpleNamespace(campaign_path=lambda c, i: "rn")
+
+        def get_type(self, name):
+            return SimpleNamespace(
+                locale="", country_code="", location_names=SimpleNamespace(names=[])
+            )
+
+    try:
+        mut._set_geo_location_via_sdk(
+            _Client(), DRAFT_ACCOUNT_ID, "23", ["абракадабра"], "UA", "ru"
+        )
+        raise AssertionError("ожидался ValueError (ничего не распознано)")
+    except ValueError:
+        pass
+
+
+async def test_set_geo_location_supported_as_proposal():
+    """set_geo_location поддержан → агент предлагает черновик с кнопками (не отклоняет)."""
+    import agent.loop as L
+
+    fake = _fake_chat(
+        "set_geo_location",
+        {"campaign": "X", "locations": ["Украина", "Киев"], "country_code": "UA"},
+    )
+    with patched(L, "chat", fake):
+        res = await L.handle_command("таргет на Украину и Киев в кампании X", chat_id=1)
+    assert res["type"] == "proposal" and res["operation"] == "set_geo_location"
+
+
 # ── Валидатор длины ключевых слов (golden rule #4: код, кириллица = 1) ───────────
 def test_assert_keyword_ok_counts_cyrillic_as_one():
     assert mut._assert_keyword_ok("  цветы  ") == "цветы"
@@ -824,6 +994,13 @@ def _apply_case(op):
         return mut.apply_resume_campaign, {"campaign_id": "7", **base}
     if op == "pause_campaign":
         return mut.apply_pause_campaign, {"campaign_id": "7", **base}
+    if op == "set_geo_location":
+        return mut.apply_set_geo_location, {
+            "campaign_id": "7",
+            "locations": ["Украина"],
+            "country_code": "UA",
+            **base,
+        }
     raise AssertionError(op)
 
 
@@ -834,6 +1011,7 @@ _ALL_OPS = [
     "add_negative_keywords",
     "resume_campaign",
     "pause_campaign",
+    "set_geo_location",
 ]
 
 

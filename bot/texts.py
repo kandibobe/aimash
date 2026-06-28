@@ -298,6 +298,13 @@ def fmt_mutation_summary(operation: str, params: dict) -> str:
         return (
             f"Кампания «{c}» — радиус {rs} км вокруг «{city}» ({cc}). Заменит прежний гео-радиус."
         )
+    if operation == "set_geo_location":
+        locs = ", ".join(str(x) for x in (params.get("locations") or []))
+        cc = params.get("country_code", "")
+        return (
+            f"Кампания «{c}» — гео-таргетинг: {locs} ({cc}). "
+            "Заменит прежний географический таргетинг кампании."
+        )
     if operation in ("add_keywords", "remove_keywords", "add_negative_keywords"):
         kws = params.get("keywords") or []
         mt = match_type_human(params.get("match_type", ""))

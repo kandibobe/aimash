@@ -36,6 +36,7 @@ MUTATION_TOOLS = {
     "pause_campaign",
     "resume_campaign",
     "set_geo_proximity",
+    "set_geo_location",
     "create_rsa",
     "create_gdn_campaign",
 }
@@ -132,6 +133,37 @@ class SetGeoProximity(BaseModel):
     country_code: str = "UA"  # ISO-3166 alpha-2 (UA, PL, US…)
     street_address: str | None = None
     postal_code: str | None = None
+
+    @field_validator("country_code")
+    @classmethod
+    def _cc(cls, v):
+        v = str(v or "UA").strip().upper()
+        if len(v) != 2 or not v.isalpha():
+            raise ValueError("country_code — ISO-3166 alpha-2 (напр. UA)")
+        return v
+
+
+class SetGeoLocation(BaseModel):
+    """Гео-таргетинг кампании по стране/городу/региону через geoTargetConstants (§3). Модель даёт
+    НАЗВАНИЯ локаций (напр. ['Украина', 'Киев']); КОД резолвит их в geoTargetConstant и заменяет
+    весь географический таргетинг кампании (remove-before-create). country_code сужает поиск
+    (по умолчанию UA), locale — язык названий."""
+
+    campaign: str  # обязателен: гео-таргетинг привязывается к кампании
+    locations: list[str] = Field(min_length=1, max_length=20)
+    country_code: str = "UA"  # ISO-3166 alpha-2 — сужает поиск названий
+    locale: str = "ru"  # язык названий локаций (ru/uk/en)
+
+    @field_validator("locations")
+    @classmethod
+    def _loc(cls, v):
+        out = [s.strip() for s in v if s and s.strip()]
+        if not out:
+            raise ValueError("нужна хотя бы одна локация (страна/город/регион)")
+        for s in out:
+            if len(s) > 80:
+                raise ValueError(f"название локации слишком длинное (>80): «{s}»")
+        return out
 
     @field_validator("country_code")
     @classmethod
@@ -290,6 +322,7 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "pause_campaign": PauseCampaign,
     "resume_campaign": ResumeCampaign,
     "set_geo_proximity": SetGeoProximity,
+    "set_geo_location": SetGeoLocation,
     "create_rsa": CreateRsa,
     "create_gdn_campaign": CreateGdnCampaign,
     "get_stats": GetStats,
@@ -340,6 +373,13 @@ TOOLS: list[dict] = [
         "Радиус-таргетинг (км) вокруг города для кампании. Укажи campaign, city_name, "
         "country_code (ISO alpha-2, по умолчанию UA) и radius_km.",
         SetGeoProximity,
+    ),
+    _tool(
+        "set_geo_location",
+        "Гео-таргетинг кампании по СТРАНЕ/ГОРОДУ/региону (не радиус). Укажи campaign и список "
+        "locations (названия, напр. ['Украина','Киев']); country_code (ISO alpha-2, по умолчанию "
+        "UA) сужает поиск. Заменяет прежний географический таргетинг кампании.",
+        SetGeoLocation,
     ),
     _tool(
         "generate_rsa",

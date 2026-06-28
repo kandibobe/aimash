@@ -3,7 +3,7 @@
 Вызывается из бота на «да». Чтение SDK (резолв) — синхронное → asyncio.to_thread.
 Аккаунт всегда Aimash Draft (замок в ads.client). Поддержаны (SUPPORTED_OPERATIONS):
 update_budget, update_bid, add_keywords, remove_keywords, add_negative_keywords, pause_campaign,
-resume_campaign, set_geo_proximity, create_rsa, create_gdn_campaign.
+resume_campaign, set_geo_proximity, set_geo_location, create_rsa, create_gdn_campaign.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
         "pause_campaign",
         "resume_campaign",
         "set_geo_proximity",
+        "set_geo_location",
         "create_rsa",
         "create_gdn_campaign",
     }
@@ -277,6 +278,23 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             campaign_id=ref.id,
             radius_km=params["radius_km"],
             address=address,
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
+    if op == "set_geo_location":
+        ref = await asyncio.to_thread(
+            resolve.find_campaign_by_name, client, customer_id, params["campaign"]
+        )
+        if ref is None:
+            raise ValueError(f"кампания '{params['campaign']}' не найдена")
+        return await mutations.apply_set_geo_location(
+            customer_id=customer_id,
+            campaign_id=ref.id,
+            locations=params["locations"],
+            country_code=params.get("country_code", "UA"),
+            locale=params.get("locale", "ru"),
             confirmation_id=confirmation_id,
             confirm_store=store,
             ads_client=client,

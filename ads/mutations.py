@@ -263,6 +263,50 @@ async def apply_set_geo_proximity(
     return result
 
 
+# ── Гео-таргетинг по стране/городу/региону (geoTargetConstants) ──────────────────
+def _validate_locations(locations: list[str], country_code: str) -> None:
+    """Гео по стране/городу — валидирует КОД ДО claim (golden rule #4): непустой список названий
+    (1–80 символов каждое) + country_code ISO alpha-2. Плохой ввод не «съедает» черновик."""
+    if not locations:
+        raise ValueError("нужна хотя бы одна локация (страна/город/регион)")
+    for s in locations:
+        t = str(s).strip()
+        if not t or len(t) > 80:
+            raise ValueError("название локации — 1–80 символов")
+    cc = str(country_code or "").strip()
+    if len(cc) != 2 or not cc.isalpha():
+        raise ValueError("country_code — ISO-3166 alpha-2 (напр. UA)")
+
+
+async def apply_set_geo_location(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    locations: list[str],
+    country_code: str = "UA",
+    locale: str = "ru",
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """Гео-таргетинг кампании по стране/городу/региону (§3). НЕ деньги → user_initiated не требуем
+    (как proximity/keywords). Резолв названий → geoTargetConstant + remove-before-create — в SDK-слое."""
+    ensure_allowed(customer_id)  # гейт 1 — замок аккаунта
+    _validate_locations(locations, country_code)  # ДО claim
+    await _require_confirmation(confirm_store, confirmation_id, "set_geo_location")  # гейт 2
+    result = await run_ads_call(
+        _set_geo_location_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_id,
+        locations,
+        country_code,
+        locale,
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
 # ── Создание RSA-объявления (фаза 2.C: применение сгенерированных текстов к группе) ─
 def _validate_rsa_inputs(
     headlines: list[str],
@@ -622,6 +666,72 @@ def _set_geo_proximity_via_sdk(
         "radius_km": float(radius_km),
         "removed_proximity": removed,  # сколько старых proximity заменили
         "resource_name": resp.results[-1].resource_name if resp.results else None,
+        "applied": True,
+    }
+
+
+def _set_geo_location_via_sdk(
+    client, customer_id: str, campaign_id: str, locations: list, country_code: str, locale: str
+) -> dict:
+    """Гео по стране/городу: резолв НАЗВАНИЙ → geoTargetConstant (SuggestGeoTargetConstants), затем
+    REMOVE-BEFORE-CREATE location-критериев кампании одним атомарным mutate (как proximity). Берём
+    топ-подсказку на каждый search_term (один geoTargetConstant на распознанное название) — без
+    over-таргетинга. Если ни одна локация не распознана — НЕ трогаем кампанию (raise), чтобы не
+    стереть гео в пустоту."""
+    cmp_svc = client.get_service("CampaignService")
+    svc = client.get_service("CampaignCriterionService")
+    ga = client.get_service("GoogleAdsService")
+    gtc = client.get_service("GeoTargetConstantService")
+    campaign_rn = cmp_svc.campaign_path(str(customer_id), str(campaign_id))
+
+    # 1) Резолв названий → geoTargetConstant (топ-подсказка на каждый search_term).
+    req = client.get_type("SuggestGeoTargetConstantsRequest")
+    req.locale = locale or "ru"
+    if country_code:
+        req.country_code = country_code
+    req.location_names.names.extend([str(s).strip() for s in locations])
+    resp = gtc.suggest_geo_target_constants(request=req)
+    best: dict[str, str] = {}  # search_term → geo_target_constant.resource_name (первая = лучшая)
+    names: dict[str, str] = {}
+    for s in resp.geo_target_constant_suggestions:
+        term = s.search_term
+        rn = s.geo_target_constant.resource_name
+        if term not in best and rn:
+            best[term] = rn
+            names[term] = s.geo_target_constant.name
+    targets = list(best.values())
+    if not targets:
+        raise ValueError("не удалось распознать ни одной локации — уточни названия (страна/город)")
+
+    ops = []
+    # 2) Существующие LOCATION-критерии кампании → remove (заменяем гео целиком).
+    for row in ga.search(
+        customer_id=str(customer_id),
+        query=(
+            "SELECT campaign_criterion.resource_name FROM campaign_criterion "
+            f"WHERE campaign_criterion.campaign = '{campaign_rn}' "
+            "AND campaign_criterion.type = 'LOCATION'"
+        ),
+    ):
+        rm = client.get_type("CampaignCriterionOperation")
+        rm.remove = row.campaign_criterion.resource_name
+        ops.append(rm)
+    removed = len(ops)
+
+    # 3) Новые location-критерии (по одному на распознанную локацию).
+    for rn in targets:
+        op = client.get_type("CampaignCriterionOperation")
+        op.create.campaign = campaign_rn
+        op.create.location.geo_target_constant = rn
+        ops.append(op)
+
+    svc.mutate_campaign_criteria(customer_id=str(customer_id), operations=ops)
+    return {
+        "customer_id": str(customer_id),
+        "campaign_id": str(campaign_id),
+        "locations": list(names.values()),
+        "removed_location": removed,  # сколько старых location-критериев заменили
+        "count": len(targets),
         "applied": True,
     }
 
