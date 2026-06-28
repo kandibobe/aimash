@@ -79,6 +79,16 @@ class Settings(BaseSettings):
     sentry_dsn: SecretStr = SecretStr("")
     sentry_traces_sample_rate: float = 0.0
 
+    # Планировщик / расписание (§14). Глобальная кадэнс read-only задач (отчёт/аномалии/очистка).
+    # REPORT_SCHEDULE — стандартная crontab-строка «мин час день месяц день_недели»: одним полем
+    # покрывает и ежедневно, и еженедельно (ТЗ §14 «ежедн./еженед.»). По умолчанию ежедневно 09:00.
+    # Невалидная строка НЕ роняет старт (это не security-гейт): scheduler откатывается на дефолт с
+    # громким логом (fail-safe). UserSettings.report_schedule (per-user) — задел под мультиюзер;
+    # пока единый источник глобального расписания — env.
+    report_schedule: str = "0 9 * * *"  # crontab: ежедневно 09:00 (локальное время)
+    anomaly_interval_hours: int = 6  # проверка аномалий каждые N часов
+    cleanup_interval_minutes: int = 60  # очистка просроченных черновиков каждые N минут
+
     @property
     def whitelist(self) -> set[int]:
         return {int(x) for x in self.telegram_whitelist_chat_ids.split(",") if x.strip()}

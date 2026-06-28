@@ -10,22 +10,38 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from core.config import settings
 from core.logging import log
 from scheduler import jobs
 
-# Кадэнс по умолчанию (позже — настраиваемо через UserSettings/настройки):
-REPORT_CRON = {"hour": 9, "minute": 0}  # ежедневный плановый отчёт в 09:00 (локальное время)
-ANOMALY_INTERVAL_HOURS = 6  # проверка аномалий каждые 6 ч
-CLEANUP_INTERVAL_MINUTES = 60  # очистка просроченных черновиков ежечасно
+# Дефолт планового отчёта — fallback, если REPORT_SCHEDULE невалиден (см. report_trigger).
+_DEFAULT_REPORT_CRON = {"hour": 9, "minute": 0}  # ежедневно 09:00 (локальное время)
+
+
+def report_trigger() -> CronTrigger:
+    """CronTrigger планового отчёта из settings.report_schedule (стандартная crontab-строка —
+    покрывает ежедн./еженед., ТЗ §14). Невалидную строку НЕ роняем стартом (расписание — не
+    security-гейт): откат на ежедневно 09:00 + громкий лог (fail-safe). Изолировано → тестируемо."""
+    raw = (settings.report_schedule or "").strip()
+    try:
+        return CronTrigger.from_crontab(raw)
+    except (ValueError, TypeError) as e:
+        log.warning(
+            "REPORT_SCHEDULE=%r невалиден (%s) — откат на ежедневно 09:00",
+            raw,
+            type(e).__name__,
+        )
+        return CronTrigger(**_DEFAULT_REPORT_CRON)
 
 
 def setup_scheduler(bot) -> AsyncIOScheduler:
     """Создать и ЗАПУСТИТЬ планировщик в текущем (running) event loop. Возвращает scheduler
-    (для graceful shutdown). Задачи — только read/notify/cleanup, без mutations."""
+    (для graceful shutdown). Задачи — только read/notify/cleanup, без mutations. Кадэнс — из env
+    (§14): REPORT_SCHEDULE / ANOMALY_INTERVAL_HOURS / CLEANUP_INTERVAL_MINUTES."""
     sched = AsyncIOScheduler()
     sched.add_job(
         jobs.run_scheduled_report,
-        CronTrigger(**REPORT_CRON),
+        report_trigger(),
         args=[bot],
         id="scheduled_report",
         replace_existing=True,
@@ -33,7 +49,7 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
     )
     sched.add_job(
         jobs.run_anomaly_check,
-        IntervalTrigger(hours=ANOMALY_INTERVAL_HOURS),
+        IntervalTrigger(hours=settings.anomaly_interval_hours),
         args=[bot],
         id="anomaly_check",
         replace_existing=True,
@@ -41,16 +57,16 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
     )
     sched.add_job(
         jobs.cleanup_stale_proposals,
-        IntervalTrigger(minutes=CLEANUP_INTERVAL_MINUTES),
+        IntervalTrigger(minutes=settings.cleanup_interval_minutes),
         id="cleanup_stale",
         replace_existing=True,
         misfire_grace_time=600,
     )
     sched.start()
     log.info(
-        "scheduler запущен: отчёт %s, аномалии каждые %dч, очистка каждые %dмин (read-only)",
-        REPORT_CRON,
-        ANOMALY_INTERVAL_HOURS,
-        CLEANUP_INTERVAL_MINUTES,
+        "scheduler запущен: отчёт cron=%r, аномалии каждые %dч, очистка каждые %dмин (read-only)",
+        settings.report_schedule,
+        settings.anomaly_interval_hours,
+        settings.cleanup_interval_minutes,
     )
     return sched
