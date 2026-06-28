@@ -105,6 +105,12 @@ def _is_retryable_ads(exc: BaseException) -> bool:
     )
 
 
+def _is_retryable_ads_read(exc: BaseException) -> bool:
+    """Для ЧТЕНИЙ Google Ads (идемпотентны) ретраим всё, что и для мутаций, ПЛЮС TimeoutError —
+    повторный read не «трогает деньги», поэтому таймаут безопасно повторить (в отличие от мутаций)."""
+    return isinstance(exc, TimeoutError) or _is_retryable_ads(exc)
+
+
 def _is_retryable_llm(exc: BaseException) -> bool:
     try:
         from openai import (
@@ -149,6 +155,35 @@ async def run_ads_call(
         log.warning("ads-call %s: %s за %dмс", name, type(e).__name__, _ms(start))
         raise
     log.info("ads-call %s: ok за %dмс", name, _ms(start))
+    return result
+
+
+async def run_ads_read_call(
+    fn: Callable[..., T], *args: object, label: str | None = None, **kwargs: object
+) -> T:
+    """Как run_ads_call, но для ЧТЕНИЙ Google Ads (идемпотентны): таймаут на попытку + ретрай
+    транзиентных ошибок И TimeoutError (read безопасно повторить). НЕ использовать для мутаций
+    (на денежном пути таймаут не повторяем — см. run_ads_call). Логирует запрос (§15)."""
+    name = label or getattr(fn, "__name__", "ads_read")
+
+    async def _inner() -> T:
+        async with asyncio.timeout(ADS_TIMEOUT_S):
+            return await asyncio.to_thread(fn, *args, **kwargs)
+
+    retryer: AsyncRetrying = AsyncRetrying(
+        wait=wait_random_exponential(multiplier=ADS_WAIT_MULTIPLIER, max=ADS_WAIT_MAX),
+        stop=stop_after_attempt(ADS_MAX_ATTEMPTS),
+        retry=retry_if_exception(_is_retryable_ads_read),
+        before_sleep=before_sleep_log(log, logging.WARNING),
+        reraise=True,
+    )
+    start = time.monotonic()
+    try:
+        result: T = await retryer(_inner)
+    except Exception as e:
+        log.warning("ads-read %s: %s за %dмс", name, type(e).__name__, _ms(start))
+        raise
+    log.info("ads-read %s: ok за %dмс", name, _ms(start))
     return result
 
 
