@@ -45,6 +45,31 @@ LLM_MAX_ATTEMPTS: int = 3
 LLM_WAIT_MULTIPLIER: float = 0.5
 LLM_WAIT_MAX: float = 20.0
 
+# ── Ограничение конкурентности к Google Ads ──────────────────────────────────────
+# Глобальный потолок ОДНОВРЕМЕННЫХ вызовов к Google Ads (и read, и мутации, идущие через эти
+# обёртки): защита от лавины запросов (rate-limit/таймауты под нагрузкой) и контроль денежного
+# пути. Слот берётся ДО ретрай-цикла — повторы НЕ освобождают и не перезанимают слот, поэтому
+# бюджет in-flight (включая ретраеров на backoff) ограничен ровно потолком.
+# Семафор asyncio привязывается к event loop при первом использовании; pytest-asyncio даёт свой
+# loop на каждый тест, а долгоживущий семафор из мёртвого loop бросил бы RuntimeError — поэтому
+# пересоздаём его при смене running loop ИЛИ ёмкости (тест может переопределить ADS_MAX_CONCURRENCY).
+ADS_MAX_CONCURRENCY: int = 4
+_ads_sem: "asyncio.Semaphore | None" = None
+_ads_sem_loop: "asyncio.AbstractEventLoop | None" = None
+_ads_sem_capacity: int = 0
+
+
+def _get_ads_semaphore() -> asyncio.Semaphore:
+    """Семафор конкурентности к Google Ads для ТЕКУЩЕГО event loop (lazy, per-loop)."""
+    global _ads_sem, _ads_sem_loop, _ads_sem_capacity
+    loop = asyncio.get_running_loop()
+    if _ads_sem is None or _ads_sem_loop is not loop or _ads_sem_capacity != ADS_MAX_CONCURRENCY:
+        _ads_sem = asyncio.Semaphore(ADS_MAX_CONCURRENCY)
+        _ads_sem_loop = loop
+        _ads_sem_capacity = ADS_MAX_CONCURRENCY
+    return _ads_sem
+
+
 # Транзиентные коды Google Ads (сравнение по ИМЕНИ enum — версионно-безопасно, как в
 # ads.mutations._apply_bid_via_sdk). Auth/permission/validation/неизвестное — НЕ ретраим.
 RETRYABLE_ADS_NAMES: frozenset[str] = frozenset(
@@ -150,7 +175,8 @@ async def run_ads_call(
     )
     start = time.monotonic()
     try:
-        result: T = await retryer(_inner)
+        async with _get_ads_semaphore():  # потолок одновременных вызовов к Google Ads
+            result: T = await retryer(_inner)
     except Exception as e:
         log.warning("ads-call %s: %s за %dмс", name, type(e).__name__, _ms(start))
         raise
@@ -179,7 +205,8 @@ async def run_ads_read_call(
     )
     start = time.monotonic()
     try:
-        result: T = await retryer(_inner)
+        async with _get_ads_semaphore():  # тот же потолок конкурентности, что и для мутаций
+            result: T = await retryer(_inner)
     except Exception as e:
         log.warning("ads-read %s: %s за %dмс", name, type(e).__name__, _ms(start))
         raise

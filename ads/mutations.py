@@ -25,6 +25,10 @@ from adcopy.validate import (
 from adcopy.validate import validate as _rsa_validate
 from ads.client import ensure_allowed
 from ads.validation import assert_keyword_ok, normalize_keywords
+from core.limits import (
+    MAX_RADIUS_KM,
+    MONEY_MAX_MICROS,
+)  # единый источник порогов (defense-in-depth)
 from core.resilience import run_ads_call  # таймаут+ретрай на самом SDK-вызове (не на гейтах)
 
 # Длину/форму ключевых слов считает КОД (golden rule #4) — единый источник в ads.validation.
@@ -33,12 +37,11 @@ _assert_keyword_ok = assert_keyword_ok
 
 # Абсолютный потолок суммы (micros) — защита от галлюцинации/инъекции модели СВЕРХ диапазон-
 # валидации схемы (set_to/increase_by_amount без верхней границы). Это не бизнес-лимит, а
-# «очевидно неверно» граница: 1 000 000 единиц валюты * 1e6. Считает КОД, у самой границы SDK.
-MAX_AMOUNT_MICROS = 1_000_000 * 1_000_000
-
-# Потолок радиуса proximity (defense-in-depth у границы SDK; зеркалит SetGeoProximity.radius_km le=2000
-# — лимит Google Ads). Если apply_* позовут вне schema-валидированного пути — абсурд не пройдёт.
-MAX_RADIUS_KM = 2000
+# «очевидно неверно» граница у самого SDK. Единый источник — core.limits (MONEY_MAX_MICROS);
+# схема проверяет ту же границу в единицах валюты. Имена MAX_AMOUNT_MICROS/MAX_RADIUS_KM
+# сохранены как модульные алиасы (на них ссылаются тесты).
+MAX_AMOUNT_MICROS = MONEY_MAX_MICROS
+# MAX_RADIUS_KM (proximity, лимит Google Ads) — тоже из core.limits; re-export для apply_* и тестов.
 
 # Лимиты состава RSA — единый источник в adcopy.validate; зеркалят agent.tools.schemas.CreateRsa
 # (два независимых гейта: схема + SDK). Длину каждого элемента считает КОД (golden rule #4).

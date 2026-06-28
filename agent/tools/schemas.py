@@ -18,13 +18,15 @@ from adcopy.validate import (
 )
 from adcopy.validate import validate as _rsa_validate
 from ads.validation import normalize_keywords
+from core.limits import MONEY_MAX_UNITS
 
 Currency = Literal["USD", "UAH", "EUR", "percent"]
 MatchType = Literal["broad", "phrase", "exact"]
 
 # Абсолютный «очевидно неверно» потолок суммы (в единицах валюты аккаунта) для set_to/
-# increase_by_amount. Защита от галлюцинации модели сверх gt=0. Зеркалит mutations.MAX_AMOUNT_MICROS.
-MAX_AMOUNT = 1_000_000
+# increase_by_amount. Защита от галлюцинации модели сверх gt=0. Единый источник — core.limits
+# (mutations использует ту же границу в micros: MONEY_MAX_MICROS). Имя MAX_AMOUNT сохранено.
+MAX_AMOUNT = MONEY_MAX_UNITS
 
 # Какие инструменты — изменяющие (mutation), какие read-only.
 MUTATION_TOOLS = {
