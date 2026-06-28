@@ -42,7 +42,9 @@ def _crop_resize(img: Image.Image, tw: int, th: int) -> Image.Image:
         nh = int(round(sw / tr))
         y = (sh - nh) // 2
         img = img.crop((0, y, sw, y + nh))
-    return img.resize((tw, th), Image.LANCZOS)
+    return img.resize(
+        (tw, th), Image.Resampling.LANCZOS
+    )  # Resampling — стабильный путь (Pillow≥9.1)
 
 
 def _to_jpeg(img: Image.Image) -> bytes:
