@@ -696,6 +696,8 @@ def test_set_bidding_strategy_via_sdk_maximize_conversions_sets_mask():
 
         def get_type(self, name):
             assert name == "CampaignOperation"
+            # update_mask — поле ОПЕРАЦИИ (sibling of `update`), НЕ Campaign: реальный proto
+            # бросает "Unknown field for Campaign: update_mask", если ставить его на op.update.
             return SimpleNamespace(
                 update=SimpleNamespace(
                     resource_name=None,
@@ -703,8 +705,8 @@ def test_set_bidding_strategy_via_sdk_maximize_conversions_sets_mask():
                     maximize_conversions=SimpleNamespace(target_cpa_micros=0),
                     maximize_conversion_value=SimpleNamespace(target_roas=0.0),
                     target_spend=SimpleNamespace(),
-                    update_mask=SimpleNamespace(paths=[]),
-                )
+                ),
+                update_mask=SimpleNamespace(paths=[]),
             )
 
     res = mut._set_bidding_strategy_via_sdk(
@@ -714,7 +716,7 @@ def test_set_bidding_strategy_via_sdk_maximize_conversions_sets_mask():
     assert res["target_cpa_micros"] == 5_000_000
     op = captured["op"]
     assert op.update.maximize_conversions.target_cpa_micros == 5_000_000
-    assert "maximize_conversions" in op.update.update_mask.paths  # явный mask на oneof
+    assert "maximize_conversions" in op.update_mask.paths  # явный mask на ОПЕРАЦИИ (не на Campaign)
 
 
 async def test_set_bidding_strategy_supported_as_proposal():

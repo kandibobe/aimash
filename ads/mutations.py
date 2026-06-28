@@ -883,7 +883,10 @@ def _set_bidding_strategy_via_sdk(
         client.copy_from(c.target_spend, client.get_type("TargetSpend"))
     else:
         raise ValueError(f"неизвестная стратегия ставок: {strategy}")
-    c.update_mask.paths.append(strategy)  # явный путь — надёжно для oneof-переключения
+    # update_mask живёт на ОПЕРАЦИИ (CampaignOperation.update_mask), а НЕ на Campaign (op.update):
+    # Campaign-сообщение поля update_mask не имеет → иначе AttributeError "Unknown field for
+    # Campaign: update_mask". Сравни с op.update_mask в _set_budget/_set_bid выше.
+    op.update_mask.paths.append(strategy)  # явный путь — надёжно для oneof-переключения
     svc.mutate_campaigns(customer_id=str(customer_id), operations=[op])
     return {
         "customer_id": str(customer_id),
