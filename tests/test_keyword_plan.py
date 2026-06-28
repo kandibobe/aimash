@@ -299,6 +299,61 @@ async def test_cluster_keywords_groups_from_model(monkeypatch):
     assert set(clusters[0].keywords) == {"a", "b"}
 
 
+# ── §7: таксономия интента / приоритезация / минус-слова ──────────────────────────
+def test_normalize_intent_maps_to_tz_taxonomy():
+    from keywords.cluster import INTENTS, normalize_intent
+
+    assert (
+        normalize_intent("Брендовый") == "навигационный"
+    )  # «бренд»/навигация → навигационный (ТЗ §7)
+    assert normalize_intent("commercial") == "коммерческий"
+    assert normalize_intent("ТРАНЗАКЦИОННЫЙ") == "транзакционный"
+    assert normalize_intent("информационный") == "информационный"
+    assert normalize_intent("чёрт-знает-что") == ""  # неизвестное → пусто (не мусорный лейбл)
+    assert set(INTENTS) == {"транзакционный", "коммерческий", "информационный", "навигационный"}
+
+
+async def test_parse_normalizes_model_intent(monkeypatch):
+    from keywords import cluster as cl
+
+    async def _ok(messages, **k):
+        return SimpleNamespace(content='[{"name":"Бренд","intent":"брендовый","keywords":["a"]}]')
+
+    monkeypatch.setattr(cl, "chat", _ok)
+    clusters = await cl.cluster_keywords(["a"], "ru")
+    assert clusters[0].intent == "навигационный"  # «брендовый» от модели сведён к таксономии ТЗ
+
+
+def test_rank_clusters_orders_by_volume_and_intent():
+    from keywords.cluster import Cluster, rank_clusters
+
+    trans = Cluster(name="Купить", intent="транзакционный", keywords=["a", "b"])
+    info = Cluster(name="Как", intent="информационный", keywords=["c", "d"])
+    leftover = Cluster(name="Прочее", intent="", keywords=["e"])
+    by_text = {"a": 100, "b": 100, "c": 100, "d": 100, "e": 10_000}
+    ranked = rank_clusters([info, leftover, trans], by_text)
+    # транзакционный (200×1.0=200) выше информационного (200×0.3=60); «Прочее» всегда в конце
+    assert [c.name for c in ranked] == ["Купить", "Как", "Прочее"]
+    assert ranked[0].priority == 200.0 and ranked[1].priority == 60.0
+
+
+async def test_suggest_negative_keywords_parses_and_fallbacks(monkeypatch):
+    from keywords import cluster as cl
+
+    async def _ok(messages, **k):
+        return SimpleNamespace(content='["бесплатно","скачать","Бесплатно"]')  # дубль по регистру
+
+    monkeypatch.setattr(cl, "chat", _ok)
+    neg = await cl.suggest_negative_keywords("доставка цветов", ["купить цветы"], language="ru")
+    assert neg == ["бесплатно", "скачать"]  # нижний регистр + дедуп
+
+    async def _bad(*a, **k):
+        raise RuntimeError("llm down")
+
+    monkeypatch.setattr(cl, "chat", _bad)
+    assert await cl.suggest_negative_keywords("x", ["y"]) == []  # advisory → пустой fallback
+
+
 # ── Экспорт .xlsx ─────────────────────────────────────────────────────────────────
 def test_export_build_workbook_contains_rows():
     from ads.keyword_plan import KeywordIdea
@@ -313,6 +368,21 @@ def test_export_build_workbook_contains_rows():
     wb = build_workbook(clusters, ideas, seeds=["сид"], language="ru")
     values = [str(c.value) for row in wb.active.iter_rows() for c in row]
     assert "alpha" in values and "beta" in values and "Группа" in values
+
+
+def test_export_workbook_has_negatives_sheet():
+    from ads.keyword_plan import KeywordIdea
+    from keywords.cluster import Cluster
+    from keywords.export import build_workbook
+
+    wb = build_workbook(
+        [Cluster(name="Группа", keywords=["alpha"])],
+        [KeywordIdea("alpha", 100, "HIGH", 80)],
+        negatives=["бесплатно", "скачать"],
+    )
+    assert "Минус-слова" in wb.sheetnames  # §7: отдельный лист предложенных минус-слов
+    vals = [str(c.value) for row in wb["Минус-слова"].iter_rows() for c in row]
+    assert "бесплатно" in vals and "скачать" in vals
 
 
 # ── Регистрация read-tool ─────────────────────────────────────────────────────────

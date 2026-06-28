@@ -1069,19 +1069,45 @@ async def _kw_run(
         await target.answer(texts.KW_EMPTY)
         return
 
-    from keywords.cluster import Cluster, cluster_keywords
+    from keywords.cluster import (
+        Cluster,
+        cluster_keywords,
+        rank_clusters,
+        suggest_negative_keywords,
+    )
 
-    try:
-        clusters = await cluster_keywords([i.text for i in ideas], language)
-    except Exception:  # кластеризация не критична — fallback на одну группу
-        clusters = [Cluster(name="Все ключи", keywords=[i.text for i in ideas])]
+    idea_texts = [i.text for i in ideas]
+    src = ", ".join(seeds) or (url or "")
+    # §7: кластеризация по интенту и предложение минус-слов независимы → параллельно. Обе advisory
+    # с внутренним fallback; return_exceptions страхует от пробрасывания (фича не падает).
+    clusters_res, negatives = await asyncio.gather(
+        cluster_keywords(idea_texts, language),
+        suggest_negative_keywords(src, idea_texts, language=language),
+        return_exceptions=True,
+    )
+    clusters = (
+        clusters_res
+        if isinstance(clusters_res, list) and clusters_res
+        else [Cluster(name="Все ключи", keywords=idea_texts)]
+    )
+    if not isinstance(negatives, list):
+        negatives = []
 
     by_text = {i.text: i.avg_monthly_searches for i in ideas}
-    src = ", ".join(seeds) or (url or "")
-    await target.answer(
-        texts.fmt_keywords_summary(clusters, by_text, len(ideas), src),
-        parse_mode=ParseMode.HTML,
-    )
+    clusters = rank_clusters(
+        clusters, by_text
+    )  # §7: приоритезация (объём × интент) — порядок показа
+    summary = texts.fmt_keywords_summary(clusters, by_text, len(ideas), src)
+    if (
+        negatives
+    ):  # §7 «предложение минус-слов» (advisory; добавление — отдельной командой за гейтом)
+        shown = ", ".join(texts.esc(x) for x in negatives[:15])
+        more = f" …ещё {len(negatives) - 15}" if len(negatives) > 15 else ""
+        summary += (
+            f"\n\n🚫 <b>Минус-слова</b> (предложение): {shown}{more}"
+            "\n<i>Добавлю отдельной командой — после «да».</i>"
+        )
+    await target.answer(summary, parse_mode=ParseMode.HTML)
 
     path: str | None = None
     try:
@@ -1090,7 +1116,14 @@ async def _kw_run(
         fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_keywords_")
         os.close(fd)
         await asyncio.to_thread(
-            write_keywords_xlsx, clusters, ideas, path, seeds=seeds, url=url, language=language
+            write_keywords_xlsx,
+            clusters,
+            ideas,
+            path,
+            seeds=seeds,
+            url=url,
+            language=language,
+            negatives=negatives,
         )
         await target.answer_document(FSInputFile(path, filename="aimash_keywords.xlsx"))
     except Exception as e:  # openpyxl/IO

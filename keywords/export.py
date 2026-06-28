@@ -50,6 +50,7 @@ def build_workbook(
     seeds: list[str] | None = None,
     url: str | None = None,
     language: str = "ru",
+    negatives: list[str] | None = None,
 ) -> Workbook:
     by_text = {i.text: i for i in ideas}  # метрики по тексту ключа
     wb = Workbook()
@@ -97,6 +98,24 @@ def build_workbook(
         for r in range(header_row + 1, ws.max_row + 1):
             ws.cell(row=r, column=col).number_format = fmt
     _autosize(ws, len(HEADERS))
+
+    # §7 «предложение минус-слов» — отдельный лист (advisory; добавление идёт командой за confirm-гейтом).
+    if negatives:
+        ws2 = wb.create_sheet("Минус-слова")
+        ws2.append(
+            ["Предложенные минус-слова (добавляются отдельной командой после подтверждения)"]
+        )
+        ws2.cell(row=1, column=1).font = Font(bold=True, size=14)
+        ws2.append([])
+        hr = ws2.max_row + 1
+        ws2.append(["#", "Минус-слово"])
+        for c in range(1, 3):
+            ws2.cell(row=hr, column=c).fill = _HEADER_FILL
+            ws2.cell(row=hr, column=c).font = _HEADER_FONT
+        ws2.freeze_panes = f"A{hr + 1}"
+        for i, n in enumerate(negatives, 1):
+            ws2.append([i, n])
+        _autosize(ws2, 2)
     return wb
 
 
@@ -108,9 +127,12 @@ def write_keywords_xlsx(
     seeds: list[str] | None = None,
     url: str | None = None,
     language: str = "ru",
+    negatives: list[str] | None = None,
 ) -> str:
     """Сохранить .xlsx по пути path. Возвращает path."""
-    build_workbook(clusters, ideas, seeds=seeds, url=url, language=language).save(path)
+    build_workbook(
+        clusters, ideas, seeds=seeds, url=url, language=language, negatives=negatives
+    ).save(path)
     return path
 
 
