@@ -526,8 +526,22 @@ def fmt_stats(account: str, days: int, st: dict, currency: str = "") -> str:
     )
 
 
-def _usd(n: float, dec: int = 2) -> str:
-    """Денежная строка в долларах OpenRouter-кредитов: $12.34 / $0.0042 (без CJK-ширины)."""
+def _usd_live(n: float | None) -> str:
+    """Деньги для /balance с АДАПТИВНОЙ точностью. Зачем: запрос к LLM стоит доли цента
+    ($~0.000003 за парс), и при фиксированных 2 знаках трата $0.0805 «зависает» как $0.08 на
+    сотни вызовов — выглядит, будто данные не обновляются. Тут знаков ровно столько, чтобы
+    микро-движение было видно: ≥$1 → 2 знака; $0.01–$1 → 4; меньше (но >0) → 6; ноль → $0.00."""
+    if n is None:
+        return "—"
+    a = abs(n)
+    if a == 0:
+        dec = 2
+    elif a >= 1:
+        dec = 2
+    elif a >= 0.01:
+        dec = 4
+    else:
+        dec = 6
     return f"${_thou(n, dec)}"
 
 
@@ -539,14 +553,23 @@ def fmt_balance(acct, snap: dict) -> str:
 
     bal = acct.balance
     if bal is not None:
-        L.append(f"💰 Остаток на счёте: <b>{_usd(bal)}</b>")
+        L.append(f"💰 Остаток на счёте: <b>{_usd_live(bal)}</b>")
     if acct.total_usage is not None:
-        L.append(f"Потрачено:   <b>{_usd(acct.total_usage)}</b> (всего по аккаунту)")
+        L.append(f"Потрачено всего: <b>{_usd_live(acct.total_usage)}</b> (по аккаунту)")
     if bal is None and acct.key_usage is not None:
         # /credits недоступен (нужен management-ключ) — показываем траты по самому ключу.
-        L.append(f"Потрачено ключом: <b>{_usd(acct.key_usage, 4)}</b>")
+        L.append(f"Потрачено ключом: <b>{_usd_live(acct.key_usage)}</b>")
+    # Живые срезы по периодам (/key): двигаются с каждым запросом — «актуально», как просили.
+    periods = [
+        (acct.usage_daily, "сегодня"),
+        (acct.usage_weekly, "неделя"),
+        (acct.usage_monthly, "месяц"),
+    ]
+    chips = [f"{label} {_usd_live(v)}" for v, label in periods if v is not None]
+    if chips:
+        L.append("Траты: " + " · ".join(chips))
     if acct.limit_remaining is not None:
-        L.append(f"Лимит ключа: <b>{_usd(acct.limit_remaining)}</b> остаток")
+        L.append(f"Лимит ключа: <b>{_usd_live(acct.limit_remaining)}</b> остаток")
     if acct.is_free_tier:
         L.append("Тариф: <b>free</b> (есть лимиты по числу запросов)")
     if len(L) == 2:  # ни одного поля не пришло
@@ -564,11 +587,11 @@ def fmt_balance(acct, snap: dict) -> str:
             L.append(
                 f"Из кэша: {_thou(total.cached_tokens)} вход. токенов ({pct:.0f}%) — дешевле ✅"
             )
-        L.append(f"Стоимость: <b>{_usd(total.cost, 4)}</b>")
+        L.append(f"Стоимость: <b>{_usd_live(total.cost)}</b>")
         names = {"parsing": "парсинг", "copy": "копирайт", "fallback": "резерв"}
         for role, u in roles.items():
             if u.calls:
-                L.append(f"  • {esc(names.get(role, role))}: {u.calls}× · {_usd(u.cost, 4)}")
+                L.append(f"  • {esc(names.get(role, role))}: {u.calls}× · {_usd_live(u.cost)}")
     else:
         L += ["", "<i>С запуска вызовов модели ещё не было.</i>"]
 

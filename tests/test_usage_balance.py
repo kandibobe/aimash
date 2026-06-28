@@ -86,6 +86,32 @@ def test_balance_none_when_credits_unavailable():
     assert st.balance is None
 
 
+def test_num_rejects_non_finite():
+    # stdlib json парсит литералы NaN/Infinity → отбрасываем в None, чтобы бюджет не показал «$inf»
+    from agent.openrouter_account import _num
+
+    assert _num(float("nan")) is None
+    assert _num(float("inf")) is None
+    assert _num(float("-inf")) is None
+    assert _num("3.14") == 3.14  # обычное число по-прежнему проходит
+    assert _num(None) is None
+
+
+# ── _usd_live: адаптивная точность (микро-траты не «зависают» при округлении) ──────
+def test_usd_live_precision_scales_with_magnitude():
+    assert texts._usd_live(9.92) == "$9.92"  # ≥$1 → 2 знака
+    assert texts._usd_live(0.080534788) == "$0.0805"  # $0.01–$1 → 4 знака (видно движение)
+    assert texts._usd_live(0.00104198) == "$0.001042"  # <$0.01 → 6 знаков (per-call виден)
+    assert texts._usd_live(0.0) == "$0.00"  # ноль — обычный вид
+    assert texts._usd_live(None) == "—"  # нет данных — прочерк, не падаем
+
+
+def test_usd_live_tiny_cost_not_rounded_to_zero():
+    # суть бага: при 2 знаках $0.0000028 показывался как $0.00 («фиксированное значение»)
+    assert texts._usd_live(2.8e-06) != "$0.00"
+    assert texts._usd_live(2.8e-06) == "$0.000003"
+
+
 # ── fmt_balance: не падает на частичных/пустых данных, показывает что есть ─────────
 def test_fmt_balance_full():
     U.reset()
@@ -96,6 +122,23 @@ def test_fmt_balance_full():
     assert "Потрачено" in out
     assert "Из кэша" in out  # cached_tokens > 0 → строка про кэш-экономию
     assert "парсинг" in out
+    U.reset()
+
+
+def test_fmt_balance_shows_live_period_breakdown():
+    # /key даёт срезы по периодам — самый «живой» сигнал трат; должны попасть в вывод
+    st = AccountStatus(
+        total_credits=10.0,
+        total_usage=0.080534788,
+        usage_daily=0.00104198,
+        usage_weekly=0.080534788,
+        usage_monthly=0.080534788,
+    )
+    out = texts.fmt_balance(st, {"total": None, "roles": {}})
+    assert "Траты:" in out
+    assert "сегодня $0.001042" in out  # суточная трата с per-call точностью
+    assert "неделя" in out and "месяц" in out
+    assert "$0.0805" in out  # суммарная трата уже не «$0.08», движение видно
     U.reset()
 
 
