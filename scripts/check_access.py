@@ -9,6 +9,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+# Windows-консоль часто cp1251 → emoji (✅/⚠️) в выводе роняют скрипт UnicodeEncodeError.
+# Принудительно UTF-8 для stdout/stderr (Python 3.7+); errors=replace — не падаем на экзотике.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    except (AttributeError, ValueError):  # не TextIOWrapper / уже сконфигурирован
+        pass
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from google.ads.googleads.client import GoogleAdsClient  # noqa: E402
