@@ -34,7 +34,12 @@ from adcopy.generate import CopyBrief
 from adcopy.generate import generate_rsa as _generate_rsa
 from adcopy.refine import refine_element
 from adcopy.session import SessionStore
-from adcopy.validate import RSA_MIN_DESCRIPTIONS, RSA_MIN_HEADLINES
+from adcopy.validate import (
+    RSA_MAX_DESCRIPTIONS,
+    RSA_MAX_HEADLINES,
+    RSA_MIN_DESCRIPTIONS,
+    RSA_MIN_HEADLINES,
+)
 from adcopy.validate import validate as rsa_validate
 from ads.assets import clear_pending_media, prepare_display_images, save_pending_media
 from ads.client import DRAFT_ACCOUNT_ID
@@ -122,6 +127,10 @@ class RsaRefine(StatesGroup):
 
 class KwWizard(StatesGroup):
     awaiting_seeds = State()  # ждём сид-слова и/или URL для подбора ключей
+
+
+class SearchWizard(StatesGroup):
+    awaiting_brief = State()  # ждём «название | url | бюджет [| тематика [| ключи]]» (/newsearch)
 
 
 class GdnWizard(StatesGroup):
@@ -1134,6 +1143,97 @@ async def model_custom_text(m: Message, state: FSMContext) -> None:
     await state.clear()
     await _persist_and_set_model(slug)
     await m.answer(texts.MODEL_SET.format(model=texts.esc(slug)), parse_mode=ParseMode.HTML)
+
+
+# ── §3 Создание поисковой (Search) кампании: /newsearch → бриф → RSA → черновик ─────
+def _parse_search_brief(text: str) -> tuple[str, str, float, str, list[str]] | None:
+    """«Название | url | бюджет [| тематика [| ключи через запятую]]» →
+    (name, url, budget_units, topic, keywords). None при неверном формате (golden rule #4 —
+    границы бюджета считает КОД до генерации, а не Pydantic после)."""
+    parts = [p.strip() for p in (text or "").split("|")]
+    if len(parts) < 3:
+        return None
+    name, url, budget_s = parts[0], parts[1], parts[2]
+    if not name or not url.startswith(("http://", "https://")):
+        return None
+    try:
+        budget = float(budget_s.replace(",", "."))
+    except ValueError:
+        return None
+    if budget <= 0 or budget > 1_000_000:  # потолок схемы (1e6 единиц) — отвергаем сразу
+        return None
+    topic = parts[3] if len(parts) >= 4 and parts[3] else name
+    kw_raw = parts[4] if len(parts) >= 5 else ""
+    keywords = [k.strip() for k in kw_raw.split(",") if k.strip()]
+    return (name, url, budget, topic, keywords)
+
+
+@dp.message(Command("newsearch"))
+async def newsearch_cmd(m: Message, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(SearchWizard.awaiting_brief)
+    await m.answer(texts.SEARCH_ASK_BRIEF, parse_mode=ParseMode.HTML)
+
+
+@dp.message(SearchWizard.awaiting_brief)
+async def search_brief(m: Message, state: FSMContext) -> None:
+    """Бриф → генерация RSA → ЧЕРНОВИК create_search_campaign (как GDN-визард). Кампания PAUSED,
+    исполнение только после ✅ (двойной гейт + user_initiated держит apply_create_search_campaign)."""
+    parsed = _parse_search_brief(m.text or "")
+    if parsed is None:
+        await m.answer(texts.SEARCH_BAD_BRIEF, parse_mode=ParseMode.HTML)
+        return  # остаёмся в состоянии — пользователь пришлёт бриф ещё раз
+    name, url, budget_units, topic, keywords = parsed
+    await m.answer(texts.SEARCH_GENERATING)
+    try:
+        draft = await _generate_rsa(CopyBrief(topic=topic, n_headlines=15, n_descriptions=4))
+    except Exception as e:  # LLM/сеть
+        await state.clear()
+        await m.answer(f"⚠️ Генерация текстов не удалась: {ux.err_text(e)}")
+        return
+    headlines = list(draft.headlines or [])[:RSA_MAX_HEADLINES]
+    descriptions = list(draft.descriptions or [])[:RSA_MAX_DESCRIPTIONS]
+    if len(headlines) < RSA_MIN_HEADLINES or len(descriptions) < RSA_MIN_DESCRIPTIONS:
+        await state.clear()
+        await m.answer(texts.SEARCH_GEN_EMPTY)
+        return
+    params = {
+        "campaign_name": name,
+        "final_url": url,
+        "headlines": headlines,
+        "descriptions": descriptions,
+        "budget_daily_micros": int(round(budget_units * 1_000_000)),
+        "keywords": keywords,
+        "match_type": "phrase",
+        "cpc_bid_micros": 500_000,
+    }
+    try:  # defense-in-depth: схема ещё раз проверит длины/составы/URL/бюджет + нормализует ключи
+        params = SCHEMAS["create_search_campaign"](**params).model_dump()
+    except Exception as e:
+        await state.clear()
+        await m.answer(f"⚠️ Параметры не прошли валидацию: {e}")
+        return
+    summary = texts.fmt_search_proposal_summary(
+        name,
+        url,
+        budget_units,
+        params["headlines"],
+        params["descriptions"],
+        params["keywords"],
+        params["match_type"],
+    )
+    p = Proposal(
+        operation="create_search_campaign", summary=summary, params=params, chat_id=m.chat.id
+    )
+    await state.clear()
+    await _present_proposal(
+        m,
+        chat_id=m.chat.id,
+        operation="create_search_campaign",
+        params=params,
+        summary=summary,
+        cid=p.confirmation_id,
+    )
 
 
 # ── GDN из фото (§11): приём фото → бриф → черновик за confirm-гейтом ─────────────

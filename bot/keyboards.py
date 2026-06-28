@@ -43,6 +43,7 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="export", description="Глубокий отчёт .xlsx"),
     BotCommand(command="sheets", description="Глубокий отчёт в Google Sheets (ссылка)"),
     BotCommand(command="rsa", description="Сгенерировать тексты объявления (RSA)"),
+    BotCommand(command="newsearch", description="Создать поисковую кампанию (RSA + ключи)"),
     BotCommand(command="cancel", description="Отменить текущий черновик"),
     BotCommand(command="keywords", description="Подбор ключевых слов"),
     BotCommand(command="model", description="Модель ИИ (OpenRouter)"),

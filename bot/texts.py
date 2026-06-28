@@ -78,6 +78,7 @@ HELP = (
     "/export [период] — глубокий отчёт .xlsx (пресет или диапазон дат)\n"
     "/sheets [период] — глубокий отчёт в Google Sheets (ссылка)\n"
     "/rsa — сгенерировать тексты объявления (RSA) с поэлементным подтверждением\n"
+    "/newsearch — создать поисковую кампанию (RSA + ключи), на паузе — запуск отдельно\n"
     "/keywords — подбор ключевых слов (объём, конкуренция, кластеры) + .xlsx\n"
     "🖼 пришли фото — соберу медийную кампанию (GDN), создам после «да»\n"
     "/model — выбрать модель ИИ (OpenRouter)\n"
@@ -233,6 +234,59 @@ def fmt_rsa_proposal_summary(
         f"Ссылка: {final_url}\n\n"
         f"Заголовки ({len(headlines)}):\n{h_lines}\n\n"
         f"Описания ({len(descriptions)}):\n{d_lines}"
+    )
+
+
+SEARCH_ASK_BRIEF = (
+    "🆕 <b>Новая поисковая кампания</b>\n"
+    "Пришли одним сообщением через <code>|</code>:\n"
+    "<code>Название | https://сайт | дневной_бюджет [| тематика [| ключ1, ключ2]]</code>\n\n"
+    "Например:\n"
+    "<code>Доставка цветов | https://flowers.ua | 300 | доставка букетов Киев | "
+    "доставка цветов, букет роз</code>\n\n"
+    "Я сгенерирую заголовки/описания (RSA) и покажу черновик. Кампания создаётся "
+    "<b>на паузе</b> — запуск отдельным действием."
+)
+SEARCH_GENERATING = "⏳ Генерирую тексты объявления (RSA) для кампании…"
+SEARCH_GEN_EMPTY = (
+    "Не удалось сгенерировать достаточно текстов (нужно ≥3 заголовков и ≥2 описаний). "
+    "Попробуй другую тематику: /newsearch"
+)
+SEARCH_BAD_BRIEF = (
+    "Неверный формат. Нужно: <code>Название | https://сайт | бюджет "
+    "[| тематика [| ключи через запятую]]</code>\n"
+    "Бюджет — число в валюте аккаунта (0 &lt; бюджет ≤ 1 000 000). Пришли ещё раз."
+)
+
+
+def fmt_search_proposal_summary(
+    name: str,
+    url: str,
+    budget_units: float,
+    headlines: list[str],
+    descriptions: list[str],
+    keywords: list[str],
+    match_type: str,
+) -> str:
+    """Плейн-текст сводка create_search_campaign для confirm-гейта (esc применяется при показе)."""
+    h_lines = "\n".join(f"  • {h}" for h in headlines)
+    d_lines = "\n".join(f"  • {d}" for d in descriptions)
+    kw_block = ""
+    if keywords:
+        shown = list(keywords)[:KW_INLINE_MAX]
+        kw_lines = "\n".join(f"  • {k}" for k in shown)
+        more = f"\n  …ещё {len(keywords) - KW_INLINE_MAX}" if len(keywords) > KW_INLINE_MAX else ""
+        kw_block = (
+            f"\n\nКлючевые слова ({len(keywords)}, {match_type_human(match_type)}):\n"
+            f"{kw_lines}{more}"
+        )
+    return (
+        f"Создать поисковую кампанию «{name}» — на паузе.\n"
+        f"Ссылка: {url}\n"
+        f"Дневной бюджет: {budget_units:g}\n\n"
+        f"Заголовки ({len(headlines)}):\n{h_lines}\n\n"
+        f"Описания ({len(descriptions)}):\n{d_lines}"
+        f"{kw_block}"
     )
 
 
@@ -478,11 +532,11 @@ def fmt_balance(acct, snap: dict) -> str:
     """Бюджет LLM: баланс/траты OpenRouter (источник истины, переживает рестарты) + живая
     разбивка ТЕКУЩЕГО процесса по ролям «с запуска». acct — openrouter_account.AccountStatus;
     snap — core.usage.snapshot(). Кредит OpenRouter = USD, поэтому показываем в $."""
-    L = ["💳 <b>Бюджет LLM · OpenRouter</b>", ""]
+    L = ["💳 <b>Бюджет ИИ · OpenRouter</b> <i>(актуально сейчас)</i>", ""]
 
     bal = acct.balance
     if bal is not None:
-        L.append(f"Остаток:     <b>{_usd(bal)}</b>")
+        L.append(f"💰 Остаток на счёте: <b>{_usd(bal)}</b>")
     if acct.total_usage is not None:
         L.append(f"Потрачено:   <b>{_usd(acct.total_usage)}</b> (всего по аккаунту)")
     if bal is None and acct.key_usage is not None:
@@ -515,6 +569,65 @@ def fmt_balance(acct, snap: dict) -> str:
     else:
         L += ["", "<i>С запуска вызовов модели ещё не было.</i>"]
 
+    return "\n".join(L)
+
+
+# ── Журнал изменений (ТЗ §12/§18: audit-лог всех операций — кто/когда/что/результат) ─
+_AUDIT_STATUS = {
+    "applied": ("✅", "применено"),
+    "failed": ("⚠️", "ошибка"),
+    "rejected": ("❌", "отклонено"),
+}
+# Человекочитаемые имена операций для журнала (как в keyboards/loop, без технических slug'ов).
+_OP_HUMAN = {
+    "update_budget": "бюджет",
+    "update_bid": "ставка CPC",
+    "add_keywords": "добавить ключи",
+    "remove_keywords": "удалить ключи",
+    "add_negative_keywords": "минус-слова",
+    "pause_campaign": "пауза кампании",
+    "resume_campaign": "возобновить кампанию",
+    "set_geo_proximity": "гео-радиус",
+    "set_geo_location": "гео-локации",
+    "set_bidding_strategy": "стратегия ставок",
+    "attach_audience": "аудитории",
+    "create_rsa": "создать RSA",
+    "create_gdn_campaign": "создать GDN-кампанию",
+    "create_search_campaign": "создать Search-кампанию",
+}
+
+
+def _journal_actor(actor_user_id: int | None, actor_username: str | None) -> str:
+    """«Кто» для строки журнала: @username, иначе id, иначе «—» (системное/неизвестно)."""
+    if actor_username:
+        return f"@{esc(actor_username)}"
+    if actor_user_id:
+        return f"id{actor_user_id}"
+    return "—"
+
+
+def fmt_journal(events) -> str:
+    """Журнал последних изменений (ТЗ §12): что/когда/кто/результат. events — список
+    confirm.store.AuditEvent (applied/failed/rejected), reverse-chron. Время — UTC сервера."""
+    if not events:
+        return (
+            "📜 <b>Журнал изменений</b>\n\n"
+            "<i>Пока пусто — подтверждённых изменений ещё не было.</i>\n"
+            "Каждое применённое/отклонённое действие попадёт сюда автоматически."
+        )
+    L = [f"📜 <b>Журнал изменений</b> · последние {len(events)}", ""]
+    for e in events:
+        emoji, status = _AUDIT_STATUS.get(e.status, ("•", e.status))
+        op = _OP_HUMAN.get(e.operation, e.operation)
+        when = e.created_at.strftime("%d.%m %H:%M") if e.created_at else "—"
+        who = _journal_actor(e.actor_user_id, e.actor_username)
+        L.append(f"{emoji} <b>{esc(op)}</b> — {status} · {when} UTC · {who}")
+        if e.status == "failed" and isinstance(e.result, dict):
+            err = str(e.result.get("error") or "").strip()
+            if err:
+                L.append(f"    ↳ {esc(err[:120])}")
+    L.append("")
+    L.append("<i>Полная история и «было→станет» хранятся в БД (audit_log).</i>")
     return "\n".join(L)
 
 

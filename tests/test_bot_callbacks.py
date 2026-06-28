@@ -129,6 +129,64 @@ async def test_audience_pick_stale_cache_alerts_no_proposal():
     assert bm._LAST_PENDING.get(chat_id) is None  # черновик не создан
 
 
+# ── §3 /newsearch: бриф → RSA → ТОЛЬКО черновик create_search_campaign ─────────────
+class FakeState:
+    """Минимальный FSMContext для офлайн-теста визарда (search_brief зовёт лишь clear())."""
+
+    def __init__(self):
+        self.cleared = False
+        self.state = None
+
+    async def clear(self):
+        self.cleared = True
+        self.state = None
+
+    async def set_state(self, s):
+        self.state = s
+
+
+async def test_newsearch_brief_creates_pending_search_proposal():
+    await init_db()
+    from types import SimpleNamespace
+
+    chat_id = 210
+    msg = FakeMessage(chat_id=chat_id)
+    msg.text = "Цветы | https://flowers.ua | 300 | доставка цветов | роза, букет роз"
+
+    async def fake_gen(brief):  # без LLM — отдаём валидный RSA-набор
+        return SimpleNamespace(
+            headlines=[f"Заголовок {i}" for i in range(3)],
+            descriptions=[f"Описание объявления {i}" for i in range(2)],
+        )
+
+    with patched(bm, "_generate_rsa", fake_gen):
+        await bm.search_brief(msg, FakeState())
+
+    cid = bm._LAST_PENDING.get(chat_id)
+    assert cid is not None
+    snap = await ConfirmStore().get_confirmed(cid)
+    assert snap.operation == "create_search_campaign"
+    assert snap.status == "pending"  # НЕ исполнено — ждёт ✅
+    assert snap.user_initiated is True
+    assert snap.params["campaign_name"] == "Цветы"
+    assert snap.params["final_url"] == "https://flowers.ua"
+    assert snap.params["budget_daily_micros"] == 300_000_000  # 300 единиц * 1e6
+    assert "роза" in snap.params["keywords"]
+    assert "Цветы" in snap.summary
+
+
+async def test_newsearch_bad_brief_no_proposal():
+    await init_db()
+    chat_id = 211
+    bm._LAST_PENDING.pop(chat_id, None)
+    msg = FakeMessage(chat_id=chat_id)
+    msg.text = "без разделителей и url"  # неверный формат
+    state = FakeState()
+    await bm.search_brief(msg, state)
+    assert bm._LAST_PENDING.get(chat_id) is None  # черновик не создан
+    assert state.cleared is False  # остаёмся в состоянии — ждём корректный бриф
+
+
 # ── RSA-курация ──────────────────────────────────────────────────────────────────
 async def _make_session(chat_id: int):
     return await bm.SESSIONS.create(
