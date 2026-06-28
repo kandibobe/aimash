@@ -26,8 +26,13 @@ class Settings(BaseSettings):
     openrouter_api_key: SecretStr = SecretStr("")
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     # имена llm_* (не model_*) — иначе шадоуят метод BaseModel.model_copy()
+    # Разделение «что за что» (дефолты; ручной выбор оператора через /model бьёт их — см.
+    # agent.router.effective_model: override > роль-дефолт):
+    #   parsing — разбор команд (function calling, денежный путь): дёшево и точно, ошибку
+    #             ловит confirm-гейт + код-валидация → дорогая модель тут не нужна.
+    #   copy    — генерация RSA-текстов: качество РУССКОГО важнее цены → сильная модель.
     llm_parsing: str = "deepseek/deepseek-chat"  # A/B: дёшево, ≈Claude на парсинге
-    llm_copy: str = "deepseek/deepseek-chat"  # копирайт ок и дёшево; апгрейд → claude
+    llm_copy: str = "anthropic/claude-sonnet-4.6"  # копирайт RU — лучшее качество (RSA)
     llm_fallback: str = "anthropic/claude-sonnet-4.6"  # Hermes выбыл (нет tool use на OpenRouter)
     # Пресеты для рантайм-переключателя /model (CSV slug'ов OpenRouter). Пусто => дефолт в
     # agent.router._DEFAULT_CHOICES (tool-use-capable модели). Своя модель — через /model в боте.
@@ -40,6 +45,12 @@ class Settings(BaseSettings):
     # :floor — роутинг к самому дешёвому провайдеру (тот же вес = текст-нейтрально, но фиксирует
     # на одном эндпоинте → операционно рискованнее). По умолчанию ВЫКЛ (fail-safe к надёжности).
     openrouter_price_floor: bool = False
+    # Роутинг ТОЛЬКО parsing-роли (самый чувствительный к задержке путь — пользователь ждёт в
+    # «печатает…») к быстрейшему эндпоинту модели через OpenRouter provider:{sort}. Значения:
+    # "throughput" (выше токенов/с) или "latency" (ниже TTFT); пусто => ВЫКЛ (текущее поведение).
+    # Копирайт НЕ трогаем (там важнее качество). Как и :floor, фиксирует на конкретном эндпоинте →
+    # операционно рискованнее, поэтому по умолчанию ВЫКЛ и включается осознанно в .env.
+    openrouter_parsing_provider_sort: str = ""
 
     # Telegram
     telegram_bot_token: SecretStr = SecretStr("")
@@ -61,6 +72,12 @@ class Settings(BaseSettings):
     # SecretStr: DSN несёт пароль БД — маскируем в repr/логах/трейсбеках (golden rule #5).
     # Реальное значение — только через .get_secret_value() (db.session, migrations.env).
     database_url: SecretStr = SecretStr("postgresql+asyncpg://aimash:aimash@localhost:5432/aimash")
+
+    # Наблюдаемость / мониторинг ошибок (Sentry, опционально). Пусто => ВЫКЛ (core.observability):
+    # ноль накладных расходов и сети. SecretStr — DSN считается чувствительным. Перф-трейсинг по
+    # умолчанию 0.0 (без оверхеда на запросах); ошибки сэмплируются 100%.
+    sentry_dsn: SecretStr = SecretStr("")
+    sentry_traces_sample_rate: float = 0.0
 
     @property
     def whitelist(self) -> set[int]:

@@ -6,12 +6,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
+import httpx
 from openai import AsyncOpenAI
 
 from core.config import settings
-from core.resilience import call_llm  # таймаут+ретрай на rate-limit/timeout OpenRouter
+from core.resilience import (
+    LLM_TIMEOUT_S,
+    call_llm,
+)  # таймаут+ретрай на rate-limit/timeout OpenRouter
 
 # Назначение → конкретная модель (дефолты из .env; сменяемо в рантайме через /model)
 ROLE_MODELS = {
@@ -53,18 +58,22 @@ def _with_price_floor(model: str) -> str:
 # парсинг команд (денежный путь) без него не работает (Hermes выбыл именно поэтому). Свою модель
 # можно задать в боте (/model <vendor/slug>) или через env MODEL_CHOICES.
 _DEFAULT_CHOICES = [
-    "deepseek/deepseek-chat",  # дёшево, дефолт
-    "anthropic/claude-sonnet-4.6",  # сильная
+    "deepseek/deepseek-chat",  # дёшево, дефолт (DeepSeek V3)
+    "deepseek/deepseek-v4-pro",  # лучший DeepSeek (V4 Pro)
+    "anthropic/claude-sonnet-4.6",  # сильная, топ-копирайт
+    "anthropic/claude-opus-4.8",  # максимум качества (дорого)
     "openai/gpt-4o-mini",  # дёшево, надёжный tool use
-    "openai/gpt-4o",  # сильная, tool use
+    "openai/gpt-4o",  # сильная, универсал
 ]
 MODEL_CHOICES: list[str] = settings.model_choice_list or _DEFAULT_CHOICES
 
 # Человекочитаемые подписи к slug'ам для кнопок /model (что для чего). Неизвестный slug
-# (своя модель / env MODEL_CHOICES) показывается как есть.
+# (своя модель / env MODEL_CHOICES) показывается как есть. Slug'и сверены со списком OpenRouter.
 MODEL_LABELS: dict[str, str] = {
     "deepseek/deepseek-chat": "🐬 DeepSeek V3 · дёшево (дефолт)",
+    "deepseek/deepseek-v4-pro": "🐬 DeepSeek V4 Pro · лучший DeepSeek",
     "anthropic/claude-sonnet-4.6": "🧠 Claude Sonnet 4.6 · топ-тексты",
+    "anthropic/claude-opus-4.8": "👑 Claude Opus 4.8 · максимум (дорого)",
     "openai/gpt-4o": "🤖 GPT-4o · сильный, универсал",
     "openai/gpt-4o-mini": "⚡ GPT-4o mini · дёшево, надёжный",
 }
@@ -97,13 +106,37 @@ def effective_model(role: str = "parsing") -> str:
     return _active_model or ROLE_MODELS.get(role) or settings.llm_parsing
 
 
+# Один переиспользуемый AsyncOpenAI на event loop. Зачем: AsyncOpenAI владеет httpx-пулом —
+# новый клиент на каждый вызов = холодный TCP+TLS-хендшейк к openrouter.ai каждый раз (~150-400мс
+# чистого setup на не-колокированном хосте). Синглтон держит соединение тёплым (keep-alive) →
+# хендшейк только на первом запросе. Мемоизация ПО event loop (как ADS-семафор в core.resilience):
+# pytest-asyncio даёт свой loop на тест, httpx-клиент из мёртвого loop бросил бы ошибку.
+# ВАЖНО (fail-closed, §10): проверка пустого ключа — ВНУТРИ, чтобы пустой ключ не закэшировал
+# битый клиент. Ключ читается из SecretStr в момент конструирования и в логи/repr не попадает (§5).
+# max_retries=0 + явный timeout: tenacity (core.resilience.call_llm) — ЕДИНСТВЕННЫЙ авторитет
+# ретраев, иначе встроенные 2 ретрая SDK вложились бы в 3 попытки tenacity (до 9 HTTP-попыток).
+_client_cache: AsyncOpenAI | None = None
+_client_loop: asyncio.AbstractEventLoop | None = None
+
+
 def _client() -> AsyncOpenAI:
-    if not settings.openrouter_api_key.get_secret_value():
+    global _client_cache, _client_loop
+    key = settings.openrouter_api_key.get_secret_value()
+    if not key:
         raise RuntimeError("OPENROUTER_API_KEY не задан в .env")
-    return AsyncOpenAI(
-        api_key=settings.openrouter_api_key.get_secret_value(),
-        base_url=settings.openrouter_base_url,
-    )
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:  # вне event loop (не наш рантайм-путь) — не кэшируем по loop
+        loop = None
+    if _client_cache is None or _client_loop is not loop:
+        _client_cache = AsyncOpenAI(
+            api_key=key,
+            base_url=settings.openrouter_base_url,
+            max_retries=0,  # ретраи — только через tenacity (core.resilience), без вложенности
+            timeout=httpx.Timeout(LLM_TIMEOUT_S),
+        )
+        _client_loop = loop
+    return _client_cache
 
 
 async def chat(
@@ -133,7 +166,15 @@ async def chat(
         kwargs["max_tokens"] = mt
     # usage:{include:true} — на текущем OpenRouter no-op (cost и так в ответе), но на старых
     # сборках включает usage.cost; безвредно. Через extra_body — это вне типизированных полей SDK.
-    kwargs["extra_body"] = {"usage": {"include": True}}
+    extra_body: dict[str, Any] = {"usage": {"include": True}}
+    # Provider-routing по скорости ТОЛЬКО для parsing (денежный путь, пользователь ждёт ответ):
+    # OpenRouter выберет быстрейший эндпоинт ТОЙ ЖЕ модели (вес не меняется → текст-нейтрально).
+    # Config-gated, по умолчанию ВЫКЛ (settings.openrouter_parsing_provider_sort=""). Копирайт не
+    # трогаем. Веса/качество модели неизменны — это выбор эндпоинта, не модели.
+    sort = settings.openrouter_parsing_provider_sort
+    if role == "parsing" and sort:
+        extra_body["provider"] = {"sort": sort}
+    kwargs["extra_body"] = extra_body
     # call_llm: zero-arg фабрика — tenacity создаёт свежую корутину на каждую попытку.
     # label → лог запроса к LLM (модель/роль, без секретов; ТЗ §15).
     resp = await call_llm(

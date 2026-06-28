@@ -1,14 +1,16 @@
 """A/B-тест моделей (Фаза −1) — выбираем модель ПО ДАННЫМ, не по бренду.
 
-Прогоняет реальные русские команды через несколько моделей (DeepSeek / Hermes / Claude)
+Прогоняет реальные русские команды через несколько моделей (DeepSeek / GPT / Claude)
 через OpenRouter и проверяет:
   1) function calling: выбрана ли правильная функция и аргументы (ловушки «на 20%» vs «до 20%»,
      суммы/валюта, типы соответствия broad/phrase/exact, неоднозначное → должна УТОЧНИТЬ);
-  2) генерация RSA-текстов: укладывается ли в лимиты (кириллица = 1 символ), без CAPS.
+  2) генерация RSA-текстов: укладывается ли в лимиты (кириллица = 1 символ), без CAPS;
+  3) СКОРОСТЬ (TTFT) — время-до-первого-токена парс-запроса: то, что реально ждёт пользователь.
+     Парсинг — денежный путь и самый чувствительный к задержке, поэтому скорость = отдельная ось.
 
 Запуск:  python scripts/ab_test_models.py
-Нужен только OPENROUTER_API_KEY в .env. Печатает таблицу: автоматический скоринг +
-сэмплы для ручной оценки качества русского (его автоматом не оценить).
+Нужен только OPENROUTER_API_KEY в .env. Печатает таблицу: автоматический скоринг (функции +
+длина + TTFT) + сэмплы для ручной оценки качества русского (его автоматом не оценить).
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -24,10 +27,13 @@ from openai import AsyncOpenAI  # noqa: E402
 
 from core.config import settings  # noqa: E402
 
+# Кандидаты с tool use (Hermes выбыл — нет function calling на OpenRouter). Сравниваем точность
+# парсинга, длину текстов и СКОРОСТЬ (TTFT). deepseek дёшев; gpt-4o-mini — быстрый/надёжный на
+# tool use; gpt-4o/claude — посильнее. Свой набор — правь список или env MODEL_CHOICES.
 CANDIDATES = [
     "deepseek/deepseek-chat",
-    "nousresearch/hermes-4-70b",
-    "nousresearch/hermes-4-405b",
+    "openai/gpt-4o-mini",
+    "openai/gpt-4o",
     "anthropic/claude-sonnet-4.6",
 ]
 
@@ -285,6 +291,39 @@ async def run_copy(cli: AsyncOpenAI, model: str) -> dict:
         return {"headlines": [], "descriptions": []}
 
 
+async def measure_ttft(cli: AsyncOpenAI, model: str, command: str, n: int = 3) -> float | None:
+    """Среднее время-до-первого-токена (TTFT) парс-запроса по n прогонам, в мс — то, что реально
+    ждёт пользователь в «печатает…». Стримим ответ и засекаем задержку до первого чанка. None, если
+    все прогоны упали. TTFT — отдельная ось от точности/цены: «скорость», а не «правильность»."""
+    samples: list[float] = []
+    for _ in range(n):
+        t0 = time.monotonic()
+        stream = None
+        try:
+            stream = await cli.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": SYSTEM},
+                    {"role": "user", "content": command},
+                ],
+                tools=TOOLS,
+                tool_choice="auto",
+                stream=True,
+            )
+            async for _chunk in stream:  # первый чанк = первый токен → фиксируем TTFT и выходим
+                samples.append((time.monotonic() - t0) * 1000)
+                break
+        except Exception:  # noqa: BLE001 — один упавший прогон не валит весь замер
+            continue
+        finally:
+            if stream is not None:
+                try:
+                    await stream.close()  # не копим открытые соединения после break
+                except Exception:  # noqa: BLE001
+                    pass
+    return sum(samples) / len(samples) if samples else None
+
+
 async def test_model(cli: AsyncOpenAI, model: str) -> dict:
     print(f"\n=== {model} ===")
     fc_pass = 0
@@ -298,6 +337,12 @@ async def test_model(cli: AsyncOpenAI, model: str) -> dict:
         fc_pass += int(ok)
         mark = "✓" if ok else "✗"
         print(f"  {mark} «{command}» → {fn} {args}  [{note}]")
+
+    # Скорость: TTFT парс-запроса (то, что ждёт пользователь). Отдельная ось от точности/цены.
+    ttft = await measure_ttft(cli, model, SCENARIOS[0][0])
+    print(
+        f"  TTFT парсинга (среднее 3): {f'{ttft:.0f} мс' if ttft is not None else '— (стрим недоступен)'}"
+    )
 
     # Тексты: автоматически — только длина; качество русского оцени глазами по сэмплам.
     copy = await run_copy(cli, model)
@@ -315,6 +360,7 @@ async def test_model(cli: AsyncOpenAI, model: str) -> dict:
         "fc_total": len(SCENARIOS),
         "copy_len_ok": len_ok,
         "copy_total": len_tot,
+        "ttft_ms": ttft,
     }
 
 
@@ -328,13 +374,20 @@ async def main() -> None:
             print(f"\n=== {model} === недоступна: {e}")
 
     print("\n\n================= ИТОГ =================")
-    print(f"{'модель':<32} {'функции':>10} {'длина текстов':>16}")
+    print(f"{'модель':<32} {'функции':>10} {'тексты':>10} {'TTFT мс':>10}")
     for r in sorted(results, key=lambda x: -x["fc_pass"]):
+        ttft = f"{r['ttft_ms']:.0f}" if r.get("ttft_ms") is not None else "—"
         print(
-            f"{r['model']:<32} {r['fc_pass']}/{r['fc_total']:>8} {r['copy_len_ok']}/{r['copy_total']:>12}"
+            f"{r['model']:<32} {r['fc_pass']}/{r['fc_total']:>8} "
+            f"{r['copy_len_ok']}/{r['copy_total']:>6} {ttft:>10}"
         )
     print(
         "\nПравило выбора: бери САМУЮ ДЕШЁВУЮ модель, что проходит function calling на денежном пути."
+    )
+    print(
+        "Скорость (TTFT) — отдельная ось: parsing ждёт пользователь. Если разница в колонке TTFT "
+        "ощутима — поставь быстрый эндпоинт через OPENROUTER_PARSING_PROVIDER_SORT (=throughput/latency) "
+        "или смени LLM_PARSING на более быструю tool-use модель."
     )
     print("Качество русского в текстах оцени глазами по сэмплам — его автоскоринг не ловит.")
     print(

@@ -77,6 +77,7 @@ from confirm.store import ConfirmStore
 from core.ads_errors import humanize_google_ads_error
 from core.config import settings
 from core.logging import log, setup_logging
+from core.observability import init_observability
 from core.resilience import run_ads_read_call
 from db.session import dispose_engine, init_db
 
@@ -577,13 +578,12 @@ async def report_(m: Message, command: CommandObject) -> None:
         return
     try:
         from ads.client import build_client
-        from reports.service import build_account_report, summary_text
+        from reports.service import build_account_report_async, summary_text
 
         client = build_client()
         async with ux.typing_action(m):
-            report = await run_ads_read_call(
-                build_account_report, client, DRAFT_ACCOUNT_ID, period, label="build_account_report"
-            )
+            # build_account_report_async параллелит 9 GAQL-запросов под семафором (≈2.5-3x быстрее)
+            report = await build_account_report_async(client, DRAFT_ACCOUNT_ID, period)
             report.currency = await _read_currency(client)  # §9: валюта денежных метрик
     except Exception as e:  # сеть/доступ/SDK
         await m.answer(f"⚠️ Не удалось построить отчёт: {ux.err_text(e)}")
@@ -600,14 +600,12 @@ async def _run_export(m: Message, period) -> None:
     path: str | None = None
     try:
         from ads.client import build_client
-        from reports.service import build_account_report
+        from reports.service import build_account_report_async
         from reports.xlsx import write_report_xlsx
 
         client = build_client()
         async with ux.upload_action(m):  # «отправляет документ…» пока строим .xlsx
-            report = await run_ads_read_call(
-                build_account_report, client, DRAFT_ACCOUNT_ID, period, label="build_account_report"
-            )
+            report = await build_account_report_async(client, DRAFT_ACCOUNT_ID, period)
             report.currency = await _read_currency(client)  # §9: валюта денежных метрик
             fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_report_")
             os.close(fd)
@@ -640,20 +638,21 @@ async def _run_sheets(m: Message, period) -> None:
     await m.answer("Готовлю Google Sheets-отчёт…")
     try:
         from ads.client import build_client
-        from reports.service import build_account_report
+        from reports.service import build_account_report_async
         from reports.sheets import publish_report_to_sheets
 
         client = build_client()
         async with ux.typing_action(m):
-            report = await run_ads_read_call(
-                build_account_report, client, DRAFT_ACCOUNT_ID, period, label="build_account_report"
-            )
+            report = await build_account_report_async(client, DRAFT_ACCOUNT_ID, period)
             report.currency = await _read_currency(client)  # §9: валюта денежных метрик
             url = await asyncio.to_thread(publish_report_to_sheets, report)
     except Exception as e:  # сеть/доступ/SDK/нет OAuth-scope Sheets
         await m.answer(
             f"⚠️ Не удалось выгрузить в Google Sheets: {ux.err_text(e)}\n"
-            "Возможно, у OAuth-токена нет scope drive.file — см. docs/DEPLOYMENT.md (Google Sheets)."
+            "У OAuth-токена нет доступа drive.file. Перевыпусти токен с обоими доступами: запусти "
+            "`python scripts/get_refresh_token.py` (на экране согласия отметь Google Ads и drive.file), "
+            "затем перезапусти бота. Подробно — docs/DEPLOYMENT.md (Google Sheets).\n"
+            "📄 Тот же отчёт без re-auth доступен сразу через /export (.xlsx)."
         )
         return
     await m.answer(f"✅ Google Sheets готов: {url}")
@@ -1360,13 +1359,11 @@ async def period_report(cq: CallbackQuery, callback_data: PeriodCB) -> None:
         return
     try:
         from ads.client import build_client
-        from reports.service import build_account_report, summary_text
+        from reports.service import build_account_report_async, summary_text
 
         client = build_client()
         async with ux.typing_action(cq.message):
-            report = await run_ads_read_call(
-                build_account_report, client, DRAFT_ACCOUNT_ID, period, label="build_account_report"
-            )
+            report = await build_account_report_async(client, DRAFT_ACCOUNT_ID, period)
             report.currency = await _read_currency(client)  # §9: валюта денежных метрик
     except Exception as e:  # сеть/доступ/SDK
         await cq.message.answer(f"⚠️ Не удалось построить отчёт: {ux.err_text(e)}")
@@ -1602,6 +1599,7 @@ async def on_error(event: ErrorEvent) -> bool:
 
 async def main() -> None:
     setup_logging()
+    init_observability()  # Sentry — no-op без SENTRY_DSN (core.observability)
     token = settings.telegram_bot_token.get_secret_value()
     if not token:
         log.warning("TELEGRAM_BOT_TOKEN пуст — добавь в .env (токен у @BotFather).")
@@ -1623,18 +1621,29 @@ async def main() -> None:
             log.info("модель ИИ: активна %s (из user_settings)", saved_model)
     except Exception as e:  # настройка не критична — стартуем на дефолтах из .env
         log.warning("model_override не загружен из БД: %s", type(e).__name__)
+    try:  # прогрев Google Ads клиента: тяжёлый импорт SDK + OAuth выполняем на старте off-loop,
+        # а не на первом /status — иначе первый интерактивный read морозит event loop на ~0.5-2с.
+        from ads.client import build_client
+
+        await asyncio.to_thread(build_client)  # @lru_cache → все последующие вызовы мгновенны
+    except Exception as e:  # cred-сбой на старте не валит бота — реальные вызовы всё равно проверят
+        log.warning("прогрев build_client не удался: %s", type(e).__name__)
     dp.message.outer_middleware(WhitelistMiddleware())
     dp.callback_query.outer_middleware(WhitelistMiddleware())
     dp.message.outer_middleware(ThrottleMiddleware())  # анти-спам (ТЗ §12), после whitelist
     bot = Bot(token)
-    try:
-        # Меню-команды + профиль бота (about/description в @BotFather). Всё косметика —
-        # ставим при каждом старте, чтобы правки текстов подхватывались без ручного BotFather.
-        await bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeAllPrivateChats())
-        await bot.set_my_short_description(texts.BOT_SHORT_DESCRIPTION)
-        await bot.set_my_description(texts.BOT_DESCRIPTION)
-    except Exception as e:  # не критично — бот поднимется и без меню-команд/описаний
-        log.warning("set_my_* (команды/описание) не удалось: %s: %s", type(e).__name__, e)
+    # Меню-команды + профиль бота (about/description в @BotFather). Всё косметика — ставим при
+    # каждом старте, чтобы правки текстов подхватывались без ручного BotFather. ПАРАЛЛЕЛЬНО
+    # (3 независимых round-trip к Telegram): раньше последовательно задерживало приём апдейтов.
+    # return_exceptions=True сохраняет «не критично», но КАЖДУЮ ошибку логируем (иначе потеряли бы).
+    for r in await asyncio.gather(
+        bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeAllPrivateChats()),
+        bot.set_my_short_description(texts.BOT_SHORT_DESCRIPTION),
+        bot.set_my_description(texts.BOT_DESCRIPTION),
+        return_exceptions=True,
+    ):
+        if isinstance(r, Exception):  # не критично — бот поднимется и без меню-команд/описаний
+            log.warning("set_my_* (команды/описание) не удалось: %s: %s", type(r).__name__, r)
     sched = None
     try:
         from scheduler.service import setup_scheduler

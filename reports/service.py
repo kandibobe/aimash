@@ -7,9 +7,11 @@ spreadsheets/drive.file — валидируется только на боев�
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 from ads.client import ensure_allowed
+from core.resilience import run_ads_read_call
 from reports.period import Period
 from reports.queries import BREAKDOWN_FETCHERS, Breakdown, Metrics, fetch_totals
 
@@ -35,6 +37,42 @@ def build_account_report(
     totals = fetch_totals(client, customer_id, period)
     prev_totals = fetch_totals(client, customer_id, period.previous()) if with_comparison else None
     breakdowns = [f(client, customer_id, period) for f in BREAKDOWN_FETCHERS]
+    return ReportData(str(customer_id), period, totals, prev_totals, breakdowns, currency)
+
+
+async def build_account_report_async(
+    client, customer_id: str, period: Period, *, with_comparison: bool = True, currency: str = ""
+) -> ReportData:
+    """Async-сборка отчёта — ИДЕНТИЧНА build_account_report по данным, но независимые GAQL-фетчеры
+    идут ПАРАЛЛЕЛЬНО, а не последовательно (раньше 9 round-trip подряд в одном to_thread).
+
+    Каждый fetch_* (totals + prev + 7 разбивок) данных друг от друга НЕ зависит — собираем их через
+    run_ads_read_call (read-safe: ретраит TimeoutError+транзиентные) под общим семафором Google Ads
+    (ADS_MAX_CONCURRENCY): 9 запросов укладываются в ~ceil(9/4)=3 волны вместо 9 → ~2.5-3x быстрее
+    /report, /export, /sheets. asyncio.gather СОХРАНЯЕТ порядок отправки → разбивки остаются в
+    порядке BREAKDOWN_FETCHERS, summary_text по ключу 'campaign' резолвится как прежде. ensure_allowed
+    держится и здесь (быстрый fail-closed до фан-аута), и внутри каждого fetch_* (замок аккаунта §9).
+    Синхронный build_account_report оставлен дословно — на нём строятся тесты/не-async вызовы."""
+    ensure_allowed(customer_id)  # быстрый fail-closed ДО фан-аута; каждый fetch_* проверит ещё раз
+    tasks = [run_ads_read_call(fetch_totals, client, customer_id, period, label="rpt_totals")]
+    if with_comparison:
+        tasks.append(
+            run_ads_read_call(
+                fetch_totals, client, customer_id, period.previous(), label="rpt_prev"
+            )
+        )
+    tasks += [
+        run_ads_read_call(f, client, customer_id, period, label=f"rpt_{f.__name__}")
+        for f in BREAKDOWN_FETCHERS
+    ]
+    results = await asyncio.gather(*tasks)  # порядок результатов == порядок tasks
+    totals = results[0]
+    idx = 1
+    prev_totals = None
+    if with_comparison:
+        prev_totals = results[idx]
+        idx += 1
+    breakdowns = list(results[idx:])  # порядок == BREAKDOWN_FETCHERS
     return ReportData(str(customer_id), period, totals, prev_totals, breakdowns, currency)
 
 

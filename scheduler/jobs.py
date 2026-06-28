@@ -21,7 +21,7 @@ from db.models import Proposal, UserSettings
 from db.session import Session
 from reports.period import last_n_days
 from reports.queries import fetch_totals
-from reports.service import build_account_report, summary_text
+from reports.service import build_account_report_async, summary_text
 from scheduler.anomaly import detect_anomalies
 
 REPORT_WINDOW_DAYS = 7  # окно планового отчёта
@@ -50,7 +50,7 @@ async def run_scheduled_report(bot) -> None:
     try:
         client = build_client()
         period = last_n_days(REPORT_WINDOW_DAYS)
-        report = await asyncio.to_thread(build_account_report, client, DRAFT_ACCOUNT_ID, period)
+        report = await build_account_report_async(client, DRAFT_ACCOUNT_ID, period)
     except Exception as e:  # сеть/доступ/SDK — не валим планировщик
         log.warning("scheduler: плановый отчёт не собран: %s: %s", type(e).__name__, e)
         return

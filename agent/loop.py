@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any
 
@@ -147,11 +146,16 @@ async def _do_read(name: str, args: dict[str, Any]) -> dict[str, Any]:
     try:
         from ads.client import build_client
         from ads.read import account_currency, account_stats
+        from core.resilience import run_ads_read_call
 
         client = build_client()
-        st = await asyncio.to_thread(account_stats, client, cid, days)
+        # run_ads_read_call: таймаут+ретрай транзиентных/TimeoutError под семафором Google Ads —
+        # ограничивает хвост (зависший read капается на ADS_TIMEOUT_S, единичный блип → авторетрай).
+        st = await run_ads_read_call(account_stats, client, cid, days, label="account_stats")
         try:  # §9: валюта аккаунта (необязательна — без неё показываем метрики без кода валюты)
-            currency = await asyncio.to_thread(account_currency, client, cid)
+            currency = await run_ads_read_call(
+                account_currency, client, cid, label="account_currency"
+            )
         except Exception:  # noqa: BLE001
             currency = ""
         return {

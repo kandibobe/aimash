@@ -1,10 +1,16 @@
-"""Получить refresh token для Google Ads API (OAuth Desktop flow) и сохранить в .env.
+"""Получить refresh token для Google Ads API + Google Sheets-экспорта (OAuth Desktop flow) и сохранить в .env.
 
 При запуске откроется БРАУЗЕР на этой машине:
 1. Войди тем Google-аккаунтом (gmail от Антона), у которого есть доступ к Google Ads «Aimash» (775-364-3025).
 2. Если «Google hasn't verified this app» → Advanced → Go to … (норм для своего dev-приложения).
    Если «Access blocked» → добавь этот gmail в Test users в OAuth consent screen (или Publish → In Production).
-3. Разреши доступ. Скрипт сам впишет refresh_token в .env (GOOGLE_ADS_REFRESH_TOKEN) — токен не печатается.
+3. На экране согласия будут ДВА доступа: Google Ads и «See, edit, create … only files you open with this app»
+   (drive.file). Разреши ОБА — иначе /sheets упадёт с invalid_scope. Скрипт впишет refresh_token в .env
+   (GOOGLE_ADS_REFRESH_TOKEN) — токен не печатается.
+
+Зачем drive.file: команда /sheets создаёт Google-таблицу с отчётом (reports/sheets.py). Этот scope —
+минимально достаточный (доступ ТОЛЬКО к файлам, созданным приложением; чужие файлы недоступны).
+Google Ads-доступ (adwords) от этого не меняется — токен просто получает ОБА разрешения сразу.
 
 Секреты (client_id/secret) берутся из .env, не из кода.
 """
@@ -22,7 +28,12 @@ from google_auth_oauthlib.flow import InstalledAppFlow  # noqa: E402
 
 from core.config import settings  # noqa: E402
 
-SCOPES = ["https://www.googleapis.com/auth/adwords"]
+# adwords — Google Ads API; drive.file — /sheets-экспорт (reports/sheets.py: SHEETS_SCOPE).
+# Оба scope в ОДНОМ токене: иначе Sheets-рефреш просит drive.file, которого нет в гранте → invalid_scope.
+SCOPES = [
+    "https://www.googleapis.com/auth/adwords",
+    "https://www.googleapis.com/auth/drive.file",
+]
 ENV_PATH = ROOT / ".env"
 
 
@@ -62,9 +73,16 @@ def main() -> None:
         print("⚠️ refresh_token пуст — перезапусти и выдай согласие заново (prompt=consent).")
         sys.exit(1)
 
+    granted = set(getattr(creds, "scopes", None) or [])
+    if "https://www.googleapis.com/auth/drive.file" not in granted:
+        print(
+            "⚠️ Доступ drive.file НЕ выдан — /sheets продолжит падать с invalid_scope. "
+            "Перезапусти и на экране согласия отметь оба доступа (Google Ads + drive.file)."
+        )
     save_to_env(creds.refresh_token)
     print(
-        "✅ refresh_token получен и сохранён в .env (GOOGLE_ADS_REFRESH_TOKEN). Токен не печатается."
+        "✅ refresh_token получен и сохранён в .env (GOOGLE_ADS_REFRESH_TOKEN). Токен не печатается.\n"
+        "   Покрывает Google Ads + Google Sheets (/sheets). Перезапусти бота, чтобы подхватил новый токен."
     )
 
 
