@@ -4,7 +4,7 @@
 Аккаунт всегда Aimash Draft (замок в ads.client). Поддержаны (SUPPORTED_OPERATIONS):
 update_budget, update_bid, add_keywords, remove_keywords, add_negative_keywords, pause_campaign,
 resume_campaign, set_geo_proximity, set_geo_location, set_bidding_strategy, create_rsa,
-create_gdn_campaign.
+create_gdn_campaign, create_search_campaign.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
         "set_bidding_strategy",
         "create_rsa",
         "create_gdn_campaign",
+        "create_search_campaign",
     }
 )
 
@@ -344,6 +345,24 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             )
         finally:
             clear_pending_media(params["media_id"])  # успех или сбой — временные файлы чистим
+
+    if op == "create_search_campaign":
+        # Создание новой кампании — резолв существующей не нужен. Замок/валидацию/гейт держит
+        # сам apply_create_search_campaign (двойной гейт + user_initiated, всё PAUSED).
+        return await mutations.apply_create_search_campaign(
+            customer_id=customer_id,
+            campaign_name=params["campaign_name"],
+            final_url=params["final_url"],
+            headlines=params["headlines"],
+            descriptions=params["descriptions"],
+            budget_daily_micros=params["budget_daily_micros"],
+            keywords=params.get("keywords"),
+            match_type=params.get("match_type", "phrase"),
+            cpc_bid_micros=params.get("cpc_bid_micros", 500_000),
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
 
     if op == "create_rsa":
         # Группа уже зарезолвлена в курации (ad_group_id в params) → доп. резолв не нужен.

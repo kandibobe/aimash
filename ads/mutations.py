@@ -873,6 +873,196 @@ def _create_rsa_via_sdk(
     }
 
 
+# ── Создание поисковой (Search) кампании из текстов (§3): бюджет→Search→группа→RSA→ключи, PAUSED ─
+def _validate_search_inputs(
+    campaign_name: str,
+    headlines: list[str],
+    descriptions: list[str],
+    final_url: str,
+    budget_daily_micros: int,
+) -> None:
+    """Полная валидация В КОДЕ — ДО claim. Длину/составы/URL/бюджет/имя считает КОД (golden rule #4)."""
+    if not campaign_name or len(campaign_name) > 120:
+        raise ValueError("название кампании 1–120 символов")
+    _validate_rsa_inputs(
+        headlines, descriptions, final_url, None, None
+    )  # реюз RSA-валидации набора
+    if budget_daily_micros <= 0:
+        raise ValueError("дневной бюджет должен быть > 0")
+    if budget_daily_micros > MAX_AMOUNT_MICROS:
+        raise ValueError("дневной бюджет подозрительно большой — проверь команду")
+
+
+async def apply_create_search_campaign(
+    *,
+    customer_id: str,
+    campaign_name: str,
+    final_url: str,
+    headlines: list[str],
+    descriptions: list[str],
+    budget_daily_micros: int,
+    keywords: list[str] | None = None,
+    match_type: str = "phrase",
+    cpc_bid_micros: int = 500_000,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """Создать поисковую кампанию из текстов за двойным гейтом. Все сущности — PAUSED (0 расхода).
+    Создание — ТОЛЬКО прямой командой пользователя (как бюджет/GDN). НЕ через run_ads_call: цепочка
+    из создающих вызовов НЕ идемпотентна (авто-ретрай породил бы дубли) — от повтора защищает claim."""
+    ensure_allowed(customer_id)  # гейт 1 — замок аккаунта
+    _validate_search_inputs(campaign_name, headlines, descriptions, final_url, budget_daily_micros)
+    clean_kw = normalize_keywords(keywords) if keywords else []
+    proposal = await _require_confirmation(confirm_store, confirmation_id, "create_search_campaign")
+    if not proposal.user_initiated:
+        raise PermissionError("создание кампании должно быть прямой командой пользователя")
+    result = await asyncio.to_thread(
+        _create_search_campaign_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_name=campaign_name,
+        final_url=final_url,
+        headlines=headlines,
+        descriptions=descriptions,
+        budget_micros=int(budget_daily_micros),
+        keywords=clean_kw,
+        match_type=match_type,
+        cpc_bid_micros=int(cpc_bid_micros),
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+def _create_search_campaign_via_sdk(
+    client,
+    customer_id: str,
+    *,
+    campaign_name: str,
+    final_url: str,
+    headlines: list[str],
+    descriptions: list[str],
+    budget_micros: int,
+    keywords: list[str],
+    match_type: str,
+    cpc_bid_micros: int,
+) -> dict:
+    """Синхронная цепочка v24: budget → campaign(SEARCH,PAUSED,manual CPC) → ad group(PAUSED) →
+    RSA(PAUSED) → опц. ключевые слова. Статусы PAUSED зашиты в КОДЕ → 0 расхода. При сбое создания
+    кампании удаляем осиротевший бюджет (как GDN); сбой после кампании оставляет PAUSED-сущности
+    (безопасно, 0 расхода)."""
+    cid = str(customer_id)
+    stamp = str(int(time.time()))
+
+    # 1) Бюджет.
+    budget_svc = client.get_service("CampaignBudgetService")
+    bop = client.get_type("CampaignBudgetOperation")
+    bop.create.name = f"{campaign_name}_budget_{stamp}"
+    bop.create.amount_micros = int(budget_micros)
+    bop.create.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
+    bop.create.explicitly_shared = False
+    budget_rn = (
+        budget_svc.mutate_campaign_budgets(customer_id=cid, operations=[bop])
+        .results[0]
+        .resource_name
+    )
+
+    # 2) Кампания (SEARCH, PAUSED, manual CPC, поиск + поисковые партнёры).
+    camp_svc = client.get_service("CampaignService")
+    cop = client.get_type("CampaignOperation")
+    c = cop.create
+    c.name = campaign_name
+    c.advertising_channel_type = client.enums.AdvertisingChannelTypeEnum.SEARCH
+    c.status = client.enums.CampaignStatusEnum.PAUSED  # код решает — не показывается до включения
+    c.campaign_budget = budget_rn
+    c.manual_cpc.enhanced_cpc_enabled = False
+    c.network_settings.target_google_search = True
+    c.network_settings.target_search_network = True
+    c.network_settings.target_content_network = False
+    c.network_settings.target_partner_search_network = False
+    try:  # v24 может требовать декларацию EU-политической рекламы при создании
+        c.contains_eu_political_advertising = (
+            client.enums.EuPoliticalAdvertisingStatusEnum.DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
+        )
+    except Exception:  # noqa: BLE001 — поле опционально на части аккаунтов
+        pass
+    try:
+        campaign_rn = (
+            camp_svc.mutate_campaigns(customer_id=cid, operations=[cop]).results[0].resource_name
+        )
+    except Exception:
+        try:  # откат осиротевшего бюджета (explicitly_shared=False)
+            dop = client.get_type("CampaignBudgetOperation")
+            dop.remove = budget_rn
+            budget_svc.mutate_campaign_budgets(customer_id=cid, operations=[dop])
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+
+    # 3) Группа объявлений (SEARCH_STANDARD, PAUSED).
+    ag_svc = client.get_service("AdGroupService")
+    agop = client.get_type("AdGroupOperation")
+    ag = agop.create
+    ag.name = f"{campaign_name}_ag_{stamp}"
+    ag.campaign = campaign_rn
+    ag.status = client.enums.AdGroupStatusEnum.PAUSED
+    ag.type_ = client.enums.AdGroupTypeEnum.SEARCH_STANDARD
+    ag.cpc_bid_micros = int(cpc_bid_micros)
+    ad_group_rn = (
+        ag_svc.mutate_ad_groups(customer_id=cid, operations=[agop]).results[0].resource_name
+    )
+
+    # 4) RSA-объявление (PAUSED).
+    ad_svc = client.get_service("AdGroupAdService")
+    adop = client.get_type("AdGroupAdOperation")
+    aga = adop.create
+    aga.ad_group = ad_group_rn
+    aga.status = client.enums.AdGroupAdStatusEnum.PAUSED
+    aga.ad.final_urls.append(str(final_url))
+    rsa = aga.ad.responsive_search_ad
+    for text in headlines:
+        a = client.get_type("AdTextAsset")
+        a.text = text
+        rsa.headlines.append(a)
+    for text in descriptions:
+        a = client.get_type("AdTextAsset")
+        a.text = text
+        rsa.descriptions.append(a)
+    ad_rn = ad_svc.mutate_ad_group_ads(customer_id=cid, operations=[adop]).results[0].resource_name
+
+    # 5) Опциональные ключевые слова в группу.
+    kw_created = 0
+    if keywords:
+        crit_svc = client.get_service("AdGroupCriterionService")
+        mt = getattr(client.enums.KeywordMatchTypeEnum, str(match_type).upper())
+        enabled = client.enums.AdGroupCriterionStatusEnum.ENABLED
+        kops = []
+        for text in keywords:
+            kop = client.get_type("AdGroupCriterionOperation")
+            kop.create.ad_group = ad_group_rn
+            kop.create.status = enabled
+            kop.create.keyword.text = text
+            kop.create.keyword.match_type = mt
+            kops.append(kop)
+        kw_created = len(
+            crit_svc.mutate_ad_group_criteria(customer_id=cid, operations=kops).results
+        )
+
+    return {
+        "customer_id": cid,
+        "campaign_name": campaign_name,
+        "campaign": campaign_rn,
+        "budget": budget_rn,
+        "ad_group": ad_group_rn,
+        "ad": ad_rn,
+        "headlines": len(headlines),
+        "descriptions": len(descriptions),
+        "keywords": kw_created,
+        "status": "PAUSED",
+        "applied": True,
+    }
+
+
 # ── Создание GDN-кампании из фото (§11): фото→Asset→Display→группа→RDA, всё PAUSED ─
 GDN_MAX_HEADLINES = 5
 GDN_MAX_DESCRIPTIONS = 5

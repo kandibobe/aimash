@@ -40,6 +40,7 @@ MUTATION_TOOLS = {
     "set_bidding_strategy",
     "create_rsa",
     "create_gdn_campaign",
+    "create_search_campaign",
 }
 READ_TOOLS = {"get_stats", "generate_rsa", "keyword_research"}
 
@@ -342,6 +343,45 @@ class CreateGdnCampaign(BaseModel):
         return v
 
 
+class CreateSearchCampaign(BaseModel):
+    """Финальные параметры поисковой (Search) кампании (§3). Минтуется ботом после визарда
+    (/newsearch: генерация RSA), не из LLM напрямую. Длину/составы считает КОД — зеркалит
+    ads.mutations._validate_search_inputs (defense-in-depth). Ключевые слова — опциональны."""
+
+    campaign_name: str = Field(min_length=1, max_length=120)
+    final_url: str
+    headlines: list[str] = Field(min_length=RSA_MIN_HEADLINES, max_length=RSA_MAX_HEADLINES)
+    descriptions: list[str] = Field(
+        min_length=RSA_MIN_DESCRIPTIONS, max_length=RSA_MAX_DESCRIPTIONS
+    )
+    budget_daily_micros: int = Field(gt=0, le=1_000_000_000_000)  # ≤1e12 micros (=1M единиц валюты)
+    keywords: list[str] = Field(default_factory=list, max_length=50)
+    match_type: MatchType = "phrase"
+    cpc_bid_micros: int = Field(default=500_000, gt=0, le=1_000_000_000_000)
+
+    @field_validator("final_url")
+    @classmethod
+    def _url(cls, v):
+        if not v or not str(v).startswith(("http://", "https://")):
+            raise ValueError("нужен валидный final_url (http/https)")
+        return v
+
+    @field_validator("headlines")
+    @classmethod
+    def _h(cls, v):
+        return _assert_rsa_len(v, "headline")
+
+    @field_validator("descriptions")
+    @classmethod
+    def _d(cls, v):
+        return _assert_rsa_len(v, "description")
+
+    @field_validator("keywords")
+    @classmethod
+    def _kw(cls, v):
+        return normalize_keywords(v) if v else []
+
+
 SCHEMAS: dict[str, type[BaseModel]] = {
     "update_budget": UpdateBudget,
     "update_bid": UpdateBid,
@@ -355,6 +395,7 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "set_bidding_strategy": SetBiddingStrategy,
     "create_rsa": CreateRsa,
     "create_gdn_campaign": CreateGdnCampaign,
+    "create_search_campaign": CreateSearchCampaign,
     "get_stats": GetStats,
     "generate_rsa": GenerateRsa,
     "keyword_research": KeywordResearch,
