@@ -100,8 +100,21 @@ def test_err_text_redacts_secret_in_exception():
 
 
 def test_err_text_plain_for_clean_message():
+    # валидационная ошибка — без подсказки-суффикса (текст самодостаточен)
     out = ux.err_text(ValueError("кампания не найдена"))
     assert out == "ValueError: кампания не найдена"
+
+
+def test_err_text_appends_hint_for_transient_errors():
+    # сеть/таймаут/LLM → короткая подсказка «что делать»; валидация — без подсказки
+    assert "попробуй ещё раз" in ux.err_text(TimeoutError("read timed out")).lower()
+    assert "сеть" in ux.err_text(ConnectionError("connection refused")).lower()
+
+    class _OpenAIErr(Exception):
+        __module__ = "openai.error"
+
+    assert "/model" in ux.err_text(_OpenAIErr("rate limit exceeded"))
+    assert ux._err_hint(ValueError("bad")) == ""
 
 
 # ── длинные proposal ─────────────────────────────────────────────────────────────

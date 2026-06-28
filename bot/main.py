@@ -394,7 +394,10 @@ async def _present_proposal(
         await ux.send_proposal_text(
             message,
             full_text=display,
-            header_html="📝 <b>Черновик изменения</b> — полный текст во вложении ⬆️\n\nПодтвердить?",
+            header_html=(
+                "📎 <b>Черновик изменения</b> — полный текст во вложении ⬆️\n"
+                "Это одно изменение. Подтверди кнопками <b>✅ / ❌</b> ниже 👇"
+            ),
             reply_markup=confirm_kb(cid),
             parse_mode=ParseMode.HTML,
         )

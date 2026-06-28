@@ -74,6 +74,21 @@ async def chat_action(event: object, action: str = ChatAction.TYPING) -> AsyncIt
             pass
 
 
+def _err_hint(e: BaseException) -> str:
+    """Короткая подсказка «что делать» для частых ВРЕМЕННЫХ ошибок (сеть/LLM); '' если подсказки
+    нет. Срабатывает только на узнаваемых классах — валидационные ошибки (ValueError и т.п.)
+    остаются без суффикса (их текст уже самодостаточен)."""
+    text = str(e).lower()
+    mod = type(e).__module__ or ""
+    if isinstance(e, TimeoutError) or "timed out" in text or "timeout" in text:
+        return " — попробуй ещё раз через минуту."
+    if isinstance(e, ConnectionError):
+        return " — проверь сеть и попробуй ещё раз."
+    if mod.startswith("openai") or "rate limit" in text or "rate_limit" in text:
+        return " — модель занята или достигнут лимит: упрости запрос или смени модель (/model)."
+    return ""
+
+
 def err_text(e: BaseException) -> str:
     """Безопасный текст исключения для показа пользователю (golden rule #5): редактирует
     секрето-подобные подстроки. str(e) от google-ads/google.auth/OpenAI может нести токен/креды,
@@ -82,13 +97,15 @@ def err_text(e: BaseException) -> str:
 
     GoogleAdsException → единый богатый humanize (§15: сообщения+коды+request_id вместо сырого
     дампа протобуфа), тот же, что на мутационном пути — чтобы read- и write-ошибки выглядели
-    одинаково понятно. Дакт-тайпинг (failure.errors) — без жёсткого импорта google.ads."""
+    одинаково понятно. Дакт-тайпинг (failure.errors) — без жёсткого импорта google.ads.
+
+    Для частых временных ошибок (сеть/LLM) добавляем короткую подсказку к действию (_err_hint)."""
     failure = getattr(e, "failure", None)
     if getattr(failure, "errors", None):
         from core.ads_errors import humanize_google_ads_error  # сам редактирует секреты
 
         return humanize_google_ads_error(e)
-    return redact_text(f"{type(e).__name__}: {e}")
+    return redact_text(f"{type(e).__name__}: {e}") + _err_hint(e)
 
 
 def typing_action(event: object):  # noqa: ANN201 — возвращает async-CM
