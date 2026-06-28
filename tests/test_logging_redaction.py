@@ -86,6 +86,42 @@ def test_resolve_level_precedence(monkeypatch):
     assert L._resolve_level(None) == logging.INFO  # дефолт
 
 
+def test_redact_text_scrubs_developer_token_by_known_value(monkeypatch):
+    """Google Ads developer_token — «голый» алфанумерик без префикса/разделителя: под форму-паттерн
+    НЕ подходит. redact_text обязан вычистить его по точному значению из settings (golden rule #5),
+    т.к. outward-пути (err_text/humanize/record_failure) зовут ТОЛЬКО redact_text, мимо фильтра."""
+    from core.config import settings
+
+    token = "AbC123dEf456Gh789Jk012"  # 22-симв. форма developer-токена, gitleaks:allow
+    monkeypatch.setattr(
+        settings, "google_ads_developer_token", type(settings.google_ads_developer_token)(token)
+    )
+    out = L.redact_text(
+        f"GoogleAdsException: developer token {token} is invalid"
+    )  # без разделителя
+    assert token not in out
+    assert L.REDACTED in out
+
+
+def test_redact_text_scrubs_openrouter_key_by_shape():
+    key = "sk-or-v1-0123456789abcdef0123456789abcdef"  # gitleaks:allow
+    out = L.redact_text(f"401 Unauthorized for key {key}")
+    assert key not in out and L.REDACTED in out
+
+
+def test_err_text_redacts_bare_developer_token(monkeypatch):
+    """bot.ux.err_text (текст ошибки в Telegram) не утекает developer_token, даже без 'token='."""
+    from bot.ux import err_text
+    from core.config import settings
+
+    token = "Zz99Yy88Xx77Ww66Vv55Uu"  # gitleaks:allow
+    monkeypatch.setattr(
+        settings, "google_ads_developer_token", type(settings.google_ads_developer_token)(token)
+    )
+    msg = err_text(RuntimeError(f"google.auth refused: {token} not authorized"))  # bare-токен
+    assert token not in msg and L.REDACTED in msg
+
+
 def test_known_secret_value_redacted_via_filter(monkeypatch):
     # Секрет, который НЕ подходит под паттерны (короткое «обычное» слово), но известен из settings.
     from core.config import settings

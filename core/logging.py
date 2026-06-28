@@ -32,6 +32,8 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b[A-Za-z0-9_\-]{43}="), REDACTED),
     # Authorization: Bearer <...>
     (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]+"), "Bearer " + REDACTED),
+    # OpenRouter / OpenAI-стиль API-ключи (sk-or-v1-…, sk-…) — у них есть префикс sk-
+    (re.compile(r"\bsk-(?:or-)?[A-Za-z0-9_\-]{16,}\b"), REDACTED),
     # key=value / key: value для чувствительных ключей (значение скрываем, ключ оставляем)
     (
         re.compile(
@@ -44,10 +46,19 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
 
 def redact_text(text: str) -> str:
-    """Заменить секрето-подобные подстроки на REDACTED. Безопасно (никогда не бросает)."""
+    """Заменить секрето-подобные подстроки на REDACTED. Безопасно (никогда не бросает).
+
+    Скрабит по ДВУМ источникам: (1) ТОЧНЫЕ известные значения SecretStr — нужно, т.к. Google Ads
+    developer_token это «голый» алфанумерик без префикса/разделителя, под который НЕТ безопасного
+    паттерна; (2) паттерны формы. Так outward-пути, зовущие ТОЛЬКО redact_text мимо RedactionFilter
+    (bot.ux.err_text → Telegram, core.ads_errors.humanize, confirm.store.record_failure → audit_log),
+    не утекут секрет (golden rule #5). Точные значения — ДО паттернов (целиком)."""
     if not text:
         return text
     out = text
+    for secret in _known_secret_values():
+        if secret in out:
+            out = out.replace(secret, REDACTED)
     for pat, repl in _PATTERNS:
         out = pat.sub(repl, out)
     return out

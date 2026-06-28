@@ -359,7 +359,9 @@ def _before(params: dict) -> dict | None:
 def _money_summary(label: str, params: dict) -> str:
     c = params.get("campaign", "")
     mode = params.get("mode")
-    cur = _CURRENCY_HUMAN.get(str(params.get("currency", "")), str(params.get("currency", "")))
+    # currency=None (не указана → валюта аккаунта) → код валюты не печатаем (числа уже в валюте
+    # аккаунта; сверка валюты — на предпросмотре). 'percent' → «%». Неизвестное → без кода.
+    cur = _CURRENCY_HUMAN.get(params.get("currency") or "", "")
     try:
         v = f"{float(params.get('value')):g}"
     except (TypeError, ValueError):
@@ -371,7 +373,7 @@ def _money_summary(label: str, params: dict) -> str:
         if mode == "increase_by_percent":
             tail = f" (+{v}%)"
         elif mode == "increase_by_amount":
-            tail = f" (+{v} {cur})".rstrip()
+            tail = f" (+{f'{v} {cur}'.strip()})"  # cur='' (валюта аккаунта) → «(+10)», без лишнего пробела
         else:
             tail = ""
         return f"Кампания «{c}» — {label}: {before_s} → {after_s}{tail}".rstrip()

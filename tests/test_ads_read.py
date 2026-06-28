@@ -120,13 +120,20 @@ def test_account_stats_empty_is_zero():
     assert stats.conversions == 0.0 and stats.conv_value == 0.0
 
 
-def test_account_stats_days_clamped_to_preset():
+def test_account_stats_window_matches_requested_days():
+    """Окно строится из РЕАЛЬНОГО N (любого), а не схлопывается в пресет — иначе подпись врала бы
+    про объём денежных метрик (находка аудита: 90 дн. показывали 30 дн. данных)."""
+    from datetime import date, timedelta
+
     client = _FakeClient([])
+    end = date.today() - timedelta(days=1)  # вчера (как LAST_N_DAYS — без неполного сегодня)
     with allowed_ids(DRAFT_ACCOUNT_ID):
-        account_stats(client, DRAFT_ACCOUNT_ID, days=7)
-        assert "LAST_7_DAYS" in client._ga.last_query
-        account_stats(client, DRAFT_ACCOUNT_ID, days=90)  # не из пресета → молча 30
-        assert "LAST_30_DAYS" in client._ga.last_query
+        for n in (7, 14, 90, 60):
+            account_stats(client, DRAFT_ACCOUNT_ID, days=n)
+            q = client._ga.last_query
+            start = end - timedelta(days=n - 1)
+            assert f"BETWEEN '{start.isoformat()}' AND '{end.isoformat()}'" in q
+            assert "LAST_" not in q  # больше не пресет — реальное окно N дней
 
 
 def test_account_stats_rejects_foreign_account():

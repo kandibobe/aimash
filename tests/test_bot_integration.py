@@ -214,6 +214,40 @@ async def test_confirm_execute_failure_records_failed():
     assert "failed" in await _audit_statuses(cid)
 
 
+# ── Денежная безопасность: успех + сбой пост-успешного edit НЕ помечает failed ─────
+async def test_confirm_applied_then_edit_fails_stays_applied():
+    """execute_confirmed применил мутацию (status=applied, finalize записан), но пост-успешный
+    edit_text бросил TelegramBadRequest («message is not modified»/«to edit not found»). Это НЕ
+    должно пометить операцию failed (лишняя audit-строка failed + юзеру FAILED). Находка аудита:
+    APPLIED-edit лежал в той же try-ветке, что и record_failure."""
+    from aiogram.exceptions import TelegramBadRequest
+
+    await init_db()
+    cid = uuid.uuid4().hex
+    store = ConfirmStore()
+    msg = FakeMessage("возобнови X", chat_id=106, bot=FakeBot())
+    with patched(bm, "handle_command", _proposal_handler(cid)):
+        await bm.on_text(msg, FakeFSM())
+
+    async def fake_exec(s, c):  # успех: claim → finalize → applied
+        assert await s.claim(c, operation="resume_campaign") is not None
+        await s.finalize(c, result={"applied": True})
+        return {"applied": True}
+
+    class EditFailsMessage(FakeMessage):
+        async def edit_text(self, text: str = "", **kw):
+            raise TelegramBadRequest(method=None, message="message is not modified")
+
+    cq = FakeCallbackQuery(EditFailsMessage(chat_id=106))
+    with patched(bm, "execute_confirmed", fake_exec):
+        await bm.on_confirm(cq, ConfirmCB(action="ok", cid=cid))
+
+    assert (await store.get_confirmed(cid)).status == "applied"  # успех остался успехом
+    statuses = await _audit_statuses(cid)
+    assert "applied" in statuses
+    assert "failed" not in statuses  # косметический сбой edit НЕ дописал failed
+
+
 # ── ТЗ §5: большой список ключей в черновике → .xlsx-вложение, маленький → инлайн ──
 async def test_big_keyword_proposal_attaches_xlsx():
     await init_db()

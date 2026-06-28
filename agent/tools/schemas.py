@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from adcopy.validate import (
     RSA_MAX_DESCRIPTIONS,
@@ -49,6 +49,18 @@ READ_TOOLS = {"get_stats", "generate_rsa", "keyword_research"}
 
 
 # ── Pydantic-схемы (валидация в коде, не на доверии к модели) ───────────────────
+def _assert_mode_currency(mode: str | None, currency: str | None) -> None:
+    """Связка mode↔currency (golden rule #4): абсолютная сумма (set_to/increase_by_amount) НЕ может
+    нести currency='percent' — иначе процент умножился бы на 1e6 как абсолют (галлюцинация модели
+    вида currency='percent' + mode='set_to'). Сверка валюты с валютой аккаунта (без FX) — на пути
+    предпросмотра (ads.resolve.currency_mismatch), т.к. требует чтения аккаунта."""
+    if mode in ("set_to", "increase_by_amount") and currency == "percent":
+        raise ValueError(
+            "абсолютная сумма не может иметь currency='percent' — укажи валюту аккаунта "
+            "или опусти currency (тогда сумма трактуется в валюте аккаунта)"
+        )
+
+
 def _value_sane(v: float, mode: str | None) -> float:
     """Диапазон суммы считает КОД (golden rule #4): процент ≤1000%, абсолютная сумма ≤MAX_AMOUNT.
     Без верхней границы set_to/increase_by_amount пропустили бы галлюцинацию вида 999_999_999."""
@@ -63,12 +75,19 @@ class UpdateBudget(BaseModel):
     campaign: str
     mode: Literal["increase_by_percent", "increase_by_amount", "set_to"]
     value: float = Field(gt=0)
-    currency: Currency = "USD"
+    # None = «в валюте аккаунта» (модель указывает валюту ТОЛЬКО если её явно назвал пользователь).
+    # Сверка с реальной валютой аккаунта (без FX) — в ads.resolve.currency_mismatch на предпросмотре.
+    currency: Currency | None = None
 
     @field_validator("value")
     @classmethod
     def _val(cls, v, info):
         return _value_sane(v, info.data.get("mode"))
+
+    @model_validator(mode="after")
+    def _mode_currency(self):
+        _assert_mode_currency(self.mode, self.currency)
+        return self
 
 
 class UpdateBid(BaseModel):
@@ -77,12 +96,17 @@ class UpdateBid(BaseModel):
     campaign: str
     mode: Literal["increase_by_percent", "set_to"]
     value: float = Field(gt=0)
-    currency: Currency = "USD"
+    currency: Currency | None = None
 
     @field_validator("value")
     @classmethod
     def _val(cls, v, info):
         return _value_sane(v, info.data.get("mode"))
+
+    @model_validator(mode="after")
+    def _mode_currency(self):
+        _assert_mode_currency(self.mode, self.currency)
+        return self
 
 
 class AddKeywords(BaseModel):

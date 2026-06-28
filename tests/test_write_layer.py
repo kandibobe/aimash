@@ -986,6 +986,44 @@ async def test_record_failure_terminalizes_confirmed_but_not_applied():
     assert (await store.get_confirmed(cid2)).status == "applied"  # терминальный не понижен
 
 
+async def test_record_failure_redacts_secret_in_audit():
+    """Авторитетная редакция на границе БД (golden rule #5): секрет в тексте ошибки НЕ попадает в
+    audit_log. Прежний тест подавал ЧИСТУЮ строку — удаление redact_text на этой границе его бы
+    не уронило (находка аудита: ветка редакции не покрыта)."""
+    from sqlalchemy import select
+
+    from confirm.store import ConfirmStore
+    from core.logging import REDACTED
+    from db.models import AuditLog
+    from db.session import Session, init_db
+
+    await init_db()
+    store = ConfirmStore()
+    cid = uuid.uuid4().hex
+    await store.save_proposal(
+        confirmation_id=cid,
+        operation="update_budget",
+        customer_id=DRAFT_ACCOUNT_ID,
+        params={"campaign": "X", "mode": "set_to", "value": 10},
+        summary="b",
+        chat_id=1,
+        user_initiated=True,
+    )
+    await store.confirm(cid, chat_id=1)
+    secret = "1//0SECRETrefreshTOKENvalue123"  # gitleaks:allow — форма refresh-токена
+    await store.record_failure(cid, error=f"auth failed refresh_token={secret} denied")
+
+    async with Session() as s:
+        row = (
+            await s.execute(
+                select(AuditLog).where(AuditLog.confirmation_id == cid, AuditLog.status == "failed")
+            )
+        ).scalar_one()
+    blob = str(row.result)
+    assert secret not in blob  # секрет вычищен на границе audit_log
+    assert REDACTED in blob
+
+
 # ── FIX 1: confirmation_id одной операции нельзя «переиграть» в другую (wrong-op) ─
 async def test_apply_rejects_wrong_operation_confirmation():
     store = FakeStore(FakeProposal("add_keywords", "confirmed", user_initiated=True))

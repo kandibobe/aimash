@@ -90,6 +90,37 @@ def find_ad_groups(
     return out
 
 
+_CURRENCY_HUMAN = {"USD": "USD", "UAH": "грн", "EUR": "EUR"}
+
+
+def currency_mismatch(operation: str, params: dict, account_currency: str) -> str | None:
+    """Текст-уточнение, если абсолютная денежная команда (set_to/increase_by_amount) задана в валюте,
+    отличной от валюты аккаунта. FX НЕ делаем — суммы считаются в валюте аккаунта (golden rule #4:
+    «было→станет» обязан быть правдивым). None — расхождения нет / неприменимо.
+
+    - Только update_budget/update_bid; процентный режим — без валюты (None).
+    - currency не указана или 'percent' → трактуем как валюту аккаунта (расхождения нет).
+    - валюта аккаунта неизвестна (read не удался, '') → не блокируем (деградация, не показываем чужую).
+    """
+    if operation not in ("update_budget", "update_bid"):
+        return None
+    if params.get("mode") == "increase_by_percent":
+        return None
+    claimed = params.get("currency")
+    if not claimed or claimed == "percent":
+        return None
+    acct = (account_currency or "").strip().upper()
+    if not acct:
+        return None
+    if str(claimed).strip().upper() != acct:
+        human = _CURRENCY_HUMAN.get(acct, acct)
+        return (
+            f"Сумма указана в {claimed}, а аккаунт ведётся в {human}. "
+            f"Конвертацию валют не делаю — переформулируй сумму в {human}."
+        )
+    return None
+
+
 def compute_new_micros(current_micros: int, mode: str, value: float) -> int:
     """Пересчёт бюджета в micros по режиму команды. Валюта не конвертируется (значение в валюте аккаунта)."""
     if mode == "increase_by_percent":

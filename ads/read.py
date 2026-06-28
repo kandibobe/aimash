@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 from google.ads.googleads.client import GoogleAdsClient
 
@@ -65,14 +66,21 @@ def list_child_accounts(client: GoogleAdsClient, manager_id: str) -> list[ChildA
 
 
 def account_stats(client: GoogleAdsClient, customer_id: str, days: int = 30) -> AccountStats:
-    """Сводная статистика по аккаунту за период. Только для аккаунтов из белого списка."""
+    """Сводная статистика по аккаунту за РЕАЛЬНЫЙ период N дней. Только для аккаунтов из белого списка.
+
+    Окно строим из фактического N через `segments.date BETWEEN` (а не из пресета `LAST_N_DAYS`):
+    раньше любой N кроме 7/14/30 молча схлопывался в 30, и подпись «N дн.» врала про объём данных
+    (а это денежные метрики). end = вчера (как LAST_N_DAYS — без неполного «сегодня»); нормализация
+    таймзон по дочерним аккаунтам — §8, отложена (один аккаунт → host-дата ок)."""
     ensure_allowed(customer_id)
-    days = {7: 7, 14: 14, 30: 30}.get(days, 30)  # предустановленные диапазоны GAQL
+    n = max(1, int(days))
+    end = date.today() - timedelta(days=1)
+    start = end - timedelta(days=n - 1)
     ga = client.get_service("GoogleAdsService")
     q = (
         "SELECT metrics.impressions, metrics.clicks, metrics.cost_micros, "
         "metrics.conversions, metrics.conversions_value "
-        f"FROM customer WHERE segments.date DURING LAST_{days}_DAYS"
+        f"FROM customer WHERE segments.date BETWEEN '{start.isoformat()}' AND '{end.isoformat()}'"
     )
     imp = clk = cost = 0
     conv = cval = 0.0

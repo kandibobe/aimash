@@ -44,7 +44,7 @@ from adcopy.validate import validate as rsa_validate
 from ads.assets import clear_pending_media, prepare_display_images, save_pending_media
 from ads.client import DRAFT_ACCOUNT_ID
 from ads.mutations import GDN_BUSINESS_NAME_MAX
-from ads.resolve import find_ad_groups
+from ads.resolve import currency_mismatch, find_ad_groups
 from ads.service import execute_confirmed, read_before
 from agent import router
 from agent.loop import handle_command
@@ -287,6 +287,21 @@ async def _present_proposal(
     # и снимок-база для оптимистичной сверки при исполнении (TOCTOU). read_before fail-safe (None).
     async with ux.typing_action(message):
         before = await read_before(operation, params)
+        # P0 (golden rule #4): денежная команда в валюте ≠ валюте аккаунта → отказ с уточнением ДО
+        # показа кнопок (FX не делаем; иначе «было→станет» соврал бы про сумму). Валюта — best-effort:
+        # неизвестна (нет клиента/сбой read) ⇒ не блокируем (и чужую валюту на показе не печатаем).
+        if operation in ("update_budget", "update_bid"):
+            acct_cur = ""
+            try:
+                from ads.client import build_client
+
+                acct_cur = await _read_currency(build_client())
+            except Exception:  # noqa: BLE001 — валюту не определить → без FX-сверки, не роняем показ
+                acct_cur = ""
+            mismatch = currency_mismatch(operation, params, acct_cur)
+            if mismatch:
+                await message.answer("⚠️ " + mismatch)
+                return
     if before is not None:
         params = {**params, "_before": before}  # инертно для execute (apply_* читают свои ключи)
     # Человекочитаемая сводка по operation+params (деньги — реальное «40.00 → 48.00 (+20%)»).
@@ -1616,13 +1631,14 @@ async def _do_confirm(cq: CallbackQuery, cid: str) -> None:
         await cq.message.edit_text(texts.EXECUTING)  # убирает кнопки
     except TelegramBadRequest:
         pass
+    # ВАЖНО (денежный путь): успешное исполнение и косметический edit_text РАЗДЕЛЕНЫ. execute_confirmed
+    # уже применил мутацию и записал finalize → если бы пост-успешный edit_text (часто бросает
+    # TelegramBadRequest: «message is not modified»/«to edit not found» после >48ч) попал в этот же
+    # except — record_failure пометил бы УЖЕ применённую операцию как failed (лишняя audit-строка +
+    # юзеру FAILED). Поэтому ловим только сбой самого execute_confirmed, а APPLIED-edit — отдельно.
     try:
         result = await execute_confirmed(STORE, cid)
-        log.info("мутация применена cid=%s chat=%s", cid, chat_id)  # денежный путь — успех в лог
-        await cq.message.edit_text(
-            texts.APPLIED.format(result=texts.esc(result)), parse_mode=ParseMode.HTML
-        )
-    except Exception as e:  # доступ/резолв/SDK
+    except Exception as e:  # доступ/резолв/SDK — мутация НЕ применена
         # Денежный путь: пишем в лог С traceback (RedactionFilter чистит секреты) — раньше молчал;
         # в audit_log кладём УЖЕ редактированный текст (str(e) от SDK/google.auth может нести креды).
         log.error(
@@ -1643,6 +1659,16 @@ async def _do_confirm(cq: CallbackQuery, cid: str) -> None:
             )
         except TelegramBadRequest:
             pass
+        return
+    # Успех: мутация применена и finalize записан. Косметический сбой UI-edit НЕ должен пометить
+    # успешную операцию как failed — отдельный try/except, вне ветки record_failure.
+    log.info("мутация применена cid=%s chat=%s", cid, chat_id)  # денежный путь — успех в лог
+    try:
+        await cq.message.edit_text(
+            texts.APPLIED.format(result=texts.esc(result)), parse_mode=ParseMode.HTML
+        )
+    except TelegramBadRequest:
+        pass
 
 
 async def _do_cancel(cq: CallbackQuery, cid: str) -> None:
