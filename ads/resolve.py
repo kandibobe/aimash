@@ -33,9 +33,14 @@ class AdGroupRef:
     campaign_id: str
 
 
-def _gaql_escape(value: str) -> str:
-    """Экранирование строкового литерала для GAQL (предотвращает инъекцию в WHERE name = '...')."""
+def gaql_escape(value: str) -> str:
+    """Экранирование строкового литерала для GAQL (предотвращает инъекцию в WHERE name = '...').
+    ЕДИНЫЙ источник: используют и резолв по имени (user/model-вход), и mutations для literal-WHERE
+    с resource_name (источник — Google API, но эскейпим единообразно, чтобы не было дыр-исключений)."""
     return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+_gaql_escape = gaql_escape  # обратная совместимость (имя могло использоваться извне)
 
 
 def find_campaign_by_name(
@@ -43,7 +48,7 @@ def find_campaign_by_name(
 ) -> CampaignRef | None:
     ensure_allowed(customer_id)
     ga = client.get_service("GoogleAdsService")
-    safe = _gaql_escape(name)
+    safe = gaql_escape(name)
     q = (
         "SELECT campaign.id, campaign.name, campaign.status, campaign.campaign_budget, "
         "campaign_budget.amount_micros FROM campaign "
@@ -69,7 +74,7 @@ def find_ad_groups(
     (или кампания не найдена) — вызывающий код должен это обработать ДО любой записи."""
     ensure_allowed(customer_id)
     ga = client.get_service("GoogleAdsService")
-    safe = _gaql_escape(campaign_name)
+    safe = gaql_escape(campaign_name)
     q = (
         "SELECT ad_group.id, ad_group.name, ad_group.status, ad_group.cpc_bid_micros, "
         "ad_group.resource_name, campaign.id FROM ad_group "

@@ -24,6 +24,7 @@ from adcopy.validate import (
 )
 from adcopy.validate import validate as _rsa_validate
 from ads.client import ensure_allowed
+from ads.resolve import gaql_escape  # единый GAQL-эскейп для literal-WHERE (defense-in-depth)
 from ads.validation import assert_keyword_ok, normalize_keywords
 from core.ads_errors import error_code_names  # единый источник имён кодов ошибок Google Ads
 from core.limits import (
@@ -570,7 +571,7 @@ def _apply_bid_via_sdk(client, customer_id: str, campaign_id: str, bids: list) -
             customer_id=str(customer_id),
             query=(
                 "SELECT bidding_strategy.type FROM bidding_strategy "
-                f"WHERE bidding_strategy.resource_name = '{portfolio_rn}'"
+                f"WHERE bidding_strategy.resource_name = '{gaql_escape(portfolio_rn)}'"
             ),
         ):
             bst = row.bidding_strategy.type
@@ -756,7 +757,7 @@ def _set_geo_proximity_via_sdk(
         customer_id=str(customer_id),
         query=(
             "SELECT campaign_criterion.resource_name FROM campaign_criterion "
-            f"WHERE campaign_criterion.campaign = '{campaign_rn}' "
+            f"WHERE campaign_criterion.campaign = '{gaql_escape(campaign_rn)}' "
             "AND campaign_criterion.type = 'PROXIMITY'"
         ),
     ):
@@ -827,7 +828,7 @@ def _set_geo_location_via_sdk(
         customer_id=str(customer_id),
         query=(
             "SELECT campaign_criterion.resource_name FROM campaign_criterion "
-            f"WHERE campaign_criterion.campaign = '{campaign_rn}' "
+            f"WHERE campaign_criterion.campaign = '{gaql_escape(campaign_rn)}' "
             "AND campaign_criterion.type = 'LOCATION'"
         ),
     ):

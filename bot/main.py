@@ -203,6 +203,15 @@ def _valid_idx(seq: list | None, idx: int) -> TypeGuard[list]:
     return seq is not None and 0 <= idx < len(seq)
 
 
+def _cq_msg(cq: CallbackQuery) -> Message | None:
+    """Доступное Message из callback или None. aiogram отдаёт Message|InaccessibleMessage|None:
+    исходное сообщение может быть старше 48ч / удалено (InaccessibleMessage) или отсутствовать.
+    Правки/ответы по кнопке — только на реальном Message; иначе .edit_text/.answer бросили бы
+    AttributeError (его глотает глобальный errors-хендлер → «мёртвая» кнопка без ответа юзеру)."""
+    m = cq.message
+    return m if isinstance(m, Message) else None
+
+
 # ── Общие действия (чтобы команда и кнопка делали одно и то же) ─────────────────
 async def _send_help(message: Message) -> None:
     await message.answer(texts.HELP, parse_mode=ParseMode.HTML)
@@ -461,8 +470,11 @@ async def lang_cmd(m: Message, command: CommandObject) -> None:
 async def on_lang(cq: CallbackQuery, callback_data: LangCB) -> None:
     lang = i18n.set_lang(_cq_chat_id(cq), callback_data.code)
     await cq.answer()
+    msg = _cq_msg(cq)
+    if msg is None:
+        return
     try:
-        await cq.message.edit_text(i18n.t("lang_set", lang))
+        await msg.edit_text(i18n.t("lang_set", lang))
     except TelegramBadRequest:
         pass
 
@@ -580,7 +592,9 @@ async def on_model_reset(cq: CallbackQuery) -> None:
 async def on_model_custom(cq: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(ModelWizard.awaiting_model)
     await cq.answer()
-    await cq.message.answer(texts.MODEL_ASK_CUSTOM, parse_mode=ParseMode.HTML)
+    msg = _cq_msg(cq)
+    if msg is not None:
+        await msg.answer(texts.MODEL_ASK_CUSTOM, parse_mode=ParseMode.HTML)
 
 
 async def _slash_mutate(m: Message, command: CommandObject, operation: str) -> None:
@@ -994,7 +1008,11 @@ async def _rsa_start_from_intent(m: Message, brief: dict, state: FSMContext) -> 
         from ads.read import list_campaigns
 
         client = build_client()
-        camps = await asyncio.to_thread(list_campaigns, client, DRAFT_ACCOUNT_ID)
+        # как остальной read-слой: таймаут+ретрай транзиентных под семафором Google Ads
+        # (а не «голый» to_thread — иначе зависший SearchStream не капается и копит in-flight).
+        camps = await run_ads_read_call(
+            list_campaigns, client, DRAFT_ACCOUNT_ID, label="list_campaigns"
+        )
     except Exception as e:  # сеть/доступ/SDK
         await m.answer(f"⚠️ Не удалось получить кампании: {ux.err_text(e)}")
         return
@@ -1107,7 +1125,11 @@ async def rsa_cmd(m: Message, state: FSMContext) -> None:
         from ads.read import list_campaigns
 
         client = build_client()
-        camps = await asyncio.to_thread(list_campaigns, client, DRAFT_ACCOUNT_ID)
+        # как остальной read-слой: таймаут+ретрай транзиентных под семафором Google Ads
+        # (а не «голый» to_thread — иначе зависший SearchStream не капается и копит in-flight).
+        camps = await run_ads_read_call(
+            list_campaigns, client, DRAFT_ACCOUNT_ID, label="list_campaigns"
+        )
     except Exception as e:  # сеть/доступ/SDK
         await m.answer(f"⚠️ Не удалось получить кампании: {ux.err_text(e)}")
         return
@@ -1596,45 +1618,54 @@ async def on_audience_pick(cq: CallbackQuery, callback_data: AudienceCB) -> None
 @dp.callback_query(PeriodCB.filter(F.target == "report"))
 async def period_report(cq: CallbackQuery, callback_data: PeriodCB) -> None:
     await cq.answer()
+    msg = _cq_msg(cq)
+    if msg is None:
+        return
     try:
         period = _period_from_arg(callback_data.code)
     except ValueError as e:
-        await cq.message.answer(f"⚠️ {e}")
+        await msg.answer(f"⚠️ {e}")
         return
     try:
         from ads.client import build_client
         from reports.service import build_account_report_async, summary_text
 
         client = build_client()
-        async with ux.typing_action(cq.message):
+        async with ux.typing_action(msg):
             report = await build_account_report_async(client, DRAFT_ACCOUNT_ID, period)
             report.currency = await _read_currency(client)  # §9: валюта денежных метрик
     except Exception as e:  # сеть/доступ/SDK
-        await cq.message.answer(f"⚠️ Не удалось построить отчёт: {ux.err_text(e)}")
+        await msg.answer(f"⚠️ Не удалось построить отчёт: {ux.err_text(e)}")
         return
-    await cq.message.answer(summary_text(report))
+    await msg.answer(summary_text(report))
 
 
 @dp.callback_query(PeriodCB.filter(F.target == "export"))
 async def period_export(cq: CallbackQuery, callback_data: PeriodCB) -> None:
     await cq.answer()
+    msg = _cq_msg(cq)
+    if msg is None:
+        return
     try:
         period = _period_from_arg(callback_data.code)
     except ValueError as e:
-        await cq.message.answer(f"⚠️ {e}")
+        await msg.answer(f"⚠️ {e}")
         return
-    await _run_export(cq.message, period)
+    await _run_export(msg, period)
 
 
 @dp.callback_query(PeriodCB.filter(F.target == "sheets"))
 async def period_sheets(cq: CallbackQuery, callback_data: PeriodCB) -> None:
     await cq.answer()
+    msg = _cq_msg(cq)
+    if msg is None:
+        return
     try:
         period = _period_from_arg(callback_data.code)
     except ValueError as e:
-        await cq.message.answer(f"⚠️ {e}")
+        await msg.answer(f"⚠️ {e}")
         return
-    await _run_sheets(cq.message, period)
+    await _run_sheets(msg, period)
 
 
 # ── Inline: подтверждение/отмена черновика (confirm-гейт) ─────────────────────────
@@ -1806,7 +1837,9 @@ async def rsa_refine(cq: CallbackQuery, callback_data: RsaCB, state: FSMContext)
     await state.set_state(RsaRefine.awaiting_text)
     await state.update_data(cid=callback_data.cid, kind=callback_data.kind, idx=callback_data.idx)
     await cq.answer()
-    await cq.message.answer(texts.RSA_REFINE_PROMPT)
+    msg = _cq_msg(cq)
+    if msg is not None:
+        await msg.answer(texts.RSA_REFINE_PROMPT)
 
 
 @dp.callback_query(RsaCB.filter(F.action == "finalize"))
