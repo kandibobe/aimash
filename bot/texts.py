@@ -24,16 +24,44 @@ def status_human(status: str) -> str:
     )
 
 
+# ── Профиль бота (@BotFather) ────────────────────────────────────────────────────
+# Плейн-текст (Telegram НЕ парсит HTML в описаниях). Длина считается КОДОМ (golden rule #4):
+# short ≤120, description ≤512 символов-кодпойнтов. Ставятся при старте (bot.main.main →
+# set_my_short_description / set_my_description). Голос продукта: контроль/прозрачность/«твоё да».
+BOT_SHORT_DESCRIPTION = (
+    "Управляй Google Ads прямо в Telegram — обычным текстом. "
+    "Любое изменение только после твоего «да». 🙂"
+)
+
+BOT_DESCRIPTION = (
+    "Aimash — твой ассистент по Google Ads прямо в Telegram.\n\n"
+    "Я читаю кампании и предлагаю изменения, но решаешь ты. Перед любой правкой бюджета, "
+    "ставки или ключей покажу «было → станет» и попрошу подтверждение. Без твоего «да» "
+    "ничего не меняется — это про твои деньги.\n\n"
+    "Что умею:\n"
+    "• статистика и отчёты за период (.xlsx и Google Sheets)\n"
+    "• бюджет, ставки, ключевые и минус-слова, пауза кампаний\n"
+    "• генерация RSA-текстов, подбор ключевых слов\n\n"
+    "Я исполнитель, не автопилот. Каждое действие пишется в журнал. /start"
+)
+
+
 # ── Статичные тексты ─────────────────────────────────────────────────────────────
+# START — подпись к приветственному баннеру bot/assets/welcome.png (HTML; лимит подписи 1024).
 START = (
     "👋 <b>Aimash на связи.</b>\n\n"
-    "Я читаю Google Ads и предлагаю изменения. Любое изменение — "
-    "<b>только после твоего «да»</b>: покажу «было → станет» и кнопки.\n\n"
-    "Пиши обычным текстом, например:\n"
+    "Я читаю твой Google Ads и предлагаю изменения, но я <b>исполнитель, не автопилот</b> — "
+    "последнее слово всегда за тобой.\n\n"
+    "Любая правка (бюджет, ставка, ключи, пауза) — <b>только после твоего «да»</b>. "
+    "Сначала покажу <i>«было → станет»</i> и кнопки ✅/❌, потом выполню. Без подтверждения "
+    "не трогаю ничего — это твои деньги, и они под контролем.\n\n"
+    "🔒 Каждое действие пишется в журнал: всегда видно, что и когда изменилось. "
+    "Бюджет меняю только по твоей прямой команде.\n\n"
+    "Попробуй обычным текстом:\n"
     "• <i>покажи статистику за 7 дней</i>\n"
-    "• <i>повысь бюджет кампании Search Spring на 20%</i>\n"
-    "• <i>поставь на паузу кампанию Brand</i>\n\n"
-    "Или жми кнопки меню ниже. /help — подробнее."
+    "• <i>повысь бюджет Search Spring на 20%</i>\n"
+    "• <i>поставь на паузу Brand</i>\n\n"
+    "Или жми кнопки меню. /help — подробнее."
 )
 
 HELP = (
@@ -52,8 +80,49 @@ HELP = (
     "/rsa — сгенерировать тексты объявления (RSA) с поэлементным подтверждением\n"
     "/keywords — подбор ключевых слов (объём, конкуренция, кластеры) + .xlsx\n"
     "🖼 пришли фото — соберу медийную кампанию (GDN), создам после «да»\n"
+    "/model — выбрать модель ИИ (OpenRouter)\n"
+    "/balance — бюджет ИИ: баланс OpenRouter и траты\n"
     "/cancel — отменить текущий черновик\n\n"
     "<i>Отчёты по расписанию и алерты аномалий работают в фоне.</i>"
+)
+
+
+# ── Переключатель модели ИИ (/model) ─────────────────────────────────────────────
+def fmt_model_menu(active: str | None, parsing: str, copy: str) -> str:
+    """Экран /model: что активно сейчас + что реально пойдёт в запросы (parsing/copy)."""
+    head = (
+        f"🧠 <b>Активная модель:</b> <code>{esc(active)}</code>"
+        if active
+        else "🧠 <b>Модель:</b> по умолчанию (из настроек)"
+    )
+    same = parsing == copy
+    used = (
+        f"<code>{esc(parsing)}</code>"
+        if same
+        else f"разбор — <code>{esc(parsing)}</code>, тексты — <code>{esc(copy)}</code>"
+    )
+    return (
+        f"{head}\n"
+        f"Сейчас в работе: {used}\n\n"
+        "💡 <b>Что для чего:</b>\n"
+        "• 🐬 <b>DeepSeek V3</b> — дёшево и быстро, на каждый день (разбор команд, отчёты).\n"
+        "• 🧠 <b>Claude Sonnet 4.6</b> — самый умный, лучшие тексты объявлений (RSA).\n"
+        "• 🤖 <b>GPT-4o</b> — сильный универсал; <b>4o-mini</b> — дёшево и надёжно для разбора.\n\n"
+        "Выбери пресет, задай свою или сбрось на дефолт.\n"
+        "<i>⚠️ Модель должна поддерживать function calling — иначе разбор команд не сработает.</i>"
+    )
+
+
+MODEL_SET = "🧠 Модель переключена на <code>{model}</code>."
+MODEL_RESET = "↩️ Сброшено на модель по умолчанию: <code>{model}</code>."
+MODEL_ASK_CUSTOM = (
+    "✏️ Пришли slug модели OpenRouter одним сообщением.\n"
+    "Например: <code>anthropic/claude-sonnet-4.6</code> или <code>openai/gpt-4o-mini</code>\n"
+    "Список — на openrouter.ai/models. Нужна поддержка function calling."
+)
+MODEL_BAD = (
+    "Не похоже на slug модели OpenRouter (нужен вид <code>vendor/model</code>, до 128 символов). "
+    "Пришли ещё раз или /model для меню."
 )
 
 # ── Keyword research (Фаза 3, БЛОК E) ────────────────────────────────────────────
@@ -379,6 +448,55 @@ def fmt_stats(account: str, days: int, st: dict, currency: str = "") -> str:
         f"Конверсии:   <b>{conv:g}</b>\n"
         f"Ценность:    <b>{_thou(cval, 2)}{cur}</b>"
     )
+
+
+def _usd(n: float, dec: int = 2) -> str:
+    """Денежная строка в долларах OpenRouter-кредитов: $12.34 / $0.0042 (без CJK-ширины)."""
+    return f"${_thou(n, dec)}"
+
+
+def fmt_balance(acct, snap: dict) -> str:
+    """Бюджет LLM: баланс/траты OpenRouter (источник истины, переживает рестарты) + живая
+    разбивка ТЕКУЩЕГО процесса по ролям «с запуска». acct — openrouter_account.AccountStatus;
+    snap — core.usage.snapshot(). Кредит OpenRouter = USD, поэтому показываем в $."""
+    L = ["💳 <b>Бюджет LLM · OpenRouter</b>", ""]
+
+    bal = acct.balance
+    if bal is not None:
+        L.append(f"Остаток:     <b>{_usd(bal)}</b>")
+    if acct.total_usage is not None:
+        L.append(f"Потрачено:   <b>{_usd(acct.total_usage)}</b> (всего по аккаунту)")
+    if bal is None and acct.key_usage is not None:
+        # /credits недоступен (нужен management-ключ) — показываем траты по самому ключу.
+        L.append(f"Потрачено ключом: <b>{_usd(acct.key_usage, 4)}</b>")
+    if acct.limit_remaining is not None:
+        L.append(f"Лимит ключа: <b>{_usd(acct.limit_remaining)}</b> остаток")
+    if acct.is_free_tier:
+        L.append("Тариф: <b>free</b> (есть лимиты по числу запросов)")
+    if len(L) == 2:  # ни одного поля не пришло
+        L.append("<i>Данные счёта недоступны (проверь OPENROUTER_API_KEY).</i>")
+
+    total = snap.get("total")
+    roles = snap.get("roles", {})
+    if total is not None and total.calls:
+        L += ["", f"<b>С запуска бота</b> · {total.calls} запрос(ов) к модели"]
+        L.append(
+            f"Токены: {_thou(total.prompt_tokens)} вход / {_thou(total.completion_tokens)} выход"
+        )
+        if total.cached_tokens and total.prompt_tokens:
+            pct = total.cached_tokens / total.prompt_tokens * 100
+            L.append(
+                f"Из кэша: {_thou(total.cached_tokens)} вход. токенов ({pct:.0f}%) — дешевле ✅"
+            )
+        L.append(f"Стоимость: <b>{_usd(total.cost, 4)}</b>")
+        names = {"parsing": "парсинг", "copy": "копирайт", "fallback": "резерв"}
+        for role, u in roles.items():
+            if u.calls:
+                L.append(f"  • {esc(names.get(role, role))}: {u.calls}× · {_usd(u.cost, 4)}")
+    else:
+        L += ["", "<i>С запуска вызовов модели ещё не было.</i>"]
+
+    return "\n".join(L)
 
 
 def campaigns_title(account: str) -> str:

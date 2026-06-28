@@ -10,7 +10,7 @@ from __future__ import annotations
 from aiogram.types import BotCommand, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
-from bot.callbacks import CampCB, ConfirmCB, LangCB, PeriodCB, RsaCB, RsaPickCB
+from bot.callbacks import CampCB, ConfirmCB, LangCB, ModelCB, PeriodCB, RsaCB, RsaPickCB
 
 _NAME_LIMIT = 40
 
@@ -36,6 +36,8 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="rsa", description="Сгенерировать тексты объявления (RSA)"),
     BotCommand(command="cancel", description="Отменить текущий черновик"),
     BotCommand(command="keywords", description="Подбор ключевых слов"),
+    BotCommand(command="model", description="Модель ИИ (OpenRouter)"),
+    BotCommand(command="balance", description="Бюджет ИИ: баланс OpenRouter и траты"),
     BotCommand(command="lang", description="Язык интерфейса / interface language"),
 ]
 
@@ -49,20 +51,59 @@ def lang_kb() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-# ── Reply-меню (постоянное нижнее) — только навигация/чтение, НЕ мутации ─────────
+def model_kb(
+    choices: list[str], active: str | None, labels: dict[str, str] | None = None
+) -> InlineKeyboardMarkup:
+    """Выбор модели ИИ (/model): пресеты (✓ у активной) + своя модель + сброс на дефолт.
+    idx указывает на позицию в choices (slug в callback_data не кладём — длинный и с '/').
+    labels — дружелюбные подписи slug→текст (неизвестный slug показываем как есть)."""
+    labels = labels or {}
+    kb = InlineKeyboardBuilder()
+    for i, slug in enumerate(choices):
+        mark = "✅ " if slug == active else ""
+        text = labels.get(slug) or _ellipsize(slug)
+        kb.button(text=f"{mark}{text}", callback_data=ModelCB(action="set", idx=i))
+    kb.button(text="✏️ Своя модель", callback_data=ModelCB(action="custom"))
+    if active is not None:
+        kb.button(text="↩️ Сбросить (дефолт)", callback_data=ModelCB(action="reset"))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+# ── Reply-меню (постоянное нижнее) — навигация/чтение + запуск визардов, НЕ прямые мутации ─
+# Мутации (бюджет/ставка/ключи/пауза) идут через /campaigns или свободный текст → confirm-гейт:
+# им нужна цель, поэтому прямых кнопок-мутаций тут нет. Кнопки лишь открывают экран/визард.
 BTN_STATUS = "📊 Статистика"
 BTN_CAMPAIGNS = "📋 Кампании"
 BTN_REPORT = "📈 Отчёт"
+BTN_EXPORT = "📄 Экспорт .xlsx"
+BTN_SHEETS = "🟢 Sheets"
+BTN_KEYWORDS = "🔑 Ключевые слова"
+BTN_RSA = "✍️ Тексты (RSA)"
+BTN_MODEL = "🧠 Модель"
+BTN_BALANCE = "💳 Бюджет ИИ"
+BTN_LANG = "🌐 Язык"
 BTN_HELP = "❓ Помощь"
 
 
 def main_menu() -> ReplyKeyboardMarkup:
+    """Полное нижнее меню: все основные функции одним тапом (мутации — через цель в /campaigns)."""
     kb = ReplyKeyboardBuilder()
-    kb.button(text=BTN_STATUS)
-    kb.button(text=BTN_CAMPAIGNS)
-    kb.button(text=BTN_REPORT)
-    kb.button(text=BTN_HELP)
-    kb.adjust(2, 2)
+    for text in (
+        BTN_STATUS,
+        BTN_CAMPAIGNS,
+        BTN_REPORT,
+        BTN_EXPORT,
+        BTN_SHEETS,
+        BTN_KEYWORDS,
+        BTN_RSA,
+        BTN_MODEL,
+        BTN_BALANCE,
+        BTN_LANG,
+        BTN_HELP,
+    ):
+        kb.button(text=text)
+    kb.adjust(2, 3, 2, 2, 2)
     return kb.as_markup(
         resize_keyboard=True,
         is_persistent=True,

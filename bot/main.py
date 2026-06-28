@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import io
 import uuid
+from pathlib import Path
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.enums import ParseMode
@@ -40,21 +41,30 @@ from ads.client import DRAFT_ACCOUNT_ID
 from ads.mutations import GDN_BUSINESS_NAME_MAX
 from ads.resolve import find_ad_groups
 from ads.service import execute_confirmed, read_before
+from agent import router
 from agent.loop import handle_command
 from agent.tools.schemas import SCHEMAS
 from bot import i18n, texts, ux
-from bot.callbacks import CampCB, ConfirmCB, LangCB, PeriodCB, RsaCB, RsaPickCB
+from bot.callbacks import CampCB, ConfirmCB, LangCB, ModelCB, PeriodCB, RsaCB, RsaPickCB
 from bot.keyboards import (
     BOT_COMMANDS,
+    BTN_BALANCE,
     BTN_CAMPAIGNS,
+    BTN_EXPORT,
     BTN_HELP,
+    BTN_KEYWORDS,
+    BTN_LANG,
+    BTN_MODEL,
     BTN_REPORT,
+    BTN_RSA,
+    BTN_SHEETS,
     BTN_STATUS,
     campaign_actions_kb,
     campaigns_kb,
     confirm_kb,
     lang_kb,
     main_menu,
+    model_kb,
     period_kb,
     rsa_item_kb,
     rsa_overview_kb,
@@ -70,6 +80,11 @@ from db.session import init_db
 
 STORE = ConfirmStore()  # черновики + audit в БД (SQLite dev), вместо очереди в памяти
 SESSIONS = SessionStore()  # сессии курации RSA (фаза 2.C), персист в proposals (rsa_curation)
+
+# Приветственный баннер к /start (генерится scripts/make_welcome_image.py, закоммичен в репо).
+# Кэш file_id после первой загрузки — чтобы не перезаливать PNG в Telegram на каждый /start.
+WELCOME_IMG = Path(__file__).resolve().parent / "assets" / "welcome.png"
+_welcome_file_id: str | None = None
 
 # Операции со списком ключей — большой список в черновике уходит .xlsx-вложением (ТЗ §5).
 _KEYWORD_OPS = frozenset({"add_keywords", "remove_keywords", "add_negative_keywords"})
@@ -95,6 +110,16 @@ class KwWizard(StatesGroup):
 
 class GdnWizard(StatesGroup):
     awaiting_brief = State()  # ждём «название | url | бюджет» после приёма фото
+
+
+class ModelWizard(StatesGroup):
+    awaiting_model = State()  # ждём свой slug модели OpenRouter для /model
+
+
+# Глобальные настройки бота (модель ИИ и т.п.) живут в одной строке user_settings с этим chat_id.
+# Модель — общая на процесс (места вызова chat() в adcopy/keywords не знают chat_id), поэтому
+# и персист глобальный, а не на пользователя.
+GLOBAL_SETTINGS_CHAT_ID = 0
 
 
 dp = Dispatcher()
@@ -159,6 +184,22 @@ async def _send_status(message: Message) -> None:
         ),
         parse_mode=ParseMode.HTML,
     )
+
+
+async def _send_balance(message: Message) -> None:
+    """Бюджет ИИ (read-only): баланс/траты OpenRouter (источник истины) + разбивка процесса по
+    ролям «с запуска». Баланс берём из OpenRouter (переживает рестарты), а живую разбивку — из
+    core.usage (накопитель текущего процесса). Секретов нет — только числа."""
+    from agent.openrouter_account import fetch_account
+    from core.usage import snapshot
+
+    try:
+        async with ux.typing_action(message):  # «печатает…» пока идёт запрос к OpenRouter
+            acct = await fetch_account()
+    except Exception as e:  # нет ключа / сеть
+        await message.answer(f"⚠️ Не удалось получить баланс OpenRouter: {ux.err_text(e)}")
+        return
+    await message.answer(texts.fmt_balance(acct, snapshot()), parse_mode=ParseMode.HTML)
 
 
 async def _send_campaigns(message: Message, chat_id: int) -> None:
@@ -250,7 +291,23 @@ async def _present_proposal(
 # ── Команды ──────────────────────────────────────────────────────────────────────
 @dp.message(CommandStart())
 async def start(m: Message) -> None:
-    await m.answer(texts.START, reply_markup=main_menu(), parse_mode=ParseMode.HTML)
+    """Приветствие баннером (фото + подпись) + постоянное меню. Фолбэк на текст, если фото
+    не отправилось (нет файла / сбой Telegram) — приветствие НЕ должно падать из-за картинки."""
+    global _welcome_file_id
+    kb = main_menu()
+    if _welcome_file_id or WELCOME_IMG.exists():
+        photo = _welcome_file_id or FSInputFile(WELCOME_IMG)
+        try:
+            sent = await m.answer_photo(
+                photo, caption=texts.START, reply_markup=kb, parse_mode=ParseMode.HTML
+            )
+            if sent.photo:  # кэшируем file_id — следующие /start без перезаливки PNG
+                _welcome_file_id = sent.photo[-1].file_id
+            return
+        except Exception as e:  # сеть/Telegram/битый файл — деградируем до текста, не падаем
+            log.warning("welcome-баннер не отправлен (%s) — шлю текст", type(e).__name__)
+            _welcome_file_id = None
+    await m.answer(texts.START, reply_markup=kb, parse_mode=ParseMode.HTML)
 
 
 @dp.message(Command("help"))
@@ -261,6 +318,12 @@ async def help_(m: Message) -> None:
 @dp.message(Command("status"))
 async def status_(m: Message) -> None:
     await _send_status(m)
+
+
+@dp.message(Command("balance"))
+async def balance_(m: Message) -> None:
+    """Бюджет ИИ: баланс OpenRouter + траты (read-only, без подтверждения)."""
+    await _send_balance(m)
 
 
 @dp.message(Command("campaigns"))
@@ -312,6 +375,122 @@ async def on_lang(cq: CallbackQuery, callback_data: LangCB) -> None:
         await cq.message.edit_text(i18n.t("lang_set", lang))
     except TelegramBadRequest:
         pass
+
+
+# ── Модель ИИ (/model): рантайм-переключатель OpenRouter-модели (глобально на процесс) ─────
+def _valid_model_slug(s: str) -> str | None:
+    """OpenRouter-slug вида vendor/model (до 128 — лимит колонки user_settings.model_override),
+    без пробелов. Не валидируем существование/tool use — это покажет первый реальный вызов."""
+    s = (s or "").strip()
+    if not s or len(s) > 128 or "/" not in s or any(c.isspace() for c in s):
+        return None
+    return s
+
+
+async def _load_model_override() -> str | None:
+    """Сохранённая активная модель из глобальной строки user_settings (None — дефолты по ролям)."""
+    from sqlalchemy import select
+
+    from db.models import UserSettings
+    from db.session import Session
+
+    async with Session() as s:
+        row = (
+            await s.execute(
+                select(UserSettings).where(UserSettings.chat_id == GLOBAL_SETTINGS_CHAT_ID)
+            )
+        ).scalar_one_or_none()
+        return row.model_override if row else None
+
+
+async def _save_model_override(model: str | None) -> None:
+    """Upsert активной модели в глобальную строку user_settings (переживает рестарт)."""
+    from sqlalchemy import select
+
+    from db.models import UserSettings
+    from db.session import Session
+
+    async with Session() as s:
+        row = (
+            await s.execute(
+                select(UserSettings).where(UserSettings.chat_id == GLOBAL_SETTINGS_CHAT_ID)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            s.add(UserSettings(chat_id=GLOBAL_SETTINGS_CHAT_ID, model_override=model))
+        else:
+            row.model_override = model
+        await s.commit()
+
+
+async def _persist_and_set_model(model: str | None) -> None:
+    """Применить модель в рантайме (router) + персист в БД. Сбой БД не мешает применению."""
+    router.set_active_model(model)
+    try:
+        await _save_model_override(model)
+    except Exception as e:  # БД недоступна — модель всё равно активна до рестарта
+        log.warning("model_override не сохранён в БД: %s", type(e).__name__)
+
+
+@dp.message(Command("model"))
+async def model_cmd(m: Message, command: CommandObject, state: FSMContext) -> None:
+    """Выбор модели ИИ (OpenRouter). С аргументом (/model vendor/slug) — сразу; иначе меню."""
+    await state.clear()
+    arg = (command.args or "").strip()
+    if arg:
+        slug = _valid_model_slug(arg)
+        if not slug:
+            await m.answer(texts.MODEL_BAD, parse_mode=ParseMode.HTML)
+            return
+        await _persist_and_set_model(slug)
+        await m.answer(texts.MODEL_SET.format(model=texts.esc(slug)), parse_mode=ParseMode.HTML)
+        return
+    await m.answer(
+        texts.fmt_model_menu(
+            router.get_active_model(),
+            router.effective_model("parsing"),
+            router.effective_model("copy"),
+        ),
+        reply_markup=model_kb(router.MODEL_CHOICES, router.get_active_model(), router.MODEL_LABELS),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@dp.callback_query(ModelCB.filter(F.action == "set"))
+async def on_model_set(cq: CallbackQuery, callback_data: ModelCB) -> None:
+    choices = router.MODEL_CHOICES
+    if callback_data.idx < 0 or callback_data.idx >= len(choices):
+        await cq.answer("Список устарел — открой /model заново", show_alert=True)
+        return
+    slug = choices[callback_data.idx]
+    await _persist_and_set_model(slug)
+    await cq.answer("Готово")
+    try:
+        await cq.message.edit_text(
+            texts.MODEL_SET.format(model=texts.esc(slug)), parse_mode=ParseMode.HTML
+        )
+    except TelegramBadRequest:
+        pass
+
+
+@dp.callback_query(ModelCB.filter(F.action == "reset"))
+async def on_model_reset(cq: CallbackQuery) -> None:
+    await _persist_and_set_model(None)
+    await cq.answer("Сброшено")
+    try:
+        await cq.message.edit_text(
+            texts.MODEL_RESET.format(model=texts.esc(router.effective_model("parsing"))),
+            parse_mode=ParseMode.HTML,
+        )
+    except TelegramBadRequest:
+        pass
+
+
+@dp.callback_query(ModelCB.filter(F.action == "custom"))
+async def on_model_custom(cq: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(ModelWizard.awaiting_model)
+    await cq.answer()
+    await cq.message.answer(texts.MODEL_ASK_CUSTOM, parse_mode=ParseMode.HTML)
 
 
 async def _slash_mutate(m: Message, command: CommandObject, operation: str) -> None:
@@ -402,17 +581,11 @@ async def report_(m: Message, command: CommandObject) -> None:
     await m.answer(summary_text(report))
 
 
-@dp.message(Command("export"))
-async def export_(m: Message, command: CommandObject) -> None:
-    """Глубокий отчёт .xlsx (разбивки ТЗ §9) вложением. Read-only."""
+async def _run_export(m: Message, period) -> None:
+    """Построить .xlsx-отчёт за период и прислать вложением. Read-only. Общий код команды/кнопки."""
     import os
     import tempfile
 
-    try:
-        period = _period_from_arg(command.args)
-    except ValueError as e:
-        await m.answer(f"⚠️ {e}")
-        return
     await m.answer("Готовлю .xlsx-отчёт…")
     path: str | None = None
     try:
@@ -439,14 +612,19 @@ async def export_(m: Message, command: CommandObject) -> None:
                 pass
 
 
-@dp.message(Command("sheets"))
-async def sheets_(m: Message, command: CommandObject) -> None:
-    """ТЗ §9: глубокий отчёт в Google Sheets (новая таблица + вкладка на разбивку, ссылка). Read-only."""
+@dp.message(Command("export"))
+async def export_(m: Message, command: CommandObject) -> None:
+    """Глубокий отчёт .xlsx (разбивки ТЗ §9) вложением. Read-only."""
     try:
         period = _period_from_arg(command.args)
     except ValueError as e:
         await m.answer(f"⚠️ {e}")
         return
+    await _run_export(m, period)
+
+
+async def _run_sheets(m: Message, period) -> None:
+    """Выгрузить отчёт за период в Google Sheets, прислать ссылку. Read-only. Общий код."""
     await m.answer("Готовлю Google Sheets-отчёт…")
     try:
         from ads.client import build_client
@@ -467,6 +645,17 @@ async def sheets_(m: Message, command: CommandObject) -> None:
     await m.answer(f"✅ Google Sheets готов: {url}")
 
 
+@dp.message(Command("sheets"))
+async def sheets_(m: Message, command: CommandObject) -> None:
+    """ТЗ §9: глубокий отчёт в Google Sheets (новая таблица + вкладка на разбивку, ссылка). Read-only."""
+    try:
+        period = _period_from_arg(command.args)
+    except ValueError as e:
+        await m.answer(f"⚠️ {e}")
+        return
+    await _run_sheets(m, period)
+
+
 # ── Reply-кнопки (ОБЯЗАТЕЛЬНО до общего F.text-хендлера — иначе перехватит on_text) ─
 @dp.message(F.text == BTN_STATUS)
 async def btn_status(m: Message) -> None:
@@ -478,6 +667,11 @@ async def btn_campaigns(m: Message) -> None:
     await _send_campaigns(m, m.chat.id)
 
 
+@dp.message(F.text == BTN_BALANCE)
+async def btn_balance(m: Message) -> None:
+    await _send_balance(m)
+
+
 @dp.message(F.text == BTN_HELP)
 async def btn_help(m: Message) -> None:
     await _send_help(m)
@@ -486,6 +680,51 @@ async def btn_help(m: Message) -> None:
 @dp.message(F.text == BTN_REPORT)
 async def btn_report(m: Message) -> None:
     await m.answer("📈 За какой период построить сводку?", reply_markup=period_kb("report"))
+
+
+@dp.message(F.text == BTN_EXPORT)
+async def btn_export(m: Message) -> None:
+    await m.answer("📄 За какой период .xlsx-отчёт?", reply_markup=period_kb("export"))
+
+
+@dp.message(F.text == BTN_SHEETS)
+async def btn_sheets(m: Message) -> None:
+    await m.answer("🟢 За какой период Google Sheets?", reply_markup=period_kb("sheets"))
+
+
+@dp.message(F.text == BTN_KEYWORDS)
+async def btn_keywords(m: Message, state: FSMContext) -> None:
+    """Кнопка «Ключевые слова» = /keywords без аргументов: запускаем визард подбора."""
+    await state.clear()
+    await state.set_state(KwWizard.awaiting_seeds)
+    await m.answer(texts.KW_ASK, parse_mode=ParseMode.HTML)
+
+
+@dp.message(F.text == BTN_RSA)
+async def btn_rsa(m: Message, state: FSMContext) -> None:
+    """Кнопка «Тексты (RSA)» = /rsa: визард выбора кампании → генерация → курация."""
+    await rsa_cmd(m, state)
+
+
+@dp.message(F.text == BTN_MODEL)
+async def btn_model(m: Message, state: FSMContext) -> None:
+    """Кнопка «Модель» = /model без аргументов: меню выбора модели ИИ."""
+    await state.clear()
+    await m.answer(
+        texts.fmt_model_menu(
+            router.get_active_model(),
+            router.effective_model("parsing"),
+            router.effective_model("copy"),
+        ),
+        reply_markup=model_kb(router.MODEL_CHOICES, router.get_active_model(), router.MODEL_LABELS),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@dp.message(F.text == BTN_LANG)
+async def btn_lang(m: Message) -> None:
+    """Кнопка «Язык» = /lang без аргументов: выбор языка интерфейса."""
+    await m.answer(i18n.t("lang_pick", i18n.get_lang(m.chat.id)), reply_markup=lang_kb())
 
 
 # ── RSA-генерация (фаза 2.C): /rsa визард → курация → confirm-гейт create_rsa ─────
@@ -855,6 +1094,18 @@ async def kw_seeds(m: Message, state: FSMContext) -> None:
     await _kw_run(m, m.chat.id, seeds, url, "ru")
 
 
+@dp.message(ModelWizard.awaiting_model)
+async def model_custom_text(m: Message, state: FSMContext) -> None:
+    """Своя модель из /model → ✏️ Своя модель. Валидируем slug, применяем + персистим."""
+    slug = _valid_model_slug(m.text or "")
+    if not slug:
+        await m.answer(texts.MODEL_BAD, parse_mode=ParseMode.HTML)
+        return  # остаёмся в состоянии — пользователь пришлёт slug ещё раз
+    await state.clear()
+    await _persist_and_set_model(slug)
+    await m.answer(texts.MODEL_SET.format(model=texts.esc(slug)), parse_mode=ParseMode.HTML)
+
+
 # ── GDN из фото (§11): приём фото → бриф → черновик за confirm-гейтом ─────────────
 def _parse_gdn_brief(text: str) -> tuple[str, str, float] | None:
     """«название | url | бюджет» → (name, url, budget_units). None при неверном формате."""
@@ -1105,6 +1356,28 @@ async def period_report(cq: CallbackQuery, callback_data: PeriodCB) -> None:
     await cq.message.answer(summary_text(report))
 
 
+@dp.callback_query(PeriodCB.filter(F.target == "export"))
+async def period_export(cq: CallbackQuery, callback_data: PeriodCB) -> None:
+    await cq.answer()
+    try:
+        period = _period_from_arg(callback_data.code)
+    except ValueError as e:
+        await cq.message.answer(f"⚠️ {e}")
+        return
+    await _run_export(cq.message, period)
+
+
+@dp.callback_query(PeriodCB.filter(F.target == "sheets"))
+async def period_sheets(cq: CallbackQuery, callback_data: PeriodCB) -> None:
+    await cq.answer()
+    try:
+        period = _period_from_arg(callback_data.code)
+    except ValueError as e:
+        await cq.message.answer(f"⚠️ {e}")
+        return
+    await _run_sheets(cq.message, period)
+
+
 # ── Inline: подтверждение/отмена черновика (confirm-гейт) ─────────────────────────
 async def _do_confirm(cq: CallbackQuery, cid: str) -> None:
     chat_id = _cq_chat_id(cq)
@@ -1322,14 +1595,25 @@ async def main() -> None:
     except Exception as e:  # БД недоступна: НЕ даём дефолтному excepthook напечатать DSN с паролем
         log.error("init_db не удалось — бот не стартует: %s", type(e).__name__, exc_info=e)
         return
+    try:  # восстановить выбранную в боте модель (/model), переживает рестарт
+        saved_model = await _load_model_override()
+        if saved_model:
+            router.set_active_model(saved_model)
+            log.info("модель ИИ: активна %s (из user_settings)", saved_model)
+    except Exception as e:  # настройка не критична — стартуем на дефолтах из .env
+        log.warning("model_override не загружен из БД: %s", type(e).__name__)
     dp.message.outer_middleware(WhitelistMiddleware())
     dp.callback_query.outer_middleware(WhitelistMiddleware())
     dp.message.outer_middleware(ThrottleMiddleware())  # анти-спам (ТЗ §12), после whitelist
     bot = Bot(token)
     try:
+        # Меню-команды + профиль бота (about/description в @BotFather). Всё косметика —
+        # ставим при каждом старте, чтобы правки текстов подхватывались без ручного BotFather.
         await bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeAllPrivateChats())
-    except Exception as e:  # не критично — бот поднимется и без меню-команд
-        log.warning("set_my_commands не удалось: %s: %s", type(e).__name__, e)
+        await bot.set_my_short_description(texts.BOT_SHORT_DESCRIPTION)
+        await bot.set_my_description(texts.BOT_DESCRIPTION)
+    except Exception as e:  # не критично — бот поднимется и без меню-команд/описаний
+        log.warning("set_my_* (команды/описание) не удалось: %s: %s", type(e).__name__, e)
     sched = None
     try:
         from scheduler.service import setup_scheduler

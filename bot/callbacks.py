@@ -55,3 +55,11 @@ class LangCB(CallbackData, prefix="lang"):
     """Выбор языка интерфейса (RU/EN) через /lang."""
 
     code: str  # "ru" | "en"
+
+
+class ModelCB(CallbackData, prefix="mdl"):
+    """Переключатель модели ИИ (/model). idx — позиция в router.MODEL_CHOICES (slug в
+    callback_data не кладём: длинный и с '/'). Для reset/custom idx не используется."""
+
+    action: str  # "set" | "reset" | "custom"
+    idx: int = -1

@@ -29,6 +29,17 @@ class Settings(BaseSettings):
     llm_parsing: str = "deepseek/deepseek-chat"  # A/B: дёшево, ≈Claude на парсинге
     llm_copy: str = "deepseek/deepseek-chat"  # копирайт ок и дёшево; апгрейд → claude
     llm_fallback: str = "anthropic/claude-sonnet-4.6"  # Hermes выбыл (нет tool use на OpenRouter)
+    # Пресеты для рантайм-переключателя /model (CSV slug'ов OpenRouter). Пусто => дефолт в
+    # agent.router._DEFAULT_CHOICES (tool-use-capable модели). Своя модель — через /model в боте.
+    model_choices: str = ""
+    # Потолок генерации по ролям (явный max_tokens — экономия бюджета БЕЗ потери качества:
+    # без него OpenRouter резервирует полный max-output против дневного бюджета; см.
+    # agent.router.ROLE_MAX_TOKENS). Парсинг → крошечный tool-call; копирайт → короткий JSON.
+    llm_max_tokens_parsing: int = 1024
+    llm_max_tokens_copy: int = 2048
+    # :floor — роутинг к самому дешёвому провайдеру (тот же вес = текст-нейтрально, но фиксирует
+    # на одном эндпоинте → операционно рискованнее). По умолчанию ВЫКЛ (fail-safe к надёжности).
+    openrouter_price_floor: bool = False
 
     # Telegram
     telegram_bot_token: SecretStr = SecretStr("")
@@ -54,6 +65,11 @@ class Settings(BaseSettings):
     @property
     def whitelist(self) -> set[int]:
         return {int(x) for x in self.telegram_whitelist_chat_ids.split(",") if x.strip()}
+
+    @property
+    def model_choice_list(self) -> list[str]:
+        """Пресеты моделей для /model (из env MODEL_CHOICES). Пусто => дефолт в agent.router."""
+        return [m.strip() for m in self.model_choices.split(",") if m.strip()]
 
     @property
     def allowed_customer_ids(self) -> set[str]:
