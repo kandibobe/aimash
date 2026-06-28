@@ -27,6 +27,8 @@ from aiogram.types import (
     CallbackQuery,
     ErrorEvent,
     FSInputFile,
+    InaccessibleMessage,
+    InlineKeyboardMarkup,
     Message,
     TelegramObject,
 )
@@ -209,7 +211,24 @@ def _cq_msg(cq: CallbackQuery) -> Message | None:
     Правки/ответы по кнопке — только на реальном Message; иначе .edit_text/.answer бросили бы
     AttributeError (его глотает глобальный errors-хендлер → «мёртвая» кнопка без ответа юзеру)."""
     m = cq.message
-    return m if isinstance(m, Message) else None
+    # Исключаем недоступное/None (а НЕ требуем isinstance(Message)): дакт-фейки в тестах — не
+    # настоящие aiogram Message, но и не InaccessibleMessage, поэтому корректно проходят дальше.
+    if m is None or isinstance(m, InaccessibleMessage):
+        return None
+    return m
+
+
+async def _safe_edit(cq: CallbackQuery, text: str, **kwargs) -> None:
+    """Безопасно отредактировать сообщение под кнопкой: None/InaccessibleMessage (устарело/удалено)
+    → тихо пропускаем; TelegramBadRequest («не изменено»/«не найдено») → тоже. Убирает повторяющийся
+    try/except и снимает union-attr на cq.message (Message|InaccessibleMessage|None)."""
+    m = _cq_msg(cq)
+    if m is None:
+        return
+    try:
+        await m.edit_text(text, **kwargs)
+    except TelegramBadRequest:
+        pass
 
 
 # ── Общие действия (чтобы команда и кнопка делали одно и то же) ─────────────────
@@ -567,25 +586,18 @@ async def on_model_set(cq: CallbackQuery, callback_data: ModelCB) -> None:
     slug = choices[callback_data.idx]
     await _persist_and_set_model(slug)
     await cq.answer("Готово")
-    try:
-        await cq.message.edit_text(
-            texts.MODEL_SET.format(model=texts.esc(slug)), parse_mode=ParseMode.HTML
-        )
-    except TelegramBadRequest:
-        pass
+    await _safe_edit(cq, texts.MODEL_SET.format(model=texts.esc(slug)), parse_mode=ParseMode.HTML)
 
 
 @dp.callback_query(ModelCB.filter(F.action == "reset"))
 async def on_model_reset(cq: CallbackQuery) -> None:
     await _persist_and_set_model(None)
     await cq.answer("Сброшено")
-    try:
-        await cq.message.edit_text(
-            texts.MODEL_RESET.format(model=texts.esc(router.effective_model("parsing"))),
-            parse_mode=ParseMode.HTML,
-        )
-    except TelegramBadRequest:
-        pass
+    await _safe_edit(
+        cq,
+        texts.MODEL_RESET.format(model=texts.esc(router.effective_model("parsing"))),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 @dp.callback_query(ModelCB.filter(F.action == "custom"))
@@ -845,7 +857,7 @@ async def btn_lang(m: Message) -> None:
 
 
 # ── RSA-генерация (фаза 2.C): /rsa визард → курация → confirm-гейт create_rsa ─────
-def _rsa_render(session) -> tuple[str, object]:
+def _rsa_render(session) -> tuple[str, InlineKeyboardMarkup]:
     """По состоянию сессии: следующий pending-элемент с кнопками либо итоговый экран."""
     nxt = session.next_pending()
     if nxt is None:
@@ -860,7 +872,7 @@ def _rsa_render(session) -> tuple[str, object]:
     return text, rsa_item_kb(session.session_id, kind, idx)
 
 
-def _rsa_overview(session) -> tuple[str, object]:
+def _rsa_overview(session) -> tuple[str, InlineKeyboardMarkup]:
     h, d = session.counts()
     has_pending = session.next_pending() is not None
     text = texts.fmt_rsa_overview(h, d, len(session.headlines), len(session.descriptions))
@@ -1184,9 +1196,10 @@ async def rsa_pick_camp(cq: CallbackQuery, callback_data: RsaPickCB, state: FSMC
         await cq.answer(texts.CAMP_LIST_STALE, show_alert=True)
         return
     await cq.answer()
-    await _rsa_resolve_after_campaign(
-        cq.message, _cq_chat_id(cq), camps[callback_data.idx]["name"], state
-    )
+    msg = _cq_msg(cq)
+    if msg is None:
+        return
+    await _rsa_resolve_after_campaign(msg, _cq_chat_id(cq), camps[callback_data.idx]["name"], state)
 
 
 @dp.callback_query(RsaPickCB.filter(F.what == "ag"))
@@ -1198,7 +1211,10 @@ async def rsa_pick_ag(cq: CallbackQuery, callback_data: RsaPickCB, state: FSMCon
     await cq.answer()
     g = groups[callback_data.idx]
     await state.update_data(ad_group_id=str(g["id"]), ad_group_name=g["name"])
-    await _rsa_after_adgroup(cq.message, _cq_chat_id(cq), state)
+    msg = _cq_msg(cq)
+    if msg is None:
+        return
+    await _rsa_after_adgroup(msg, _cq_chat_id(cq), state)
 
 
 # FSM-хендлеры сообщений — ОБЯЗАТЕЛЬНО до общего on_text (иначе перехватит свободный текст).
@@ -1217,7 +1233,7 @@ async def rsa_refine_text(m: Message, state: FSMContext) -> None:
     data = await state.get_data()
     cid, kind, idx = data.get("cid"), data.get("kind"), data.get("idx")
     session = await SESSIONS.get(cid) if cid else None
-    if session is None or kind is None or idx is None:
+    if session is None or not isinstance(cid, str) or kind is None or idx is None:
         await state.clear()
         await m.answer(texts.RSA_SESSION_STALE)
         return
@@ -1234,6 +1250,9 @@ async def rsa_refine_text(m: Message, state: FSMContext) -> None:
         return  # остаёмся в состоянии — пользователь пришлёт другую правку
     await state.clear()
     session = await SESSIONS.replace_element(cid, kind, idx, new_text)
+    if session is None:  # сессия исчезла между правкой и записью — не падаем
+        await m.answer(texts.RSA_SESSION_STALE)
+        return
     items = session.items(kind)
     await m.answer(
         texts.fmt_rsa_element(
@@ -1329,19 +1348,20 @@ async def search_brief(m: Message, state: FSMContext) -> None:
         "cpc_bid_micros": 500_000,
     }
     try:  # defense-in-depth: схема ещё раз проверит длины/составы/URL/бюджет + нормализует ключи
-        params = SCHEMAS["create_search_campaign"](**params).model_dump()
+        validated: dict = SCHEMAS["create_search_campaign"](**params).model_dump()
     except Exception as e:
         await state.clear()
         await m.answer(f"⚠️ Параметры не прошли валидацию: {e}")
         return
+    params = validated
     summary = texts.fmt_search_proposal_summary(
         name,
         url,
         budget_units,
-        params["headlines"],
-        params["descriptions"],
-        params["keywords"],
-        params["match_type"],
+        validated["headlines"],
+        validated["descriptions"],
+        validated["keywords"],
+        validated["match_type"],
     )
     p = Proposal(
         operation="create_search_campaign", summary=summary, params=params, chat_id=m.chat.id
@@ -1388,6 +1408,8 @@ async def _gdn_cleanup(state: FSMContext, media_id: str | None) -> None:
 async def on_photo(m: Message, state: FSMContext, bot: Bot) -> None:
     """Приём фото для GDN-кампании (§11): скачиваем, режем в 1.91:1 + 1:1, запускаем визард.
     Бинарь НЕ в proposal/логах — подготовленные кадры кладём во временное хранилище по media_id."""
+    if not m.photo:  # фильтр F.photo гарантирует фото, но узкий гард снимает Optional и страхует
+        return
     prev = await state.get_data()  # новое фото отменяет прежнее → чистим его медиа (без утечки)
     old_id = prev.get("gdn_media_id")
     if old_id:
@@ -1474,7 +1496,7 @@ async def gdn_brief(m: Message, state: FSMContext) -> None:
 @dp.message(F.text)
 async def on_text(m: Message, state: FSMContext) -> None:
     async with ux.typing_action(m):  # «печатает…» пока модель парсит команду
-        res = await handle_command(m.text, chat_id=m.chat.id)
+        res = await handle_command(m.text or "", chat_id=m.chat.id)
     t = res.get("type")
     if t == "proposal":
         await _present_proposal(
@@ -1527,14 +1549,12 @@ async def camp_menu(cq: CallbackQuery, callback_data: CampCB) -> None:
         return
     await cq.answer()
     c = camps[callback_data.idx]
-    try:
-        await cq.message.edit_text(
-            texts.fmt_campaign_header(c),
-            reply_markup=campaign_actions_kb(callback_data.idx, c.get("status", "")),
-            parse_mode=ParseMode.HTML,
-        )
-    except TelegramBadRequest:
-        pass
+    await _safe_edit(
+        cq,
+        texts.fmt_campaign_header(c),
+        reply_markup=campaign_actions_kb(callback_data.idx, c.get("status", "")),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 @dp.callback_query(CampCB.filter(F.action == "back"))
@@ -1544,14 +1564,12 @@ async def camp_back(cq: CallbackQuery, callback_data: CampCB) -> None:
         await cq.answer(texts.CAMP_LIST_STALE, show_alert=True)
         return
     await cq.answer()
-    try:
-        await cq.message.edit_text(
-            texts.campaigns_title(DRAFT_ACCOUNT_ID),
-            reply_markup=campaigns_kb(camps),
-            parse_mode=ParseMode.HTML,
-        )
-    except TelegramBadRequest:
-        pass
+    await _safe_edit(
+        cq,
+        texts.campaigns_title(DRAFT_ACCOUNT_ID),
+        reply_markup=campaigns_kb(camps),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def _camp_mutate(cq: CallbackQuery, idx: int, operation: str) -> None:
@@ -1569,8 +1587,11 @@ async def _camp_mutate(cq: CallbackQuery, idx: int, operation: str) -> None:
         await cq.answer(f"Ошибка: {type(e).__name__}", show_alert=True)
         return
     await cq.answer()
+    msg = _cq_msg(cq)
+    if msg is None:
+        return
     await _present_proposal(
-        cq.message, chat_id=chat_id, operation=op, params=params, summary=summary, cid=cid
+        msg, chat_id=chat_id, operation=op, params=params, summary=summary, cid=cid
     )
 
 
@@ -1611,14 +1632,12 @@ async def camp_audience(cq: CallbackQuery, callback_data: CampCB) -> None:
         return
     _AUD_CACHE[chat_id] = auds
     await cq.answer()
-    try:
-        await cq.message.edit_text(
-            texts.audiences_title(camps[callback_data.idx]["name"]),
-            reply_markup=audiences_kb(auds, callback_data.idx),
-            parse_mode=ParseMode.HTML,
-        )
-    except TelegramBadRequest:
-        pass
+    await _safe_edit(
+        cq,
+        texts.audiences_title(camps[callback_data.idx]["name"]),
+        reply_markup=audiences_kb(auds, callback_data.idx),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 @dp.callback_query(AudienceCB.filter(F.action == "pick"))
@@ -1642,8 +1661,11 @@ async def on_audience_pick(cq: CallbackQuery, callback_data: AudienceCB) -> None
         return
     params["_audience_names"] = [aud.name]  # инертно для исполнения; для дружелюбной сводки
     await cq.answer()
+    msg = _cq_msg(cq)
+    if msg is None:
+        return
     await _present_proposal(
-        cq.message, chat_id=chat_id, operation=op, params=params, summary=summary, cid=cid
+        msg, chat_id=chat_id, operation=op, params=params, summary=summary, cid=cid
     )
 
 
@@ -1712,10 +1734,7 @@ async def _do_confirm(cq: CallbackQuery, cid: str) -> None:
         return
     _LAST_PENDING.pop(chat_id, None)
     await cq.answer("Выполняю…")
-    try:
-        await cq.message.edit_text(texts.EXECUTING)  # убирает кнопки
-    except TelegramBadRequest:
-        pass
+    await _safe_edit(cq, texts.EXECUTING)  # убирает кнопки
     # ВАЖНО (денежный путь): успешное исполнение и косметический edit_text РАЗДЕЛЕНЫ. execute_confirmed
     # уже применил мутацию и записал finalize → если бы пост-успешный edit_text (часто бросает
     # TelegramBadRequest: «message is not modified»/«to edit not found» после >48ч) попал в этот же
@@ -1737,23 +1756,16 @@ async def _do_confirm(cq: CallbackQuery, cid: str) -> None:
         # humanize_google_ads_error сам редактирует секреты (golden rule #5) — кладём в audit И юзеру.
         human = humanize_google_ads_error(e)
         await STORE.record_failure(cid, error=human)
-        try:
-            await cq.message.edit_text(
-                texts.FAILED.format(kind=type(e).__name__, err=texts.esc(human)),
-                parse_mode=ParseMode.HTML,
-            )
-        except TelegramBadRequest:
-            pass
+        await _safe_edit(
+            cq,
+            texts.FAILED.format(kind=type(e).__name__, err=texts.esc(human)),
+            parse_mode=ParseMode.HTML,
+        )
         return
     # Успех: мутация применена и finalize записан. Косметический сбой UI-edit НЕ должен пометить
     # успешную операцию как failed — отдельный try/except, вне ветки record_failure.
     log.info("мутация применена cid=%s chat=%s", cid, chat_id)  # денежный путь — успех в лог
-    try:
-        await cq.message.edit_text(
-            texts.APPLIED.format(result=texts.esc(result)), parse_mode=ParseMode.HTML
-        )
-    except TelegramBadRequest:
-        pass
+    await _safe_edit(cq, texts.APPLIED.format(result=texts.esc(result)), parse_mode=ParseMode.HTML)
 
 
 async def _do_cancel(cq: CallbackQuery, cid: str) -> None:
@@ -1761,10 +1773,7 @@ async def _do_cancel(cq: CallbackQuery, cid: str) -> None:
     actor_id, actor_name = _actor(cq)
     await STORE.reject(cid, chat_id=chat_id, actor_user_id=actor_id, actor_username=actor_name)
     _LAST_PENDING.pop(chat_id, None)
-    try:
-        await cq.message.edit_text(texts.REJECTED)
-    except TelegramBadRequest:
-        pass
+    await _safe_edit(cq, texts.REJECTED)
     await cq.answer("Отменено")
 
 
@@ -1781,30 +1790,24 @@ async def on_cancel(cq: CallbackQuery, callback_data: ConfirmCB) -> None:
 # Legacy-fallback: старые сообщения с "ok:/no:" (до рестарта). После переходного периода удалить.
 @dp.callback_query(F.data.startswith("ok:"))
 async def on_confirm_legacy(cq: CallbackQuery) -> None:
-    await _do_confirm(cq, cq.data[3:])
+    await _do_confirm(cq, (cq.data or "")[3:])
 
 
 @dp.callback_query(F.data.startswith("no:"))
 async def on_cancel_legacy(cq: CallbackQuery) -> None:
-    await _do_cancel(cq, cq.data[3:])
+    await _do_cancel(cq, (cq.data or "")[3:])
 
 
 # ── Inline: курация RSA (поэлементно + массово) ───────────────────────────────────
 async def _rsa_edit(cq: CallbackQuery, session) -> None:
     """Перерисовать текущий шаг курации в том же сообщении (следующий pending или итог)."""
     text, kb = _rsa_render(session)
-    try:
-        await cq.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
-    except TelegramBadRequest:
-        pass
+    await _safe_edit(cq, text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
 
 async def _rsa_edit_overview(cq: CallbackQuery, session) -> None:
     text, kb = _rsa_overview(session)
-    try:
-        await cq.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
-    except TelegramBadRequest:
-        pass
+    await _safe_edit(cq, text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
 
 @dp.callback_query(RsaCB.filter(F.action == "approve"))
@@ -1891,18 +1894,18 @@ async def rsa_finalize(cq: CallbackQuery, callback_data: RsaCB) -> None:
         await cq.answer(f"Ошибка: {type(e).__name__}", show_alert=True)
         return
     await cq.answer()
+    msg = _cq_msg(cq)
+    if msg is None:
+        return
     await _present_proposal(
-        cq.message, chat_id=_cq_chat_id(cq), operation=op, params=params, summary=summary, cid=cid
+        msg, chat_id=_cq_chat_id(cq), operation=op, params=params, summary=summary, cid=cid
     )
 
 
 @dp.callback_query(RsaCB.filter(F.action == "cancel"))
 async def rsa_cancel(cq: CallbackQuery, callback_data: RsaCB) -> None:
     await cq.answer("Отменено")
-    try:
-        await cq.message.edit_text(texts.REJECTED)
-    except TelegramBadRequest:
-        pass
+    await _safe_edit(cq, texts.REJECTED)
 
 
 @dp.errors()
