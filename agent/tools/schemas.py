@@ -38,6 +38,7 @@ MUTATION_TOOLS = {
     "set_geo_proximity",
     "set_geo_location",
     "set_bidding_strategy",
+    "attach_audience",
     "create_rsa",
     "create_gdn_campaign",
     "create_search_campaign",
@@ -202,6 +203,26 @@ class SetBiddingStrategy(BaseModel):
         if v is not None and (v <= 0 or v > 1000):
             raise ValueError("target_roas — доля в (0, 1000] (напр. 4.0 = 400%)")
         return v
+
+
+class AttachAudience(BaseModel):
+    """Прикрепить существующие аудитории (user_list/audience) к кампании (§3). Минтуется ботом после
+    выбора из списка (resource_name из ads.read.list_audiences), не из LLM напрямую. Не деньги →
+    user_initiated не требуется (как гео/ключи)."""
+
+    campaign: str
+    audience_resource_names: list[str] = Field(min_length=1, max_length=20)
+
+    @field_validator("audience_resource_names")
+    @classmethod
+    def _rn(cls, v):
+        out = [s.strip() for s in v if s and s.strip()]
+        if not out:
+            raise ValueError("нужна хотя бы одна аудитория")
+        for rn in out:
+            if "/userLists/" not in rn and "/audiences/" not in rn:
+                raise ValueError(f"некорректный resource_name аудитории: {rn}")
+        return out
 
 
 class GetStats(BaseModel):
@@ -393,6 +414,7 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "set_geo_proximity": SetGeoProximity,
     "set_geo_location": SetGeoLocation,
     "set_bidding_strategy": SetBiddingStrategy,
+    "attach_audience": AttachAudience,
     "create_rsa": CreateRsa,
     "create_gdn_campaign": CreateGdnCampaign,
     "create_search_campaign": CreateSearchCampaign,

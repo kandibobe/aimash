@@ -3,8 +3,8 @@
 Вызывается из бота на «да». Чтение SDK (резолв) — синхронное → asyncio.to_thread.
 Аккаунт всегда Aimash Draft (замок в ads.client). Поддержаны (SUPPORTED_OPERATIONS):
 update_budget, update_bid, add_keywords, remove_keywords, add_negative_keywords, pause_campaign,
-resume_campaign, set_geo_proximity, set_geo_location, set_bidding_strategy, create_rsa,
-create_gdn_campaign, create_search_campaign.
+resume_campaign, set_geo_proximity, set_geo_location, set_bidding_strategy, attach_audience,
+create_rsa, create_gdn_campaign, create_search_campaign.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
         "set_geo_proximity",
         "set_geo_location",
         "set_bidding_strategy",
+        "attach_audience",
         "create_rsa",
         "create_gdn_campaign",
         "create_search_campaign",
@@ -345,6 +346,21 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             )
         finally:
             clear_pending_media(params["media_id"])  # успех или сбой — временные файлы чистим
+
+    if op == "attach_audience":
+        ref = await asyncio.to_thread(
+            resolve.find_campaign_by_name, client, customer_id, params["campaign"]
+        )
+        if ref is None:
+            raise ValueError(f"кампания '{params['campaign']}' не найдена")
+        return await mutations.apply_attach_audience(
+            customer_id=customer_id,
+            campaign_id=ref.id,
+            audience_resource_names=params["audience_resource_names"],
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
 
     if op == "create_search_campaign":
         # Создание новой кампании — резолв существующей не нужен. Замок/валидацию/гейт держит

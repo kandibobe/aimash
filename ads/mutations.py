@@ -307,6 +307,69 @@ async def apply_set_geo_location(
     return result
 
 
+# ── Прикрепление аудиторий к кампании (§3; не деньги → без user_initiated) ────────
+def _validate_audience_rns(audience_resource_names: list[str]) -> None:
+    """Прикрепление аудиторий — валидирует КОД ДО claim: непустой список resource_name'ов
+    user_list/audience. Плохой ввод не «съедает» одноразовый черновик."""
+    if not audience_resource_names:
+        raise ValueError("нужна хотя бы одна аудитория")
+    for rn in audience_resource_names:
+        s = str(rn)
+        if "/userLists/" not in s and "/audiences/" not in s:
+            raise ValueError(f"некорректный resource_name аудитории: {rn}")
+
+
+async def apply_attach_audience(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    audience_resource_names: list[str],
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """Прикрепить существующие аудитории (user_list/audience) к кампании (§3). НЕ деньги →
+    user_initiated не требуем (как гео/ключи). resource_name'ы берутся из ads.read.list_audiences."""
+    ensure_allowed(customer_id)  # гейт 1 — замок аккаунта
+    _validate_audience_rns(audience_resource_names)  # ДО claim
+    await _require_confirmation(confirm_store, confirmation_id, "attach_audience")  # гейт 2
+    result = await run_ads_call(
+        _attach_audience_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_id,
+        list(audience_resource_names),
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+def _attach_audience_via_sdk(client, customer_id, campaign_id, audience_resource_names) -> dict:
+    """Прикрепить аудитории к кампании (campaign_criterion). user_list-ресурс → criterion.user_list,
+    audience-ресурс → criterion.audience (тип определяем по сегменту resource_name). Один атомарный
+    mutate из create-операций (как add_keywords). Снятие аудиторий — отдельный remove-флоу."""
+    cmp_svc = client.get_service("CampaignService")
+    svc = client.get_service("CampaignCriterionService")
+    campaign_rn = cmp_svc.campaign_path(str(customer_id), str(campaign_id))
+    ops = []
+    for rn in audience_resource_names:
+        op = client.get_type("CampaignCriterionOperation")
+        op.create.campaign = campaign_rn
+        if "/userLists/" in str(rn):
+            op.create.user_list.user_list = rn
+        else:
+            op.create.audience.audience = rn
+        ops.append(op)
+    resp = svc.mutate_campaign_criteria(customer_id=str(customer_id), operations=ops)
+    return {
+        "customer_id": str(customer_id),
+        "campaign_id": str(campaign_id),
+        "attached": [r.resource_name for r in resp.results],
+        "count": len(resp.results),
+        "applied": True,
+    }
+
+
 # ── Смена стратегии назначения ставок кампании (§3; ДЕНЬГИ → user_initiated) ──────
 _BIDDING_STRATEGIES = frozenset(
     {"manual_cpc", "maximize_conversions", "maximize_conversion_value", "target_spend"}

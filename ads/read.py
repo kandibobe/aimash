@@ -31,6 +31,13 @@ class AccountStats:
     conv_value: float
 
 
+@dataclass
+class Audience:
+    resource_name: str
+    name: str
+    size: int  # размер аудитории для показа (user_list.size_for_display), 0 если неизвестно
+
+
 def list_child_accounts(client: GoogleAdsClient, manager_id: str) -> list[ChildAccount]:
     """Обход иерархии MCC через customer_client. Чокпойнт: только настроенный MCC (fail-closed) —
     перечисление дочерних аккаунтов чужого менеджера запрещено (golden rule #9)."""
@@ -102,6 +109,28 @@ def account_currency(client: GoogleAdsClient, customer_id: str) -> str:
     if code:
         _CURRENCY_CACHE[cid] = code  # кэшируем только успешное чтение
     return code
+
+
+def list_audiences(client: GoogleAdsClient, customer_id: str) -> list[Audience]:
+    """Доступные аудитории аккаунта (user_list) для прикрепления к кампании (§3). Только белый
+    список (замок аккаунта). Берём открытые для членства списки ремаркетинга/аудиторий."""
+    ensure_allowed(customer_id)
+    ga = client.get_service("GoogleAdsService")
+    q = (
+        "SELECT user_list.resource_name, user_list.name, user_list.size_for_display "
+        "FROM user_list WHERE user_list.membership_status = 'OPEN' ORDER BY user_list.name"
+    )
+    out: list[Audience] = []
+    for row in ga.search(customer_id=str(customer_id), query=q):
+        ul = row.user_list
+        out.append(
+            Audience(
+                resource_name=ul.resource_name,
+                name=ul.name,
+                size=int(getattr(ul, "size_for_display", 0) or 0),
+            )
+        )
+    return out
 
 
 def list_campaigns(client: GoogleAdsClient, customer_id: str) -> list[dict]:
