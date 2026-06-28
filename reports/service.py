@@ -8,7 +8,9 @@ spreadsheets/drive.file — валидируется только на боев�
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable
 from dataclasses import dataclass
+from typing import Any
 
 from ads.client import ensure_allowed
 from core.resilience import run_ads_read_call
@@ -54,7 +56,11 @@ async def build_account_report_async(
     держится и здесь (быстрый fail-closed до фан-аута), и внутри каждого fetch_* (замок аккаунта §9).
     Синхронный build_account_report оставлен дословно — на нём строятся тесты/не-async вызовы."""
     ensure_allowed(customer_id)  # быстрый fail-closed ДО фан-аута; каждый fetch_* проверит ещё раз
-    tasks = [run_ads_read_call(fetch_totals, client, customer_id, period, label="rpt_totals")]
+    # Гетерогенный список: fetch_totals → Metrics, разбивки → Breakdown. gather распаковываем
+    # позиционно (totals/prev/breakdowns), статически тип элементов тут не отследить → Awaitable[Any].
+    tasks: list[Awaitable[Any]] = [
+        run_ads_read_call(fetch_totals, client, customer_id, period, label="rpt_totals")
+    ]
     if with_comparison:
         tasks.append(
             run_ads_read_call(

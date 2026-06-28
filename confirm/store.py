@@ -16,8 +16,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import cast
 
-from sqlalchemy import func, select, update
+from sqlalchemy import CursorResult, func, select, update
 
 from core.logging import redact_text
 from db.models import AuditLog, Proposal
@@ -101,7 +102,8 @@ class ConfirmStore:
                 )
                 .values(status="executing", decided_at=func.now())
             )
-            if res.rowcount != 1:  # не застолбили (нет/не confirmed/чужая операция/уже взят)
+            # cast: DML возвращает CursorResult (есть .rowcount); async-стаб видит общий Result.
+            if cast(CursorResult, res).rowcount != 1:  # не застолбили (нет/не confirmed/чужая/взят)
                 await s.rollback()
                 return None
             p = (
@@ -140,7 +142,8 @@ class ConfirmStore:
                 .where(Proposal.confirmation_id == confirmation_id, Proposal.status == "pending")
                 .values(status="confirmed", decided_at=func.now())
             )
-            if res.rowcount != 1:  # нет/не pending/уже подтверждён/гонка → не перевели
+            # cast: DML возвращает CursorResult (есть .rowcount); async-стаб видит общий Result.
+            if cast(CursorResult, res).rowcount != 1:  # нет/не pending/уже подтверждён/гонка
                 await s.rollback()
                 return False
             p = (
