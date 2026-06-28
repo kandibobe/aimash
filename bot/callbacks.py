@@ -21,8 +21,17 @@ class ConfirmCB(CallbackData, prefix="cfm"):
 class CampCB(CallbackData, prefix="camp"):
     """Действия в меню /campaigns. idx — позиция в последнем списке кампаний (по chat_id)."""
 
-    action: str  # "menu" | "pause" | "resume" | "back"
+    action: str  # "menu" | "pause" | "resume" | "audience" | "back"
     idx: int
+
+
+class AudienceCB(CallbackData, prefix="aud"):
+    """Прикрепление аудитории к кампании (§3). camp_idx — кампания в _CAMP_CACHE (выбрана на
+    предыдущем шаге), idx — аудитория в _AUD_CACHE (оба резолвятся по chat_id в bot.main)."""
+
+    action: str  # "pick"
+    camp_idx: int = -1
+    idx: int = -1
 
 
 class PeriodCB(CallbackData, prefix="per"):

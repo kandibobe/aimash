@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bot.main as bm  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
-from bot.callbacks import CampCB, RsaCB  # noqa: E402
+from bot.callbacks import AudienceCB, CampCB, RsaCB  # noqa: E402
 from confirm.store import ConfirmStore  # noqa: E402
 from db.session import init_db  # noqa: E402
 
@@ -89,6 +89,42 @@ async def test_camp_mutate_stale_cache_alerts_no_proposal():
     bm._LAST_PENDING.pop(chat_id, None)
     cq = FakeCallbackQuery(FakeMessage(chat_id=chat_id))
     await bm.camp_pause(cq, CampCB(action="pause", idx=0))
+    assert cq.answers and cq.answers[-1][1] is True  # show_alert: список устарел
+    assert bm._LAST_PENDING.get(chat_id) is None  # черновик не создан
+
+
+# ── §3 Аудитории: выбор аудитории создаёт ТОЛЬКО черновик attach_audience ──────────
+async def test_audience_pick_creates_pending_attach_proposal():
+    await init_db()
+    from ads.read import Audience
+
+    chat_id = 208
+    bm._CAMP_CACHE[chat_id] = [{"name": "BrandZ", "status": "ENABLED"}]
+    bm._AUD_CACHE[chat_id] = [
+        Audience(resource_name="customers/1/userLists/55", name="Покупатели", size=1500)
+    ]
+    cq = FakeCallbackQuery(FakeMessage(chat_id=chat_id))
+    await bm.on_audience_pick(cq, AudienceCB(action="pick", camp_idx=0, idx=0))
+
+    cid = bm._LAST_PENDING.get(chat_id)
+    assert cid is not None
+    snap = await ConfirmStore().get_confirmed(cid)
+    assert snap.operation == "attach_audience"
+    assert snap.status == "pending"  # НЕ исполнено — ждёт ✅
+    assert snap.user_initiated is True
+    assert snap.params["campaign"] == "BrandZ"
+    assert snap.params["audience_resource_names"] == ["customers/1/userLists/55"]
+    assert "Покупатели" in snap.summary  # дружелюбное имя в сводке
+
+
+async def test_audience_pick_stale_cache_alerts_no_proposal():
+    await init_db()
+    chat_id = 209
+    bm._CAMP_CACHE.pop(chat_id, None)
+    bm._AUD_CACHE.pop(chat_id, None)
+    bm._LAST_PENDING.pop(chat_id, None)
+    cq = FakeCallbackQuery(FakeMessage(chat_id=chat_id))
+    await bm.on_audience_pick(cq, AudienceCB(action="pick", camp_idx=0, idx=0))
     assert cq.answers and cq.answers[-1][1] is True  # show_alert: список устарел
     assert bm._LAST_PENDING.get(chat_id) is None  # черновик не создан
 

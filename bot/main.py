@@ -45,7 +45,16 @@ from agent import router
 from agent.loop import handle_command
 from agent.tools.schemas import SCHEMAS
 from bot import i18n, texts, ux
-from bot.callbacks import CampCB, ConfirmCB, LangCB, ModelCB, PeriodCB, RsaCB, RsaPickCB
+from bot.callbacks import (
+    AudienceCB,
+    CampCB,
+    ConfirmCB,
+    LangCB,
+    ModelCB,
+    PeriodCB,
+    RsaCB,
+    RsaPickCB,
+)
 from bot.keyboards import (
     BOT_COMMANDS,
     BTN_BALANCE,
@@ -59,6 +68,7 @@ from bot.keyboards import (
     BTN_RSA,
     BTN_SHEETS,
     BTN_STATUS,
+    audiences_kb,
     campaign_actions_kb,
     campaigns_kb,
     confirm_kb,
@@ -97,6 +107,9 @@ _CAMP_CACHE: dict[int, list[dict]] = {}  # chat_id → последний спи
 _LAST_PENDING: dict[int, str] = {}  # chat_id → confirmation_id последнего черновика (для /cancel)
 _RSA_CAMP_CACHE: dict[int, list[dict]] = {}  # chat_id → кампании для визарда /rsa
 _RSA_AG_CACHE: dict[int, list[dict]] = {}  # chat_id → группы объявлений для визарда /rsa
+_AUD_CACHE: dict[
+    int, list
+] = {}  # chat_id → последний список аудиторий (§3, резолв idx→resource_name)
 
 
 class RsaWizard(StatesGroup):
@@ -649,10 +662,12 @@ async def _run_sheets(m: Message, period) -> None:
     except Exception as e:  # сеть/доступ/SDK/нет OAuth-scope Sheets
         await m.answer(
             f"⚠️ Не удалось выгрузить в Google Sheets: {ux.err_text(e)}\n"
-            "У OAuth-токена нет доступа drive.file. Перевыпусти токен с обоими доступами: запусти "
-            "`python scripts/get_refresh_token.py` (на экране согласия отметь Google Ads и drive.file), "
-            "затем перезапусти бота. Подробно — docs/DEPLOYMENT.md (Google Sheets).\n"
-            "📄 Тот же отчёт без re-auth доступен сразу через /export (.xlsx)."
+            "Проверь настройку (docs/DEPLOYMENT.md → Google Sheets):\n"
+            "1) включён ли Google Sheets API в Google Cloud — ссылка для включения обычно есть в "
+            "тексте ошибки выше (после включения подожди 1–2 мин);\n"
+            "2) есть ли у токена доступ drive.file: `python scripts/get_refresh_token.py` "
+            "(отметь Google Ads и drive.file), затем перезапусти бота.\n"
+            "📄 Тот же отчёт без этой настройки доступен сразу через /export (.xlsx)."
         )
         return
     await m.answer(f"✅ Google Sheets готов: {url}")
@@ -1346,6 +1361,74 @@ async def camp_pause(cq: CallbackQuery, callback_data: CampCB) -> None:
 @dp.callback_query(CampCB.filter(F.action == "resume"))
 async def camp_resume(cq: CallbackQuery, callback_data: CampCB) -> None:
     await _camp_mutate(cq, callback_data.idx, "resume_campaign")
+
+
+# ── §3 Аудитории: меню кампании → список аудиторий → черновик attach_audience ───────
+@dp.callback_query(CampCB.filter(F.action == "audience"))
+async def camp_audience(cq: CallbackQuery, callback_data: CampCB) -> None:
+    """Показать доступные аудитории (user_list) для прикрепления к выбранной кампании.
+    READ-ONLY: только список; прикрепление — отдельным черновиком после выбора (confirm-гейт)."""
+    chat_id = _cq_chat_id(cq)
+    camps = _CAMP_CACHE.get(chat_id)
+    if not camps or callback_data.idx >= len(camps):
+        await cq.answer(texts.CAMP_LIST_STALE, show_alert=True)
+        return
+    try:
+        from ads.client import build_client
+        from ads.read import list_audiences
+
+        client = build_client()
+        async with ux.typing_action(cq.message):
+            auds = await run_ads_read_call(
+                list_audiences, client, DRAFT_ACCOUNT_ID, label="list_audiences"
+            )
+    except Exception as e:  # сеть/доступ/SDK
+        await cq.answer(f"Ошибка: {type(e).__name__}", show_alert=True)
+        return
+    if not auds:
+        await cq.answer(texts.NO_AUDIENCES, show_alert=True)
+        return
+    _AUD_CACHE[chat_id] = auds
+    await cq.answer()
+    try:
+        await cq.message.edit_text(
+            texts.audiences_title(camps[callback_data.idx]["name"]),
+            reply_markup=audiences_kb(auds, callback_data.idx),
+            parse_mode=ParseMode.HTML,
+        )
+    except TelegramBadRequest:
+        pass
+
+
+@dp.callback_query(AudienceCB.filter(F.action == "pick"))
+async def on_audience_pick(cq: CallbackQuery, callback_data: AudienceCB) -> None:
+    """Выбрана аудитория → СОЗДАЁТ черновик attach_audience (как кнопки пауза/возобновление):
+    исполнение только после ✅ через confirm-гейт. Кампания+аудитория резолвятся из кэшей по idx."""
+    chat_id = _cq_chat_id(cq)
+    camps = _CAMP_CACHE.get(chat_id)
+    auds = _AUD_CACHE.get(chat_id)
+    if (
+        not camps
+        or callback_data.camp_idx >= len(camps)
+        or not auds
+        or callback_data.idx >= len(auds)
+    ):
+        await cq.answer(texts.AUD_LIST_STALE, show_alert=True)
+        return
+    name = camps[callback_data.camp_idx]["name"]
+    aud = auds[callback_data.idx]
+    try:
+        cid, op, params, summary = _build_proposal(
+            "attach_audience", campaign=name, audience_resource_names=[aud.resource_name]
+        )
+    except Exception as e:  # валидация схемы
+        await cq.answer(f"Ошибка: {type(e).__name__}", show_alert=True)
+        return
+    params["_audience_names"] = [aud.name]  # инертно для исполнения; для дружелюбной сводки
+    await cq.answer()
+    await _present_proposal(
+        cq.message, chat_id=chat_id, operation=op, params=params, summary=summary, cid=cid
+    )
 
 
 # ── Inline: выбор периода для отчёта ──────────────────────────────────────────────

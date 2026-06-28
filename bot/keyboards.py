@@ -10,7 +10,16 @@ from __future__ import annotations
 from aiogram.types import BotCommand, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
-from bot.callbacks import CampCB, ConfirmCB, LangCB, ModelCB, PeriodCB, RsaCB, RsaPickCB
+from bot.callbacks import (
+    AudienceCB,
+    CampCB,
+    ConfirmCB,
+    LangCB,
+    ModelCB,
+    PeriodCB,
+    RsaCB,
+    RsaPickCB,
+)
 
 _NAME_LIMIT = 40
 
@@ -141,7 +150,24 @@ def campaign_actions_kb(idx: int, status: str) -> InlineKeyboardMarkup:
         kb.button(text="⏸ Поставить на паузу", callback_data=CampCB(action="pause", idx=idx))
     elif status == "PAUSED":
         kb.button(text="▶️ Возобновить", callback_data=CampCB(action="resume", idx=idx))
+    kb.button(text="🎯 Аудитории", callback_data=CampCB(action="audience", idx=idx))
     kb.button(text="‹ Назад к списку", callback_data=CampCB(action="back", idx=idx))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def audiences_kb(auds: list, camp_idx: int) -> InlineKeyboardMarkup:
+    """Выбор аудитории для прикрепления к кампании (§3). idx — позиция в списке аудиторий;
+    camp_idx ведёт прикрепление к конкретной кампании и кнопку «назад» — к её меню."""
+    kb = InlineKeyboardBuilder()
+    for i, a in enumerate(auds):
+        size = getattr(a, "size", 0) or 0
+        suffix = f" · {size:,}".replace(",", " ") if size else ""
+        kb.button(
+            text=f"👥 {_ellipsize(a.name)}{suffix}",
+            callback_data=AudienceCB(action="pick", camp_idx=camp_idx, idx=i),
+        )
+    kb.button(text="‹ Назад", callback_data=CampCB(action="menu", idx=camp_idx))
     kb.adjust(1)
     return kb.as_markup()
 
