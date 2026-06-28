@@ -37,6 +37,7 @@ MUTATION_TOOLS = {
     "resume_campaign",
     "set_geo_proximity",
     "set_geo_location",
+    "set_bidding_strategy",
     "create_rsa",
     "create_gdn_campaign",
 }
@@ -171,6 +172,34 @@ class SetGeoLocation(BaseModel):
         v = str(v or "UA").strip().upper()
         if len(v) != 2 or not v.isalpha():
             raise ValueError("country_code — ISO-3166 alpha-2 (напр. UA)")
+        return v
+
+
+class SetBiddingStrategy(BaseModel):
+    """Смена стратегии назначения ставок кампании (§3). Деньги (управляет расходом) → как бюджет/
+    ставка, применяется ТОЛЬКО прямой командой пользователя (user_initiated). Поддержаны стандартные
+    (не портфельные) стратегии. target_cpa — в валюте аккаунта; target_roas — доля (4.0 = 400%)."""
+
+    campaign: str
+    strategy: Literal[
+        "manual_cpc", "maximize_conversions", "maximize_conversion_value", "target_spend"
+    ]
+    target_cpa: float | None = None  # для maximize_conversions (валюта аккаунта)
+    target_roas: float | None = None  # для maximize_conversion_value (доля, напр. 4.0 = 400%)
+    enhanced_cpc: bool = False  # для manual_cpc
+
+    @field_validator("target_cpa")
+    @classmethod
+    def _tcpa(cls, v):
+        if v is not None and (v <= 0 or v > MAX_AMOUNT):
+            raise ValueError(f"target_cpa должен быть в (0, {MAX_AMOUNT}]")
+        return v
+
+    @field_validator("target_roas")
+    @classmethod
+    def _troas(cls, v):
+        if v is not None and (v <= 0 or v > 1000):
+            raise ValueError("target_roas — доля в (0, 1000] (напр. 4.0 = 400%)")
         return v
 
 
@@ -323,6 +352,7 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "resume_campaign": ResumeCampaign,
     "set_geo_proximity": SetGeoProximity,
     "set_geo_location": SetGeoLocation,
+    "set_bidding_strategy": SetBiddingStrategy,
     "create_rsa": CreateRsa,
     "create_gdn_campaign": CreateGdnCampaign,
     "get_stats": GetStats,
@@ -380,6 +410,14 @@ TOOLS: list[dict] = [
         "locations (названия, напр. ['Украина','Киев']); country_code (ISO alpha-2, по умолчанию "
         "UA) сужает поиск. Заменяет прежний географический таргетинг кампании.",
         SetGeoLocation,
+    ),
+    _tool(
+        "set_bidding_strategy",
+        "Сменить стратегию назначения ставок кампании: manual_cpc (ручная, опц. enhanced_cpc), "
+        "maximize_conversions (опц. target_cpa в валюте аккаунта), maximize_conversion_value "
+        "(опц. target_roas — доля, 4.0=400%), target_spend (максимум кликов). Деньги: только "
+        "по прямой команде. Укажи campaign и strategy.",
+        SetBiddingStrategy,
     ),
     _tool(
         "generate_rsa",

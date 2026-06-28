@@ -305,6 +305,21 @@ def fmt_mutation_summary(operation: str, params: dict) -> str:
             f"Кампания «{c}» — гео-таргетинг: {locs} ({cc}). "
             "Заменит прежний географический таргетинг кампании."
         )
+    if operation == "set_bidding_strategy":
+        strat = {
+            "manual_cpc": "Ручная CPC",
+            "maximize_conversions": "Максимум конверсий",
+            "maximize_conversion_value": "Максимум ценности конверсий",
+            "target_spend": "Максимум кликов",
+        }.get(params.get("strategy", ""), params.get("strategy", ""))
+        extra = ""
+        if params.get("target_cpa"):
+            extra = f", target CPA {float(params['target_cpa']):g}"
+        elif params.get("target_roas"):
+            extra = f", target ROAS {float(params['target_roas']):g}"
+        elif params.get("strategy") == "manual_cpc" and params.get("enhanced_cpc"):
+            extra = ", enhanced CPC"
+        return f"Кампания «{c}» — стратегия ставок → {strat}{extra}."
     if operation in ("add_keywords", "remove_keywords", "add_negative_keywords"):
         kws = params.get("keywords") or []
         mt = match_type_human(params.get("match_type", ""))

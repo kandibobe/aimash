@@ -307,6 +307,55 @@ async def apply_set_geo_location(
     return result
 
 
+# ── Смена стратегии назначения ставок кампании (§3; ДЕНЬГИ → user_initiated) ──────
+_BIDDING_STRATEGIES = frozenset(
+    {"manual_cpc", "maximize_conversions", "maximize_conversion_value", "target_spend"}
+)
+
+
+async def apply_set_bidding_strategy(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    strategy: str,
+    target_cpa: float | None = None,
+    target_roas: float | None = None,
+    enhanced_cpc: bool = False,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """Смена стратегии ставок кампании (§3). ДЕНЬГИ (управляет расходом) → как бюджет/ставка,
+    требуем user_initiated. Диапазоны target_cpa (валюта аккаунта) / target_roas (доля) — КОД ДО claim."""
+    ensure_allowed(customer_id)  # гейт 1 — замок аккаунта
+    if strategy not in _BIDDING_STRATEGIES:
+        raise ValueError(f"неизвестная стратегия ставок: {strategy}")
+    target_cpa_micros = None
+    if target_cpa is not None:
+        if target_cpa <= 0 or target_cpa > 1_000_000:
+            raise ValueError("target_cpa вне допустимого диапазона (0, 1 000 000]")
+        target_cpa_micros = int(round(float(target_cpa) * 1_000_000))
+    if target_roas is not None and (target_roas <= 0 or target_roas > 1000):
+        raise ValueError("target_roas — доля в (0, 1000] (напр. 4.0 = 400%)")
+
+    proposal = await _require_confirmation(confirm_store, confirmation_id, "set_bidding_strategy")
+    if not proposal.user_initiated:  # деньги: только прямая команда пользователя
+        raise PermissionError("смена стратегии ставок должна быть прямой командой пользователя")
+
+    result = await run_ads_call(
+        _set_bidding_strategy_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_id,
+        strategy,
+        target_cpa_micros,
+        target_roas,
+        bool(enhanced_cpc),
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
 # ── Создание RSA-объявления (фаза 2.C: применение сгенерированных текстов к группе) ─
 def _validate_rsa_inputs(
     headlines: list[str],
@@ -732,6 +781,47 @@ def _set_geo_location_via_sdk(
         "locations": list(names.values()),
         "removed_location": removed,  # сколько старых location-критериев заменили
         "count": len(targets),
+        "applied": True,
+    }
+
+
+def _set_bidding_strategy_via_sdk(
+    client, customer_id, campaign_id, strategy, target_cpa_micros, target_roas, enhanced_cpc
+) -> dict:
+    """Стандартная (не портфельная) стратегия ставок на кампании. Меняем oneof
+    campaign_bidding_strategy + ЯВНЫЙ update_mask на имя стратегии (надёжно для переключения oneof,
+    в т.ч. на пустую стратегию без таргета). Переключение с портфельной — Google очистит её сам."""
+    svc = client.get_service("CampaignService")
+    op = client.get_type("CampaignOperation")
+    c = op.update
+    c.resource_name = svc.campaign_path(str(customer_id), str(campaign_id))
+    if strategy == "manual_cpc":
+        c.manual_cpc.enhanced_cpc_enabled = bool(enhanced_cpc)
+    elif strategy == "maximize_conversions":
+        if target_cpa_micros:
+            c.maximize_conversions.target_cpa_micros = int(target_cpa_micros)
+        else:  # пустая стратегия (без таргета) — присваиваем чистое сообщение
+            client.copy_from(c.maximize_conversions, client.get_type("MaximizeConversions"))
+    elif strategy == "maximize_conversion_value":
+        if target_roas:
+            c.maximize_conversion_value.target_roas = float(target_roas)
+        else:
+            client.copy_from(
+                c.maximize_conversion_value, client.get_type("MaximizeConversionValue")
+            )
+    elif strategy == "target_spend":
+        client.copy_from(c.target_spend, client.get_type("TargetSpend"))
+    else:
+        raise ValueError(f"неизвестная стратегия ставок: {strategy}")
+    c.update_mask.paths.append(strategy)  # явный путь — надёжно для oneof-переключения
+    svc.mutate_campaigns(customer_id=str(customer_id), operations=[op])
+    return {
+        "customer_id": str(customer_id),
+        "campaign_id": str(campaign_id),
+        "strategy": strategy,
+        "target_cpa_micros": int(target_cpa_micros) if target_cpa_micros else None,
+        "target_roas": float(target_roas) if target_roas else None,
+        "enhanced_cpc": bool(enhanced_cpc) if strategy == "manual_cpc" else None,
         "applied": True,
     }
 

@@ -610,6 +610,127 @@ async def test_set_geo_location_supported_as_proposal():
     assert res["type"] == "proposal" and res["operation"] == "set_geo_location"
 
 
+# ── apply_set_bidding_strategy (§3): ДЕНЬГИ → оба гейта + user_initiated ──────────
+async def test_apply_set_bidding_strategy_happy_path():
+    called = {}
+
+    def fake(client, customer_id, campaign_id, strategy, target_cpa_micros, target_roas, enh):
+        called.update(
+            strategy=strategy, target_cpa_micros=target_cpa_micros, campaign_id=campaign_id
+        )
+        return {"applied": True, "strategy": strategy}
+
+    store = FakeStore(FakeProposal("set_bidding_strategy", "confirmed", user_initiated=True))
+    with patched(mut, "_set_bidding_strategy_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_set_bidding_strategy(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_id="23",
+            strategy="maximize_conversions",
+            target_cpa=5.0,
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+        )
+    assert res["applied"] and called["strategy"] == "maximize_conversions"
+    assert called["target_cpa_micros"] == 5_000_000  # единицы → micros (КОД)
+    assert store.finalized is True
+
+
+async def test_apply_set_bidding_strategy_blocked_when_not_user_initiated():
+    store = FakeStore(FakeProposal("set_bidding_strategy", "confirmed", user_initiated=False))
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        try:
+            await mut.apply_set_bidding_strategy(
+                customer_id=DRAFT_ACCOUNT_ID,
+                campaign_id="23",
+                strategy="manual_cpc",
+                confirmation_id="x",
+                confirm_store=store,
+                ads_client=object(),
+            )
+            raise AssertionError("ожидался PermissionError (стратегия = деньги)")
+        except PermissionError:
+            pass
+    assert store.finalized is False
+
+
+async def test_apply_set_bidding_strategy_validates_target_cpa_before_claim():
+    calls = {"n": 0}
+
+    def fake(*a, **k):
+        calls["n"] += 1
+        return {"applied": True}
+
+    store = FakeStore(FakeProposal("set_bidding_strategy", "confirmed", user_initiated=True))
+    with patched(mut, "_set_bidding_strategy_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        try:
+            await mut.apply_set_bidding_strategy(
+                customer_id=DRAFT_ACCOUNT_ID,
+                campaign_id="23",
+                strategy="maximize_conversions",
+                target_cpa=2_000_000,  # > 1e6 → ValueError ДО claim
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=object(),
+            )
+            raise AssertionError("ожидался ValueError (target_cpa за потолком)")
+        except ValueError:
+            pass
+    assert calls["n"] == 0 and store.finalized is False
+
+
+def test_set_bidding_strategy_via_sdk_maximize_conversions_sets_mask():
+    captured = {}
+
+    class _Cmp:
+        def campaign_path(self, cid, campid):
+            return f"customers/{cid}/campaigns/{campid}"
+
+        def mutate_campaigns(self, customer_id, operations):
+            captured["op"] = operations[0]
+            return SimpleNamespace(results=[SimpleNamespace(resource_name="rn")])
+
+    class _Client:
+        def get_service(self, name):
+            return _Cmp()
+
+        def get_type(self, name):
+            assert name == "CampaignOperation"
+            return SimpleNamespace(
+                update=SimpleNamespace(
+                    resource_name=None,
+                    manual_cpc=SimpleNamespace(enhanced_cpc_enabled=False),
+                    maximize_conversions=SimpleNamespace(target_cpa_micros=0),
+                    maximize_conversion_value=SimpleNamespace(target_roas=0.0),
+                    target_spend=SimpleNamespace(),
+                    update_mask=SimpleNamespace(paths=[]),
+                )
+            )
+
+    res = mut._set_bidding_strategy_via_sdk(
+        _Client(), DRAFT_ACCOUNT_ID, "23", "maximize_conversions", 5_000_000, None, False
+    )
+    assert res["applied"] and res["strategy"] == "maximize_conversions"
+    assert res["target_cpa_micros"] == 5_000_000
+    op = captured["op"]
+    assert op.update.maximize_conversions.target_cpa_micros == 5_000_000
+    assert "maximize_conversions" in op.update.update_mask.paths  # явный mask на oneof
+
+
+async def test_set_bidding_strategy_supported_as_proposal():
+    import agent.loop as L
+
+    fake = _fake_chat(
+        "set_bidding_strategy",
+        {"campaign": "X", "strategy": "maximize_conversions", "target_cpa": 5.0},
+    )
+    with patched(L, "chat", fake):
+        res = await L.handle_command(
+            "стратегия максимум конверсий target CPA 5 в кампании X", chat_id=1
+        )
+    assert res["type"] == "proposal" and res["operation"] == "set_bidding_strategy"
+
+
 # ── Валидатор длины ключевых слов (golden rule #4: код, кириллица = 1) ───────────
 def test_assert_keyword_ok_counts_cyrillic_as_one():
     assert mut._assert_keyword_ok("  цветы  ") == "цветы"
@@ -705,11 +826,11 @@ async def test_capability_guard_allows_supported_bid_as_proposal():
 # ── Capability-guard / defense-in-depth на уровне execute_confirmed ──────────────
 async def test_execute_confirmed_rejects_unsupported_op():
     """Defense-in-depth: операцию вне SUPPORTED_OPERATIONS execute_confirmed отвергает даже при
-    дыре в loop-гейте. set_bidding_strategy — реальная ещё не реализованная операция."""
+    дыре в loop-гейте. Используем заведомо несуществующую операцию-плейсхолдер."""
     from ads.service import execute_confirmed
 
     cp = SimpleNamespace(
-        operation="set_bidding_strategy",
+        operation="totally_unsupported_op_xyz",
         status="confirmed",
         params={"campaign": "X"},
     )
@@ -1001,6 +1122,12 @@ def _apply_case(op):
             "country_code": "UA",
             **base,
         }
+    if op == "set_bidding_strategy":
+        return mut.apply_set_bidding_strategy, {
+            "campaign_id": "7",
+            "strategy": "manual_cpc",
+            **base,
+        }
     raise AssertionError(op)
 
 
@@ -1012,6 +1139,7 @@ _ALL_OPS = [
     "resume_campaign",
     "pause_campaign",
     "set_geo_location",
+    "set_bidding_strategy",
 ]
 
 
