@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "aimash"
 version = "0.0.1"
@@ -34,6 +38,12 @@ dev = [
     "mypy>=1.11",
     "pre-commit>=3.8",        # хуки: gitleaks (секрет-скан) + ruff/ruff-format
 ]
+
+# Плоская раскладка с несколькими top-level пакетами → setuptools НЕ авто-определит их
+# (ошибка «Multiple top-level packages discovered»). Перечисляем явно; tests/scripts/migrations —
+# не пакеты (в образ всё равно COPY . . попадают, alembic/pytest находят их без установки).
+[tool.setuptools.packages.find]
+include = ["adcopy*", "ads*", "agent*", "bot*", "confirm*", "core*", "db*", "keywords*", "reports*", "scheduler*"]
 
 [tool.ruff]
 line-length = 100
