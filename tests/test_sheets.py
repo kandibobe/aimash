@@ -137,3 +137,32 @@ def test_publish_creates_spreadsheet_and_writes_values():
     batch = next(e for e in svc.log if e[0] == "values.batchUpdate")
     ranges = [d["range"] for d in batch[2]["data"]]
     assert ranges == ["'Сводка'!A1", "'Кампании'!A1"]
+
+
+def test_publish_logs_success(caplog):
+    """§15: путь Sheets больше не «молчащий» — успешная публикация пишет лог (раньше при сбое
+    scope/сети не было трейса). Логируется без секретов (имя/длительность/число вкладок)."""
+    import logging as _logging
+
+    svc = FakeService()
+    with caplog.at_level(_logging.INFO, logger="aimash"):
+        publish_report_to_sheets(_report(), service=svc)
+    assert any("sheets-publish: ok" in r.getMessage() for r in caplog.records)
+
+
+def test_publish_logs_failure_and_reraises(caplog):
+    """Сбой Sheets API логируется (warning) и пробрасывается дальше (бот покажет понятное)."""
+    import logging as _logging
+
+    class _Boom:
+        def spreadsheets(self):
+            raise RuntimeError("scope drive.file missing")
+
+    raised = False
+    with caplog.at_level(_logging.WARNING, logger="aimash"):
+        try:
+            publish_report_to_sheets(_report(), service=_Boom())
+        except RuntimeError:
+            raised = True
+    assert raised  # ошибка проброшена (не проглочена)
+    assert any("sheets-publish:" in r.getMessage() for r in caplog.records)

@@ -30,6 +30,16 @@ def _ellipsize(s: str, limit: int = _NAME_LIMIT) -> str:
     return s if len(s) <= limit else s[: limit - 1].rstrip() + "…"
 
 
+def _lang(lang: str | None) -> str:
+    """Язык клавиатуры: явный lang → он; None → язык текущего запроса (contextvar). i18n
+    импортируем ЛЕНИВО — bot.i18n тянет bot.texts, верхнеуровневый импорт ради цикла не нужен."""
+    if lang is None:
+        from bot import i18n
+
+        return i18n.current_lang()
+    return lang if lang in ("ru", "en") else "ru"
+
+
 # ── Меню-кнопка Telegram (список команд в «/») ──────────────────────────────────
 # Показываем только то, что бот реально умеет, + честные пометки «скоро» для фаз 2-3.
 BOT_COMMANDS: list[BotCommand] = [
@@ -49,7 +59,30 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="model", description="Модель ИИ (OpenRouter)"),
     BotCommand(command="balance", description="Бюджет ИИ: баланс OpenRouter и траты"),
     BotCommand(command="journal", description="Журнал изменений (что/когда/кто)"),
+    BotCommand(command="diag", description="Журнал ошибок (диагностика)"),
     BotCommand(command="lang", description="Язык интерфейса / interface language"),
+]
+
+# EN-вариант меню команд (Telegram отдаёт его клиентам с language_code='en'; RU — дефолтный fallback).
+BOT_COMMANDS_EN: list[BotCommand] = [
+    BotCommand(command="start", description="Launch and menu"),
+    BotCommand(command="help", description="What I can do"),
+    BotCommand(command="status", description="Account stats (30 days)"),
+    BotCommand(command="campaigns", description="Campaigns: list and quick actions"),
+    BotCommand(command="pause", description="Pause a campaign: /pause Name"),
+    BotCommand(command="resume", description="Resume a campaign: /resume Name"),
+    BotCommand(command="report", description="Period summary (7/30/90/MTD)"),
+    BotCommand(command="export", description="Deep report .xlsx"),
+    BotCommand(command="sheets", description="Deep report in Google Sheets (link)"),
+    BotCommand(command="rsa", description="Generate ad copy (RSA)"),
+    BotCommand(command="newsearch", description="Create a search campaign (RSA + keywords)"),
+    BotCommand(command="cancel", description="Cancel the current draft"),
+    BotCommand(command="keywords", description="Keyword research"),
+    BotCommand(command="model", description="AI model (OpenRouter)"),
+    BotCommand(command="balance", description="AI budget: OpenRouter balance and spend"),
+    BotCommand(command="journal", description="Change journal (what/when/who)"),
+    BotCommand(command="diag", description="Error log (diagnostics)"),
+    BotCommand(command="lang", description="Interface language / язык интерфейса"),
 ]
 
 
@@ -63,20 +96,30 @@ def lang_kb() -> InlineKeyboardMarkup:
 
 
 def model_kb(
-    choices: list[str], active: str | None, labels: dict[str, str] | None = None
+    choices: list[str],
+    active: str | None,
+    labels: dict[str, str] | None = None,
+    lang: str | None = None,
 ) -> InlineKeyboardMarkup:
     """Выбор модели ИИ (/model): пресеты (✓ у активной) + своя модель + сброс на дефолт.
     idx указывает на позицию в choices (slug в callback_data не кладём — длинный и с '/').
     labels — дружелюбные подписи slug→текст (неизвестный slug показываем как есть)."""
     labels = labels or {}
+    en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     for i, slug in enumerate(choices):
         mark = "✅ " if slug == active else ""
         text = labels.get(slug) or _ellipsize(slug)
         kb.button(text=f"{mark}{text}", callback_data=ModelCB(action="set", idx=i))
-    kb.button(text="✏️ Своя модель", callback_data=ModelCB(action="custom"))
+    kb.button(
+        text="✏️ Custom model" if en else "✏️ Своя модель",
+        callback_data=ModelCB(action="custom"),
+    )
     if active is not None:
-        kb.button(text="↩️ Сбросить (дефолт)", callback_data=ModelCB(action="reset"))
+        kb.button(
+            text="↩️ Reset (default)" if en else "↩️ Сбросить (дефолт)",
+            callback_data=ModelCB(action="reset"),
+        )
     kb.adjust(1)
     return kb.as_markup()
 
@@ -84,24 +127,42 @@ def model_kb(
 # ── Reply-меню (постоянное нижнее) — навигация/чтение + запуск визардов, НЕ прямые мутации ─
 # Мутации (бюджет/ставка/ключи/пауза) идут через /campaigns или свободный текст → confirm-гейт:
 # им нужна цель, поэтому прямых кнопок-мутаций тут нет. Кнопки лишь открывают экран/визард.
-BTN_STATUS = "📊 Статистика"
-BTN_CAMPAIGNS = "📋 Кампании"
-BTN_REPORT = "📈 Отчёт"
-BTN_EXPORT = "📄 Экспорт .xlsx"
-BTN_SHEETS = "🟢 Sheets"
-BTN_KEYWORDS = "🔑 Ключевые слова"
-BTN_RSA = "✍️ Тексты (RSA)"
-BTN_MODEL = "🧠 Модель"
-BTN_BALANCE = "💳 Бюджет ИИ"
-BTN_JOURNAL = "📜 Журнал"
-BTN_LANG = "🌐 Язык"
-BTN_HELP = "❓ Помощь"
+# Локализация (§4): каждая подпись — {lang: текст}; main_menu(lang) рендерит для языка, а хендлеры
+# матчат по BTN_*_ALL (frozenset обоих языков) — иначе EN-пользователь прислал бы EN-подпись, а
+# `F.text == BTN_*` (RU-литерал) её не поймал бы → кнопка «мёртвая».
+BTN_STATUS = {"ru": "📊 Статистика", "en": "📊 Stats"}
+BTN_CAMPAIGNS = {"ru": "📋 Кампании", "en": "📋 Campaigns"}
+BTN_REPORT = {"ru": "📈 Отчёт", "en": "📈 Report"}
+BTN_EXPORT = {"ru": "📄 Экспорт .xlsx", "en": "📄 Export .xlsx"}
+BTN_SHEETS = {"ru": "🟢 Sheets", "en": "🟢 Sheets"}
+BTN_KEYWORDS = {"ru": "🔑 Ключевые слова", "en": "🔑 Keywords"}
+BTN_RSA = {"ru": "✍️ Тексты (RSA)", "en": "✍️ Ad copy (RSA)"}
+BTN_MODEL = {"ru": "🧠 Модель", "en": "🧠 Model"}
+BTN_BALANCE = {"ru": "💳 Бюджет ИИ", "en": "💳 AI budget"}
+BTN_JOURNAL = {"ru": "📜 Журнал", "en": "📜 Journal"}
+BTN_LANG = {"ru": "🌐 Язык", "en": "🌐 Language"}
+BTN_HELP = {"ru": "❓ Помощь", "en": "❓ Help"}
+
+# Множества всех языковых вариантов для матчинга в хендлерах (F.text.in_(BTN_*_ALL)).
+BTN_STATUS_ALL = frozenset(BTN_STATUS.values())
+BTN_CAMPAIGNS_ALL = frozenset(BTN_CAMPAIGNS.values())
+BTN_REPORT_ALL = frozenset(BTN_REPORT.values())
+BTN_EXPORT_ALL = frozenset(BTN_EXPORT.values())
+BTN_SHEETS_ALL = frozenset(BTN_SHEETS.values())
+BTN_KEYWORDS_ALL = frozenset(BTN_KEYWORDS.values())
+BTN_RSA_ALL = frozenset(BTN_RSA.values())
+BTN_MODEL_ALL = frozenset(BTN_MODEL.values())
+BTN_BALANCE_ALL = frozenset(BTN_BALANCE.values())
+BTN_JOURNAL_ALL = frozenset(BTN_JOURNAL.values())
+BTN_LANG_ALL = frozenset(BTN_LANG.values())
+BTN_HELP_ALL = frozenset(BTN_HELP.values())
 
 
-def main_menu() -> ReplyKeyboardMarkup:
+def main_menu(lang: str | None = None) -> ReplyKeyboardMarkup:
     """Полное нижнее меню: все основные функции одним тапом (мутации — через цель в /campaigns)."""
+    lng = _lang(lang)
     kb = ReplyKeyboardBuilder()
-    for text in (
+    for btn in (
         BTN_STATUS,
         BTN_CAMPAIGNS,
         BTN_REPORT,
@@ -115,20 +176,26 @@ def main_menu() -> ReplyKeyboardMarkup:
         BTN_LANG,
         BTN_HELP,
     ):
-        kb.button(text=text)
+        kb.button(text=btn[lng])
     kb.adjust(2, 3, 2, 2, 3)
+    placeholder = "Command or text…" if lng == "en" else "Команда или текст…"
     return kb.as_markup(
         resize_keyboard=True,
         is_persistent=True,
-        input_field_placeholder="Команда или текст…",
+        input_field_placeholder=placeholder,
     )
 
 
 # ── Inline: подтверждение мутации (главный — confirm-гейт) ───────────────────────
-def confirm_kb(cid: str) -> InlineKeyboardMarkup:
+def confirm_kb(cid: str, lang: str | None = None) -> InlineKeyboardMarkup:
+    en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Подтвердить", callback_data=ConfirmCB(action="ok", cid=cid))
-    kb.button(text="❌ Отмена", callback_data=ConfirmCB(action="no", cid=cid))
+    kb.button(
+        text="✅ Confirm" if en else "✅ Подтвердить", callback_data=ConfirmCB(action="ok", cid=cid)
+    )
+    kb.button(
+        text="❌ Cancel" if en else "❌ Отмена", callback_data=ConfirmCB(action="no", cid=cid)
+    )
     kb.adjust(2)
     return kb.as_markup()
 
@@ -146,23 +213,37 @@ def campaigns_kb(camps: list[dict]) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def campaign_actions_kb(idx: int, status: str) -> InlineKeyboardMarkup:
+def campaign_actions_kb(idx: int, status: str, lang: str | None = None) -> InlineKeyboardMarkup:
     """Действия для одной кампании. pause/resume зависят от статуса; мутации идут через
     confirm-гейт (кнопка лишь создаёт черновик, не исполняет)."""
+    en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     if status == "ENABLED":
-        kb.button(text="⏸ Поставить на паузу", callback_data=CampCB(action="pause", idx=idx))
+        kb.button(
+            text="⏸ Pause" if en else "⏸ Поставить на паузу",
+            callback_data=CampCB(action="pause", idx=idx),
+        )
     elif status == "PAUSED":
-        kb.button(text="▶️ Возобновить", callback_data=CampCB(action="resume", idx=idx))
-    kb.button(text="🎯 Аудитории", callback_data=CampCB(action="audience", idx=idx))
-    kb.button(text="‹ Назад к списку", callback_data=CampCB(action="back", idx=idx))
+        kb.button(
+            text="▶️ Resume" if en else "▶️ Возобновить",
+            callback_data=CampCB(action="resume", idx=idx),
+        )
+    kb.button(
+        text="🎯 Audiences" if en else "🎯 Аудитории",
+        callback_data=CampCB(action="audience", idx=idx),
+    )
+    kb.button(
+        text="‹ Back to list" if en else "‹ Назад к списку",
+        callback_data=CampCB(action="back", idx=idx),
+    )
     kb.adjust(1)
     return kb.as_markup()
 
 
-def audiences_kb(auds: list, camp_idx: int) -> InlineKeyboardMarkup:
+def audiences_kb(auds: list, camp_idx: int, lang: str | None = None) -> InlineKeyboardMarkup:
     """Выбор аудитории для прикрепления к кампании (§3). idx — позиция в списке аудиторий;
     camp_idx ведёт прикрепление к конкретной кампании и кнопку «назад» — к её меню."""
+    en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     for i, a in enumerate(auds):
         size = getattr(a, "size", 0) or 0
@@ -171,56 +252,80 @@ def audiences_kb(auds: list, camp_idx: int) -> InlineKeyboardMarkup:
             text=f"👥 {_ellipsize(a.name)}{suffix}",
             callback_data=AudienceCB(action="pick", camp_idx=camp_idx, idx=i),
         )
-    kb.button(text="‹ Назад", callback_data=CampCB(action="menu", idx=camp_idx))
+    kb.button(text="‹ Back" if en else "‹ Назад", callback_data=CampCB(action="menu", idx=camp_idx))
     kb.adjust(1)
     return kb.as_markup()
 
 
 # ── Inline: выбор периода (отчёт) ────────────────────────────────────────────────
-def period_kb(target: str) -> InlineKeyboardMarkup:
+def period_kb(target: str, lang: str | None = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    for label, code in [("7 дней", "7"), ("30 дней", "30"), ("90 дней", "90"), ("MTD", "MTD")]:
+    if _lang(lang) == "en":
+        items = [("7 days", "7"), ("30 days", "30"), ("90 days", "90"), ("MTD", "MTD")]
+    else:
+        items = [("7 дней", "7"), ("30 дней", "30"), ("90 дней", "90"), ("MTD", "MTD")]
+    for label, code in items:
         kb.button(text=label, callback_data=PeriodCB(target=target, code=code))
     kb.adjust(2, 2)
     return kb.as_markup()
 
 
 # ── RSA-курация (ТЗ §10): поэлементное подтверждение + массовые действия ──────────
-def rsa_item_kb(cid: str, kind: str, idx: int) -> InlineKeyboardMarkup:
+def rsa_item_kb(cid: str, kind: str, idx: int, lang: str | None = None) -> InlineKeyboardMarkup:
     """Кнопки одного элемента (заголовок/описание): одобрить/доработать/отклонить + к итогу."""
+    en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     kb.button(
-        text="✅ Одобрить", callback_data=RsaCB(action="approve", cid=cid, kind=kind, idx=idx)
+        text="✅ Approve" if en else "✅ Одобрить",
+        callback_data=RsaCB(action="approve", cid=cid, kind=kind, idx=idx),
     )
     kb.button(
-        text="✏️ Доработать", callback_data=RsaCB(action="refine", cid=cid, kind=kind, idx=idx)
+        text="✏️ Refine" if en else "✏️ Доработать",
+        callback_data=RsaCB(action="refine", cid=cid, kind=kind, idx=idx),
     )
     kb.button(
-        text="❌ Отклонить", callback_data=RsaCB(action="reject", cid=cid, kind=kind, idx=idx)
+        text="❌ Reject" if en else "❌ Отклонить",
+        callback_data=RsaCB(action="reject", cid=cid, kind=kind, idx=idx),
     )
-    kb.button(text="📋 К итогу", callback_data=RsaCB(action="overview", cid=cid))
+    kb.button(
+        text="📋 To summary" if en else "📋 К итогу",
+        callback_data=RsaCB(action="overview", cid=cid),
+    )
     kb.adjust(3, 1)
     return kb.as_markup()
 
 
-def rsa_overview_kb(cid: str, can_finalize: bool, has_pending: bool = True) -> InlineKeyboardMarkup:
+def rsa_overview_kb(
+    cid: str, can_finalize: bool, has_pending: bool = True, lang: str | None = None
+) -> InlineKeyboardMarkup:
     """Итог курации: массовое одобрение/просмотр по одному (если есть pending),
     создание объявления (если набран минимум ≥3 загол./≥2 опис.), отмена."""
+    en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     if has_pending:
         kb.button(
-            text="✅ Применить все валидные", callback_data=RsaCB(action="approveall", cid=cid)
+            text="✅ Apply all valid" if en else "✅ Применить все валидные",
+            callback_data=RsaCB(action="approveall", cid=cid),
         )
-        kb.button(text="🔍 Смотреть по одному", callback_data=RsaCB(action="review", cid=cid))
+        kb.button(
+            text="🔍 Review one by one" if en else "🔍 Смотреть по одному",
+            callback_data=RsaCB(action="review", cid=cid),
+        )
     if can_finalize:
-        kb.button(text="➡️ Создать объявление", callback_data=RsaCB(action="finalize", cid=cid))
-    kb.button(text="❌ Отмена", callback_data=RsaCB(action="cancel", cid=cid))
+        kb.button(
+            text="➡️ Create ad" if en else "➡️ Создать объявление",
+            callback_data=RsaCB(action="finalize", cid=cid),
+        )
+    kb.button(
+        text="❌ Cancel" if en else "❌ Отмена", callback_data=RsaCB(action="cancel", cid=cid)
+    )
     kb.adjust(1)
     return kb.as_markup()
 
 
-def rsa_pick_campaigns_kb(camps: list[dict]) -> InlineKeyboardMarkup:
-    """Визард /rsa: выбор кампании (idx → имя из кэша)."""
+def rsa_pick_campaigns_kb(camps: list[dict], lang: str | None = None) -> InlineKeyboardMarkup:
+    """Визард /rsa: выбор кампании (idx → имя из кэша). lang принимаем для единообразия
+    (подписи кампаний — данные, не переводятся; маркер статуса нейтрален)."""
     kb = InlineKeyboardBuilder()
     for i, c in enumerate(camps):
         mark = {"ENABLED": "▶️", "PAUSED": "⏸"}.get(c.get("status", ""), "•")
@@ -231,8 +336,8 @@ def rsa_pick_campaigns_kb(camps: list[dict]) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def rsa_pick_adgroups_kb(groups: list[dict]) -> InlineKeyboardMarkup:
-    """Визард /rsa: выбор группы объявлений (idx → имя из кэша)."""
+def rsa_pick_adgroups_kb(groups: list[dict], lang: str | None = None) -> InlineKeyboardMarkup:
+    """Визард /rsa: выбор группы объявлений (idx → имя из кэша). lang — для единообразия сигнатур."""
     kb = InlineKeyboardBuilder()
     for i, g in enumerate(groups):
         kb.button(text=f"• {_ellipsize(g['name'])}", callback_data=RsaPickCB(what="ag", idx=i))

@@ -83,8 +83,11 @@ alembic upgrade head                 # применить миграции (Post
 dev/SQLite и тестов. В dev (SQLite) `init_db()` дополнительно зовёт `heal_sqlite_schema` —
 аддитивно дотягивает недостающие NULLABLE-колонки (на SQLite `create_all` НЕ альтерит уже
 существующие таблицы → после новой миграции dev-БД иначе дрейфует от модели). На Postgres
-схему по-прежнему ведёт ТОЛЬКО Alembic (self-heal трогает лишь SQLite). В контейнере миграции
-одноразово:
+схему по-прежнему ведёт ТОЛЬКО Alembic (self-heal трогает лишь SQLite).
+
+**В Docker миграции применяются автоматически** при старте контейнера бота
+(`docker-entrypoint.sh` → `alembic upgrade head` ДО `python -m bot.main`; падение миграции
+останавливает старт — fail-fast). Прогнать вручную (напр. на хосте или для проверки):
 ```bash
 docker compose run --rm bot alembic upgrade head
 ```

@@ -151,6 +151,45 @@ async def apply_resume_campaign(
     return result
 
 
+# ── Пауза/возобновление ГРУППЫ объявлений (§16 AdGroupService) ───────────────────
+# Зеркало pause/resume кампании, но статус живёт на ad_group. Деньги НЕ трогаются →
+# user_initiated не требуется (как и для паузы кампании). Оба гейта обязательны.
+async def apply_pause_ad_group(
+    *,
+    customer_id: str,
+    ad_group_id: str,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    ensure_allowed(customer_id)
+    await _require_confirmation(confirm_store, confirmation_id, "pause_ad_group")
+    status = ads_client.enums.AdGroupStatusEnum.PAUSED
+    result = await run_ads_call(
+        _set_ad_group_status_via_sdk, ads_client, customer_id, ad_group_id, status
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+async def apply_resume_ad_group(
+    *,
+    customer_id: str,
+    ad_group_id: str,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    ensure_allowed(customer_id)
+    await _require_confirmation(confirm_store, confirmation_id, "resume_ad_group")
+    status = ads_client.enums.AdGroupStatusEnum.ENABLED
+    result = await run_ads_call(
+        _set_ad_group_status_via_sdk, ads_client, customer_id, ad_group_id, status
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
 # ── Ставка CPC на уровне групп объявлений ───────────────────────────────────────
 async def apply_update_bid(
     *,
@@ -541,6 +580,23 @@ def _set_campaign_status_via_sdk(client, customer_id: str, campaign_id: str, sta
     return {
         "customer_id": customer_id,
         "campaign_id": str(campaign_id),
+        "status": getattr(status, "name", str(status)),
+        "applied": True,
+    }
+
+
+def _set_ad_group_status_via_sdk(client, customer_id: str, ad_group_id: str, status) -> dict:
+    """Статус ad_group через AdGroupService (зеркало _set_campaign_status_via_sdk). update_mask —
+    только status (field_mask по изменённым полям op.update)."""
+    svc = client.get_service("AdGroupService")
+    op = client.get_type("AdGroupOperation")
+    op.update.resource_name = svc.ad_group_path(str(customer_id), str(ad_group_id))
+    op.update.status = status
+    client.copy_from(op.update_mask, protobuf_helpers.field_mask(None, op.update._pb))
+    svc.mutate_ad_groups(customer_id=str(customer_id), operations=[op])
+    return {
+        "customer_id": customer_id,
+        "ad_group_id": str(ad_group_id),
         "status": getattr(status, "name", str(status)),
         "applied": True,
     }

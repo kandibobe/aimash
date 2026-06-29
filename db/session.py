@@ -29,6 +29,12 @@ else:
     # соединения старше N сек (защита от server-side idle-timeout). Стабильность рантайма (P2).
     _engine_kwargs["pool_pre_ping"] = True
     _engine_kwargs["pool_recycle"] = 1800
+    # Размер пула: дефолт SQLAlchemy (5) тесноват — бот И scheduler конкурентно ходят в БД
+    # (confirm-колбэки + плановая очистка/аномалии). 10 постоянных + 5 overflow с запасом покрывают
+    # пиковую нагрузку одного инстанса. connect timeout — не виснуть бесконечно на старте/обрыве.
+    _engine_kwargs["pool_size"] = 10
+    _engine_kwargs["max_overflow"] = 5
+    _engine_kwargs["connect_args"] = {"timeout": 10}
 
 engine = create_async_engine(_db_url, **_engine_kwargs)
 Session = async_sessionmaker(engine, expire_on_commit=False)

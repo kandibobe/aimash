@@ -63,8 +63,12 @@ class Settings(BaseSettings):
     google_ads_refresh_token: SecretStr = SecretStr("")
     google_ads_login_customer_id: str = ""  # менеджерский аккаунт (MCC), контекст авторизации
     google_ads_allowed_customer_ids: str = (
-        ""  # белый список аккаунтов (см. ads.client.ensure_allowed)
+        ""  # белый список аккаунтов для МУТАЦИЙ (см. ads.client.ensure_allowed)
     )
+    # §8: аккаунты, доступные ТОЛЬКО на чтение (сводка по дочерним MCC) ПОМИМО мутационного списка.
+    # fail-closed; мутации этим НЕ затрагиваются (свой узкий замок). Пусто => чтение, как и мутации,
+    # только на разрешённый аккаунт (поведение не меняется). См. ads.client.ensure_read_allowed.
+    google_ads_read_customer_ids: str = ""
     google_ads_api_version: str = "v24"  # API-версия (мажор). SDK-пин google-ads — в pyproject.toml
 
     # Безопасность / БД
@@ -108,6 +112,16 @@ class Settings(BaseSettings):
         }
 
     @property
+    def read_customer_ids(self) -> set[str]:
+        """§8: аккаунты, доступные на ЧТЕНИЕ помимо мутационного allow-list (сводка по дочерним
+        MCC), нормализованные. Замок чтения — ads.client.ensure_read_allowed (fail-closed)."""
+        return {
+            normalize_customer_id(x)
+            for x in self.google_ads_read_customer_ids.split(",")
+            if x.strip()
+        }
+
+    @property
     def is_prod(self) -> bool:
         return self.env == "prod"
 
@@ -142,6 +156,25 @@ class Settings(BaseSettings):
                 "TELEGRAM_WHITELIST_CHAT_IDS обязателен в prod — пустой whitelist означал бы "
                 "ответы всем (fail-open). Укажи хотя бы один chat_id."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _require_google_ads_in_prod(self) -> "Settings":
+        """Fail-fast: в prod без developer token / allowed_customer_ids бот всё равно не сможет
+        работать с Google Ads. Падаем на СТАРТЕ (тут), а не на первом вызове API: ensure_allowed
+        и так fail-closed на пустой allow-list, но это срабатывает позже — лучше не подняться с
+        неполной конфигурацией. В dev/тестах не требуем (работа на фейках/без живых кредов)."""
+        if self.env == "prod":
+            missing = []
+            if not self.google_ads_developer_token.get_secret_value():
+                missing.append("GOOGLE_ADS_DEVELOPER_TOKEN")
+            if not self.allowed_customer_ids:
+                missing.append("GOOGLE_ADS_ALLOWED_CUSTOMER_IDS")
+            if missing:
+                raise ValueError(
+                    f"В prod обязательны: {', '.join(missing)} — иначе бот не сможет работать с "
+                    "Google Ads (fail-fast на старте, а не на первом вызове API)."
+                )
         return self
 
 

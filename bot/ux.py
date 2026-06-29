@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 from aiogram.enums import ChatAction
 from aiogram.types import FSInputFile
 
+from bot import i18n
 from core.logging import redact_text
 
 ACTION_REFRESH_SEC = 4.0  # Telegram гасит chat action через ~5с → обновляем раньше
@@ -81,11 +82,11 @@ def _err_hint(e: BaseException) -> str:
     text = str(e).lower()
     mod = type(e).__module__ or ""
     if isinstance(e, TimeoutError) or "timed out" in text or "timeout" in text:
-        return " — попробуй ещё раз через минуту."
+        return i18n.t("hint_timeout")
     if isinstance(e, ConnectionError):
-        return " — проверь сеть и попробуй ещё раз."
+        return i18n.t("hint_network")
     if mod.startswith("openai") or "rate limit" in text or "rate_limit" in text:
-        return " — модель занята или достигнут лимит: упрости запрос или смени модель (/model)."
+        return i18n.t("hint_ratelimit")
     return ""
 
 
@@ -126,11 +127,13 @@ def _plural_ru(n: int, one: str, many: str) -> str:
 
 
 def fmt_rsa_diagnostics(
-    draft: object, n_headlines: int, n_descriptions: int, *, lang: str = "ru"
+    draft: object, n_headlines: int, n_descriptions: int, *, lang: str | None = None
 ) -> str:
     """Сводка результата генерации из RsaDraft (дакт-тайпинг: .headlines/.descriptions/
     .dropped_headlines/.dropped_descriptions). Показывает, СКОЛЬКО набрано и сколько отброшено
-    кодом за длину (golden rule #4) — раньше эти счётчики терялись."""
+    кодом за длину (golden rule #4) — раньше эти счётчики терялись. lang=None → язык запроса
+    (contextvar i18n.current_lang), чтобы EN-пользователь видел EN без проброса lang вызывающим."""
+    lang = i18n.current_lang() if lang is None else lang
     got_h = len(getattr(draft, "headlines", []) or [])
     got_d = len(getattr(draft, "descriptions", []) or [])
     drop_h = int(getattr(draft, "dropped_headlines", 0) or 0)

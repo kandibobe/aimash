@@ -70,6 +70,37 @@ def ensure_allowed(customer_id: str) -> None:
         )
 
 
+def ensure_read_allowed(customer_id: str) -> None:
+    """Замок ЧТЕНИЯ per-account (§8: сводный отчёт по дочерним аккаунтам MCC).
+
+    Шире мутационного, но НЕ открытый. Множество разрешённого чтения =
+    мутационный allow-list (`settings.allowed_customer_ids`) ∪ read-allow-list
+    (`settings.read_customer_ids` из env `GOOGLE_ADS_READ_CUSTOMER_IDS`). Пустые оба ⇒ отказ
+    (fail-closed). Нормализуем id (только цифры), '775-364-3025' ≡ '7753643025'.
+
+    ⚠️ Мутации этим НЕ затрагиваются: у них свой узкий замок `ensure_allowed` с код-потолком
+    `ALLOWED_CEILING`. Расширение read-allow-list (перечисление дочерних MCC) НЕ даёт права их
+    менять — мутация на дочернем всё равно упрётся в `ensure_allowed`. read-allow-list по
+    умолчанию ПУСТ ⇒ чтение, как и мутации, только на разрешённый аккаунт (поведение не меняется).
+    """
+    cid = normalize_customer_id(customer_id)
+    mutate = {normalize_customer_id(x) for x in settings.allowed_customer_ids}
+    read = {normalize_customer_id(x) for x in settings.read_customer_ids}
+    allowed = mutate | read
+
+    # fail-closed: без явного списка ничего не читаем per-account.
+    if not allowed:
+        raise PermissionError(
+            "ни allowed_customer_ids, ни read_customer_ids не заданы — чтение запрещено "
+            f"(fail-closed). Задай GOOGLE_ADS_ALLOWED_CUSTOMER_IDS={DRAFT_ACCOUNT_ID} в .env"
+        )
+    if cid not in allowed:
+        raise PermissionError(
+            f"customer_id {cid} не разрешён для чтения (read allow-list {sorted(allowed)}) — "
+            "операция запрещена"
+        )
+
+
 def ensure_manager_allowed(manager_id: str) -> None:
     """Замок для ОБХОДА MCC (чтение customer_client от имени менеджерского аккаунта).
 

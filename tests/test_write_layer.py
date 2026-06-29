@@ -70,6 +70,10 @@ class _FakeEnums:
         ENABLED = "ENABLED"
         PAUSED = "PAUSED"
 
+    class AdGroupStatusEnum:
+        ENABLED = "ENABLED"
+        PAUSED = "PAUSED"
+
 
 class _FakeClient:
     enums = _FakeEnums()
@@ -339,6 +343,80 @@ async def test_apply_resume_campaign_happy_path():
     assert res["applied"] is True
     assert called["status"] == "ENABLED"  # resume → ENABLED
     assert store.finalized is True
+
+
+# ── apply_pause_ad_group / apply_resume_ad_group (§16 AdGroupService): оба гейта, без денег ──
+async def test_apply_pause_ad_group_happy_path():
+    called = {}
+
+    def fake(client, customer_id, ad_group_id, status):
+        called.update(ad_group_id=ad_group_id, status=status)
+        return {"applied": True, "status": status}
+
+    store = FakeStore(FakeProposal("pause_ad_group", "confirmed", user_initiated=True))
+    with patched(mut, "_set_ad_group_status_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_pause_ad_group(
+            customer_id=DRAFT_ACCOUNT_ID,
+            ad_group_id="77",
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=_FakeClient(),
+        )
+    assert res["applied"] is True
+    assert called["ad_group_id"] == "77" and called["status"] == "PAUSED"  # pause → PAUSED
+    assert store.finalized is True
+
+
+async def test_apply_resume_ad_group_happy_path():
+    called = {}
+
+    def fake(client, customer_id, ad_group_id, status):
+        called.update(status=status)
+        return {"applied": True, "status": status}
+
+    store = FakeStore(FakeProposal("resume_ad_group", "confirmed", user_initiated=True))
+    with patched(mut, "_set_ad_group_status_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_resume_ad_group(
+            customer_id=DRAFT_ACCOUNT_ID,
+            ad_group_id="77",
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=_FakeClient(),
+        )
+    assert res["applied"] is True
+    assert called["status"] == "ENABLED"  # resume → ENABLED
+    assert store.finalized is True
+
+
+async def test_apply_pause_ad_group_replay_one_shot():
+    """Replay: тот же confirmation_id второй раз — PermissionError, SDK зван РОВНО один раз."""
+    calls = {"n": 0}
+
+    def fake(client, customer_id, ad_group_id, status):
+        calls["n"] += 1
+        return {"applied": True, "status": status}
+
+    store = FakeStore(FakeProposal("pause_ad_group", "confirmed", user_initiated=True))
+    with patched(mut, "_set_ad_group_status_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        await mut.apply_pause_ad_group(
+            customer_id=DRAFT_ACCOUNT_ID,
+            ad_group_id="77",
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=_FakeClient(),
+        )
+        try:
+            await mut.apply_pause_ad_group(
+                customer_id=DRAFT_ACCOUNT_ID,
+                ad_group_id="77",
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=_FakeClient(),
+            )
+            raise AssertionError("ожидался PermissionError (replay)")
+        except PermissionError:
+            pass
+    assert calls["n"] == 1  # SDK зван ровно один раз (одноразовый claim)
 
 
 # ── apply_set_geo_proximity (A-geo): оба гейта, address-driven, без геокодинга ───
@@ -1298,6 +1376,10 @@ def _apply_case(op):
         return mut.apply_resume_campaign, {"campaign_id": "7", **base}
     if op == "pause_campaign":
         return mut.apply_pause_campaign, {"campaign_id": "7", **base}
+    if op == "pause_ad_group":
+        return mut.apply_pause_ad_group, {"ad_group_id": "77", **base}
+    if op == "resume_ad_group":
+        return mut.apply_resume_ad_group, {"ad_group_id": "77", **base}
     if op == "set_geo_location":
         return mut.apply_set_geo_location, {
             "campaign_id": "7",
@@ -1321,6 +1403,8 @@ _ALL_OPS = [
     "add_negative_keywords",
     "resume_campaign",
     "pause_campaign",
+    "pause_ad_group",
+    "resume_ad_group",
     "set_geo_location",
     "set_bidding_strategy",
 ]
@@ -1363,6 +1447,23 @@ def test_resolvers_reject_foreign_account():
                 raise AssertionError(f"{fn.__name__}: чужой аккаунт должен падать")
             except PermissionError:
                 pass
+
+
+# ── find_ad_group_by_name: выбор группы по имени внутри кампании (pause/resume группы) ──
+def test_find_ad_group_by_name_filters_case_insensitive():
+    """Резолвер выбирает группу по имени (регистронезависимо точно) из find_ad_groups; нет
+    совпадения / пустое имя → None (вызывающий отвергнет ДО любой записи)."""
+    from ads import resolve
+
+    groups = [
+        resolve.AdGroupRef("1", "rn1", "Brand", "ENABLED", 0, "9"),
+        resolve.AdGroupRef("2", "rn2", "Generic", "PAUSED", 0, "9"),
+    ]
+    with patched(resolve, "find_ad_groups", lambda c, cid, camp: groups):
+        got = resolve.find_ad_group_by_name(object(), DRAFT_ACCOUNT_ID, "Camp", "generic")
+        assert got is not None and got.id == "2" and got.status == "PAUSED"
+        assert resolve.find_ad_group_by_name(object(), DRAFT_ACCOUNT_ID, "Camp", "missing") is None
+        assert resolve.find_ad_group_by_name(object(), DRAFT_ACCOUNT_ID, "Camp", "  ") is None
 
 
 # ── FIX 3: ensure_manager_allowed — обход MCC только настроенного менеджера ───────

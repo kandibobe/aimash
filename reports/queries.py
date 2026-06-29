@@ -1,7 +1,8 @@
 """Глубокий отчёт по ОДНОМУ аккаунту: GAQL-разбивки + метрики. READ-ONLY.
 
-Каждый fetch_* проходит через ads.client.ensure_allowed (замок аккаунта, golden rule #9) —
-отчёты тоже только по разрешённому аккаунту. Метрики из micros считает КОД (cost/CPC/CPA/ROAS),
+Каждый fetch_* проходит через ads.client.ensure_read_allowed (замок ЧТЕНИЯ, §8) — отчёты по
+разрешённому на чтение аккаунту (мутации этим не затрагиваются). Метрики из micros считает КОД
+(cost/CPC/CPA/ROAS),
 не модель. Большие разбивки (ключи/объявления) ограничиваются топ-N по расходу — усечение
 помечается явно (Breakdown.note), без «тихого» обрезания.
 """
@@ -10,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ads.client import ensure_allowed
+from ads.client import ensure_read_allowed
 
 # Топ-N для потенциально огромных разбивок (ключи/объявления): сортируем по расходу.
 TOP_N = 1000
@@ -126,7 +127,7 @@ def _search(client, customer_id: str, query: str):
 
 # ── Totals (агрегат за период; resource customer) ───────────────────────────────
 def fetch_totals(client, customer_id: str, period) -> Metrics:
-    ensure_allowed(customer_id)
+    ensure_read_allowed(customer_id)
     q = f"SELECT {_METRICS_SELECT} FROM customer WHERE {period.gaql_between()}"
     total = Metrics()
     for row in _search(client, customer_id, q):
@@ -136,7 +137,7 @@ def fetch_totals(client, customer_id: str, period) -> Metrics:
 
 # ── Разбивки ────────────────────────────────────────────────────────────────────
 def fetch_by_campaign(client, customer_id: str, period) -> Breakdown:
-    ensure_allowed(customer_id)
+    ensure_read_allowed(customer_id)
     q = (
         f"SELECT campaign.name, campaign.status, {_METRICS_SELECT} FROM campaign "
         f"WHERE {period.gaql_between()} ORDER BY metrics.cost_micros DESC"
@@ -149,7 +150,7 @@ def fetch_by_campaign(client, customer_id: str, period) -> Breakdown:
 
 
 def fetch_by_ad_group(client, customer_id: str, period) -> Breakdown:
-    ensure_allowed(customer_id)
+    ensure_read_allowed(customer_id)
     q = (
         f"SELECT campaign.name, ad_group.name, ad_group.status, {_METRICS_SELECT} "
         f"FROM ad_group WHERE {period.gaql_between()} ORDER BY metrics.cost_micros DESC"
@@ -165,7 +166,7 @@ def fetch_by_ad_group(client, customer_id: str, period) -> Breakdown:
 
 
 def fetch_by_keyword(client, customer_id: str, period) -> Breakdown:
-    ensure_allowed(customer_id)
+    ensure_read_allowed(customer_id)
     q = (
         "SELECT campaign.name, ad_group.name, ad_group_criterion.keyword.text, "
         f"ad_group_criterion.keyword.match_type, {_METRICS_SELECT} FROM keyword_view "
@@ -188,7 +189,7 @@ def fetch_by_keyword(client, customer_id: str, period) -> Breakdown:
 
 
 def fetch_by_ad(client, customer_id: str, period) -> Breakdown:
-    ensure_allowed(customer_id)
+    ensure_read_allowed(customer_id)
     q = (
         "SELECT campaign.name, ad_group.name, ad_group_ad.ad.id, ad_group_ad.ad.type, "
         f"{_METRICS_SELECT} FROM ad_group_ad "
@@ -211,7 +212,7 @@ def fetch_by_ad(client, customer_id: str, period) -> Breakdown:
 
 
 def fetch_by_device(client, customer_id: str, period) -> Breakdown:
-    ensure_allowed(customer_id)
+    ensure_read_allowed(customer_id)
     q = f"SELECT segments.device, {_METRICS_SELECT} FROM customer WHERE {period.gaql_between()}"
     rows = [
         ((_enum_name(r.segments.device),), _metrics(r.metrics))
@@ -222,7 +223,7 @@ def fetch_by_device(client, customer_id: str, period) -> Breakdown:
 
 
 def fetch_by_network(client, customer_id: str, period) -> Breakdown:
-    ensure_allowed(customer_id)
+    ensure_read_allowed(customer_id)
     q = (
         f"SELECT segments.ad_network_type, {_METRICS_SELECT} FROM customer "
         f"WHERE {period.gaql_between()}"
@@ -236,7 +237,7 @@ def fetch_by_network(client, customer_id: str, period) -> Breakdown:
 
 
 def fetch_by_day(client, customer_id: str, period) -> Breakdown:
-    ensure_allowed(customer_id)
+    ensure_read_allowed(customer_id)
     q = (
         f"SELECT segments.date, {_METRICS_SELECT} FROM customer "
         f"WHERE {period.gaql_between()} ORDER BY segments.date"

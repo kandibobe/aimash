@@ -27,6 +27,8 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
         "add_negative_keywords",
         "pause_campaign",
         "resume_campaign",
+        "pause_ad_group",
+        "resume_ad_group",
         "set_geo_proximity",
         "set_geo_location",
         "set_bidding_strategy",
@@ -39,7 +41,16 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
 
 
 # Операции, для которых имеет смысл показать реальное «было» (§5) и сверить дрейф при исполнении.
-_DIFFABLE_OPS = frozenset({"update_budget", "update_bid", "pause_campaign", "resume_campaign"})
+_DIFFABLE_OPS = frozenset(
+    {
+        "update_budget",
+        "update_bid",
+        "pause_campaign",
+        "resume_campaign",
+        "pause_ad_group",
+        "resume_ad_group",
+    }
+)
 
 
 async def read_before(operation: str, params: dict) -> dict | None:
@@ -71,6 +82,13 @@ async def read_before(operation: str, params: dict) -> dict | None:
             if ref is None:
                 return None
             return {"kind": "status", "before_status": ref.status}
+        if operation in ("pause_ad_group", "resume_ad_group"):
+            ag = await asyncio.to_thread(
+                resolve.find_ad_group_by_name, client, cid, name, params.get("ad_group", "")
+            )
+            if ag is None:
+                return None
+            return {"kind": "status", "before_status": ag.status}
         if operation == "update_bid":
             ad_groups = await asyncio.to_thread(resolve.find_ad_groups, client, cid, name)
             if not ad_groups:
@@ -180,6 +198,32 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
         return await mutations.apply_resume_campaign(
             customer_id=customer_id,
             campaign_id=ref.id,
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
+    if op in ("pause_ad_group", "resume_ad_group"):
+        # Статус живёт на ad_group → резолвим конкретную группу по имени ВНУТРИ кампании.
+        ag = await asyncio.to_thread(
+            resolve.find_ad_group_by_name,
+            client,
+            customer_id,
+            params["campaign"],
+            params["ad_group"],
+        )
+        if ag is None:
+            raise ValueError(
+                f"группа «{params['ad_group']}» в кампании «{params['campaign']}» не найдена"
+            )
+        apply = (
+            mutations.apply_pause_ad_group
+            if op == "pause_ad_group"
+            else mutations.apply_resume_ad_group
+        )
+        return await apply(
+            customer_id=customer_id,
+            ad_group_id=ag.id,
             confirmation_id=confirmation_id,
             confirm_store=store,
             ads_client=client,

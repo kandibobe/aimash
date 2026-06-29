@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-from ads.client import ensure_allowed
+from ads.client import ensure_read_allowed
 from core.logging import log
 
 # Языковые константы (сверено live): ru=1031, uk=1036, en=1000. Гео Украина (country) = 2804.
@@ -114,8 +114,8 @@ def generate_keyword_ideas(
     """Идеи ключевых слов по сид-ключам и/или URL. Синхронно → звать через asyncio.to_thread.
 
     seeds и url можно комбинировать (keyword_and_url_seed). Возвращает идеи, отсортированные по
-    объёму поиска (по убыванию), не более `limit`. Замок аккаунта — ensure_allowed."""
-    ensure_allowed(customer_id)  # golden rule #9: только разрешённый аккаунт
+    объёму поиска (по убыванию), не более `limit`. Замок ЧТЕНИЯ — ensure_read_allowed (§8)."""
+    ensure_read_allowed(customer_id)  # §8: разрешённый на чтение аккаунт (мутации не затрагиваются)
     seeds = [s.strip() for s in (seeds or []) if s.strip()]
     url = (url or "").strip() or None
     if not seeds and not url:

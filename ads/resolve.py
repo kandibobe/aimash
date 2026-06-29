@@ -95,6 +95,22 @@ def find_ad_groups(
     return out
 
 
+def find_ad_group_by_name(
+    client: GoogleAdsClient, customer_id: str, campaign_name: str, ad_group_name: str
+) -> AdGroupRef | None:
+    """Конкретная группа объявлений по имени ВНУТРИ кампании (для pause/resume на уровне группы, §16).
+    Реюз find_ad_groups + точное регистронезависимое совпадение имени. None — группа не найдена
+    (вызывающий честно отвергает ДО любой записи). Имена групп в одной кампании обычно уникальны;
+    при дубле берём первую по ORDER BY ad_group.id (детерминированно)."""
+    target = (ad_group_name or "").strip().casefold()
+    if not target:
+        return None
+    for ag in find_ad_groups(client, customer_id, campaign_name):
+        if ag.name.casefold() == target:
+            return ag
+    return None
+
+
 _CURRENCY_HUMAN = {"USD": "USD", "UAH": "грн", "EUR": "EUR"}
 
 

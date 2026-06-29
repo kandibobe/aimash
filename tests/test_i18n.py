@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -39,3 +40,159 @@ def test_get_set_lang_in_memory():
     assert i18n.set_lang(424242, "en") == "en"
     assert i18n.get_lang(424242) == "en"
     assert i18n.set_lang(424242, "xx") == "ru"  # нормализация неизвестного
+
+
+# ── Языковой contextvar (§4): t() и форматтеры читают язык текущего запроса ───────────
+def test_current_lang_default_is_ru():
+    assert i18n.current_lang() == "ru"
+
+
+def test_set_current_lang_switches_t_and_formatter():
+    tok = i18n.set_current_lang("en")
+    try:
+        # t() без явного lang берёт contextvar
+        assert i18n.t("help") == i18n.CATALOG["help"]["en"]
+        # форматтер тоже берёт contextvar (без проброса lang)
+        st = texts.fmt_stats("7753643025", 30, {"impressions": 10, "clicks": 2}, "USD")
+        assert "Impressions:" in st and "Показы:" not in st
+    finally:
+        i18n.reset_current_lang(tok)
+    # после reset — снова RU
+    assert i18n.current_lang() == "ru"
+    st_ru = texts.fmt_stats("7753643025", 30, {"impressions": 10, "clicks": 2}, "USD")
+    assert "Показы:" in st_ru
+
+
+def test_catalog_en_differs_and_nonempty():
+    for key in ("start", "help", "rsa_ask_brief", "kw_ask", "model_set", "search_bad_brief"):
+        entry = i18n.CATALOG[key]
+        assert entry["ru"] and entry["en"], key
+        assert entry["en"] != entry["ru"], key
+
+
+def test_ru_default_unchanged_start_help():
+    # RU дефолт байт-в-байт совпадает с исходными константами texts.* (EN — чисто аддитивно)
+    assert i18n.t("start", "ru") == texts.START
+    assert i18n.t("help", "ru") == texts.HELP
+    # узнаваемая RU-подстрока сохранена
+    assert "Aimash на связи" in texts.START
+    assert "Что я умею сейчас" in texts.HELP
+
+
+def test_formatter_en_smoke_journal_and_mutation():
+    # fmt_mutation_summary под EN-contextvar — узнаваемо английский
+    tok = i18n.set_current_lang("en")
+    try:
+        s = texts.fmt_mutation_summary("pause_campaign", {"campaign": "Brand"})
+        assert s == "Campaign “Brand” — pause."
+        # fmt_journal (пустой) под EN
+        j = texts.fmt_journal([])
+        assert "Change journal" in j and "Журнал" not in j
+    finally:
+        i18n.reset_current_lang(tok)
+    # RU по умолчанию неизменен
+    assert texts.fmt_mutation_summary("pause_campaign", {"campaign": "Brand"}).startswith(
+        "Кампания «Brand»"
+    )
+
+
+async def test_save_lang_load_langs_roundtrip():
+    """Персист языка переживает «рестарт»: save_lang пишет в user_settings.language, а load_langs
+    поднимает кэш заново. Реальный temp-SQLite (conftest); чистим кэш, чтобы проверить именно БД."""
+    from db.session import init_db
+
+    await init_db()
+    chat = 991_002_003
+    await i18n.save_lang(chat, "en")
+    # эмулируем рестарт: затираем in-memory кэш и грузим из БД
+    i18n._CHAT_LANG.pop(chat, None)
+    assert i18n.get_lang(chat) == "ru"  # кэш пуст → дефолт
+    await i18n.load_langs()
+    assert i18n.get_lang(chat) == "en"  # поднят из user_settings.language
+    # upsert: смена на ru обновляет ту же строку
+    await i18n.save_lang(chat, "ru")
+    i18n._CHAT_LANG.pop(chat, None)
+    await i18n.load_langs()
+    assert i18n.get_lang(chat) == "ru"
+
+
+# ── Полнота каталога (харденинг §4): каждая строка переведена ──────────────────────
+_CYRILLIC = re.compile("[А-Яа-яЁё]")
+_PLACEHOLDER = re.compile(r"{[^}]+}")
+
+
+def test_catalog_every_key_has_ru_and_en():
+    for k, v in i18n.CATALOG.items():
+        assert set(v) == {"ru", "en"}, k
+        assert v["ru"] and v["en"], k
+
+
+def test_catalog_en_has_no_cyrillic():
+    """Полный харденинг: ни одна EN-строка каталога не содержит кириллицы. Ловит забытый перевод
+    при добавлении нового ключа (EN-сторона осталась русской) — фейлит до того, как увидит юзер."""
+    leaked = sorted(k for k, v in i18n.CATALOG.items() if _CYRILLIC.search(v["en"]))
+    assert not leaked, f"EN-строки с кириллицей: {leaked}"
+
+
+def test_catalog_placeholders_match_ru_en():
+    """{placeholder}-набор обязан совпадать между RU и EN — иначе .format(**kw) даст KeyError
+    на одном из языков (напр. ключ ждёт {err}, а перевод его потерял)."""
+    bad = sorted(
+        k
+        for k, v in i18n.CATALOG.items()
+        if set(_PLACEHOLDER.findall(v["ru"])) != set(_PLACEHOLDER.findall(v["en"]))
+    )
+    assert not bad, f"рассинхрон плейсхолдеров RU/EN: {bad}"
+
+
+def test_hardened_keys_render_both_langs():
+    """Новые «вторичные» ключи (callback-тосты, ошибки, хинты, agent.loop) отдают перевод, а не
+    мост к texts.* и не сам ключ. Проверяем оба языка + подстановку kw."""
+    assert i18n.t("cb_done", "en") == "Done"
+    assert i18n.t("cb_done", "ru") == "Готово"
+    assert i18n.t("err_stats", "en", err="X") == "⚠️ Couldn't fetch the stats: X"
+    assert i18n.t("loop_bad_args", "en", name="update_budget", errors="[...]").startswith(
+        "invalid arguments for update_budget"
+    )
+    assert "minute" in i18n.t("hint_timeout", "en")
+
+
+# ── Изоляция языка по asyncio-таске (§4): параллельные апдейты не «перекрашивают» друг друга ──
+async def test_langmiddleware_contextvar_isolation():
+    """Модель LangMiddleware: set_current_lang в начале апдейта, reset в finally. aiogram гонит
+    апдейты разными asyncio-тасками → contextvar изолирован: EN-юзер и RU-юзер, обрабатываемые
+    одновременно, видят КАЖДЫЙ свой язык. Без изоляции один перекрасил бы другого."""
+    import asyncio
+
+    seen: dict[str, tuple[str, str]] = {}
+
+    async def worker(lang: str) -> None:
+        tok = i18n.set_current_lang(lang)
+        try:
+            await asyncio.sleep(0)  # отдать управление другим воркерам (интерлив)
+            await asyncio.sleep(0)
+            seen[lang] = (i18n.current_lang(), i18n.t("cb_done"))
+        finally:
+            i18n.reset_current_lang(tok)
+
+    await asyncio.gather(worker("en"), worker("ru"), worker("en"))
+    assert seen["en"] == ("en", "Done")
+    assert seen["ru"] == ("ru", "Готово")
+
+
+def test_fmt_rsa_diagnostics_follows_contextvar():
+    """ux.fmt_rsa_diagnostics без явного lang берёт язык запроса (contextvar), как форматтеры texts.*."""
+    from bot import ux
+
+    class _Draft:
+        headlines = [1] * 12
+        descriptions = [1] * 4
+        dropped_headlines = 0
+        dropped_descriptions = 0
+
+    tok = i18n.set_current_lang("en")
+    try:
+        assert ux.fmt_rsa_diagnostics(_Draft(), 15, 4).startswith("✅ Generated")
+    finally:
+        i18n.reset_current_lang(tok)
+    assert ux.fmt_rsa_diagnostics(_Draft(), 15, 4).startswith("✅ Сгенерировано")

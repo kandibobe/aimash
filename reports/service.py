@@ -12,7 +12,7 @@ from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import Any
 
-from ads.client import ensure_allowed
+from ads.client import ensure_read_allowed
 from core.resilience import run_ads_read_call
 from reports.period import Period
 from reports.queries import BREAKDOWN_FETCHERS, Breakdown, Metrics, fetch_totals
@@ -35,7 +35,7 @@ def build_account_report(
 
     currency — код валюты аккаунта для денежных метрик (§9); читается вызывающим (bot) через
     ads.read.account_currency и передаётся сюда. Пустой → отчёт без явной валюты (как раньше)."""
-    ensure_allowed(customer_id)  # быстрый отказ; каждый fetch_* проверяет ещё раз
+    ensure_read_allowed(customer_id)  # быстрый отказ; каждый fetch_* проверяет ещё раз
     totals = fetch_totals(client, customer_id, period)
     prev_totals = fetch_totals(client, customer_id, period.previous()) if with_comparison else None
     breakdowns = [f(client, customer_id, period) for f in BREAKDOWN_FETCHERS]
@@ -52,10 +52,10 @@ async def build_account_report_async(
     run_ads_read_call (read-safe: ретраит TimeoutError+транзиентные) под общим семафором Google Ads
     (ADS_MAX_CONCURRENCY): 9 запросов укладываются в ~ceil(9/4)=3 волны вместо 9 → ~2.5-3x быстрее
     /report, /export, /sheets. asyncio.gather СОХРАНЯЕТ порядок отправки → разбивки остаются в
-    порядке BREAKDOWN_FETCHERS, summary_text по ключу 'campaign' резолвится как прежде. ensure_allowed
-    держится и здесь (быстрый fail-closed до фан-аута), и внутри каждого fetch_* (замок аккаунта §9).
+    порядке BREAKDOWN_FETCHERS, summary_text по ключу 'campaign' резолвится как прежде. Замок ЧТЕНИЯ
+    держится и здесь (быстрый fail-closed до фан-аута), и внутри каждого fetch_* (ensure_read_allowed, §8).
     Синхронный build_account_report оставлен дословно — на нём строятся тесты/не-async вызовы."""
-    ensure_allowed(customer_id)  # быстрый fail-closed ДО фан-аута; каждый fetch_* проверит ещё раз
+    ensure_read_allowed(customer_id)  # fail-closed ДО фан-аута; каждый fetch_* проверит ещё раз
     # Гетерогенный список: fetch_totals → Metrics, разбивки → Breakdown. gather распаковываем
     # позиционно (totals/prev/breakdowns), статически тип элементов тут не отследить → Awaitable[Any].
     tasks: list[Awaitable[Any]] = [
@@ -102,12 +102,46 @@ def _delta_pct(now: float, prev: float) -> str:
     return f"{arrow} {pct:+.0f}%"
 
 
-def summary_text(report: ReportData) -> str:
+def _resolve_lang(lang: str | None) -> str:
+    """Язык сводки: явный lang → он; None → язык текущего запроса (contextvar bot.i18n,
+    ставит LangMiddleware). i18n импортируем ЛЕНИВО — reports не должен жёстко зависеть от bot."""
+    if lang is None:
+        from bot import i18n
+
+        return i18n.current_lang()
+    return lang if lang in ("ru", "en") else "ru"
+
+
+def summary_text(report: ReportData, lang: str | None = None) -> str:
     """Короткая сводка для Telegram (/report): период, итоги, сравнение, топ-кампании.
     Денежные метрики — с разделителем тысяч и кодом валюты (§9); дельты — со стрелками ▲/▼."""
     t = report.totals
     p = report.period
     cur = report.currency
+    if _resolve_lang(lang) == "en":
+        lines = [
+            f"📊 Account {report.customer_id} · {p.label} ({p.date_from} — {p.date_to})",
+            f"Impressions {_thou(t.impressions)} · Clicks {_thou(t.clicks)} · "
+            f"CTR {t.ctr * 100:.1f}%",
+            f"Cost {_money(t.cost, cur)} · CPC {_money(t.avg_cpc, cur)} · "
+            f"Conv. {t.conversions:.1f} · CPA {_money(t.cpa, cur)} · ROAS {t.roas:.2f}",
+        ]
+        if report.prev_totals is not None:
+            pr = report.prev_totals
+            lines.append(
+                f"vs. prev. period: cost {_delta_pct(t.cost, pr.cost)}, "
+                f"clicks {_delta_pct(t.clicks, pr.clicks)}, "
+                f"conv. {_delta_pct(t.conversions, pr.conversions)}"
+            )
+        camp = next((b for b in report.breakdowns if b.key == "campaign"), None)
+        if camp and camp.rows:
+            lines.append("Top campaigns by cost:")
+            for (name, _status), m in camp.rows[:3]:
+                lines.append(
+                    f"  • {name}: cost {_money(m.cost, cur)}, clicks {_thou(m.clicks)}, "
+                    f"conv. {m.conversions:.1f}"
+                )
+        return "\n".join(lines)
     lines = [
         f"📊 Аккаунт {report.customer_id} · {p.label} ({p.date_from} — {p.date_to})",
         f"Показы {_thou(t.impressions)} · Клики {_thou(t.clicks)} · CTR {t.ctr * 100:.1f}%",

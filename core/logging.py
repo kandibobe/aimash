@@ -113,10 +113,33 @@ class RedactionFilter(logging.Filter):
         return True
 
 
+class ContextFilter(logging.Filter):
+    """Впрыскивает поля корреляционного контекста (request_id/chat_id/operation из core.context)
+    в КАЖДУЮ запись — все логи одного апдейта/джобы сшиваются по request_id (§15). Существующие
+    log.* (resilience, router, хендлеры, on_error) получают поля без правок call-site. Никогда не
+    роняет логирование (наблюдаемость не критична к собственной ошибке)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            from core.context import get_context
+
+            ctx = get_context()
+            record.request_id = ctx.request_id
+            record.chat_id = "-" if ctx.chat_id is None else ctx.chat_id
+            record.operation = ctx.operation
+        except Exception:  # noqa: BLE001 — контекст не должен ломать лог
+            record.request_id = getattr(record, "request_id", "-")
+            record.chat_id = getattr(record, "chat_id", "-")
+            record.operation = getattr(record, "operation", "-")
+        return True
+
+
 class _RedactingTextFormatter(logging.Formatter):
     """Текстовый форматтер: редактирует финальную строку (в т.ч. traceback из exc_info)."""
 
     def format(self, record: logging.LogRecord) -> str:
+        if not hasattr(record, "request_id"):  # запись мимо ContextFilter (тесты/чужой хендлер)
+            record.request_id = "-"
         return redact_text(super().format(record))
 
 
@@ -126,6 +149,9 @@ class _JsonFormatter(logging.Formatter):
             "ts": self.formatTime(record),
             "level": record.levelname,
             "logger": record.name,
+            "req": getattr(record, "request_id", "-"),
+            "chat": getattr(record, "chat_id", "-"),
+            "op": getattr(record, "operation", "-"),
             "msg": redact_text(record.getMessage()),
         }
         if record.exc_info:
@@ -148,12 +174,15 @@ def setup_logging(level: int | None = None) -> None:
     """Сконфигурировать корневой логгер: один stream-хендлер с редакцией секретов.
     Идемпотентно (перенастройка в тестах не плодит хендлеры)."""
     handler = logging.StreamHandler()
+    handler.addFilter(ContextFilter())  # сначала контекст (request_id/chat/op), потом редакция
     handler.addFilter(RedactionFilter())
     if os.getenv("LOG_FORMAT", "text").strip().lower() == "json":
         handler.setFormatter(_JsonFormatter())
     else:
         handler.setFormatter(
-            _RedactingTextFormatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+            _RedactingTextFormatter(
+                "%(asctime)s %(levelname)s [%(request_id)s] %(name)s %(message)s"
+            )
         )
     root = logging.getLogger()
     root.handlers.clear()

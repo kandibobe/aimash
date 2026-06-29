@@ -65,18 +65,19 @@ from bot.callbacks import (
 )
 from bot.keyboards import (
     BOT_COMMANDS,
-    BTN_BALANCE,
-    BTN_CAMPAIGNS,
-    BTN_EXPORT,
-    BTN_HELP,
-    BTN_JOURNAL,
-    BTN_KEYWORDS,
-    BTN_LANG,
-    BTN_MODEL,
-    BTN_REPORT,
-    BTN_RSA,
-    BTN_SHEETS,
-    BTN_STATUS,
+    BOT_COMMANDS_EN,
+    BTN_BALANCE_ALL,
+    BTN_CAMPAIGNS_ALL,
+    BTN_EXPORT_ALL,
+    BTN_HELP_ALL,
+    BTN_JOURNAL_ALL,
+    BTN_KEYWORDS_ALL,
+    BTN_LANG_ALL,
+    BTN_MODEL_ALL,
+    BTN_REPORT_ALL,
+    BTN_RSA_ALL,
+    BTN_SHEETS_ALL,
+    BTN_STATUS_ALL,
     audiences_kb,
     campaign_actions_kb,
     campaigns_kb,
@@ -95,6 +96,8 @@ from confirm.gate import Proposal, build_summary
 from confirm.store import ConfirmStore
 from core.ads_errors import humanize_google_ads_error
 from core.config import settings
+from core.context import new_request_id, reset_context, set_context
+from core.errors import capture_exception
 from core.limits import MONEY_MAX_UNITS  # единый источник денежного потолка (defense-in-depth)
 from core.logging import log, setup_logging
 from core.observability import init_observability
@@ -178,6 +181,36 @@ def _event_chat_type(event: object) -> str | None:
     return getattr(chat, "type", None)
 
 
+def _event_op(event: object) -> str:
+    """Грубая метка операции для логов (§15): команда сообщения / префикс callback-data / тип события.
+    Только для наблюдаемости — попадает в request-контекст, не влияет на маршрутизацию."""
+    data = getattr(event, "data", None)  # CallbackQuery.data ('modelcb:set:0' → 'modelcb')
+    if isinstance(data, str) and data:
+        return data.split(":", 1)[0][:32]
+    text = getattr(event, "text", None)  # Message.text
+    if isinstance(text, str) and text.startswith("/"):
+        return text.split()[0][:32]
+    if isinstance(text, str):
+        return "text"
+    return type(event).__name__.lower()[:32]
+
+
+class TraceMiddleware(BaseMiddleware):
+    """Назначает корреляционный request_id (+ chat_id/operation) на время обработки апдейта (§15) —
+    все логи и перехваченные ошибки этого апдейта сшиваются по request_id. Регистрируется САМЫМ
+    внешним (до whitelist), чтобы даже отказ доступа логировался с request_id. Сброс в finally —
+    contextvar не «протекает» в следующий апдейт (один event loop под APScheduler)."""
+
+    async def __call__(self, handler, event: TelegramObject, data):
+        token = set_context(
+            request_id=new_request_id(), chat_id=_event_chat_id(event), operation=_event_op(event)
+        )
+        try:
+            return await handler(event, data)
+        finally:
+            reset_context(token)
+
+
 class WhitelistMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: TelegramObject, data):
         # Fail-closed (как ads.client.ensure_allowed): пустой whitelist => блок ВСЕХ, а не fail-open.
@@ -195,6 +228,20 @@ class WhitelistMiddleware(BaseMiddleware):
             log.warning("заблокирован не-private чат %s (тип %s)", uid, ctype)
             return
         return await handler(event, data)
+
+
+class LangMiddleware(BaseMiddleware):
+    """Ставит язык интерфейса (§4) в contextvar bot.i18n на время обработки апдейта — форматтеры
+    (texts.fmt_*, summary_text, клавиатуры) сами берут язык, без проброса lang через ~80 call-site.
+    Резолв по chat_id (как whitelist); сброс в finally, чтобы язык не «протёк» в следующий апдейт
+    (один event loop под APScheduler). Дефолт RU при отсутствии выбора (i18n.get_lang)."""
+
+    async def __call__(self, handler, event: TelegramObject, data):
+        token = i18n.set_current_lang(i18n.get_lang(_event_chat_id(event) or 0))
+        try:
+            return await handler(event, data)
+        finally:
+            i18n.reset_current_lang(token)
 
 
 def _valid_idx(seq: list | None, idx: int) -> TypeGuard[list]:
@@ -233,7 +280,7 @@ async def _safe_edit(cq: CallbackQuery, text: str, **kwargs) -> None:
 
 # ── Общие действия (чтобы команда и кнопка делали одно и то же) ─────────────────
 async def _send_help(message: Message) -> None:
-    await message.answer(texts.HELP, parse_mode=ParseMode.HTML)
+    await message.answer(i18n.t("help"), parse_mode=ParseMode.HTML)
 
 
 async def _send_status(message: Message) -> None:
@@ -249,7 +296,7 @@ async def _send_status(message: Message) -> None:
             )
             cur = await _read_currency(client)  # §9: валюта в денежных строках
     except Exception as e:  # сеть/доступ/SDK
-        await message.answer(f"⚠️ Не удалось получить статистику: {ux.err_text(e)}")
+        await message.answer(i18n.t("err_stats", err=ux.err_text(e)))
         return
     await message.answer(
         texts.fmt_stats(
@@ -279,7 +326,7 @@ async def _send_balance(message: Message) -> None:
         async with ux.typing_action(message):  # «печатает…» пока идёт запрос к OpenRouter
             acct = await fetch_account()
     except Exception as e:  # нет ключа / сеть
-        await message.answer(f"⚠️ Не удалось получить баланс OpenRouter: {ux.err_text(e)}")
+        await message.answer(i18n.t("err_balance", err=ux.err_text(e)))
         return
     await message.answer(texts.fmt_balance(acct, snapshot()), parse_mode=ParseMode.HTML)
 
@@ -292,7 +339,7 @@ async def _send_journal(message: Message) -> None:
     try:
         events = await list_recent_audit(15)
     except Exception as e:  # БД недоступна
-        await message.answer(f"⚠️ Не удалось прочитать журнал: {ux.err_text(e)}")
+        await message.answer(i18n.t("err_journal", err=ux.err_text(e)))
         return
     await message.answer(texts.fmt_journal(events), parse_mode=ParseMode.HTML)
 
@@ -309,10 +356,10 @@ async def _send_campaigns(message: Message, chat_id: int) -> None:
                 list_campaigns, client, DRAFT_ACCOUNT_ID, label="list_campaigns"
             )
     except Exception as e:  # сеть/доступ/SDK
-        await message.answer(f"⚠️ Не удалось получить кампании: {ux.err_text(e)}")
+        await message.answer(i18n.t("err_campaigns", err=ux.err_text(e)))
         return
     if not camps:
-        await message.answer(texts.NO_CAMPAIGNS)
+        await message.answer(i18n.t("no_campaigns"))
         return
     _CAMP_CACHE[chat_id] = camps
     await message.answer(
@@ -380,12 +427,12 @@ async def _present_proposal(
             keywords=kws,
             match_type=params.get("match_type", ""),
             action=texts.keyword_action_label(operation),
-            header_html=texts.PROPOSAL_PENDING.format(summary=texts.esc(display)),
+            header_html=i18n.t("proposal_pending", summary=texts.esc(display)),
             reply_markup=confirm_kb(cid),
             parse_mode=ParseMode.HTML,
         )
         return
-    rendered = texts.PROPOSAL_PENDING.format(summary=texts.esc(display))
+    rendered = i18n.t("proposal_pending", summary=texts.esc(display))
     if ux.proposal_fits(rendered):
         await message.answer(rendered, reply_markup=confirm_kb(cid), parse_mode=ParseMode.HTML)
     else:
@@ -394,10 +441,7 @@ async def _present_proposal(
         await ux.send_proposal_text(
             message,
             full_text=display,
-            header_html=(
-                "📎 <b>Черновик изменения</b> — полный текст во вложении ⬆️\n"
-                "Это одно изменение. Подтверди кнопками <b>✅ / ❌</b> ниже 👇"
-            ),
+            header_html=i18n.t("proposal_long_header"),
             reply_markup=confirm_kb(cid),
             parse_mode=ParseMode.HTML,
         )
@@ -409,12 +453,13 @@ async def start(m: Message) -> None:
     """Приветствие баннером (фото + подпись) + постоянное меню. Фолбэк на текст, если фото
     не отправилось (нет файла / сбой Telegram) — приветствие НЕ должно падать из-за картинки."""
     global _welcome_file_id
-    kb = main_menu()
+    kb = main_menu()  # язык — из contextvar (LangMiddleware), как и текст START
+    start_text = i18n.t("start")
     if _welcome_file_id or WELCOME_IMG.exists():
         photo = _welcome_file_id or FSInputFile(WELCOME_IMG)
         try:
             sent = await m.answer_photo(
-                photo, caption=texts.START, reply_markup=kb, parse_mode=ParseMode.HTML
+                photo, caption=start_text, reply_markup=kb, parse_mode=ParseMode.HTML
             )
             if sent.photo:  # кэшируем file_id — следующие /start без перезаливки PNG
                 _welcome_file_id = sent.photo[-1].file_id
@@ -422,7 +467,7 @@ async def start(m: Message) -> None:
         except Exception as e:  # сеть/Telegram/битый файл — деградируем до текста, не падаем
             log.warning("welcome-баннер не отправлен (%s) — шлю текст", type(e).__name__)
             _welcome_file_id = None
-    await m.answer(texts.START, reply_markup=kb, parse_mode=ParseMode.HTML)
+    await m.answer(start_text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
 
 @dp.message(Command("help"))
@@ -462,19 +507,19 @@ async def keywords_(m: Message, state: FSMContext, command: CommandObject) -> No
         await _kw_run(m, m.chat.id, seeds, url, "ru")
         return
     await state.set_state(KwWizard.awaiting_seeds)
-    await m.answer(texts.KW_ASK, parse_mode=ParseMode.HTML)
+    await m.answer(i18n.t("kw_ask"), parse_mode=ParseMode.HTML)
 
 
 @dp.message(Command("cancel"))
 async def cancel_cmd(m: Message) -> None:
     cid = _LAST_PENDING.get(m.chat.id)
     if not cid:
-        await m.answer(texts.NO_PROPOSAL)
+        await m.answer(i18n.t("no_proposal"))
         return
     actor_id, actor_name = _actor(m)
     await STORE.reject(cid, chat_id=m.chat.id, actor_user_id=actor_id, actor_username=actor_name)
     _LAST_PENDING.pop(m.chat.id, None)
-    await m.answer(texts.REJECTED)
+    await m.answer(i18n.t("rejected"))
 
 
 @dp.message(Command("lang"))
@@ -482,15 +527,20 @@ async def lang_cmd(m: Message, command: CommandObject) -> None:
     """Язык интерфейса RU/EN. С аргументом (/lang en) — сразу; иначе кнопки выбора."""
     arg = (command.args or "").strip().lower()
     if arg in i18n.LANGS:
-        lang = i18n.set_lang(m.chat.id, arg)
+        lang = i18n.set_lang(m.chat.id, arg)  # кэш
+        i18n.set_current_lang(lang)  # ответ ниже сразу на выбранном языке (для текущего апдейта)
+        await i18n.save_lang(m.chat.id, lang)  # персист — переживает рестарт (§4)
         await m.answer(i18n.t("lang_set", lang))
         return
-    await m.answer(i18n.t("lang_pick", i18n.get_lang(m.chat.id)), reply_markup=lang_kb())
+    await m.answer(i18n.t("lang_pick"), reply_markup=lang_kb())
 
 
 @dp.callback_query(LangCB.filter())
 async def on_lang(cq: CallbackQuery, callback_data: LangCB) -> None:
-    lang = i18n.set_lang(_cq_chat_id(cq), callback_data.code)
+    chat_id = _cq_chat_id(cq)
+    lang = i18n.set_lang(chat_id, callback_data.code)  # кэш
+    i18n.set_current_lang(lang)  # ответ ниже сразу на выбранном языке (для текущего апдейта)
+    await i18n.save_lang(chat_id, lang)  # персист — переживает рестарт (§4)
     await cq.answer()
     msg = _cq_msg(cq)
     if msg is None:
@@ -564,10 +614,10 @@ async def model_cmd(m: Message, command: CommandObject, state: FSMContext) -> No
     if arg:
         slug = _valid_model_slug(arg)
         if not slug:
-            await m.answer(texts.MODEL_BAD, parse_mode=ParseMode.HTML)
+            await m.answer(i18n.t("model_bad"), parse_mode=ParseMode.HTML)
             return
         await _persist_and_set_model(slug)
-        await m.answer(texts.MODEL_SET.format(model=texts.esc(slug)), parse_mode=ParseMode.HTML)
+        await m.answer(i18n.t("model_set", model=texts.esc(slug)), parse_mode=ParseMode.HTML)
         return
     await m.answer(
         texts.fmt_model_menu(
@@ -584,21 +634,21 @@ async def model_cmd(m: Message, command: CommandObject, state: FSMContext) -> No
 async def on_model_set(cq: CallbackQuery, callback_data: ModelCB) -> None:
     choices = router.MODEL_CHOICES
     if callback_data.idx < 0 or callback_data.idx >= len(choices):
-        await cq.answer("Список устарел — открой /model заново", show_alert=True)
+        await cq.answer(i18n.t("model_list_stale"), show_alert=True)
         return
     slug = choices[callback_data.idx]
     await _persist_and_set_model(slug)
-    await cq.answer("Готово")
-    await _safe_edit(cq, texts.MODEL_SET.format(model=texts.esc(slug)), parse_mode=ParseMode.HTML)
+    await cq.answer(i18n.t("cb_done"))
+    await _safe_edit(cq, i18n.t("model_set", model=texts.esc(slug)), parse_mode=ParseMode.HTML)
 
 
 @dp.callback_query(ModelCB.filter(F.action == "reset"))
 async def on_model_reset(cq: CallbackQuery) -> None:
     await _persist_and_set_model(None)
-    await cq.answer("Сброшено")
+    await cq.answer(i18n.t("cb_reset"))
     await _safe_edit(
         cq,
-        texts.MODEL_RESET.format(model=texts.esc(router.effective_model("parsing"))),
+        i18n.t("model_reset", model=texts.esc(router.effective_model("parsing"))),
         parse_mode=ParseMode.HTML,
     )
 
@@ -609,7 +659,7 @@ async def on_model_custom(cq: CallbackQuery, state: FSMContext) -> None:
     await cq.answer()
     msg = _cq_msg(cq)
     if msg is not None:
-        await msg.answer(texts.MODEL_ASK_CUSTOM, parse_mode=ParseMode.HTML)
+        await msg.answer(i18n.t("model_ask_custom"), parse_mode=ParseMode.HTML)
 
 
 async def _slash_mutate(m: Message, command: CommandObject, operation: str) -> None:
@@ -617,12 +667,8 @@ async def _slash_mutate(m: Message, command: CommandObject, operation: str) -> N
     (тот же путь, что inline-кнопка и текстовая команда). Без имени — подсказка."""
     name = (command.args or "").strip()
     if not name:
-        cmd = "pause" if operation == "pause_campaign" else "resume"
-        verb = "приостановить" if operation == "pause_campaign" else "возобновить"
-        await m.answer(
-            f"Укажи кампанию: <code>/{cmd} Название кампании</code> — чтобы {verb}.",
-            parse_mode=ParseMode.HTML,
-        )
+        key = "slash_pause_hint" if operation == "pause_campaign" else "slash_resume_hint"
+        await m.answer(i18n.t(key), parse_mode=ParseMode.HTML)
         return
     try:
         cid, op, params, summary = _build_proposal(operation, campaign=name)
@@ -685,8 +731,8 @@ async def report_(m: Message, command: CommandObject) -> None:
     """Read-only сводка по аккаунту за период (итоги + сравнение + топ-кампании)."""
     try:
         period = _period_from_arg(command.args)
-    except ValueError as e:
-        await m.answer(f"⚠️ {e}")
+    except ValueError:
+        await m.answer(i18n.t("err_period"))
         return
     try:
         from ads.client import build_client
@@ -698,7 +744,7 @@ async def report_(m: Message, command: CommandObject) -> None:
             report = await build_account_report_async(client, DRAFT_ACCOUNT_ID, period)
             report.currency = await _read_currency(client)  # §9: валюта денежных метрик
     except Exception as e:  # сеть/доступ/SDK
-        await m.answer(f"⚠️ Не удалось построить отчёт: {ux.err_text(e)}")
+        await m.answer(i18n.t("err_report", err=ux.err_text(e)))
         return
     await m.answer(summary_text(report))
 
@@ -708,7 +754,7 @@ async def _run_export(m: Message, period) -> None:
     import os
     import tempfile
 
-    await m.answer("Готовлю .xlsx-отчёт…")
+    await m.answer(i18n.t("report_preparing_xlsx"))
     path: str | None = None
     try:
         from ads.client import build_client
@@ -725,7 +771,7 @@ async def _run_export(m: Message, period) -> None:
         fname = f"aimash_{DRAFT_ACCOUNT_ID}_{period.date_from}_{period.date_to}.xlsx"
         await m.answer_document(FSInputFile(path, filename=fname))
     except Exception as e:  # сеть/доступ/SDK/openpyxl
-        await m.answer(f"⚠️ Не удалось сформировать отчёт: {ux.err_text(e)}")
+        await m.answer(i18n.t("err_report_make", err=ux.err_text(e)))
     finally:
         if path and os.path.exists(path):
             try:
@@ -739,15 +785,15 @@ async def export_(m: Message, command: CommandObject) -> None:
     """Глубокий отчёт .xlsx (разбивки ТЗ §9) вложением. Read-only."""
     try:
         period = _period_from_arg(command.args)
-    except ValueError as e:
-        await m.answer(f"⚠️ {e}")
+    except ValueError:
+        await m.answer(i18n.t("err_period"))
         return
     await _run_export(m, period)
 
 
 async def _run_sheets(m: Message, period) -> None:
     """Выгрузить отчёт за период в Google Sheets, прислать ссылку. Read-only. Общий код."""
-    await m.answer("Готовлю Google Sheets-отчёт…")
+    await m.answer(i18n.t("report_preparing_sheets"))
     try:
         from ads.client import build_client
         from reports.service import build_account_report_async
@@ -759,17 +805,9 @@ async def _run_sheets(m: Message, period) -> None:
             report.currency = await _read_currency(client)  # §9: валюта денежных метрик
             url = await asyncio.to_thread(publish_report_to_sheets, report)
     except Exception as e:  # сеть/доступ/SDK/нет OAuth-scope Sheets
-        await m.answer(
-            f"⚠️ Не удалось выгрузить в Google Sheets: {ux.err_text(e)}\n"
-            "Проверь настройку (docs/DEPLOYMENT.md → Google Sheets):\n"
-            "1) включён ли Google Sheets API в Google Cloud — ссылка для включения обычно есть в "
-            "тексте ошибки выше (после включения подожди 1–2 мин);\n"
-            "2) есть ли у токена доступ drive.file: `python scripts/get_refresh_token.py` "
-            "(отметь Google Ads и drive.file), затем перезапусти бота.\n"
-            "📄 Тот же отчёт без этой настройки доступен сразу через /export (.xlsx)."
-        )
+        await m.answer(i18n.t("err_sheets", err=ux.err_text(e)))
         return
-    await m.answer(f"✅ Google Sheets готов: {url}")
+    await m.answer(i18n.t("sheets_ready", url=url))
 
 
 @dp.message(Command("sheets"))
@@ -777,68 +815,70 @@ async def sheets_(m: Message, command: CommandObject) -> None:
     """ТЗ §9: глубокий отчёт в Google Sheets (новая таблица + вкладка на разбивку, ссылка). Read-only."""
     try:
         period = _period_from_arg(command.args)
-    except ValueError as e:
-        await m.answer(f"⚠️ {e}")
+    except ValueError:
+        await m.answer(i18n.t("err_period"))
         return
     await _run_sheets(m, period)
 
 
 # ── Reply-кнопки (ОБЯЗАТЕЛЬНО до общего F.text-хендлера — иначе перехватит on_text) ─
-@dp.message(F.text == BTN_STATUS)
+# Матчим по МНОЖЕСТВУ языковых подписей (F.text.in_(BTN_*_ALL)), а не по одному RU-литералу:
+# EN-пользователь шлёт EN-подпись, и `== BTN_*` (RU) её бы не поймал → «мёртвая» кнопка (§4).
+@dp.message(F.text.in_(BTN_STATUS_ALL))
 async def btn_status(m: Message) -> None:
     await _send_status(m)
 
 
-@dp.message(F.text == BTN_CAMPAIGNS)
+@dp.message(F.text.in_(BTN_CAMPAIGNS_ALL))
 async def btn_campaigns(m: Message) -> None:
     await _send_campaigns(m, m.chat.id)
 
 
-@dp.message(F.text == BTN_BALANCE)
+@dp.message(F.text.in_(BTN_BALANCE_ALL))
 async def btn_balance(m: Message) -> None:
     await _send_balance(m)
 
 
-@dp.message(F.text == BTN_JOURNAL)
+@dp.message(F.text.in_(BTN_JOURNAL_ALL))
 async def btn_journal(m: Message) -> None:
     await _send_journal(m)
 
 
-@dp.message(F.text == BTN_HELP)
+@dp.message(F.text.in_(BTN_HELP_ALL))
 async def btn_help(m: Message) -> None:
     await _send_help(m)
 
 
-@dp.message(F.text == BTN_REPORT)
+@dp.message(F.text.in_(BTN_REPORT_ALL))
 async def btn_report(m: Message) -> None:
-    await m.answer("📈 За какой период построить сводку?", reply_markup=period_kb("report"))
+    await m.answer(i18n.t("period_pick_report"), reply_markup=period_kb("report"))
 
 
-@dp.message(F.text == BTN_EXPORT)
+@dp.message(F.text.in_(BTN_EXPORT_ALL))
 async def btn_export(m: Message) -> None:
-    await m.answer("📄 За какой период .xlsx-отчёт?", reply_markup=period_kb("export"))
+    await m.answer(i18n.t("period_pick_export"), reply_markup=period_kb("export"))
 
 
-@dp.message(F.text == BTN_SHEETS)
+@dp.message(F.text.in_(BTN_SHEETS_ALL))
 async def btn_sheets(m: Message) -> None:
-    await m.answer("🟢 За какой период Google Sheets?", reply_markup=period_kb("sheets"))
+    await m.answer(i18n.t("period_pick_sheets"), reply_markup=period_kb("sheets"))
 
 
-@dp.message(F.text == BTN_KEYWORDS)
+@dp.message(F.text.in_(BTN_KEYWORDS_ALL))
 async def btn_keywords(m: Message, state: FSMContext) -> None:
     """Кнопка «Ключевые слова» = /keywords без аргументов: запускаем визард подбора."""
     await state.clear()
     await state.set_state(KwWizard.awaiting_seeds)
-    await m.answer(texts.KW_ASK, parse_mode=ParseMode.HTML)
+    await m.answer(i18n.t("kw_ask"), parse_mode=ParseMode.HTML)
 
 
-@dp.message(F.text == BTN_RSA)
+@dp.message(F.text.in_(BTN_RSA_ALL))
 async def btn_rsa(m: Message, state: FSMContext) -> None:
     """Кнопка «Тексты (RSA)» = /rsa: визард выбора кампании → генерация → курация."""
     await rsa_cmd(m, state)
 
 
-@dp.message(F.text == BTN_MODEL)
+@dp.message(F.text.in_(BTN_MODEL_ALL))
 async def btn_model(m: Message, state: FSMContext) -> None:
     """Кнопка «Модель» = /model без аргументов: меню выбора модели ИИ."""
     await state.clear()
@@ -853,10 +893,10 @@ async def btn_model(m: Message, state: FSMContext) -> None:
     )
 
 
-@dp.message(F.text == BTN_LANG)
+@dp.message(F.text.in_(BTN_LANG_ALL))
 async def btn_lang(m: Message) -> None:
     """Кнопка «Язык» = /lang без аргументов: выбор языка интерфейса."""
-    await m.answer(i18n.t("lang_pick", i18n.get_lang(m.chat.id)), reply_markup=lang_kb())
+    await m.answer(i18n.t("lang_pick"), reply_markup=lang_kb())
 
 
 # ── RSA-генерация (фаза 2.C): /rsa визард → курация → confirm-гейт create_rsa ─────
@@ -923,7 +963,7 @@ async def _rsa_after_adgroup(target: Message, chat_id: int, state: FSMContext) -
         await _rsa_generate_and_start(target, chat_id, state)
         return
     await state.set_state(RsaWizard.awaiting_brief)
-    await target.answer(texts.RSA_ASK_BRIEF, parse_mode=ParseMode.HTML)
+    await target.answer(i18n.t("rsa_ask_brief"), parse_mode=ParseMode.HTML)
 
 
 async def _rsa_resolve_after_campaign(
@@ -939,10 +979,10 @@ async def _rsa_resolve_after_campaign(
             find_ad_groups, client, DRAFT_ACCOUNT_ID, campaign, label="find_ad_groups"
         )
     except Exception as e:  # сеть/доступ/SDK
-        await target.answer(f"⚠️ Не удалось получить группы: {ux.err_text(e)}")
+        await target.answer(i18n.t("err_adgroups", err=ux.err_text(e)))
         return
     if not groups:
-        await target.answer(texts.RSA_NO_ADGROUPS)
+        await target.answer(i18n.t("rsa_no_adgroups"))
         await state.clear()
         return
     if len(groups) == 1:
@@ -952,7 +992,7 @@ async def _rsa_resolve_after_campaign(
         return
     _RSA_AG_CACHE[chat_id] = [{"id": str(g.id), "name": g.name} for g in groups]
     await target.answer(
-        texts.RSA_PICK_ADGROUP, reply_markup=rsa_pick_adgroups_kb(_RSA_AG_CACHE[chat_id])
+        i18n.t("rsa_pick_adgroup"), reply_markup=rsa_pick_adgroups_kb(_RSA_AG_CACHE[chat_id])
     )
 
 
@@ -969,18 +1009,18 @@ async def _rsa_generate_and_start(target: Message, chat_id: int, state: FSMConte
         n_headlines=int(data.get("n_headlines") or 15),
         n_descriptions=int(data.get("n_descriptions") or 4),
     )
-    await target.answer(texts.RSA_GENERATING)
+    await target.answer(i18n.t("rsa_generating"))
     try:
         async with ux.typing_action(target):
             draft = await _generate_rsa(brief)
     except Exception as e:  # LLM/сеть
-        await target.answer(f"⚠️ Генерация не удалась: {ux.err_text(e)}")
+        await target.answer(i18n.t("err_gen", err=ux.err_text(e)))
         await state.clear()
         return
     # Диагностика: сколько набрано/отброшено КОДОМ за длину (golden rule #4) — раньше терялось.
     await target.answer(ux.fmt_rsa_diagnostics(draft, brief.n_headlines, brief.n_descriptions))
     if len(draft.headlines) < RSA_MIN_HEADLINES or len(draft.descriptions) < RSA_MIN_DESCRIPTIONS:
-        await target.answer(texts.RSA_GEN_EMPTY)
+        await target.answer(i18n.t("rsa_gen_empty"))
         await state.clear()
         return
     session_id = await SESSIONS.create(
@@ -1029,14 +1069,14 @@ async def _rsa_start_from_intent(m: Message, brief: dict, state: FSMContext) -> 
             list_campaigns, client, DRAFT_ACCOUNT_ID, label="list_campaigns"
         )
     except Exception as e:  # сеть/доступ/SDK
-        await m.answer(f"⚠️ Не удалось получить кампании: {ux.err_text(e)}")
+        await m.answer(i18n.t("err_campaigns", err=ux.err_text(e)))
         return
     if not camps:
-        await m.answer(texts.NO_CAMPAIGNS)
+        await m.answer(i18n.t("no_campaigns"))
         return
     _RSA_CAMP_CACHE[m.chat.id] = camps
     await m.answer(
-        texts.RSA_PICK_CAMPAIGN,
+        i18n.t("rsa_pick_campaign"),
         reply_markup=rsa_pick_campaigns_kb(camps),
         parse_mode=ParseMode.HTML,
     )
@@ -1063,7 +1103,7 @@ async def _kw_run(
     import os
     import tempfile
 
-    await target.answer(texts.KW_SEARCHING)
+    await target.answer(i18n.t("kw_searching"))
     try:
         from ads.client import build_client
         from ads.keyword_plan import generate_keyword_ideas
@@ -1078,10 +1118,10 @@ async def _kw_run(
             language=language,
         )
     except Exception as e:  # сеть/доступ/SDK/валидация ввода
-        await target.answer(f"⚠️ Не удалось подобрать ключи: {ux.err_text(e)}")
+        await target.answer(i18n.t("err_kw", err=ux.err_text(e)))
         return
     if not ideas:
-        await target.answer(texts.KW_EMPTY)
+        await target.answer(i18n.t("kw_empty"))
         return
 
     from keywords.cluster import (
@@ -1142,7 +1182,7 @@ async def _kw_run(
         )
         await target.answer_document(FSInputFile(path, filename="aimash_keywords.xlsx"))
     except Exception as e:  # openpyxl/IO
-        await target.answer(f"⚠️ Таблицу .xlsx сформировать не удалось: {ux.err_text(e)}")
+        await target.answer(i18n.t("err_kw_xlsx", err=ux.err_text(e)))
     finally:
         if path and os.path.exists(path):
             try:
@@ -1161,7 +1201,7 @@ async def _kw_start_from_intent(m: Message, brief: dict, state: FSMContext) -> N
         await _kw_run(m, m.chat.id, seeds, url, language)
         return
     await state.set_state(KwWizard.awaiting_seeds)
-    await m.answer(texts.KW_ASK, parse_mode=ParseMode.HTML)
+    await m.answer(i18n.t("kw_ask"), parse_mode=ParseMode.HTML)
 
 
 @dp.message(Command("rsa"))
@@ -1179,14 +1219,14 @@ async def rsa_cmd(m: Message, state: FSMContext) -> None:
             list_campaigns, client, DRAFT_ACCOUNT_ID, label="list_campaigns"
         )
     except Exception as e:  # сеть/доступ/SDK
-        await m.answer(f"⚠️ Не удалось получить кампании: {ux.err_text(e)}")
+        await m.answer(i18n.t("err_campaigns", err=ux.err_text(e)))
         return
     if not camps:
-        await m.answer(texts.NO_CAMPAIGNS)
+        await m.answer(i18n.t("no_campaigns"))
         return
     _RSA_CAMP_CACHE[m.chat.id] = camps
     await m.answer(
-        texts.RSA_PICK_CAMPAIGN,
+        i18n.t("rsa_pick_campaign"),
         reply_markup=rsa_pick_campaigns_kb(camps),
         parse_mode=ParseMode.HTML,
     )
@@ -1196,7 +1236,7 @@ async def rsa_cmd(m: Message, state: FSMContext) -> None:
 async def rsa_pick_camp(cq: CallbackQuery, callback_data: RsaPickCB, state: FSMContext) -> None:
     camps = _RSA_CAMP_CACHE.get(_cq_chat_id(cq))
     if not _valid_idx(camps, callback_data.idx):
-        await cq.answer(texts.CAMP_LIST_STALE, show_alert=True)
+        await cq.answer(i18n.t("camp_list_stale"), show_alert=True)
         return
     await cq.answer()
     msg = _cq_msg(cq)
@@ -1209,7 +1249,7 @@ async def rsa_pick_camp(cq: CallbackQuery, callback_data: RsaPickCB, state: FSMC
 async def rsa_pick_ag(cq: CallbackQuery, callback_data: RsaPickCB, state: FSMContext) -> None:
     groups = _RSA_AG_CACHE.get(_cq_chat_id(cq))
     if not _valid_idx(groups, callback_data.idx):
-        await cq.answer(texts.CAMP_LIST_STALE, show_alert=True)
+        await cq.answer(i18n.t("camp_list_stale"), show_alert=True)
         return
     await cq.answer()
     g = groups[callback_data.idx]
@@ -1225,7 +1265,7 @@ async def rsa_pick_ag(cq: CallbackQuery, callback_data: RsaPickCB, state: FSMCon
 async def rsa_brief(m: Message, state: FSMContext) -> None:
     topic, url = _parse_brief_text(m.text or "")
     if not url or not topic:
-        await m.answer(texts.RSA_BAD_URL)
+        await m.answer(i18n.t("rsa_bad_url"))
         return
     await state.update_data(topic=topic, final_url=url)
     await _rsa_generate_and_start(m, m.chat.id, state)
@@ -1238,23 +1278,23 @@ async def rsa_refine_text(m: Message, state: FSMContext) -> None:
     session = await SESSIONS.get(cid) if cid else None
     if session is None or not isinstance(cid, str) or kind is None or idx is None:
         await state.clear()
-        await m.answer(texts.RSA_SESSION_STALE)
+        await m.answer(i18n.t("rsa_session_stale"))
         return
     try:
         new_text = await refine_element(session.brief, kind, m.text or "")
     except Exception as e:  # LLM/сеть
-        await m.answer(f"⚠️ Доработка не удалась: {ux.err_text(e)}")
+        await m.answer(i18n.t("err_refine", err=ux.err_text(e)))
         return
     valid_kind = "headline" if kind == "h" else "description"
     ok, n = rsa_validate(new_text, valid_kind)
     if not ok:
         limit = 30 if kind == "h" else 90
-        await m.answer(texts.RSA_REFINE_TOO_LONG.format(n=n, limit=limit))
+        await m.answer(i18n.t("rsa_refine_too_long", n=n, limit=limit))
         return  # остаёмся в состоянии — пользователь пришлёт другую правку
     await state.clear()
     session = await SESSIONS.replace_element(cid, kind, idx, new_text)
     if session is None:  # сессия исчезла между правкой и записью — не падаем
-        await m.answer(texts.RSA_SESSION_STALE)
+        await m.answer(i18n.t("rsa_session_stale"))
         return
     items = session.items(kind)
     await m.answer(
@@ -1270,7 +1310,7 @@ async def rsa_refine_text(m: Message, state: FSMContext) -> None:
 async def kw_seeds(m: Message, state: FSMContext) -> None:
     seeds, url = _parse_kw_input(m.text or "")
     if not seeds and not url:
-        await m.answer(texts.KW_BAD_INPUT, parse_mode=ParseMode.HTML)
+        await m.answer(i18n.t("kw_bad_input"), parse_mode=ParseMode.HTML)
         return  # остаёмся в состоянии — пользователь пришлёт сиды/URL ещё раз
     await state.clear()
     await _kw_run(m, m.chat.id, seeds, url, "ru")
@@ -1281,11 +1321,11 @@ async def model_custom_text(m: Message, state: FSMContext) -> None:
     """Своя модель из /model → ✏️ Своя модель. Валидируем slug, применяем + персистим."""
     slug = _valid_model_slug(m.text or "")
     if not slug:
-        await m.answer(texts.MODEL_BAD, parse_mode=ParseMode.HTML)
+        await m.answer(i18n.t("model_bad"), parse_mode=ParseMode.HTML)
         return  # остаёмся в состоянии — пользователь пришлёт slug ещё раз
     await state.clear()
     await _persist_and_set_model(slug)
-    await m.answer(texts.MODEL_SET.format(model=texts.esc(slug)), parse_mode=ParseMode.HTML)
+    await m.answer(i18n.t("model_set", model=texts.esc(slug)), parse_mode=ParseMode.HTML)
 
 
 # ── §3 Создание поисковой (Search) кампании: /newsearch → бриф → RSA → черновик ─────
@@ -1315,7 +1355,7 @@ def _parse_search_brief(text: str) -> tuple[str, str, float, str, list[str]] | N
 async def newsearch_cmd(m: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(SearchWizard.awaiting_brief)
-    await m.answer(texts.SEARCH_ASK_BRIEF, parse_mode=ParseMode.HTML)
+    await m.answer(i18n.t("search_ask_brief"), parse_mode=ParseMode.HTML)
 
 
 @dp.message(SearchWizard.awaiting_brief)
@@ -1324,21 +1364,21 @@ async def search_brief(m: Message, state: FSMContext) -> None:
     исполнение только после ✅ (двойной гейт + user_initiated держит apply_create_search_campaign)."""
     parsed = _parse_search_brief(m.text or "")
     if parsed is None:
-        await m.answer(texts.SEARCH_BAD_BRIEF, parse_mode=ParseMode.HTML)
+        await m.answer(i18n.t("search_bad_brief"), parse_mode=ParseMode.HTML)
         return  # остаёмся в состоянии — пользователь пришлёт бриф ещё раз
     name, url, budget_units, topic, keywords = parsed
-    await m.answer(texts.SEARCH_GENERATING)
+    await m.answer(i18n.t("search_generating"))
     try:
         draft = await _generate_rsa(CopyBrief(topic=topic, n_headlines=15, n_descriptions=4))
     except Exception as e:  # LLM/сеть
         await state.clear()
-        await m.answer(f"⚠️ Генерация текстов не удалась: {ux.err_text(e)}")
+        await m.answer(i18n.t("err_text_gen", err=ux.err_text(e)))
         return
     headlines = list(draft.headlines or [])[:RSA_MAX_HEADLINES]
     descriptions = list(draft.descriptions or [])[:RSA_MAX_DESCRIPTIONS]
     if len(headlines) < RSA_MIN_HEADLINES or len(descriptions) < RSA_MIN_DESCRIPTIONS:
         await state.clear()
-        await m.answer(texts.SEARCH_GEN_EMPTY)
+        await m.answer(i18n.t("search_gen_empty"))
         return
     params = {
         "campaign_name": name,
@@ -1354,7 +1394,7 @@ async def search_brief(m: Message, state: FSMContext) -> None:
         validated: dict = SCHEMAS["create_search_campaign"](**params).model_dump()
     except Exception as e:
         await state.clear()
-        await m.answer(f"⚠️ Параметры не прошли валидацию: {e}")
+        await m.answer(i18n.t("err_validate", err=e))
         return
     params = validated
     summary = texts.fmt_search_proposal_summary(
@@ -1423,13 +1463,13 @@ async def on_photo(m: Message, state: FSMContext, bot: Bot) -> None:
         await bot.download(m.photo[-1], destination=buf)  # самое большое разрешение
         landscape, square = await asyncio.to_thread(prepare_display_images, buf.getvalue())
     except Exception as e:  # сеть/битый файл/не картинка
-        await m.answer(f"⚠️ Не удалось обработать фото: {ux.err_text(e)}")
+        await m.answer(i18n.t("err_photo", err=ux.err_text(e)))
         return
     media_id = uuid.uuid4().hex
     await asyncio.to_thread(save_pending_media, media_id, landscape, square)
     await state.update_data(gdn_media_id=media_id)
     await state.set_state(GdnWizard.awaiting_brief)
-    await m.answer(texts.GDN_ASK_BRIEF, parse_mode=ParseMode.HTML)
+    await m.answer(i18n.t("gdn_ask_brief"), parse_mode=ParseMode.HTML)
 
 
 @dp.message(GdnWizard.awaiting_brief)
@@ -1438,25 +1478,25 @@ async def gdn_brief(m: Message, state: FSMContext) -> None:
     media_id = data.get("gdn_media_id")
     if not media_id:
         await state.clear()
-        await m.answer(texts.GDN_SESSION_STALE)
+        await m.answer(i18n.t("gdn_session_stale"))
         return
     parsed = _parse_gdn_brief(m.text or "")
     if parsed is None:
-        await m.answer(texts.GDN_BAD_BRIEF, parse_mode=ParseMode.HTML)
+        await m.answer(i18n.t("gdn_bad_brief"), parse_mode=ParseMode.HTML)
         return  # остаёмся в состоянии — пользователь пришлёт бриф ещё раз
     name, url, budget_units = parsed
-    await m.answer(texts.GDN_GENERATING)
+    await m.answer(i18n.t("gdn_generating"))
     try:
         draft = await _generate_rsa(CopyBrief(topic=name, n_headlines=5, n_descriptions=4))
     except Exception as e:  # LLM/сеть
         await _gdn_cleanup(state, media_id)
-        await m.answer(f"⚠️ Генерация текстов не удалась: {ux.err_text(e)}")
+        await m.answer(i18n.t("err_text_gen", err=ux.err_text(e)))
         return
     # Нужно ≥1 заголовка и ≥2 описаний: первое описание идёт в long_headline, остальные — в
     # descriptions (иначе long_headline дублировал бы единственное описание).
     if not draft.headlines or len(draft.descriptions) < 2:
         await _gdn_cleanup(state, media_id)
-        await m.answer(texts.GDN_GEN_EMPTY)
+        await m.answer(i18n.t("gdn_gen_empty"))
         return
     headlines = draft.headlines[:5]
     all_desc = draft.descriptions[:5]
@@ -1478,7 +1518,7 @@ async def gdn_brief(m: Message, state: FSMContext) -> None:
         SCHEMAS["create_gdn_campaign"](**params)
     except Exception as e:
         await _gdn_cleanup(state, media_id)
-        await m.answer(f"⚠️ Параметры не прошли валидацию: {e}")
+        await m.answer(i18n.t("err_validate", err=e))
         return
     summary = texts.fmt_gdn_proposal_summary(
         name, url, budget_units, headlines, descriptions, business_name
@@ -1548,7 +1588,7 @@ def _actor(event: object) -> tuple[int | None, str | None]:
 async def camp_menu(cq: CallbackQuery, callback_data: CampCB) -> None:
     camps = _CAMP_CACHE.get(_cq_chat_id(cq))
     if not _valid_idx(camps, callback_data.idx):
-        await cq.answer(texts.CAMP_LIST_STALE, show_alert=True)
+        await cq.answer(i18n.t("camp_list_stale"), show_alert=True)
         return
     await cq.answer()
     c = camps[callback_data.idx]
@@ -1564,7 +1604,7 @@ async def camp_menu(cq: CallbackQuery, callback_data: CampCB) -> None:
 async def camp_back(cq: CallbackQuery, callback_data: CampCB) -> None:
     camps = _CAMP_CACHE.get(_cq_chat_id(cq))
     if not camps:
-        await cq.answer(texts.CAMP_LIST_STALE, show_alert=True)
+        await cq.answer(i18n.t("camp_list_stale"), show_alert=True)
         return
     await cq.answer()
     await _safe_edit(
@@ -1581,13 +1621,13 @@ async def _camp_mutate(cq: CallbackQuery, idx: int, operation: str) -> None:
     chat_id = _cq_chat_id(cq)
     camps = _CAMP_CACHE.get(chat_id)
     if not _valid_idx(camps, idx):
-        await cq.answer(texts.CAMP_LIST_STALE, show_alert=True)
+        await cq.answer(i18n.t("camp_list_stale"), show_alert=True)
         return
     name = camps[idx]["name"]
     try:
         cid, op, params, summary = _build_proposal(operation, campaign=name)
     except Exception as e:  # валидация схемы
-        await cq.answer(f"Ошибка: {type(e).__name__}", show_alert=True)
+        await cq.answer(i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
         return
     await cq.answer()
     msg = _cq_msg(cq)
@@ -1616,7 +1656,7 @@ async def camp_audience(cq: CallbackQuery, callback_data: CampCB) -> None:
     chat_id = _cq_chat_id(cq)
     camps = _CAMP_CACHE.get(chat_id)
     if not _valid_idx(camps, callback_data.idx):
-        await cq.answer(texts.CAMP_LIST_STALE, show_alert=True)
+        await cq.answer(i18n.t("camp_list_stale"), show_alert=True)
         return
     try:
         from ads.client import build_client
@@ -1628,10 +1668,10 @@ async def camp_audience(cq: CallbackQuery, callback_data: CampCB) -> None:
                 list_audiences, client, DRAFT_ACCOUNT_ID, label="list_audiences"
             )
     except Exception as e:  # сеть/доступ/SDK
-        await cq.answer(f"Ошибка: {type(e).__name__}", show_alert=True)
+        await cq.answer(i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
         return
     if not auds:
-        await cq.answer(texts.NO_AUDIENCES, show_alert=True)
+        await cq.answer(i18n.t("no_audiences"), show_alert=True)
         return
     _AUD_CACHE[chat_id] = auds
     await cq.answer()
@@ -1651,7 +1691,7 @@ async def on_audience_pick(cq: CallbackQuery, callback_data: AudienceCB) -> None
     camps = _CAMP_CACHE.get(chat_id)
     auds = _AUD_CACHE.get(chat_id)
     if not _valid_idx(camps, callback_data.camp_idx) or not _valid_idx(auds, callback_data.idx):
-        await cq.answer(texts.AUD_LIST_STALE, show_alert=True)
+        await cq.answer(i18n.t("aud_list_stale"), show_alert=True)
         return
     name = camps[callback_data.camp_idx]["name"]
     aud = auds[callback_data.idx]
@@ -1660,7 +1700,7 @@ async def on_audience_pick(cq: CallbackQuery, callback_data: AudienceCB) -> None
             "attach_audience", campaign=name, audience_resource_names=[aud.resource_name]
         )
     except Exception as e:  # валидация схемы
-        await cq.answer(f"Ошибка: {type(e).__name__}", show_alert=True)
+        await cq.answer(i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
         return
     params["_audience_names"] = [aud.name]  # инертно для исполнения; для дружелюбной сводки
     await cq.answer()
@@ -1681,8 +1721,8 @@ async def period_report(cq: CallbackQuery, callback_data: PeriodCB) -> None:
         return
     try:
         period = _period_from_arg(callback_data.code)
-    except ValueError as e:
-        await msg.answer(f"⚠️ {e}")
+    except ValueError:
+        await msg.answer(i18n.t("err_period"))
         return
     try:
         from ads.client import build_client
@@ -1693,7 +1733,7 @@ async def period_report(cq: CallbackQuery, callback_data: PeriodCB) -> None:
             report = await build_account_report_async(client, DRAFT_ACCOUNT_ID, period)
             report.currency = await _read_currency(client)  # §9: валюта денежных метрик
     except Exception as e:  # сеть/доступ/SDK
-        await msg.answer(f"⚠️ Не удалось построить отчёт: {ux.err_text(e)}")
+        await msg.answer(i18n.t("err_report", err=ux.err_text(e)))
         return
     await msg.answer(summary_text(report))
 
@@ -1706,8 +1746,8 @@ async def period_export(cq: CallbackQuery, callback_data: PeriodCB) -> None:
         return
     try:
         period = _period_from_arg(callback_data.code)
-    except ValueError as e:
-        await msg.answer(f"⚠️ {e}")
+    except ValueError:
+        await msg.answer(i18n.t("err_period"))
         return
     await _run_export(msg, period)
 
@@ -1720,8 +1760,8 @@ async def period_sheets(cq: CallbackQuery, callback_data: PeriodCB) -> None:
         return
     try:
         period = _period_from_arg(callback_data.code)
-    except ValueError as e:
-        await msg.answer(f"⚠️ {e}")
+    except ValueError:
+        await msg.answer(i18n.t("err_period"))
         return
     await _run_sheets(msg, period)
 
@@ -1733,11 +1773,11 @@ async def _do_confirm(cq: CallbackQuery, cid: str) -> None:
     if not await STORE.confirm(
         cid, chat_id=chat_id, actor_user_id=actor_id, actor_username=actor_name
     ):
-        await cq.answer(texts.STALE, show_alert=True)
+        await cq.answer(i18n.t("stale"), show_alert=True)
         return
     _LAST_PENDING.pop(chat_id, None)
-    await cq.answer("Выполняю…")
-    await _safe_edit(cq, texts.EXECUTING)  # убирает кнопки
+    await cq.answer(i18n.t("cb_working"))
+    await _safe_edit(cq, i18n.t("executing"))  # убирает кнопки
     # ВАЖНО (денежный путь): успешное исполнение и косметический edit_text РАЗДЕЛЕНЫ. execute_confirmed
     # уже применил мутацию и записал finalize → если бы пост-успешный edit_text (часто бросает
     # TelegramBadRequest: «message is not modified»/«to edit not found» после >48ч) попал в этот же
@@ -1761,14 +1801,14 @@ async def _do_confirm(cq: CallbackQuery, cid: str) -> None:
         await STORE.record_failure(cid, error=human)
         await _safe_edit(
             cq,
-            texts.FAILED.format(kind=type(e).__name__, err=texts.esc(human)),
+            i18n.t("failed", kind=type(e).__name__, err=texts.esc(human)),
             parse_mode=ParseMode.HTML,
         )
         return
     # Успех: мутация применена и finalize записан. Косметический сбой UI-edit НЕ должен пометить
     # успешную операцию как failed — отдельный try/except, вне ветки record_failure.
     log.info("мутация применена cid=%s chat=%s", cid, chat_id)  # денежный путь — успех в лог
-    await _safe_edit(cq, texts.APPLIED.format(result=texts.esc(result)), parse_mode=ParseMode.HTML)
+    await _safe_edit(cq, i18n.t("applied", result=texts.esc(result)), parse_mode=ParseMode.HTML)
 
 
 async def _do_cancel(cq: CallbackQuery, cid: str) -> None:
@@ -1776,8 +1816,8 @@ async def _do_cancel(cq: CallbackQuery, cid: str) -> None:
     actor_id, actor_name = _actor(cq)
     await STORE.reject(cid, chat_id=chat_id, actor_user_id=actor_id, actor_username=actor_name)
     _LAST_PENDING.pop(chat_id, None)
-    await _safe_edit(cq, texts.REJECTED)
-    await cq.answer("Отменено")
+    await _safe_edit(cq, i18n.t("rejected"))
+    await cq.answer(i18n.t("cb_cancelled"))
 
 
 @dp.callback_query(ConfirmCB.filter(F.action == "ok"))
@@ -1819,9 +1859,9 @@ async def rsa_approve(cq: CallbackQuery, callback_data: RsaCB) -> None:
         callback_data.cid, callback_data.kind, callback_data.idx, "approved"
     )
     if session is None:
-        await cq.answer(texts.RSA_SESSION_STALE, show_alert=True)
+        await cq.answer(i18n.t("rsa_session_stale"), show_alert=True)
         return
-    await cq.answer("Одобрено")
+    await cq.answer(i18n.t("cb_approved"))
     await _rsa_edit(cq, session)
 
 
@@ -1831,9 +1871,9 @@ async def rsa_reject(cq: CallbackQuery, callback_data: RsaCB) -> None:
         callback_data.cid, callback_data.kind, callback_data.idx, "rejected"
     )
     if session is None:
-        await cq.answer(texts.RSA_SESSION_STALE, show_alert=True)
+        await cq.answer(i18n.t("rsa_session_stale"), show_alert=True)
         return
-    await cq.answer("Отклонено")
+    await cq.answer(i18n.t("cb_rejected"))
     await _rsa_edit(cq, session)
 
 
@@ -1841,9 +1881,9 @@ async def rsa_reject(cq: CallbackQuery, callback_data: RsaCB) -> None:
 async def rsa_approveall(cq: CallbackQuery, callback_data: RsaCB) -> None:
     session = await SESSIONS.approve_all_valid(callback_data.cid)
     if session is None:
-        await cq.answer(texts.RSA_SESSION_STALE, show_alert=True)
+        await cq.answer(i18n.t("rsa_session_stale"), show_alert=True)
         return
-    await cq.answer("Одобрены все валидные")
+    await cq.answer(i18n.t("cb_approved_all"))
     await _rsa_edit_overview(cq, session)
 
 
@@ -1851,7 +1891,7 @@ async def rsa_approveall(cq: CallbackQuery, callback_data: RsaCB) -> None:
 async def rsa_review(cq: CallbackQuery, callback_data: RsaCB) -> None:
     session = await SESSIONS.get(callback_data.cid)
     if session is None:
-        await cq.answer(texts.RSA_SESSION_STALE, show_alert=True)
+        await cq.answer(i18n.t("rsa_session_stale"), show_alert=True)
         return
     await cq.answer()
     await _rsa_edit(cq, session)  # _rsa_render покажет следующий pending
@@ -1861,7 +1901,7 @@ async def rsa_review(cq: CallbackQuery, callback_data: RsaCB) -> None:
 async def rsa_to_overview(cq: CallbackQuery, callback_data: RsaCB) -> None:
     session = await SESSIONS.get(callback_data.cid)
     if session is None:
-        await cq.answer(texts.RSA_SESSION_STALE, show_alert=True)
+        await cq.answer(i18n.t("rsa_session_stale"), show_alert=True)
         return
     await cq.answer()
     await _rsa_edit_overview(cq, session)
@@ -1871,30 +1911,30 @@ async def rsa_to_overview(cq: CallbackQuery, callback_data: RsaCB) -> None:
 async def rsa_refine(cq: CallbackQuery, callback_data: RsaCB, state: FSMContext) -> None:
     session = await SESSIONS.get(callback_data.cid)
     if session is None:
-        await cq.answer(texts.RSA_SESSION_STALE, show_alert=True)
+        await cq.answer(i18n.t("rsa_session_stale"), show_alert=True)
         return
     await state.set_state(RsaRefine.awaiting_text)
     await state.update_data(cid=callback_data.cid, kind=callback_data.kind, idx=callback_data.idx)
     await cq.answer()
     msg = _cq_msg(cq)
     if msg is not None:
-        await msg.answer(texts.RSA_REFINE_PROMPT)
+        await msg.answer(i18n.t("rsa_refine_prompt"))
 
 
 @dp.callback_query(RsaCB.filter(F.action == "finalize"))
 async def rsa_finalize(cq: CallbackQuery, callback_data: RsaCB) -> None:
     session = await SESSIONS.get(callback_data.cid)
     if session is None:
-        await cq.answer(texts.RSA_SESSION_STALE, show_alert=True)
+        await cq.answer(i18n.t("rsa_session_stale"), show_alert=True)
         return
     if not session.can_finalize():
         h, d = session.counts()
-        await cq.answer(texts.RSA_BELOW_MIN.format(h=h, d=d), show_alert=True)
+        await cq.answer(i18n.t("rsa_below_min", h=h, d=d), show_alert=True)
         return
     try:
         cid, op, params, summary = _build_rsa_proposal(session)
     except Exception as e:  # валидация схемы
-        await cq.answer(f"Ошибка: {type(e).__name__}", show_alert=True)
+        await cq.answer(i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
         return
     await cq.answer()
     msg = _cq_msg(cq)
@@ -1907,21 +1947,54 @@ async def rsa_finalize(cq: CallbackQuery, callback_data: RsaCB) -> None:
 
 @dp.callback_query(RsaCB.filter(F.action == "cancel"))
 async def rsa_cancel(cq: CallbackQuery, callback_data: RsaCB) -> None:
-    await cq.answer("Отменено")
-    await _safe_edit(cq, texts.REJECTED)
+    await cq.answer(i18n.t("cb_cancelled"))
+    await _safe_edit(cq, i18n.t("rejected"))
 
 
 @dp.errors()
 async def on_error(event: ErrorEvent) -> bool:
-    """Глобальная сеть безопасности: необработанное исключение в любом хендлере логируется
-    (через RedactionFilter — без секретов в сообщении И в traceback), а не падает молча в stderr.
-    Пользователю сырой текст НЕ шлём (мог бы содержать креды) — только пишем в лог."""
-    log.error(
-        "необработанная ошибка в хендлере: %s",
-        type(event.exception).__name__,
-        exc_info=event.exception,
-    )
+    """Глобальная сеть безопасности (§15): необработанное исключение в любом хендлере ловится,
+    логируется (РЕДАКТИРОВАННО — без секретов в сообщении И traceback) с request_id, СОХРАНЯЕТСЯ
+    в error_events (триаж/`/diag`) и уходит в Sentry — а не падает молча в stderr.
+
+    Пользователю сырой текст НЕ шлём (мог бы нести креды) — показываем понятное сообщение с «кодом
+    инцидента» (request_id), по которому ошибку находят в /diag и логах."""
+    code = await capture_exception(event.exception, where="handler")
+    try:  # уведомление пользователя — best-effort (ошибка уже зафиксирована)
+        upd = event.update
+        target = getattr(upd, "message", None) or getattr(
+            getattr(upd, "callback_query", None), "message", None
+        )
+        if target is not None:
+            await target.answer(i18n.t("err_unexpected", code=code))
+    except Exception:  # noqa: BLE001 — не даём сбою уведомления перекрыть фиксацию ошибки
+        pass
     return True  # «обработано» — aiogram не пробрасывает дальше
+
+
+@dp.message(Command("diag"))
+async def diag(m: Message) -> None:
+    """§15: последние перехваченные ошибки (error_events) для триажа. Только whitelisted
+    (WhitelistMiddleware). Read-only; message/traceback уже редактированы (секретов нет)."""
+    from sqlalchemy import desc, select
+
+    from db.models import ErrorEvent as DBErrorEvent
+    from db.session import Session
+
+    try:
+        async with Session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(DBErrorEvent).order_by(desc(DBErrorEvent.created_at)).limit(10)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        await m.answer(texts.fmt_errors(rows), parse_mode=ParseMode.HTML)
+    except Exception as e:  # noqa: BLE001 — диагностика не должна сама падать наружу
+        await m.answer(i18n.t("err_journal", err=ux.err_text(e)))
 
 
 async def main() -> None:
@@ -1941,6 +2014,10 @@ async def main() -> None:
     except Exception as e:  # БД недоступна: НЕ даём дефолтному excepthook напечатать DSN с паролем
         log.error("init_db не удалось — бот не стартует: %s", type(e).__name__, exc_info=e)
         return
+    try:  # §4: восстановить сохранённые языки интерфейса (user_settings.language), переживает рестарт
+        await i18n.load_langs()
+    except Exception as e:  # настройка не критична — стартуем на дефолтах (RU)
+        log.warning("языки интерфейса не загружены из БД: %s", type(e).__name__)
     try:  # восстановить выбранную в боте модель (/model), переживает рестарт
         saved_model = await _load_model_override()
         if saved_model:
@@ -1955,8 +2032,15 @@ async def main() -> None:
         await asyncio.to_thread(build_client)  # @lru_cache → все последующие вызовы мгновенны
     except Exception as e:  # cred-сбой на старте не валит бота — реальные вызовы всё равно проверят
         log.warning("прогрев build_client не удался: %s", type(e).__name__)
+    # Корреляция (§15): request_id ДО whitelist — даже отказ доступа логируется с request_id.
+    dp.message.outer_middleware(TraceMiddleware())
+    dp.callback_query.outer_middleware(TraceMiddleware())
     dp.message.outer_middleware(WhitelistMiddleware())
     dp.callback_query.outer_middleware(WhitelistMiddleware())
+    # Язык интерфейса (§4): ставит contextvar до хендлеров (порядок относительно whitelist не важен
+    # функционально — оба outer; язык нужен лишь когда хендлер уже формирует ответ).
+    dp.message.outer_middleware(LangMiddleware())
+    dp.callback_query.outer_middleware(LangMiddleware())
     dp.message.outer_middleware(ThrottleMiddleware())  # анти-спам (ТЗ §12), после whitelist
     bot = Bot(token)
     # Меню-команды + профиль бота (about/description в @BotFather). Всё косметика — ставим при
@@ -1965,6 +2049,9 @@ async def main() -> None:
     # return_exceptions=True сохраняет «не критично», но КАЖДУЮ ошибку логируем (иначе потеряли бы).
     for r in await asyncio.gather(
         bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeAllPrivateChats()),
+        bot.set_my_commands(
+            BOT_COMMANDS_EN, scope=BotCommandScopeAllPrivateChats(), language_code="en"
+        ),
         bot.set_my_short_description(texts.BOT_SHORT_DESCRIPTION),
         bot.set_my_description(texts.BOT_DESCRIPTION),
         return_exceptions=True,

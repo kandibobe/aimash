@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from agent.router import chat
 from agent.tools.schemas import MUTATION_TOOLS, READ_TOOLS, SCHEMAS, TOOLS
+from bot import i18n
 from confirm.gate import Proposal, build_summary
 from core.logging import redact_text
 
@@ -25,7 +26,9 @@ SYSTEM = (
     "'до N' (установить В значение). Для изменения ставки (update_bid), ключевых слов "
     "(add_keywords), минус-слов (add_negative_keywords) ВСЕГДА указывай кампанию (campaign); "
     "ставка применяется к группам объявлений этой кампании. pause_campaign ставит на паузу, "
-    "resume_campaign — возобновляет. Если не указана кампания, сумма или направление — вызови "
+    "resume_campaign — возобновляет ВСЮ кампанию; pause_ad_group/resume_ad_group — пауза/"
+    "возобновление ОТДЕЛЬНОЙ группы объявлений (нужны и campaign, и ad_group). Если не указана "
+    "кампания, группа, сумма или направление — вызови "
     "ask_clarification, НЕ угадывай. Поле currency указывай ТОЛЬКО если пользователь ЯВНО назвал "
     "валюту (USD/$, грн/UAH, EUR/€); иначе НЕ заполняй currency — сумма трактуется в валюте "
     "аккаунта. Для процентных команд («на N%») currency не указывай. Ничего не выполняй сам — "
@@ -54,8 +57,7 @@ async def handle_command(text: str, *, chat_id: int = 0) -> dict[str, Any]:
     if not getattr(msg, "tool_calls", None):
         return {
             "type": "text",
-            "text": (msg.content or "").strip()
-            or "Не удалось распознать команду — переформулируй.",
+            "text": (msg.content or "").strip() or i18n.t("loop_unrecognized"),
         }
 
     call = msg.tool_calls[0]
@@ -63,12 +65,12 @@ async def handle_command(text: str, *, chat_id: int = 0) -> dict[str, Any]:
     try:
         args = json.loads(call.function.arguments or "{}")
     except json.JSONDecodeError:
-        return {"type": "text", "text": "не удалось разобрать аргументы инструмента"}
+        return {"type": "text", "text": i18n.t("loop_bad_tool_args")}
 
     if name == "ask_clarification":
         return {
             "type": "clarify",
-            "question": args.get("question", "Уточните, пожалуйста, команду."),
+            "question": args.get("question") or i18n.t("loop_clarify_default"),
         }
 
     if name in READ_TOOLS:
@@ -78,7 +80,10 @@ async def handle_command(text: str, *, chat_id: int = 0) -> dict[str, Any]:
             try:
                 validated = SCHEMAS[name](**args)
             except ValidationError as e:
-                return {"type": "text", "text": f"некорректные аргументы для {name}: {e.errors()}"}
+                return {
+                    "type": "text",
+                    "text": i18n.t("loop_bad_args", name=name, errors=e.errors()),
+                }
             return {"type": "rsa_intent", "brief": validated.model_dump()}
         if name == "keyword_research":
             # Подбор ключей — read-only (advisory). Валидируем бриф и отдаём боту «намерение»:
@@ -86,7 +91,10 @@ async def handle_command(text: str, *, chat_id: int = 0) -> dict[str, Any]:
             try:
                 validated = SCHEMAS[name](**args)
             except ValidationError as e:
-                return {"type": "text", "text": f"некорректные аргументы для {name}: {e.errors()}"}
+                return {
+                    "type": "text",
+                    "text": i18n.t("loop_bad_args", name=name, errors=e.errors()),
+                }
             return {"type": "keywords_intent", "brief": validated.model_dump()}
         return await _do_read(name, args)
 
@@ -98,21 +106,16 @@ async def handle_command(text: str, *, chat_id: int = 0) -> dict[str, Any]:
         from ads.service import SUPPORTED_OPERATIONS
 
         if name not in SUPPORTED_OPERATIONS:
-            return {
-                "type": "text",
-                "text": (
-                    f"Операция «{name}» пока не поддерживается — выполнить не смогу, поэтому "
-                    "не предлагаю подтверждение. Доступно: бюджет, ставка (CPC) и стратегия ставок, "
-                    "ключевые и минус-слова, гео-таргетинг, пауза/возобновление кампании, "
-                    "генерация RSA-текстов и подбор ключевых слов."
-                ),
-            }
+            return {"type": "text", "text": i18n.t("loop_unsupported", name=name)}
 
         # Валидация диапазонов В КОДЕ (не доверяем модели)
         try:
             validated = SCHEMAS[name](**args)
         except ValidationError as e:
-            return {"type": "text", "text": f"некорректные аргументы для {name}: {e.errors()}"}
+            return {
+                "type": "text",
+                "text": i18n.t("loop_bad_args", name=name, errors=e.errors()),
+            }
 
         # Черновик: «было» возьмётся из Google Ads в Фазе 1; сейчас плейсхолдер.
         after = validated.model_dump()
@@ -130,7 +133,7 @@ async def handle_command(text: str, *, chat_id: int = 0) -> dict[str, Any]:
             "Выполнить только после «да».",
         }
 
-    return {"type": "text", "text": f"неизвестный инструмент: {name}"}
+    return {"type": "text", "text": i18n.t("loop_unknown_tool", name=name)}
 
 
 async def _do_read(name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -143,7 +146,7 @@ async def _do_read(name: str, args: dict[str, Any]) -> dict[str, Any]:
 
     allowed = sorted(settings.allowed_customer_ids)
     if not allowed:
-        return {"type": "text", "text": "нет разрешённых аккаунтов (allowed_customer_ids пуст)"}
+        return {"type": "text", "text": i18n.t("loop_no_accounts")}
     cid = allowed[0]
     days = int(args.get("period_days") or 30)
     try:
@@ -178,5 +181,5 @@ async def _do_read(name: str, args: dict[str, Any]) -> dict[str, Any]:
     except Exception as e:  # сеть/доступ/SDK
         return {
             "type": "text",
-            "text": redact_text(f"ошибка чтения Google Ads: {type(e).__name__}: {e}"),
+            "text": redact_text(i18n.t("loop_read_error", detail=f"{type(e).__name__}: {e}")),
         }

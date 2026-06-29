@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from adcopy.validate import rsa_len, validate  # noqa: E402
-from ads.client import DRAFT_ACCOUNT_ID, ensure_allowed  # noqa: E402
+from ads.client import DRAFT_ACCOUNT_ID, ensure_allowed, ensure_read_allowed  # noqa: E402
 from ads.mutations import apply_update_budget  # noqa: E402
 from core.config import settings  # noqa: E402
 
@@ -33,6 +33,17 @@ def allowed_ids(value: str):
         yield
     finally:
         settings.google_ads_allowed_customer_ids = prev
+
+
+@contextmanager
+def read_ids(value: str):
+    """Временно задать GOOGLE_ADS_READ_CUSTOMER_IDS (read-allow-list, §8) и вернуть как было."""
+    prev = settings.google_ads_read_customer_ids
+    settings.google_ads_read_customer_ids = value
+    try:
+        yield
+    finally:
+        settings.google_ads_read_customer_ids = prev
 
 
 # ── RSA длина: кириллица = 1 символ ────────────────────────────────────────────
@@ -83,6 +94,51 @@ def test_ensure_allowed_ceiling_blocks_foreign_env():
         try:
             ensure_allowed("1234567890")
             raise AssertionError("ожидался PermissionError (выход за потолок)")
+        except PermissionError:
+            pass
+
+
+# ── Раздельный замок ЧТЕНИЯ (§8: сводка по дочерним MCC) ───────────────────────
+_CHILD = "1112223334"  # условный дочерний аккаунт MCC
+
+
+def test_ensure_read_allowed_fail_closed_when_empty():
+    # Оба списка пусты → чтение запрещено (fail-closed), как и мутации.
+    with allowed_ids(""), read_ids(""):
+        try:
+            ensure_read_allowed(DRAFT_ACCOUNT_ID)
+            raise AssertionError("ожидался PermissionError (fail-closed)")
+        except PermissionError:
+            pass
+
+
+def test_ensure_read_allowed_defaults_to_mutation_scope():
+    # read-list пуст → множество чтения = мутационный список (поведение не меняется).
+    with allowed_ids(DRAFT_ACCOUNT_ID), read_ids(""):
+        ensure_read_allowed(DRAFT_ACCOUNT_ID)  # разрешённый аккаунт читается
+        ensure_read_allowed("775-364-3025")  # нормализация
+        try:
+            ensure_read_allowed(_CHILD)  # дочерний не в списках → отказ
+            raise AssertionError("ожидался PermissionError (дочерний не перечислен)")
+        except PermissionError:
+            pass
+
+
+def test_ensure_read_allowed_permits_listed_child():
+    # Дочерний в read-list → читать можно (расширение под §8).
+    with allowed_ids(DRAFT_ACCOUNT_ID), read_ids(_CHILD):
+        ensure_read_allowed(_CHILD)
+        ensure_read_allowed(DRAFT_ACCOUNT_ID)  # мутационный аккаунт тоже остаётся читаемым
+
+
+def test_mutation_lock_unchanged_by_read_allowlist():
+    # ⚠️ КЛЮЧЕВОЙ инвариант разделения замков: дочерний в read-list НЕ открывает мутации на нём.
+    # ensure_allowed (деньги) обязан отклонить его — даже когда чтение разрешено.
+    with allowed_ids(DRAFT_ACCOUNT_ID), read_ids(_CHILD):
+        ensure_read_allowed(_CHILD)  # читать — можно
+        try:
+            ensure_allowed(_CHILD)  # менять — НЕЛЬЗЯ
+            raise AssertionError("замок мутаций пробит read-list — критическая регрессия!")
         except PermissionError:
             pass
 
@@ -220,6 +276,10 @@ if __name__ == "__main__":
     test_ensure_allowed_accepts_draft_normalized()
     test_ensure_allowed_rejects_other_account()
     test_ensure_allowed_ceiling_blocks_foreign_env()
+    test_ensure_read_allowed_fail_closed_when_empty()
+    test_ensure_read_allowed_defaults_to_mutation_scope()
+    test_ensure_read_allowed_permits_listed_child()
+    test_mutation_lock_unchanged_by_read_allowlist()
     test_mutation_rejected_without_confirmation()
     test_mutation_rejected_for_foreign_account()
     test_budget_blocked_when_not_user_initiated()

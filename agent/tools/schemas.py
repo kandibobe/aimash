@@ -37,6 +37,8 @@ MUTATION_TOOLS = {
     "add_negative_keywords",
     "pause_campaign",
     "resume_campaign",
+    "pause_ad_group",
+    "resume_ad_group",
     "set_geo_proximity",
     "set_geo_location",
     "set_bidding_strategy",
@@ -149,6 +151,17 @@ class PauseCampaign(BaseModel):
 
 class ResumeCampaign(BaseModel):
     campaign: str
+
+
+class PauseAdGroup(BaseModel):
+    # Пауза/возобновление НА УРОВНЕ ГРУППЫ (§16 AdGroupService): группу ищем по имени внутри кампании.
+    campaign: str  # имя кампании, в которой искать группу
+    ad_group: str  # имя группы объявлений
+
+
+class ResumeAdGroup(BaseModel):
+    campaign: str
+    ad_group: str
 
 
 class SetGeoProximity(BaseModel):
@@ -441,6 +454,8 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "add_negative_keywords": AddNegativeKeywords,
     "pause_campaign": PauseCampaign,
     "resume_campaign": ResumeCampaign,
+    "pause_ad_group": PauseAdGroup,
+    "resume_ad_group": ResumeAdGroup,
     "set_geo_proximity": SetGeoProximity,
     "set_geo_location": SetGeoLocation,
     "set_bidding_strategy": SetBiddingStrategy,
@@ -491,6 +506,17 @@ TOOLS: list[dict] = [
     ),
     _tool("pause_campaign", "Поставить кампанию на паузу.", PauseCampaign),
     _tool("resume_campaign", "Возобновить (включить) кампанию из паузы.", ResumeCampaign),
+    _tool(
+        "pause_ad_group",
+        "Поставить ОТДЕЛЬНУЮ группу объявлений на паузу. Укажи campaign (кампанию) и ad_group "
+        "(имя группы).",
+        PauseAdGroup,
+    ),
+    _tool(
+        "resume_ad_group",
+        "Возобновить (включить) ОТДЕЛЬНУЮ группу объявлений из паузы. Укажи campaign и ad_group.",
+        ResumeAdGroup,
+    ),
     _tool(
         "set_geo_proximity",
         "Радиус-таргетинг (км) вокруг города для кампании. Укажи campaign, city_name, "

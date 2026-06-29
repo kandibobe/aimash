@@ -35,19 +35,26 @@ def test_dev_without_key_ok():
 
 def test_prod_with_valid_key_ok():
     key = Fernet.generate_key().decode()
-    # whitelist обязателен в prod → передаём, чтобы проверить именно ключ-валидатор
+    # whitelist + Google Ads creds обязательны в prod → передаём, чтобы проверить именно ключ-валидатор
     s = Settings(
-        env="prod", secrets_encryption_key=key, telegram_whitelist_chat_ids="123", _env_file=None
+        env="prod",
+        secrets_encryption_key=key,
+        telegram_whitelist_chat_ids="123",
+        google_ads_developer_token="dev-token",
+        google_ads_allowed_customer_ids="7753643025",
+        _env_file=None,
     )
     assert s.is_prod is True
 
 
 def _prod_kwargs(**extra):
-    """Валидный prod-ключ по умолчанию — чтобы изолировать проверяемый валидатор."""
+    """Валидный prod-набор по умолчанию — чтобы изолировать проверяемый валидатор."""
     base = {
         "env": "prod",
         "secrets_encryption_key": Fernet.generate_key().decode(),
         "telegram_whitelist_chat_ids": "123",
+        "google_ads_developer_token": "dev-token",
+        "google_ads_allowed_customer_ids": "7753643025",
         "_env_file": None,
     }
     base.update(extra)
@@ -69,6 +76,26 @@ def test_dev_without_whitelist_ok():
     # в dev пустой whitelist допустим при конструировании (fail-closed обеспечивает middleware)
     s = Settings(**_prod_kwargs(env="dev", telegram_whitelist_chat_ids=""))
     assert s.whitelist == set()
+
+
+def test_prod_without_google_ads_token_raises():
+    # в prod пустой developer token = бот не сможет работать с Google Ads → падаем на старте
+    with pytest.raises(ValidationError):
+        Settings(**_prod_kwargs(google_ads_developer_token=""))
+
+
+def test_prod_without_allowed_customer_ids_raises():
+    # в prod пустой allow-list аккаунтов = нечего трогать (fail-closed) → падаем на старте
+    with pytest.raises(ValidationError):
+        Settings(**_prod_kwargs(google_ads_allowed_customer_ids=""))
+
+
+def test_dev_without_google_ads_ok():
+    # в dev живые креды Google Ads не обязательны (работа на фейках/офлайн-тестах)
+    s = Settings(
+        **_prod_kwargs(env="dev", google_ads_developer_token="", google_ads_allowed_customer_ids="")
+    )
+    assert s.is_prod is False
 
 
 def test_require_dev_env_blocks_outside_dev(monkeypatch):

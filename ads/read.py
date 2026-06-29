@@ -10,7 +10,7 @@ from datetime import date, timedelta
 
 from google.ads.googleads.client import GoogleAdsClient
 
-from ads.client import ensure_allowed, ensure_manager_allowed
+from ads.client import ensure_manager_allowed, ensure_read_allowed
 
 
 @dataclass
@@ -72,7 +72,7 @@ def account_stats(client: GoogleAdsClient, customer_id: str, days: int = 30) -> 
     раньше любой N кроме 7/14/30 молча схлопывался в 30, и подпись «N дн.» врала про объём данных
     (а это денежные метрики). end = вчера (как LAST_N_DAYS — без неполного «сегодня»); нормализация
     таймзон по дочерним аккаунтам — §8, отложена (один аккаунт → host-дата ок)."""
-    ensure_allowed(customer_id)
+    ensure_read_allowed(customer_id)
     n = max(1, int(days))
     end = date.today() - timedelta(days=1)
     start = end - timedelta(days=n - 1)
@@ -103,7 +103,7 @@ def account_currency(client: GoogleAdsClient, customer_id: str) -> str:
     """Код валюты аккаунта (§9), напр. 'USD'/'UAH'. Один GAQL FROM customer, кэш по customer_id.
     Только для белого списка (замок аккаунта). '' если не удалось прочитать (вызывающий покажет
     метрики без явной валюты)."""
-    ensure_allowed(customer_id)
+    ensure_read_allowed(customer_id)
     cid = str(customer_id)
     if cid in _CURRENCY_CACHE:
         return _CURRENCY_CACHE[cid]
@@ -122,7 +122,7 @@ def account_currency(client: GoogleAdsClient, customer_id: str) -> str:
 def list_audiences(client: GoogleAdsClient, customer_id: str) -> list[Audience]:
     """Доступные аудитории аккаунта (user_list) для прикрепления к кампании (§3). Только белый
     список (замок аккаунта). Берём открытые для членства списки ремаркетинга/аудиторий."""
-    ensure_allowed(customer_id)
+    ensure_read_allowed(customer_id)
     ga = client.get_service("GoogleAdsService")
     q = (
         "SELECT user_list.resource_name, user_list.name, user_list.size_for_display "
@@ -143,7 +143,7 @@ def list_audiences(client: GoogleAdsClient, customer_id: str) -> list[Audience]:
 
 def list_campaigns(client: GoogleAdsClient, customer_id: str) -> list[dict]:
     """Список кампаний аккаунта (id, имя, статус). Только для белого списка."""
-    ensure_allowed(customer_id)
+    ensure_read_allowed(customer_id)
     ga = client.get_service("GoogleAdsService")
     q = "SELECT campaign.id, campaign.name, campaign.status FROM campaign ORDER BY campaign.id"
     return [

@@ -16,6 +16,8 @@ from sqlalchemy import select
 from ads.client import DRAFT_ACCOUNT_ID, build_client
 from confirm.store import ConfirmStore
 from core.config import settings
+from core.context import request_scope
+from core.errors import capture_exception
 from core.logging import log
 from db.models import Proposal, UserSettings
 from db.session import Session
@@ -44,17 +46,18 @@ async def _broadcast(bot, text: str, **kw) -> None:
 
 async def run_scheduled_report(bot) -> None:
     """Плановый отчёт (последние N дн.) — рассылка whitelisted-пользователям. READ-ONLY."""
-    if not _recipients():
-        log.info("scheduler: получателей нет (whitelist пуст) — пропуск планового отчёта")
-        return
-    try:
-        client = build_client()
-        period = last_n_days(REPORT_WINDOW_DAYS)
-        report = await build_account_report_async(client, DRAFT_ACCOUNT_ID, period)
-    except Exception as e:  # сеть/доступ/SDK — не валим планировщик
-        log.warning("scheduler: плановый отчёт не собран: %s: %s", type(e).__name__, e)
-        return
-    await _broadcast(bot, "🗓 Плановый отчёт\n\n" + summary_text(report))
+    with request_scope("scheduler:report"):  # §15: корреляция логов джобы по request_id
+        if not _recipients():
+            log.info("scheduler: получателей нет (whitelist пуст) — пропуск планового отчёта")
+            return
+        try:
+            client = build_client()
+            period = last_n_days(REPORT_WINDOW_DAYS)
+            report = await build_account_report_async(client, DRAFT_ACCOUNT_ID, period)
+        except Exception as e:  # сеть/доступ/SDK — не валим планировщик, но фиксируем (§15)
+            await capture_exception(e, where="scheduler:report")
+            return
+        await _broadcast(bot, "🗓 Плановый отчёт\n\n" + summary_text(report))
 
 
 async def _thresholds_by_chat(chat_ids: set[int]) -> dict[int, dict | None]:
@@ -86,27 +89,32 @@ async def run_anomaly_check(bot) -> None:
     """Сравнение последних N дн. с предыдущими; алерт при росте расхода/падении конверсий.
     Пороги берутся per-chat из UserSettings.alert_thresholds (иначе — дефолтные). READ-ONLY:
     только уведомление, никаких изменений аккаунта (golden rule #3)."""
-    recipients = _recipients()
-    if not recipients:
-        return
-    try:
-        client = build_client()
-        period = last_n_days(ANOMALY_WINDOW_DAYS)
-        cur = await asyncio.to_thread(fetch_totals, client, DRAFT_ACCOUNT_ID, period)
-        prev = await asyncio.to_thread(fetch_totals, client, DRAFT_ACCOUNT_ID, period.previous())
-    except Exception as e:  # сеть/доступ/SDK
-        log.warning("scheduler: проверка аномалий не выполнена: %s: %s", type(e).__name__, e)
-        return
-    thresholds = await _thresholds_by_chat(recipients)
-    # Пороги per-chat → алерты считаем для каждого получателя отдельно (метрики аккаунта общие).
-    for chat_id in recipients:
-        alerts = detect_anomalies(cur, prev, thresholds.get(chat_id))
-        if not alerts:
-            continue
+    with request_scope("scheduler:anomaly"):  # §15: корреляция логов джобы по request_id
+        recipients = _recipients()
+        if not recipients:
+            return
         try:
-            await bot.send_message(chat_id, _format_alerts(alerts), parse_mode="HTML")
-        except Exception as e:  # один недоступный чат не должен ронять остальные
-            log.warning("scheduler: алерт не доставлен в %s: %s: %s", chat_id, type(e).__name__, e)
+            client = build_client()
+            period = last_n_days(ANOMALY_WINDOW_DAYS)
+            cur = await asyncio.to_thread(fetch_totals, client, DRAFT_ACCOUNT_ID, period)
+            prev = await asyncio.to_thread(
+                fetch_totals, client, DRAFT_ACCOUNT_ID, period.previous()
+            )
+        except Exception as e:  # сеть/доступ/SDK — фиксируем для триажа (§15), планировщик жив
+            await capture_exception(e, where="scheduler:anomaly")
+            return
+        thresholds = await _thresholds_by_chat(recipients)
+        # Пороги per-chat → алерты считаем для каждого получателя отдельно (метрики аккаунта общие).
+        for chat_id in recipients:
+            alerts = detect_anomalies(cur, prev, thresholds.get(chat_id))
+            if not alerts:
+                continue
+            try:
+                await bot.send_message(chat_id, _format_alerts(alerts), parse_mode="HTML")
+            except Exception as e:  # один недоступный чат не должен ронять остальные
+                log.warning(
+                    "scheduler: алерт не доставлен в %s: %s: %s", chat_id, type(e).__name__, e
+                )
 
 
 async def cleanup_stale_proposals(
@@ -116,23 +124,26 @@ async def cleanup_stale_proposals(
 
     Сравнение возраста — в Python (а не в SQL), чтобы корректно работать и на SQLite (наивный
     UTC), и на Postgres (tz-aware): наивный created_at трактуем как UTC."""
-    cutoff = (now or datetime.now(timezone.utc)) - timedelta(hours=ttl_hours)
-    store = ConfirmStore()
-    async with Session() as s:
-        rows = (
-            (await s.execute(select(Proposal).where(Proposal.status == "pending"))).scalars().all()
-        )
-        stale: list[tuple[str, int]] = []
-        for p in rows:
-            created = p.created_at
-            if created is None:
-                continue
-            if created.tzinfo is None:  # SQLite хранит наивный UTC
-                created = created.replace(tzinfo=timezone.utc)
-            if created < cutoff:
-                stale.append((p.confirmation_id, p.chat_id))
-    for cid, chat_id in stale:
-        await store.reject(cid, chat_id=chat_id)  # pending→rejected + audit (одноразово)
-    if stale:
-        log.info("scheduler: отклонено просроченных черновиков: %d", len(stale))
-    return len(stale)
+    with request_scope("scheduler:cleanup"):  # §15: корреляция логов джобы по request_id
+        cutoff = (now or datetime.now(timezone.utc)) - timedelta(hours=ttl_hours)
+        store = ConfirmStore()
+        async with Session() as s:
+            rows = (
+                (await s.execute(select(Proposal).where(Proposal.status == "pending")))
+                .scalars()
+                .all()
+            )
+            stale: list[tuple[str, int]] = []
+            for p in rows:
+                created = p.created_at
+                if created is None:
+                    continue
+                if created.tzinfo is None:  # SQLite хранит наивный UTC
+                    created = created.replace(tzinfo=timezone.utc)
+                if created < cutoff:
+                    stale.append((p.confirmation_id, p.chat_id))
+        for cid, chat_id in stale:
+            await store.reject(cid, chat_id=chat_id)  # pending→rejected + audit (одноразово)
+        if stale:
+            log.info("scheduler: отклонено просроченных черновиков: %d", len(stale))
+        return len(stale)

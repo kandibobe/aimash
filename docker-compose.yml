@@ -22,8 +22,9 @@ services:
       retries: 10
 
   # Бот (Telegram long-poll + планировщик). Запуск всего: `docker compose up --build`.
-  # Секреты — из .env (env_file), в образ НЕ запекаются. Миграции до старта:
-  #   docker compose run --rm bot alembic upgrade head
+  # Секреты — из .env (env_file), в образ НЕ запекаются. Миграции применяются АВТОМАТИЧЕСКИ
+  # при старте (docker-entrypoint.sh → alembic upgrade head, fail-fast если миграция падает).
+  # Прогнать вручную при необходимости: docker compose run --rm bot alembic upgrade head
   bot:
     build:
       context: .
@@ -38,6 +39,19 @@ services:
       # ВНУТРИ сети compose — имя сервиса + порт 5432 (НЕ хостовый 5433!).
       DATABASE_URL: postgresql+asyncpg://aimash:aimash@postgres:5432/aimash
     restart: unless-stopped
+    # Потолок ресурсов одного инстанса (long-poll бот лёгкий; лимит ловит утечку/раздувание).
+    # docker compose v2 (не-swarm) применяет deploy.resources.limits для memory/cpus.
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    # Ротация логов: без неё json-file растёт безгранично и забивает диск VPS.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
 volumes:
   aimash_pgdata:

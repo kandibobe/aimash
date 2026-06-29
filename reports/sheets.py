@@ -12,9 +12,11 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
+from core.logging import log
 from reports.queries import metric_headers
 from reports.service import ReportData
 
@@ -103,27 +105,42 @@ def _build_service() -> Any:
 def publish_report_to_sheets(
     report: ReportData, *, title: str | None = None, service: Any = None
 ) -> str:
-    """Создать новую таблицу с вкладками отчёта и вернуть ссылку. `service` — для тестов (мок)."""
+    """Создать новую таблицу с вкладками отчёта и вернуть ссылку. `service` — для тестов (мок).
+    Логирует вызовы Sheets API (создание + запись значений, длительность, исход — БЕЗ секретов;
+    §15): раньше путь был «молчащим» — при сбое scope/сети не было трейса для разбора."""
     tabs = build_sheets_data(report)
     svc = service or _build_service()
-    created = (
-        svc.spreadsheets()
-        .create(
-            body={
-                "properties": {"title": title or _default_title(report)},
-                "sheets": [{"properties": {"title": t.title}} for t in tabs],
-            },
-            fields="spreadsheetId,spreadsheetUrl",
+    start = time.monotonic()
+    try:
+        created = (
+            svc.spreadsheets()
+            .create(
+                body={
+                    "properties": {"title": title or _default_title(report)},
+                    "sheets": [{"properties": {"title": t.title}} for t in tabs],
+                },
+                fields="spreadsheetId,spreadsheetUrl",
+            )
+            .execute()
         )
-        .execute()
+        sid = created["spreadsheetId"]
+        url = created.get("spreadsheetUrl") or f"https://docs.google.com/spreadsheets/d/{sid}"
+        svc.spreadsheets().values().batchUpdate(
+            spreadsheetId=sid,
+            body={
+                "valueInputOption": "RAW",
+                "data": [{"range": f"'{t.title}'!A1", "values": t.rows} for t in tabs],
+            },
+        ).execute()
+    except Exception as e:
+        log.warning(
+            "sheets-publish: %s за %dмс (вкладок=%d)",
+            type(e).__name__,
+            int((time.monotonic() - start) * 1000),
+            len(tabs),
+        )
+        raise
+    log.info(
+        "sheets-publish: ok за %dмс (вкладок=%d)", int((time.monotonic() - start) * 1000), len(tabs)
     )
-    sid = created["spreadsheetId"]
-    url = created.get("spreadsheetUrl") or f"https://docs.google.com/spreadsheets/d/{sid}"
-    svc.spreadsheets().values().batchUpdate(
-        spreadsheetId=sid,
-        body={
-            "valueInputOption": "RAW",
-            "data": [{"range": f"'{t.title}'!A1", "values": t.rows} for t in tabs],
-        },
-    ).execute()
     return url
