@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 from aiogram.enums import ChatAction
 from aiogram.types import FSInputFile
 
+from adcopy.validate import count_flagged
 from bot import i18n
 from core.logging import redact_text
 
@@ -138,15 +139,32 @@ def fmt_rsa_diagnostics(
     got_d = len(getattr(draft, "descriptions", []) or [])
     drop_h = int(getattr(draft, "dropped_headlines", 0) or 0)
     drop_d = int(getattr(draft, "dropped_descriptions", 0) or 0)
+    # §10: редакторская политика (КАПС/пунктуация/повторы) — считает КОД, не промпт. Advisory:
+    # подсвечиваем рискованные тексты ДО запуска, не блокируя (редактура Google нечёткая).
+    flagged = count_flagged(
+        [*(getattr(draft, "headlines", []) or []), *(getattr(draft, "descriptions", []) or [])]
+    )
     if lang == "en":
         h = f"{got_h}/{n_headlines} headlines" + (f" ({drop_h} too long)" if drop_h else "")
         d = f"{got_d}/{n_descriptions} descriptions" + (f" ({drop_d} too long)" if drop_d else "")
-        return f"✅ Generated {h}, {d}."
+        out = f"✅ Generated {h}, {d}."
+        if flagged:
+            out += (
+                f"\n⚠️ {flagged} text(s) may fail ad review (caps / punctuation / repeats)"
+                " — check before launch."
+            )
+        return out
     h_word = _plural_ru(got_h, "заголовок", "заголовков")
     d_word = _plural_ru(got_d, "описание", "описаний")
     h = f"{got_h}/{n_headlines} {h_word}" + (f" ({drop_h} слишком длинных)" if drop_h else "")
     d = f"{got_d}/{n_descriptions} {d_word}" + (f" ({drop_d} слишком длинных)" if drop_d else "")
-    return f"✅ Сгенерировано {h}, {d}."
+    out = f"✅ Сгенерировано {h}, {d}."
+    if flagged:
+        out += (
+            f"\n⚠️ {flagged} текст(ов) под риском модерации (КАПС / пунктуация / повторы)"
+            " — проверьте перед запуском."
+        )
+    return out
 
 
 # ── Длинные proposal: .txt-вложение, кнопки на отдельном текстовом сообщении ──────
