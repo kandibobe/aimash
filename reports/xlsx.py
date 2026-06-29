@@ -116,3 +116,69 @@ def write_report_xlsx(report: ReportData, path: str) -> str:
     """Сохранить отчёт в .xlsx по пути path. Возвращает path."""
     build_workbook(report).save(path)
     return path
+
+
+# ── MCC-сводка (§8): подытоги по валюте + лист аккаунтов + лист пропусков/ошибок ────
+def build_mcc_workbook(summary) -> Workbook:
+    """Книга по сводке дочерних MCC (reports.mcc.MccSummary, duck-typed). Листы: «Сводка MCC»
+    (подытоги ПО ВАЛЮТАМ — без FX), «Аккаунты» (по строке на лист-аккаунт), «Пропущено/ошибки»
+    (read-list/менеджерские/частичные сбои — без тихого замалчивания, §8/§5)."""
+    wb = Workbook()
+    p = summary.period
+
+    # 1) Сводка MCC: подытоги по валюте (валюта — отдельной колонкой, т.к. денежные колонки
+    # разных валют нельзя свести в один заголовок; FX не делаем).
+    ws = wb.active
+    ws.title = "Сводка MCC"
+    ws.append([f"Сводка по MCC {summary.manager_id}"])
+    ws.append([f"Период: {p.label} ({p.date_from.isoformat()} — {p.date_to.isoformat()})"])
+    ws.append([])
+    headers = ["Валюта", "Аккаунтов", *metric_headers("")]
+    ws.append(headers)
+    header_row = ws.max_row
+    for sub in summary.subtotals:
+        ws.append([sub.currency, sub.accounts, *sub.totals.as_row()])
+    for c in range(1, len(headers) + 1):
+        ws.cell(row=header_row, column=c).fill = _HEADER_FILL
+        ws.cell(row=header_row, column=c).font = _HEADER_FONT
+    _apply_metric_formats_at(ws, 2, header_row + 1, len(summary.subtotals))
+    ws.cell(row=1, column=1).font = Font(bold=True, size=14)
+    _autosize(ws, len(headers))
+
+    # 2) Аккаунты: по строке на лист-аккаунт (id/имя/валюта/статус + метрики).
+    acc = wb.create_sheet(title="Аккаунты")
+    acc_headers = ["ID", "Аккаунт", "Валюта", "Статус", *metric_headers("")]
+    acc.append(acc_headers)
+    for cr in summary.children:
+        a = cr.account
+        acc.append(
+            [
+                a.id,
+                getattr(a, "name", "") or "",
+                a.currency or "",
+                getattr(a, "status", "") or "",
+                *cr.totals.as_row(),
+            ]
+        )
+    _style_header_row(acc, len(acc_headers))
+    _apply_metric_formats_at(acc, 4, 2, len(summary.children))
+    _autosize(acc, len(acc_headers))
+
+    # 3) Пропущено/ошибки: read-list пропуски, менеджерские, частичные сбои чтения.
+    iss = wb.create_sheet(title="Пропущено и ошибки")
+    iss.append(["Тип", "Аккаунт", "Причина"])
+    _style_header_row(iss, 3)
+    for cid in summary.skipped:
+        iss.append(["пропущен (нет доступа на чтение)", cid, ""])
+    for cid in summary.managers:
+        iss.append(["менеджерский (без собственных метрик)", cid, ""])
+    for cid, reason in summary.errors:
+        iss.append(["ошибка чтения", cid, reason])
+    _autosize(iss, 3)
+    return wb
+
+
+def write_mcc_xlsx(summary, path: str) -> str:
+    """Сохранить MCC-сводку в .xlsx по пути path. Возвращает path."""
+    build_mcc_workbook(summary).save(path)
+    return path

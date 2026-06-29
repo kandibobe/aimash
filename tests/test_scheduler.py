@@ -130,9 +130,12 @@ async def test_anomaly_thresholds_read_from_user_settings(monkeypatch):
 
     # Расход +100% (100 → 200), конверсии без изменений. fetch_totals: 1-й вызов cur, 2-й prev.
     seq = iter([_m(200, 5), _m(100, 5)])
-    monkeypatch.setattr(jobs, "build_client", lambda: None)
+    # build_client теперь per-account (принимает customer_id) → лямбда глотает аргументы.
+    monkeypatch.setattr(jobs, "build_client", lambda *a, **k: None)
     monkeypatch.setattr(jobs, "fetch_totals", lambda *a, **k: next(seq))
     monkeypatch.setattr(jobs, "_recipients", lambda: {1, 2})
+    # Один аккаунт (метрики аккаунта общие, пороги — per-chat): seq из 2 значений = cur+prev.
+    monkeypatch.setattr(jobs, "_scheduled_accounts", lambda: [DRAFT_ACCOUNT_ID])
 
     class FakeBot:
         def __init__(self):
@@ -146,6 +149,57 @@ async def test_anomaly_thresholds_read_from_user_settings(monkeypatch):
 
     assert 2 in bot.sent  # дефолтный порог 50% < 100% → алерт
     assert 1 not in bot.sent  # личный порог 200% > 100% → тишина
+
+
+# ── Мультиаккаунт (§8): ОДИН дайджест/сообщение на оператора по всем аккаунтам ─────
+async def test_scheduled_report_multi_account_one_digest(monkeypatch):
+    """run_scheduled_report обходит все разрешённые аккаунты и шлёт ОДИН дайджест на оператора
+    (анти-спам), а не по сообщению на аккаунт."""
+    from scheduler import jobs
+
+    A, B = "1112223334", "2223334445"
+    monkeypatch.setattr(jobs, "_scheduled_accounts", lambda: [A, B])
+    monkeypatch.setattr(jobs, "build_client", lambda *a, **k: None)
+
+    async def fake_report(_client, acct, _period, **k):
+        return f"R:{acct}"
+
+    monkeypatch.setattr(jobs, "build_account_report_async", fake_report)
+    monkeypatch.setattr(jobs, "summary_text", lambda r: r)  # r == "R:<acct>"
+    monkeypatch.setattr(jobs, "_recipients", lambda: {1})
+
+    sent: list[tuple[int, str]] = []
+
+    class FakeBot:
+        async def send_message(self, chat_id, text, **kw):
+            sent.append((chat_id, text))
+
+    await jobs.run_scheduled_report(FakeBot())
+    assert len(sent) == 1  # ОДНО сообщение оператору, не два
+    assert f"R:{A}" in sent[0][1] and f"R:{B}" in sent[0][1]  # оба аккаунта в дайджесте
+
+
+async def test_anomaly_multi_account_one_message(monkeypatch):
+    """run_anomaly_check собирает аномалии по нескольким аккаунтам в ОДНО сообщение на оператора."""
+    from scheduler import jobs
+
+    A, B = "1112223334", "2223334445"
+    monkeypatch.setattr(jobs, "_scheduled_accounts", lambda: [A, B])
+    monkeypatch.setattr(jobs, "build_client", lambda *a, **k: None)
+    # Оба аккаунта со всплеском расхода (+100%): curA,prevA, curB,prevB.
+    seq = iter([_m(200, 5), _m(100, 5), _m(300, 5), _m(150, 5)])
+    monkeypatch.setattr(jobs, "fetch_totals", lambda *a, **k: next(seq))
+    monkeypatch.setattr(jobs, "_recipients", lambda: {2})  # дефолтный порог → алерт
+
+    sent: list[tuple[int, str]] = []
+
+    class FakeBot:
+        async def send_message(self, chat_id, text, **kw):
+            sent.append((chat_id, text))
+
+    await jobs.run_anomaly_check(FakeBot())
+    assert len(sent) == 1  # одно сообщение оператору
+    assert f"Аккаунт {A}" in sent[0][1] and f"Аккаунт {B}" in sent[0][1]
 
 
 # ── КОД-ГАРД (golden rule #3): планировщик НЕ может менять аккаунт ────────────────

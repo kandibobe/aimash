@@ -163,3 +163,65 @@ def summary_text(report: ReportData, lang: str | None = None) -> str:
                 f"конв. {m.conversions:.1f}"
             )
     return "\n".join(lines)
+
+
+def summary_text_mcc(summary, lang: str | None = None) -> str:
+    """Сводка по дочерним MCC (§8) для Telegram (/mcc): подытоги ПО ВАЛЮТАМ (без FX — деньги не
+    выдумываем), топ-аккаунты по расходу, счётчики пропущенных/менеджерских/ошибок. Частичные сбои
+    видны (errors) — без тихого замалчивания. `summary` — reports.mcc.MccSummary (duck-typed, чтобы
+    не тянуть reports.mcc на уровне модуля)."""
+    p = summary.period
+    en = _resolve_lang(lang) == "en"
+    n_children = len(summary.children)
+    if en:
+        lines = [
+            f"🏢 MCC {summary.manager_id} · {p.label} ({p.date_from} — {p.date_to})",
+            f"Accounts with data: {n_children}",
+        ]
+    else:
+        lines = [
+            f"🏢 MCC {summary.manager_id} · {p.label} ({p.date_from} — {p.date_to})",
+            f"Аккаунтов с данными: {n_children}",
+        ]
+    # Подытоги по валюте (отсортированы по расходу убыв. в aggregate_by_currency). FX НЕ делаем.
+    for sub in summary.subtotals:
+        t = sub.totals
+        cur = sub.currency
+        if en:
+            lines.append(
+                f"💰 {cur} · {sub.accounts} acct: cost {_money(t.cost, cur)} · "
+                f"clicks {_thou(t.clicks)} · conv. {t.conversions:.1f} · "
+                f"CPA {_money(t.cpa, cur)} · ROAS {t.roas:.2f}"
+            )
+        else:
+            lines.append(
+                f"💰 {cur} · {sub.accounts} акк: расход {_money(t.cost, cur)} · "
+                f"клики {_thou(t.clicks)} · конв. {t.conversions:.1f} · "
+                f"CPA {_money(t.cpa, cur)} · ROAS {t.roas:.2f}"
+            )
+    # Топ-аккаунты по расходу (через все валюты; валюта показана у каждого, без суммирования).
+    top = sorted(summary.children, key=lambda c: c.totals.cost_micros, reverse=True)[:5]
+    if top:
+        lines.append("Top accounts by cost:" if en else "Топ аккаунтов по расходу:")
+        for cr in top:
+            cur = cr.account.currency or "?"
+            name = getattr(cr.account, "name", "") or cr.account.id
+            if en:
+                lines.append(f"  • {name} ({cur}): cost {_money(cr.totals.cost, cur)}")
+            else:
+                lines.append(f"  • {name} ({cur}): расход {_money(cr.totals.cost, cur)}")
+    # Частичные пропуски/сбои — счётчиками (детали в errors/skipped/managers; /diag).
+    tail = []
+    if summary.skipped:
+        tail.append(
+            f"skipped (no read access): {len(summary.skipped)}"
+            if en
+            else f"пропущено (нет доступа на чтение): {len(summary.skipped)}"
+        )
+    if summary.errors:
+        tail.append(
+            f"read errors: {len(summary.errors)}" if en else f"ошибок чтения: {len(summary.errors)}"
+        )
+    if tail:
+        lines.append("⚠️ " + " · ".join(tail))
+    return "\n".join(lines)

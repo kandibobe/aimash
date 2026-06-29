@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     google_ads_client_secret: SecretStr = SecretStr("")
     google_ads_refresh_token: SecretStr = SecretStr("")
     google_ads_login_customer_id: str = ""  # менеджерский аккаунт (MCC), контекст авторизации
+    # §8/мультиаккаунт: ДОПОЛНИТЕЛЬНЫЕ MCC (под разными менеджерами), под которыми бот обходит/
+    # логинится (Фаза 3 — аккаунты под разными MCC). CSV. Легаси-скаляр выше вложен в множество
+    # (login_customer_id_set). Пусто => только основной login_customer_id (поведение не меняется).
+    google_ads_login_customer_ids: str = ""
     google_ads_allowed_customer_ids: str = (
         ""  # белый список аккаунтов для МУТАЦИЙ (см. ads.client.ensure_allowed)
     )
@@ -122,6 +126,23 @@ class Settings(BaseSettings):
         }
 
     @property
+    def login_customer_id_set(self) -> set[str]:
+        """Все MCC (нормализованные), под которыми разрешён обход/логин (§8). Основной
+        login_customer_id ∪ доп. список google_ads_login_customer_ids. Замок обхода —
+        ads.client.ensure_manager_allowed (fail-closed на пустом множестве)."""
+        base = (
+            {normalize_customer_id(self.google_ads_login_customer_id)}
+            if self.google_ads_login_customer_id
+            else set()
+        )
+        extra = {
+            normalize_customer_id(x)
+            for x in self.google_ads_login_customer_ids.split(",")
+            if x.strip()
+        }
+        return base | extra
+
+    @property
     def is_prod(self) -> bool:
         return self.env == "prod"
 
@@ -139,7 +160,13 @@ class Settings(BaseSettings):
             try:
                 from cryptography.fernet import Fernet
 
-                Fernet(key.encode())
+                # Round-trip (а не только конструктор Fernet): шифруем И расшифровываем пробу —
+                # ловит порчу ключа / сломанный crypto-бэкенд ДО первой реальной мутации токенов,
+                # а не на первом обращении к oauth_tokens. Без импорта core.secrets (тот тянет config).
+                f = Fernet(key.encode())
+                probe = b"aimash-keycheck"
+                if f.decrypt(f.encrypt(probe)) != probe:
+                    raise ValueError("round-trip mismatch")
             except Exception as e:
                 raise ValueError(
                     "SECRETS_ENCRYPTION_KEY невалиден (нужен ключ Fernet.generate_key())"

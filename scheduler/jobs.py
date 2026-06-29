@@ -8,7 +8,6 @@ execute_confirmed / apply_* — планировщик не меняет акк�
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -19,6 +18,7 @@ from core.config import settings
 from core.context import request_scope
 from core.errors import capture_exception
 from core.logging import log
+from core.resilience import run_ads_read_call
 from db.models import Proposal, UserSettings
 from db.session import Session
 from reports.period import last_n_days
@@ -29,11 +29,20 @@ from scheduler.anomaly import detect_anomalies
 REPORT_WINDOW_DAYS = 7  # окно планового отчёта
 ANOMALY_WINDOW_DAYS = 7  # окно сравнения для аномалий (текущие N дн. vs предыдущие N дн.)
 PROPOSAL_TTL_HOURS = 24  # сколько живёт неподтверждённый черновик до авто-отклонения
+_DIGEST_MAX = 3800  # потолок длины дайджеста для Telegram (лимит 4096, оставляем запас)
 
 
 def _recipients() -> set[int]:
     """Кому слать: доверенные whitelisted-пользователи (операторы бота)."""
     return set(settings.whitelist)
+
+
+def _scheduled_accounts() -> list[str]:
+    """Аккаунты для плановых отчётов/аномалий (§8): мутационный allow-list ∪ read-list (всё, что
+    боту РАЗРЕШЕНО читать). Пусто ⇒ дефолт [Draft] (поведение как раньше — единственный аккаунт).
+    READ-ONLY: scheduler только читает (golden rule #3)."""
+    accts = settings.allowed_customer_ids | settings.read_customer_ids
+    return sorted(accts) if accts else [DRAFT_ACCOUNT_ID]
 
 
 async def _broadcast(bot, text: str, **kw) -> None:
@@ -45,19 +54,33 @@ async def _broadcast(bot, text: str, **kw) -> None:
 
 
 async def run_scheduled_report(bot) -> None:
-    """Плановый отчёт (последние N дн.) — рассылка whitelisted-пользователям. READ-ONLY."""
+    """Плановый отчёт (последние N дн.) по ВСЕМ разрешённым на чтение аккаунтам (§8) — ОДИН дайджест
+    на оператора (анти-спам, не N сообщений). READ-ONLY. Сбой одного аккаунта не валит остальные
+    (capture_exception per-account) и не топит рассылку."""
     with request_scope("scheduler:report"):  # §15: корреляция логов джобы по request_id
         if not _recipients():
             log.info("scheduler: получателей нет (whitelist пуст) — пропуск планового отчёта")
             return
-        try:
-            client = build_client()
-            period = last_n_days(REPORT_WINDOW_DAYS)
-            report = await build_account_report_async(client, DRAFT_ACCOUNT_ID, period)
-        except Exception as e:  # сеть/доступ/SDK — не валим планировщик, но фиксируем (§15)
-            await capture_exception(e, where="scheduler:report")
+        accounts = _scheduled_accounts()
+        if not accounts:
+            log.info("scheduler: нет аккаунтов для отчёта (allow/read-list пусты) — пропуск")
             return
-        await _broadcast(bot, "🗓 Плановый отчёт\n\n" + summary_text(report))
+        period = last_n_days(REPORT_WINDOW_DAYS)
+        blocks: list[str] = []
+        for acct in accounts:
+            try:
+                client = build_client(acct)  # per-account (Фаза 3: свой токен/MCC из oauth_tokens)
+                report = await build_account_report_async(client, acct, period)
+                blocks.append(summary_text(report))
+            except Exception as e:  # сеть/доступ/SDK — фиксируем (§15), остальные аккаунты живут
+                await capture_exception(e, where=f"scheduler:report:{acct}")
+                blocks.append(f"⚠️ Аккаунт {acct}: отчёт недоступен (см. /diag)")
+        if not blocks:
+            return
+        digest = "🗓 Плановый отчёт\n\n" + "\n\n———\n\n".join(blocks)
+        if len(digest) > _DIGEST_MAX:  # анти-спам: не дробим на N сообщений, усечём с пометкой
+            digest = digest[:_DIGEST_MAX] + "\n\n…(усечено — полный отчёт по аккаунту: /report)"
+        await _broadcast(bot, digest)
 
 
 async def _thresholds_by_chat(chat_ids: set[int]) -> dict[int, dict | None]:
@@ -77,40 +100,61 @@ async def _thresholds_by_chat(chat_ids: set[int]) -> dict[int, dict | None]:
     return {cid: thr for cid, thr in rows}
 
 
-def _format_alerts(alerts) -> str:
-    return (
-        f"🔔 <b>Аномалии</b> (за {ANOMALY_WINDOW_DAYS} дн. к предыдущему периоду):\n"
-        + "\n".join("• " + a.message for a in alerts)
-        + "\n\n<i>Это только сигнал — сам я ничего не меняю. Реши и дай команду.</i>"
-    )
+def _format_alerts_multi(account_alerts: list[tuple[str, list]]) -> str:
+    """Единое сообщение об аномалиях по НЕСКОЛЬКИМ аккаунтам (§8, анти-спам: один месседж на
+    оператора, а не по сообщению на аккаунт). Каждый блок помечен аккаунтом."""
+    parts = [f"🔔 <b>Аномалии</b> (за {ANOMALY_WINDOW_DAYS} дн. к предыдущему периоду):"]
+    for acct, alerts in account_alerts:
+        parts.append(f"\n<b>Аккаунт {acct}</b>:")
+        parts.extend("• " + a.message for a in alerts)
+    parts.append("\n<i>Это только сигнал — сам я ничего не меняю. Реши и дай команду.</i>")
+    return "\n".join(parts)
 
 
 async def run_anomaly_check(bot) -> None:
-    """Сравнение последних N дн. с предыдущими; алерт при росте расхода/падении конверсий.
-    Пороги берутся per-chat из UserSettings.alert_thresholds (иначе — дефолтные). READ-ONLY:
-    только уведомление, никаких изменений аккаунта (golden rule #3)."""
+    """Сравнение последних N дн. с предыдущими ПО ВСЕМ разрешённым аккаунтам (§8); алерт при росте
+    расхода/падении конверсий. Пороги — per-chat из UserSettings.alert_thresholds (иначе дефолтные).
+    Анти-спам: ОДИН месседж на оператора со всеми его аккаунтами. READ-ONLY (golden rule #3):
+    fetch_totals через run_ads_read_call (ретрай TimeoutError/транзиентных), без мутаций."""
     with request_scope("scheduler:anomaly"):  # §15: корреляция логов джобы по request_id
         recipients = _recipients()
         if not recipients:
             return
-        try:
-            client = build_client()
-            period = last_n_days(ANOMALY_WINDOW_DAYS)
-            cur = await asyncio.to_thread(fetch_totals, client, DRAFT_ACCOUNT_ID, period)
-            prev = await asyncio.to_thread(
-                fetch_totals, client, DRAFT_ACCOUNT_ID, period.previous()
-            )
-        except Exception as e:  # сеть/доступ/SDK — фиксируем для триажа (§15), планировщик жив
-            await capture_exception(e, where="scheduler:anomaly")
+        accounts = _scheduled_accounts()
+        if not accounts:
+            return
+        period = last_n_days(ANOMALY_WINDOW_DAYS)
+        # cur/prev на каждый аккаунт; сбой одного фиксируем и пропускаем (остальные считаем).
+        metrics: dict[str, tuple] = {}
+        for acct in accounts:
+            try:
+                client = build_client(acct)
+                cur = await run_ads_read_call(
+                    fetch_totals, client, acct, period, label=f"anom_{acct}"
+                )
+                prev = await run_ads_read_call(
+                    fetch_totals, client, acct, period.previous(), label=f"anom_prev_{acct}"
+                )
+                metrics[acct] = (cur, prev)
+            except Exception as e:  # сеть/доступ/SDK — фиксируем (§15), остальные аккаунты живут
+                await capture_exception(e, where=f"scheduler:anomaly:{acct}")
+        if not metrics:
             return
         thresholds = await _thresholds_by_chat(recipients)
-        # Пороги per-chat → алерты считаем для каждого получателя отдельно (метрики аккаунта общие).
+        # Пороги per-chat → для каждого получателя собираем алерты по всем аккаунтам в ОДНО сообщение.
         for chat_id in recipients:
-            alerts = detect_anomalies(cur, prev, thresholds.get(chat_id))
-            if not alerts:
+            thr = thresholds.get(chat_id)
+            acct_alerts: list[tuple[str, list]] = []
+            for acct, (cur, prev) in metrics.items():
+                alerts = detect_anomalies(cur, prev, thr)
+                if alerts:
+                    acct_alerts.append((acct, alerts))
+            if not acct_alerts:
                 continue
             try:
-                await bot.send_message(chat_id, _format_alerts(alerts), parse_mode="HTML")
+                await bot.send_message(
+                    chat_id, _format_alerts_multi(acct_alerts), parse_mode="HTML"
+                )
             except Exception as e:  # один недоступный чат не должен ронять остальные
                 log.warning(
                     "scheduler: алерт не доставлен в %s: %s: %s", chat_id, type(e).__name__, e

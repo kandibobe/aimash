@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from core.config import normalize_customer_id, settings
@@ -18,17 +17,22 @@ from core.config import normalize_customer_id, settings
 if TYPE_CHECKING:
     from google.ads.googleads.client import GoogleAdsClient
 
-# Aimash (Draft account), 775-364-3025 — ЕДИНСТВЕННЫЙ разрешённый аккаунт.
+# Aimash (Draft account), 775-364-3025 — ЕДИНСТВЕННЫЙ аккаунт, на котором разрешены МУТАЦИИ.
 DRAFT_ACCOUNT_ID = "7753643025"
-# Жёсткий потолок: env (allowed_customer_ids) не может выйти за этот набор.
+# Жёсткий потолок МУТАЦИЙ: env (allowed_customer_ids) не может выйти за этот набор.
+# Расширение круга мутаций = ОСОЗНАННАЯ правка этого файла (см. docstring модуля).
 ALLOWED_CEILING = frozenset({DRAFT_ACCOUNT_ID})
 
+# Кэш SDK-клиентов по нормализованному customer_id. Раньше был @lru_cache(maxsize=1) — один клиент
+# на процесс. Под мультиаккаунт (§8): у разных аккаунтов будут разные refresh-токен/login_customer_id
+# (Фаза 3, oauth_tokens), поэтому кэшируем ПО id. В тест-фазе все тест-дочерние под одним MCC
+# покрываются единым env-токеном → конфиг пока общий (см. _env_cfg).
+_CLIENT_CACHE: dict[str, "GoogleAdsClient"] = {}
 
-@lru_cache(maxsize=1)
-def build_client() -> "GoogleAdsClient":
-    # Импорт SDK ленивый: ensure_allowed/константы остаются доступны без google-ads.
-    from google.ads.googleads.client import GoogleAdsClient
 
+def _env_cfg() -> dict:
+    """Конфиг google-ads из .env (единственный refresh-токен + MCC). Покрывает Draft и любой
+    тест-дочерний под тем же login_customer_id. SecretStr раскрываем в точке использования."""
     cfg = {
         "developer_token": settings.google_ads_developer_token.get_secret_value(),
         "client_id": settings.google_ads_client_id,
@@ -38,7 +42,36 @@ def build_client() -> "GoogleAdsClient":
     }
     if settings.google_ads_login_customer_id:
         cfg["login_customer_id"] = settings.google_ads_login_customer_id
-    return GoogleAdsClient.load_from_dict(cfg)
+    return cfg
+
+
+def build_client(customer_id: str | None = None) -> "GoogleAdsClient":
+    """SDK-клиент для аккаунта. Без аргумента (или Draft) — из .env (байт-в-байт как раньше),
+    кэш по нормализованному id. Импорт SDK ленивый: ensure_allowed/константы доступны без google-ads.
+
+    Фаза 1 (сейчас): конфиг всегда из .env — один тест-MCC единым токеном покрывает всех тест-
+    дочерних. Фаза 3 (разные MCC): для не-Draft будет ветка oauth_tokens (per-account refresh-токен
+    + login_customer_id из БД, расшифровка core.secrets). Сигнатура уже принимает customer_id, чтобы
+    16 вызывающих перешли на per-account вызов без новой правки контракта."""
+    from google.ads.googleads.client import GoogleAdsClient
+
+    cid = normalize_customer_id(customer_id) if customer_id else DRAFT_ACCOUNT_ID
+    cached = _CLIENT_CACHE.get(cid)
+    if cached is not None:
+        return cached
+    cfg = _env_cfg()  # Фаза 3: для не-Draft — здесь ветка oauth_tokens
+    client = GoogleAdsClient.load_from_dict(cfg)
+    _CLIENT_CACHE[cid] = client
+    return client
+
+
+def clear_client_cache(customer_id: str | None = None) -> None:
+    """Сбросить кэш клиента(ов). Без аргумента — весь кэш; с id — только его (нужно при ротации
+    refresh-токена в Фазе 3, чтобы не отдать устаревший клиент)."""
+    if customer_id is None:
+        _CLIENT_CACHE.clear()
+    else:
+        _CLIENT_CACHE.pop(normalize_customer_id(customer_id), None)
 
 
 def ensure_allowed(customer_id: str) -> None:
@@ -105,16 +138,20 @@ def ensure_manager_allowed(manager_id: str) -> None:
     """Замок для ОБХОДА MCC (чтение customer_client от имени менеджерского аккаунта).
 
     Отдельный чокпойнт, потому что manager_id (= login_customer_id) — это менеджер, он НЕ входит
-    в ALLOWED_CEILING (тот — потолок per-account операций над дочерним Aimash Draft). Разрешён
-    ТОЛЬКО настроенный login_customer_id из .env; пустой ⇒ fail-closed (обход запрещён).
-    Нормализуем id, поэтому '775-364-3025' и '7753643025' эквивалентны.
+    в ALLOWED_CEILING (тот — потолок per-account мутаций над дочерним Aimash Draft). Разрешены
+    ТОЛЬКО настроенные MCC (settings.login_customer_id_set = основной login_customer_id ∪ доп.
+    список); пустое множество ⇒ fail-closed (обход запрещён). Нормализуем id, поэтому
+    '775-364-3025' и '7753643025' эквивалентны. Под мультиаккаунт (§8/Фаза 3) аккаунты могут жить
+    под РАЗНЫМИ MCC — поэтому множество, а не один скаляр (легаси-скаляр в него вложен).
     """
     mid = normalize_customer_id(manager_id)
-    configured = normalize_customer_id(settings.google_ads_login_customer_id)
+    configured = settings.login_customer_id_set
     if not configured:
         raise PermissionError(
             "login_customer_id не задан — обход MCC запрещён (fail-closed). "
             "Задай GOOGLE_ADS_LOGIN_CUSTOMER_ID в .env."
         )
-    if mid != configured:
-        raise PermissionError(f"manager_id {mid} ≠ настроенного MCC {configured} — обход запрещён")
+    if mid not in configured:
+        raise PermissionError(
+            f"manager_id {mid} не среди настроенных MCC {sorted(configured)} — обход запрещён"
+        )

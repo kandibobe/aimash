@@ -14,10 +14,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 from ads.client import ensure_read_allowed
 from ads.read import ChildAccount, list_child_accounts
+from core.logging import redact_text
+from core.resilience import run_ads_read_call
 from reports.period import Period
 from reports.queries import Metrics, fetch_totals
 
@@ -43,6 +46,9 @@ class MccSummary:
     subtotals: list[CurrencySubtotal] = field(default_factory=list)  # агрегат по валюте
     skipped: list[str] = field(default_factory=list)  # id листов вне read-list (fail-closed)
     managers: list[str] = field(default_factory=list)  # id менеджерских (нет собственных метрик)
+    # Частичные сбои чтения дочернего (сеть/SDK/таймаут): (id, редактированная причина). Сбой одного
+    # аккаунта НЕ топит всю сводку (build_mcc_summary_async, return_exceptions) — но и не молчит.
+    errors: list[tuple[str, str]] = field(default_factory=list)
 
 
 def aggregate_by_currency(children: list[ChildReport]) -> list[CurrencySubtotal]:
@@ -89,5 +95,51 @@ def build_mcc_summary(
             summary.skipped.append(ch.id)  # вне read-list — честно отмечаем, не читаем
             continue
         summary.children.append(ChildReport(account=ch, totals=fetch(client, ch.id, period)))
+    summary.subtotals = aggregate_by_currency(summary.children)
+    return summary
+
+
+async def build_mcc_summary_async(
+    client,
+    manager_id: str,
+    period: Period,
+    *,
+    list_children=list_child_accounts,
+    fetch=fetch_totals,
+) -> MccSummary:
+    """Async-сводка по дочерним MCC — ИДЕНТИЧНА build_mcc_summary по данным, но дочерние читаются
+    ПАРАЛЛЕЛЬНО (а не N round-trip подряд). Для ~10 аккаунтов: ceil(N/ADS_MAX_CONCURRENCY) волн
+    вместо N последовательных. READ-ONLY; `list_children`/`fetch` инъектируются для тестов.
+
+    Отличие от build_account_report_async: gather с return_exceptions=True — сбой ОДНОГО дочернего
+    (сеть/SDK/таймаут) НЕ роняет всю сводку, а попадает в `summary.errors` (редактированно, без
+    секретов; §5). Замок обхода (ensure_manager_allowed) держит list_children; per-account замок
+    чтения — ensure_read_allowed (не в read-list ⇒ skipped, fail-closed). Менеджерские строки
+    пропускаем (нет собственных метрик). Синхронный build_mcc_summary оставлен для тестов/не-async."""
+    summary = MccSummary(manager_id=str(manager_id), period=period)
+    children = await run_ads_read_call(list_children, client, manager_id, label="mcc_children")
+    eligible: list[ChildAccount] = []
+    for ch in children:
+        if ch.manager:
+            summary.managers.append(ch.id)
+            continue
+        try:
+            ensure_read_allowed(ch.id)
+        except PermissionError:
+            summary.skipped.append(ch.id)  # вне read-list — честно отмечаем, не читаем
+            continue
+        eligible.append(ch)
+    # Параллельный фан-аут по разрешённым листам под общим семафором Google Ads (как
+    # build_account_report_async). return_exceptions: один упавший аккаунт → строка в errors, а не
+    # провал всей сводки (частичный результат для портфеля из ~10 — приемлем, тишина — нет).
+    results = await asyncio.gather(
+        *[run_ads_read_call(fetch, client, ch.id, period, label=f"mcc_{ch.id}") for ch in eligible],
+        return_exceptions=True,
+    )
+    for ch, res in zip(eligible, results):
+        if isinstance(res, Exception):
+            summary.errors.append((ch.id, f"{type(res).__name__}: {redact_text(str(res))}"))
+            continue
+        summary.children.append(ChildReport(account=ch, totals=res))
     summary.subtotals = aggregate_by_currency(summary.children)
     return summary

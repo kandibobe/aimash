@@ -142,29 +142,35 @@ class SessionStore:
             await s.commit()
         return session_id
 
-    async def get(self, session_id: str) -> CurationSession | None:
+    async def get(
+        self, session_id: str, *, expected_chat_id: int | None = None
+    ) -> CurationSession | None:
+        """Снимок сессии. expected_chat_id (гард владения, мультиоператор): если задан — сессия
+        видна ТОЛЬКО своему чату (чужой session_id не подойдёт по WHERE → None). None → без проверки
+        (обратная совместимость)."""
         async with Session() as s:
-            p = (
-                await s.execute(
-                    select(Proposal).where(
-                        Proposal.confirmation_id == session_id,
-                        Proposal.operation == SESSION_OP,
-                    )
-                )
-            ).scalar_one_or_none()
+            conds = [
+                Proposal.confirmation_id == session_id,
+                Proposal.operation == SESSION_OP,
+            ]
+            if expected_chat_id is not None:
+                conds.append(Proposal.chat_id == expected_chat_id)
+            p = (await s.execute(select(Proposal).where(*conds))).scalar_one_or_none()
             return _from_row(p) if p is not None else None
 
-    async def _mutate(self, session_id: str, fn) -> CurationSession | None:
-        """Загрузить сессию, применить fn(params) и переприсвоить JSON (для детекта изменения)."""
+    async def _mutate(
+        self, session_id: str, fn, *, expected_chat_id: int | None = None
+    ) -> CurationSession | None:
+        """Загрузить сессию, применить fn(params) и переприсвоить JSON (для детекта изменения).
+        expected_chat_id — гард владения (как get): чужой чат не мутирует чужую сессию."""
         async with Session() as s:
-            p = (
-                await s.execute(
-                    select(Proposal).where(
-                        Proposal.confirmation_id == session_id,
-                        Proposal.operation == SESSION_OP,
-                    )
-                )
-            ).scalar_one_or_none()
+            conds = [
+                Proposal.confirmation_id == session_id,
+                Proposal.operation == SESSION_OP,
+            ]
+            if expected_chat_id is not None:
+                conds.append(Proposal.chat_id == expected_chat_id)
+            p = (await s.execute(select(Proposal).where(*conds))).scalar_one_or_none()
             if p is None:
                 return None
             # deepcopy + flag_modified: JSON-колонка не отслеживает мутации вложенных структур;
@@ -179,7 +185,13 @@ class SessionStore:
             return _from_row(p)
 
     async def set_state(
-        self, session_id: str, kind: str, idx: int, state: str
+        self,
+        session_id: str,
+        kind: str,
+        idx: int,
+        state: str,
+        *,
+        expected_chat_id: int | None = None,
     ) -> CurationSession | None:
         """Одобрить/отклонить элемент (state: approved|rejected|pending)."""
         field = _KIND_FIELD[kind]
@@ -189,9 +201,11 @@ class SessionStore:
             if 0 <= idx < len(items):
                 items[idx]["state"] = state
 
-        return await self._mutate(session_id, _fn)
+        return await self._mutate(session_id, _fn, expected_chat_id=expected_chat_id)
 
-    async def approve_all_valid(self, session_id: str) -> CurationSession | None:
+    async def approve_all_valid(
+        self, session_id: str, *, expected_chat_id: int | None = None
+    ) -> CurationSession | None:
         """Одобрить все pending-элементы, укладывающиеся в лимит (длину считает КОД)."""
 
         def _fn(d: dict) -> None:
@@ -202,10 +216,16 @@ class SessionStore:
                         if ok:
                             e["state"] = "approved"
 
-        return await self._mutate(session_id, _fn)
+        return await self._mutate(session_id, _fn, expected_chat_id=expected_chat_id)
 
     async def replace_element(
-        self, session_id: str, kind: str, idx: int, new_text: str
+        self,
+        session_id: str,
+        kind: str,
+        idx: int,
+        new_text: str,
+        *,
+        expected_chat_id: int | None = None,
     ) -> CurationSession | None:
         """Заменить текст элемента (после доработки) и вернуть его в pending. Длину пересчитывает КОД."""
         field = _KIND_FIELD[kind]
@@ -216,4 +236,4 @@ class SessionStore:
             if 0 <= idx < len(items):
                 items[idx] = {"text": new_text, "len": n, "state": "pending"}
 
-        return await self._mutate(session_id, _fn)
+        return await self._mutate(session_id, _fn, expected_chat_id=expected_chat_id)

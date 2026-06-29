@@ -13,6 +13,7 @@ competition, competition_index, *_top_of_page_bid_micros, average_cpc_micros). �
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 
@@ -156,6 +157,17 @@ def generate_keyword_ideas(
                 log.warning(
                     "keyword_plan: rate-limit, повтор через %dс (попытка %d)", wait, attempt
                 )
+                # Гард event loop: эта функция СИНХРОННАЯ и обязана зваться через asyncio.to_thread
+                # (все вызыватели так и делают). Если кто-то позовёт её НА event loop, time.sleep
+                # заблокирует петлю (зависнут все хендлеры/джобы). Громко предупреждаем — не молчим.
+                try:
+                    asyncio.get_running_loop()
+                    log.warning(
+                        "keyword_plan: вызвана НА event loop — sleep блокирует петлю; "
+                        "зови через asyncio.to_thread"
+                    )
+                except RuntimeError:
+                    pass  # нормальный путь: в worker-потоке running loop нет
                 time.sleep(wait)
                 continue
             raise

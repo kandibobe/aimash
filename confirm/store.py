@@ -14,6 +14,7 @@ confirmed→executing идёт одним атомарным UPDATE … WHERE st
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import cast
@@ -23,6 +24,37 @@ from sqlalchemy import CursorResult, func, select, update
 from core.logging import log, redact_text
 from db.models import AuditLog, Proposal
 from db.session import Session
+
+# Потолок размера JSON результата в audit_log.result (защита от раздувания: некоторые мутации
+# возвращают длинные списки resource_name'ов — add_keywords во многих группах и т.п.). Зеркалит
+# усечение error_events.traceback (core.errors._TB_MAX). Усекаем длинные списки/строки, не теряя
+# структуру (count/applied остаются).
+_RESULT_MAX = 4000
+
+
+def _cap_result(result: object) -> object:
+    """Ограничить размер result для audit_log. Если JSON ≤ потолка — как есть. Иначе усекаем длинные
+    списки до первых 10 + счётчик и длинные строки до 500 символов, помечаем `_truncated`."""
+    if result is None:
+        return None
+    try:
+        s = json.dumps(result, ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001 — несериализуемое не должно ронять запись audit
+        return {"_unserializable": True}
+    if len(s) <= _RESULT_MAX:
+        return result
+    if isinstance(result, dict):
+        capped: dict = {}
+        for k, v in result.items():
+            if isinstance(v, list) and len(v) > 10:
+                capped[k] = list(v[:10]) + [f"…ещё {len(v) - 10}"]
+            elif isinstance(v, str) and len(v) > 500:
+                capped[k] = v[:500] + "…"
+            else:
+                capped[k] = v
+        capped["_truncated"] = True
+        return capped
+    return {"_truncated": True, "preview": s[:_RESULT_MAX]}
 
 
 @dataclass
@@ -135,11 +167,20 @@ class ConfirmStore:
         двойной доставке ✅ (Telegram может прислать callback дважды): второй параллельный confirm
         не совпадёт по WHERE → rowcount=0 → False, без второй audit-строки и без второго запуска
         execute_confirmed. На SQLite (dev) single-writer и так исключает гонку; на Postgres — нет.
-        actor_user_id/username — «кто» нажал ✅ (§12), фиксируется в audit-строке решения."""
+        actor_user_id/username — «кто» нажал ✅ (§12), фиксируется в audit-строке решения.
+
+        Гард ВЛАДЕНИЯ (мультиоператор): в WHERE добавлен `chat_id == proposal.chat_id` — подтвердить
+        черновик может ТОЛЬКО его владелец. Чужой chat_id (утёкший/угаданный confirmation_id) не
+        совпадёт по WHERE → False, неотличимо от устаревшего (безопасный generic-UX). В одно-
+        операторном режиме chat_id всегда совпадает → поведение не меняется (fail-closed, аддитивно)."""
         async with Session() as s:
             res = await s.execute(
                 update(Proposal)
-                .where(Proposal.confirmation_id == confirmation_id, Proposal.status == "pending")
+                .where(
+                    Proposal.confirmation_id == confirmation_id,
+                    Proposal.status == "pending",
+                    Proposal.chat_id == chat_id,  # владение: только владелец черновика
+                )
                 .values(status="confirmed", decided_at=func.now())
             )
             # cast: DML возвращает CursorResult (есть .rowcount); async-стаб видит общий Result.
@@ -173,7 +214,9 @@ class ConfirmStore:
             p = (
                 await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
             ).scalar_one_or_none()
-            if p is not None and p.status == "pending":
+            # Гард владения (как confirm): отклонить может только владелец черновика. Чужой chat_id
+            # → тихо ничего не делаем (fail-closed). cleanup_stale_proposals передаёт p.chat_id сам.
+            if p is not None and p.status == "pending" and p.chat_id == chat_id:
                 p.status = "rejected"
                 p.decided_at = func.now()
                 s.add(
@@ -255,7 +298,7 @@ def _audit(
         actor_user_id=actor_user_id,
         actor_username=actor_username,
         status=status,
-        result=result,
+        result=_cap_result(result),  # потолок размера (защита audit_log от раздувания)
     )
 
 
