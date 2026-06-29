@@ -675,6 +675,82 @@ def test_set_geo_location_via_sdk_raises_when_nothing_resolved():
         pass
 
 
+def test_set_geo_proximity_via_sdk_replaces_and_maps_address():
+    """A-geo inner: remove-before-create proximity (2 старых заменены 1 новым) + маппинг адреса/
+    радиуса. Радиус-юниты ставит КОД (KILOMETERS), не модель; address-поля переносятся структурно."""
+    captured = {}
+
+    class _Cmp:
+        def campaign_path(self, cid, campid):
+            return f"customers/{cid}/campaigns/{campid}"
+
+    class _GA:
+        def search(self, customer_id, query):
+            # два существующих PROXIMITY-критерия → оба должны попасть в remove
+            return [
+                SimpleNamespace(campaign_criterion=SimpleNamespace(resource_name="old_prox1")),
+                SimpleNamespace(campaign_criterion=SimpleNamespace(resource_name="old_prox2")),
+            ]
+
+    class _Crit:
+        def mutate_campaign_criteria(self, customer_id, operations):
+            captured["ops"] = list(operations)
+            captured["customer_id"] = customer_id
+            return SimpleNamespace(results=[SimpleNamespace(resource_name="new_prox")])
+
+    def _new_op():
+        return SimpleNamespace(
+            create=SimpleNamespace(
+                campaign=None,
+                proximity=SimpleNamespace(
+                    radius=None,
+                    radius_units=None,
+                    address=SimpleNamespace(
+                        street_address=None,
+                        city_name=None,
+                        province_code=None,
+                        postal_code=None,
+                        country_code=None,
+                    ),
+                ),
+            ),
+            remove=None,
+        )
+
+    class _Client:
+        enums = SimpleNamespace(ProximityRadiusUnitsEnum=SimpleNamespace(KILOMETERS="KM"))
+
+        def get_service(self, name):
+            return {
+                "CampaignService": _Cmp(),
+                "GoogleAdsService": _GA(),
+                "CampaignCriterionService": _Crit(),
+            }[name]
+
+        def get_type(self, name):
+            assert name == "CampaignCriterionOperation"
+            return _new_op()
+
+    address = {"city_name": "Kyiv", "country_code": "UA", "street_address": "Main St 1"}
+    res = mut._set_geo_proximity_via_sdk(_Client(), DRAFT_ACCOUNT_ID, "23", 5.0, address)
+
+    assert res["applied"] is True
+    assert res["removed_proximity"] == 2  # оба старых proximity заменены
+    assert res["radius_km"] == 5.0
+    assert res["resource_name"] == "new_prox"  # resp.results[-1]
+    ops = captured["ops"]
+    assert sum(1 for o in ops if o.remove is not None) == 2  # два remove
+    creates = [o for o in ops if o.remove is None]
+    assert len(creates) == 1  # ровно один create, последним
+    prox = creates[0].create.proximity
+    assert prox.radius == 5.0
+    assert prox.radius_units == "KM"  # юнит выставил КОД (client.enums), не модель
+    assert prox.address.city_name == "Kyiv"
+    assert prox.address.country_code == "UA"
+    assert prox.address.street_address == "Main St 1"
+    assert prox.address.postal_code is None  # не передан → не выставляется
+
+
 async def test_set_geo_location_supported_as_proposal():
     """set_geo_location поддержан → агент предлагает черновик с кнопками (не отклоняет)."""
     import agent.loop as L
