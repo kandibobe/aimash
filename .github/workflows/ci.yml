@@ -49,3 +49,35 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Авто-деплой на VPS (Hetzner) ────────────────────────────────────────────────
+  # Только push в master И только ПОСЛЕ зелёных lint-test + secret-scan (не катим сломанное).
+  # На сервере: git reset --hard origin/master → docker compose up -d --build. Миграции
+  # применяются АВТОМАТИЧЕСКИ при старте контейнера (docker-entrypoint.sh → alembic upgrade head,
+  # fail-fast). .env на сервере — untracked (секреты не в гите), reset --hard его не трогает.
+  # Нужны секреты репозитория (Settings → Secrets and variables → Actions):
+  #   VPS_SSH_HOST, VPS_SSH_USER, VPS_SSH_KEY (приватный ключ), VPS_SSH_PORT (опц., деф. 22).
+  deploy:
+    needs: [lint-test, secret-scan]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false   # деплои не отменяем посередине (полу-применённый rollout опаснее)
+    steps:
+      - name: Deploy over SSH (git pull + compose up --build)
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_SSH_PORT || 22 }}
+          script_stop: true   # любая команда упала → job красный (видно сбой деплоя)
+          script: |
+            set -e
+            cd /opt/aimash
+            git fetch --prune origin master
+            git reset --hard origin/master
+            docker compose up -d --build
+            docker image prune -f
+            docker compose ps

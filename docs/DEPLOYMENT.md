@@ -110,6 +110,39 @@ healthcheck контейнера — лёгкий импорт конфигур�
 
 Планировщик только читает/уведомляет/чистит — аккаунт никогда не меняет (golden rule #3).
 
+## 5.1 Авто-деплой на VPS (CI/CD, GitHub Actions)
+
+Пуш в **master** → `.github/workflows/ci.yml`: сначала `lint-test` + `secret-scan`, и ТОЛЬКО при
+их успехе — job `deploy` заходит по SSH на VPS и катит обновление. Сломанное (красные тесты или
+gitleaks) на сервер НЕ попадает. Миграции применяются сами при старте контейнера
+(`docker-entrypoint.sh` → `alembic upgrade head`, fail-fast).
+
+Что делает деплой на сервере (`/opt/aimash`):
+```bash
+git fetch --prune origin master
+git reset --hard origin/master      # деплой-чекаут: ровно состояние master (.env untracked — сохраняется)
+docker compose up -d --build
+docker image prune -f
+```
+
+**Секреты репозитория** (GitHub → Settings → Secrets and variables → Actions → New repository secret):
+
+| Секрет | Значение |
+|---|---|
+| `VPS_SSH_HOST` | `167.233.48.243` |
+| `VPS_SSH_USER` | пользователь деплоя на VPS (напр. `root` или `deploy`) |
+| `VPS_SSH_KEY` | приватный SSH-ключ (весь, с заголовками `-----BEGIN…`), публичная часть — в `~/.ssh/authorized_keys` пользователя на VPS |
+| `VPS_SSH_PORT` | опц., по умолчанию `22` |
+
+**Разовая подготовка сервера:** в `/opt/aimash` должен быть git-чекаут, отслеживающий `origin/master`
+(`git remote -v` → ваш origin; `git branch --set-upstream-to=origin/master`), доступный пушером ключ,
+установленный Docker + Compose v2, и заполненный `.env` (untracked — `git reset --hard` его не трогает).
+
+**Откат:** `git revert <commit> && git push origin master` (повторно прогонит CI+deploy) — предпочтительно;
+либо на сервере `git reset --hard <предыдущий-тег/коммит> && docker compose up -d --build` вручную.
+
+Без заданных секретов job `deploy` будет падать (lint-test всё равно зелёный) — это сигнал «настрой секреты».
+
 ## 6. Prod-чеклист
 - [ ] `ENV=prod` (включает fail-fast по `SECRETS_ENCRYPTION_KEY`).
 - [ ] `SECRETS_ENCRYPTION_KEY` — валидный Fernet-ключ, из секрет-менеджера (не из репо).
