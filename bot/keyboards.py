@@ -14,6 +14,7 @@ from bot.callbacks import (
     AudienceCB,
     CampCB,
     ConfirmCB,
+    KwAddCB,
     LangCB,
     ModelCB,
     PeriodCB,
@@ -187,6 +188,37 @@ def main_menu(lang: str | None = None) -> ReplyKeyboardMarkup:
 
 
 # ── Inline: подтверждение мутации (главный — confirm-гейт) ───────────────────────
+def kw_add_kb(token: str, lang: str | None = None) -> InlineKeyboardMarkup:
+    """§7: под сводкой keyword-research — предложить ДОБАВИТЬ подобранные ключи в кампанию.
+    Кнопка лишь СТАРТУЕТ флоу (кампания → тип соответствия → confirm-гейт), ничего не меняет."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="➕ Add keywords to a campaign" if en else "➕ Добавить ключи в кампанию",
+        callback_data=KwAddCB(action="start", token=token),
+    )
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def match_type_kb(token: str, lang: str | None = None) -> InlineKeyboardMarkup:
+    """§7: выбор типа соответствия (broad/phrase/exact) при добавлении ключей. Закрывает зазор
+    «тип определяет только LLM» — пользователь выбирает явно. Выбор → черновик add_keywords."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    for mt, text in (
+        ("broad", "Broad" if en else "Широкое"),
+        ("phrase", "Phrase" if en else "Фразовое"),
+        ("exact", "Exact" if en else "Точное"),
+    ):
+        kb.button(text=text, callback_data=KwAddCB(action="match", token=token, mt=mt))
+    kb.button(
+        text="❌ Cancel" if en else "❌ Отмена", callback_data=KwAddCB(action="cancel", token=token)
+    )
+    kb.adjust(3, 1)
+    return kb.as_markup()
+
+
 def confirm_kb(cid: str, lang: str | None = None) -> InlineKeyboardMarkup:
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()

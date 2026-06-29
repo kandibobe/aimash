@@ -57,6 +57,7 @@ from bot.callbacks import (
     AudienceCB,
     CampCB,
     ConfirmCB,
+    KwAddCB,
     LangCB,
     ModelCB,
     PeriodCB,
@@ -82,8 +83,10 @@ from bot.keyboards import (
     campaign_actions_kb,
     campaigns_kb,
     confirm_kb,
+    kw_add_kb,
     lang_kb,
     main_menu,
+    match_type_kb,
     model_kb,
     period_kb,
     rsa_item_kb,
@@ -118,6 +121,24 @@ _KEYWORD_OPS = frozenset({"add_keywords", "remove_keywords", "add_negative_keywo
 # Лёгкое in-memory состояние UI (теряется при рестарте — это ок, не источник истины):
 _CAMP_CACHE: dict[int, list[dict]] = {}  # chat_id → последний список кампаний (резолв idx→имя)
 _LAST_PENDING: dict[int, str] = {}  # chat_id → confirmation_id последнего черновика (для /cancel)
+
+# §7: эфемерные сессии «добавить подобранные ключи» (token → {keywords, src}). Список ключей не
+# влезает в callback_data (64 байта) → держим по короткому токену. Кап защищает от роста.
+_KW_ADD: dict[str, dict] = {}
+_KW_ADD_MAX = 200
+
+
+def _kw_add_put(keywords: list[str], src: str) -> str:
+    """Сохранить подобранные ключи под новым токеном; вернуть токен. Эвикт старейших при переполнении."""
+    import uuid
+
+    while len(_KW_ADD) >= _KW_ADD_MAX:
+        _KW_ADD.pop(next(iter(_KW_ADD)), None)  # dict хранит порядок вставки → первый = старейший
+    token = uuid.uuid4().hex
+    _KW_ADD[token] = {"keywords": list(keywords), "src": src}
+    return token
+
+
 _RSA_CAMP_CACHE: dict[int, list[dict]] = {}  # chat_id → кампании для визарда /rsa
 _RSA_AG_CACHE: dict[int, list[dict]] = {}  # chat_id → группы объявлений для визарда /rsa
 _AUD_CACHE: dict[
@@ -135,6 +156,10 @@ class RsaRefine(StatesGroup):
 
 class KwWizard(StatesGroup):
     awaiting_seeds = State()  # ждём сид-слова и/или URL для подбора ключей
+
+
+class KwAdd(StatesGroup):
+    awaiting_campaign = State()  # §7: ждём название кампании для добавления подобранных ключей
 
 
 class SearchWizard(StatesGroup):
@@ -1162,7 +1187,15 @@ async def _kw_run(
             f"\n\n🚫 <b>Минус-слова</b> (предложение): {shown}{more}"
             "\n<i>Добавлю отдельной командой — после «да».</i>"
         )
-    await target.answer(summary, parse_mode=ParseMode.HTML)
+    # §7: предложить ДОБАВИТЬ подобранные ключи в кампанию (только по команде → confirm-гейт).
+    # Берём топ по объёму (схема AddKeywords: ≤50). Кнопка лишь СТАРТУЕТ флоу, ничего не меняет.
+    top_kw = [t for t, _ in sorted(by_text.items(), key=lambda kv: kv[1] or 0, reverse=True)][:50]
+    token = _kw_add_put(top_kw, src) if top_kw else ""
+    await target.answer(
+        summary,
+        parse_mode=ParseMode.HTML,
+        reply_markup=kw_add_kb(token) if token else None,
+    )
 
     path: str | None = None
     try:
@@ -1314,6 +1347,83 @@ async def kw_seeds(m: Message, state: FSMContext) -> None:
         return  # остаёмся в состоянии — пользователь пришлёт сиды/URL ещё раз
     await state.clear()
     await _kw_run(m, m.chat.id, seeds, url, "ru")
+
+
+# ── §7: добавить подобранные ключи в кампанию (research → кампания → тип соответствия → «да») ──
+@dp.callback_query(KwAddCB.filter(F.action == "start"))
+async def on_kw_add_start(cq: CallbackQuery, callback_data: KwAddCB, state: FSMContext) -> None:
+    """Старт флоу: ключи лежат в _KW_ADD по токену (не в callback_data) → спрашиваем кампанию.
+    Ничего не меняем — это лишь сбор ввода до confirm-гейта."""
+    if callback_data.token not in _KW_ADD:
+        await cq.answer(i18n.t("kw_add_stale"), show_alert=True)
+        return
+    msg = _cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    await state.clear()
+    await state.set_state(KwAdd.awaiting_campaign)
+    await state.update_data(kw_add_token=callback_data.token)
+    await cq.answer()
+    await msg.answer(i18n.t("kw_add_pick_campaign"))
+
+
+@dp.message(KwAdd.awaiting_campaign)
+async def kw_add_campaign(m: Message, state: FSMContext) -> None:
+    """Получили название кампании → показываем выбор типа соответствия (broad/phrase/exact)."""
+    campaign = (m.text or "").strip()
+    if not campaign:
+        await m.answer(i18n.t("kw_add_empty_campaign"), parse_mode=ParseMode.HTML)
+        return  # остаёмся в состоянии — пользователь пришлёт название ещё раз
+    data = await state.get_data()
+    sess = _KW_ADD.get(data.get("kw_add_token", ""))
+    if not sess:
+        await state.clear()
+        await m.answer(i18n.t("kw_add_stale"))
+        return
+    sess["campaign"] = campaign
+    await state.clear()
+    n = len(sess.get("keywords") or [])
+    await m.answer(
+        i18n.t("kw_add_pick_match", camp=texts.esc(campaign), n=n),
+        reply_markup=match_type_kb(data.get("kw_add_token", "")),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@dp.callback_query(KwAddCB.filter(F.action == "cancel"))
+async def on_kw_add_cancel(cq: CallbackQuery, callback_data: KwAddCB) -> None:
+    _KW_ADD.pop(callback_data.token, None)
+    await cq.answer(i18n.t("cb_cancelled"))
+    await _safe_edit(cq, i18n.t("rejected"))
+
+
+@dp.callback_query(KwAddCB.filter(F.action == "match"))
+async def on_kw_add_match(cq: CallbackQuery, callback_data: KwAddCB) -> None:
+    """Тип соответствия выбран → собрать черновик add_keywords (confirm-гейт + XLSX-для-списка,
+    как любой keyword-черновик §5). Само добавление — только после ✅."""
+    sess = _KW_ADD.pop(callback_data.token, None)
+    msg = _cq_msg(cq)
+    if not sess or not sess.get("campaign") or msg is None:
+        await cq.answer(i18n.t("kw_add_stale"), show_alert=True)
+        return
+    mt = callback_data.mt if callback_data.mt in ("broad", "phrase", "exact") else "broad"
+    try:
+        cid, operation, params, summary = _build_proposal(
+            "add_keywords", campaign=sess["campaign"], keywords=sess["keywords"], match_type=mt
+        )
+    except Exception as e:  # noqa: BLE001 — валидация схемы (длина/пустой список) → понятный ответ
+        await cq.answer(i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
+        return
+    await cq.answer()
+    await _present_proposal(
+        msg,
+        chat_id=_cq_chat_id(cq),
+        operation=operation,
+        params=params,
+        summary=summary,
+        cid=cid,
+    )
 
 
 @dp.message(ModelWizard.awaiting_model)

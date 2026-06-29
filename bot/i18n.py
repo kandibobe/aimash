@@ -157,6 +157,23 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": texts.KW_BAD_INPUT,
         "en": "I need seed words or a link. Send, for example: <code>buy phone, smartphone</code>",
     },
+    # — §7: добавление подобранных ключей в кампанию (после показа списка + типа + «да») —
+    "kw_add_pick_campaign": {
+        "ru": "В какую кампанию добавить ключи? Пришли название кампании одним сообщением.",
+        "en": "Which campaign should I add the keywords to? Send the campaign name in one message.",
+    },
+    "kw_add_empty_campaign": {
+        "ru": "Пришли НАЗВАНИЕ кампании одним сообщением (например: <code>Search Spring</code>).",
+        "en": "Send the campaign NAME in a single message (e.g. <code>Search Spring</code>).",
+    },
+    "kw_add_pick_match": {
+        "ru": "🔑 Тип соответствия для «{camp}» ({n} ключ.):",
+        "en": "🔑 Match type for “{camp}” ({n} kw):",
+    },
+    "kw_add_stale": {
+        "ru": "Список подобранных ключей устарел — запусти /keywords заново.",
+        "en": "The researched keyword list expired — run /keywords again.",
+    },
     # — confirm-гейт / статусы —
     "proposal_pending": {
         "ru": texts.PROPOSAL_PENDING,

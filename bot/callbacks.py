@@ -72,3 +72,13 @@ class ModelCB(CallbackData, prefix="mdl"):
 
     action: str  # "set" | "reset" | "custom"
     idx: int = -1
+
+
+class KwAddCB(CallbackData, prefix="kwadd"):
+    """§7: добавить подобранные ключи (из результатов /keywords) в кампанию — только по команде,
+    после показа списка + типа соответствия и «да» (confirm-гейт). token — ключ серверной сессии
+    (список ключей не влезает в callback_data, 64 байта). mt — тип соответствия (для action='match')."""
+
+    action: str  # "start" | "match" | "cancel"
+    token: str  # hex-токен сессии _KW_ADD (bot.main)
+    mt: str = ""  # "broad" | "phrase" | "exact" (только для action='match')
