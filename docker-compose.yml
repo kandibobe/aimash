@@ -10,8 +10,9 @@ services:
       POSTGRES_PASSWORD: aimash
       POSTGRES_DB: aimash
     ports:
-      # 5433 на хосте (5432 часто занят локальным/нативным Postgres). Внутри контейнера — 5432.
-      - "5433:5432"
+      # 5433 ТОЛЬКО на loopback (localhost): dev/alembic с хоста работают, но наружу (0.0.0.0) НЕ
+      # светим — иначе Docker пробивает host-firewall через iptables. Внутри контейнера — 5432.
+      - "127.0.0.1:5433:5432"
     volumes:
       - aimash_pgdata:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
@@ -20,6 +21,12 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    # Потолок ресурсов БД (co-located с ботом на 2 vCPU / 4 ГБ — БД не должна задушить бота).
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
 
   # Бот (Telegram long-poll + планировщик). Запуск всего: `docker compose up --build`.
   # Секреты — из .env (env_file), в образ НЕ запекаются. Миграции применяются АВТОМАТИЧЕСКИ
@@ -44,7 +51,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 768M
           cpus: "1.0"
     # Ротация логов: без неё json-file растёт безгранично и забивает диск VPS.
     logging:
