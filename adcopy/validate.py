@@ -49,6 +49,57 @@ def assert_valid(text: str, kind: str) -> str:
     return text
 
 
+# ── §3-assets: лимиты длины ассетов-расширений (КОД, code points, кириллица=1) ────
+# Считаем тем же rsa_len (кириллица=1, CJK=2). Источник лимитов — справка Google Ads (v24).
+ASSET_LIMITS = {
+    "sitelink_text": 25,  # link_text
+    "sitelink_desc": 35,  # description1/description2
+    "callout": 25,  # callout_text
+    "snippet_value": 25,  # каждое значение Structured Snippet
+    "business_name": 25,
+    "promotion_target": 20,
+    "price_header": 25,
+    "price_desc": 25,
+}
+
+# Канонический АНГЛИЙСКИЙ список заголовков Structured Snippet (иначе API → HEADER_NOT_FOUND).
+# Локализация — в values, header — строго из этого набора.
+STRUCTURED_SNIPPET_HEADERS = frozenset(
+    {
+        "Amenities",
+        "Brands",
+        "Courses",
+        "Degree programs",
+        "Destinations",
+        "Featured hotels",
+        "Insurance coverage",
+        "Models",
+        "Neighborhoods",
+        "Service catalog",
+        "Shows",
+        "Show types",
+        "Styles",
+        "Types",
+    }
+)
+
+
+def asset_len_ok(text: str, kind: str) -> tuple[bool, int]:
+    """(укладывается_ли, длина) для текста ассета-расширения. kind — ключ ASSET_LIMITS.
+    Длину считает КОД (rsa_len: кириллица=1, CJK=2) — зеркалит RSA-дисциплину."""
+    if kind not in ASSET_LIMITS:
+        raise ValueError(f"неизвестный тип ассет-текста: {kind}")
+    n = rsa_len(text)
+    return n <= ASSET_LIMITS[kind], n
+
+
+def assert_asset_len(text: str, kind: str) -> str:
+    ok, n = asset_len_ok(text, kind)
+    if not ok:
+        raise ValueError(f"{kind} превышает лимит {ASSET_LIMITS[kind]}: {n} симв. — «{text}»")
+    return text
+
+
 # ── Редакторская политика (advisory, НЕ хард-блок): КОД, а не промпт ──────────────
 # Юникод-aware «слово» — серия букв без цифр/символов (\d и _ исключены); так isupper() для
 # кириллицы/латиницы работает одинаково, а «B2B»/«01001» не считаются капсом (цифры рвут слово).

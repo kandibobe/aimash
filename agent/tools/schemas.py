@@ -15,6 +15,8 @@ from adcopy.validate import (
     RSA_MAX_HEADLINES,
     RSA_MIN_DESCRIPTIONS,
     RSA_MIN_HEADLINES,
+    STRUCTURED_SNIPPET_HEADERS,
+    assert_asset_len,
 )
 from adcopy.validate import validate as _rsa_validate
 from ads.validation import normalize_keywords
@@ -46,8 +48,12 @@ MUTATION_TOOLS = {
     "create_rsa",
     "create_gdn_campaign",
     "create_search_campaign",
+    "add_sitelinks",
+    "add_callouts",
+    "add_structured_snippets",
+    "remove_asset_link",
 }
-READ_TOOLS = {"get_stats", "generate_rsa", "keyword_research"}
+READ_TOOLS = {"get_stats", "generate_rsa", "keyword_research", "clone_campaign"}
 
 
 # ── Pydantic-схемы (валидация в коде, не на доверии к модели) ───────────────────
@@ -315,6 +321,26 @@ class GenerateRsa(BaseModel):
     n_descriptions: int = Field(default=4, ge=2, le=4)
 
 
+class CloneCampaign(BaseModel):
+    """Read-намерение (§2A): «сделай кампанию N с настройками как в кампании X». Модель лишь
+    заполняет new_name + source_campaign (+ опц. оверрайды); живое чтение исходной кампании и
+    сборку черновика create_search_campaign делает бот (confirm-гейт обязателен). НЕ мутация —
+    в MUTATION_TOOLS/SUPPORTED_OPERATIONS не входит."""
+
+    new_name: str = Field(min_length=1, max_length=120)
+    source_campaign: str = Field(min_length=1)
+    budget_daily_units: float | None = Field(default=None, gt=0, le=MONEY_MAX_UNITS)
+    geo_override: list[str] | None = Field(default=None, max_length=20)
+    final_url: str | None = None
+
+    @field_validator("final_url")
+    @classmethod
+    def _url(cls, v):
+        if v is not None and not str(v).startswith(("http://", "https://")):
+            raise ValueError("final_url должен быть http/https")
+        return v
+
+
 class CreateRsa(BaseModel):
     """Финальные параметры создания RSA (минтуются ботом после курации, не из LLM напрямую).
     Минимумы/максимумы и длину считает КОД — зеркалит ads.mutations (defense-in-depth)."""
@@ -446,6 +472,129 @@ class CreateSearchCampaign(BaseModel):
         return normalize_keywords(v) if v else []
 
 
+# ── §3-assets: текстовые расширения (sitelinks/callouts/structured snippets) ─────────
+class Sitelink(BaseModel):
+    """Один sitelink: текст-ссылка (≤25) + final_url + опц. два описания (≤35). description2
+    нельзя без description1. Длину считает КОД (кириллица=1)."""
+
+    link_text: str = Field(min_length=1)
+    final_url: str
+    description1: str | None = None
+    description2: str | None = None
+
+    @field_validator("link_text")
+    @classmethod
+    def _lt(cls, v):
+        return assert_asset_len(v, "sitelink_text")
+
+    @field_validator("final_url")
+    @classmethod
+    def _u(cls, v):
+        if not v or not str(v).startswith(("http://", "https://")):
+            raise ValueError("нужен валидный final_url (http/https)")
+        return v
+
+    @field_validator("description1", "description2")
+    @classmethod
+    def _d(cls, v):
+        if v:
+            assert_asset_len(v, "sitelink_desc")
+        return v
+
+    @model_validator(mode="after")
+    def _order(self):
+        if self.description2 and not self.description1:
+            raise ValueError("description2 нельзя задавать без description1")
+        return self
+
+
+class AddSitelinks(BaseModel):
+    campaign: str
+    sitelinks: list[Sitelink] = Field(min_length=1, max_length=20)
+
+
+class AddCallouts(BaseModel):
+    campaign: str
+    callouts: list[str] = Field(min_length=1, max_length=20)  # каждый ≤25, trim+dedup
+
+    @field_validator("callouts")
+    @classmethod
+    def _c(cls, v):
+        out: list[str] = []
+        seen: set[str] = set()
+        for t in v:
+            t = (t or "").strip()
+            if not t:
+                continue
+            assert_asset_len(t, "callout")
+            key = t.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(t)
+        if not out:
+            raise ValueError("нужен хотя бы один непустой callout")
+        return out
+
+
+class AddStructuredSnippets(BaseModel):
+    campaign: str
+    header: str  # из канонического англ. списка (иначе HEADER_NOT_FOUND)
+    values: list[str] = Field(min_length=3, max_length=10)  # каждое ≤25
+
+    @field_validator("header")
+    @classmethod
+    def _h(cls, v):
+        if v not in STRUCTURED_SNIPPET_HEADERS:
+            raise ValueError(
+                "header должен быть из канонического списка Google: "
+                + ", ".join(sorted(STRUCTURED_SNIPPET_HEADERS))
+            )
+        return v
+
+    @field_validator("values")
+    @classmethod
+    def _v(cls, v):
+        out = [(t or "").strip() for t in v if (t or "").strip()]
+        for t in out:
+            assert_asset_len(t, "snippet_value")
+        if len(out) < 3:
+            raise ValueError("нужно минимум 3 непустых значения структурного описания")
+        return out
+
+
+class AttachImageAsset(BaseModel):
+    """Прикрепить изображение-ассет к кампании (§3-assets, семейство 2). Минтуется ботом после
+    приёма фото (как GDN): бинарь НЕ здесь — media_id ссылается на временно сохранённое
+    подготовленное изображение. Не LLM-tool (нужно фото) — только bot-визард через SCHEMAS."""
+
+    campaign: str
+    media_id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+
+    @field_validator("media_id")
+    @classmethod
+    def _mid(cls, v):
+        if not str(v).isalnum():  # идёт в имя файла — защита от path-traversal
+            raise ValueError("media_id должен быть буквенно-цифровым")
+        return v
+
+
+class RemoveAssetLink(BaseModel):
+    """Удаление СВЯЗИ ассета с кампанией (campaign_asset), НЕ самого ассета. resource_names — из
+    list_campaign_assets (должны содержать /campaignAssets/)."""
+
+    link_resource_names: list[str] = Field(min_length=1, max_length=50)
+
+    @field_validator("link_resource_names")
+    @classmethod
+    def _rn(cls, v):
+        for rn in v:
+            if "/campaignAssets/" not in str(rn):
+                raise ValueError(f"ожидался campaign_asset resource_name: {rn}")
+        return v
+
+
 SCHEMAS: dict[str, type[BaseModel]] = {
     "update_budget": UpdateBudget,
     "update_bid": UpdateBid,
@@ -466,6 +615,12 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "get_stats": GetStats,
     "generate_rsa": GenerateRsa,
     "keyword_research": KeywordResearch,
+    "clone_campaign": CloneCampaign,
+    "add_sitelinks": AddSitelinks,
+    "add_callouts": AddCallouts,
+    "add_structured_snippets": AddStructuredSnippets,
+    "attach_image_asset": AttachImageAsset,
+    "remove_asset_link": RemoveAssetLink,
 }
 
 
@@ -552,6 +707,38 @@ TOOLS: list[dict] = [
         "конкуренция, кластеризация по интенту. Ничего не меняет в аккаунте. Укажи seeds "
         "и/или url; язык ru/uk/en.",
         KeywordResearch,
+    ),
+    _tool(
+        "clone_campaign",
+        "Клонировать настройки существующей поисковой кампании в НОВУЮ («сделай кампанию N "
+        "с настройками как в кампании X»). Укажи new_name (имя новой) и source_campaign (имя "
+        "образца). Можно переопределить budget_daily_units / final_url / geo_override. "
+        "Ничего не создаёт сразу — бот покажет черновик и спросит подтверждение.",
+        CloneCampaign,
+    ),
+    _tool(
+        "add_sitelinks",
+        "Добавить быстрые ссылки (sitelinks) в кампанию: для каждой link_text (≤25), final_url и "
+        "опц. два описания (≤35). Укажи campaign. Применяется после подтверждения.",
+        AddSitelinks,
+    ),
+    _tool(
+        "add_callouts",
+        "Добавить уточнения (callouts) в кампанию — короткие фразы (≤25) списком. Укажи campaign. "
+        "Применяется после подтверждения.",
+        AddCallouts,
+    ),
+    _tool(
+        "add_structured_snippets",
+        "Добавить структурные описания в кампанию: header из канонического англ. списка "
+        "(Brands/Types/Models/Styles/Amenities/…) + values (3–10, каждое ≤25). Укажи campaign.",
+        AddStructuredSnippets,
+    ),
+    _tool(
+        "remove_asset_link",
+        "Открепить ассет(ы)-расширения от кампании по resource_name связи (из списка ассетов). "
+        "Удаляется СВЯЗЬ, не сам ассет. Применяется после подтверждения.",
+        RemoveAssetLink,
     ),
     {
         "type": "function",

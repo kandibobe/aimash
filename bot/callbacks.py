@@ -91,3 +91,41 @@ class GeoCB(CallbackData, prefix="geo"):
 
     action: str  # "loc" | "prox" (кнопка «‹ Назад» возвращает через CampCB menu)
     idx: int = -1
+
+
+class NavCB(CallbackData, prefix="nav"):
+    """Универсальная навигация мастеров (FSM-визардов): только ОТМЕНА. «‹ Назад» НЕ здесь —
+    он переиспользует родительский callback каждого flow (breadcrumb: CampCB/RsaPickCB/…),
+    т.к. родитель-экран знает, как себя пере-отрисовать. Отмена контекст-свободна → один общий
+    хендлер: state.clear() + возврат главного меню. Черновик НЕ создаётся (это чистый UI/FSM)."""
+
+    action: str  # "cancel"
+
+
+class TemplateCB(CallbackData, prefix="tpl"):
+    """§2B: именованные шаблоны кампаний (/templates). idx — позиция в _TPL_CACHE[chat_id]
+    (имя в callback_data не кладём: длинное/спецсимволы). use → спросить имя новой кампании и
+    собрать черновик create_search_campaign (confirm-гейт); del → удалить шаблон."""
+
+    action: str  # "use" | "del"
+    idx: int = -1
+
+
+class RecentCB(CallbackData, prefix="rcnt"):
+    """§2C: авто-память — «↻ повторить» недавнее применённое действие. idx — позиция в
+    _RECENT_CACHE[chat_id]. Повтор пере-собирает ТЕ ЖЕ params → ре-валидация → confirm-гейт
+    (пользователь снова видит «было→станет» и жмёт ✅). Гейт не обходится."""
+
+    action: str  # "repeat"
+    idx: int = -1
+
+
+class ExtCB(CallbackData, prefix="ext"):
+    """§3-assets: ассеты-расширения кампании из меню /campaigns. idx — кампания в _CAMP_CACHE
+    (для remove — строка в _EXT_CACHE). action: type-меню/выбор типа/показать/удалить. sub —
+    заголовок структурного описания (для snippet) или иной под-параметр. Кнопка лишь собирает
+    ввод; черновик и confirm-гейт — после ввода (мутация только по «да»)."""
+
+    action: str  # "sitelink" | "callout" | "snippet" | "snip_h" | "show" | "remove"
+    idx: int = -1
+    sub: str = ""  # header структурного описания (для action='snip_h')

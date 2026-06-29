@@ -57,13 +57,17 @@ from bot.callbacks import (
     AudienceCB,
     CampCB,
     ConfirmCB,
+    ExtCB,
     GeoCB,
     KwAddCB,
     LangCB,
     ModelCB,
+    NavCB,
     PeriodCB,
+    RecentCB,
     RsaCB,
     RsaPickCB,
+    TemplateCB,
 )
 from bot.keyboards import (
     BOT_COMMANDS,
@@ -84,12 +88,18 @@ from bot.keyboards import (
     campaign_actions_kb,
     campaigns_kb,
     confirm_kb,
+    ext_assets_list_kb,
+    ext_menu_kb,
+    ext_snippet_header_kb,
     geo_mode_kb,
     kw_add_kb,
     lang_kb,
     main_menu,
     match_type_kb,
     model_kb,
+    nav_kb,
+    recent_kb,
+    templates_kb,
     period_kb,
     rsa_item_kb,
     rsa_overview_kb,
@@ -99,6 +109,7 @@ from bot.keyboards import (
 from bot.throttle import ThrottleMiddleware
 from confirm.gate import Proposal, build_summary
 from confirm.store import ConfirmStore
+from core import ingest
 from core.ads_errors import humanize_google_ads_error
 from core.config import settings
 from core.context import new_request_id, reset_context, set_context
@@ -123,6 +134,18 @@ _KEYWORD_OPS = frozenset({"add_keywords", "remove_keywords", "add_negative_keywo
 # Лёгкое in-memory состояние UI (теряется при рестарте — это ок, не источник истины):
 _CAMP_CACHE: dict[int, list[dict]] = {}  # chat_id → последний список кампаний (резолв idx→имя)
 _LAST_PENDING: dict[int, str] = {}  # chat_id → confirmation_id последнего черновика (для /cancel)
+# §2B: params последнего черновика create_search_campaign на чат — материал для /savetemplate
+# «сохранить как шаблон». В памяти (как _LAST_PENDING); секретов нет.
+_LAST_SEARCH_PARAMS: dict[int, dict] = {}
+_TPL_CACHE: dict[int, list] = {}  # chat_id → последний показанный список шаблонов (резолв idx→имя)
+_RECENT_CACHE: dict[
+    int, list
+] = {}  # §2C: chat_id → последние применённые действия (резолв idx→action)
+_EXT_CACHE: dict[
+    int, list
+] = {}  # §3-assets: chat_id → текущие ассеты кампании (резолв idx→link rn)
+# ingest: chat_id → {text, source} прочитанного файла, ждущего задачу (в памяти, без секретов).
+_PENDING_CONTEXT: dict[int, dict] = {}
 
 # §7: эфемерные сессии «добавить подобранные ключи» (token → {keywords, src}). Список ключей не
 # влезает в callback_data (64 байта) → держим по короткому токену. Кап защищает от роста.
@@ -180,6 +203,24 @@ class GdnWizard(StatesGroup):
 
 class ModelWizard(StatesGroup):
     awaiting_model = State()  # ждём свой slug модели OpenRouter для /model
+
+
+class TplWizard(StatesGroup):
+    awaiting_name = State()  # §2B: создание из шаблона — ждём ИМЯ новой кампании (token в state)
+
+
+class IngestWizard(StatesGroup):
+    awaiting_task = (
+        State()
+    )  # ingest: файл принят без подписи → ждём задачу (контент в _PENDING_CONTEXT)
+
+
+class ExtWizard(StatesGroup):
+    # §3-assets: тип расширения выбран в меню → ждём текст/фото. Кампания в state-data (ext_campaign).
+    awaiting_sitelinks = State()  # «Текст | url [| описание1 [| описание2]]» построчно
+    awaiting_callouts = State()  # уточнения через запятую/строки
+    awaiting_snippet_values = State()  # значения через запятую (header выбран кнопкой → ext_header)
+    awaiting_image = State()  # ждём фото для image-ассета (перехват в on_photo по состоянию)
 
 
 # Глобальные настройки бота (модель ИИ и т.п.) живут в одной строке user_settings с этим chat_id.
@@ -451,6 +492,10 @@ async def _present_proposal(
         user_initiated=True,
     )
     _LAST_PENDING[chat_id] = cid
+    # §2B: запоминаем params последнего create_search_campaign (клон/новая кампания) — для
+    # /savetemplate «сохранить как шаблон». _before инертен для шаблона → исключаем.
+    if operation == "create_search_campaign":
+        _LAST_SEARCH_PARAMS[chat_id] = {k: v for k, v in params.items() if k != "_before"}
     # Большой список ключей/минус-слов (ТЗ §5) → полный список .xlsx-вложением, кнопки на коротком
     # сообщении; в самой сводке список усечён до KW_INLINE_MAX с пометкой «…ещё N во вложении».
     kws = params.get("keywords") if isinstance(params, dict) else None
@@ -540,7 +585,7 @@ async def keywords_(m: Message, state: FSMContext, command: CommandObject) -> No
         await _kw_run(m, m.chat.id, seeds, url, "ru")
         return
     await state.set_state(KwWizard.awaiting_seeds)
-    await m.answer(i18n.t("kw_ask"), parse_mode=ParseMode.HTML)
+    await m.answer(i18n.t("kw_ask"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML)
 
 
 @dp.message(Command("cancel"))
@@ -692,7 +737,9 @@ async def on_model_custom(cq: CallbackQuery, state: FSMContext) -> None:
     await cq.answer()
     msg = _cq_msg(cq)
     if msg is not None:
-        await msg.answer(i18n.t("model_ask_custom"), parse_mode=ParseMode.HTML)
+        await msg.answer(
+            i18n.t("model_ask_custom"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML
+        )
 
 
 async def _slash_mutate(m: Message, command: CommandObject, operation: str) -> None:
@@ -902,7 +949,7 @@ async def btn_keywords(m: Message, state: FSMContext) -> None:
     """Кнопка «Ключевые слова» = /keywords без аргументов: запускаем визард подбора."""
     await state.clear()
     await state.set_state(KwWizard.awaiting_seeds)
-    await m.answer(i18n.t("kw_ask"), parse_mode=ParseMode.HTML)
+    await m.answer(i18n.t("kw_ask"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML)
 
 
 @dp.message(F.text.in_(BTN_RSA_ALL))
@@ -996,7 +1043,7 @@ async def _rsa_after_adgroup(target: Message, chat_id: int, state: FSMContext) -
         await _rsa_generate_and_start(target, chat_id, state)
         return
     await state.set_state(RsaWizard.awaiting_brief)
-    await target.answer(i18n.t("rsa_ask_brief"), parse_mode=ParseMode.HTML)
+    await target.answer(i18n.t("rsa_ask_brief"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML)
 
 
 async def _rsa_resolve_after_campaign(
@@ -1267,7 +1314,7 @@ async def _kw_start_from_intent(m: Message, brief: dict, state: FSMContext) -> N
         await _kw_run(m, m.chat.id, seeds, url, language)
         return
     await state.set_state(KwWizard.awaiting_seeds)
-    await m.answer(i18n.t("kw_ask"), parse_mode=ParseMode.HTML)
+    await m.answer(i18n.t("kw_ask"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML)
 
 
 @dp.message(Command("rsa"))
@@ -1331,8 +1378,8 @@ async def rsa_pick_ag(cq: CallbackQuery, callback_data: RsaPickCB, state: FSMCon
 async def rsa_brief(m: Message, state: FSMContext) -> None:
     topic, url = _parse_brief_text(m.text or "")
     if not url or not topic:
-        await m.answer(i18n.t("rsa_bad_url"))
-        return
+        await m.answer(i18n.t("rsa_bad_url"), reply_markup=nav_kb())
+        return  # остаёмся в состоянии — retry-подсказка несёт «✖ Отмена» (не застрять)
     await state.update_data(topic=topic, final_url=url)
     await _rsa_generate_and_start(m, m.chat.id, state)
 
@@ -1341,7 +1388,7 @@ async def rsa_brief(m: Message, state: FSMContext) -> None:
 async def rsa_refine_text(m: Message, state: FSMContext) -> None:
     data = await state.get_data()
     cid, kind, idx = data.get("cid"), data.get("kind"), data.get("idx")
-    session = await SESSIONS.get(cid) if cid else None
+    session = await SESSIONS.get(cid, expected_chat_id=m.chat.id) if cid else None
     if session is None or not isinstance(cid, str) or kind is None or idx is None:
         await state.clear()
         await m.answer(i18n.t("rsa_session_stale"))
@@ -1349,16 +1396,16 @@ async def rsa_refine_text(m: Message, state: FSMContext) -> None:
     try:
         new_text = await refine_element(session.brief, kind, m.text or "")
     except Exception as e:  # LLM/сеть
-        await m.answer(i18n.t("err_refine", err=ux.err_text(e)))
-        return
+        await m.answer(i18n.t("err_refine", err=ux.err_text(e)), reply_markup=nav_kb())
+        return  # остаёмся в состоянии — retry с «✖ Отмена» (выход из курации в меню)
     valid_kind = "headline" if kind == "h" else "description"
     ok, n = rsa_validate(new_text, valid_kind)
     if not ok:
         limit = 30 if kind == "h" else 90
-        await m.answer(i18n.t("rsa_refine_too_long", n=n, limit=limit))
-        return  # остаёмся в состоянии — пользователь пришлёт другую правку
+        await m.answer(i18n.t("rsa_refine_too_long", n=n, limit=limit), reply_markup=nav_kb())
+        return  # остаёмся в состоянии — пользователь пришлёт другую правку (или «✖ Отмена»)
     await state.clear()
-    session = await SESSIONS.replace_element(cid, kind, idx, new_text)
+    session = await SESSIONS.replace_element(cid, kind, idx, new_text, expected_chat_id=m.chat.id)
     if session is None:  # сессия исчезла между правкой и записью — не падаем
         await m.answer(i18n.t("rsa_session_stale"))
         return
@@ -1376,8 +1423,8 @@ async def rsa_refine_text(m: Message, state: FSMContext) -> None:
 async def kw_seeds(m: Message, state: FSMContext) -> None:
     seeds, url = _parse_kw_input(m.text or "")
     if not seeds and not url:
-        await m.answer(i18n.t("kw_bad_input"), parse_mode=ParseMode.HTML)
-        return  # остаёмся в состоянии — пользователь пришлёт сиды/URL ещё раз
+        await m.answer(i18n.t("kw_bad_input"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML)
+        return  # остаёмся в состоянии — пользователь пришлёт сиды/URL ещё раз (или «✖ Отмена»)
     await state.clear()
     await _kw_run(m, m.chat.id, seeds, url, "ru")
 
@@ -1398,7 +1445,9 @@ async def on_kw_add_start(cq: CallbackQuery, callback_data: KwAddCB, state: FSMC
     await state.set_state(KwAdd.awaiting_campaign)
     await state.update_data(kw_add_token=callback_data.token)
     await cq.answer()
-    await msg.answer(i18n.t("kw_add_pick_campaign"))
+    # nav_kb() без back_cb: предыдущий экран — сводка /keywords (нет дешёвого inline-родителя),
+    # поэтому только «✖ Отмена» (выход в меню). Этого достаточно — пользователь больше не застрянет.
+    await msg.answer(i18n.t("kw_add_pick_campaign"), reply_markup=nav_kb())
 
 
 @dp.message(KwAdd.awaiting_campaign)
@@ -1406,7 +1455,11 @@ async def kw_add_campaign(m: Message, state: FSMContext) -> None:
     """Получили название кампании → показываем выбор типа соответствия (broad/phrase/exact)."""
     campaign = (m.text or "").strip()
     if not campaign:
-        await m.answer(i18n.t("kw_add_empty_campaign"), parse_mode=ParseMode.HTML)
+        # retry-подсказка ОБЯЗАНА нести nav_kb — иначе после невалидного ввода кнопок снова нет
+        # (это и есть исходный баг «застрял без Назад»).
+        await m.answer(
+            i18n.t("kw_add_empty_campaign"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML
+        )
         return  # остаёмся в состоянии — пользователь пришлёт название ещё раз
     data = await state.get_data()
     sess = _KW_ADD.get(data.get("kw_add_token", ""))
@@ -1429,6 +1482,27 @@ async def on_kw_add_cancel(cq: CallbackQuery, callback_data: KwAddCB) -> None:
     _KW_ADD.pop(callback_data.token, None)
     await cq.answer(i18n.t("cb_cancelled"))
     await _safe_edit(cq, i18n.t("rejected"))
+
+
+@dp.callback_query(NavCB.filter(F.action == "cancel"))
+async def on_nav_cancel(cq: CallbackQuery, state: FSMContext) -> None:
+    """Универсальная «✖ Отмена» любого мастера: очистить FSM + вернуть главное меню. НИЧЕГО не
+    мутирует и не трогает _LAST_PENDING (черновика тут нет — это лишь выход из сбора ввода). Старую
+    inline-подсказку правим в «отменено», а reply-меню шлём НОВЫМ сообщением: ReplyKeyboardMarkup
+    нельзя прицепить через edit_text (только новое сообщение)."""
+    # GDN/ассет-визарды держат во временном хранилище подготовленное фото по media_id — чистим его
+    # при выходе (best-effort, без падения), иначе остаётся осиротевший temp-файл.
+    data = await state.get_data()
+    media_id = data.get("gdn_media_id") or data.get("ext_media_id")
+    if media_id:
+        await asyncio.to_thread(clear_pending_media, media_id)
+    _PENDING_CONTEXT.pop(_cq_chat_id(cq), None)  # ingest: бросаем недоиспользованный контент файла
+    await state.clear()
+    await cq.answer(i18n.t("cb_cancelled"))
+    await _safe_edit(cq, i18n.t("wizard_cancelled"))
+    msg = _cq_msg(cq)
+    if msg is not None:
+        await msg.answer(i18n.t("main_menu_back"), reply_markup=main_menu())
 
 
 @dp.callback_query(KwAddCB.filter(F.action == "match"))
@@ -1460,6 +1534,14 @@ async def on_kw_add_match(cq: CallbackQuery, callback_data: KwAddCB) -> None:
 
 
 # ── §3: гео-таргетинг кампании из меню (локации/радиус → текст → черновик set_geo_* → «да») ──
+async def _geo_nav_kb(state: FSMContext):
+    """nav_kb для retry-шага гео: «‹ Назад» → меню кампании (idx из state-data geo_idx,
+    положен в on_geo_mode), иначе только «✖ Отмена». Держит кнопки и после невалидного ввода."""
+    idx = (await state.get_data()).get("geo_idx", -1)
+    back = CampCB(action="menu", idx=idx) if isinstance(idx, int) and idx >= 0 else None
+    return nav_kb(back)
+
+
 @dp.callback_query(CampCB.filter(F.action == "geo"))
 async def camp_geo(cq: CallbackQuery, callback_data: CampCB) -> None:
     """Меню кампании → «📍 Гео-таргетинг»: показываем выбор способа (локации/радиус). READ-ONLY:
@@ -1499,9 +1581,16 @@ async def on_geo_mode(cq: CallbackQuery, callback_data: GeoCB, state: FSMContext
     else:
         await state.set_state(Geo.awaiting_proximity)
         prompt = "geo_pick_proximity"
-    await state.update_data(geo_campaign=name)
+    # geo_idx нужен retry-хендлерам, чтобы собрать Back-цель (меню кампании) даже после
+    # невалидного ввода; имя кампании уже резолвлено в geo_campaign.
+    await state.update_data(geo_campaign=name, geo_idx=callback_data.idx)
     await cq.answer()
-    await msg.answer(i18n.t(prompt), parse_mode=ParseMode.HTML)
+    # Back → меню кампании (та же цель, что у «‹ Назад» в geo_mode_kb): переиспользуем camp_menu.
+    await msg.answer(
+        i18n.t(prompt),
+        reply_markup=nav_kb(CampCB(action="menu", idx=callback_data.idx)),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 @dp.message(Geo.awaiting_locations)
@@ -1510,7 +1599,11 @@ async def geo_locations(m: Message, state: FSMContext) -> None:
     названий → geoTargetConstant и remove-before-create — в SDK-слое после ✅; здесь только черновик."""
     locations = _parse_geo_locations(m.text or "")
     if not locations:
-        await m.answer(i18n.t("geo_empty_locations"), parse_mode=ParseMode.HTML)
+        await m.answer(
+            i18n.t("geo_empty_locations"),
+            reply_markup=await _geo_nav_kb(state),
+            parse_mode=ParseMode.HTML,
+        )
         return  # остаёмся в состоянии — пользователь пришлёт локации ещё раз
     data = await state.get_data()
     campaign = (data.get("geo_campaign") or "").strip()
@@ -1537,7 +1630,11 @@ async def geo_proximity(m: Message, state: FSMContext) -> None:
     адрес сам; границы радиуса (0, 2000] валидирует схема. Исполнение — только после ✅."""
     parsed = _parse_geo_proximity(m.text or "")
     if parsed is None:
-        await m.answer(i18n.t("geo_bad_proximity"), parse_mode=ParseMode.HTML)
+        await m.answer(
+            i18n.t("geo_bad_proximity"),
+            reply_markup=await _geo_nav_kb(state),
+            parse_mode=ParseMode.HTML,
+        )
         return  # остаёмся в состоянии — пользователь пришлёт «город, радиус» ещё раз
     city, radius = parsed
     data = await state.get_data()
@@ -1564,8 +1661,8 @@ async def model_custom_text(m: Message, state: FSMContext) -> None:
     """Своя модель из /model → ✏️ Своя модель. Валидируем slug, применяем + персистим."""
     slug = _valid_model_slug(m.text or "")
     if not slug:
-        await m.answer(i18n.t("model_bad"), parse_mode=ParseMode.HTML)
-        return  # остаёмся в состоянии — пользователь пришлёт slug ещё раз
+        await m.answer(i18n.t("model_bad"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML)
+        return  # остаёмся в состоянии — пользователь пришлёт slug ещё раз (или «✖ Отмена»)
     await state.clear()
     await _persist_and_set_model(slug)
     await m.answer(i18n.t("model_set", model=texts.esc(slug)), parse_mode=ParseMode.HTML)
@@ -1598,7 +1695,7 @@ def _parse_search_brief(text: str) -> tuple[str, str, float, str, list[str]] | N
 async def newsearch_cmd(m: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(SearchWizard.awaiting_brief)
-    await m.answer(i18n.t("search_ask_brief"), parse_mode=ParseMode.HTML)
+    await m.answer(i18n.t("search_ask_brief"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML)
 
 
 @dp.message(SearchWizard.awaiting_brief)
@@ -1607,8 +1704,8 @@ async def search_brief(m: Message, state: FSMContext) -> None:
     исполнение только после ✅ (двойной гейт + user_initiated держит apply_create_search_campaign)."""
     parsed = _parse_search_brief(m.text or "")
     if parsed is None:
-        await m.answer(i18n.t("search_bad_brief"), parse_mode=ParseMode.HTML)
-        return  # остаёмся в состоянии — пользователь пришлёт бриф ещё раз
+        await m.answer(i18n.t("search_bad_brief"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML)
+        return  # остаёмся в состоянии — пользователь пришлёт бриф ещё раз (или «✖ Отмена»)
     name, url, budget_units, topic, keywords = parsed
     await m.answer(i18n.t("search_generating"))
     try:
@@ -1696,6 +1793,10 @@ async def on_photo(m: Message, state: FSMContext, bot: Bot) -> None:
     Бинарь НЕ в proposal/логах — подготовленные кадры кладём во временное хранилище по media_id."""
     if not m.photo:  # фильтр F.photo гарантирует фото, но узкий гард снимает Optional и страхует
         return
+    # §3-assets: фото в состоянии «жду изображение-ассет» → ветка image-extension (не GDN).
+    if await state.get_state() == ExtWizard.awaiting_image:
+        await _ext_image_from_photo(m, state, bot)
+        return
     prev = await state.get_data()  # новое фото отменяет прежнее → чистим его медиа (без утечки)
     old_id = prev.get("gdn_media_id")
     if old_id:
@@ -1712,7 +1813,8 @@ async def on_photo(m: Message, state: FSMContext, bot: Bot) -> None:
     await asyncio.to_thread(save_pending_media, media_id, landscape, square)
     await state.update_data(gdn_media_id=media_id)
     await state.set_state(GdnWizard.awaiting_brief)
-    await m.answer(i18n.t("gdn_ask_brief"), parse_mode=ParseMode.HTML)
+    # «✖ Отмена» при выходе чистит pending-media (on_nav_cancel читает gdn_media_id из state).
+    await m.answer(i18n.t("gdn_ask_brief"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML)
 
 
 @dp.message(GdnWizard.awaiting_brief)
@@ -1725,8 +1827,8 @@ async def gdn_brief(m: Message, state: FSMContext) -> None:
         return
     parsed = _parse_gdn_brief(m.text or "")
     if parsed is None:
-        await m.answer(i18n.t("gdn_bad_brief"), parse_mode=ParseMode.HTML)
-        return  # остаёмся в состоянии — пользователь пришлёт бриф ещё раз
+        await m.answer(i18n.t("gdn_bad_brief"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML)
+        return  # остаёмся в состоянии — пользователь пришлёт бриф ещё раз (или «✖ Отмена»)
     name, url, budget_units = parsed
     await m.answer(i18n.t("gdn_generating"))
     try:
@@ -1778,11 +1880,750 @@ async def gdn_brief(m: Message, state: FSMContext) -> None:
     )
 
 
+# ── §2A: клон кампании «как в кампании X» (read live → черновик create_search_campaign) ──
+# ── §3-assets: ассеты-расширения кампании (sitelinks/callouts/snippets/показать/удалить) ──
+def _parse_sitelinks(text: str) -> list[dict]:
+    """Построчно «Текст | url [| описание1 [| описание2]]» → list[dict]. Пустые строки/поля
+    пропускаем. Длину/состав валидирует схема AddSitelinks при сборке черновика."""
+    out: list[dict] = []
+    for line in (text or "").splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 2 or not parts[0] or not parts[1]:
+            continue
+        sl: dict = {"link_text": parts[0], "final_url": parts[1]}
+        if len(parts) >= 3 and parts[2]:
+            sl["description1"] = parts[2]
+        if len(parts) >= 4 and parts[3]:
+            sl["description2"] = parts[3]
+        out.append(sl)
+    return out
+
+
+def _parse_csv_lines(text: str) -> list[str]:
+    """Запятые/переносы строк → список непустых токенов (для callouts/значений сниппета)."""
+    return [p.strip() for p in (text or "").replace("\n", ",").split(",") if p.strip()]
+
+
+async def _ext_nav_kb(state: FSMContext):
+    """nav_kb для шага мастера расширений: «‹ Назад» → меню расширений кампании (idx из state)."""
+    idx = (await state.get_data()).get("ext_idx", -1)
+    back = CampCB(action="ext", idx=idx) if isinstance(idx, int) and idx >= 0 else None
+    return nav_kb(back)
+
+
+@dp.callback_query(CampCB.filter(F.action == "ext"))
+async def camp_ext(cq: CallbackQuery, callback_data: CampCB) -> None:
+    """Меню кампании → «🧩 Расширения»: показать выбор типа. READ-ONLY (ввод/черновик — дальше)."""
+    camps = _CAMP_CACHE.get(_cq_chat_id(cq))
+    if not _valid_idx(camps, callback_data.idx):
+        await cq.answer(i18n.t("camp_list_stale"), show_alert=True)
+        return
+    await cq.answer()
+    name = camps[callback_data.idx]["name"]
+    await _safe_edit(
+        cq,
+        i18n.t("ext_menu_pick", camp=texts.esc(name)),
+        reply_markup=ext_menu_kb(callback_data.idx),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@dp.callback_query(ExtCB.filter(F.action.in_(["sitelink", "callout", "snippet", "image"])))
+async def on_ext_type(cq: CallbackQuery, callback_data: ExtCB, state: FSMContext) -> None:
+    """Тип расширения выбран → ждём ввод (для snippet сначала выбор header кнопками; для image —
+    фото, его перехватывает on_photo по состоянию ExtWizard.awaiting_image)."""
+    chat_id = _cq_chat_id(cq)
+    camps = _CAMP_CACHE.get(chat_id)
+    if not _valid_idx(camps, callback_data.idx):
+        await cq.answer(i18n.t("camp_list_stale"), show_alert=True)
+        return
+    msg = _cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    name = camps[callback_data.idx]["name"]
+    await cq.answer()
+    if callback_data.action == "snippet":
+        # header строго из канонического списка → выбираем кнопкой (иначе HEADER_NOT_FOUND)
+        await _safe_edit(
+            cq,
+            i18n.t("ext_ask_snippet_header", camp=texts.esc(name)),
+            reply_markup=ext_snippet_header_kb(callback_data.idx),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    await state.clear()
+    await state.update_data(ext_campaign=name, ext_idx=callback_data.idx)
+    if callback_data.action == "sitelink":
+        await state.set_state(ExtWizard.awaiting_sitelinks)
+        prompt = "ext_ask_sitelinks"
+    elif callback_data.action == "image":
+        await state.set_state(ExtWizard.awaiting_image)
+        prompt = "ext_ask_image"
+    else:
+        await state.set_state(ExtWizard.awaiting_callouts)
+        prompt = "ext_ask_callouts"
+    await msg.answer(
+        i18n.t(prompt),
+        reply_markup=nav_kb(CampCB(action="ext", idx=callback_data.idx)),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@dp.callback_query(ExtCB.filter(F.action == "snip_h"))
+async def on_ext_snippet_header(cq: CallbackQuery, callback_data: ExtCB, state: FSMContext) -> None:
+    """Header структурного описания выбран → ждём значения текстом."""
+    chat_id = _cq_chat_id(cq)
+    camps = _CAMP_CACHE.get(chat_id)
+    if not _valid_idx(camps, callback_data.idx):
+        await cq.answer(i18n.t("camp_list_stale"), show_alert=True)
+        return
+    msg = _cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    name = camps[callback_data.idx]["name"]
+    await state.clear()
+    await state.set_state(ExtWizard.awaiting_snippet_values)
+    await state.update_data(
+        ext_campaign=name, ext_idx=callback_data.idx, ext_header=callback_data.sub
+    )
+    await cq.answer()
+    await msg.answer(
+        i18n.t("ext_ask_snippet_values", header=texts.esc(callback_data.sub)),
+        reply_markup=nav_kb(CampCB(action="ext", idx=callback_data.idx)),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@dp.message(ExtWizard.awaiting_sitelinks)
+async def ext_sitelinks(m: Message, state: FSMContext) -> None:
+    sitelinks = _parse_sitelinks(m.text or "")
+    if not sitelinks:
+        await m.answer(
+            i18n.t("ext_bad_sitelinks"),
+            reply_markup=await _ext_nav_kb(state),
+            parse_mode=ParseMode.HTML,
+        )
+        return  # остаёмся в состоянии (retry с навигацией)
+    data = await state.get_data()
+    campaign = (data.get("ext_campaign") or "").strip()
+    if not campaign:
+        await state.clear()
+        await m.answer(i18n.t("ext_stale"))
+        return
+    await state.clear()
+    try:
+        cid, operation, params, summary = _build_proposal(
+            "add_sitelinks", campaign=campaign, sitelinks=sitelinks
+        )
+    except Exception as e:  # noqa: BLE001 — валидация схемы (длина/URL/desc) → понятный ответ
+        await m.answer(i18n.t("cb_error", kind=type(e).__name__))
+        return
+    await _present_proposal(
+        m, chat_id=m.chat.id, operation=operation, params=params, summary=summary, cid=cid
+    )
+
+
+@dp.message(ExtWizard.awaiting_callouts)
+async def ext_callouts(m: Message, state: FSMContext) -> None:
+    callouts = _parse_csv_lines(m.text or "")
+    if not callouts:
+        await m.answer(
+            i18n.t("ext_bad_callouts"),
+            reply_markup=await _ext_nav_kb(state),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    data = await state.get_data()
+    campaign = (data.get("ext_campaign") or "").strip()
+    if not campaign:
+        await state.clear()
+        await m.answer(i18n.t("ext_stale"))
+        return
+    await state.clear()
+    try:
+        cid, operation, params, summary = _build_proposal(
+            "add_callouts", campaign=campaign, callouts=callouts
+        )
+    except Exception as e:  # noqa: BLE001
+        await m.answer(i18n.t("cb_error", kind=type(e).__name__))
+        return
+    await _present_proposal(
+        m, chat_id=m.chat.id, operation=operation, params=params, summary=summary, cid=cid
+    )
+
+
+@dp.message(ExtWizard.awaiting_snippet_values)
+async def ext_snippet_values(m: Message, state: FSMContext) -> None:
+    values = _parse_csv_lines(m.text or "")
+    data = await state.get_data()
+    header = (data.get("ext_header") or "").strip()
+    campaign = (data.get("ext_campaign") or "").strip()
+    if len(values) < 3:
+        await m.answer(
+            i18n.t("ext_bad_snippet_values"),
+            reply_markup=await _ext_nav_kb(state),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    if not campaign or not header:
+        await state.clear()
+        await m.answer(i18n.t("ext_stale"))
+        return
+    await state.clear()
+    try:
+        cid, operation, params, summary = _build_proposal(
+            "add_structured_snippets", campaign=campaign, header=header, values=values
+        )
+    except Exception as e:  # noqa: BLE001
+        await m.answer(i18n.t("cb_error", kind=type(e).__name__))
+        return
+    await _present_proposal(
+        m, chat_id=m.chat.id, operation=operation, params=params, summary=summary, cid=cid
+    )
+
+
+async def _ext_image_from_photo(m: Message, state: FSMContext, bot: Bot) -> None:
+    """Фото → подготовка (1.91:1) → ЧЕРНОВИК attach_image_asset (PAUSED-семантика не нужна — это
+    расширение). Бинарь во временном хранилище по media_id (НЕ в proposal). Исполнение после ✅."""
+    data = await state.get_data()
+    campaign = (data.get("ext_campaign") or "").strip()
+    if not campaign:
+        await state.clear()
+        await m.answer(i18n.t("ext_stale"))
+        return
+    try:
+        buf = io.BytesIO()
+        await bot.download(m.photo[-1], destination=buf)
+        landscape, square = await asyncio.to_thread(prepare_display_images, buf.getvalue())
+    except Exception as e:  # сеть/битый файл/не картинка
+        await m.answer(i18n.t("err_photo", err=ux.err_text(e)))
+        return
+    media_id = uuid.uuid4().hex
+    await asyncio.to_thread(save_pending_media, media_id, landscape, square)
+    await state.clear()
+    try:
+        cid, operation, params, summary = _build_proposal(
+            "attach_image_asset", campaign=campaign, media_id=media_id, name=f"img{media_id[:12]}"
+        )
+    except Exception as e:  # noqa: BLE001 — валидация схемы → понятный ответ + чистим медиа
+        await asyncio.to_thread(clear_pending_media, media_id)
+        await m.answer(i18n.t("cb_error", kind=type(e).__name__))
+        return
+    await _present_proposal(
+        m, chat_id=m.chat.id, operation=operation, params=params, summary=summary, cid=cid
+    )
+
+
+@dp.callback_query(ExtCB.filter(F.action == "show"))
+async def on_ext_show(cq: CallbackQuery, callback_data: ExtCB) -> None:
+    """Показать текущие расширения кампании с кнопками удаления (open-чтение, ничего не меняем)."""
+    chat_id = _cq_chat_id(cq)
+    camps = _CAMP_CACHE.get(chat_id)
+    if not _valid_idx(camps, callback_data.idx):
+        await cq.answer(i18n.t("camp_list_stale"), show_alert=True)
+        return
+    await cq.answer()
+    campaign_id = camps[callback_data.idx].get("id")
+    from ads.client import build_client
+    from ads.read import list_campaign_assets
+
+    try:
+        rows = await run_ads_read_call(
+            list_campaign_assets,
+            build_client(),
+            DRAFT_ACCOUNT_ID,
+            campaign_id,
+            label="list_campaign_assets",
+        )
+    except Exception as e:  # сеть/доступ/SDK
+        await _safe_edit(cq, i18n.t("ext_show_error", err=ux.err_text(e)))
+        return
+    if not rows:
+        await _safe_edit(cq, i18n.t("ext_empty"), reply_markup=ext_menu_kb(callback_data.idx))
+        return
+    _EXT_CACHE[chat_id] = rows
+    await _safe_edit(
+        cq,
+        i18n.t("ext_list_title", n=len(rows)),
+        reply_markup=ext_assets_list_kb(rows, callback_data.idx),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@dp.callback_query(ExtCB.filter(F.action == "remove"))
+async def on_ext_remove(cq: CallbackQuery, callback_data: ExtCB) -> None:
+    """Кнопка 🗑 у расширения → черновик remove_asset_link (открепить связь, confirm-гейт)."""
+    chat_id = _cq_chat_id(cq)
+    rows = _EXT_CACHE.get(chat_id)
+    if not _valid_idx(rows, callback_data.idx):
+        await cq.answer(i18n.t("ext_list_stale"), show_alert=True)
+        return
+    msg = _cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    rn = rows[callback_data.idx].link_resource_name
+    try:
+        cid, operation, params, summary = _build_proposal(
+            "remove_asset_link", link_resource_names=[rn]
+        )
+    except Exception as e:  # noqa: BLE001
+        await cq.answer(i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
+        return
+    await cq.answer()
+    await _present_proposal(
+        msg, chat_id=chat_id, operation=operation, params=params, summary=summary, cid=cid
+    )
+
+
+# ── §2B: именованные шаблоны кампаний (/savetemplate, /templates, создание из шаблона) ──
+def _parse_savetemplate_arg(arg: str) -> tuple[str, str | None]:
+    """«<имя> [from <кампания>]» → (name, source|None). Разделитель « from » — регистронезависимо,
+    по ПОСЛЕДНЕМУ вхождению (имя шаблона может содержать слово from)."""
+    idx = arg.lower().rfind(" from ")
+    if idx < 0:
+        return arg.strip(), None
+    name = arg[:idx].strip()
+    source = arg[idx + 6 :].strip()
+    return name, (source or None)
+
+
+async def _send_templates(message: Message, chat_id: int) -> None:
+    from db.templates import list_templates
+
+    rows = await list_templates(chat_id)
+    if not rows:
+        await message.answer(i18n.t("tpl_list_empty"))
+        return
+    _TPL_CACHE[chat_id] = rows
+    await message.answer(i18n.t("tpl_list_title", n=len(rows)), reply_markup=templates_kb(rows))
+
+
+@dp.message(Command("templates"))
+async def templates_cmd(m: Message) -> None:
+    await _send_templates(m, m.chat.id)
+
+
+@dp.message(Command("savetemplate"))
+async def savetemplate_cmd(m: Message, command: CommandObject) -> None:
+    """/savetemplate <имя> [from <кампания>]. Без from — из последнего черновика
+    create_search_campaign (клон/новая кампания). С from — читаем живую кампанию (как клон,
+    с ре-валидацией RSA). Шаблон хранит ВАЛИДИРОВАННЫЕ params; применение — через confirm-гейт."""
+    name, source = _parse_savetemplate_arg((command.args or "").strip())
+    if not name:
+        await m.answer(i18n.t("tpl_save_hint"))
+        return
+    from db.templates import save_template
+
+    if source:
+        from ads.client import build_client
+        from ads.read import read_campaign_config
+
+        try:
+            client = build_client()
+            cfg = await run_ads_read_call(
+                read_campaign_config, client, DRAFT_ACCOUNT_ID, source, label="read_campaign_config"
+            )
+        except Exception as e:  # сеть/доступ/SDK
+            await m.answer(i18n.t("clone_read_error", err=ux.err_text(e)))
+            return
+        if cfg is None:
+            await m.answer(i18n.t("clone_source_not_found", name=texts.esc(source)))
+            return
+        try:
+            params, _bu, _dr, _rg = await _search_params_from_cfg(cfg, campaign_name=source)
+        except _SearchBuildError as e:
+            await m.answer(i18n.t(e.key, **e.kw))
+            return
+        await save_template(chat_id=m.chat.id, name=name, params=params, source_campaign=source)
+        await m.answer(i18n.t("tpl_saved", name=texts.esc(name)), parse_mode=ParseMode.HTML)
+        return
+    last = _LAST_SEARCH_PARAMS.get(m.chat.id)
+    if not last:
+        await m.answer(i18n.t("tpl_save_none"))
+        return
+    await save_template(chat_id=m.chat.id, name=name, params=dict(last), source_campaign=None)
+    await m.answer(i18n.t("tpl_saved", name=texts.esc(name)), parse_mode=ParseMode.HTML)
+
+
+@dp.callback_query(TemplateCB.filter(F.action == "del"))
+async def on_template_del(cq: CallbackQuery, callback_data: TemplateCB) -> None:
+    chat_id = _cq_chat_id(cq)
+    rows = _TPL_CACHE.get(chat_id)
+    if not _valid_idx(rows, callback_data.idx):
+        await cq.answer(i18n.t("tpl_list_stale"), show_alert=True)
+        return
+    from db.templates import delete_template, list_templates
+
+    await delete_template(chat_id, rows[callback_data.idx].name)
+    await cq.answer(i18n.t("tpl_deleted"))
+    new_rows = await list_templates(chat_id)
+    _TPL_CACHE[chat_id] = new_rows
+    if new_rows:
+        await _safe_edit(
+            cq, i18n.t("tpl_list_title", n=len(new_rows)), reply_markup=templates_kb(new_rows)
+        )
+    else:
+        await _safe_edit(cq, i18n.t("tpl_list_empty"))
+
+
+@dp.callback_query(TemplateCB.filter(F.action == "use"))
+async def on_template_use(cq: CallbackQuery, callback_data: TemplateCB, state: FSMContext) -> None:
+    """Создание из шаблона: спрашиваем НОВОЕ имя кампании (защита от дубля), затем черновик."""
+    chat_id = _cq_chat_id(cq)
+    rows = _TPL_CACHE.get(chat_id)
+    if not _valid_idx(rows, callback_data.idx):
+        await cq.answer(i18n.t("tpl_list_stale"), show_alert=True)
+        return
+    msg = _cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    name = rows[callback_data.idx].name
+    await state.clear()
+    await state.set_state(TplWizard.awaiting_name)
+    await state.update_data(tpl_name=name)
+    await cq.answer()
+    await msg.answer(
+        i18n.t("tpl_ask_name", tpl=texts.esc(name)),
+        reply_markup=nav_kb(),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@dp.message(TplWizard.awaiting_name)
+async def tpl_name(m: Message, state: FSMContext) -> None:
+    """Имя новой кампании получено → подставляем в params шаблона, ре-валидируем, черновик
+    create_search_campaign (тот же confirm-гейт). Дубль имени → стоп. Шаблон гейт НЕ обходит."""
+    new_name = (m.text or "").strip()
+    if not new_name:
+        await m.answer(i18n.t("tpl_name_empty"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML)
+        return  # остаёмся в состоянии (retry с навигацией)
+    data = await state.get_data()
+    tpl_key = (data.get("tpl_name") or "").strip()
+    from db.templates import get_template
+
+    tpl = await get_template(m.chat.id, tpl_key) if tpl_key else None
+    if tpl is None:
+        await state.clear()
+        await m.answer(i18n.t("tpl_not_found"))
+        return
+    await state.clear()
+    from ads.client import build_client
+    from ads.resolve import find_campaign_by_name
+
+    try:
+        existing = await run_ads_read_call(
+            find_campaign_by_name,
+            build_client(),
+            DRAFT_ACCOUNT_ID,
+            new_name,
+            label="find_campaign_by_name",
+        )
+    except Exception:  # noqa: BLE001 — дубль-проверка best-effort
+        existing = None
+    if existing is not None:
+        await m.answer(i18n.t("clone_name_taken", name=texts.esc(new_name)))
+        return
+    params = dict(tpl.params)
+    params["campaign_name"] = new_name
+    try:  # ре-валидация (схема могла измениться с момента сохранения)
+        validated: dict = SCHEMAS["create_search_campaign"](**params).model_dump()
+    except Exception as e:
+        await m.answer(i18n.t("err_validate", err=e))
+        return
+    budget_units = validated["budget_daily_micros"] / 1_000_000
+    summary = texts.fmt_search_proposal_summary(
+        new_name,
+        validated["final_url"],
+        budget_units,
+        validated["headlines"],
+        validated["descriptions"],
+        validated["keywords"],
+        validated["match_type"],
+    )
+    p = Proposal(
+        operation="create_search_campaign", summary=summary, params=validated, chat_id=m.chat.id
+    )
+    await _present_proposal(
+        m,
+        chat_id=m.chat.id,
+        operation="create_search_campaign",
+        params=validated,
+        summary=summary,
+        cid=p.confirmation_id,
+    )
+
+
+# ── §2C: авто-память — /recent (повторить недавнее применённое действие) ────────────
+async def _send_recent(message: Message, chat_id: int) -> None:
+    from db.history import list_recent_applied
+
+    rows = await list_recent_applied(chat_id, limit=5)
+    if not rows:
+        await message.answer(i18n.t("recent_empty"))
+        return
+    _RECENT_CACHE[chat_id] = rows
+    lines = []
+    for i, a in enumerate(rows):
+        label = texts.fmt_mutation_summary(a.operation, a.params) or a.summary or a.operation
+        lines.append(f"{i + 1}. {texts.esc(label.splitlines()[0][:120])}")
+    body = i18n.t("recent_title") + "\n\n" + "\n".join(lines)
+    await message.answer(body, reply_markup=recent_kb(rows), parse_mode=ParseMode.HTML)
+
+
+@dp.message(Command("recent"))
+async def recent_cmd(m: Message) -> None:
+    await _send_recent(m, m.chat.id)
+
+
+@dp.callback_query(RecentCB.filter(F.action == "repeat"))
+async def on_recent_repeat(cq: CallbackQuery, callback_data: RecentCB) -> None:
+    """Повтор недавнего действия: пере-собираем ТЕ ЖЕ params → ре-валидация схемой → confirm-гейт
+    (пользователь снова видит «было→станет»). Гейт НЕ обходится. Неподдержанную/невалидную
+    операцию честно отклоняем."""
+    chat_id = _cq_chat_id(cq)
+    rows = _RECENT_CACHE.get(chat_id)
+    if not _valid_idx(rows, callback_data.idx):
+        await cq.answer(i18n.t("recent_stale"), show_alert=True)
+        return
+    msg = _cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    action = rows[callback_data.idx]
+    op = action.operation
+    if op not in SCHEMAS:
+        await cq.answer(i18n.t("recent_unsupported"), show_alert=True)
+        return
+    try:  # ре-валидация (схема могла измениться) + нормализация
+        validated: dict = SCHEMAS[op](**action.params).model_dump()
+    except Exception:  # noqa: BLE001 — параметры устарели/не валидны → понятный отказ
+        await cq.answer(i18n.t("recent_unsupported"), show_alert=True)
+        return
+    # summary-фолбэк = сохранённый текст (для create_*, у которых fmt_mutation_summary == "").
+    fallback = action.summary or op
+    p = Proposal(operation=op, summary=fallback, params=validated, chat_id=chat_id)
+    await cq.answer()
+    await _present_proposal(
+        msg,
+        chat_id=chat_id,
+        operation=op,
+        params=validated,
+        summary=fallback,
+        cid=p.confirmation_id,
+    )
+
+
+class _SearchBuildError(Exception):
+    """Жёсткий отказ сборки create_search_campaign из конфига источника — несёт i18n-ключ (+kw)
+    для понятного ответа пользователю. Перехватывается вызывающим (clone / шаблон-из-кампании)."""
+
+    def __init__(self, key: str, **kw):
+        super().__init__(key)
+        self.key = key
+        self.kw = kw
+
+
+async def _search_params_from_cfg(
+    cfg,
+    *,
+    campaign_name: str,
+    budget_units: float | None = None,
+    final_url: str | None = None,
+) -> tuple[dict, float, int, bool]:
+    """Из CampaignConfig источника собрать ВАЛИДИРОВАННЫЕ params create_search_campaign под новым
+    именем (общая логика клона §2A и шаблона-из-кампании §2B). Берём ad_group[0] (схема делает одну
+    группу — ограничение v1). RSA-длины считает КОД (кириллица=1): длинные отбрасываем, при нехватке
+    регенерируем. Возвращает (validated_params, budget_units, dropped_texts, regenerated). Жёсткие
+    отказы → _SearchBuildError(key)."""
+    if cfg.channel_type != "SEARCH":
+        raise _SearchBuildError("clone_not_search", name=texts.esc(cfg.name))
+    if not cfg.ad_groups:
+        raise _SearchBuildError("clone_empty", name=texts.esc(cfg.name))
+    ag = cfg.ad_groups[0]
+    url = (final_url or ag.final_url or "").strip()
+    if not url:
+        raise _SearchBuildError("clone_no_url", name=texts.esc(cfg.name))
+    budget = budget_units or (cfg.budget_micros / 1_000_000)
+    if not budget or budget <= 0:
+        raise _SearchBuildError("clone_no_budget")
+
+    headlines = [h for h in ag.headlines if rsa_validate(h, "headline")[0]]
+    descriptions = [d for d in ag.descriptions if rsa_validate(d, "description")[0]]
+    dropped = (len(ag.headlines) - len(headlines)) + (len(ag.descriptions) - len(descriptions))
+    regenerated = False
+    if len(headlines) < RSA_MIN_HEADLINES or len(descriptions) < RSA_MIN_DESCRIPTIONS:
+        try:
+            draft = await _generate_rsa(
+                CopyBrief(topic=campaign_name, n_headlines=15, n_descriptions=4)
+            )
+        except Exception as e:  # LLM/сеть
+            raise _SearchBuildError("err_text_gen", err=ux.err_text(e)) from e
+        headlines = list(draft.headlines or [])[:RSA_MAX_HEADLINES]
+        descriptions = list(draft.descriptions or [])[:RSA_MAX_DESCRIPTIONS]
+        regenerated = True
+        if len(headlines) < RSA_MIN_HEADLINES or len(descriptions) < RSA_MIN_DESCRIPTIONS:
+            raise _SearchBuildError("search_gen_empty")
+    else:
+        headlines = headlines[:RSA_MAX_HEADLINES]
+        descriptions = descriptions[:RSA_MAX_DESCRIPTIONS]
+
+    params = {
+        "campaign_name": campaign_name,
+        "final_url": url,
+        "headlines": headlines,
+        "descriptions": descriptions,
+        "budget_daily_micros": int(round(budget * 1_000_000)),
+        "keywords": [k.text for k in ag.keywords][:50],
+        "match_type": ag.keywords[0].match_type if ag.keywords else "phrase",
+        "cpc_bid_micros": ag.cpc_bid_micros or 500_000,
+    }
+    try:  # defense-in-depth: схема ещё раз проверит длины/составы/URL/бюджет + нормализует ключи
+        validated: dict = SCHEMAS["create_search_campaign"](**params).model_dump()
+    except Exception as e:
+        raise _SearchBuildError("err_validate", err=e) from e
+    return validated, float(budget), dropped, regenerated
+
+
+async def _clone_from_intent(m: Message, brief: dict) -> None:
+    """«сделай кампанию N с настройками как в кампании X» → читаем живой конфиг источника и
+    собираем ЧЕРНОВИК create_search_campaign (PAUSED, тот же confirm-гейт, что /newsearch). Гео/
+    минус-слова/стратегия/аудитории НЕ переносятся (честно в сводке). Источник не найден /
+    имя-дубль → понятный стоп БЕЗ черновика. Сборку params (включая RSA-валидацию) делает общий
+    _search_params_from_cfg."""
+    new_name = (brief.get("new_name") or "").strip()
+    source = (brief.get("source_campaign") or "").strip()
+    if not new_name or not source:
+        await m.answer(i18n.t("clone_bad_args"))
+        return
+    from ads.client import build_client
+    from ads.read import read_campaign_config
+    from ads.resolve import find_campaign_by_name
+
+    try:
+        client = build_client()
+        cfg = await run_ads_read_call(
+            read_campaign_config, client, DRAFT_ACCOUNT_ID, source, label="read_campaign_config"
+        )
+    except Exception as e:  # сеть/доступ/SDK
+        await m.answer(i18n.t("clone_read_error", err=ux.err_text(e)))
+        return
+    if cfg is None:
+        await m.answer(i18n.t("clone_source_not_found", name=texts.esc(source)))
+        return
+    # Имя-дубль ломает резолв по имени (find_campaign_by_name LIMIT 1) → стоп ДО показа черновика.
+    try:
+        existing = await run_ads_read_call(
+            find_campaign_by_name, client, DRAFT_ACCOUNT_ID, new_name, label="find_campaign_by_name"
+        )
+    except Exception:  # noqa: BLE001 — дубль-проверка best-effort, не роняем клон из-за сбоя read
+        existing = None
+    if existing is not None:
+        await m.answer(i18n.t("clone_name_taken", name=texts.esc(new_name)))
+        return
+
+    try:
+        validated, budget_units, dropped, regenerated = await _search_params_from_cfg(
+            cfg,
+            campaign_name=new_name,
+            budget_units=brief.get("budget_daily_units"),
+            final_url=brief.get("final_url"),
+        )
+    except _SearchBuildError as e:
+        await m.answer(i18n.t(e.key, **e.kw))
+        return
+    params = validated
+    summary = texts.fmt_clone_proposal_summary(
+        new_name, source, budget_units, validated, dropped, regenerated
+    )
+    p = Proposal(
+        operation="create_search_campaign", summary=summary, params=params, chat_id=m.chat.id
+    )
+    await _present_proposal(
+        m,
+        chat_id=m.chat.id,
+        operation="create_search_campaign",
+        params=params,
+        summary=summary,
+        cid=p.confirmation_id,
+    )
+
+
 # ── Свободный текст → агент ───────────────────────────────────────────────────────
-@dp.message(F.text)
-async def on_text(m: Message, state: FSMContext) -> None:
-    async with ux.typing_action(m):  # «печатает…» пока модель парсит команду
-        res = await handle_command(m.text or "", chat_id=m.chat.id)
+# ── ingest: приём файла → чтение → задача (бриф/ключи/данные для агента) ─────────────
+@dp.message(F.document)
+async def on_document(m: Message, state: FSMContext, bot: Bot) -> None:
+    """Файл (txt/csv/json/.docx/.xlsx) → текст. С подписью — сразу задача; без подписи — спросим
+    задачу (контент в _PENDING_CONTEXT). Это ДАННЫЕ для агента; мутации — за confirm-гейтом."""
+    doc = m.document
+    if doc is None:
+        return
+    if (doc.file_size or 0) > ingest.MAX_FILE_BYTES:
+        await m.answer(i18n.t("ingest_too_big", mb=ingest.MAX_FILE_BYTES // 1_000_000))
+        return
+    try:
+        buf = io.BytesIO()
+        await bot.download(doc, destination=buf)
+        text = await asyncio.to_thread(
+            ingest.extract_file_text, doc.file_name or "", buf.getvalue()
+        )
+    except ingest.IngestError as e:
+        await m.answer(
+            i18n.t("ingest_file_failed", err=texts.esc(str(e))), parse_mode=ParseMode.HTML
+        )
+        return
+    except Exception as e:  # сеть/скачивание
+        await m.answer(
+            i18n.t("ingest_file_failed", err=texts.esc(type(e).__name__)), parse_mode=ParseMode.HTML
+        )
+        return
+    source = doc.file_name or "файл"
+    caption = (m.caption or "").strip()
+    await state.clear()
+    if caption:
+        await _run_task_with_context(
+            m, instruction=caption, context_text=text, source=source, state=state
+        )
+        return
+    _PENDING_CONTEXT[m.chat.id] = {"text": text, "source": source}
+    await state.set_state(IngestWizard.awaiting_task)
+    await m.answer(
+        i18n.t("ingest_ask_task", source=texts.esc(source)),
+        reply_markup=nav_kb(),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@dp.message(IngestWizard.awaiting_task)
+async def ingest_task(m: Message, state: FSMContext) -> None:
+    """Задача к ранее принятому файлу получена → агент с контентом как СПРАВОЧНЫМ КОНТЕКСТОМ."""
+    ctx = _PENDING_CONTEXT.get(m.chat.id)
+    if not ctx:
+        await state.clear()
+        await m.answer(i18n.t("ingest_stale"))
+        return
+    instruction = (m.text or "").strip()
+    if not instruction:
+        await m.answer(
+            i18n.t("ingest_empty_task"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML
+        )
+        return  # остаёмся в состоянии (retry с навигацией)
+    _PENDING_CONTEXT.pop(m.chat.id, None)
+    await state.clear()
+    await _run_task_with_context(
+        m,
+        instruction=instruction,
+        context_text=ctx["text"],
+        source=ctx.get("source", ""),
+        state=state,
+    )
+
+
+async def _dispatch_command_result(m: Message, res: dict, state: FSMContext) -> None:
+    """Единый роутинг исхода handle_command (используют on_text, ingest-флоу файла/ссылки)."""
     t = res.get("type")
     if t == "proposal":
         await _present_proposal(
@@ -1797,6 +2638,8 @@ async def on_text(m: Message, state: FSMContext) -> None:
         await _rsa_start_from_intent(m, res.get("brief", {}), state)
     elif t == "keywords_intent":
         await _kw_start_from_intent(m, res.get("brief", {}), state)
+    elif t == "clone_intent":
+        await _clone_from_intent(m, res.get("brief", {}))
     elif t == "clarify":
         await m.answer("❓ " + res["question"])
     elif t == "read":
@@ -1811,6 +2654,42 @@ async def on_text(m: Message, state: FSMContext) -> None:
         )
     else:
         await m.answer(res.get("text", "(пусто)"))
+
+
+async def _run_task_with_context(
+    m: Message, *, instruction: str, context_text: str, source: str, state: FSMContext
+) -> None:
+    """Задача + СПРАВОЧНЫЙ КОНТЕНТ (из файла/ссылки) → агент → роутинг исхода (как on_text).
+    Мутации всё равно за confirm-гейтом — контент это данные, не команды."""
+    async with ux.typing_action(m):
+        res = await handle_command(instruction, chat_id=m.chat.id, context_text=context_text)
+    await m.answer(i18n.t("ingest_used", source=texts.esc(source)), parse_mode=ParseMode.HTML)
+    await _dispatch_command_result(m, res, state)
+
+
+@dp.message(F.text)
+async def on_text(m: Message, state: FSMContext) -> None:
+    text = m.text or ""
+    # ingest: если в сообщении есть ссылка — прочитаем её и передадим агенту как СПРАВОЧНЫЙ КОНТЕНТ
+    # (best-effort: сбой чтения не ломает обычную команду). FSM-визарды сюда не попадают (свой стейт).
+    urls = ingest.extract_urls(text)
+    if urls:
+        try:
+            async with ux.typing_action(m):
+                content = await ingest.fetch_url_text(urls[0])
+        except ingest.IngestError as e:
+            await m.answer(
+                i18n.t("ingest_link_failed", err=texts.esc(str(e))), parse_mode=ParseMode.HTML
+            )
+            content = ""
+        if content:
+            await _run_task_with_context(
+                m, instruction=text, context_text=content, source=urls[0], state=state
+            )
+            return
+    async with ux.typing_action(m):  # «печатает…» пока модель парсит команду
+        res = await handle_command(text, chat_id=m.chat.id)
+    await _dispatch_command_result(m, res, state)
 
 
 # ── Inline: выбор кампании и быстрые действия ─────────────────────────────────────
@@ -2041,7 +2920,13 @@ async def _do_confirm(cq: CallbackQuery, cid: str) -> None:
         # §15: человекочитаемая ошибка Google Ads (сообщения+коды+request_id) вместо «GoogleAdsException».
         # humanize_google_ads_error сам редактирует секреты (golden rule #5) — кладём в audit И юзеру.
         human = humanize_google_ads_error(e)
-        await STORE.record_failure(cid, error=human)
+        # record_failure в своём try: если БД недоступна, audit-строку не записали, но пользователю
+        # ВСЁ РАВНО сообщим о провале (иначе он навсегда остался бы с «executing…», а исключение
+        # ушло бы в глобальный errors-хендлер). Полнота уведомления важнее полноты audit при сбое БД.
+        try:
+            await STORE.record_failure(cid, error=human)
+        except Exception:  # noqa: BLE001 — БД недоступна; логируем и продолжаем к ответу юзеру
+            log.exception("record_failure не записан cid=%s (БД недоступна?)", cid)
         await _safe_edit(
             cq,
             i18n.t("failed", kind=type(e).__name__, err=texts.esc(human)),
@@ -2099,7 +2984,11 @@ async def _rsa_edit_overview(cq: CallbackQuery, session) -> None:
 @dp.callback_query(RsaCB.filter(F.action == "approve"))
 async def rsa_approve(cq: CallbackQuery, callback_data: RsaCB) -> None:
     session = await SESSIONS.set_state(
-        callback_data.cid, callback_data.kind, callback_data.idx, "approved"
+        callback_data.cid,
+        callback_data.kind,
+        callback_data.idx,
+        "approved",
+        expected_chat_id=_cq_chat_id(cq),  # гард владения: только своя сессия курации
     )
     if session is None:
         await cq.answer(i18n.t("rsa_session_stale"), show_alert=True)
@@ -2111,7 +3000,11 @@ async def rsa_approve(cq: CallbackQuery, callback_data: RsaCB) -> None:
 @dp.callback_query(RsaCB.filter(F.action == "reject"))
 async def rsa_reject(cq: CallbackQuery, callback_data: RsaCB) -> None:
     session = await SESSIONS.set_state(
-        callback_data.cid, callback_data.kind, callback_data.idx, "rejected"
+        callback_data.cid,
+        callback_data.kind,
+        callback_data.idx,
+        "rejected",
+        expected_chat_id=_cq_chat_id(cq),  # гард владения
     )
     if session is None:
         await cq.answer(i18n.t("rsa_session_stale"), show_alert=True)
@@ -2122,7 +3015,7 @@ async def rsa_reject(cq: CallbackQuery, callback_data: RsaCB) -> None:
 
 @dp.callback_query(RsaCB.filter(F.action == "approveall"))
 async def rsa_approveall(cq: CallbackQuery, callback_data: RsaCB) -> None:
-    session = await SESSIONS.approve_all_valid(callback_data.cid)
+    session = await SESSIONS.approve_all_valid(callback_data.cid, expected_chat_id=_cq_chat_id(cq))
     if session is None:
         await cq.answer(i18n.t("rsa_session_stale"), show_alert=True)
         return
@@ -2132,7 +3025,7 @@ async def rsa_approveall(cq: CallbackQuery, callback_data: RsaCB) -> None:
 
 @dp.callback_query(RsaCB.filter(F.action == "review"))
 async def rsa_review(cq: CallbackQuery, callback_data: RsaCB) -> None:
-    session = await SESSIONS.get(callback_data.cid)
+    session = await SESSIONS.get(callback_data.cid, expected_chat_id=_cq_chat_id(cq))
     if session is None:
         await cq.answer(i18n.t("rsa_session_stale"), show_alert=True)
         return
@@ -2142,7 +3035,7 @@ async def rsa_review(cq: CallbackQuery, callback_data: RsaCB) -> None:
 
 @dp.callback_query(RsaCB.filter(F.action == "overview"))
 async def rsa_to_overview(cq: CallbackQuery, callback_data: RsaCB) -> None:
-    session = await SESSIONS.get(callback_data.cid)
+    session = await SESSIONS.get(callback_data.cid, expected_chat_id=_cq_chat_id(cq))
     if session is None:
         await cq.answer(i18n.t("rsa_session_stale"), show_alert=True)
         return
@@ -2152,7 +3045,7 @@ async def rsa_to_overview(cq: CallbackQuery, callback_data: RsaCB) -> None:
 
 @dp.callback_query(RsaCB.filter(F.action == "refine"))
 async def rsa_refine(cq: CallbackQuery, callback_data: RsaCB, state: FSMContext) -> None:
-    session = await SESSIONS.get(callback_data.cid)
+    session = await SESSIONS.get(callback_data.cid, expected_chat_id=_cq_chat_id(cq))
     if session is None:
         await cq.answer(i18n.t("rsa_session_stale"), show_alert=True)
         return
@@ -2166,7 +3059,7 @@ async def rsa_refine(cq: CallbackQuery, callback_data: RsaCB, state: FSMContext)
 
 @dp.callback_query(RsaCB.filter(F.action == "finalize"))
 async def rsa_finalize(cq: CallbackQuery, callback_data: RsaCB) -> None:
-    session = await SESSIONS.get(callback_data.cid)
+    session = await SESSIONS.get(callback_data.cid, expected_chat_id=_cq_chat_id(cq))
     if session is None:
         await cq.answer(i18n.t("rsa_session_stale"), show_alert=True)
         return
@@ -2317,7 +3210,14 @@ async def main() -> None:
         await dp.start_polling(bot)
     finally:
         if sched is not None:
-            sched.shutdown(wait=False)  # остановить плановые задачи (read-only, без потери денег)
+            # wait=True: ДОЖИДАЕМСЯ завершения работающих джоб (они read-only и ограничены
+            # ADS_TIMEOUT_S — ждать безопасно и недолго), чтобы SIGTERM не оборвал джобу на полу-
+            # записи в БД (недописанный audit / висящие row-locks на Postgres). try/except — чтобы
+            # зависший shutdown не заблокировал освобождение остальных ресурсов.
+            try:
+                sched.shutdown(wait=True)
+            except Exception as e:  # noqa: BLE001 — выключение не должно ронять teardown
+                log.warning("scheduler.shutdown(wait=True) сбой: %s", type(e).__name__)
         await (
             dispose_engine()
         )  # закрыть пул соединений БД (иначе на остановке висят коннекты asyncpg)

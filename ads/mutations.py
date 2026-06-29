@@ -21,8 +21,11 @@ from adcopy.validate import (
     RSA_MAX_HEADLINES,
     RSA_MIN_DESCRIPTIONS,
     RSA_MIN_HEADLINES,
+    STRUCTURED_SNIPPET_HEADERS,
+    assert_asset_len,
 )
 from adcopy.validate import validate as _rsa_validate
+from ads import extensions
 from ads.client import ensure_allowed
 from ads.resolve import gaql_escape  # единый GAQL-эскейп для literal-WHERE (defense-in-depth)
 from ads.validation import assert_keyword_ok, normalize_keywords
@@ -413,6 +416,169 @@ def _attach_audience_via_sdk(client, customer_id, campaign_id, audience_resource
         "count": len(resp.results),
         "applied": True,
     }
+
+
+# ── §3-assets: текстовые расширения (sitelinks/callouts/structured snippets) ─────────
+# Валидация состава/длины В КОДЕ ДО claim (зеркалит agent.tools.schemas — два независимых гейта).
+def _validate_sitelinks(sitelinks: list[dict]) -> None:
+    if not 1 <= len(sitelinks) <= 20:
+        raise ValueError("sitelinks: 1–20 ссылок")
+    for s in sitelinks:
+        assert_asset_len(s.get("link_text", ""), "sitelink_text")
+        url = str(s.get("final_url", ""))
+        if not url.startswith(("http://", "https://")):
+            raise ValueError(f"sitelink final_url должен быть http/https: {url}")
+        if s.get("description1"):
+            assert_asset_len(s["description1"], "sitelink_desc")
+        if s.get("description2"):
+            assert_asset_len(s["description2"], "sitelink_desc")
+            if not s.get("description1"):
+                raise ValueError("description2 нельзя без description1")
+
+
+def _validate_callouts(callouts: list[str]) -> None:
+    if not 1 <= len(callouts) <= 20:
+        raise ValueError("callouts: 1–20 фраз")
+    for t in callouts:
+        assert_asset_len(t, "callout")
+
+
+def _validate_snippets(header: str, values: list[str]) -> None:
+    if header not in STRUCTURED_SNIPPET_HEADERS:
+        raise ValueError(f"header не из канонического списка Google: {header}")
+    if not 3 <= len(values) <= 10:
+        raise ValueError("structured snippet: 3–10 значений")
+    for t in values:
+        assert_asset_len(t, "snippet_value")
+
+
+def _validate_link_rns(link_resource_names: list[str]) -> None:
+    if not link_resource_names:
+        raise ValueError("не указаны связи для открепления")
+    for rn in link_resource_names:
+        if "/campaignAssets/" not in str(rn):
+            raise ValueError(f"ожидался campaign_asset resource_name: {rn}")
+
+
+async def apply_add_sitelinks(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    sitelinks: list[dict],
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """Добавить sitelinks в кампанию (create-asset → campaign_asset SITELINK). НЕ деньги →
+    user_initiated не требуем (как attach_audience/keywords). Цепочка create+link НЕ идемпотентна
+    → asyncio.to_thread (защита от дублей — claim one-shot, не ретрай)."""
+    ensure_allowed(customer_id)  # гейт 1 — замок аккаунта
+    _validate_sitelinks(sitelinks)  # ДО claim
+    await _require_confirmation(confirm_store, confirmation_id, "add_sitelinks")  # гейт 2
+    result = await asyncio.to_thread(
+        extensions._add_sitelinks_via_sdk, ads_client, customer_id, campaign_id, list(sitelinks)
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+async def apply_add_callouts(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    callouts: list[str],
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """Добавить callouts (уточнения) в кампанию. НЕ деньги. create+link через to_thread."""
+    ensure_allowed(customer_id)
+    _validate_callouts(callouts)
+    await _require_confirmation(confirm_store, confirmation_id, "add_callouts")
+    result = await asyncio.to_thread(
+        extensions._add_callouts_via_sdk, ads_client, customer_id, campaign_id, list(callouts)
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+async def apply_add_structured_snippets(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    header: str,
+    values: list[str],
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """Добавить структурное описание (header + values) в кампанию. НЕ деньги. create+link через to_thread."""
+    ensure_allowed(customer_id)
+    _validate_snippets(header, values)
+    await _require_confirmation(confirm_store, confirmation_id, "add_structured_snippets")
+    result = await asyncio.to_thread(
+        extensions._add_structured_snippets_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_id,
+        header,
+        list(values),
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+async def apply_attach_image_asset(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    image_bytes: bytes,
+    name: str,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """Прикрепить изображение-ассет к кампании (create image asset → campaign_asset MARKETING_IMAGE).
+    НЕ деньги. Бинарь приходит из временного хранилища (service грузит по media_id). create+link
+    через to_thread (НЕ идемпотентна — защита от дублей claim one-shot)."""
+    ensure_allowed(customer_id)  # гейт 1 — замок аккаунта
+    if not image_bytes:
+        raise ValueError("пустое изображение")
+    if not (name or "").strip():
+        raise ValueError("пустое имя ассета")
+    await _require_confirmation(confirm_store, confirmation_id, "attach_image_asset")  # гейт 2
+    result = await asyncio.to_thread(
+        extensions._attach_image_asset_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_id,
+        image_bytes,
+        name,
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+async def apply_remove_asset_link(
+    *,
+    customer_id: str,
+    link_resource_names: list[str],
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """Открепить ассет(ы) от кампании (удаляется СВЯЗЬ campaign_asset, не сам ассет). НЕ деньги."""
+    ensure_allowed(customer_id)
+    _validate_link_rns(link_resource_names)
+    await _require_confirmation(confirm_store, confirmation_id, "remove_asset_link")
+    result = await asyncio.to_thread(
+        extensions._remove_campaign_assets_via_sdk,
+        ads_client,
+        customer_id,
+        list(link_resource_names),
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
 
 
 # ── Смена стратегии назначения ставок кампании (§3; ДЕНЬГИ → user_initiated) ──────

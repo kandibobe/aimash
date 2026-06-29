@@ -214,7 +214,7 @@ CATALOG: dict[str, dict[str, str]] = {
     # — confirm-гейт / статусы —
     "proposal_pending": {
         "ru": texts.PROPOSAL_PENDING,
-        "en": "📝 <b>Change draft</b>\n\n{summary}\n\nConfirm?",
+        "en": "📝 <b>Change draft</b>\n\n{summary}\n\nConfirm? <i>(draft valid for 24h)</i>",
     },
     "proposal_long_header": {
         "ru": (
@@ -368,6 +368,192 @@ CATALOG: dict[str, dict[str, str]] = {
             "Budget is a number in the account currency (0 &lt; budget ≤ 1 000 000). Send again."
         ),
     },
+    # — §2A: клон кампании «как в X» —
+    "clone_bad_args": {
+        "ru": "Нужны имя новой кампании и образец: «сделай кампанию N как в кампании X».",
+        "en": "I need the new name and a source: “create campaign N like campaign X”.",
+    },
+    "clone_read_error": {
+        "ru": "Не удалось прочитать кампанию-образец: {err}",
+        "en": "Couldn't read the source campaign: {err}",
+    },
+    "clone_source_not_found": {
+        "ru": "Кампания-образец «{name}» не найдена в аккаунте.",
+        "en": "Source campaign “{name}” not found in the account.",
+    },
+    "clone_not_search": {
+        "ru": "Клонирование поддержано только для ПОИСКОВЫХ кампаний, а «{name}» — другого типа.",
+        "en": "Cloning is supported only for SEARCH campaigns; “{name}” is a different type.",
+    },
+    "clone_empty": {
+        "ru": "У кампании «{name}» нет групп/текстов для клонирования.",
+        "en": "Campaign “{name}” has no ad groups/copy to clone.",
+    },
+    "clone_no_url": {
+        "ru": "У образца «{name}» не нашёлся финальный URL — укажи его в команде.",
+        "en": "Source “{name}” has no final URL — specify one in the command.",
+    },
+    "clone_no_budget": {
+        "ru": "Не удалось определить бюджет образца — укажи дневной бюджет в команде.",
+        "en": "Couldn't determine the source budget — specify a daily budget in the command.",
+    },
+    "clone_name_taken": {
+        "ru": "Кампания «{name}» уже существует — выбери другое имя для новой.",
+        "en": "Campaign “{name}” already exists — choose a different name for the new one.",
+    },
+    # — ingest: чтение файлов и ссылок → задача агенту —
+    "ingest_used": {
+        "ru": "📎 Прочитал «{source}» — использую как контекст для задачи.",
+        "en": "📎 Read “{source}” — using it as context for the task.",
+    },
+    "ingest_ask_task": {
+        "ru": "📄 Файл «{source}» прочитан. Что с ним сделать? Напиши задачу одним сообщением "
+        "(например: «сделай поисковую кампанию по этому брифу» или «подбери ключи»).",
+        "en": "📄 File “{source}” read. What should I do with it? Send the task in one message "
+        "(e.g. “make a search campaign from this brief” or “research keywords”).",
+    },
+    "ingest_empty_task": {
+        "ru": "Напиши, что сделать с файлом, одним сообщением.",
+        "en": "Send what to do with the file in a single message.",
+    },
+    "ingest_stale": {
+        "ru": "Контент файла устарел — пришли файл заново.",
+        "en": "The file content expired — send the file again.",
+    },
+    "ingest_too_big": {
+        "ru": "Файл слишком большой (> {mb} МБ). Пришли поменьше или пришли текст.",
+        "en": "File too large (> {mb} MB). Send a smaller one or paste text.",
+    },
+    "ingest_file_failed": {
+        "ru": "Не удалось прочитать файл: {err}",
+        "en": "Couldn't read the file: {err}",
+    },
+    "ingest_link_failed": {
+        "ru": "Не смог прочитать ссылку: {err}. Выполняю задачу без её содержимого.",
+        "en": "Couldn't read the link: {err}. Proceeding without its content.",
+    },
+    # — §3-assets: ассеты-расширения кампании —
+    "ext_menu_pick": {
+        "ru": "🧩 Расширения кампании «{camp}». Что добавить или показать?",
+        "en": "🧩 Extensions for campaign “{camp}”. What to add or show?",
+    },
+    "ext_ask_sitelinks": {
+        "ru": "Пришли быстрые ссылки построчно: <code>Текст | https://url [| описание1 [| описание2]]</code>.\n"
+        "Текст ссылки ≤25, описания ≤35 симв.",
+        "en": "Send sitelinks line by line: <code>Text | https://url [| description1 [| description2]]</code>.\n"
+        "Link text ≤25, descriptions ≤35 chars.",
+    },
+    "ext_bad_sitelinks": {
+        "ru": "Не разобрал ни одной ссылки. Формат построчно: <code>Текст | https://url</code>.",
+        "en": "Couldn't parse any sitelink. Per line: <code>Text | https://url</code>.",
+    },
+    "ext_ask_callouts": {
+        "ru": "Пришли уточнения через запятую (каждое ≤25 симв.), например: "
+        "<code>Бесплатная доставка, Гарантия 2 года, Поддержка 24/7</code>.",
+        "en": "Send callouts comma-separated (each ≤25 chars), e.g.: "
+        "<code>Free shipping, 2-year warranty, 24/7 support</code>.",
+    },
+    "ext_bad_callouts": {
+        "ru": "Не вижу уточнений. Пришли через запятую, например: <code>Гарантия, Доставка</code>.",
+        "en": "No callouts found. Send them comma-separated, e.g.: <code>Warranty, Delivery</code>.",
+    },
+    "ext_ask_snippet_header": {
+        "ru": "📑 Структурное описание для «{camp}». Выбери заголовок:",
+        "en": "📑 Structured snippet for “{camp}”. Choose a header:",
+    },
+    "ext_ask_snippet_values": {
+        "ru": "Заголовок «{header}». Пришли 3–10 значений через запятую (каждое ≤25 симв.).",
+        "en": "Header “{header}”. Send 3–10 values comma-separated (each ≤25 chars).",
+    },
+    "ext_bad_snippet_values": {
+        "ru": "Нужно минимум 3 значения через запятую (каждое ≤25 симв.).",
+        "en": "Need at least 3 values, comma-separated (each ≤25 chars).",
+    },
+    "ext_ask_image": {
+        "ru": "🖼 Пришли фото — добавлю его изображением-ассетом в кампанию (обрежу до 1.91:1).",
+        "en": "🖼 Send a photo — I'll add it as an image asset to the campaign (cropped to 1.91:1).",
+    },
+    "ext_stale": {
+        "ru": "Сессия расширений устарела — открой меню кампании в /campaigns заново.",
+        "en": "The extensions session expired — reopen the campaign menu via /campaigns.",
+    },
+    "ext_empty": {
+        "ru": "У кампании пока нет расширений. Добавь их из этого меню.",
+        "en": "The campaign has no extensions yet. Add some from this menu.",
+    },
+    "ext_list_title": {
+        "ru": "🧩 Текущие расширения ({n}). 🗑 — открепить (с подтверждением):",
+        "en": "🧩 Current extensions ({n}). 🗑 — detach (with confirmation):",
+    },
+    "ext_list_stale": {
+        "ru": "Список расширений устарел — открой «Показать текущие» заново.",
+        "en": "The extensions list is outdated — open “Show current” again.",
+    },
+    "ext_show_error": {
+        "ru": "Не удалось получить расширения: {err}",
+        "en": "Couldn't fetch extensions: {err}",
+    },
+    # — §2B: именованные шаблоны кампаний —
+    "tpl_list_empty": {
+        "ru": "📋 Шаблонов пока нет. Создай кампанию (/newsearch или клон) и сохрани: "
+        "<code>/savetemplate имя</code>, либо <code>/savetemplate имя from Кампания</code>.",
+        "en": "📋 No templates yet. Create a campaign (/newsearch or clone) and save it: "
+        "<code>/savetemplate name</code>, or <code>/savetemplate name from Campaign</code>.",
+    },
+    "tpl_list_title": {
+        "ru": "📋 Шаблоны кампаний ({n}). «использовать» создаст кампанию по шаблону (с подтверждением).",
+        "en": "📋 Campaign templates ({n}). “use” creates a campaign from a template (with confirmation).",
+    },
+    "tpl_save_hint": {
+        "ru": "Укажи имя: <code>/savetemplate имя</code> (из последней созданной кампании) "
+        "или <code>/savetemplate имя from Название кампании</code> (из живой кампании).",
+        "en": "Specify a name: <code>/savetemplate name</code> (from the last created campaign) "
+        "or <code>/savetemplate name from Campaign name</code> (from a live campaign).",
+    },
+    "tpl_save_none": {
+        "ru": "Нет недавнего черновика кампании для сохранения. Сначала /newsearch или клонируй "
+        "кампанию, либо используй <code>/savetemplate имя from Название</code>.",
+        "en": "No recent campaign draft to save. First run /newsearch or clone a campaign, "
+        "or use <code>/savetemplate name from Campaign</code>.",
+    },
+    "tpl_saved": {
+        "ru": "✅ Шаблон «{name}» сохранён. Открой /templates, чтобы создать по нему кампанию.",
+        "en": "✅ Template “{name}” saved. Open /templates to create a campaign from it.",
+    },
+    "tpl_deleted": {"ru": "🗑 Шаблон удалён", "en": "🗑 Template deleted"},
+    "tpl_list_stale": {
+        "ru": "Список шаблонов устарел — открой /templates заново.",
+        "en": "The templates list is outdated — open /templates again.",
+    },
+    "tpl_ask_name": {
+        "ru": "Имя НОВОЙ кампании из шаблона «{tpl}»? Пришли название одним сообщением.",
+        "en": "Name of the NEW campaign from template “{tpl}”? Send it in one message.",
+    },
+    "tpl_name_empty": {
+        "ru": "Пришли название новой кампании одним сообщением.",
+        "en": "Send the new campaign name in a single message.",
+    },
+    "tpl_not_found": {
+        "ru": "Шаблон не найден — открой /templates заново.",
+        "en": "Template not found — open /templates again.",
+    },
+    # — §2C: авто-память (/recent — повтор недавних действий) —
+    "recent_empty": {
+        "ru": "📭 Пока нет применённых действий для повтора. Сделай что-нибудь (с подтверждением) — и оно появится тут.",
+        "en": "📭 No applied actions to repeat yet. Do something (with confirmation) and it will show up here.",
+    },
+    "recent_title": {
+        "ru": "↻ <b>Недавние действия</b> — нажми «↻ N», чтобы повторить (с подтверждением):",
+        "en": "↻ <b>Recent actions</b> — tap “↻ N” to repeat (with confirmation):",
+    },
+    "recent_stale": {
+        "ru": "Список устарел — открой /recent заново.",
+        "en": "The list is outdated — open /recent again.",
+    },
+    "recent_unsupported": {
+        "ru": "Это действие нельзя повторить автоматически.",
+        "en": "This action can't be repeated automatically.",
+    },
     # — короткие callback-тосты (cq.answer); раньше литералами в bot.main —
     "model_list_stale": {
         "ru": "Список устарел — открой /model заново",
@@ -378,6 +564,12 @@ CATALOG: dict[str, dict[str, str]] = {
     "cb_error": {"ru": "Ошибка: {kind}", "en": "Error: {kind}"},
     "cb_working": {"ru": "Выполняю…", "en": "Working…"},
     "cb_cancelled": {"ru": "Отменено", "en": "Cancelled"},
+    # — универсальная навигация мастеров (NavCB cancel) —
+    "wizard_cancelled": {
+        "ru": "✖ Отменено. Вышли из мастера.",
+        "en": "✖ Cancelled. Left the wizard.",
+    },
+    "main_menu_back": {"ru": "Главное меню 👇", "en": "Main menu 👇"},
     "cb_approved": {"ru": "Одобрено", "en": "Approved"},
     "cb_rejected": {"ru": "Отклонено", "en": "Rejected"},
     "cb_approved_all": {"ru": "Одобрены все валидные", "en": "All valid approved"},

@@ -42,6 +42,9 @@ class UserSettings(Base):
     alert_thresholds: Mapped[dict | None] = mapped_column(JSON)  # пороги аномалий
     model_override: Mapped[str | None] = mapped_column(String(128))  # переопределение LLM (опц.)
     language: Mapped[str | None] = mapped_column(String(8))  # язык интерфейса RU/EN (§4); NULL → RU
+    # §8/мультиаккаунт: активный аккаунт чата (читаем/минтуем черновики на нём). NULL → Draft
+    # (bot.account_ctx.get_active_account). Перепроверяется ensure_read_allowed + per-user доступом.
+    selected_customer_id: Mapped[str | None] = mapped_column(String(20))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -106,6 +109,9 @@ class OAuthToken(Base):
     refresh_token_enc: Mapped[str] = mapped_column(
         Text, nullable=False
     )  # core.secrets.encrypt(...)
+    # §8/Фаза 3: MCC (login_customer_id) ЭТОГО аккаунта — аккаунты живут под РАЗНЫМИ менеджерами,
+    # поэтому login хранится per-account (ads.client.build_client подставит при сборке клиента).
+    login_customer_id: Mapped[str | None] = mapped_column(String(20))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -127,3 +133,44 @@ class ErrorEvent(Base):
     message: Mapped[str] = mapped_column(Text, nullable=False)  # str(e) — РЕДАКТИРОВАНО
     traceback: Mapped[str | None] = mapped_column(Text)  # РЕДАКТИРОВАНО + усечено
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AccountAccess(Base):
+    """Пер-пользовательский доступ к аккаунтам (§12/мультиоператор): chat_id → разрешённые
+    customer_id. Draft доступен всем whitelisted без строки (см. ensure_account_allowed_for_user);
+    прочие аккаунты — только при явном гранте здесь (fail-closed). Композится с глобальным
+    ensure_read_allowed: чтение требует И глобального read-замка, И этого пер-юзер гранта.
+
+    Граница безопасности → отдельная таблица (не JSON на UserSettings): запросная, аудируемая."""
+
+    __tablename__ = "account_access"
+    __table_args__ = (Index("ux_account_access", "chat_id", "customer_id", unique=True),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    customer_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CampaignTemplate(Base):
+    """Именованный пресет настроек кампании (§2B): пользователь сохраняет валидированные params
+    create_search_campaign под именем и переиспользует при создании. params НЕ содержат секретов
+    (только параметры кампании/тексты/суммы). Уникальность (chat_id, name) — upsert по имени в
+    рамках чата. На SQLite (dev) таблицу создаёт create_all; на Postgres (prod) — Alembic-миграция
+    (heal_sqlite_schema таблицы НЕ создаёт). Применение — только через confirm-гейт (шаблон лишь
+    ПРЕД-заполняет params, гейт не обходит)."""
+
+    __tablename__ = "campaign_templates"
+    __table_args__ = (Index("ux_campaign_templates_chat_name", "chat_id", "name", unique=True),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    params: Mapped[dict] = mapped_column(
+        JSON, nullable=False
+    )  # валидированные create_search_campaign
+    source_campaign: Mapped[str | None] = mapped_column(String(120))  # имя образца (если from X)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

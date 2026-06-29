@@ -36,6 +36,11 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
         "create_rsa",
         "create_gdn_campaign",
         "create_search_campaign",
+        "add_sitelinks",
+        "add_callouts",
+        "add_structured_snippets",
+        "attach_image_asset",
+        "remove_asset_link",
     }
 )
 
@@ -404,6 +409,74 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             customer_id=customer_id,
             campaign_id=ref.id,
             audience_resource_names=params["audience_resource_names"],
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
+    if op in ("add_sitelinks", "add_callouts", "add_structured_snippets"):
+        # §3-assets: резолв кампании по имени → id, дальше apply_* (замок/гейт/валидация внутри).
+        ref = await asyncio.to_thread(
+            resolve.find_campaign_by_name, client, customer_id, params["campaign"]
+        )
+        if ref is None:
+            raise ValueError(f"кампания '{params['campaign']}' не найдена")
+        if op == "add_sitelinks":
+            return await mutations.apply_add_sitelinks(
+                customer_id=customer_id,
+                campaign_id=ref.id,
+                sitelinks=params["sitelinks"],
+                confirmation_id=confirmation_id,
+                confirm_store=store,
+                ads_client=client,
+            )
+        if op == "add_callouts":
+            return await mutations.apply_add_callouts(
+                customer_id=customer_id,
+                campaign_id=ref.id,
+                callouts=params["callouts"],
+                confirmation_id=confirmation_id,
+                confirm_store=store,
+                ads_client=client,
+            )
+        return await mutations.apply_add_structured_snippets(
+            customer_id=customer_id,
+            campaign_id=ref.id,
+            header=params["header"],
+            values=params["values"],
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
+    if op == "attach_image_asset":
+        # Подготовленное изображение лежит во временном хранилище по media_id (бинарь НЕ в params).
+        ref = await asyncio.to_thread(
+            resolve.find_campaign_by_name, client, customer_id, params["campaign"]
+        )
+        if ref is None:
+            raise ValueError(f"кампания '{params['campaign']}' не найдена")
+        from ads.assets import clear_pending_media, load_pending_media
+
+        landscape, _square = await asyncio.to_thread(load_pending_media, params["media_id"])
+        try:
+            return await mutations.apply_attach_image_asset(
+                customer_id=customer_id,
+                campaign_id=ref.id,
+                image_bytes=landscape,
+                name=params["name"],
+                confirmation_id=confirmation_id,
+                confirm_store=store,
+                ads_client=client,
+            )
+        finally:
+            await asyncio.to_thread(clear_pending_media, params["media_id"])
+
+    if op == "remove_asset_link":
+        # Резолв кампании не нужен — link_resource_names несут аккаунт; замок/гейт держит apply_*.
+        return await mutations.apply_remove_asset_link(
+            customer_id=customer_id,
+            link_resource_names=params["link_resource_names"],
             confirmation_id=confirmation_id,
             confirm_store=store,
             ads_client=client,

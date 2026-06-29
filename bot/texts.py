@@ -180,7 +180,9 @@ KW_SEARCHING = "⏳ Подбираю ключевые слова и группи
 KW_EMPTY = "Ничего не нашлось по этим сидам. Попробуй другие слова или ссылку: /keywords"
 KW_BAD_INPUT = "Нужны сид-слова или ссылка. Пришли, например: <code>купить телефон, смартфон</code>"
 
-PROPOSAL_PENDING = "📝 <b>Черновик изменения</b>\n\n{summary}\n\nПодтвердить?"
+PROPOSAL_PENDING = (
+    "📝 <b>Черновик изменения</b>\n\n{summary}\n\nПодтвердить? <i>(черновик действует 24 ч)</i>"
+)
 EXECUTING = "⏳ Выполняю…"
 APPLIED = "✅ <b>Готово.</b>\n{result}"
 FAILED = "⚠️ Не удалось выполнить: {kind}: {err}"
@@ -398,6 +400,56 @@ def fmt_search_proposal_summary(
         f"Описания ({len(descriptions)}):\n{d_lines}"
         f"{kw_block}"
     )
+
+
+def fmt_clone_proposal_summary(
+    new_name: str,
+    source: str,
+    budget_units: float,
+    params: dict,
+    dropped_texts: int = 0,
+    regenerated: bool = False,
+    lang: str | None = None,
+) -> str:
+    """§2A: сводка клона — заголовок «клон из X» + тело create_search_campaign + честная сноска
+    о том, что НЕ переносится (гео/минус-слова/стратегия/аудитории — применять отдельно).
+    esc применяется при показе."""
+    lng = _lang(lang)
+    body = fmt_search_proposal_summary(
+        new_name,
+        params.get("final_url", ""),
+        budget_units,
+        params.get("headlines", []),
+        params.get("descriptions", []),
+        params.get("keywords", []),
+        params.get("match_type", "phrase"),
+        lang=lng,
+    )
+    if lng == "en":
+        head = f"Clone of “{source}” → new campaign “{new_name}”.\n\n"
+        notes = []
+        if dropped_texts:
+            notes.append(f"{dropped_texts} ad text(s) dropped (over length limit)")
+        if regenerated:
+            notes.append("ad copy regenerated (too few valid texts to clone)")
+        note_block = ("\n\n" + "; ".join(notes)) if notes else ""
+        tail = (
+            "\n\nNot copied automatically: geo, negative keywords, bidding strategy, audiences — "
+            "apply them separately after creation."
+        )
+        return head + body + note_block + tail
+    head = f"Клон из «{source}» → новая кампания «{new_name}».\n\n"
+    notes = []
+    if dropped_texts:
+        notes.append(f"{dropped_texts} текст(ов) объявления отброшено (превышали лимит длины)")
+    if regenerated:
+        notes.append("тексты сгенерированы заново (валидных для клона было мало)")
+    note_block = ("\n\n" + "; ".join(notes)) if notes else ""
+    tail = (
+        "\n\nНе переносится автоматически: гео, минус-слова, стратегия ставок, аудитории — "
+        "применить отдельно после создания."
+    )
+    return head + body + note_block + tail
 
 
 def fmt_gdn_proposal_summary(
@@ -646,6 +698,23 @@ def fmt_mutation_summary(operation: str, params: dict, lang: str | None = None) 
             f"Кампания «{c}» — прикрепить аудиторию к таргетингу: {label}. "
             "Показы пойдут выбранной аудитории."
         )
+    if operation == "add_sitelinks":
+        sls = params.get("sitelinks") or []
+        lines = "\n".join(f"  • {s.get('link_text', '')} → {s.get('final_url', '')}" for s in sls)
+        return f"Кампания «{c}» — добавить быстрые ссылки ({len(sls)}):\n{lines}"
+    if operation == "add_callouts":
+        cs = params.get("callouts") or []
+        return f"Кампания «{c}» — добавить уточнения ({len(cs)}): " + ", ".join(str(x) for x in cs)
+    if operation == "add_structured_snippets":
+        vals = params.get("values") or []
+        return f"Кампания «{c}» — структурное описание «{params.get('header', '')}»: " + ", ".join(
+            str(x) for x in vals
+        )
+    if operation == "attach_image_asset":
+        return f"Кампания «{c}» — добавить изображение-ассет (обрезано до 1.91:1)."
+    if operation == "remove_asset_link":
+        n = len(params.get("link_resource_names") or [])
+        return f"Открепить расширения от кампании: {n} шт. (ассеты не удаляются)."
     return ""  # create_rsa / create_gdn_campaign / неизвестное — оставить summary вызывающего
 
 
@@ -720,6 +789,23 @@ def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
             f"Campaign “{c}” — attach audience to targeting: {label}. "
             "Impressions will go to the chosen audience."
         )
+    if operation == "add_sitelinks":
+        sls = params.get("sitelinks") or []
+        lines = "\n".join(f"  • {s.get('link_text', '')} → {s.get('final_url', '')}" for s in sls)
+        return f"Campaign “{c}” — add sitelinks ({len(sls)}):\n{lines}"
+    if operation == "add_callouts":
+        cs = params.get("callouts") or []
+        return f"Campaign “{c}” — add callouts ({len(cs)}): " + ", ".join(str(x) for x in cs)
+    if operation == "add_structured_snippets":
+        vals = params.get("values") or []
+        return f"Campaign “{c}” — structured snippet “{params.get('header', '')}”: " + ", ".join(
+            str(x) for x in vals
+        )
+    if operation == "attach_image_asset":
+        return f"Campaign “{c}” — add an image asset (cropped to 1.91:1)."
+    if operation == "remove_asset_link":
+        n = len(params.get("link_resource_names") or [])
+        return f"Detach {n} extension(s) from the campaign (assets are not deleted)."
     return ""  # create_rsa / create_gdn_campaign / unknown — keep caller's summary
 
 

@@ -27,6 +27,9 @@ dependencies = [
     "python-dotenv>=1.0",
     "tenacity>=9.0",           # ретраи/backoff (rate limits Google Ads)
     "sentry-sdk>=2.0",         # мониторинг ошибок (опц.; ВЫКЛ без SENTRY_DSN — core.observability)
+    "httpx>=0.27",             # чтение ссылок (ingest): async-фетч с таймаутом и SSRF-гардом
+    "beautifulsoup4>=4.12",    # HTML→текст при чтении ссылок (ingest)
+    "python-docx>=1.1",        # чтение .docx-брифов (ingest)
 ]
 
 [project.optional-dependencies]

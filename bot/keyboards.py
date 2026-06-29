@@ -7,20 +7,26 @@
 
 from __future__ import annotations
 
+from aiogram.filters.callback_data import CallbackData
 from aiogram.types import BotCommand, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
+from adcopy.validate import STRUCTURED_SNIPPET_HEADERS
 from bot.callbacks import (
     AudienceCB,
     CampCB,
     ConfirmCB,
+    ExtCB,
     GeoCB,
     KwAddCB,
     LangCB,
     ModelCB,
+    NavCB,
     PeriodCB,
+    RecentCB,
     RsaCB,
     RsaPickCB,
+    TemplateCB,
 )
 
 _NAME_LIMIT = 40
@@ -56,6 +62,11 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="sheets", description="Глубокий отчёт в Google Sheets (ссылка)"),
     BotCommand(command="rsa", description="Сгенерировать тексты объявления (RSA)"),
     BotCommand(command="newsearch", description="Создать поисковую кампанию (RSA + ключи)"),
+    BotCommand(command="templates", description="Шаблоны кампаний: список и создание"),
+    BotCommand(
+        command="savetemplate", description="Сохранить шаблон: /savetemplate имя [from Кампания]"
+    ),
+    BotCommand(command="recent", description="Недавние действия: повторить"),
     BotCommand(command="cancel", description="Отменить текущий черновик"),
     BotCommand(command="keywords", description="Подбор ключевых слов"),
     BotCommand(command="model", description="Модель ИИ (OpenRouter)"),
@@ -78,6 +89,11 @@ BOT_COMMANDS_EN: list[BotCommand] = [
     BotCommand(command="sheets", description="Deep report in Google Sheets (link)"),
     BotCommand(command="rsa", description="Generate ad copy (RSA)"),
     BotCommand(command="newsearch", description="Create a search campaign (RSA + keywords)"),
+    BotCommand(command="templates", description="Campaign templates: list and create"),
+    BotCommand(
+        command="savetemplate", description="Save a template: /savetemplate name [from Campaign]"
+    ),
+    BotCommand(command="recent", description="Recent actions: repeat"),
     BotCommand(command="cancel", description="Cancel the current draft"),
     BotCommand(command="keywords", description="Keyword research"),
     BotCommand(command="model", description="AI model (OpenRouter)"),
@@ -188,6 +204,22 @@ def main_menu(lang: str | None = None) -> ReplyKeyboardMarkup:
     )
 
 
+# ── Inline: универсальная навигация мастеров (Назад + Отмена) ────────────────────
+def nav_kb(back_cb: CallbackData | None = None, lang: str | None = None) -> InlineKeyboardMarkup:
+    """Кнопки навигации для шага FSM-визарда: «‹ Назад» (если передан back_cb — родительский
+    callback flow, breadcrumb) + «✖ Отмена» (всегда NavCB cancel → выход в главное меню).
+    back_cb=None → только Отмена (первый шаг без inline-родителя). Чистая функция: никаких
+    обращений к БД/Ads. «✖» намеренно ≠ «❌» (последняя — отмена ЧЕРНОВИКА в ConfirmCB/KwAddCB):
+    Nav-Отмена = «выйти из мастера», а не «отменить подтверждаемую мутацию»."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    if back_cb is not None:
+        kb.button(text="‹ Back" if en else "‹ Назад", callback_data=back_cb)
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    kb.adjust(2 if back_cb is not None else 1)
+    return kb.as_markup()
+
+
 # ── Inline: подтверждение мутации (главный — confirm-гейт) ───────────────────────
 def kw_add_kb(token: str, lang: str | None = None) -> InlineKeyboardMarkup:
     """§7: под сводкой keyword-research — предложить ДОБАВИТЬ подобранные ключи в кампанию.
@@ -270,9 +302,72 @@ def campaign_actions_kb(idx: int, status: str, lang: str | None = None) -> Inlin
         callback_data=CampCB(action="geo", idx=idx),
     )
     kb.button(
+        text="🧩 Extensions" if en else "🧩 Расширения",
+        callback_data=CampCB(action="ext", idx=idx),
+    )
+    kb.button(
         text="‹ Back to list" if en else "‹ Назад к списку",
         callback_data=CampCB(action="back", idx=idx),
     )
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def ext_menu_kb(idx: int, lang: str | None = None) -> InlineKeyboardMarkup:
+    """§3-assets: меню расширений кампании (sitelinks/callouts/structured snippets/показать) +
+    «‹ Назад» в меню кампании (breadcrumb через CampCB menu). Выбор типа → ввод текста → черновик."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="🔗 Sitelinks" if en else "🔗 Быстрые ссылки",
+        callback_data=ExtCB(action="sitelink", idx=idx),
+    )
+    kb.button(
+        text="🏷 Callouts" if en else "🏷 Уточнения",
+        callback_data=ExtCB(action="callout", idx=idx),
+    )
+    kb.button(
+        text="📑 Structured snippets" if en else "📑 Структурные описания",
+        callback_data=ExtCB(action="snippet", idx=idx),
+    )
+    kb.button(
+        text="🖼 Image" if en else "🖼 Изображение",
+        callback_data=ExtCB(action="image", idx=idx),
+    )
+    kb.button(
+        text="👁 Show current" if en else "👁 Показать текущие",
+        callback_data=ExtCB(action="show", idx=idx),
+    )
+    kb.button(text="‹ Back" if en else "‹ Назад", callback_data=CampCB(action="menu", idx=idx))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def ext_snippet_header_kb(idx: int, lang: str | None = None) -> InlineKeyboardMarkup:
+    """§3-assets: выбор канонического header структурного описания (кнопками — иначе HEADER_NOT_FOUND).
+    После выбора — ввод значений текстом. «‹ Назад» возвращает к меню расширений."""
+    kb = InlineKeyboardBuilder()
+    for h in sorted(STRUCTURED_SNIPPET_HEADERS):
+        kb.button(text=h, callback_data=ExtCB(action="snip_h", idx=idx, sub=h))
+    kb.button(
+        text="‹ Back" if _lang(lang) == "en" else "‹ Назад",
+        callback_data=ExtCB(action="snippet", idx=idx),
+    )
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def ext_assets_list_kb(rows: list, camp_idx: int, lang: str | None = None) -> InlineKeyboardMarkup:
+    """§3-assets: текущие расширения кампании с кнопками удаления (🗑 idx). idx — строка в
+    _EXT_CACHE[chat_id]; «‹ Назад» — к меню расширений кампании (camp_idx в _CAMP_CACHE)."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    for i, r in enumerate(rows):
+        kb.button(
+            text=f"🗑 {_ellipsize(getattr(r, 'label', '') or getattr(r, 'field_type', ''))}",
+            callback_data=ExtCB(action="remove", idx=i),
+        )
+    kb.button(text="‹ Back" if en else "‹ Назад", callback_data=CampCB(action="ext", idx=camp_idx))
     kb.adjust(1)
     return kb.as_markup()
 
@@ -311,6 +406,33 @@ def audiences_kb(auds: list, camp_idx: int, lang: str | None = None) -> InlineKe
         )
     kb.button(text="‹ Back" if en else "‹ Назад", callback_data=CampCB(action="menu", idx=camp_idx))
     kb.adjust(1)
+    return kb.as_markup()
+
+
+# ── Inline: именованные шаблоны кампаний (§2B) ───────────────────────────────────
+def templates_kb(rows: list, lang: str | None = None) -> InlineKeyboardMarkup:
+    """Список шаблонов: на каждый — «использовать» (создать кампанию из шаблона) и «удалить».
+    idx = позиция в _TPL_CACHE[chat_id] (имя в callback_data не кладём). rows — TemplateRow."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    for i, r in enumerate(rows):
+        kb.button(text=f"📋 {_ellipsize(r.name)}", callback_data=TemplateCB(action="use", idx=i))
+        kb.button(text="🗑" if en else "🗑", callback_data=TemplateCB(action="del", idx=i))
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+# ── Inline: авто-память — повтор недавних действий (§2C) ─────────────────────────
+def recent_kb(rows: list, lang: str | None = None) -> InlineKeyboardMarkup:
+    """Кнопки «↻ N» для повтора недавних применённых действий. idx = позиция в _RECENT_CACHE."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    for i, _ in enumerate(rows):
+        kb.button(
+            text=f"↻ {i + 1}" if en else f"↻ {i + 1}",
+            callback_data=RecentCB(action="repeat", idx=i),
+        )
+    kb.adjust(5)
     return kb.as_markup()
 
 
