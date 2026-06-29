@@ -82,3 +82,12 @@ class KwAddCB(CallbackData, prefix="kwadd"):
     action: str  # "start" | "match" | "cancel"
     token: str  # hex-токен сессии _KW_ADD (bot.main)
     mt: str = ""  # "broad" | "phrase" | "exact" (только для action='match')
+
+
+class GeoCB(CallbackData, prefix="geo"):
+    """§3: гео-таргетинг кампании из меню /campaigns. idx — позиция кампании в _CAMP_CACHE (по
+    chat_id, как CampCB). Кнопка лишь выбирает СПОСОБ; адрес/локации вводятся текстом следующим
+    шагом (FSM), черновик set_geo_* собирается после ввода — confirm-гейт обязателен."""
+
+    action: str  # "loc" | "prox" (кнопка «‹ Назад» возвращает через CampCB menu)
+    idx: int = -1

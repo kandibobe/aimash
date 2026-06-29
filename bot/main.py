@@ -57,6 +57,7 @@ from bot.callbacks import (
     AudienceCB,
     CampCB,
     ConfirmCB,
+    GeoCB,
     KwAddCB,
     LangCB,
     ModelCB,
@@ -83,6 +84,7 @@ from bot.keyboards import (
     campaign_actions_kb,
     campaigns_kb,
     confirm_kb,
+    geo_mode_kb,
     kw_add_kb,
     lang_kb,
     main_menu,
@@ -160,6 +162,12 @@ class KwWizard(StatesGroup):
 
 class KwAdd(StatesGroup):
     awaiting_campaign = State()  # §7: ждём название кампании для добавления подобранных ключей
+
+
+class Geo(StatesGroup):
+    # §3: способ выбран в меню → ждём текст. campaign лежит в state-data (geo_campaign).
+    awaiting_locations = State()  # ждём локации через запятую (страна/город/регион)
+    awaiting_proximity = State()  # ждём «город, радиус_км» для радиус-таргетинга
 
 
 class SearchWizard(StatesGroup):
@@ -1121,6 +1129,31 @@ def _parse_kw_input(text: str) -> tuple[list[str], str | None]:
     return seeds, url
 
 
+def _parse_geo_locations(text: str) -> list[str]:
+    """Ввод → список локаций (страна/город/регион): токены через запятую/перенос, без пустых.
+    Диапазоны/длину валидирует схема SetGeoLocation (макс. 20, ≤80 симв.) при сборке черновика."""
+    return [p.strip() for p in (text or "").replace("\n", ",").split(",") if p.strip()]
+
+
+def _parse_geo_proximity(text: str) -> tuple[str, float] | None:
+    """Ввод «город, радиус_км» → (city, radius_km) или None при нераспознанном формате. Разделитель —
+    ПОСЛЕДНЯЯ запятая/'|' (название города может содержать пробелы; десятичный радиус — через точку).
+    Границы радиуса (0, 2000] и длину города валидирует схема SetGeoProximity (после сборки)."""
+    raw = (text or "").strip()
+    sep = max(raw.rfind(","), raw.rfind("|"))
+    if sep < 0:
+        return None
+    city = raw[:sep].strip()
+    rad_s = raw[sep + 1 :].strip()
+    if not city or not rad_s:
+        return None
+    try:
+        radius = float(rad_s)
+    except ValueError:
+        return None
+    return city, radius
+
+
 async def _kw_run(
     target: Message, chat_id: int, seeds: list[str], url: str | None, language: str
 ) -> None:
@@ -1423,6 +1456,106 @@ async def on_kw_add_match(cq: CallbackQuery, callback_data: KwAddCB) -> None:
         params=params,
         summary=summary,
         cid=cid,
+    )
+
+
+# ── §3: гео-таргетинг кампании из меню (локации/радиус → текст → черновик set_geo_* → «да») ──
+@dp.callback_query(CampCB.filter(F.action == "geo"))
+async def camp_geo(cq: CallbackQuery, callback_data: CampCB) -> None:
+    """Меню кампании → «📍 Гео-таргетинг»: показываем выбор способа (локации/радиус). READ-ONLY:
+    ничего не меняем — адрес/локации вводятся следующим шагом, черновик собирается после (confirm-гейт)."""
+    camps = _CAMP_CACHE.get(_cq_chat_id(cq))
+    if not _valid_idx(camps, callback_data.idx):
+        await cq.answer(i18n.t("camp_list_stale"), show_alert=True)
+        return
+    await cq.answer()
+    name = camps[callback_data.idx]["name"]
+    await _safe_edit(
+        cq,
+        i18n.t("geo_mode_pick", camp=texts.esc(name)),
+        reply_markup=geo_mode_kb(callback_data.idx),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@dp.callback_query(GeoCB.filter(F.action.in_(["loc", "prox"])))
+async def on_geo_mode(cq: CallbackQuery, callback_data: GeoCB, state: FSMContext) -> None:
+    """Способ выбран → ждём текст (локации ИЛИ «город, радиус»). Кампанию резолвим СЕЙЧАС и кладём
+    в state-data (имя стабильно, даже если _CAMP_CACHE сменится до ввода). Сбор ввода — до гейта."""
+    chat_id = _cq_chat_id(cq)
+    camps = _CAMP_CACHE.get(chat_id)
+    if not _valid_idx(camps, callback_data.idx):
+        await cq.answer(i18n.t("camp_list_stale"), show_alert=True)
+        return
+    msg = _cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    name = camps[callback_data.idx]["name"]
+    await state.clear()
+    if callback_data.action == "loc":
+        await state.set_state(Geo.awaiting_locations)
+        prompt = "geo_pick_locations"
+    else:
+        await state.set_state(Geo.awaiting_proximity)
+        prompt = "geo_pick_proximity"
+    await state.update_data(geo_campaign=name)
+    await cq.answer()
+    await msg.answer(i18n.t(prompt), parse_mode=ParseMode.HTML)
+
+
+@dp.message(Geo.awaiting_locations)
+async def geo_locations(m: Message, state: FSMContext) -> None:
+    """Локации введены → черновик set_geo_location (заменяет гео кампании целиком, §3). Резолв
+    названий → geoTargetConstant и remove-before-create — в SDK-слое после ✅; здесь только черновик."""
+    locations = _parse_geo_locations(m.text or "")
+    if not locations:
+        await m.answer(i18n.t("geo_empty_locations"), parse_mode=ParseMode.HTML)
+        return  # остаёмся в состоянии — пользователь пришлёт локации ещё раз
+    data = await state.get_data()
+    campaign = (data.get("geo_campaign") or "").strip()
+    if not campaign:
+        await state.clear()
+        await m.answer(i18n.t("geo_stale"))
+        return
+    await state.clear()
+    try:
+        cid, operation, params, summary = _build_proposal(
+            "set_geo_location", campaign=campaign, locations=locations
+        )
+    except Exception as e:  # noqa: BLE001 — валидация схемы (>20 локаций / >80 симв.) → понятный ответ
+        await m.answer(i18n.t("cb_error", kind=type(e).__name__))
+        return
+    await _present_proposal(
+        m, chat_id=m.chat.id, operation=operation, params=params, summary=summary, cid=cid
+    )
+
+
+@dp.message(Geo.awaiting_proximity)
+async def geo_proximity(m: Message, state: FSMContext) -> None:
+    """«город, радиус_км» введено → черновик set_geo_proximity (радиус-таргетинг, §3). Google геокодит
+    адрес сам; границы радиуса (0, 2000] валидирует схема. Исполнение — только после ✅."""
+    parsed = _parse_geo_proximity(m.text or "")
+    if parsed is None:
+        await m.answer(i18n.t("geo_bad_proximity"), parse_mode=ParseMode.HTML)
+        return  # остаёмся в состоянии — пользователь пришлёт «город, радиус» ещё раз
+    city, radius = parsed
+    data = await state.get_data()
+    campaign = (data.get("geo_campaign") or "").strip()
+    if not campaign:
+        await state.clear()
+        await m.answer(i18n.t("geo_stale"))
+        return
+    await state.clear()
+    try:
+        cid, operation, params, summary = _build_proposal(
+            "set_geo_proximity", campaign=campaign, city_name=city, radius_km=radius
+        )
+    except Exception as e:  # noqa: BLE001 — валидация схемы (радиус вне (0,2000] / длина) → понятный ответ
+        await m.answer(i18n.t("cb_error", kind=type(e).__name__))
+        return
+    await _present_proposal(
+        m, chat_id=m.chat.id, operation=operation, params=params, summary=summary, cid=cid
     )
 
 

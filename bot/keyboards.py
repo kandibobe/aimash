@@ -14,6 +14,7 @@ from bot.callbacks import (
     AudienceCB,
     CampCB,
     ConfirmCB,
+    GeoCB,
     KwAddCB,
     LangCB,
     ModelCB,
@@ -265,9 +266,33 @@ def campaign_actions_kb(idx: int, status: str, lang: str | None = None) -> Inlin
         callback_data=CampCB(action="audience", idx=idx),
     )
     kb.button(
+        text="📍 Geo targeting" if en else "📍 Гео-таргетинг",
+        callback_data=CampCB(action="geo", idx=idx),
+    )
+    kb.button(
         text="‹ Back to list" if en else "‹ Назад к списку",
         callback_data=CampCB(action="back", idx=idx),
     )
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def geo_mode_kb(idx: int, lang: str | None = None) -> InlineKeyboardMarkup:
+    """§3: выбор способа гео-таргетинга кампании. «По локации» (страна/город/регион через
+    geoTargetConstants) или «Радиус вокруг точки» (proximity). Кнопка лишь выбирает способ —
+    адрес/локации вводятся текстом, черновик собирается после ввода (confirm-гейт). idx — кампания
+    в _CAMP_CACHE (резолв по chat_id в bot.main)."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="🌍 By location (city/region)" if en else "🌍 По локации (город/регион)",
+        callback_data=GeoCB(action="loc", idx=idx),
+    )
+    kb.button(
+        text="📍 Radius around a point" if en else "📍 Радиус вокруг точки",
+        callback_data=GeoCB(action="prox", idx=idx),
+    )
+    kb.button(text="‹ Back" if en else "‹ Назад", callback_data=CampCB(action="menu", idx=idx))
     kb.adjust(1)
     return kb.as_markup()
 

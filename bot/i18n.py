@@ -174,6 +174,43 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "Список подобранных ключей устарел — запусти /keywords заново.",
         "en": "The researched keyword list expired — run /keywords again.",
     },
+    # — §3: гео-таргетинг кампании из меню (локации / радиус → confirm-гейт) —
+    "geo_mode_pick": {
+        "ru": "📍 Гео-таргетинг кампании «{camp}». Как зададим географию?",
+        "en": "📍 Geo targeting for campaign “{camp}”. How should we set it?",
+    },
+    "geo_pick_locations": {
+        "ru": (
+            "Пришли локации через запятую (страна/город/регион), "
+            "например: <code>Киев, Львов, Одесса</code>."
+        ),
+        "en": (
+            "Send locations separated by commas (country/city/region), "
+            "for example: <code>Kyiv, Lviv, Odesa</code>."
+        ),
+    },
+    "geo_pick_proximity": {
+        "ru": (
+            "Пришли «город, радиус_км» — например: <code>Киев, 10</code> "
+            "(точку Google вычислит по адресу, радиус в км)."
+        ),
+        "en": (
+            "Send “city, radius_km” — for example: <code>Kyiv, 10</code> "
+            "(Google geocodes the address; radius is in km)."
+        ),
+    },
+    "geo_empty_locations": {
+        "ru": "Не вижу ни одной локации. Пришли через запятую, например: <code>Киев, Львов</code>.",
+        "en": "No locations found. Send them comma-separated, e.g.: <code>Kyiv, Lviv</code>.",
+    },
+    "geo_bad_proximity": {
+        "ru": "Не разобрал. Формат: «город, радиус_км», например: <code>Киев, 10</code>.",
+        "en": "Couldn't parse it. Format: “city, radius_km”, e.g.: <code>Kyiv, 10</code>.",
+    },
+    "geo_stale": {
+        "ru": "Сессия гео устарела — открой меню кампании в /campaigns заново.",
+        "en": "The geo session expired — reopen the campaign menu via /campaigns.",
+    },
     # — confirm-гейт / статусы —
     "proposal_pending": {
         "ru": texts.PROPOSAL_PENDING,
