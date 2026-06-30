@@ -71,6 +71,7 @@ jobs:
           host: ${{ secrets.VPS_SSH_HOST }}
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          passphrase: ${{ secrets.VPS_SSH_PASSPHRASE }}   # парольная фраза ключа (если ключ ею защищён); пусто — для ключа без passphrase
           port: ${{ secrets.VPS_SSH_PORT || 22 }}
           script_stop: true   # любая команда упала → job красный (видно сбой деплоя)
           script: |
