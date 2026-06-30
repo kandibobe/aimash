@@ -125,9 +125,13 @@ class ErrorEvent(Base):
 
     __tablename__ = "error_events"
 
+    __table_args__ = (Index("ix_error_events_customer_created", "customer_id", "created_at"),)
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     request_id: Mapped[str] = mapped_column(String(16), index=True, nullable=False)
     chat_id: Mapped[int | None] = mapped_column(BigInteger)  # NULL — ошибка вне Telegram (джоба)
+    # §8: какой аккаунт обрабатывался при ошибке (для /diag-фильтра по аккаунту на масштабе ~10).
+    customer_id: Mapped[str | None] = mapped_column(String(20))
     where: Mapped[str] = mapped_column(String(160), nullable=False)  # точка перехвата (handler/job)
     exc_type: Mapped[str] = mapped_column(String(100), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)  # str(e) — РЕДАКТИРОВАНО

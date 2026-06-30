@@ -136,6 +136,50 @@ def write_keywords_xlsx(
     return path
 
 
+def write_keywords_csv(
+    clusters: list[Cluster],
+    ideas: list[KeywordIdea],
+    path: str,
+    *,
+    seeds: list[str] | None = None,
+    url: str | None = None,
+    language: str = "ru",
+) -> str:
+    """ТЗ §7 «CSV/table export»: те же данные, что .xlsx, но плоским CSV (для импорта в таблицы/BI).
+    Кодировка utf-8-sig (BOM) — Excel корректно открывает кириллицу. Группировка по кластеру, внутри —
+    по убыванию объёма (как в .xlsx). Возвращает path. Минус-слова сюда не кладём (advisory, отдельно)."""
+    import csv
+
+    by_text = {i.text: i for i in ideas}
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(HEADERS)
+        for cl in clusters:
+            rows = sorted(
+                (by_text.get(k) for k in cl.keywords),
+                key=lambda i: (i.avg_monthly_searches if i else 0),
+                reverse=True,
+            )
+            for idea in rows:
+                if idea is None:
+                    continue
+                w.writerow(
+                    [
+                        cl.name,
+                        cl.intent,
+                        idea.text,
+                        idea.avg_monthly_searches,
+                        idea.competition,
+                        idea.competition_index,
+                        round(idea.avg_cpc, 2),
+                        round(idea.low_bid, 2),
+                        round(idea.high_bid, 2),
+                        idea.peak_month,
+                    ]
+                )
+    return path
+
+
 def write_keyword_list_xlsx(keywords: list[str], match_type: str, action: str, path: str) -> str:
     """Компактный список ключей/минус-слов для ЧЕРНОВИКА мутации (ТЗ §5: большие списки —
     вложением, не текстом). Одна вкладка: # / ключ / тип соответствия / действие. Без метрик

@@ -19,7 +19,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from adcopy.validate import rsa_len, validate  # noqa: E402
-from ads.client import DRAFT_ACCOUNT_ID, ensure_allowed, ensure_read_allowed  # noqa: E402
+from ads.client import (  # noqa: E402
+    DRAFT_ACCOUNT_ID,
+    ensure_allowed,
+    ensure_manager_allowed,
+    ensure_read_allowed,
+)
 from ads.mutations import apply_update_budget  # noqa: E402
 from core.config import settings  # noqa: E402
 
@@ -44,6 +49,17 @@ def read_ids(value: str):
         yield
     finally:
         settings.google_ads_read_customer_ids = prev
+
+
+@contextmanager
+def login_customer_id(value: str):
+    """Временно задать настроенный MCC (login_customer_id, для ensure_manager_allowed)."""
+    prev = settings.google_ads_login_customer_id
+    settings.google_ads_login_customer_id = value
+    try:
+        yield
+    finally:
+        settings.google_ads_login_customer_id = prev
 
 
 # ── RSA длина: кириллица = 1 символ ────────────────────────────────────────────
@@ -139,6 +155,34 @@ def test_mutation_lock_unchanged_by_read_allowlist():
         try:
             ensure_allowed(_CHILD)  # менять — НЕЛЬЗЯ
             raise AssertionError("замок мутаций пробит read-list — критическая регрессия!")
+        except PermissionError:
+            pass
+
+
+# ── Замок обхода MCC (ensure_manager_allowed): прямой юнит (раньше — лишь косвенно) ──
+def test_ensure_manager_allowed_fail_closed_when_empty():
+    # Пустой login_customer_id → обход MCC запрещён (fail-closed), а не «разрешено всё».
+    with login_customer_id(""):
+        try:
+            ensure_manager_allowed(DRAFT_ACCOUNT_ID)
+            raise AssertionError("ожидался PermissionError (fail-closed)")
+        except PermissionError:
+            pass
+
+
+def test_ensure_manager_allowed_accepts_configured_normalized():
+    # Настроенный MCC разрешён; нормализация: '775-364-3025' ≡ '7753643025'.
+    with login_customer_id(DRAFT_ACCOUNT_ID):
+        ensure_manager_allowed(DRAFT_ACCOUNT_ID)
+        ensure_manager_allowed("775-364-3025")
+
+
+def test_ensure_manager_allowed_rejects_unconfigured():
+    # manager_id вне настроенного набора MCC → отказ.
+    with login_customer_id(DRAFT_ACCOUNT_ID):
+        try:
+            ensure_manager_allowed("1234567890")
+            raise AssertionError("ожидался PermissionError (MCC не настроен)")
         except PermissionError:
             pass
 
@@ -280,6 +324,9 @@ if __name__ == "__main__":
     test_ensure_read_allowed_defaults_to_mutation_scope()
     test_ensure_read_allowed_permits_listed_child()
     test_mutation_lock_unchanged_by_read_allowlist()
+    test_ensure_manager_allowed_fail_closed_when_empty()
+    test_ensure_manager_allowed_accepts_configured_normalized()
+    test_ensure_manager_allowed_rejects_unconfigured()
     test_mutation_rejected_without_confirmation()
     test_mutation_rejected_for_foreign_account()
     test_budget_blocked_when_not_user_initiated()

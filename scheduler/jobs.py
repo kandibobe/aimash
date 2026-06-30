@@ -15,7 +15,7 @@ from sqlalchemy import select
 from ads.client import DRAFT_ACCOUNT_ID, build_client
 from confirm.store import ConfirmStore
 from core.config import settings
-from core.context import request_scope
+from core.context import request_scope, reset_context, set_context
 from core.errors import capture_exception
 from core.logging import log
 from core.resilience import run_ads_read_call
@@ -68,6 +68,7 @@ async def run_scheduled_report(bot) -> None:
         period = last_n_days(REPORT_WINDOW_DAYS)
         blocks: list[str] = []
         for acct in accounts:
+            tok = set_context(customer_id=acct)  # §8: ошибки/логи этого аккаунта атрибутируются
             try:
                 client = build_client(acct)  # per-account (Фаза 3: свой токен/MCC из oauth_tokens)
                 report = await build_account_report_async(client, acct, period)
@@ -75,6 +76,8 @@ async def run_scheduled_report(bot) -> None:
             except Exception as e:  # сеть/доступ/SDK — фиксируем (§15), остальные аккаунты живут
                 await capture_exception(e, where=f"scheduler:report:{acct}")
                 blocks.append(f"⚠️ Аккаунт {acct}: отчёт недоступен (см. /diag)")
+            finally:
+                reset_context(tok)
         if not blocks:
             return
         digest = "🗓 Плановый отчёт\n\n" + "\n\n———\n\n".join(blocks)
@@ -127,6 +130,7 @@ async def run_anomaly_check(bot) -> None:
         # cur/prev на каждый аккаунт; сбой одного фиксируем и пропускаем (остальные считаем).
         metrics: dict[str, tuple] = {}
         for acct in accounts:
+            tok = set_context(customer_id=acct)  # §8: per-account атрибуция ошибок/логов
             try:
                 client = build_client(acct)
                 cur = await run_ads_read_call(
@@ -138,6 +142,8 @@ async def run_anomaly_check(bot) -> None:
                 metrics[acct] = (cur, prev)
             except Exception as e:  # сеть/доступ/SDK — фиксируем (§15), остальные аккаунты живут
                 await capture_exception(e, where=f"scheduler:anomaly:{acct}")
+            finally:
+                reset_context(tok)
         if not metrics:
             return
         thresholds = await _thresholds_by_chat(recipients)

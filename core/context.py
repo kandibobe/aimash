@@ -25,6 +25,9 @@ class ReqContext:
     request_id: str = "-"
     chat_id: int | None = None
     operation: str = "-"
+    customer_id: str | None = (
+        None  # §8: какой аккаунт обрабатывается (для per-account триажа/тегов)
+    )
 
 
 _CTX: contextvars.ContextVar[ReqContext] = contextvars.ContextVar(
@@ -47,6 +50,7 @@ def set_context(
     request_id: str | None = None,
     chat_id: int | None = None,
     operation: str | None = None,
+    customer_id: str | None = None,
 ) -> contextvars.Token:
     """Слить переданные поля в текущий контекст; вернуть Token для reset (как i18n.set_current_lang).
     Непереданные (None) поля сохраняются из текущего контекста."""
@@ -56,6 +60,7 @@ def set_context(
         request_id=cur.request_id if request_id is None else request_id,
         chat_id=cur.chat_id if chat_id is None else chat_id,
         operation=cur.operation if operation is None else operation,
+        customer_id=cur.customer_id if customer_id is None else customer_id,
     )
     return _CTX.set(merged)
 
@@ -66,13 +71,17 @@ def reset_context(token: contextvars.Token) -> None:
 
 
 @contextmanager
-def request_scope(operation: str, *, chat_id: int | None = None) -> Iterator[str]:
+def request_scope(
+    operation: str, *, chat_id: int | None = None, customer_id: str | None = None
+) -> Iterator[str]:
     """Открыть новый корреляционный scope (свежий request_id) на время блока — для путей БЕЗ
     Telegram-middleware (scheduler-джобы, скрипты). Возвращает request_id. Сброс в finally.
 
     contextvar.set держится сквозь await внутри блока (та же asyncio-таска), поэтому корректно
     оборачивает и асинхронное тело: `with request_scope('job'): await do()`."""
-    token = set_context(request_id=new_request_id(), chat_id=chat_id, operation=operation)
+    token = set_context(
+        request_id=new_request_id(), chat_id=chat_id, operation=operation, customer_id=customer_id
+    )
     try:
         yield _CTX.get().request_id
     finally:

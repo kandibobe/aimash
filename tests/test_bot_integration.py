@@ -373,3 +373,95 @@ async def test_small_keyword_proposal_inline_no_doc():
     )
     assert all(a[0] != "<doc>" for a in msg.answers)  # маленький список — без вложения
     assert any(a[1].get("reply_markup") for a in msg.answers)
+
+
+# ── golden rule #5 E2E: секрет в ошибке исполнения редактируется и в audit, и в сообщении юзеру ─
+async def test_confirm_failure_redacts_secret_in_audit_and_user_msg():
+    """Сбой execute_confirmed с токено-подобной строкой в тексте → проверяем редакцию на ОБОИХ
+    исходящих рубежах: (а) audit_log.result (путь confirm.store.record_failure → redact_text);
+    (б) сообщение юзеру под кнопкой (путь humanize_google_ads_error → redact_text). Существующий
+    test_confirm_execute_failure_records_failed гоняет безобидный 'sdk boom' и редакцию НЕ ловит;
+    test_logging_redaction.py тестирует redact_text в вакууме, но не живые границы."""
+    from core.logging import REDACTED
+
+    await init_db()
+    cid = uuid.uuid4().hex
+    store = ConfirmStore()
+    secret = (
+        "1//0gLEAKEDrefreshTOKEN_must_not_surface_123"  # синтетика под паттерн '1//' (не реальный)
+    )
+
+    msg = FakeMessage("возобнови X", chat_id=130, bot=FakeBot())
+    with patched(bm, "handle_command", _proposal_handler(cid)):
+        await bm.on_text(msg, FakeFSM())
+
+    async def fake_exec_leak(s, c):  # ошибка SDK/google.auth несёт «секрет» в тексте
+        raise RuntimeError(f"google.auth refresh failed: token={secret}")
+
+    cq = FakeCallbackQuery(FakeMessage(chat_id=130))
+    with patched(bm, "execute_confirmed", fake_exec_leak):
+        await bm.on_confirm(cq, ConfirmCB(action="ok", cid=cid))
+
+    # (а) audit: строка failed есть, секрет редактирован (а не записан/не пусто)
+    assert (await store.get_confirmed(cid)).status == "failed"
+    async with Session() as s:
+        row = (
+            (
+                await s.execute(
+                    select(AuditLog).where(
+                        AuditLog.confirmation_id == cid, AuditLog.status == "failed"
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+    assert row is not None
+    audit_text = str(row.result)
+    assert secret not in audit_text  # ⛔ секрет в audit_log — утечка (golden rule #5)
+    assert REDACTED in audit_text  # именно редакция, а не потеря текста
+
+    # (б) сообщение юзеру (edit_text под кнопкой) санитизировано тем же маркером
+    user_text = " ".join(t for t, _ in cq.message.edits)
+    assert secret not in user_text  # ⛔ секрет ушёл в Telegram — утечка
+    assert REDACTED in user_text
+
+
+# ── golden rule #3 E2E: бюджет с user_initiated=False сквозь РЕАЛЬНЫЙ execute_confirmed заблокирован ─
+async def test_scheduler_style_budget_blocked_through_execute_confirmed():
+    """Черновик update_budget с user_initiated=False (как создал бы scheduler/anomaly) проходит
+    РЕАЛЬНЫЙ execute_confirmed → упирается в гейт user_initiated → audit failed, нижний SDK НЕ вызван
+    ни разу. Зеркало test_on_confirm_runs_real_execute_confirmed_gates (там True) — негативная ветка
+    §3 на сквозном шве бот→execute_confirmed (раньше покрыто только apply_*-юнитом)."""
+    await init_db()
+    cid = uuid.uuid4().hex
+    store = ConfirmStore()
+    await store.save_proposal(
+        confirmation_id=cid,
+        operation="update_budget",
+        customer_id=DRAFT_ACCOUNT_ID,
+        params={"campaign": "Search", "mode": "set_to", "value": 50},
+        summary="бюджет Search → 50 (как от scheduler)",
+        chat_id=310,
+        user_initiated=False,  # НЕ прямая команда пользователя
+    )
+
+    fake_ref = SimpleNamespace(id="77", budget_micros=40_000_000, status="ENABLED")
+    sdk: dict = {"n": 0}
+
+    def fake_sdk(client, customer_id, campaign_id, micros):  # нижний SDK-исполнитель
+        sdk["n"] += 1
+        return {"applied": True}
+
+    cq = FakeCallbackQuery(FakeMessage(chat_id=310, bot=FakeBot()))
+    with (
+        _allowed_draft(),
+        patched(svc, "build_client", lambda: object()),
+        patched(resolve, "find_campaign_by_name", lambda *a, **k: fake_ref),
+        patched(mut, "_apply_budget_via_sdk", fake_sdk),
+    ):
+        await bm.on_confirm(cq, ConfirmCB(action="ok", cid=cid))
+
+    assert sdk["n"] == 0  # бюджет НЕ тронут — гейт user_initiated отсёк ДО SDK (§3)
+    assert (await store.get_confirmed(cid)).status == "failed"  # черновик помечен failed
+    assert "failed" in await _audit_statuses(cid)

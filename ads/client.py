@@ -29,6 +29,50 @@ ALLOWED_CEILING = frozenset({DRAFT_ACCOUNT_ID})
 # покрываются единым env-токеном → конфиг пока общий (см. _env_cfg).
 _CLIENT_CACHE: dict[str, "GoogleAdsClient"] = {}
 
+# Рантайм-кэш РАСШИФРОВАННЫХ per-account OAuth-кредов (§8/Фаза 3): account → (refresh_token,
+# login_customer_id). Заполняется load_oauth_cache() из таблицы oauth_tokens (decrypt) на старте.
+# ⚠️ Секрет В ПАМЯТИ (не логируем, не в repr) — golden rule #5. Пусто ⇒ build_client падает на
+# .env (обратная совместимость: тест-дочерние под одним MCC покрыты единым токеном).
+_OAUTH_RUNTIME: dict[str, tuple[str, str | None]] = {}
+
+
+def set_oauth_runtime(account: str, refresh_token: str, login_customer_id: str | None) -> None:
+    """Положить расшифрованные креды аккаунта в рантайм-кэш + сбросить SDK-клиент этого id
+    (чтобы пересобрался на новом токене при ротации). Секрет не логируем."""
+    cid = normalize_customer_id(account)
+    _OAUTH_RUNTIME[cid] = (refresh_token, normalize_customer_id(login_customer_id) or None)
+    _CLIENT_CACHE.pop(cid, None)
+
+
+async def load_oauth_cache() -> int:
+    """Загрузить per-account OAuth-токены из БД (oauth_tokens) в рантайм-кэш: расшифровать
+    refresh_token_enc (core.secrets.decrypt) и положить в _OAUTH_RUNTIME. Вызывать на СТАРТЕ бота
+    (после init_db). Возвращает число загруженных аккаунтов.
+
+    Сбой расшифровки ОДНОГО аккаунта (порча ключа/строки) логируем и ПРОПУСКАЕМ — не роняем старт
+    из-за одного аккаунта; этот аккаунт просто не будет доступен (build_client упрётся в отсутствие
+    кредов или откатится на .env). Секреты не логируем (только id и тип ошибки)."""
+    from core.logging import log
+    from core.secrets import decrypt
+    from db.models import OAuthToken
+    from db.session import Session
+    from sqlalchemy import select
+
+    loaded = 0
+    async with Session() as s:
+        rows = (await s.execute(select(OAuthToken))).scalars().all()
+    for r in rows:
+        try:
+            token = decrypt(r.refresh_token_enc)
+        except Exception as e:  # noqa: BLE001 — порча ключа/строки: пропускаем аккаунт, не старт
+            log.warning("oauth: не расшифрован токен аккаунта %s (%s)", r.account, type(e).__name__)
+            continue
+        set_oauth_runtime(r.account, token, r.login_customer_id)
+        loaded += 1
+    if loaded:
+        log.info("oauth: загружено per-account токенов: %d", loaded)
+    return loaded
+
 
 def _env_cfg() -> dict:
     """Конфиг google-ads из .env (единственный refresh-токен + MCC). Покрывает Draft и любой
@@ -59,10 +103,30 @@ def build_client(customer_id: str | None = None) -> "GoogleAdsClient":
     cached = _CLIENT_CACHE.get(cid)
     if cached is not None:
         return cached
-    cfg = _env_cfg()  # Фаза 3: для не-Draft — здесь ветка oauth_tokens
-    client = GoogleAdsClient.load_from_dict(cfg)
+    client = GoogleAdsClient.load_from_dict(_cfg_for(cid))
     _CLIENT_CACHE[cid] = client
     return client
+
+
+def _cfg_for(cid: str) -> dict:
+    """Конфиг google-ads для нормализованного cid. Фаза 3: не-Draft с зарегистрированным per-account
+    токеном (oauth_tokens → _OAUTH_RUNTIME через load_oauth_cache) → свой refresh-токен + свой
+    login_customer_id (MCC). Иначе (Draft или нет записи) — .env (один тест-MCC единым токеном
+    покрывает тест-дочерних). Вынесен из build_client, чтобы тестировать выбор кредов без SDK."""
+    creds = _OAUTH_RUNTIME.get(cid) if cid != DRAFT_ACCOUNT_ID else None
+    if creds is None:
+        return _env_cfg()
+    refresh_token, login_cid = creds
+    cfg = {
+        "developer_token": settings.google_ads_developer_token.get_secret_value(),
+        "client_id": settings.google_ads_client_id,
+        "client_secret": settings.google_ads_client_secret.get_secret_value(),
+        "refresh_token": refresh_token,
+        "use_proto_plus": True,
+    }
+    if login_cid:
+        cfg["login_customer_id"] = login_cid
+    return cfg
 
 
 def clear_client_cache(customer_id: str | None = None) -> None:

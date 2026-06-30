@@ -39,9 +39,20 @@ def _scrub(value: Any) -> Any:
 
 
 def _before_send(event: Any, _hint: Any) -> Any:
-    """Редакция всего события перед отправкой. Никогда не роняет отправку из-за ошибки редакции."""
+    """Редакция всего события перед отправкой + per-account тег (§8). Никогда не роняет отправку."""
     try:
-        return _scrub(event)
+        scrubbed = _scrub(event)
+        # Тег аккаунта из контекста запроса — фильтрация инцидентов по аккаунту на масштабе ~10.
+        # customer_id — цифры (не секрет). Ставим ПОСЛЕ scrub, чтобы тег не потёрся редакцией.
+        try:
+            from core.context import get_context
+
+            cid = get_context().customer_id
+            if cid and isinstance(scrubbed, dict):
+                scrubbed.setdefault("tags", {})["customer_id"] = cid
+        except Exception:  # noqa: BLE001 — тег не критичен
+            pass
+        return scrubbed
     except Exception:  # noqa: BLE001 — редакция не должна ломать телеметрию
         return event
 

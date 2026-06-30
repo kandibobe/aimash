@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     # только на разрешённый аккаунт (поведение не меняется). См. ads.client.ensure_read_allowed.
     google_ads_read_customer_ids: str = ""
     google_ads_api_version: str = "v24"  # API-версия (мажор). SDK-пин google-ads — в pyproject.toml
+    # Дневной лимит операций Google Ads API (§3): Basic dev-token = 15 000 операций/сутки; Standard —
+    # фактически без лимита (ставь высоким). core.quota предупреждает на 80% и БЛОКИРУЕТ новые
+    # МУТАЦИИ на 95% (чтение не блокируем). 0 ⇒ трекинг выключен (без гарда).
+    google_ads_daily_op_limit: int = 15000
 
     # Безопасность / БД
     secrets_encryption_key: SecretStr = SecretStr("")

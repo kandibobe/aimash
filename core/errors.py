@@ -31,13 +31,26 @@ async def capture_exception(exc: BaseException, *, where: str) -> str:
     # request_id/chat попадут в строку лога автоматически (core.logging.ContextFilter).
     log.error("ошибка в %s: %s", where, type(exc).__name__, exc_info=exc)
     try:
-        await _persist(exc, where=where, request_id=ctx.request_id, chat_id=ctx.chat_id)
+        await _persist(
+            exc,
+            where=where,
+            request_id=ctx.request_id,
+            chat_id=ctx.chat_id,
+            customer_id=ctx.customer_id,
+        )
     except Exception:  # noqa: BLE001 — персист не критичен; ошибка уже залогирована/в Sentry
         log.warning("error-capture: ErrorEvent не сохранён (%s)", type(exc).__name__)
     return ctx.request_id
 
 
-async def _persist(exc: BaseException, *, where: str, request_id: str, chat_id: int | None) -> None:
+async def _persist(
+    exc: BaseException,
+    *,
+    where: str,
+    request_id: str,
+    chat_id: int | None,
+    customer_id: str | None = None,
+) -> None:
     """Записать редактированный снимок ошибки в error_events (для /diag и пост-разбора)."""
     from db.models import ErrorEvent
     from db.session import Session
@@ -48,6 +61,7 @@ async def _persist(exc: BaseException, *, where: str, request_id: str, chat_id: 
             ErrorEvent(
                 request_id=request_id[:16],
                 chat_id=chat_id,
+                customer_id=(customer_id or None),
                 where=where[:160],
                 exc_type=type(exc).__name__[:100],
                 message=redact_text(str(exc))[:_MSG_MAX],

@@ -136,13 +136,23 @@ def _is_retryable_llm(exc: BaseException) -> bool:
 
 
 async def run_ads_call(
-    fn: Callable[..., T], *args: object, label: str | None = None, **kwargs: object
+    fn: Callable[..., T],
+    *args: object,
+    label: str | None = None,
+    account: str | None = None,
+    **kwargs: object,
 ) -> T:
-    """Замена `asyncio.to_thread(fn, *args)` для синхронных вызовов google-ads SDK:
+    """Замена `asyncio.to_thread(fn, *args)` для синхронных вызовов google-ads SDK (МУТАЦИИ):
     таймаут на попытку + ретрай транзиентных ошибок с backoff+jitter. Логирует запрос к
     Google Ads API (имя, длительность, исход — БЕЗ секретов; ТЗ §15). Сигнатура совместима
-    с to_thread (call-site не меняется); `label` — опц. имя для лога."""
+    с to_thread (call-site не меняется); `label` — опц. имя для лога, `account` — для квоты.
+
+    Квота (§3): ПЕРЕД вызовом check_mutation_allowed — на ≥95% дневного лимита бросает
+    QuotaExceededError (fail-closed, до SDK, без трат). Успешную операцию учитываем (record)."""
+    from core import quota
+
     name = label or getattr(fn, "__name__", "ads_call")
+    quota.check_mutation_allowed(account)  # ДО семафора/SDK: не тратим слот на заведомо блок
 
     async def _inner() -> T:
         async with asyncio.timeout(ADS_TIMEOUT_S):
@@ -162,16 +172,26 @@ async def run_ads_call(
     except Exception as e:
         log.warning("ads-call %s: %s за %dмс", name, type(e).__name__, _ms(start))
         raise
+    quota.record(account, kind="mutate")  # учёт операции в дневной квоте (§3)
     log.info("ads-call %s: ok за %dмс", name, _ms(start))
     return result
 
 
 async def run_ads_read_call(
-    fn: Callable[..., T], *args: object, label: str | None = None, **kwargs: object
+    fn: Callable[..., T],
+    *args: object,
+    label: str | None = None,
+    account: str | None = None,
+    **kwargs: object,
 ) -> T:
     """Как run_ads_call, но для ЧТЕНИЙ Google Ads (идемпотентны): таймаут на попытку + ретрай
     транзиентных ошибок И TimeoutError (read безопасно повторить). НЕ использовать для мутаций
-    (на денежном пути таймаут не повторяем — см. run_ads_call). Логирует запрос (§15)."""
+    (на денежном пути таймаут не повторяем — см. run_ads_call). Логирует запрос (§15).
+
+    Квота (§3): чтение НЕ блокируем (нужно и для безопасности), но учитываем (record) — чтобы
+    дневной счётчик отражал реальную нагрузку. `account` — опц. метка аккаунта."""
+    from core import quota
+
     name = label or getattr(fn, "__name__", "ads_read")
 
     async def _inner() -> T:
@@ -192,6 +212,7 @@ async def run_ads_read_call(
     except Exception as e:
         log.warning("ads-read %s: %s за %dмс", name, type(e).__name__, _ms(start))
         raise
+    quota.record(account, kind="read")  # учёт чтения в дневной квоте (§3), без блокировки
     log.info("ads-read %s: ok за %dмс", name, _ms(start))
     return result
 
