@@ -146,6 +146,129 @@ def _attach_image_asset_via_sdk(
     }
 
 
+def _add_call_asset_via_sdk(
+    client, customer_id, campaign_id, phone_number: str, country_code: str
+) -> dict:
+    """call_asset (country_code + phone_number) → link CALL. Конверс-трекинг звонков не задаём
+    (аккаунтное по умолчанию)."""
+    cid = str(customer_id)
+    asset_svc = client.get_service("AssetService")
+    op = client.get_type("AssetOperation")
+    call = op.create.call_asset
+    call.country_code = country_code
+    call.phone_number = phone_number
+    asset_rns = [
+        r.resource_name for r in asset_svc.mutate_assets(customer_id=cid, operations=[op]).results
+    ]
+    field_type = client.enums.AssetFieldTypeEnum.CALL
+    link_rns = _link_campaign_assets(
+        client, cid, _campaign_rn(client, cid, campaign_id), asset_rns, field_type
+    )
+    return {
+        "customer_id": cid,
+        "campaign_id": str(campaign_id),
+        "kind": "call",
+        "assets": asset_rns,
+        "links": link_rns,
+        "count": len(link_rns),
+        "applied": True,
+    }
+
+
+def _add_promotion_via_sdk(
+    client,
+    customer_id,
+    campaign_id,
+    *,
+    promotion_target: str,
+    final_url: str,
+    percent_off: float | None = None,
+    money_off_units: float | None = None,
+    currency: str | None = None,
+    promo_code: str | None = None,
+) -> dict:
+    """promotion_asset (percent_off ИЛИ money_amount_off) → link PROMOTION. final_urls — на сам
+    Asset (.create), не на promotion_asset. ВАЖНО (сверено с v24-исходником): percent_off в
+    шкале «1_000_000 = 100%» → percent × 10_000."""
+    cid = str(customer_id)
+    asset_svc = client.get_service("AssetService")
+    op = client.get_type("AssetOperation")
+    asset = op.create
+    asset.final_urls.append(final_url)  # final_urls — на Asset, НЕ на promotion_asset
+    pa = asset.promotion_asset
+    pa.promotion_target = promotion_target
+    if percent_off is not None:
+        pa.percent_off = int(round(float(percent_off) * 10_000))  # 1_000_000 == 100%
+    else:
+        pa.money_amount_off.amount_micros = int(round(float(money_off_units) * 1_000_000))
+        pa.money_amount_off.currency_code = currency
+    if promo_code:
+        pa.promotion_code = promo_code
+    asset_rns = [
+        r.resource_name for r in asset_svc.mutate_assets(customer_id=cid, operations=[op]).results
+    ]
+    field_type = client.enums.AssetFieldTypeEnum.PROMOTION
+    link_rns = _link_campaign_assets(
+        client, cid, _campaign_rn(client, cid, campaign_id), asset_rns, field_type
+    )
+    return {
+        "customer_id": cid,
+        "campaign_id": str(campaign_id),
+        "kind": "promotion",
+        "assets": asset_rns,
+        "links": link_rns,
+        "count": len(link_rns),
+        "applied": True,
+    }
+
+
+def _add_price_asset_via_sdk(
+    client,
+    customer_id,
+    campaign_id,
+    *,
+    price_type: str,
+    currency: str,
+    language_code: str,
+    offerings: list[dict],
+) -> dict:
+    """price_asset (type_ + language + 3–8 price_offerings) → link PRICE. Money: 1_000_000 micros =
+    1 единица валюты. type_/unit — enum-члены в UPPER_CASE."""
+    cid = str(customer_id)
+    asset_svc = client.get_service("AssetService")
+    op = client.get_type("AssetOperation")
+    pa = op.create.price_asset
+    pa.type_ = getattr(client.enums.PriceExtensionTypeEnum, price_type.upper())
+    pa.language_code = language_code
+    for o in offerings:
+        off = client.get_type("PriceOffering")
+        off.header = o["header"]
+        off.description = o["description"]
+        off.price.amount_micros = int(round(float(o["price_units"]) * 1_000_000))
+        off.price.currency_code = currency
+        off.final_url = o["final_url"]
+        if o.get("unit"):
+            off.unit = getattr(client.enums.PriceExtensionPriceUnitEnum, str(o["unit"]).upper())
+        pa.price_offerings.append(off)
+    asset_rns = [
+        r.resource_name for r in asset_svc.mutate_assets(customer_id=cid, operations=[op]).results
+    ]
+    field_type = client.enums.AssetFieldTypeEnum.PRICE
+    link_rns = _link_campaign_assets(
+        client, cid, _campaign_rn(client, cid, campaign_id), asset_rns, field_type
+    )
+    return {
+        "customer_id": cid,
+        "campaign_id": str(campaign_id),
+        "kind": "price",
+        "assets": asset_rns,
+        "links": link_rns,
+        "count": len(link_rns),
+        "offerings": len(offerings),
+        "applied": True,
+    }
+
+
 def _remove_campaign_assets_via_sdk(client, customer_id, link_resource_names: list[str]) -> dict:
     """Открепить ассеты от кампании: CampaignAssetOperation.remove на каждый campaign_asset.
     Удаляется СВЯЗЬ, не сам Asset (ассет может быть привязан к другим кампаниям)."""

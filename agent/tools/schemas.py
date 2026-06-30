@@ -6,6 +6,7 @@ Read-инструменты выполняются сразу; mutation-инст
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -51,6 +52,9 @@ MUTATION_TOOLS = {
     "add_sitelinks",
     "add_callouts",
     "add_structured_snippets",
+    "add_call_asset",
+    "add_promotion",
+    "add_price_asset",
     "remove_asset_link",
 }
 READ_TOOLS = {"get_stats", "generate_rsa", "keyword_research", "clone_campaign"}
@@ -595,6 +599,116 @@ class RemoveAssetLink(BaseModel):
         return v
 
 
+# ── §3-assets семейство 3: Call / Promotion / Price (LLM-заполняемые, за confirm-гейтом) ──
+class AddCallAsset(BaseModel):
+    """Телефон-расширение (CallAsset). country_code — ISO alpha-2; phone_number — сырой номер.
+    Конверс-трекинг звонков в MVP не подключаем (по умолчанию аккаунтное)."""
+
+    campaign: str
+    phone_number: str = Field(min_length=3, max_length=30)
+    country_code: str = "UA"
+
+    @field_validator("country_code")
+    @classmethod
+    def _cc(cls, v):
+        v = (v or "UA").strip().upper()
+        if len(v) != 2 or not v.isalpha():
+            raise ValueError("country_code — двухбуквенный ISO-код (напр. UA, US)")
+        return v
+
+    @field_validator("phone_number")
+    @classmethod
+    def _pn(cls, v):
+        v = (v or "").strip()
+        if not re.fullmatch(r"[+()\-\s\d]{3,30}", v):
+            raise ValueError("телефон: цифры, +, пробел, (), - (3–30 символов)")
+        return v
+
+
+class AddPromotion(BaseModel):
+    """Промо-расширение (PromotionAsset). РОВНО одна скидка: percent_off (1–100%) ИЛИ
+    money_off_units (+currency). final_url — посадочная (ставится на сам Asset). Длину
+    promotion_target считает КОД."""
+
+    campaign: str
+    promotion_target: str = Field(min_length=1)
+    final_url: str
+    percent_off: float | None = Field(default=None, gt=0, le=100)
+    money_off_units: float | None = Field(default=None, gt=0, le=MONEY_MAX_UNITS)
+    currency: Literal["USD", "UAH", "EUR"] | None = None
+    promo_code: str | None = Field(default=None, max_length=40)
+
+    @field_validator("promotion_target")
+    @classmethod
+    def _pt(cls, v):
+        return assert_asset_len(v, "promotion_target")
+
+    @field_validator("final_url")
+    @classmethod
+    def _u(cls, v):
+        if not v or not str(v).startswith(("http://", "https://")):
+            raise ValueError("нужен валидный final_url (http/https)")
+        return v
+
+    @model_validator(mode="after")
+    def _discount(self):
+        has_pct = self.percent_off is not None
+        has_money = self.money_off_units is not None
+        if has_pct == has_money:  # оба или ни одного
+            raise ValueError("укажи РОВНО одно: percent_off (1–100) ИЛИ money_off_units+currency")
+        if has_money and not self.currency:
+            raise ValueError("для money_off_units укажи currency (USD/UAH/EUR)")
+        return self
+
+
+class PriceOfferingItem(BaseModel):
+    header: str = Field(min_length=1)  # ≤25 (asset_len)
+    description: str = Field(min_length=1)  # ≤25
+    price_units: float = Field(gt=0, le=MONEY_MAX_UNITS)  # в валюте прайса
+    final_url: str
+    unit: (
+        Literal["per_hour", "per_day", "per_week", "per_month", "per_year", "per_night"] | None
+    ) = None
+
+    @field_validator("header")
+    @classmethod
+    def _h(cls, v):
+        return assert_asset_len(v, "price_header")
+
+    @field_validator("description")
+    @classmethod
+    def _d(cls, v):
+        return assert_asset_len(v, "price_desc")
+
+    @field_validator("final_url")
+    @classmethod
+    def _u(cls, v):
+        if not v or not str(v).startswith(("http://", "https://")):
+            raise ValueError("нужен валидный final_url (http/https) у каждого price-офера")
+        return v
+
+
+class AddPriceAsset(BaseModel):
+    """Прайс-расширение (PriceAsset): 3–8 оферов (header≤25, description≤25, цена, URL). Валюта
+    общая на все оферы. type_/unit — из канонического enum (lower-case)."""
+
+    campaign: str
+    price_type: Literal[
+        "brands",
+        "events",
+        "locations",
+        "neighborhoods",
+        "product_categories",
+        "product_tiers",
+        "services",
+        "service_categories",
+        "service_tiers",
+    ] = "services"
+    currency: Literal["USD", "UAH", "EUR"]
+    language_code: str = "uk"
+    offerings: list[PriceOfferingItem] = Field(min_length=3, max_length=8)
+
+
 SCHEMAS: dict[str, type[BaseModel]] = {
     "update_budget": UpdateBudget,
     "update_bid": UpdateBid,
@@ -620,6 +734,9 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "add_callouts": AddCallouts,
     "add_structured_snippets": AddStructuredSnippets,
     "attach_image_asset": AttachImageAsset,
+    "add_call_asset": AddCallAsset,
+    "add_promotion": AddPromotion,
+    "add_price_asset": AddPriceAsset,
     "remove_asset_link": RemoveAssetLink,
 }
 
@@ -733,6 +850,24 @@ TOOLS: list[dict] = [
         "Добавить структурные описания в кампанию: header из канонического англ. списка "
         "(Brands/Types/Models/Styles/Amenities/…) + values (3–10, каждое ≤25). Укажи campaign.",
         AddStructuredSnippets,
+    ),
+    _tool(
+        "add_call_asset",
+        "Добавить телефон-расширение (звонок) в кампанию: phone_number и country_code "
+        "(ISO alpha-2, по умолчанию UA). Укажи campaign. Применяется после подтверждения.",
+        AddCallAsset,
+    ),
+    _tool(
+        "add_promotion",
+        "Добавить промо-расширение в кампанию: promotion_target (что по акции), final_url и РОВНО "
+        "одну скидку — percent_off (1–100) ИЛИ money_off_units+currency; опц. promo_code. Укажи campaign.",
+        AddPromotion,
+    ),
+    _tool(
+        "add_price_asset",
+        "Добавить прайс-расширение в кампанию: price_type, currency, language_code и 3–8 оферов "
+        "(header ≤25, description ≤25, price_units, final_url, опц. unit). Укажи campaign.",
+        AddPriceAsset,
     ),
     _tool(
         "remove_asset_link",

@@ -110,6 +110,8 @@ CATALOG: dict[str, dict[str, str]] = {
             "<b>Like another campaign / from a brief</b>\n"
             "• “create campaign N with settings like campaign X” — I clone the settings.\n"
             "• 🧩 in /campaigns → “Extensions”: sitelinks, callouts, structured snippets, image.\n"
+            "• By text: “add phone +380… to campaign X”, “add a −20% summer promo”, “add prices: "
+            "Basic 9.99/mo…” — I'll build the extension (call/promotion/price) and ask to confirm.\n"
             "• 📎 send a link or a file (.txt/.csv/.docx/.xlsx) + a task — I'll read it and act "
             "(e.g. “research keywords for this landing” or “make a campaign from this brief”).\n\n"
             "<i>New ads and campaigns are created paused — launch is separate, so nothing goes "

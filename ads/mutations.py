@@ -559,6 +559,146 @@ async def apply_attach_image_asset(
     return result
 
 
+# ── §3-assets семейство 3: Call / Promotion / Price (валидация В КОДЕ ДО claim) ──────
+def _validate_call(phone_number: str, country_code: str) -> None:
+    import re as _re
+
+    if not _re.fullmatch(r"[+()\-\s\d]{3,30}", (phone_number or "").strip()):
+        raise ValueError("телефон: цифры/+/()/-/пробел, 3–30 символов")
+    cc = (country_code or "").strip().upper()
+    if len(cc) != 2 or not cc.isalpha():
+        raise ValueError("country_code — двухбуквенный ISO-код")
+
+
+def _validate_promotion(
+    promotion_target: str,
+    final_url: str,
+    percent_off: float | None,
+    money_off_units: float | None,
+    currency: str | None,
+) -> None:
+    assert_asset_len(promotion_target, "promotion_target")
+    if not str(final_url).startswith(("http://", "https://")):
+        raise ValueError("promotion final_url должен быть http/https")
+    has_pct = percent_off is not None
+    has_money = money_off_units is not None
+    if has_pct == has_money:
+        raise ValueError("ровно одна скидка: percent_off ИЛИ money_off_units")
+    if has_pct and not (0 < float(percent_off) <= 100):
+        raise ValueError("percent_off — в (0, 100]")
+    if has_money:
+        if not (0 < float(money_off_units) <= MONEY_MAX_UNITS):
+            raise ValueError(f"money_off_units — в (0, {MONEY_MAX_UNITS}]")
+        if not currency:
+            raise ValueError("для money_off_units нужна currency")
+
+
+def _validate_price(offerings: list[dict], currency: str) -> None:
+    if not 3 <= len(offerings) <= 8:
+        raise ValueError("прайс: 3–8 оферов")
+    if not currency:
+        raise ValueError("нужна currency для прайса")
+    for o in offerings:
+        assert_asset_len(o.get("header", ""), "price_header")
+        assert_asset_len(o.get("description", ""), "price_desc")
+        if not (0 < float(o.get("price_units", 0)) <= MONEY_MAX_UNITS):
+            raise ValueError("price_units — в (0, лимит]")
+        if not str(o.get("final_url", "")).startswith(("http://", "https://")):
+            raise ValueError("у каждого price-офера final_url http/https")
+
+
+async def apply_add_call_asset(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    phone_number: str,
+    country_code: str,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """Телефон-расширение (CallAsset) в кампанию. НЕ деньги (не управляет ставкой/бюджетом)."""
+    ensure_allowed(customer_id)
+    _validate_call(phone_number, country_code)
+    await _require_confirmation(confirm_store, confirmation_id, "add_call_asset")
+    result = await asyncio.to_thread(
+        extensions._add_call_asset_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_id,
+        phone_number,
+        country_code,
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+async def apply_add_promotion(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    promotion_target: str,
+    final_url: str,
+    percent_off: float | None = None,
+    money_off_units: float | None = None,
+    currency: str | None = None,
+    promo_code: str | None = None,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """Промо-расширение (PromotionAsset). percent_off в шкале 1_000_000=100% (×10_000) — в SDK-слое."""
+    ensure_allowed(customer_id)
+    _validate_promotion(promotion_target, final_url, percent_off, money_off_units, currency)
+    await _require_confirmation(confirm_store, confirmation_id, "add_promotion")
+    result = await asyncio.to_thread(
+        lambda: extensions._add_promotion_via_sdk(
+            ads_client,
+            customer_id,
+            campaign_id,
+            promotion_target=promotion_target,
+            final_url=final_url,
+            percent_off=percent_off,
+            money_off_units=money_off_units,
+            currency=currency,
+            promo_code=promo_code,
+        )
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+async def apply_add_price_asset(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    price_type: str,
+    currency: str,
+    language_code: str,
+    offerings: list[dict],
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """Прайс-расширение (PriceAsset, 3–8 оферов). Money: 1_000_000 micros = 1 единица — в SDK-слое."""
+    ensure_allowed(customer_id)
+    _validate_price(offerings, currency)
+    await _require_confirmation(confirm_store, confirmation_id, "add_price_asset")
+    result = await asyncio.to_thread(
+        lambda: extensions._add_price_asset_via_sdk(
+            ads_client,
+            customer_id,
+            campaign_id,
+            price_type=price_type,
+            currency=currency,
+            language_code=language_code,
+            offerings=list(offerings),
+        )
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
 async def apply_remove_asset_link(
     *,
     customer_id: str,

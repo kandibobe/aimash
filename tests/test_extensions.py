@@ -276,7 +276,12 @@ class _FakeClient:
                 CALLOUT="CALLOUT",
                 STRUCTURED_SNIPPET="STRUCTURED_SNIPPET",
                 MARKETING_IMAGE="MARKETING_IMAGE",
-            )
+                CALL="CALL",
+                PROMOTION="PROMOTION",
+                PRICE="PRICE",
+            ),
+            PriceExtensionTypeEnum=SimpleNamespace(SERVICES="SERVICES", BRANDS="BRANDS"),
+            PriceExtensionPriceUnitEnum=SimpleNamespace(PER_MONTH="PER_MONTH", PER_DAY="PER_DAY"),
         )
 
     def get_service(self, name):
@@ -297,12 +302,28 @@ class _FakeClient:
                     ),
                     callout_asset=SimpleNamespace(callout_text=None),
                     structured_snippet_asset=SimpleNamespace(header=None, values=[]),
+                    call_asset=SimpleNamespace(country_code=None, phone_number=None),
+                    promotion_asset=SimpleNamespace(
+                        promotion_target=None,
+                        percent_off=None,
+                        money_amount_off=SimpleNamespace(amount_micros=None, currency_code=None),
+                        promotion_code=None,
+                    ),
+                    price_asset=SimpleNamespace(type_=None, language_code=None, price_offerings=[]),
                     final_urls=[],
                 )
             )
         if name == "CampaignAssetOperation":
             return SimpleNamespace(
                 create=SimpleNamespace(campaign=None, asset=None, field_type=None), remove=None
+            )
+        if name == "PriceOffering":
+            return SimpleNamespace(
+                header=None,
+                description=None,
+                price=SimpleNamespace(amount_micros=None, currency_code=None),
+                final_url=None,
+                unit=None,
             )
         raise AssertionError(name)
 
@@ -419,9 +440,250 @@ def test_asset_ops_in_supported_operations():
         "add_callouts",
         "add_structured_snippets",
         "attach_image_asset",
+        "add_call_asset",
+        "add_promotion",
+        "add_price_asset",
         "remove_asset_link",
     ):
         assert op in SUPPORTED_OPERATIONS
+
+
+# ── семейство 3: схемы ────────────────────────────────────────────────────────────
+def test_call_asset_schema():
+    from agent.tools.schemas import AddCallAsset
+
+    ok = AddCallAsset(campaign="X", phone_number="+380 (44) 123-45-67", country_code="ua")
+    assert ok.country_code == "UA"
+    with pytest.raises(Exception):
+        AddCallAsset(campaign="X", phone_number="abc", country_code="UA")  # буквы в телефоне
+    with pytest.raises(Exception):
+        AddCallAsset(campaign="X", phone_number="+380441234567", country_code="UKR")  # не 2 буквы
+
+
+def test_promotion_schema_exactly_one_discount():
+    from agent.tools.schemas import AddPromotion
+
+    ok = AddPromotion(
+        campaign="X", promotion_target="Лето", final_url="https://s.ua", percent_off=20
+    )
+    assert ok.percent_off == 20
+    with pytest.raises(Exception):  # обе скидки
+        AddPromotion(
+            campaign="X",
+            promotion_target="L",
+            final_url="https://s.ua",
+            percent_off=10,
+            money_off_units=5,
+            currency="USD",
+        )
+    with pytest.raises(Exception):  # ни одной
+        AddPromotion(campaign="X", promotion_target="L", final_url="https://s.ua")
+    with pytest.raises(Exception):  # money без currency
+        AddPromotion(
+            campaign="X", promotion_target="L", final_url="https://s.ua", money_off_units=5
+        )
+    with pytest.raises(Exception):  # percent вне (0,100]
+        AddPromotion(campaign="X", promotion_target="L", final_url="https://s.ua", percent_off=150)
+
+
+def test_price_schema_offering_bounds():
+    from agent.tools.schemas import AddPriceAsset
+
+    offs = [
+        {
+            "header": "Basic",
+            "description": "Старт",
+            "price_units": 9.99,
+            "final_url": "https://s.ua/b",
+        },
+        {
+            "header": "Pro",
+            "description": "Рост",
+            "price_units": 19.99,
+            "final_url": "https://s.ua/p",
+        },
+        {
+            "header": "Max",
+            "description": "Всё",
+            "price_units": 49.99,
+            "final_url": "https://s.ua/m",
+        },
+    ]
+    ok = AddPriceAsset(campaign="X", currency="USD", offerings=offs)
+    assert len(ok.offerings) == 3 and ok.price_type == "services"
+    with pytest.raises(Exception):  # < 3 оферов
+        AddPriceAsset(campaign="X", currency="USD", offerings=offs[:2])
+    with pytest.raises(Exception):  # header > 25
+        AddPriceAsset(
+            campaign="X",
+            currency="USD",
+            offerings=[{**offs[0], "header": "А" * 26}, offs[1], offs[2]],
+        )
+
+
+# ── семейство 3: SDK-ветки (включая КРИТИЧНОЕ масштабирование percent_off) ─────────────
+def test_add_call_via_sdk():
+    client = _FakeClient()
+    res = ext._add_call_asset_via_sdk(client, DRAFT_ACCOUNT_ID, "23", "+380441234567", "UA")
+    assert res["count"] == 1
+    aop = client.cap["asset_ops"][0]
+    assert aop.create.call_asset.country_code == "UA"
+    assert aop.create.call_asset.phone_number == "+380441234567"
+    assert client.cap["link_ops"][0].create.field_type == "CALL"
+
+
+def test_add_promotion_via_sdk_percent_scaling():
+    # КРИТИЧНО: 1_000_000 == 100% → 20% должно стать 200_000 (НЕ 20_000_000).
+    client = _FakeClient()
+    res = ext._add_promotion_via_sdk(
+        client,
+        DRAFT_ACCOUNT_ID,
+        "23",
+        promotion_target="Лето",
+        final_url="https://shop.ua",
+        percent_off=20,
+    )
+    assert res["count"] == 1
+    aop = client.cap["asset_ops"][0]
+    assert aop.create.promotion_asset.percent_off == 200_000  # 20 × 10_000
+    assert list(aop.create.final_urls) == ["https://shop.ua"]  # на Asset, не на promotion_asset
+    assert client.cap["link_ops"][0].create.field_type == "PROMOTION"
+
+
+def test_add_promotion_via_sdk_money_off():
+    client = _FakeClient()
+    ext._add_promotion_via_sdk(
+        client,
+        DRAFT_ACCOUNT_ID,
+        "23",
+        promotion_target="Скидка",
+        final_url="https://shop.ua",
+        money_off_units=5,
+        currency="USD",
+    )
+    mo = client.cap["asset_ops"][0].create.promotion_asset.money_amount_off
+    assert (
+        mo.amount_micros == 5_000_000 and mo.currency_code == "USD"
+    )  # 1_000_000 micros = 1 единица
+
+
+def test_add_price_via_sdk():
+    client = _FakeClient()
+    offs = [
+        {
+            "header": "Basic",
+            "description": "Старт",
+            "price_units": 9.99,
+            "final_url": "https://s.ua/b",
+            "unit": "per_month",
+        },
+        {
+            "header": "Pro",
+            "description": "Рост",
+            "price_units": 19.99,
+            "final_url": "https://s.ua/p",
+        },
+        {"header": "Max", "description": "Всё", "price_units": 49.0, "final_url": "https://s.ua/m"},
+    ]
+    res = ext._add_price_asset_via_sdk(
+        client,
+        DRAFT_ACCOUNT_ID,
+        "23",
+        price_type="services",
+        currency="USD",
+        language_code="uk",
+        offerings=offs,
+    )
+    assert res["count"] == 1 and res["offerings"] == 3
+    pa = client.cap["asset_ops"][0].create.price_asset
+    assert pa.type_ == "SERVICES" and pa.language_code == "uk"
+    assert pa.price_offerings[0].price.amount_micros == 9_990_000  # 9.99 × 1e6
+    assert pa.price_offerings[0].unit == "PER_MONTH"
+    assert client.cap["link_ops"][0].create.field_type == "PRICE"
+
+
+# ── семейство 3: гейты apply_* (happy / validate-before-claim / no-confirmation) ──────
+async def test_apply_add_call_asset_gates():
+    calls = {"n": 0}
+
+    def fake(client, customer_id, campaign_id, phone, cc):
+        calls["n"] += 1
+        return {"applied": True, "count": 1}
+
+    store = FakeStore(FakeProposal("add_call_asset", "confirmed", user_initiated=False))
+    with patched(ext, "_add_call_asset_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_add_call_asset(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_id="23",
+            phone_number="+380441234567",
+            country_code="UA",
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+        )
+    assert res["applied"] and calls["n"] == 1 and store.finalized is True
+    # без подтверждения → PermissionError, SDK не зван
+    store2 = FakeStore(proposal=None)
+    with patched(ext, "_add_call_asset_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        with pytest.raises(PermissionError):
+            await mut.apply_add_call_asset(
+                customer_id=DRAFT_ACCOUNT_ID,
+                campaign_id="23",
+                phone_number="+380441234567",
+                country_code="UA",
+                confirmation_id="bogus",
+                confirm_store=store2,
+                ads_client=object(),
+            )
+    assert calls["n"] == 1  # не вырос
+
+
+async def test_apply_add_promotion_validate_before_claim():
+    calls = {"n": 0}
+
+    def fake(*a, **k):
+        calls["n"] += 1
+        return {"applied": True}
+
+    store = FakeStore(FakeProposal("add_promotion", "confirmed", user_initiated=False))
+    with patched(ext, "_add_promotion_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        with pytest.raises(ValueError):  # ни одной скидки → отказ ДО claim
+            await mut.apply_add_promotion(
+                customer_id=DRAFT_ACCOUNT_ID,
+                campaign_id="23",
+                promotion_target="L",
+                final_url="https://s.ua",
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=object(),
+            )
+    assert calls["n"] == 0 and store.finalized is False
+
+
+async def test_apply_add_price_foreign_account():
+    store = FakeStore(FakeProposal("add_price_asset", "confirmed", user_initiated=False))
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        with pytest.raises(PermissionError):  # чужой аккаунт → замок до всего
+            await mut.apply_add_price_asset(
+                customer_id="1234567890",
+                campaign_id="23",
+                price_type="services",
+                currency="USD",
+                language_code="uk",
+                offerings=[
+                    {
+                        "header": "A",
+                        "description": "a",
+                        "price_units": 1,
+                        "final_url": "https://s.ua",
+                    }
+                ]
+                * 3,
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=object(),
+            )
+    assert store.finalized is False
 
 
 # ── image-ассет (семейство 2): мутация + SDK-ветка ───────────────────────────────────

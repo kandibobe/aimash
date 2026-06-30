@@ -40,6 +40,9 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
         "add_callouts",
         "add_structured_snippets",
         "attach_image_asset",
+        "add_call_asset",
+        "add_promotion",
+        "add_price_asset",
         "remove_asset_link",
     }
 )
@@ -471,6 +474,49 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             )
         finally:
             await asyncio.to_thread(clear_pending_media, params["media_id"])
+
+    if op in ("add_call_asset", "add_promotion", "add_price_asset"):
+        # §3-assets семейство 3: резолв кампании по имени → id, дальше apply_* (замок/гейт внутри).
+        ref = await asyncio.to_thread(
+            resolve.find_campaign_by_name, client, customer_id, params["campaign"]
+        )
+        if ref is None:
+            raise ValueError(f"кампания '{params['campaign']}' не найдена")
+        if op == "add_call_asset":
+            return await mutations.apply_add_call_asset(
+                customer_id=customer_id,
+                campaign_id=ref.id,
+                phone_number=params["phone_number"],
+                country_code=params.get("country_code", "UA"),
+                confirmation_id=confirmation_id,
+                confirm_store=store,
+                ads_client=client,
+            )
+        if op == "add_promotion":
+            return await mutations.apply_add_promotion(
+                customer_id=customer_id,
+                campaign_id=ref.id,
+                promotion_target=params["promotion_target"],
+                final_url=params["final_url"],
+                percent_off=params.get("percent_off"),
+                money_off_units=params.get("money_off_units"),
+                currency=params.get("currency"),
+                promo_code=params.get("promo_code"),
+                confirmation_id=confirmation_id,
+                confirm_store=store,
+                ads_client=client,
+            )
+        return await mutations.apply_add_price_asset(
+            customer_id=customer_id,
+            campaign_id=ref.id,
+            price_type=params.get("price_type", "services"),
+            currency=params["currency"],
+            language_code=params.get("language_code", "uk"),
+            offerings=params["offerings"],
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
 
     if op == "remove_asset_link":
         # Резолв кампании не нужен — link_resource_names несут аккаунт; замок/гейт держит apply_*.

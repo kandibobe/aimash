@@ -107,6 +107,8 @@ HELP = (
     "<b>Как в другой кампании / по брифу</b>\n"
     "• «сделай кампанию N с настройками как в кампании X» — клонирую настройки.\n"
     "• 🧩 в /campaigns → «Расширения»: быстрые ссылки, уточнения, структурные описания, картинка.\n"
+    "• Текстом: «добавь телефон +380… в кампанию X», «добавь промо −20% на лето», «добавь цены: "
+    "Basic 9.99/мес…» — соберу расширение (телефон/промо/прайс) и спрошу подтверждение.\n"
     "• 📎 пришли ссылку или файл (.txt/.csv/.docx/.xlsx) + задачу — прочитаю и выполню "
     "(например: «подбери ключи по этому лендингу» или «кампанию по этому брифу»).\n\n"
     "<i>Новые объявления и кампании создаются на паузе — запуск отдельно, чтобы ничего не "
@@ -720,6 +722,27 @@ def fmt_mutation_summary(operation: str, params: dict, lang: str | None = None) 
         )
     if operation == "attach_image_asset":
         return f"Кампания «{c}» — добавить изображение-ассет (обрезано до 1.91:1)."
+    if operation == "add_call_asset":
+        return (
+            f"Кампания «{c}» — телефон-расширение: {params.get('phone_number', '')} "
+            f"({params.get('country_code', 'UA')})."
+        )
+    if operation == "add_promotion":
+        if params.get("percent_off") is not None:
+            disc = f"-{params['percent_off']:g}%"
+        else:
+            disc = f"-{params.get('money_off_units', '')} {params.get('currency', '')}"
+        code = f", промокод {params['promo_code']}" if params.get("promo_code") else ""
+        return f"Кампания «{c}» — промо: «{params.get('promotion_target', '')}» {disc}{code}."
+    if operation == "add_price_asset":
+        offs = params.get("offerings") or []
+        lines = "\n".join(
+            f"  • {o.get('header', '')}: {o.get('price_units', '')} {params.get('currency', '')}"
+            for o in offs
+        )
+        return (
+            f"Кампания «{c}» — прайс ({len(offs)} оферов, {params.get('currency', '')}):\n{lines}"
+        )
     if operation == "remove_asset_link":
         n = len(params.get("link_resource_names") or [])
         return f"Открепить расширения от кампании: {n} шт. (ассеты не удаляются)."
@@ -811,6 +834,25 @@ def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
         )
     if operation == "attach_image_asset":
         return f"Campaign “{c}” — add an image asset (cropped to 1.91:1)."
+    if operation == "add_call_asset":
+        return (
+            f"Campaign “{c}” — call extension: {params.get('phone_number', '')} "
+            f"({params.get('country_code', 'UA')})."
+        )
+    if operation == "add_promotion":
+        if params.get("percent_off") is not None:
+            disc = f"-{params['percent_off']:g}%"
+        else:
+            disc = f"-{params.get('money_off_units', '')} {params.get('currency', '')}"
+        code = f", code {params['promo_code']}" if params.get("promo_code") else ""
+        return f"Campaign “{c}” — promotion: “{params.get('promotion_target', '')}” {disc}{code}."
+    if operation == "add_price_asset":
+        offs = params.get("offerings") or []
+        lines = "\n".join(
+            f"  • {o.get('header', '')}: {o.get('price_units', '')} {params.get('currency', '')}"
+            for o in offs
+        )
+        return f"Campaign “{c}” — price ({len(offs)} offerings, {params.get('currency', '')}):\n{lines}"
     if operation == "remove_asset_link":
         n = len(params.get("link_resource_names") or [])
         return f"Detach {n} extension(s) from the campaign (assets are not deleted)."
