@@ -17,7 +17,11 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.5",
     "SQLAlchemy>=2.0",
-    "asyncpg>=0.30",
+    "asyncpg>=0.30",           # async-драйвер Postgres (prod DSN)
+    "aiosqlite>=0.20",         # async-драйвер SQLite (dev/test DSN по умолчанию sqlite+aiosqlite);
+                               # db.session импортирует драйвер сразу при загрузке → без него падает
+                               # collect всех тестов в CI (ModuleNotFoundError). Был не объявлен:
+                               # локально стоял, CI с `.[dev]` его не получал.
     "alembic>=1.13",
     "APScheduler>=3.10",
     "cryptography>=43.0",      # Fernet для шифрования токенов at-rest
