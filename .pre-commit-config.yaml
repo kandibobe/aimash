@@ -9,9 +9,10 @@ repos:
     hooks:
       - id: gitleaks
 
-  # Линт + формат Python.
+  # Линт + формат Python. rev ДОЛЖЕН совпадать с пином ruff в pyproject [dev] и версией
+  # в CI — иначе pre-commit/локаль/CI форматируют по-разному и `ruff format --check` в CI падает.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9
+    rev: v0.14.10
     hooks:
       - id: ruff
         args: [--fix]

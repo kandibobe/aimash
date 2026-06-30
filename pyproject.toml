@@ -37,7 +37,11 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",        # покрытие в CI (--cov-report=xml)
-    "ruff>=0.6",
+    # ПИН ТОЧНОЙ ВЕРСИИ (не ">="): ruff меняет стиль форматтера между минорами (0.15.x
+    # переформатировал файлы иначе 0.14.x). Без пина CI ставил новейший ruff, расходился
+    # с локальным → `ruff format --check` падал → деплой не катился. Версия == pre-commit
+    # rev (.pre-commit-config.yaml). Бамп ruff — осознанный (обнови оба места + ruff format).
+    "ruff==0.14.10",
     "mypy>=1.11",
     "pre-commit>=3.8",        # хуки: gitleaks (секрет-скан) + ruff/ruff-format
 ]
