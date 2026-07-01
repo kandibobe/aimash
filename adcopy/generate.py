@@ -54,8 +54,9 @@ _SYSTEM = (
 
 def _user_prompt(brief: CopyBrief, need_h: int, need_d: int) -> str:
     parts = [
-        f"Язык: {brief.language}.",
-        f"Тематика: {brief.topic}.",
+        # §19.5: тексты — на языке АУДИТОРИИ кампании (для Кении en/sw), а не языка менеджера.
+        f"Пиши ВСЕ заголовки и описания на языке аудитории: {brief.language}.",
+        f"Тематика (что рекламируем): {brief.topic}.",
     ]
     if brief.keywords:
         parts.append("Ключевые слова: " + ", ".join(brief.keywords) + ".")

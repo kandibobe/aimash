@@ -26,6 +26,12 @@ from core.limits import MONEY_MAX_MICROS, MONEY_MAX_UNITS
 Currency = Literal["USD", "UAH", "EUR", "percent"]
 MatchType = Literal["broad", "phrase", "exact"]
 
+# §19: потолок числа ключевых слов на кампанию (одна ad group). Верифицированный менеджером список
+# из Google Sheets бывает в сотни строк — прежний max_length=50 ронял «Создать черновик»
+# ValidationError'ом (напр. 81 ключ). Google допускает тысячи ключей на группу; держим щедрый, но
+# конечный потолок (защита от абсурда/одного гигантского mutate). Бот обрезает список до него.
+MAX_CAMPAIGN_KEYWORDS = 2000
+
 # Абсолютный «очевидно неверно» потолок суммы (в единицах валюты аккаунта) для set_to/
 # increase_by_amount. Защита от галлюцинации модели сверх gt=0. Единый источник — core.limits
 # (mutations использует ту же границу в micros: MONEY_MAX_MICROS). Имя MAX_AMOUNT сохранено.
@@ -449,7 +455,7 @@ class CreateSearchCampaign(BaseModel):
     budget_daily_micros: int = Field(
         gt=0, le=MONEY_MAX_MICROS
     )  # потолок из core.limits (=1M единиц)
-    keywords: list[str] = Field(default_factory=list, max_length=50)
+    keywords: list[str] = Field(default_factory=list, max_length=MAX_CAMPAIGN_KEYWORDS)
     match_type: MatchType = "phrase"
     cpc_bid_micros: int = Field(default=500_000, gt=0, le=MONEY_MAX_MICROS)
     # §19 (composite, опциональные — без них поведение прежнее). Глубокую валидацию дублирует

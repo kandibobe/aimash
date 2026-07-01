@@ -113,6 +113,32 @@ def test_assemble_tags_by_analogy_when_budget_from_median():
     assert "Кения" in out["campaign_name"] and out["campaign_name"].endswith("Search")
 
 
+def test_assemble_kenya_uses_product_and_audience_language():
+    """§19: страна Кения ⇒ язык аудитории en (НЕ интерфейс ru), гео Кении, имя из product.
+    Гард против регресса «тур в кению»/русские тексты для англоязычной кампании."""
+    from ads import geo
+
+    extracted = CampaignSettings(product="поддержанные авто", geo_locations=["Кения"], goal="calls")
+    out = assemble_settings(extracted, topic="…полное описание…", ui_language="ru")
+    assert out["product"] == "поддержанные авто"  # драйвер seed/RSA, не имя кампании
+    assert out["target_language"] == "en"  # аудитория Кении, НЕ ru
+    assert out["geo_country_code"] == "KE"
+    assert out["geo_locale"] == "ru"  # язык названий локаций (менеджер писал «Кения»)
+    assert out["campaign_name"] == "Кения · поддержанные авто · Search"
+    assert geo.geo_ids_for_settings(out) == (2404,)  # Discover по Кении, НЕ Украине
+
+
+def test_assemble_product_absent_falls_back_to_description_theme():
+    # product не извлечён → тема seed/RSA = всё описание (не обрезано), имя — чистое geo+Search
+    out = assemble_settings(
+        CampaignSettings(geo_locations=["Кения"]),
+        topic="длинное описание про авто",
+        ui_language="ru",
+    )
+    assert out["product"] == "длинное описание про авто"
+    assert out["campaign_name"] == "Кения · Search"  # без мусора в имени
+
+
 def test_assemble_explicit_budget_not_by_analogy():
     extracted = CampaignSettings(budget_daily_units=60)
     out = assemble_settings(extracted, median_budget_micros=40_000_000)

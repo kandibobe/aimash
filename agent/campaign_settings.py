@@ -36,6 +36,7 @@ class CampaignSettings(BaseModel):
     assemble_settings из медиан/дефолтов). Модель НЕ считает деньги — только переносит из текста."""
 
     campaign_name: str | None = None
+    product: str | None = None  # ЧТО рекламируется (товар/услуга): «поддержанные авто» — драйвер
     geo_locations: list[str] = Field(default_factory=list)  # ["Кения"] / ["Украина","Киев"]
     geo_country_code: str | None = None  # ISO alpha-2, если модель уверенно вывела
     languages: list[str] = Field(default_factory=list)  # ["English","Swahili"]
@@ -64,9 +65,13 @@ _SYSTEM = (
     "СТРОГО один JSON-объект без пояснений и markdown со СЛЕДУЮЩИМИ полями (любое неизвестное — "
     "null, не выдумывай): "
     '{"campaign_name": "короткое имя или null", '
+    '"product": "ЧТО именно рекламируется — товар или услуга, кратко и по сути, БЕЗ слов '
+    "'создай кампанию'/страны/бюджета (напр. 'поддержанные авто', 'доставка цветов'); "
+    'null если неясно", '
     '"geo_locations": ["страна/город как в тексте"], '
-    '"geo_country_code": "ISO alpha-2 страны или null", '
-    '"languages": ["язык(и) таргетинга"], '
+    '"geo_country_code": "ISO alpha-2 страны таргетинга (Кения→KE, Украина→UA) или null", '
+    '"languages": ["язык(и), на которых ищет аудитория ЦЕЛЕВОЙ страны, напр. для Кении '
+    'English, Swahili"], '
     '"budget_daily_units": число дневного бюджета или null, '
     '"currency": "USD|UAH|EUR если ЯВНО назван, иначе null", '
     '"goal": "calls|leads|sales|traffic|awareness или null", '
@@ -173,11 +178,18 @@ def assemble_settings(
     avg_cpc_micros: int | None = None,
     common_match_type: str | None = None,
     topic: str | None = None,
+    ui_language: str = "ru",
 ) -> dict:
     """Слить извлечённое + медианы «по аналогии» + дефолты в финальный settings-словарь визарда.
 
     Поля, взятые из медиан (а не из описания), перечисляются в by_analogy — чтобы Этап-1 показал
-    менеджеру «(по аналогии)». Деньги/match_type — КОД. Возвращает wizard_state.settings."""
+    менеджеру «(по аналогии)». Деньги/match_type — КОД. Возвращает wizard_state.settings.
+
+    §19: помимо прежнего, вычисляет product (ЧТО рекламируем — драйвер seed/RSA), target_language
+    (язык АУДИТОРИИ целевой страны — Кения→en, а не язык интерфейса ui_language) и страну — чтобы
+    Discover/тексты были релевантны гео, а не выдавали чужой-язычную чепуху."""
+    from ads import geo  # локальный импорт: extract-путь не тянет ads/google-ads
+
     by_analogy: list[str] = []
 
     # бюджет: описание → медиана(by_analogy) → дефолт
@@ -207,18 +219,49 @@ def assemble_settings(
     if not extracted.bidding_strategy and not extracted.goal:
         by_analogy.append("bidding_strategy")
 
+    # Страна таргетинга: из ISO-кода модели, иначе из первого распознанного названия локации.
+    country_iso = geo.country_iso(extracted.geo_country_code)
+    if not country_iso:
+        for loc in extracted.geo_locations:
+            country_iso = geo.country_iso(loc)
+            if country_iso:
+                break
+
+    # Язык АУДИТОРИИ (для seed-подбора и RSA-текстов): язык из описания → по стране → интерфейс.
+    target_language = None
+    for lang in extracted.languages:
+        target_language = geo.lang_iso(lang)
+        if target_language:
+            break
+    target_language = target_language or geo.language_for_country(country_iso) or ui_language
+
+    # ЧТО рекламируем — драйвер seed/RSA. Нет product → всё описание (не обрезает товар, в отличие
+    # от прежнего text[:60]); имя кампании при этом остаётся чистым: geo · product · Search.
+    product = (extracted.product or "").strip()
+    theme = product or (topic or "").strip()
+
     name = (extracted.campaign_name or "").strip()
     if not name:
-        geo = (extracted.geo_locations[0] if extracted.geo_locations else "").strip()
-        t = (topic or "").strip()
-        parts = [p for p in (geo, t) if p] + ["Search"]
+        geo_name = (extracted.geo_locations[0] if extracted.geo_locations else "").strip()
+        parts = [p for p in (geo_name, product) if p] + ["Search"]
         name = " · ".join(parts)[:120]
+
+    # Языки таргетинга кампании (критерии): из описания, иначе имя языка страны (English), иначе [].
+    languages = list(extracted.languages)
+    if not languages:
+        nm = geo.language_name(target_language)
+        languages = [nm] if nm else []
 
     return {
         "campaign_name": name,
+        "product": theme or None,
+        "target_language": target_language,
         "geo_locations": list(extracted.geo_locations),
-        "geo_country_code": extracted.geo_country_code,
-        "languages": list(extracted.languages),
+        "geo_country_code": extracted.geo_country_code or country_iso,
+        # geo_locale — язык, на котором заданы НАЗВАНИЯ локаций (для их резолва в geoTargetConstant);
+        # менеджер пишет «Кения»/«Найроби» на языке интерфейса, поэтому ui_language, а не target.
+        "geo_locale": ui_language or "ru",
+        "languages": languages,
         "budget_daily_micros": budget_micros,
         "cpc_bid_micros": cpc_micros,
         "bidding_strategy": strat,

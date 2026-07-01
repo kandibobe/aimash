@@ -67,7 +67,7 @@ from agent.campaign_settings import (
     units_to_micros,
 )
 from agent.loop import handle_command
-from agent.tools.schemas import SCHEMAS
+from agent.tools.schemas import MAX_CAMPAIGN_KEYWORDS, SCHEMAS
 from bot import i18n, texts, ux
 from bot.campaign_wizard.store import CampaignDraftStore
 from bot.callbacks import (
@@ -2572,7 +2572,8 @@ async def cc_settings_desc(m: Message, state: FSMContext) -> None:
         median_budget_micros=medians.median_daily_budget_micros,
         avg_cpc_micros=medians.avg_cpc_micros,
         common_match_type=medians.common_match_type,
-        topic=text[:60],
+        topic=text,  # полное описание (не text[:60] — прежний срез отрезал сам товар)
+        ui_language=i18n.current_lang(),
     )
     await CDRAFTS.patch(
         session_id, lambda s: s.__setitem__("settings", settings_dict), expected_chat_id=m.chat.id
@@ -2677,12 +2678,14 @@ async def cc_ad_url(m: Message, state: FSMContext) -> None:
         page_text = ""
     prof = await _cc_profile_ctx(draft)  # §20: профиль клиента → релевантность заголовков/описаний
     brief = CopyBrief(
-        topic=(s.get("campaign_name") or url),
+        # §19.5.2: тематика = ЧТО рекламируем (product), язык — аудитории целевой страны (Кения→en),
+        # а не имя кампании / язык интерфейса — иначе тексты не по теме и на чужом языке.
+        topic=(s.get("product") or s.get("campaign_name") or url),
         keywords=kw_list[:20],
         usp=(page_text[:1500] or None),  # УТП с посадочной страницы
         profile=(prof or None),  # §20: профиль клиента — отдельным первоклассным контекстом
         geo=((s.get("geo_locations") or [""])[0] or None),
-        language=i18n.current_lang(),
+        language=(s.get("target_language") or i18n.current_lang()),
         n_headlines=RSA_MAX_HEADLINES,
         n_descriptions=RSA_MAX_DESCRIPTIONS,
     )
@@ -2909,27 +2912,32 @@ async def cc_kw_generate(cq: CallbackQuery, callback_data: CcCB, state: FSMConte
     await cq.answer()
     await msg.answer(i18n.t("cc_kw_generating"))
     s = draft.wizard_state.get("settings") or {}
-    lang = i18n.current_lang()
     try:
+        from ads import geo as adsgeo
         from ads.client import build_client
-        from ads.keyword_plan import LANGUAGE_IDS, generate_keyword_ideas
+        from ads.keyword_plan import generate_keyword_ideas
         from keywords.filter import filter_relevance
         from keywords.seeds import generate_seed_keywords
 
-        topic = s.get("campaign_name") or ""
+        # §19.4.2: тема = ЧТО рекламируем (product), а НЕ имя кампании; язык и ГЕО — целевой
+        # страны (Кения→en, geo Кения), а не интерфейса — иначе ключи нерелевантны/чужеязычны.
+        topic = s.get("product") or s.get("campaign_name") or ""
+        gen_lang = s.get("target_language") or i18n.current_lang()
+        geo_ids = adsgeo.geo_ids_for_settings(s)
         prof = await _cc_profile_ctx(draft)  # §20: профиль клиента → релевантность подбора
-        seeds = await generate_seed_keywords(topic=topic, profile=prof, language=lang)
+        seeds = await generate_seed_keywords(topic=topic, profile=prof, language=gen_lang)
         client = build_client(DRAFT_ACCOUNT_ID)
         ideas = await run_ads_read_call(
             generate_keyword_ideas,
             client,
             DRAFT_ACCOUNT_ID,
             seeds=seeds,
-            language=lang if lang in LANGUAGE_IDS else "ru",
+            language=adsgeo.keyword_ideas_lang(gen_lang),
+            geo_ids=geo_ids,  # страна кампании; () (неизвестна) → глобально, а не дефолт-Украина
             label="generate_keyword_ideas",
         )
         relevance = await filter_relevance(
-            texts=[i.text for i in ideas], topic=topic, profile=prof, language=lang
+            texts=[i.text for i in ideas], topic=topic, profile=prof, language=gen_lang
         )
     except Exception as e:  # noqa: BLE001 — сеть/квота/LLM
         await msg.answer(i18n.t("err_kw", err=ux.err_text(e)), reply_markup=cc_kw_kb())
@@ -3082,10 +3090,12 @@ async def cc_asset_type(cq: CallbackQuery, callback_data: CcCB, state: FSMContex
 
         spec = await generate_asset(
             family,
-            topic=s.get("campaign_name") or "",
+            # §19.7.2: как заголовки/описания — наполнение по товару (product) на языке аудитории
+            # целевой страны, а не по имени кампании / языку интерфейса (иначе ассеты не по теме).
+            topic=(s.get("product") or s.get("campaign_name") or ""),
             url=ad.get("final_url"),
             profile=await _cc_profile_ctx(draft),  # §20: наполнение ассетов из профиля клиента
-            language=i18n.current_lang(),
+            language=(s.get("target_language") or i18n.current_lang()),
         )
     except Exception as e:  # noqa: BLE001 — LLM/валидация наполнения
         await msg.answer(i18n.t("cc_asset_gen_failed", err=ux.err_text(e)))
@@ -3161,17 +3171,33 @@ def _cc_build_create_params(draft) -> dict:
     bidding = {"strategy": s.get("bidding_strategy") or "manual_cpc"}
     if s.get("target_cpa_micros"):
         bidding["target_cpa_micros"] = int(s["target_cpa_micros"])
+    from ads import geo as adsgeo
+
+    # Страна-хинт для резолва гео: из настроек → из названий локаций → прежний дефолт UA.
+    geo_cc = s.get("geo_country_code") or adsgeo.resolve_country(s) or "UA"
+    # §19: верифицированный список может быть большим — обрежем до потолка схемы, чтобы «Создать
+    # черновик» не падал ValidationError (напр. 81 ключ > прежнего max_length=50). Обрезку не
+    # молчим (см. правило «no silent caps») — логируем, сколько ключей отброшено.
+    kw_all = list(kw.get("list") or [])
+    kw_list = kw_all[:MAX_CAMPAIGN_KEYWORDS]
+    if len(kw_all) > MAX_CAMPAIGN_KEYWORDS:
+        log.warning(
+            "§19: список ключей %d > потолка %d — обрезан (отброшено %d)",
+            len(kw_all),
+            MAX_CAMPAIGN_KEYWORDS,
+            len(kw_all) - MAX_CAMPAIGN_KEYWORDS,
+        )
     return {
         "campaign_name": s.get("campaign_name") or "Search",
         "final_url": ad.get("final_url") or "",
         "headlines": list(ad.get("headlines") or []),
         "descriptions": list(ad.get("descriptions") or []),
         "budget_daily_micros": int(s.get("budget_daily_micros") or 0),
-        "keywords": list(kw.get("list") or []),
+        "keywords": kw_list,
         "match_type": kw.get("match_type") or "phrase",
         "cpc_bid_micros": int(s.get("cpc_bid_micros") or 500_000),
         "geo_locations": list(s.get("geo_locations") or []),
-        "geo_country_code": s.get("geo_country_code") or "UA",
+        "geo_country_code": geo_cc,
         "geo_locale": s.get("geo_locale") or "ru",
         "languages": list(s.get("languages") or []),
         "bidding": bidding,

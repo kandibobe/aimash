@@ -1657,23 +1657,30 @@ def _create_search_campaign_via_sdk(
             rsa.path2 = path2
     ad_rn = ad_svc.mutate_ad_group_ads(customer_id=cid, operations=[adop]).results[0].resource_name
 
-    # 5) Опциональные ключевые слова в группу.
+    # 5) Опциональные ключевые слова в группу. Best-effort, как гео/язык ниже: сбой добавления
+    # ключей (квота/битый ключ) НЕ роняет уже созданную PAUSED-кампанию ($0), иначе остались бы
+    # осиротевшие бюджет+кампания+группа. kw_created=0 в результате сигналит о недобавленных ключах.
     kw_created = 0
     if keywords:
-        crit_svc = client.get_service("AdGroupCriterionService")
-        mt = getattr(client.enums.KeywordMatchTypeEnum, str(match_type).upper())
-        enabled = client.enums.AdGroupCriterionStatusEnum.ENABLED
-        kops = []
-        for text in keywords:
-            kop = client.get_type("AdGroupCriterionOperation")
-            kop.create.ad_group = ad_group_rn
-            kop.create.status = enabled
-            kop.create.keyword.text = text
-            kop.create.keyword.match_type = mt
-            kops.append(kop)
-        kw_created = len(
-            crit_svc.mutate_ad_group_criteria(customer_id=cid, operations=kops).results
-        )
+        try:
+            crit_svc = client.get_service("AdGroupCriterionService")
+            mt = getattr(client.enums.KeywordMatchTypeEnum, str(match_type).upper())
+            enabled = client.enums.AdGroupCriterionStatusEnum.ENABLED
+            kops = []
+            for text in keywords:
+                kop = client.get_type("AdGroupCriterionOperation")
+                kop.create.ad_group = ad_group_rn
+                kop.create.status = enabled
+                kop.create.keyword.text = text
+                kop.create.keyword.match_type = mt
+                kops.append(kop)
+            kw_created = len(
+                crit_svc.mutate_ad_group_criteria(customer_id=cid, operations=kops).results
+            )
+        except Exception:  # noqa: BLE001 — ключи не добавились: PAUSED-кампания остаётся ($0)
+            kw_created = (
+                0  # результат вернёт keywords=0 — сигнал недобавленных ключей (как гео/язык)
+            )
 
     # 6) Опц. гео (резолв названий → geoTargetConstant; reuse builder, remove-before-create на свежей).
     geo_count = 0
