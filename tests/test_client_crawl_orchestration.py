@@ -79,14 +79,19 @@ async def test_fresh_profile_autosaves():
     await init_db()
     cust = "6000000001"
     await ClientProfileStore().apply_clear(cust)  # гарантируем «свежесть»
-    extract = ClientProfileExtract(brand="Kasi Motors", business_desc="автодилер")
+    extract = ClientProfileExtract(
+        brand="Kasi Motors",
+        business_desc="автодилер",
+        services=[{"name": "Поддержанные авто", "price": "от $4000"}],
+    )
+    bot = FakeBot()
     with (
         patched(bm.crawler, "load_robots", _noop_robots),
         patched(bm.crawler, "fetch_sitemap", _noop_sitemap),
         patched(bm.crawler, "crawl_site", _fake_crawl(_fake_result())),
         patched(bm, "structure_crawl", _fake_structure(extract)),
     ):
-        await bm._run_client_crawl(FakeBot(), 700, cust, "https://ex.com/")
+        await bm._run_client_crawl(bot, 700, cust, "https://ex.com/")
 
     prof = await ClientProfileStore().get_by_account(cust)
     assert prof is not None
@@ -94,6 +99,14 @@ async def test_fresh_profile_autosaves():
     assert prof["website"] == "https://ex.com/"
     assert prof["site_pages_count"] >= 1  # карта страниц сохранена
     assert any("+254" in c["value"] for c in prof["contacts"])  # телефон краулера влит
+
+    # §20.4: богатая сводка «что нашли» — разделы/услуги/цены/контакты/соцсети
+    msg = bot.sent[-1][1]
+    assert "Обойдено страниц" in msg
+    assert "Поддержанные авто" in msg  # услуга
+    assert "$4000" in msg  # цена
+    assert "instagram" in msg  # соцсеть
+    assert "Home" in msg  # раздел (заголовок страницы)
 
 
 @pytest.mark.asyncio

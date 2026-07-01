@@ -800,21 +800,13 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "🕷 Краулю сайт {domain}… Пришлю сводку по готовности.",
         "en": "🕷 Crawling {domain}… I'll send a summary when it's done.",
     },
-    "cli_crawl_done": {
-        "ru": (
-            "✅ Краулинг {domain} завершён.\n• Обойдено страниц: {pages}\nПрофиль клиента обновлён."
-        ),
-        "en": ("✅ Crawl of {domain} finished.\n• Pages crawled: {pages}\nClient profile updated."),
+    "cli_crawl_profile_updated": {
+        "ru": "Профиль клиента обновлён. Готов использовать в кампаниях и объявлениях.",
+        "en": "Client profile updated. Ready to use in campaigns and ads.",
     },
-    "cli_crawl_done_confirm": {
-        "ru": (
-            "✅ Краулинг {domain} завершён (страниц: {pages}). Обновить профиль клиента? "
-            "Подтвердите изменения ниже."
-        ),
-        "en": (
-            "✅ Crawl of {domain} finished (pages: {pages}). Update the client profile? "
-            "Confirm the changes below."
-        ),
+    "cli_crawl_confirm_update": {
+        "ru": "Обновить профиль клиента этими данными? Подтвердите изменения ниже.",
+        "en": "Update the client profile with this data? Confirm the changes below.",
     },
     "cli_crawl_empty": {
         "ru": "⚠️ Краулинг {domain}: не удалось собрать полезные данные с сайта.",

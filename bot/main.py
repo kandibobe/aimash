@@ -2284,6 +2284,35 @@ def _crawl_patch_from_result(extract, result) -> dict:
     return patch
 
 
+def _crawl_findings(result, patch: dict) -> dict:
+    """§20.4: «что нашли» для сводки краула — разделы (заголовки страниц), услуги, цены,
+    телефоны, соцсети. Из result (карта страниц) + patch (структурированный профиль)."""
+    sections: list[str] = []
+    for p in result.pages:
+        t = (getattr(p, "title", "") or "").strip()
+        if t and t not in sections:
+            sections.append(t)
+    services = [s.get("name", "") for s in (patch.get("services") or []) if s.get("name")]
+    prices = [
+        f"{s.get('name', '')} {s.get('price', '')}".strip()
+        for s in (patch.get("services") or [])
+        if s.get("price")
+    ]
+    phones = [
+        c.get("value", "")
+        for c in (patch.get("contacts") or [])
+        if c.get("kind") == "phone" and c.get("value")
+    ]
+    socials = list((patch.get("socials") or {}).keys())
+    return {
+        "sections": sections,
+        "services": services,
+        "prices": prices,
+        "phones": phones,
+        "socials": socials,
+    }
+
+
 async def _run_client_crawl(bot, chat_id: int, customer_id: str, url: str) -> None:
     """Фоновый обход сайта клиента: crawl_jobs running→done/failed; профиль пуст → auto-save,
     иначе черновик profile_update («было→станет») с confirm-гейтом (§20.4/20.5). Любой сбой не
@@ -2326,6 +2355,10 @@ async def _run_client_crawl(bot, chat_id: int, customer_id: str, url: str) -> No
             }
             before = await CLIENTS.get_by_account(customer_id)
             await crawl_jobs.mark_done(job_id, pages_crawled=result.pages_count)
+            # §20.4: богатая сводка «что нашли» (разделы/услуги/цены/контакты/соцсети).
+            crawl_msg = texts.fmt_crawl_summary(
+                domain, pages=result.pages_count, **_crawl_findings(result, patch)
+            )
             if before is None:
                 # свежий профиль + явное действие пользователя (нажал краул) → авто-сохранение
                 await CLIENTS.apply_upsert(
@@ -2337,7 +2370,8 @@ async def _run_client_crawl(bot, chat_id: int, customer_id: str, url: str) -> No
                 )
                 await bot.send_message(
                     chat_id,
-                    i18n.t("cli_crawl_done", domain=texts.esc(domain), pages=result.pages_count),
+                    crawl_msg + "\n\n" + i18n.t("cli_crawl_profile_updated"),
+                    parse_mode=ParseMode.HTML,
                 )
             else:
                 # профиль существует → показать «было→станет» и ждать ✅ (не перезаписываем молча)
@@ -2363,11 +2397,7 @@ async def _run_client_crawl(bot, chat_id: int, customer_id: str, url: str) -> No
                 _LAST_PENDING[chat_id] = cid
                 await bot.send_message(
                     chat_id,
-                    i18n.t(
-                        "cli_crawl_done_confirm", domain=texts.esc(domain), pages=result.pages_count
-                    )
-                    + "\n\n"
-                    + summary,
+                    crawl_msg + "\n\n" + i18n.t("cli_crawl_confirm_update") + "\n\n" + summary,
                     reply_markup=confirm_kb(cid),
                     parse_mode=ParseMode.HTML,
                 )

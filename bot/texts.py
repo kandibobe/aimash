@@ -1361,6 +1361,39 @@ def fmt_cc_final_summary(state: dict, lang: str | None = None) -> str:
 
 
 # ── §20: «Информация про клиентов» ────────────────────────────────────────────────
+def fmt_crawl_summary(
+    domain: str,
+    *,
+    pages: int,
+    sections: list[str],
+    services: list[str],
+    prices: list[str],
+    phones: list[str],
+    socials: list[str],
+    lang: str | None = None,
+) -> str:
+    """§20.4: сводка результата краулинга (что нашли на сайте). HTML, всё через esc(). Пустые
+    блоки опускаются. Заголовок/суффикс («профиль обновлён»/confirm) добавляет вызывающий."""
+    lng = _lang(lang)
+    d = esc(domain)
+    head = (
+        f"✅ <b>Crawl of {d} finished.</b>" if lng == "en" else f"✅ <b>Краулинг {d} завершён.</b>"
+    )
+    lines = [head, ("• Pages: " if lng == "en" else "• Обойдено страниц: ") + str(pages)]
+
+    def _row(label_ru: str, label_en: str, items: list[str], limit: int) -> None:
+        vals = [esc(x) for x in items if x][:limit]
+        if vals:
+            lines.append(("• " + (label_en if lng == "en" else label_ru) + ": ") + ", ".join(vals))
+
+    _row("Разделы", "Sections", sections, 8)
+    _row("Услуги", "Services", services, 8)
+    _row("Цены", "Prices", prices, 5)
+    _row("Контакты", "Contacts", phones, 3)
+    _row("Соцсети", "Socials", socials, 6)
+    return "\n".join(lines)
+
+
 def fmt_client_card(profile: dict | None, customer_id: str, lang: str | None = None) -> str:
     """§20.2 «Карточка клиента»: сохранённый профиль (бренд/бизнес/услуги/цены/контакты/сайт).
     profile=None → пустая карточка с приглашением добавить инфу. HTML, всё через esc()."""
