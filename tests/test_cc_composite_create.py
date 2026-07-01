@@ -152,6 +152,66 @@ def test_attach_asset_specs_collects_added_and_skipped():
     assert {s["family"] for s in skipped} == {"lead_form", "price"}
 
 
+# ── §19.3: конверс-стратегия без отслеживания конверсий → понижение до Maximize Clicks ──
+class _FakeEnums:
+    class ConversionTrackingStatusEnum:
+        UNSPECIFIED = 0
+        UNKNOWN = 1
+        NOT_CONVERSION_TRACKED = 2
+        CONVERSION_TRACKING_MANAGED_BY_SELF = 3
+
+
+def _fake_client_with_tracking(status: int):
+    row = SimpleNamespace(
+        customer=SimpleNamespace(
+            conversion_tracking_setting=SimpleNamespace(conversion_tracking_status=status)
+        )
+    )
+    ga = SimpleNamespace(search=lambda **kw: [row])
+    return SimpleNamespace(get_service=lambda name: ga, enums=_FakeEnums())
+
+
+def test_conversion_tracking_enabled_reads_status():
+    on = _fake_client_with_tracking(
+        _FakeEnums.ConversionTrackingStatusEnum.CONVERSION_TRACKING_MANAGED_BY_SELF
+    )
+    off = _fake_client_with_tracking(_FakeEnums.ConversionTrackingStatusEnum.NOT_CONVERSION_TRACKED)
+    assert mut._conversion_tracking_enabled(on, "123") is True
+    assert mut._conversion_tracking_enabled(off, "123") is False
+
+
+def test_conversion_tracking_read_failure_is_failsafe_off():
+    def _boom(**kw):
+        raise RuntimeError("no access")
+
+    client = SimpleNamespace(
+        get_service=lambda n: SimpleNamespace(search=_boom), enums=_FakeEnums()
+    )
+    assert mut._conversion_tracking_enabled(client, "123") is False  # сбой → выключено (fail-safe)
+
+
+def test_downgrade_bidding_when_no_conversion_tracking():
+    off = _fake_client_with_tracking(_FakeEnums.ConversionTrackingStatusEnum.NOT_CONVERSION_TRACKED)
+    bidding = {"strategy": "maximize_conversions", "target_cpa_micros": 180_000}
+    out, note = mut._downgrade_bidding_if_no_conversions(off, "123", bidding)
+    assert out["strategy"] == "target_spend"  # Maximize Clicks — конверсии не нужны
+    assert "target_cpa_micros" not in out  # неприменимый target убран
+    assert note and "maximize_clicks" in note
+
+
+def test_no_downgrade_when_tracking_on_or_non_conversion_strategy():
+    on = _fake_client_with_tracking(
+        _FakeEnums.ConversionTrackingStatusEnum.CONVERSION_TRACKING_MANAGED_BY_SELF
+    )
+    out, note = mut._downgrade_bidding_if_no_conversions(
+        on, "123", {"strategy": "maximize_conversions"}
+    )
+    assert out["strategy"] == "maximize_conversions" and note is None  # трекинг есть → не трогаем
+    off = _fake_client_with_tracking(_FakeEnums.ConversionTrackingStatusEnum.NOT_CONVERSION_TRACKED)
+    out2, note2 = mut._downgrade_bidding_if_no_conversions(off, "123", {"strategy": "manual_cpc"})
+    assert out2["strategy"] == "manual_cpc" and note2 is None  # manual_cpc конверсий не требует
+
+
 # ── async-обёртка: ассеты/изображения добавляются ПОСЛЕ кампании, сбой не роняет ──
 @pytest.mark.asyncio
 async def test_apply_create_attaches_assets_after_campaign():

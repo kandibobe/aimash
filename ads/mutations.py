@@ -1596,6 +1596,8 @@ def _create_search_campaign_via_sdk(
     c.advertising_channel_type = client.enums.AdvertisingChannelTypeEnum.SEARCH
     c.status = client.enums.CampaignStatusEnum.PAUSED  # код решает — не показывается до включения
     c.campaign_budget = budget_rn
+    # §19.3: конверс-стратегия без отслеживания конверсий → падение create; понижаем до Maximize Clicks.
+    bidding, bidding_note = _downgrade_bidding_if_no_conversions(client, cid, bidding)
     _apply_bidding_on_create(client, c, bidding)  # стратегия из §19.3 (по умолчанию manual CPC)
     c.network_settings.target_google_search = True
     c.network_settings.target_search_network = True
@@ -1711,7 +1713,7 @@ def _create_search_campaign_via_sdk(
         except Exception:  # noqa: BLE001 — язык необязателен (по умолчанию все)
             lang_count = 0
 
-    return {
+    result = {
         "customer_id": cid,
         "campaign_name": campaign_name,
         "campaign": campaign_rn,
@@ -1726,6 +1728,52 @@ def _create_search_campaign_via_sdk(
         "status": "PAUSED",
         "applied": True,
     }
+    if bidding_note:
+        result["bidding_note"] = bidding_note  # §19.3: стратегия понижена (нет конверс-трекинга)
+    return result
+
+
+# §19.3: стратегии ставок, требующие включённого отслеживания конверсий (иначе create падает).
+_CONVERSION_BIDDING = frozenset({"maximize_conversions", "maximize_conversion_value"})
+
+
+def _conversion_tracking_enabled(client, customer_id: str) -> bool:
+    """§19.3: включено ли отслеживание конверсий на аккаунте (нужно конверс-стратегиям). Читаем
+    customer.conversion_tracking_setting.conversion_tracking_status. NOT_CONVERSION_TRACKED / сбой
+    чтения → считаем ВЫКЛЮЧЕННЫМ (fail-safe: лучше понизить стратегию, чем упасть на create)."""
+    try:
+        ga = client.get_service("GoogleAdsService")
+        enum = client.enums.ConversionTrackingStatusEnum
+        off = {enum.NOT_CONVERSION_TRACKED, enum.UNKNOWN, enum.UNSPECIFIED}
+        for row in ga.search(
+            customer_id=str(customer_id),
+            query=(
+                "SELECT customer.conversion_tracking_setting.conversion_tracking_status "
+                "FROM customer LIMIT 1"
+            ),
+        ):
+            return row.customer.conversion_tracking_setting.conversion_tracking_status not in off
+        return False
+    except Exception:  # noqa: BLE001 — сбой чтения → fail-safe: считаем выключенным
+        return False
+
+
+def _downgrade_bidding_if_no_conversions(
+    client, customer_id: str, bidding: dict | None
+) -> tuple[dict | None, str | None]:
+    """§19.3: конверс-стратегия (Maximize Conversions / Target CPA / Maximize Conv. Value) на
+    аккаунте БЕЗ отслеживания конверсий → create падает GoogleAdsException. Тихо не роняем и не
+    выдумываем: понижаем до Maximize Clicks (target_spend, конверсии не нужны) и возвращаем note
+    для показа менеджеру. Иначе — bidding как есть, note=None. (На тест-Draft конверсий нет никогда.)"""
+    if (
+        bidding
+        and bidding.get("strategy") in _CONVERSION_BIDDING
+        and not _conversion_tracking_enabled(client, customer_id)
+    ):
+        clean = {k: v for k, v in bidding.items() if k not in ("target_cpa_micros", "target_roas")}
+        clean["strategy"] = "target_spend"
+        return clean, "maximize_clicks (отслеживание конверсий не настроено на аккаунте)"
+    return bidding, None
 
 
 def _apply_bidding_on_create(client, c, bidding: dict | None) -> None:
