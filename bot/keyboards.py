@@ -337,6 +337,28 @@ def client_input_kb(lang: str | None = None) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def client_save_kb(cid: str, lang: str | None = None) -> InlineKeyboardMarkup:
+    """§20.3: черновик профиля из текста, где указан сайт → предложить «🕷 Сохранить и краулить»
+    рядом с «✅ Сохранить как есть». Оба подтверждают ОДИН и тот же save-proposal (confirm-гейт);
+    «🕷» дополнительно запускает краулинг ПОСЛЕ сохранения (текст не теряется — краул мёржит поверх
+    уже сохранённого профиля). sub несёт confirmation_id (32 hex — влезает в 64 байта callback_data)."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="✅ Save as is" if en else "✅ Сохранить как есть",
+        callback_data=ConfirmCB(action="ok", cid=cid),
+    )
+    kb.button(
+        text="🕷 Save & crawl" if en else "🕷 Сохранить и краулить",
+        callback_data=ClientCB(action="save_crawl", sub=cid),
+    )
+    kb.button(
+        text="❌ Cancel" if en else "❌ Отмена", callback_data=ConfirmCB(action="no", cid=cid)
+    )
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 # ── §19: визард «Создание кампании» ──────────────────────────────────────────────
 def cc_accounts_kb(rows: list, lang: str | None = None) -> InlineKeyboardMarkup:
     """Этап 0: выбор аккаунта клиента (read-only превью). idx — позиция в _CC_ACCT_CACHE[chat_id];

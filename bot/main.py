@@ -111,6 +111,7 @@ from bot.keyboards import (
     cc_accounts_kb,
     client_card_kb,
     client_input_kb,
+    client_save_kb,
     clients_accounts_kb,
     cc_asset_types_kb,
     cc_assets_kb,
@@ -2036,12 +2037,20 @@ async def btn_newcampaign(m: Message, state: FSMContext) -> None:
 
 # ── §20: «Информация про клиентов» (профиль клиента + текстовый ввод) ─────────────
 async def _present_memory_proposal(
-    message: Message, *, chat_id: int, operation: str, customer_id: str, params: dict, summary: str
+    message: Message,
+    *,
+    chat_id: int,
+    operation: str,
+    customer_id: str,
+    params: dict,
+    summary: str,
+    with_crawl: bool = False,
 ) -> None:
     """§20: показать черновик memory-операции профиля (save/update/clear) с кнопками ✅/❌.
     user_initiated=True — действие whitelisted-человека. Исполнение — clients.execute за гейтом
     (bot.main._do_confirm маршрутизирует по operation ∈ MEMORY_OPERATIONS). Аккаунт — дочерний
-    (это ЛОКАЛЬНАЯ БД, не Google Ads; замок Draft к профилям неприменим)."""
+    (это ЛОКАЛЬНАЯ БД, не Google Ads; замок Draft к профилям неприменим). with_crawl=True (в тексте
+    указан сайт, §20.3) → добавляет «🕷 Сохранить и краулить» рядом с «✅ Сохранить как есть»."""
     cid = uuid.uuid4().hex
     await STORE.save_proposal(
         confirmation_id=cid,
@@ -2053,7 +2062,8 @@ async def _present_memory_proposal(
         user_initiated=True,
     )
     _LAST_PENDING[chat_id] = cid
-    await message.answer(summary, reply_markup=confirm_kb(cid), parse_mode=ParseMode.HTML)
+    kb = client_save_kb(cid) if with_crawl else confirm_kb(cid)
+    await message.answer(summary, reply_markup=kb, parse_mode=ParseMode.HTML)
 
 
 async def _cli_read_accounts(target: Message, chat_id: int) -> list:
@@ -2228,6 +2238,7 @@ async def cli_save_cb(cq: CallbackQuery, state: FSMContext) -> None:
     # выходим из режима накопления (черновик показан; исполнение — по ✅)
     _CLI_TEXT_BUF.pop(chat_id, None)
     await state.clear()
+    # §20.3: в тексте указан сайт → предложить «🕷 Сохранить и краулить» (краул после сохранения).
     await _present_memory_proposal(
         cq.message,
         chat_id=chat_id,
@@ -2235,7 +2246,36 @@ async def cli_save_cb(cq: CallbackQuery, state: FSMContext) -> None:
         customer_id=customer_id,
         params={"customer_id": customer_id, "patch": patch, "source": "text"},
         summary=summary,
+        with_crawl=bool(patch.get("website")),
     )
+
+
+@dp.callback_query(ClientCB.filter(F.action == "save_crawl"))
+async def cli_save_crawl_cb(cq: CallbackQuery, callback_data: ClientCB, state: FSMContext) -> None:
+    """§20.3: «🕷 Сохранить и краулить» — сначала сохранить текстовый профиль (тот же confirm-гейт,
+    что и «✅»), ЗАТЕМ запустить краул сайта. Текст не теряется: краул мёржит поверх уже сохранённого
+    профиля (существующий → profile_update-черновик по готовности), без гонки auto-save."""
+    cid = callback_data.sub
+    snap = await STORE.get_confirmed(cid)
+    if snap is None or snap.operation not in MEMORY_OPERATIONS:
+        await cq.answer(i18n.t("stale"), show_alert=True)
+        return
+    customer_id = snap.customer_id
+    website = (snap.params.get("patch") or {}).get("website")
+    await _do_confirm(cq, cid)  # сохранить текстовый профиль через memory-гейт (confirm+execute)
+    if not website:
+        return
+    url = (
+        website
+        if str(website).startswith(("http://", "https://"))
+        else "https://" + str(website).lstrip("/")
+    )
+    from urllib.parse import urlparse
+
+    await cq.message.answer(
+        i18n.t("cli_crawl_started", domain=texts.esc(urlparse(url).netloc or url))
+    )
+    _spawn_crawl(cq.message.bot, _cq_chat_id(cq), customer_id, url)
 
 
 @dp.callback_query(ClientCB.filter(F.action == "clear"))

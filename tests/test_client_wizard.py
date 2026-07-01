@@ -55,6 +55,7 @@ class FakeMessage:
         self.chat = type("C", (), {"id": chat_id})()
         self.text = text
         self.caption = None
+        self.bot = None  # §20.3: _spawn_crawl читает cq.message.bot (в тесте не нужен реальный)
         self.answers: list = []
 
     async def answer(self, text: str = "", **kw):
@@ -212,3 +213,90 @@ async def test_clear_without_profile_alerts():
     await bm.cli_clear_cb(cq, state)
     assert cq.answers and cq.answers[-1][1] is True  # show_alert: нет профиля
     assert bm._LAST_PENDING.get(chat_id) is None
+
+
+@pytest.mark.asyncio
+async def test_save_with_website_offers_crawl():
+    """§20.3: в тексте указан сайт → черновик показан с опцией «🕷 Сохранить и краулить»."""
+    await init_db()
+    chat_id = 307
+    bm._CLI_TEXT_BUF[chat_id] = ["Kasi Motors, сайт kasimotors.co.ke"]
+    state = FakeState()
+    await state.update_data(cli_customer_id=DRAFT_ACCOUNT_ID)
+    captured: dict = {}
+
+    async def fake_present(
+        message, *, chat_id, operation, customer_id, params, summary, with_crawl=False
+    ):
+        captured["with_crawl"] = with_crawl
+        captured["patch"] = params.get("patch")
+
+    extract = ClientProfileExtract(brand="Kasi Motors", website="kasimotors.co.ke")
+    with (
+        patched(bm, "extract_profile", _fake_extract(extract)),
+        patched(bm, "_present_memory_proposal", fake_present),
+    ):
+        await bm.cli_save_cb(FakeCB(chat_id=chat_id), state)
+    assert captured["with_crawl"] is True
+    assert captured["patch"]["website"] == "kasimotors.co.ke"
+
+
+@pytest.mark.asyncio
+async def test_save_without_website_no_crawl_option():
+    await init_db()
+    chat_id = 308
+    bm._CLI_TEXT_BUF[chat_id] = ["Kasi Motors, автодилер"]
+    state = FakeState()
+    await state.update_data(cli_customer_id=DRAFT_ACCOUNT_ID)
+    captured: dict = {}
+
+    async def fake_present(
+        message, *, chat_id, operation, customer_id, params, summary, with_crawl=False
+    ):
+        captured["with_crawl"] = with_crawl
+
+    extract = ClientProfileExtract(brand="Kasi Motors", business_desc="автодилер")
+    with (
+        patched(bm, "extract_profile", _fake_extract(extract)),
+        patched(bm, "_present_memory_proposal", fake_present),
+    ):
+        await bm.cli_save_cb(FakeCB(chat_id=chat_id), state)
+    assert captured["with_crawl"] is False  # нет сайта → без кнопки краула
+
+
+@pytest.mark.asyncio
+async def test_save_crawl_confirms_then_spawns_crawl():
+    """§20.3: «🕷 Сохранить и краулить» — сначала _do_confirm (сохранение текста), затем краул сайта."""
+    await init_db()
+    chat_id = 309
+    cid = "aabbccddeeff00112233445566778899"  # 32 hex
+    await ConfirmStore().save_proposal(
+        confirmation_id=cid,
+        operation="profile_save",
+        customer_id=DRAFT_ACCOUNT_ID,
+        params={
+            "customer_id": DRAFT_ACCOUNT_ID,
+            "patch": {"brand": "Kasi", "website": "kasimotors.co.ke"},
+            "source": "text",
+        },
+        summary="s",
+        chat_id=chat_id,
+        user_initiated=True,
+    )
+    calls: dict = {}
+
+    async def fake_do_confirm(cq, c):
+        calls["confirm_cid"] = c
+
+    def fake_spawn(bot, cid_chat, customer_id, url):
+        calls["spawn"] = (customer_id, url)
+
+    state = FakeState()
+    with patched(bm, "_do_confirm", fake_do_confirm), patched(bm, "_spawn_crawl", fake_spawn):
+        await bm.cli_save_crawl_cb(
+            FakeCB(chat_id=chat_id), ClientCB(action="save_crawl", sub=cid), state
+        )
+
+    assert calls["confirm_cid"] == cid  # текстовый профиль сохранён ПЕРВЫМ (через тот же гейт)
+    assert calls["spawn"][0] == DRAFT_ACCOUNT_ID
+    assert "kasimotors.co.ke" in calls["spawn"][1]  # затем краул сайта из профиля
