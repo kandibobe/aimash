@@ -1,0 +1,138 @@
+"""Офлайн-тесты §19.3 (Этап 1): извлечение настроек кампании из описания + сборка «по аналогии».
+
+LLM подменяется заглушкой (без сети). Деньги/диапазоны/by_analogy считает КОД (golden rule #4).
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import agent.campaign_settings as CS  # noqa: E402
+from agent.campaign_settings import (  # noqa: E402
+    CampaignSettings,
+    assemble_settings,
+    extract_campaign_settings,
+)
+
+
+@contextmanager
+def patched(obj, name, value):
+    orig = getattr(obj, name)
+    setattr(obj, name, value)
+    try:
+        yield
+    finally:
+        setattr(obj, name, orig)
+
+
+def _fake_chat(content: str | None = None, *, raises: bool = False):
+    async def _chat(messages, **kwargs):
+        if raises:
+            raise RuntimeError("LLM down")
+        return SimpleNamespace(content=content)
+
+    return _chat
+
+
+# ── extract_campaign_settings: строгий JSON → CampaignSettings ────────────────────
+@pytest.mark.asyncio
+async def test_extract_parses_full_description():
+    content = json.dumps(
+        {
+            "campaign_name": None,
+            "geo_locations": ["Кения"],
+            "geo_country_code": "KE",
+            "languages": ["English", "Swahili"],
+            "budget_daily_units": 40,
+            "currency": "USD",
+            "goal": "calls",
+            "bidding_strategy": None,
+            "target_cpa_units": None,
+            "payment_model": None,
+        }
+    )
+    with patched(CS, "chat", _fake_chat(content)):
+        s = await extract_campaign_settings("Кампания на Кению, б/у авто, $40/день, цель звонки")
+    assert s.geo_locations == ["Кения"]
+    assert s.geo_country_code == "KE"
+    assert s.budget_daily_units == 40
+    assert s.goal == "calls"
+    assert s.currency == "USD"
+
+
+@pytest.mark.asyncio
+async def test_extract_empty_input_skips_llm():
+    # пустой ввод → пустой объект без вызова модели (chat бросил бы — но не должен вызваться)
+    with patched(CS, "chat", _fake_chat(raises=True)):
+        s = await extract_campaign_settings("   ")
+    assert s == CampaignSettings()
+
+
+@pytest.mark.asyncio
+async def test_extract_llm_failure_falls_back_empty():
+    with patched(CS, "chat", _fake_chat(raises=True)):
+        s = await extract_campaign_settings("что-то")
+    assert s == CampaignSettings()
+
+
+@pytest.mark.asyncio
+async def test_extract_garbage_json_is_safe():
+    with patched(CS, "chat", _fake_chat("не json вовсе")):
+        s = await extract_campaign_settings("текст")
+    assert s == CampaignSettings()
+
+
+# ── assemble_settings: медианы «по аналогии» + дефолты + теги ─────────────────────
+def test_assemble_tags_by_analogy_when_budget_from_median():
+    extracted = CampaignSettings(geo_locations=["Кения"], goal="calls")  # бюджет/cpc не заданы
+    out = assemble_settings(
+        extracted,
+        median_budget_micros=40_000_000,
+        avg_cpc_micros=180_000,
+        common_match_type="exact",
+        topic="поддержанные авто",
+    )
+    assert out["budget_daily_micros"] == 40_000_000
+    assert out["cpc_bid_micros"] == 180_000
+    assert out["match_type"] == "exact"
+    # все три подставлены из медиан → помечены «по аналогии»
+    for key in ("budget_daily_micros", "cpc_bid_micros", "match_type"):
+        assert key in out["by_analogy"]
+    # цель calls → maximize_conversions, оплата cpa (§19.3)
+    assert out["bidding_strategy"] == "maximize_conversions"
+    assert out["payment_model"] == "cpa"
+    # авто-имя из geo + topic
+    assert "Кения" in out["campaign_name"] and out["campaign_name"].endswith("Search")
+
+
+def test_assemble_explicit_budget_not_by_analogy():
+    extracted = CampaignSettings(budget_daily_units=60)
+    out = assemble_settings(extracted, median_budget_micros=40_000_000)
+    assert out["budget_daily_micros"] == 60_000_000
+    assert "budget_daily_micros" not in out["by_analogy"]
+
+
+def test_assemble_defaults_when_no_median():
+    out = assemble_settings(CampaignSettings(), topic="тема")
+    # без описания и медиан → дефолты (бюджет 10, cpc 0.5, phrase)
+    assert out["budget_daily_micros"] == 10_000_000
+    assert out["cpc_bid_micros"] == 500_000
+    assert out["match_type"] == "phrase"
+
+
+# ── merge: пред-confirm правка перекрывает только непустые поля ───────────────────
+def test_merge_overrides_only_nonempty():
+    base = CampaignSettings(geo_locations=["Кения"], budget_daily_units=40, goal="calls")
+    patch = CampaignSettings(budget_daily_units=60)  # «поставь бюджет 60»
+    merged = base.merge(patch)
+    assert merged.budget_daily_units == 60
+    assert merged.geo_locations == ["Кения"]  # не затёрто пустым
+    assert merged.goal == "calls"

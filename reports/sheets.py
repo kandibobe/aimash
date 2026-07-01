@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -144,3 +145,130 @@ def publish_report_to_sheets(
         "sheets-publish: ok за %dмс (вкладок=%d)", int((time.monotonic() - start) * 1000), len(tabs)
     )
     return url
+
+
+# ── §19.4.2: выгрузка ключей с пометкой релевантности + чтение верифицированного списка ─────
+_KW_HEADERS = ["Keyword", "Avg. searches", "Competition", "Top-of-page bid", "Релевантность"]
+_RELEVANT_MARK = "✅ Релевантно"
+_IRRELEVANT_MARK = "❌ Нерелевантно"
+
+
+def build_keyword_sheet_rows(ideas, relevance: dict[str, bool]) -> list[list]:
+    """Строки таблицы ключей (§19.4.2): шапка + по строке на идею. ideas — ads.keyword_plan.KeywordIdea.
+    Релевантность из relevance (по тексту); отсутствующее → релевантно (advisory). Чистая сборка."""
+    rows: list[list] = [list(_KW_HEADERS)]
+    for it in ideas:
+        low = float(getattr(it, "low_bid", 0.0) or 0.0)
+        high = float(getattr(it, "high_bid", 0.0) or 0.0)
+        bid = f"{low:.2f}–{high:.2f}" if (low or high) else ""
+        rel = relevance.get(getattr(it, "text", ""), True)
+        rows.append(
+            [
+                getattr(it, "text", ""),
+                int(getattr(it, "avg_monthly_searches", 0) or 0),
+                getattr(it, "competition", "") or "",
+                bid,
+                _RELEVANT_MARK if rel else _IRRELEVANT_MARK,
+            ]
+        )
+    return rows
+
+
+def publish_keywords_to_sheets(
+    ideas, relevance: dict[str, bool], *, title: str, service: Any = None
+) -> tuple[str, str]:
+    """Создать таблицу ключей с колонкой «Релевантность» и вернуть (url, spreadsheet_id). service —
+    для тестов (мок). spreadsheet_id нужен на возврате для сверки присланной менеджером ссылки."""
+    rows = build_keyword_sheet_rows(ideas, relevance)
+    svc = service or _build_service()
+    start = time.monotonic()
+    try:
+        created = (
+            svc.spreadsheets()
+            .create(
+                body={
+                    "properties": {"title": title[:_TITLE_MAXLEN]},
+                    "sheets": [{"properties": {"title": "Keywords"}}],
+                },
+                fields="spreadsheetId,spreadsheetUrl",
+            )
+            .execute()
+        )
+        sid = created["spreadsheetId"]
+        url = created.get("spreadsheetUrl") or f"https://docs.google.com/spreadsheets/d/{sid}"
+        svc.spreadsheets().values().batchUpdate(
+            spreadsheetId=sid,
+            body={
+                "valueInputOption": "RAW",
+                "data": [{"range": "'Keywords'!A1", "values": rows}],
+            },
+        ).execute()
+    except Exception as e:
+        log.warning(
+            "sheets-kw-publish: %s за %dмс (строк=%d)",
+            type(e).__name__,
+            int((time.monotonic() - start) * 1000),
+            len(rows),
+        )
+        raise
+    log.info(
+        "sheets-kw-publish: ok за %dмс (строк=%d)",
+        int((time.monotonic() - start) * 1000),
+        len(rows),
+    )
+    return url, sid
+
+
+def parse_spreadsheet_id(url_or_id: str) -> str | None:
+    """Извлечь spreadsheetId из ссылки Google Sheets или принять «голый» id. None — не распознано."""
+    s = (url_or_id or "").strip()
+    if not s:
+        return None
+    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", s)
+    if m:
+        return m.group(1)
+    if re.fullmatch(r"[a-zA-Z0-9_-]{20,}", s):  # уже похоже на id
+        return s
+    return None
+
+
+def read_keyword_column(
+    spreadsheet_id: str, *, service: Any = None, sheet_range: str = "A:E"
+) -> list[str]:
+    """Прочитать верифицированный список ключей из колонки A таблицы (после правок менеджера).
+    Пропускаем строку-шапку; берём непустые значения колонки Keyword. service — для тестов (мок).
+
+    ⚠️ drive.file даёт доступ ТОЛЬКО к файлам, созданным приложением → читаем НАШУ таблицу (которую
+    бот создал на выгрузке). Чужую таблицу менеджера прочитать нельзя (нужен иной scope)."""
+    svc = service or _build_service()
+    start = time.monotonic()
+    try:
+        resp = (
+            svc.spreadsheets()
+            .values()
+            .get(spreadsheetId=spreadsheet_id, range=sheet_range)
+            .execute()
+        )
+    except Exception as e:
+        log.warning(
+            "sheets-kw-read: %s за %dмс", type(e).__name__, int((time.monotonic() - start) * 1000)
+        )
+        raise
+    values = resp.get("values", []) or []
+    out: list[str] = []
+    seen: set[str] = set()
+    header = {h.casefold() for h in _KW_HEADERS}
+    for i, row in enumerate(values):
+        cell = (row[0] if row else "").strip()
+        if not cell:
+            continue
+        if i == 0 and cell.casefold() in header:  # шапка
+            continue
+        key = cell.casefold()
+        if key not in seen:
+            seen.add(key)
+            out.append(cell)
+    log.info(
+        "sheets-kw-read: ok за %dмс (ключей=%d)", int((time.monotonic() - start) * 1000), len(out)
+    )
+    return out

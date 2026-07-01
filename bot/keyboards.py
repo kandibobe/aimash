@@ -15,6 +15,8 @@ from adcopy.validate import STRUCTURED_SNIPPET_HEADERS
 from bot.callbacks import (
     AudienceCB,
     CampCB,
+    CcCB,
+    ClientCB,
     ConfirmCB,
     ExtCB,
     GeoCB,
@@ -55,6 +57,9 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="help", description="Что я умею"),
     BotCommand(command="status", description="Статистика аккаунта (30 дн.)"),
     BotCommand(command="campaigns", description="Кампании: список и быстрые действия"),
+    BotCommand(command="newcampaign", description="Создание кампании: пошаговый визард (§19)"),
+    BotCommand(command="clients", description="ℹ️ Информация про клиентов: профили и сайты (§20)"),
+    BotCommand(command="client", description="Карточка клиента: /client <id>"),
     BotCommand(command="pause", description="Пауза кампании: /pause Название"),
     BotCommand(command="resume", description="Возобновить кампанию: /resume Название"),
     BotCommand(command="report", description="Сводка за период (7/30/90/MTD)"),
@@ -82,6 +87,9 @@ BOT_COMMANDS_EN: list[BotCommand] = [
     BotCommand(command="help", description="What I can do"),
     BotCommand(command="status", description="Account stats (30 days)"),
     BotCommand(command="campaigns", description="Campaigns: list and quick actions"),
+    BotCommand(command="newcampaign", description="Create campaign: step-by-step wizard (§19)"),
+    BotCommand(command="clients", description="ℹ️ Client info: profiles and sites (§20)"),
+    BotCommand(command="client", description="Client card: /client <id>"),
     BotCommand(command="pause", description="Pause a campaign: /pause Name"),
     BotCommand(command="resume", description="Resume a campaign: /resume Name"),
     BotCommand(command="report", description="Period summary (7/30/90/MTD)"),
@@ -148,6 +156,8 @@ def model_kb(
 # Локализация (§4): каждая подпись — {lang: текст}; main_menu(lang) рендерит для языка, а хендлеры
 # матчат по BTN_*_ALL (frozenset обоих языков) — иначе EN-пользователь прислал бы EN-подпись, а
 # `F.text == BTN_*` (RU-литерал) её не поймал бы → кнопка «мёртвая».
+BTN_NEWCAMPAIGN = {"ru": "➕ Создание кампании", "en": "➕ Create campaign"}
+BTN_CLIENTS = {"ru": "ℹ️ Клиенты", "en": "ℹ️ Clients"}  # §20: инфо про клиентов (профили/сайты)
 BTN_STATUS = {"ru": "📊 Статистика", "en": "📊 Stats"}
 BTN_CAMPAIGNS = {"ru": "📋 Кампании", "en": "📋 Campaigns"}
 BTN_REPORT = {"ru": "📈 Отчёт", "en": "📈 Report"}
@@ -162,6 +172,8 @@ BTN_LANG = {"ru": "🌐 Язык", "en": "🌐 Language"}
 BTN_HELP = {"ru": "❓ Помощь", "en": "❓ Help"}
 
 # Множества всех языковых вариантов для матчинга в хендлерах (F.text.in_(BTN_*_ALL)).
+BTN_NEWCAMPAIGN_ALL = frozenset(BTN_NEWCAMPAIGN.values())
+BTN_CLIENTS_ALL = frozenset(BTN_CLIENTS.values())
 BTN_STATUS_ALL = frozenset(BTN_STATUS.values())
 BTN_CAMPAIGNS_ALL = frozenset(BTN_CAMPAIGNS.values())
 BTN_REPORT_ALL = frozenset(BTN_REPORT.values())
@@ -181,6 +193,8 @@ def main_menu(lang: str | None = None) -> ReplyKeyboardMarkup:
     lng = _lang(lang)
     kb = ReplyKeyboardBuilder()
     for btn in (
+        BTN_NEWCAMPAIGN,  # §19: guided-визард создания кампании — отдельной первой строкой
+        BTN_CLIENTS,  # §20: информация про клиентов (профили/сайты)
         BTN_STATUS,
         BTN_CAMPAIGNS,
         BTN_REPORT,
@@ -195,7 +209,7 @@ def main_menu(lang: str | None = None) -> ReplyKeyboardMarkup:
         BTN_HELP,
     ):
         kb.button(text=btn[lng])
-    kb.adjust(2, 3, 2, 2, 3)
+    kb.adjust(1, 1, 2, 3, 2, 2, 3)
     placeholder = "Command or text…" if lng == "en" else "Команда или текст…"
     return kb.as_markup(
         resize_keyboard=True,
@@ -262,6 +276,199 @@ def confirm_kb(cid: str, lang: str | None = None) -> InlineKeyboardMarkup:
         text="❌ Cancel" if en else "❌ Отмена", callback_data=ConfirmCB(action="no", cid=cid)
     )
     kb.adjust(2)
+    return kb.as_markup()
+
+
+# ── §20: «Информация про клиентов» ───────────────────────────────────────────────
+def clients_accounts_kb(
+    rows: list, with_profile: set[str], lang: str | None = None
+) -> InlineKeyboardMarkup:
+    """§20.2: список аккаунтов MCC для выбора клиента. У аккаунтов с заполненным профилем — ✅.
+    idx — позиция в _CLI_ACCT_CACHE[chat_id]; customer_id в callback_data не кладём (как cc)."""
+    kb = InlineKeyboardBuilder()
+    for i, r in enumerate(rows):
+        name = _ellipsize(getattr(r, "name", "") or getattr(r, "id", ""))
+        cid = getattr(r, "id", "")
+        mark = "✅ " if cid in with_profile else "▫️ "
+        kb.button(text=f"{mark}{name} · {cid}", callback_data=ClientCB(action="acct", idx=i))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def client_card_kb(
+    has_profile: bool, has_website: bool = False, lang: str | None = None
+) -> InlineKeyboardMarkup:
+    """§20.2: кнопки карточки клиента. Есть профиль → Обновить/Очистить (+Перекраулить, если есть
+    сайт); нет → Добавить. Краулинг/изменения памяти — фоново/через confirm-гейт (см. bot.main)."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    if has_profile:
+        kb.button(
+            text="✏️ Update info" if en else "✏️ Обновить инфу",
+            callback_data=ClientCB(action="update"),
+        )
+        if has_website:
+            kb.button(
+                text="🔄 Re-crawl site" if en else "🔄 Перекраулить сайт",
+                callback_data=ClientCB(action="recrawl"),
+            )
+        kb.button(
+            text="🗑 Clear profile" if en else "🗑 Очистить профиль",
+            callback_data=ClientCB(action="clear"),
+        )
+    else:
+        kb.button(
+            text="➕ Add info" if en else "➕ Добавить информацию",
+            callback_data=ClientCB(action="add"),
+        )
+    kb.button(text="‹ Back" if en else "‹ Назад", callback_data=ClientCB(action="back"))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def client_input_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """§20.3: во время приёма текста профиля — «💾 Сохранить» (извлечь+показать «было→станет» и
+    confirm) / «✖ Отмена». Менеджер может прислать несколько сообщений подряд до сохранения."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="💾 Save" if en else "💾 Сохранить", callback_data=ClientCB(action="save"))
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+# ── §19: визард «Создание кампании» ──────────────────────────────────────────────
+def cc_accounts_kb(rows: list, lang: str | None = None) -> InlineKeyboardMarkup:
+    """Этап 0: выбор аккаунта клиента (read-only превью). idx — позиция в _CC_ACCT_CACHE[chat_id];
+    customer_id в callback_data НЕ кладём. rows — объекты с .name/.id (ads.read.ChildAccount)."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    for i, r in enumerate(rows):
+        name = _ellipsize(getattr(r, "name", "") or getattr(r, "id", ""))
+        cid = getattr(r, "id", "")
+        kb.button(text=f"🏢 {name} · {cid}", callback_data=CcCB(action="acct", idx=i))
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def cc_settings_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """Этап 1: подтвердить настройки (advisory — НЕ мутация, лишь принимает часть черновика) или
+    выйти. Правка — свободным текстом в состоянии (см. bot.main)."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="✅ Confirm settings" if en else "✅ Подтвердить настройки",
+        callback_data=CcCB(action="accept", sub="settings"),
+    )
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def cc_kw_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """Этап 2: «🔎 Генерация» (CcCB kw_generate) или прислать свои ключи текстом/файлом/ссылкой;
+    «⏭ Пропустить» / «✖ Отмена»."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="🔎 Generate keywords" if en else "🔎 Генерация ключевых слов",
+        callback_data=CcCB(action="kw_generate"),
+    )
+    kb.button(text="⏭ Skip" if en else "⏭ Пропустить", callback_data=CcCB(action="skip"))
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    kb.adjust(1, 2)
+    return kb.as_markup()
+
+
+def cc_assets_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """Этап 5: «✅ Использовать текущие» / «➕ Добавить новый» / «✅ Готово» / «✖ Отмена».
+    Готово ведёт к Этапу 6 (URL-опции); добавленные/переиспользованные ассеты — в черновике."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="✅ Use current account assets" if en else "✅ Использовать текущие ассеты",
+        callback_data=CcCB(action="use_assets"),
+    )
+    kb.button(
+        text="➕ Add a new asset" if en else "➕ Добавить новый ассет",
+        callback_data=CcCB(action="add_assets"),
+    )
+    kb.button(
+        text="✅ Done / Skip" if en else "✅ Готово / Пропустить", callback_data=CcCB(action="skip")
+    )
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    kb.adjust(1, 1, 2)
+    return kb.as_markup()
+
+
+# Семейства ассетов с автогенерацией текста (§19.7.2) — подписи для пикера типов.
+_CC_ASSET_TYPE_LABELS = {
+    "ru": {
+        "sitelinks": "🔗 Доп. ссылки (Sitelinks)",
+        "callouts": "🏷 Уточнения (Callouts)",
+        "structured_snippets": "📑 Структурные описания",
+        "business_name": "🏢 Название бизнеса",
+    },
+    "en": {
+        "sitelinks": "🔗 Sitelinks",
+        "callouts": "🏷 Callouts",
+        "structured_snippets": "📑 Structured snippets",
+        "business_name": "🏢 Business name",
+    },
+}
+
+
+def cc_asset_types_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """Этап 5: выбор типа нового ассета для автогенерации (§19.7.2)."""
+    lng = _lang(lang)
+    kb = InlineKeyboardBuilder()
+    for fam, label in _CC_ASSET_TYPE_LABELS[lng].items():
+        kb.button(text=label, callback_data=CcCB(action="asset_type", sub=fam))
+    kb.button(text="‹ Back" if lng == "en" else "‹ Назад", callback_data=CcCB(action="assets_back"))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def cc_final_kb(can_launch: bool = False, lang: str | None = None) -> InlineKeyboardMarkup:
+    """Этап 7: «✅ Создать черновик» (CcCB create) + «🚀 Запустить» (CcCB launch, только после
+    создания) + «✖ Отмена». Правка — свободным текстом в состоянии."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    if can_launch:
+        kb.button(
+            text="🚀 Launch campaign" if en else "🚀 Запустить кампанию",
+            callback_data=CcCB(action="launch"),
+        )
+    else:
+        kb.button(
+            text="✅ Create draft" if en else "✅ Создать черновик",
+            callback_data=CcCB(action="create"),
+        )
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    kb.adjust(1, 1)
+    return kb.as_markup()
+
+
+def cc_skip_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """Этап 4/6: «⏭ Пропустить» (CcCB skip) + «✖ Отмена». Прикрепление (фото) — отдельным
+    сообщением, не кнопкой."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⏭ Skip" if en else "⏭ Пропустить", callback_data=CcCB(action="skip"))
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def cc_resume_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """Вход в визард при наличии незавершённого черновика: продолжить / начать заново / выйти."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="▶️ Resume" if en else "▶️ Продолжить", callback_data=CcCB(action="resume"))
+    kb.button(text="🆕 Start over" if en else "🆕 Начать заново", callback_data=CcCB(action="new"))
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    kb.adjust(2, 1)
     return kb.as_markup()
 
 

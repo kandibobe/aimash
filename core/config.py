@@ -100,6 +100,24 @@ class Settings(BaseSettings):
     report_schedule: str = "0 9 * * *"  # crontab: ежедневно 09:00 (локальное время)
     anomaly_interval_hours: int = 6  # проверка аномалий каждые N часов
     cleanup_interval_minutes: int = 60  # очистка просроченных черновиков каждые N минут
+    # §19: TTL активного черновика визарда «Создание кампании» (campaign_drafts). Щедрый по
+    # умолчанию — Этап-2 round-trip с Google Sheets может занять день. Старше → status='abandoned'
+    # (та же очистка, что и просроченные proposals; cleanup_interval_minutes задаёт кадэнс).
+    campaign_draft_ttl_hours: int = 72
+
+    # §20: краулинг сайта клиента (clients.crawler). Статический краулер (без headless) с жёсткими
+    # лимитами — не перегружать чужой сайт и не голодить общий event loop (краул в фоне, bounded).
+    crawl_max_pages: int = 50  # потолок числа страниц за обход (ТЗ §20.4: «до 50–100»)
+    crawl_max_depth: int = 3  # глубина BFS от главной
+    crawl_time_budget_s: float = 90.0  # общий бюджет времени на весь обход (asyncio.wait_for)
+    crawl_delay_s: float = 0.5  # вежливая пауза между запросами к одному домену
+    crawl_max_text_chars: int = 5000  # сколько текста берём с одной страницы (токены/поверхность)
+    # §20: зависшая (running) crawl_jobs старше N минут → failed на реконсиляции (in-process задача
+    # умерла с процессом на рестарте). Кадэнс — cleanup_interval_minutes (та же очистка).
+    crawl_stale_minutes: int = 30
+    # §20.3: сколько ждём молча после последнего сообщения профиля до авто-сохранения (менеджер
+    # может слать инфу несколькими сообщениями подряд — накапливаем в буфер, потом извлекаем).
+    client_text_idle_s: int = 60
 
     @property
     def whitelist(self) -> set[int]:

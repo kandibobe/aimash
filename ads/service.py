@@ -531,20 +531,51 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
     if op == "create_search_campaign":
         # Создание новой кампании — резолв существующей не нужен. Замок/валидацию/гейт держит
         # сам apply_create_search_campaign (двойной гейт + user_initiated, всё PAUSED).
-        return await mutations.apply_create_search_campaign(
-            customer_id=customer_id,
-            campaign_name=params["campaign_name"],
-            final_url=params["final_url"],
-            headlines=params["headlines"],
-            descriptions=params["descriptions"],
-            budget_daily_micros=params["budget_daily_micros"],
-            keywords=params.get("keywords"),
-            match_type=params.get("match_type", "phrase"),
-            cpc_bid_micros=params.get("cpc_bid_micros", 500_000),
-            confirmation_id=confirmation_id,
-            confirm_store=store,
-            ads_client=client,
-        )
+        # §19: изображения приходят как media_ids — грузим бинарь из временного хранилища (как GDN)
+        # в (landscape) bytes и чистим после; передаём как image_specs. Бинарь НЕ в params/логах.
+        image_specs: list[tuple[bytes, str]] = []
+        media_ids = list(params.get("image_media_ids") or [])
+        if media_ids:
+            from ads.assets import load_pending_media
+
+            for mid in media_ids:
+                try:
+                    landscape, _square = await asyncio.to_thread(load_pending_media, mid)
+                    image_specs.append((landscape, f"{params['campaign_name']}_img"))
+                except Exception:  # noqa: BLE001 — медиа протухло/нет → просто без него
+                    pass
+        try:
+            return await mutations.apply_create_search_campaign(
+                customer_id=customer_id,
+                campaign_name=params["campaign_name"],
+                final_url=params["final_url"],
+                headlines=params["headlines"],
+                descriptions=params["descriptions"],
+                budget_daily_micros=params["budget_daily_micros"],
+                keywords=params.get("keywords"),
+                match_type=params.get("match_type", "phrase"),
+                cpc_bid_micros=params.get("cpc_bid_micros", 500_000),
+                geo_locations=params.get("geo_locations") or None,
+                geo_country_code=params.get("geo_country_code", "UA"),
+                geo_locale=params.get("geo_locale", "ru"),
+                languages=params.get("languages") or None,
+                bidding=params.get("bidding"),
+                path1=params.get("path1"),
+                path2=params.get("path2"),
+                url_options=params.get("url_options"),
+                asset_specs=params.get("asset_specs") or None,
+                existing_asset_links=params.get("existing_asset_links") or None,
+                image_specs=image_specs or None,
+                confirmation_id=confirmation_id,
+                confirm_store=store,
+                ads_client=client,
+            )
+        finally:
+            if media_ids:
+                from ads.assets import clear_pending_media
+
+                for mid in media_ids:
+                    await asyncio.to_thread(clear_pending_media, mid)
 
     if op == "create_rsa":
         # Группа уже зарезолвлена в курации (ad_group_id в params) → доп. резолв не нужен.

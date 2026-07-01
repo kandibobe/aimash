@@ -92,6 +92,13 @@ def clear_pending_media(media_id: str) -> None:
             pass
 
 
+def clear_pending_media_ids(media_ids) -> None:
+    """Пакетно удалить временные кадры по списку media_id (best-effort). §19: чистка осиротевших
+    изображений черновика на любом не-исполненном завершении (отмена/supersede/TTL/reject)."""
+    for mid in media_ids or []:
+        clear_pending_media(str(mid))
+
+
 # ── AssetService: загрузка image-ассета (SDK) ────────────────────────────────────
 def upload_image_asset(client, customer_id: str, image_bytes: bytes, name: str) -> str:
     """Загрузить image-ассет, вернуть resource_name. Замок аккаунта — и тут (golden rule #9)."""

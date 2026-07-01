@@ -452,6 +452,19 @@ class CreateSearchCampaign(BaseModel):
     keywords: list[str] = Field(default_factory=list, max_length=50)
     match_type: MatchType = "phrase"
     cpc_bid_micros: int = Field(default=500_000, gt=0, le=MONEY_MAX_MICROS)
+    # §19 (composite, опциональные — без них поведение прежнее). Глубокую валидацию дублирует
+    # ads.mutations._validate_search_inputs (defense-in-depth); здесь — форма + длины path.
+    geo_locations: list[str] = Field(default_factory=list, max_length=50)
+    geo_country_code: str = "UA"
+    geo_locale: str = "ru"
+    languages: list[str] = Field(default_factory=list, max_length=10)
+    bidding: dict | None = None
+    path1: str | None = None
+    path2: str | None = None
+    url_options: dict | None = None
+    asset_specs: list[dict] = Field(default_factory=list, max_length=30)
+    existing_asset_links: list[dict] = Field(default_factory=list, max_length=50)
+    image_media_ids: list[str] = Field(default_factory=list, max_length=10)
 
     @field_validator("final_url")
     @classmethod
@@ -474,6 +487,13 @@ class CreateSearchCampaign(BaseModel):
     @classmethod
     def _kw(cls, v):
         return normalize_keywords(v) if v else []
+
+    @field_validator("path1", "path2")
+    @classmethod
+    def _path(cls, v):
+        if v:
+            _assert_rsa_len([v], "path")  # ≤15, кириллица=1 (§19.5.1 — doc error игнорируем)
+        return v
 
 
 # ── §3-assets: текстовые расширения (sitelinks/callouts/structured snippets) ─────────

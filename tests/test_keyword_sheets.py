@@ -1,0 +1,117 @@
+"""§19.4.2 (iv-vi): офлайн-тесты выгрузки ключей в Google Sheets + чтения верифицированного списка.
+
+Сеть (Sheets API) подменяется фейковым service; чистая сборка строк и парсер id тестируются прямо.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from reports.sheets import (  # noqa: E402
+    build_keyword_sheet_rows,
+    parse_spreadsheet_id,
+    publish_keywords_to_sheets,
+    read_keyword_column,
+)
+
+
+def _idea(text, **kw):
+    base = dict(avg_monthly_searches=0, competition="", low_bid=0.0, high_bid=0.0)
+    base.update(kw)
+    return SimpleNamespace(text=text, **base)
+
+
+def test_build_rows_has_header_and_relevance():
+    ideas = [
+        _idea(
+            "used cars nairobi",
+            avg_monthly_searches=12100,
+            competition="MEDIUM",
+            low_bid=0.14,
+            high_bid=0.32,
+        ),
+        _idea("free car games", avg_monthly_searches=3100, competition="LOW"),
+    ]
+    rel = {"used cars nairobi": True, "free car games": False}
+    rows = build_keyword_sheet_rows(ideas, rel)
+    assert rows[0] == [
+        "Keyword",
+        "Avg. searches",
+        "Competition",
+        "Top-of-page bid",
+        "Релевантность",
+    ]
+    assert rows[1][0] == "used cars nairobi" and rows[1][4] == "✅ Релевантно"
+    assert rows[2][4] == "❌ Нерелевантно"
+    assert rows[1][3] == "0.14–0.32"
+
+
+def test_parse_spreadsheet_id():
+    assert (
+        parse_spreadsheet_id("https://docs.google.com/spreadsheets/d/ABC123_xyz-9/edit#gid=0")
+        == "ABC123_xyz-9"
+    )
+    assert parse_spreadsheet_id("ABCDEFGHIJKLMNOPQRSTUVWX") == "ABCDEFGHIJKLMNOPQRSTUVWX"
+    assert parse_spreadsheet_id("just text") is None
+    assert parse_spreadsheet_id("") is None
+
+
+class _FakeValues:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def batchUpdate(self, **kw):  # noqa: N802 — зеркалим API google-api-python-client
+        return SimpleNamespace(execute=lambda: {})
+
+    def get(self, **kw):  # noqa: N802
+        return SimpleNamespace(execute=lambda: {"values": self._rows})
+
+
+class _FakeSheets:
+    def __init__(self, rows=None, created_id="SID123"):
+        self._rows = rows or []
+        self._id = created_id
+
+    def create(self, **kw):  # noqa: N802
+        return SimpleNamespace(
+            execute=lambda: {
+                "spreadsheetId": self._id,
+                "spreadsheetUrl": f"https://docs.google.com/spreadsheets/d/{self._id}",
+            }
+        )
+
+    def values(self):
+        return _FakeValues(self._rows)
+
+
+class _FakeService:
+    def __init__(self, rows=None, created_id="SID123"):
+        self._s = _FakeSheets(rows, created_id)
+
+    def spreadsheets(self):
+        return self._s
+
+
+def test_publish_keywords_returns_url_and_id():
+    ideas = [_idea("used cars", avg_monthly_searches=100)]
+    url, sid = publish_keywords_to_sheets(
+        ideas, {"used cars": True}, title="kw-test", service=_FakeService(created_id="XYZ")
+    )
+    assert sid == "XYZ"
+    assert "XYZ" in url
+
+
+def test_read_keyword_column_skips_header_and_dedups():
+    rows = [
+        ["Keyword", "Avg. searches"],  # шапка
+        ["used cars nairobi", "12100"],
+        ["second hand cars", "8200"],
+        ["used cars nairobi", "12100"],  # дубль
+        ["", ""],  # пустая
+    ]
+    out = read_keyword_column("SID", service=_FakeService(rows=rows))
+    assert out == ["used cars nairobi", "second hand cars"]

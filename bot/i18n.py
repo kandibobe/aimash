@@ -737,6 +737,328 @@ CATALOG: dict[str, dict[str, str]] = {
             "model (/model)."
         ),
     },
+    # — §20: «Информация про клиентов» —
+    "cli_pick_account": {
+        "ru": "ℹ️ <b>Информация про клиентов</b>\nВыберите рекламный аккаунт (✅ — профиль заполнен):",
+        "en": "ℹ️ <b>Client info</b>\nChoose an ad account (✅ — profile filled):",
+    },
+    "cli_accounts_error": {
+        "ru": "⚠️ Не удалось получить список аккаунтов MCC: {err}",
+        "en": "⚠️ Couldn't list MCC accounts: {err}",
+    },
+    "cli_access_denied": {
+        "ru": "Нет доступа к этому аккаунту.",
+        "en": "No access to this account.",
+    },
+    "cli_card_stale": {
+        "ru": "Сессия устарела — откройте раздел «ℹ️ Клиенты» заново.",
+        "en": "Session expired — open “ℹ️ Clients” again.",
+    },
+    "cli_ask_text": {
+        "ru": (
+            "Пришлите информацию о клиенте обычным текстом (можно несколькими сообщениями): "
+            "бизнес, сайт, соцсети, услуги, цены, телефоны. Когда закончите — «💾 Сохранить»."
+        ),
+        "en": (
+            "Send the client info as free text (several messages are fine): business, site, "
+            "socials, services, prices, phones. When done — “💾 Save”."
+        ),
+    },
+    "cli_accumulating": {
+        "ru": "Принял (сообщений: {n}, символов: {chars}). Пришлите ещё или «💾 Сохранить».",
+        "en": "Got it (messages: {n}, chars: {chars}). Send more or “💾 Save”.",
+    },
+    "cli_empty_input": {
+        "ru": "Пусто — пришлите текст о клиенте.",
+        "en": "Empty — send some text about the client.",
+    },
+    "cli_nothing_to_save": {
+        "ru": "Нет текста для сохранения — пришлите информацию о клиенте.",
+        "en": "Nothing to save — send the client info first.",
+    },
+    "cli_extract_empty": {
+        "ru": "Не удалось извлечь данные из текста. Попробуйте переформулировать.",
+        "en": "Couldn't extract any data from the text. Try rephrasing.",
+    },
+    "cli_extracting": {
+        "ru": "⏳ Разбираю информацию о клиенте…",
+        "en": "⏳ Parsing the client info…",
+    },
+    "cli_no_profile_to_clear": {
+        "ru": "У этого клиента ещё нет профиля.",
+        "en": "This client has no profile yet.",
+    },
+    "cli_usage_hint": {
+        "ru": "Использование: <code>/client &lt;customer_id&gt;</code> — карточка клиента.",
+        "en": "Usage: <code>/client &lt;customer_id&gt;</code> — the client card.",
+    },
+    "cli_no_website": {
+        "ru": "У клиента не указан сайт — добавьте его через «➕ Добавить информацию».",
+        "en": "No website in the profile — add it via “➕ Add info”.",
+    },
+    "cli_crawl_started": {
+        "ru": "🕷 Краулю сайт {domain}… Пришлю сводку по готовности.",
+        "en": "🕷 Crawling {domain}… I'll send a summary when it's done.",
+    },
+    "cli_crawl_done": {
+        "ru": (
+            "✅ Краулинг {domain} завершён.\n• Обойдено страниц: {pages}\nПрофиль клиента обновлён."
+        ),
+        "en": ("✅ Crawl of {domain} finished.\n• Pages crawled: {pages}\nClient profile updated."),
+    },
+    "cli_crawl_done_confirm": {
+        "ru": (
+            "✅ Краулинг {domain} завершён (страниц: {pages}). Обновить профиль клиента? "
+            "Подтвердите изменения ниже."
+        ),
+        "en": (
+            "✅ Crawl of {domain} finished (pages: {pages}). Update the client profile? "
+            "Confirm the changes below."
+        ),
+    },
+    "cli_crawl_empty": {
+        "ru": "⚠️ Краулинг {domain}: не удалось собрать полезные данные с сайта.",
+        "en": "⚠️ Crawl of {domain}: couldn't collect useful data from the site.",
+    },
+    "cli_crawl_failed": {
+        "ru": "⚠️ Краулинг {domain} не удался: {err}",
+        "en": "⚠️ Crawl of {domain} failed: {err}",
+    },
+    # — §19: визард «Создание кампании» —
+    "cc_pick_account": {
+        "ru": "🆕 <b>Создание кампании</b>\nВыбери аккаунт клиента:",
+        "en": "🆕 <b>Create campaign</b>\nChoose the client account:",
+    },
+    "cc_accounts_error": {
+        "ru": "⚠️ Не удалось получить список аккаунтов MCC: {err}\nПродолжим на основном аккаунте.",
+        "en": "⚠️ Couldn't list MCC accounts: {err}\nProceeding with the main account.",
+    },
+    "cc_ask_description": {
+        "ru": (
+            "Опишите рекламную кампанию одним сообщением — что продвигаем, страна/город, бюджет, "
+            "цель. Я разложу это на настройки."
+        ),
+        "en": (
+            "Describe the campaign in one message — what you promote, country/city, budget, goal. "
+            "I'll turn it into settings."
+        ),
+    },
+    "cc_extracting": {
+        "ru": "⏳ Разбираю описание на настройки…",
+        "en": "⏳ Parsing the description into settings…",
+    },
+    "cc_empty_description": {
+        "ru": "Опишите кампанию текстом — что продвигаем, ГЕО, бюджет, цель.",
+        "en": "Describe the campaign in text — what you promote, geo, budget, goal.",
+    },
+    "cc_draft_stale": {
+        "ru": "Черновик кампании не найден или устарел — начните заново: «➕ Создание кампании».",
+        "en": "The campaign draft was not found or expired — start over: “➕ Create campaign”.",
+    },
+    "cc_resume_prompt": {
+        "ru": "У вас есть незавершённый черновик кампании (этап {step}/7). Продолжить или начать заново?",
+        "en": "You have an unfinished campaign draft (step {step}/7). Resume or start over?",
+    },
+    "cc_settings_saved": {
+        "ru": "✅ Настройки приняты.",
+        "en": "✅ Settings accepted.",
+    },
+    # Этап 3: объявление (URL → display path → 15 заголовков / 4 описания)
+    "cc_ask_url": {
+        "ru": (
+            "✍️ <b>Объявление.</b> Пришлите конечный URL (Final URL) рекламируемой страницы — "
+            "например <code>https://shop.example/used-cars</code>. Я сам соберу display path и "
+            "сгенерирую заголовки и описания."
+        ),
+        "en": (
+            "✍️ <b>Ad.</b> Send the Final URL of the promoted page — e.g. "
+            "<code>https://shop.example/used-cars</code>. I'll build the display path and generate "
+            "headlines and descriptions."
+        ),
+    },
+    "cc_bad_url": {
+        "ru": "Не вижу корректную ссылку (http/https, ≤2048). Пришлите Final URL ещё раз.",
+        "en": "I don't see a valid link (http/https, ≤2048). Send the Final URL again.",
+    },
+    "cc_generating_ad": {
+        "ru": "⏳ Читаю страницу и генерирую заголовки/описания (RSA)…",
+        "en": "⏳ Reading the page and generating headlines/descriptions (RSA)…",
+    },
+    "cc_ad_saved": {
+        "ru": "✅ Объявление готово (заголовки и описания утверждены).",
+        "en": "✅ Ad is ready (headlines and descriptions approved).",
+    },
+    # Этап 4: изображения
+    "cc_images_prompt": {
+        "ru": (
+            "🖼 <b>Изображения объявления</b> (если применимо).\n"
+            "Пришлите фото — добавлю его image-ассетом (обрежу до 1.91:1 и 1:1), или пропустите этот "
+            "этап."
+        ),
+        "en": (
+            "🖼 <b>Ad images</b> (if applicable).\n"
+            "Send a photo — I'll add it as an image asset (cropped to 1.91:1 and 1:1), or skip this "
+            "stage."
+        ),
+    },
+    "cc_image_saved": {
+        "ru": "🖼 Изображение добавлено к черновику ({n} шт.).",
+        "en": "🖼 Image added to the draft ({n}).",
+    },
+    "cc_stage_skipped": {
+        "ru": "⏭ Этап пропущен.",
+        "en": "⏭ Stage skipped.",
+    },
+    "cc_photo_wrong_stage": {
+        "ru": "📷 Сейчас не этап изображений. Используйте кнопки текущего шага визарда.",
+        "en": "📷 Not the images stage now. Use the current wizard step's buttons.",
+    },
+    # Этап 2: ключевые слова
+    "cc_kw_prompt": {
+        "ru": (
+            "🔑 <b>Ключевые слова.</b>\n"
+            "Пришлите свои ключи — текстом (через запятую/построчно), файлом или ссылкой на "
+            "Google-таблицу бота. Тип соответствия можно задать маркерами: <code>[точное]</code>, "
+            '<code>"фразовое"</code> (по умолчанию — фразовое).\n'
+            "Или нажмите «🔎 Генерация ключевых слов» — подберу автоматически с проверкой в таблице."
+        ),
+        "en": (
+            "🔑 <b>Keywords.</b>\n"
+            "Send your keywords — as text (comma/line separated), a file, or a link to the bot's "
+            'Google Sheet. Match type via markers: <code>[exact]</code>, <code>"phrase"</code> '
+            "(default phrase).\n"
+            "Or tap “🔎 Generate keywords” — I'll research them with sheet verification."
+        ),
+    },
+    "cc_kw_generating": {
+        "ru": "⏳ Генерирую seed-ключи → Discover → фильтрую релевантность → собираю таблицу…",
+        "en": "⏳ Generating seeds → Discover → relevance filter → building the sheet…",
+    },
+    "cc_kw_sheet_ready": {
+        "ru": (
+            "📊 Таблица ключей готова: {url}\n"
+            "Проверьте пометки «Релевантность», удалите лишние строки и пришлите ссылку обратно."
+        ),
+        "en": (
+            "📊 Keyword sheet is ready: {url}\n"
+            "Check the relevance marks, delete unneeded rows and send the link back."
+        ),
+    },
+    "cc_kw_sheet_failed": {
+        "ru": "⚠️ Не удалось выгрузить таблицу ключей: {err}\nПришлите свои ключи текстом/файлом.",
+        "en": "⚠️ Couldn't export the keyword sheet: {err}\nSend your keywords as text/file.",
+    },
+    "cc_kw_verify_prompt": {
+        "ru": "Когда отредактируете таблицу — пришлите ссылку на неё одним сообщением.",
+        "en": "When you've edited the sheet — send its link in a single message.",
+    },
+    "cc_kw_read_failed": {
+        "ru": (
+            "⚠️ Не смог прочитать таблицу: {err}\n"
+            "Пришлите ссылку на таблицу БОТА (drive.file читает только созданные ботом файлы) "
+            "или пришлите ключи текстом."
+        ),
+        "en": (
+            "⚠️ Couldn't read the sheet: {err}\n"
+            "Send the link to the BOT's sheet (drive.file reads only app-created files) "
+            "or send keywords as text."
+        ),
+    },
+    "cc_kw_accepted": {
+        "ru": "✅ Принял ключевые слова: {n} (тип соответствия — {mt}). Переходим к объявлению.",
+        "en": "✅ Keywords accepted: {n} (match type — {mt}). Moving on to the ad.",
+    },
+    "cc_kw_empty": {
+        "ru": "Не вижу ни одного валидного ключа. Пришлите ещё раз или нажмите «🔎 Генерация».",
+        "en": "No valid keywords found. Send again or tap “🔎 Generate”.",
+    },
+    # Этап 5: ассеты
+    "cc_assets_prompt": {
+        "ru": (
+            "🧩 <b>Ассеты объявления.</b>\n"
+            "Можно переиспользовать готовые ассеты аккаунта или пропустить (добавить позже через "
+            "«Кампании → Расширения»)."
+        ),
+        "en": (
+            "🧩 <b>Ad assets.</b>\n"
+            "Reuse existing account assets or skip (add later via “Campaigns → Extensions”)."
+        ),
+    },
+    "cc_assets_none": {
+        "ru": "На аккаунте не нашлось готовых ассетов. Пропускаю этап.",
+        "en": "No existing account assets found. Skipping this stage.",
+    },
+    "cc_assets_reused": {
+        "ru": "✅ Переиспользую {n} ассет(ов) аккаунта.",
+        "en": "✅ Reusing {n} account asset(s).",
+    },
+    "cc_assets_pick_type": {
+        "ru": "Какой ассет добавить? Сгенерирую наполнение по теме и сайту, вы сможете подтвердить.",
+        "en": "Which asset to add? I'll generate the content from the topic and site for you to confirm.",
+    },
+    "cc_asset_generating": {
+        "ru": "⏳ Генерирую наполнение ассета…",
+        "en": "⏳ Generating asset content…",
+    },
+    "cc_asset_added": {
+        "ru": "✅ Добавлен ассет: {label}. Всего новых: {n}. Добавить ещё или продолжить?",
+        "en": "✅ Asset added: {label}. New total: {n}. Add more or continue?",
+    },
+    "cc_asset_gen_failed": {
+        "ru": "⚠️ Не удалось сгенерировать ассет: {err}. Попробуйте другой тип.",
+        "en": "⚠️ Couldn't generate the asset: {err}. Try another type.",
+    },
+    # Этап 6: Ad URL options
+    "cc_url_prompt": {
+        "ru": (
+            "🔗 <b>Ad URL options</b> (опционально).\n"
+            "Пришлите шаблон отслеживания и/или суффикс одной строкой через «|»:\n"
+            "<code>{{lpurl}}?utm_source=google | utm_medium=cpc</code>\n"
+            "Или нажмите «⏭ Пропустить»."
+        ),
+        "en": (
+            "🔗 <b>Ad URL options</b> (optional).\n"
+            "Send a tracking template and/or suffix in one line via “|”:\n"
+            "<code>{{lpurl}}?utm_source=google | utm_medium=cpc</code>\n"
+            "Or tap “⏭ Skip”."
+        ),
+    },
+    "cc_url_bad": {
+        "ru": "⚠️ Не разобрал URL-опции: {err}\nПришлите ещё раз или «⏭ Пропустить».",
+        "en": "⚠️ Couldn't parse URL options: {err}\nSend again or “⏭ Skip”.",
+    },
+    "cc_url_saved": {
+        "ru": "✅ Ad URL options сохранены.",
+        "en": "✅ Ad URL options saved.",
+    },
+    # Этап 7: финал / создание / запуск
+    "cc_create_done": {
+        "ru": "✅ <b>Черновик кампании создан (PAUSED).</b>\n{result}",
+        "en": "✅ <b>Campaign draft created (PAUSED).</b>\n{result}",
+    },
+    "cc_launch_prompt": {
+        "ru": "🚀 Кампания создана на паузе. Запустить её (перевести в ENABLED)?",
+        "en": "🚀 Campaign created paused. Launch it (set to ENABLED)?",
+    },
+    "cc_edit_applied": {
+        "ru": "✏️ Правка применена. Обновлённая сводка:",
+        "en": "✏️ Edit applied. Updated summary:",
+    },
+    # Заглушка для этапов, ещё не подключённых (на случай рассинхрона курсора).
+    "cc_next_phase_stub": {
+        "ru": (
+            "✅ Настройки кампании сохранены (этап 1/7).\n\n"
+            "Дальнейшие этапы визарда (ключевые слова → объявление → изображения → ассеты → "
+            "URL-опции → запуск) подключаются в следующих фазах. Черновик сохранён и переживёт "
+            "перезапуск — продолжить можно будет позже кнопкой «➕ Создание кампании»."
+        ),
+        "en": (
+            "✅ Campaign settings saved (step 1/7).\n\n"
+            "The remaining wizard stages (keywords → ad → images → assets → URL options → launch) "
+            "ship in later phases. The draft is saved and survives a restart — you'll be able to "
+            "continue later via “➕ Create campaign”."
+        ),
+    },
 }
 
 _CHAT_LANG: dict[int, str] = {}

@@ -269,6 +269,100 @@ def _add_price_asset_via_sdk(
     }
 
 
+# ── §19.7.1: новые семейства ассетов (Business name / Logo) + дисп. для composite-создания ──
+def _link_customer_assets(client, customer_id: str, asset_rns, field_type) -> list[str]:
+    """Привязать ассеты на уровне АККАУНТА (customer_asset) — для Business name/Logo, которые в
+    Search показываются на уровне бренда/аккаунта. Возвращает resource_names связей."""
+    svc = client.get_service("CustomerAssetService")
+    ops = []
+    for rn in asset_rns:
+        op = client.get_type("CustomerAssetOperation")
+        op.create.asset = rn
+        op.create.field_type = field_type
+        ops.append(op)
+    resp = svc.mutate_customer_assets(customer_id=str(customer_id), operations=ops)
+    return [r.resource_name for r in resp.results]
+
+
+def _add_business_name_via_sdk(client, customer_id, business_name: str) -> dict:
+    """Business name (§19.7.1): TextAsset → link BUSINESS_NAME на уровне аккаунта (customer_asset).
+    ⚠️ Аккаунтный side-effect (имя бренда показывается во всех объявлениях аккаунта)."""
+    cid = str(customer_id)
+    asset_svc = client.get_service("AssetService")
+    op = client.get_type("AssetOperation")
+    op.create.text_asset.text = business_name
+    asset_rns = [
+        r.resource_name for r in asset_svc.mutate_assets(customer_id=cid, operations=[op]).results
+    ]
+    field_type = client.enums.AssetFieldTypeEnum.BUSINESS_NAME
+    link_rns = _link_customer_assets(client, cid, asset_rns, field_type)
+    return {
+        "customer_id": cid,
+        "kind": "business_name",
+        "assets": asset_rns,
+        "links": link_rns,
+        "count": len(link_rns),
+        "applied": True,
+    }
+
+
+def _add_business_logo_via_sdk(client, customer_id, image_bytes: bytes, name: str) -> dict:
+    """Logo (§19.7.1): ImageAsset (reuse upload_image_asset) → link BUSINESS_LOGO на уровне аккаунта.
+    ⚠️ Аккаунтный side-effect. Требования к изображению (1:1/4:1, ≤5120КБ) проверяет Pillow-слой."""
+    from ads.assets import upload_image_asset
+
+    cid = str(customer_id)
+    asset_rn = upload_image_asset(client, cid, image_bytes, name)
+    field_type = client.enums.AssetFieldTypeEnum.BUSINESS_LOGO
+    link_rns = _link_customer_assets(client, cid, [asset_rn], field_type)
+    return {
+        "customer_id": cid,
+        "kind": "logo",
+        "assets": [asset_rn],
+        "links": link_rns,
+        "count": len(link_rns),
+        "applied": True,
+    }
+
+
+# Семейства, требующие внешней конфигурации (Google Business Profile / privacy-policy URL) — в MVP
+# §19 НЕ создаём автоматически: scaffold-заглушка с понятным сообщением (Phase later). Чтобы не
+# уронить composite-создание, дисп. ловит NotImplementedError и пропускает такой ассет с пометкой.
+_CONFIG_GATED = {
+    "location": "Location asset требует привязки Google Business Profile (place_id/owner)",
+    "affiliate_location": "Affiliate location требует сети магазинов (chain registry)",
+    "lead_form": "Lead form требует privacy_policy_url + поля формы + CTA",
+}
+
+
+def apply_asset_spec_via_sdk(client, customer_id, campaign_id, spec: dict) -> dict:
+    """Дисп. для composite-создания: {family, params} → соответствующий _add_*_via_sdk на campaign_id.
+    Семейства из _CONFIG_GATED бросают NotImplementedError (вызывающий ловит и пропускает в MVP)."""
+    family = str(spec.get("family") or "")
+    p = dict(spec.get("params") or {})
+    if family in _CONFIG_GATED:
+        raise NotImplementedError(_CONFIG_GATED[family])
+    if family == "sitelinks":
+        return _add_sitelinks_via_sdk(client, customer_id, campaign_id, p["sitelinks"])
+    if family == "callouts":
+        return _add_callouts_via_sdk(client, customer_id, campaign_id, p["callouts"])
+    if family == "structured_snippets":
+        return _add_structured_snippets_via_sdk(
+            client, customer_id, campaign_id, p["header"], p["values"]
+        )
+    if family == "call":
+        return _add_call_asset_via_sdk(
+            client, customer_id, campaign_id, p["phone_number"], p["country_code"]
+        )
+    if family == "promotion":
+        return _add_promotion_via_sdk(client, customer_id, campaign_id, **p)
+    if family == "price":
+        return _add_price_asset_via_sdk(client, customer_id, campaign_id, **p)
+    if family == "business_name":
+        return _add_business_name_via_sdk(client, customer_id, p["business_name"])
+    raise ValueError(f"неизвестное семейство ассета: {family}")
+
+
 def _remove_campaign_assets_via_sdk(client, customer_id, link_resource_names: list[str]) -> dict:
     """Открепить ассеты от кампании: CampaignAssetOperation.remove на каждый campaign_asset.
     Удаляется СВЯЗЬ, не сам Asset (ассет может быть привязан к другим кампаниям)."""

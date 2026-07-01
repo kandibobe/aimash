@@ -49,6 +49,7 @@ Python 3.12 · aiogram 3.x (async; один event loop с APScheduler) · `opena
 - `confirm/` — proposal (diff), gate (логика «да»), audit.
 - `db/` — модели (whitelist, audit_log, proposals, user_settings) + Alembic.
 - `reports/`, `adcopy/` (генерация+валидация текстов; имя не `copy`, чтобы не затенять stdlib), `scheduler/` — фазы 2–3.
+- `clients/` — §20 «Информация про клиентов»: профиль клиента на `customer_id` (store), LLM-разбор текста (profile_extract), исполнитель memory-операций за confirm-гейтом (execute — НЕ через ads.mutations), статический краулер сайта (crawler) + журнал задач (crawl_jobs). Профиль подаётся как контекст в генераторы §19/§10 (seed-ключи/релевантность/RSA/ассеты).
 - `scripts/ab_test_models.py` — A/B-тест моделей через OpenRouter.
 
 ## Фазы

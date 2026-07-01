@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from ads.client import DRAFT_ACCOUNT_ID, build_client
 from confirm.store import ConfirmStore
@@ -19,7 +19,7 @@ from core.context import request_scope, reset_context, set_context
 from core.errors import capture_exception
 from core.logging import log
 from core.resilience import run_ads_read_call
-from db.models import Proposal, UserSettings
+from db.models import CampaignDraft, CrawlJob, Proposal, UserSettings
 from db.session import Session
 from reports.period import last_n_days
 from reports.queries import fetch_totals
@@ -193,7 +193,92 @@ async def cleanup_stale_proposals(
                 if created < cutoff:
                     stale.append((p.confirmation_id, p.chat_id))
         for cid, chat_id in stale:
+            # §19: TTL-просроченный create_search_campaign несёт временные изображения по media_id —
+            # чистим их перед reject (иначе осиротеют на диске).
+            snap = await store.get_confirmed(cid)
+            if snap is not None and snap.operation == "create_search_campaign":
+                from ads.assets import clear_pending_media_ids
+
+                clear_pending_media_ids((snap.params or {}).get("image_media_ids") or [])
             await store.reject(cid, chat_id=chat_id)  # pending→rejected + audit (одноразово)
         if stale:
             log.info("scheduler: отклонено просроченных черновиков: %d", len(stale))
         return len(stale)
+
+
+async def cleanup_stale_campaign_drafts(
+    *, now: datetime | None = None, ttl_hours: int | None = None
+) -> int:
+    """§19: брошенные активные черновики визарда «Создание кампании» → status='abandoned'.
+
+    Не proposal и не мутация — просто гасим залежавшиеся active-черновики (SDK не звался, деньги
+    не тратились). Возраст считаем в Python (наивный created/updated трактуем как UTC) — корректно
+    и на SQLite, и на Postgres. TTL щедрый (settings.campaign_draft_ttl_hours, дефолт 72ч): Этап-2
+    round-trip с Google Sheets может занять день."""
+    ttl = settings.campaign_draft_ttl_hours if ttl_hours is None else ttl_hours
+    with request_scope("scheduler:cleanup-drafts"):
+        cutoff = (now or datetime.now(timezone.utc)) - timedelta(hours=ttl)
+        n = 0
+        orphan_media: list[str] = []
+        async with Session() as s:
+            rows = (
+                (await s.execute(select(CampaignDraft).where(CampaignDraft.status == "active")))
+                .scalars()
+                .all()
+            )
+            for d in rows:
+                updated = d.updated_at or d.created_at
+                if updated is None:
+                    continue
+                if updated.tzinfo is None:  # SQLite хранит наивный UTC
+                    updated = updated.replace(tzinfo=timezone.utc)
+                if updated < cutoff:
+                    d.status = "abandoned"
+                    n += 1
+                    orphan_media += (d.wizard_state or {}).get("images", {}).get(
+                        "media_ids", []
+                    ) or []
+            if n:
+                await s.commit()
+        if orphan_media:  # §19: чистим временные изображения брошенных черновиков (вне транзакции)
+            from ads.assets import clear_pending_media_ids
+
+            clear_pending_media_ids(orphan_media)
+        if n:
+            log.info("scheduler: брошено просроченных черновиков визарда: %d", n)
+        return n
+
+
+async def reconcile_stale_crawls(
+    *, now: datetime | None = None, stale_minutes: int | None = None
+) -> int:
+    """§20.4: зависшие задачи краулинга (status='running' дольше N мин) → failed. Фоновый краул —
+    in-process asyncio-задача: на рестарте процесса она гибнет, а строка crawl_jobs остаётся
+    'running' навсегда. Реконсиляция закрывает их (SDK/сеть не звались — деньги не тратились).
+    Возраст считаем в Python (наивный created_at трактуем как UTC) — корректно на SQLite и Postgres."""
+    stale = settings.crawl_stale_minutes if stale_minutes is None else stale_minutes
+    with request_scope("scheduler:reconcile-crawls"):
+        cutoff = (now or datetime.now(timezone.utc)) - timedelta(minutes=stale)
+        n = 0
+        async with Session() as s:
+            rows = (
+                (await s.execute(select(CrawlJob).where(CrawlJob.status == "running")))
+                .scalars()
+                .all()
+            )
+            for j in rows:
+                created = j.created_at
+                if created is None:
+                    continue
+                if created.tzinfo is None:  # SQLite хранит наивный UTC
+                    created = created.replace(tzinfo=timezone.utc)
+                if created < cutoff:
+                    j.status = "failed"
+                    j.error = "прервано рестартом (реконсиляция)"
+                    j.finished_at = func.now()
+                    n += 1
+            if n:
+                await s.commit()
+        if n:
+            log.info("scheduler: зависших краул-задач помечено failed: %d", n)
+        return n

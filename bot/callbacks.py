@@ -120,6 +120,30 @@ class RecentCB(CallbackData, prefix="rcnt"):
     idx: int = -1
 
 
+class CcCB(CallbackData, prefix="cc"):
+    """§19: визард «➕ Создание кампании». Контекст — активный черновик чата (campaign_drafts),
+    session_id в callback_data НЕ кладём (резолвится по chat_id через CampaignDraftStore.get_active).
+    Кнопки лишь двигают визард/накапливают черновик — РЕАЛЬНАЯ мутация только на «Создать черновик»
+    (action='create') и «Запустить» (action='launch') через confirm-гейт. idx — индекс аккаунта в
+    кэше (Этап 0) или под-индекс; sub — тег стадии/под-действие."""
+
+    action: str  # "acct"|"accept"|"skip"|"edit"|"create"|"launch"|"resume"|"new"|"regen"
+    idx: int = -1
+    sub: str = ""
+
+
+class ClientCB(CallbackData, prefix="cli"):
+    """§20: раздел «ℹ️ Информация про клиентов». Контекст (выбранный customer_id) держит FSM —
+    в callback_data его НЕ кладём (резолв idx→аккаунт по chat_id через _CLI_ACCT_CACHE, как CcCB).
+    Кнопки лишь двигают UI/накопление; РЕАЛЬНАЯ мутация памяти (save/update/clear) — только через
+    confirm-гейт (proposal profile_* → ✅). action: acct|card|add|update|save|clear|recrawl|back;
+    idx — индекс аккаунта в кэше; sub — под-действие (напр. режим краула full|incr)."""
+
+    action: str  # acct|card|add|update|save|clear|recrawl|back
+    idx: int = -1
+    sub: str = ""
+
+
 class ExtCB(CallbackData, prefix="ext"):
     """§3-assets: ассеты-расширения кампании из меню /campaigns. idx — кампания в _CAMP_CACHE
     (для remove — строка в _EXT_CACHE). action: type-меню/выбор типа/показать/удалить. sub —

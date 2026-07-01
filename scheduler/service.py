@@ -62,6 +62,20 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
         replace_existing=True,
         misfire_grace_time=600,
     )
+    sched.add_job(
+        jobs.cleanup_stale_campaign_drafts,
+        IntervalTrigger(minutes=settings.cleanup_interval_minutes),
+        id="cleanup_stale_drafts",
+        replace_existing=True,
+        misfire_grace_time=600,
+    )
+    sched.add_job(
+        jobs.reconcile_stale_crawls,  # §20.4: зависшие running-краулы (после рестарта) → failed
+        IntervalTrigger(minutes=settings.cleanup_interval_minutes),
+        id="reconcile_stale_crawls",
+        replace_existing=True,
+        misfire_grace_time=600,
+    )
     sched.start()
     log.info(
         "scheduler запущен: отчёт cron=%r, аномалии каждые %dч, очистка каждые %dмин (read-only)",

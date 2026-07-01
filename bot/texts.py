@@ -1199,3 +1199,265 @@ def fmt_campaign_header(c: dict, lang: str | None = None) -> str:
         f"Статус: {status_human(c.get('status', ''), lng)}\n\n"
         "Выбери действие:"
     )
+
+
+# ── §19: визард «Создание кампании» ───────────────────────────────────────────────
+_BIDDING_HUMAN = {
+    "ru": {
+        "manual_cpc": "Ручная CPC",
+        "maximize_conversions": "Максимум конверсий",
+        "maximize_conversion_value": "Максимум ценности конверсий",
+        "target_spend": "Максимум кликов (target spend)",
+    },
+    "en": {
+        "manual_cpc": "Manual CPC",
+        "maximize_conversions": "Maximize conversions",
+        "maximize_conversion_value": "Maximize conversion value",
+        "target_spend": "Maximize clicks (target spend)",
+    },
+}
+
+
+def cc_account_header(name: str, customer_id: str, lang: str | None = None) -> str:
+    """Этап 0: «Аккаунт выбран: …» + просьба описать кампанию (§19.2)."""
+    cid = esc(str(customer_id))
+    nm = esc(name or cid)
+    if _lang(lang) == "en":
+        return (
+            f"🆕 <b>Account selected:</b> {nm} (<code>{cid}</code>).\n\n"
+            "Describe the campaign in one message — what you promote, country/city, budget, goal. "
+            "I'll turn it into settings myself."
+        )
+    return (
+        f"🆕 <b>Аккаунт выбран:</b> {nm} (<code>{cid}</code>).\n\n"
+        "Опишите рекламную кампанию одним сообщением — что продвигаем, на какую страну/город, "
+        "бюджет, цель. Я сам разложу это на настройки."
+    )
+
+
+def fmt_cc_settings_summary(s: dict, lang: str | None = None) -> str:
+    """Этап 1: сводка извлечённых настроек с пометками «(по аналогии)» (§19.3). HTML, esc внутри."""
+    lng = _lang(lang)
+    by = set(s.get("by_analogy") or [])
+    tag = " <i>(по аналогии)</i>" if lng != "en" else " <i>(by analogy)</i>"
+
+    def mk(key: str) -> str:
+        return tag if key in by else ""
+
+    geo = ", ".join(s.get("geo_locations") or []) or "—"
+    langs = ", ".join(s.get("languages") or []) or "—"
+    cur = (s.get("currency") or "").strip()
+    budget = _thou(int(s.get("budget_daily_micros", 0)) / 1_000_000, 2)
+    cpc = _thou(int(s.get("cpc_bid_micros", 0)) / 1_000_000, 2)
+    strat = _BIDDING_HUMAN[lng].get(
+        s.get("bidding_strategy") or "manual_cpc", s.get("bidding_strategy") or "—"
+    )
+    mt = match_type_human(s.get("match_type") or "phrase", lng)
+    name = esc(s.get("campaign_name") or "—")
+    cur_s = f" {esc(cur)}" if cur else ""
+    if lng == "en":
+        return (
+            "🆕 <b>Campaign (draft)</b>\n"
+            f"Name: {name}\n"
+            f"Geo: {esc(geo)} · Language: {esc(langs)}\n"
+            f"Type: Search · Daily budget: {budget}{cur_s}{mk('budget_daily_micros')}\n"
+            f"Bidding: {esc(strat)}{mk('bidding_strategy')}\n"
+            f"Avg. CPC: ≈ {cpc}{cur_s}{mk('cpc_bid_micros')}\n"
+            f"Keyword match type: {esc(mt)}{mk('match_type')}\n\n"
+            "Edit by text (e.g. <i>set budget 60</i>) or confirm the settings."
+        )
+    return (
+        "🆕 <b>Кампания (черновик)</b>\n"
+        f"Название: {name}\n"
+        f"ГЕО: {esc(geo)} · Язык: {esc(langs)}\n"
+        f"Тип: Search · Бюджет/день: {budget}{cur_s}{mk('budget_daily_micros')}\n"
+        f"Стратегия: {esc(strat)}{mk('bidding_strategy')}\n"
+        f"Ср. CPC: ≈ {cpc}{cur_s}{mk('cpc_bid_micros')}\n"
+        f"Тип соответствия ключей: {esc(mt)}{mk('match_type')}\n\n"
+        "Можно поправить командой (напр. <i>поставь бюджет 60</i>) или подтвердить настройки."
+    )
+
+
+def fmt_asset_spec_label(spec: dict, lang: str | None = None) -> str:
+    """Короткая подпись нового ассета (§19.7.2) для сообщения «добавлен ассет: …». Plain text."""
+    family = str(spec.get("family") or "")
+    p = spec.get("params") or {}
+    fam_h = {
+        "sitelinks": "Доп. ссылки",
+        "callouts": "Уточнения",
+        "structured_snippets": "Структурное описание",
+        "business_name": "Название бизнеса",
+    }.get(family, family)
+    if family == "sitelinks":
+        n = len(p.get("sitelinks") or [])
+        return f"{fam_h} ({n})"
+    if family == "callouts":
+        return f"{fam_h}: " + ", ".join(p.get("callouts") or [])[:80]
+    if family == "structured_snippets":
+        return f"{fam_h} «{p.get('header', '')}»: " + ", ".join((p.get("values") or [])[:5])
+    if family == "business_name":
+        return f"{fam_h}: {p.get('business_name', '')}"
+    return fam_h
+
+
+def fmt_cc_final_summary(state: dict, lang: str | None = None) -> str:
+    """Этап 7: финальная сводка всего черновика кампании перед созданием (§19.8). HTML, esc внутри."""
+    lng = _lang(lang)
+    s = state.get("settings") or {}
+    ad = state.get("ad") or {}
+    kw = state.get("keywords") or {}
+    imgs = state.get("images") or {}
+    assets = state.get("assets") or {}
+    url = state.get("url_options") or {}
+    geo = ", ".join(s.get("geo_locations") or []) or "—"
+    budget = _thou(int(s.get("budget_daily_micros", 0)) / 1_000_000, 2)
+    cur = (s.get("currency") or "").strip()
+    cur_s = f" {esc(cur)}" if cur else ""
+    strat = _BIDDING_HUMAN[lng].get(s.get("bidding_strategy") or "manual_cpc", "—")
+    path = "/".join(p for p in (ad.get("path1"), ad.get("path2")) if p)
+    n_kw = len(kw.get("list") or [])
+    n_h = len(ad.get("headlines") or [])
+    n_d = len(ad.get("descriptions") or [])
+    n_img = len(imgs.get("media_ids") or [])
+    n_reuse = len(assets.get("reuse_links") or [])
+    n_new = len(assets.get("new") or [])
+    url_bits = [
+        b
+        for b in (
+            "tracking" if url.get("tracking_url_template") else "",
+            "suffix" if url.get("final_url_suffix") else "",
+            f"{len(url.get('custom_parameters') or {})} params"
+            if (url.get("custom_parameters") or {})
+            else "",
+        )
+        if b
+    ]
+    head = "🆕 <b>Final summary</b>" if lng == "en" else "🆕 <b>Финальная сводка</b>"
+    if lng == "en":
+        body = (
+            f"Campaign: {esc(s.get('campaign_name') or '—')}\n"
+            f"Geo: {esc(geo)} · Budget/day: {budget}{cur_s} · {esc(strat)}\n"
+            f"Final URL: {esc(ad.get('final_url') or '—')}"
+            + (f" · path: {esc(path)}" if path else "")
+            + f"\nAd: {n_h} headlines / {n_d} descriptions · keywords: {n_kw} "
+            f"({match_type_human(kw.get('match_type') or 'phrase', lng)})\n"
+            f"Images: {n_img} · assets: {n_reuse} reused, {n_new} new\n"
+            f"URL options: {', '.join(url_bits) or '—'}\n\n"
+            "Edit by command (e.g. <i>set budget 60</i>), or create the draft."
+        )
+    else:
+        body = (
+            f"Кампания: {esc(s.get('campaign_name') or '—')}\n"
+            f"ГЕО: {esc(geo)} · Бюджет/день: {budget}{cur_s} · {esc(strat)}\n"
+            f"Final URL: {esc(ad.get('final_url') or '—')}"
+            + (f" · path: {esc(path)}" if path else "")
+            + f"\nОбъявление: {n_h} заголовков / {n_d} описаний · ключей: {n_kw} "
+            f"({match_type_human(kw.get('match_type') or 'phrase', lng)})\n"
+            f"Изображения: {n_img} · ассеты: {n_reuse} переисп., {n_new} новых\n"
+            f"URL-опции: {', '.join(url_bits) or '—'}\n\n"
+            "Поправьте командой (напр. <i>поставь бюджет 60</i>) или создайте черновик."
+        )
+    return f"{head}\n{body}"
+
+
+# ── §20: «Информация про клиентов» ────────────────────────────────────────────────
+def fmt_client_card(profile: dict | None, customer_id: str, lang: str | None = None) -> str:
+    """§20.2 «Карточка клиента»: сохранённый профиль (бренд/бизнес/услуги/цены/контакты/сайт).
+    profile=None → пустая карточка с приглашением добавить инфу. HTML, всё через esc()."""
+    lng = _lang(lang)
+    cid = esc(str(customer_id))
+    if not profile:
+        if lng == "en":
+            return (
+                f"ℹ️ <b>Client</b> · <code>{cid}</code>\n\n"
+                "No profile yet. Add client info as free text — business, site, services, "
+                "prices, phones."
+            )
+        return (
+            f"ℹ️ <b>Клиент</b> · <code>{cid}</code>\n\n"
+            "Профиль пуст. Пришлите информацию о клиенте обычным текстом — бизнес, сайт, услуги, "
+            "цены, телефоны."
+        )
+    lines: list[str] = [f"ℹ️ <b>{esc(profile.get('brand') or 'Клиент')}</b> · <code>{cid}</code>"]
+    if profile.get("business_desc"):
+        lines.append(("Business: " if lng == "en" else "Бизнес: ") + esc(profile["business_desc"]))
+    if profile.get("geo"):
+        lines.append(("Geo: " if lng == "en" else "Гео: ") + esc(profile["geo"]))
+    if profile.get("language"):
+        lines.append(("Language: " if lng == "en" else "Язык: ") + esc(profile["language"]))
+    services = profile.get("services") or []
+    if services:
+        svc = []
+        for it in services[:10]:
+            s = esc(it.get("name", ""))
+            if it.get("price"):
+                s += f" ({esc(it['price'])})"
+            svc.append(s)
+        lines.append(("Services: " if lng == "en" else "Услуги: ") + "; ".join(x for x in svc if x))
+    contacts = profile.get("contacts") or []
+    if contacts:
+        cs = "; ".join(esc(c.get("value", "")) for c in contacts[:6] if c.get("value"))
+        if cs:
+            lines.append(("Contacts: " if lng == "en" else "Контакты: ") + cs)
+    if profile.get("website"):
+        lines.append(("Site: " if lng == "en" else "Сайт: ") + esc(profile["website"]))
+    socials = profile.get("socials") or {}
+    if socials:
+        ss = "; ".join(f"{esc(k)}: {esc(v)}" for k, v in list(socials.items())[:6])
+        lines.append(("Socials: " if lng == "en" else "Соцсети: ") + ss)
+    if profile.get("notes"):
+        lines.append(("Notes: " if lng == "en" else "Заметки: ") + esc(profile["notes"]))
+    pages = int(profile.get("site_pages_count") or 0)
+    if pages:
+        lines.append(("Crawled pages: " if lng == "en" else "Страниц с сайта: ") + str(pages))
+    return "\n".join(lines)
+
+
+def _profile_summary_line(p: dict, lng: str) -> str:
+    """Короткая сводка непустых полей профиля для «было→станет» (без длинных тел)."""
+    bits: list[str] = []
+    for key, ru, en in (
+        ("brand", "бренд", "brand"),
+        ("business_desc", "бизнес", "business"),
+        ("geo", "гео", "geo"),
+        ("language", "язык", "language"),
+        ("website", "сайт", "site"),
+    ):
+        if p.get(key):
+            bits.append(en if lng == "en" else ru)
+    ns = len(p.get("services") or [])
+    nc = len(p.get("contacts") or [])
+    if ns:
+        bits.append(f"{'services' if lng == 'en' else 'услуги'}×{ns}")
+    if nc:
+        bits.append(f"{'contacts' if lng == 'en' else 'контакты'}×{nc}")
+    return ", ".join(bits) or ("—")
+
+
+def fmt_client_diff(
+    before: dict | None, after: dict, customer_id: str, *, operation: str, lang: str | None = None
+) -> str:
+    """§20.5 «было→станет» для confirm-гейта профиля. Показываем сводку полей до/после (без PII в
+    длинных телах). operation: profile_save|profile_update|profile_clear."""
+    lng = _lang(lang)
+    cid = esc(str(customer_id))
+    if operation == "profile_clear":
+        if lng == "en":
+            return (
+                f"🗑 <b>Clear client profile</b> · <code>{cid}</code>\n"
+                "The profile and all details will be removed (cannot be undone)."
+            )
+        return (
+            f"🗑 <b>Очистить профиль клиента</b> · <code>{cid}</code>\n"
+            "Профиль и все детали будут удалены (восстановить нельзя)."
+        )
+    head = (
+        f"ℹ️ <b>Client profile</b> · <code>{cid}</code>"
+        if lng == "en"
+        else f"ℹ️ <b>Профиль клиента</b> · <code>{cid}</code>"
+    )
+    was = _profile_summary_line(before or {}, lng)
+    now = _profile_summary_line(after, lng)
+    label_was = "Was" if lng == "en" else "Было"
+    label_now = "Becomes" if lng == "en" else "Станет"
+    return f"{head}\n{label_was}: {esc(was)}\n{label_now}: {esc(now)}"

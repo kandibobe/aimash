@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Protocol
 
@@ -1325,17 +1326,53 @@ def _validate_search_inputs(
     descriptions: list[str],
     final_url: str,
     budget_daily_micros: int,
+    *,
+    path1: str | None = None,
+    path2: str | None = None,
+    url_options: dict | None = None,
 ) -> None:
     """Полная валидация В КОДЕ — ДО claim. Длину/составы/URL/бюджет/имя считает КОД (golden rule #4)."""
     if not campaign_name or len(campaign_name) > 120:
         raise ValueError("название кампании 1–120 символов")
     _validate_rsa_inputs(
-        headlines, descriptions, final_url, None, None
-    )  # реюз RSA-валидации набора
+        headlines, descriptions, final_url, path1, path2
+    )  # реюз RSA-валидации набора (+ display path ≤15, кириллица=1)
     if budget_daily_micros <= 0:
         raise ValueError("дневной бюджет должен быть > 0")
     if budget_daily_micros > MAX_AMOUNT_MICROS:
         raise ValueError("дневной бюджет подозрительно большой — проверь команду")
+    _validate_url_options(url_options)
+
+
+def _validate_url_options(url_options: dict | None) -> None:
+    """§19.8 Ad URL options: tracking_url_template/final_url_suffix/custom_parameters. КОД, ДО claim."""
+    if not url_options:
+        return
+    tpl = (url_options.get("tracking_url_template") or "").strip()
+    if tpl:
+        if len(tpl) > 2048:
+            raise ValueError("tracking_url_template слишком длинный (≤2048)")
+        # ValueTrack: {lpurl} / {escapedlpurl} / {unescapedlpurl} (последние два НЕ содержат
+        # подстроку "{lpurl}" — проверяем по "lpurl}"), либо абсолютный http(s)-URL.
+        low = tpl.lower()
+        if "lpurl}" not in low and not low.startswith(("http://", "https://")):
+            raise ValueError(
+                "tracking_url_template должен содержать {lpurl}/{escapedlpurl}/{unescapedlpurl} "
+                "или начинаться с http"
+            )
+    suffix = (url_options.get("final_url_suffix") or "").strip()
+    if suffix and (suffix.startswith("?") or len(suffix) > 2048):
+        raise ValueError("final_url_suffix — без ведущего '?' и ≤2048 символов")
+    params = url_options.get("custom_parameters") or {}
+    if not isinstance(params, dict):
+        raise ValueError("custom_parameters — это словарь {ключ: значение}")
+    if len(params) > 8:  # v24: до 8 пользовательских параметров на кампанию
+        raise ValueError("custom_parameters — не более 8")
+    for k, v in params.items():
+        if not re.fullmatch(r"[A-Za-z0-9_]+", str(k)):
+            raise ValueError(f"ключ custom_parameter '{k}' — только латиница/цифры/_")
+        if len(str(v)) > 250:
+            raise ValueError("значение custom_parameter ≤250 символов")
 
 
 async def apply_create_search_campaign(
@@ -1349,15 +1386,41 @@ async def apply_create_search_campaign(
     keywords: list[str] | None = None,
     match_type: str = "phrase",
     cpc_bid_micros: int = 500_000,
+    # §19 (необязательные, обратно совместимы — без них поведение прежнее):
+    geo_locations: list[str] | None = None,
+    geo_country_code: str = "UA",
+    geo_locale: str = "ru",
+    languages: list[str] | None = None,
+    bidding: dict | None = None,
+    path1: str | None = None,
+    path2: str | None = None,
+    url_options: dict | None = None,
+    asset_specs: list[dict] | None = None,
+    existing_asset_links: list[dict] | None = None,
+    image_specs: list[tuple[bytes, str]] | None = None,
     confirmation_id: str,
     confirm_store: ConfirmStore,
     ads_client: object,
 ) -> dict:
     """Создать поисковую кампанию из текстов за двойным гейтом. Все сущности — PAUSED (0 расхода).
     Создание — ТОЛЬКО прямой командой пользователя (как бюджет/GDN). НЕ через run_ads_call: цепочка
-    из создающих вызовов НЕ идемпотентна (авто-ретрай породил бы дубли) — от повтора защищает claim."""
+    из создающих вызовов НЕ идемпотентна (авто-ретрай породил бы дубли) — от повтора защищает claim.
+
+    §19 (composite): бюджет→кампания(SEARCH,PAUSED,стратегия+URL-опции)→группа→RSA(+display path)→
+    ключи→гео→язык — в синхронной цепочке (откат осиротевшего бюджета при сбое кампании). Ассеты и
+    изображения добавляются ПОСЛЕ (PAUSED, $0 безопасно): каждый в своём try/except — сбой одного
+    ассета НЕ откатывает кампанию (отчёт per-step)."""
     ensure_allowed(customer_id)  # гейт 1 — замок аккаунта
-    _validate_search_inputs(campaign_name, headlines, descriptions, final_url, budget_daily_micros)
+    _validate_search_inputs(
+        campaign_name,
+        headlines,
+        descriptions,
+        final_url,
+        budget_daily_micros,
+        path1=path1,
+        path2=path2,
+        url_options=url_options,
+    )
     clean_kw = normalize_keywords(keywords) if keywords else []
     proposal = await _require_confirmation(confirm_store, confirmation_id, "create_search_campaign")
     if not proposal.user_initiated:
@@ -1374,9 +1437,114 @@ async def apply_create_search_campaign(
         keywords=clean_kw,
         match_type=match_type,
         cpc_bid_micros=int(cpc_bid_micros),
+        geo_locations=geo_locations,
+        geo_country_code=geo_country_code,
+        geo_locale=geo_locale,
+        languages=languages,
+        bidding=bidding,
+        path1=path1,
+        path2=path2,
+        url_options=url_options,
     )
+    # Ассеты + изображения — ПОСЛЕ кампании (PAUSED/$0): сбой одного не роняет кампанию.
+    campaign_id = (result.get("campaign") or "").rsplit("/", 1)[-1]
+    if asset_specs and campaign_id:
+        added, skipped = await asyncio.to_thread(
+            _attach_asset_specs_via_sdk, ads_client, customer_id, campaign_id, list(asset_specs)
+        )
+        result["assets_added"] = added
+        result["assets_skipped"] = skipped
+    # §19.7: переиспользование СУЩЕСТВУЮЩИХ ассетов аккаунта — линк к новой кампании по field_type.
+    if existing_asset_links and campaign_id:
+        result["assets_reused"] = await asyncio.to_thread(
+            _link_existing_assets_via_sdk,
+            ads_client,
+            customer_id,
+            campaign_id,
+            list(existing_asset_links),
+        )
+    if image_specs and campaign_id:
+        imgs = 0
+        for img_bytes, name in image_specs:
+            try:
+                await asyncio.to_thread(
+                    extensions._attach_image_asset_via_sdk,
+                    ads_client,
+                    customer_id,
+                    campaign_id,
+                    img_bytes,
+                    name,
+                )
+                imgs += 1
+            except Exception:  # noqa: BLE001 — image-ассет может быть неприменим к аккаунту
+                pass
+        result["images_added"] = imgs
     await confirm_store.finalize(confirmation_id, result=result)
     return result
+
+
+def _link_existing_assets_via_sdk(client, customer_id, campaign_id, links: list[dict]) -> int:
+    """Привязать СУЩЕСТВУЮЩИЕ ассеты аккаунта (по asset_resource_name + field_type) к новой кампании.
+    Группируем по field_type; каждый field_type линкуем через extensions._link_campaign_assets. Сбой
+    одной группы не роняет остальное ($0/PAUSED). Возвращает число привязанных ассетов."""
+    campaign_rn = extensions._campaign_rn(client, str(customer_id), str(campaign_id))
+    by_ft: dict[str, list[str]] = {}
+    for ln in links:
+        rn = str(ln.get("asset_resource_name") or "")
+        ft = str(ln.get("field_type") or "")
+        if rn and ft:
+            by_ft.setdefault(ft, []).append(rn)
+    linked = 0
+    for ft_name, rns in by_ft.items():
+        try:
+            ft = getattr(client.enums.AssetFieldTypeEnum, ft_name)
+            extensions._link_campaign_assets(client, str(customer_id), campaign_rn, rns, ft)
+            linked += len(rns)
+        except Exception:  # noqa: BLE001 — недоступный/несовместимый ассет пропускаем
+            pass
+    return linked
+
+
+def _attach_asset_specs_via_sdk(client, customer_id, campaign_id, specs: list[dict]):
+    """Применить список asset-спеков к созданной кампании (PAUSED). Возвращает (added, skipped):
+    skipped — семейства, требующие внешней конфигурации (location/affiliate/lead_form) или упавшие."""
+    added: list[str] = []
+    skipped: list[dict] = []
+    for spec in specs:
+        family = str(spec.get("family") or "")
+        try:
+            extensions.apply_asset_spec_via_sdk(client, customer_id, campaign_id, spec)
+            added.append(family)
+        except NotImplementedError as e:  # config-gated → пропускаем с пометкой
+            skipped.append({"family": family, "reason": str(e)})
+        except Exception as e:  # noqa: BLE001 — один плохой ассет не роняет $0/PAUSED кампанию
+            skipped.append({"family": family, "reason": type(e).__name__})
+    return added, skipped
+
+
+# §19: имя языка/код → languageConstant id (best-effort; неизвестные языки пропускаем — таргетинг
+# языка необязателен, по умолчанию все). Совмещён с keyword_plan.LANGUAGE_IDS (ru/uk/en).
+_LANG_NAME_IDS: dict[str, int] = {
+    "ru": 1031,
+    "russian": 1031,
+    "русский": 1031,
+    "uk": 1036,
+    "ukrainian": 1036,
+    "украинский": 1036,
+    "українська": 1036,
+    "en": 1000,
+    "english": 1000,
+    "английский": 1000,
+}
+
+
+def _resolve_language_ids(languages: list[str] | None) -> list[int]:
+    out: list[int] = []
+    for lang in languages or []:
+        lid = _LANG_NAME_IDS.get(str(lang).strip().casefold())
+        if lid and lid not in out:
+            out.append(lid)
+    return out
 
 
 def _create_search_campaign_via_sdk(
@@ -1391,11 +1559,19 @@ def _create_search_campaign_via_sdk(
     keywords: list[str],
     match_type: str,
     cpc_bid_micros: int,
+    geo_locations: list[str] | None = None,
+    geo_country_code: str = "UA",
+    geo_locale: str = "ru",
+    languages: list[str] | None = None,
+    bidding: dict | None = None,
+    path1: str | None = None,
+    path2: str | None = None,
+    url_options: dict | None = None,
 ) -> dict:
-    """Синхронная цепочка v24: budget → campaign(SEARCH,PAUSED,manual CPC) → ad group(PAUSED) →
-    RSA(PAUSED) → опц. ключевые слова. Статусы PAUSED зашиты в КОДЕ → 0 расхода. При сбое создания
-    кампании удаляем осиротевший бюджет (как GDN); сбой после кампании оставляет PAUSED-сущности
-    (безопасно, 0 расхода)."""
+    """Синхронная цепочка v24: budget → campaign(SEARCH,PAUSED,стратегия+URL-опции) → ad group(PAUSED)
+    → RSA(PAUSED,+display path) → опц. ключи → опц. гео → опц. язык. Статусы PAUSED зашиты в КОДЕ → 0
+    расхода. При сбое создания кампании удаляем осиротевший бюджет (как GDN); сбой после кампании
+    оставляет PAUSED-сущности (безопасно, 0 расхода)."""
     cid = str(customer_id)
     stamp = str(int(time.time()))
 
@@ -1412,7 +1588,7 @@ def _create_search_campaign_via_sdk(
         .resource_name
     )
 
-    # 2) Кампания (SEARCH, PAUSED, manual CPC, поиск + поисковые партнёры).
+    # 2) Кампания (SEARCH, PAUSED, стратегия ставок, поиск + поисковые партнёры, опц. URL-опции).
     camp_svc = client.get_service("CampaignService")
     cop = client.get_type("CampaignOperation")
     c = cop.create
@@ -1420,11 +1596,12 @@ def _create_search_campaign_via_sdk(
     c.advertising_channel_type = client.enums.AdvertisingChannelTypeEnum.SEARCH
     c.status = client.enums.CampaignStatusEnum.PAUSED  # код решает — не показывается до включения
     c.campaign_budget = budget_rn
-    c.manual_cpc.enhanced_cpc_enabled = False
+    _apply_bidding_on_create(client, c, bidding)  # стратегия из §19.3 (по умолчанию manual CPC)
     c.network_settings.target_google_search = True
     c.network_settings.target_search_network = True
     c.network_settings.target_content_network = False
     c.network_settings.target_partner_search_network = False
+    _apply_url_options_on_create(client, c, url_options)  # §19.8 tracking/suffix/custom params
     try:  # v24 может требовать декларацию EU-политической рекламы при создании
         c.contains_eu_political_advertising = (
             client.enums.EuPoliticalAdvertisingStatusEnum.DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
@@ -1443,6 +1620,7 @@ def _create_search_campaign_via_sdk(
         except Exception:  # noqa: BLE001
             pass
         raise
+    campaign_id = campaign_rn.rsplit("/", 1)[-1]
 
     # 3) Группа объявлений (SEARCH_STANDARD, PAUSED).
     ag_svc = client.get_service("AdGroupService")
@@ -1457,7 +1635,7 @@ def _create_search_campaign_via_sdk(
         ag_svc.mutate_ad_groups(customer_id=cid, operations=[agop]).results[0].resource_name
     )
 
-    # 4) RSA-объявление (PAUSED).
+    # 4) RSA-объявление (PAUSED, опц. display path).
     ad_svc = client.get_service("AdGroupAdService")
     adop = client.get_type("AdGroupAdOperation")
     aga = adop.create
@@ -1473,6 +1651,10 @@ def _create_search_campaign_via_sdk(
         a = client.get_type("AdTextAsset")
         a.text = text
         rsa.descriptions.append(a)
+    if path1:
+        rsa.path1 = path1
+        if path2:  # path2 допустим только при заданном path1 (прото v24)
+            rsa.path2 = path2
     ad_rn = ad_svc.mutate_ad_group_ads(customer_id=cid, operations=[adop]).results[0].resource_name
 
     # 5) Опциональные ключевые слова в группу.
@@ -1493,6 +1675,35 @@ def _create_search_campaign_via_sdk(
             crit_svc.mutate_ad_group_criteria(customer_id=cid, operations=kops).results
         )
 
+    # 6) Опц. гео (резолв названий → geoTargetConstant; reuse builder, remove-before-create на свежей).
+    geo_count = 0
+    if geo_locations:
+        try:
+            geo_res = _set_geo_location_via_sdk(
+                client, cid, campaign_id, geo_locations, geo_country_code, geo_locale
+            )
+            geo_count = geo_res.get("count", 0)
+        except Exception:  # noqa: BLE001 — гео не распознан → PAUSED-кампания остаётся (безопасно)
+            geo_count = 0
+
+    # 7) Опц. язык таргетинга (languageConstant id).
+    lang_count = 0
+    lang_ids = _resolve_language_ids(languages)
+    if lang_ids:
+        try:
+            cc_svc = client.get_service("CampaignCriterionService")
+            lops = []
+            for lid in lang_ids:
+                lop = client.get_type("CampaignCriterionOperation")
+                lop.create.campaign = campaign_rn
+                lop.create.language.language_constant = f"languageConstants/{lid}"
+                lops.append(lop)
+            lang_count = len(
+                cc_svc.mutate_campaign_criteria(customer_id=cid, operations=lops).results
+            )
+        except Exception:  # noqa: BLE001 — язык необязателен (по умолчанию все)
+            lang_count = 0
+
     return {
         "customer_id": cid,
         "campaign_name": campaign_name,
@@ -1503,9 +1714,55 @@ def _create_search_campaign_via_sdk(
         "headlines": len(headlines),
         "descriptions": len(descriptions),
         "keywords": kw_created,
+        "geo": geo_count,
+        "languages": lang_count,
         "status": "PAUSED",
         "applied": True,
     }
+
+
+def _apply_bidding_on_create(client, c, bidding: dict | None) -> None:
+    """Стратегия ставок на CampaignOperation.create (§19.3). По умолчанию (None) — manual CPC, как
+    раньше. Зеркалит логику _set_bidding_strategy_via_sdk, но БЕЗ update_mask (create)."""
+    strategy = (bidding or {}).get("strategy") or "manual_cpc"
+    if strategy == "manual_cpc":
+        c.manual_cpc.enhanced_cpc_enabled = bool((bidding or {}).get("enhanced_cpc"))
+    elif strategy == "maximize_conversions":
+        tcpa = (bidding or {}).get("target_cpa_micros")
+        if tcpa:
+            c.maximize_conversions.target_cpa_micros = int(tcpa)
+        else:
+            client.copy_from(c.maximize_conversions, client.get_type("MaximizeConversions"))
+    elif strategy == "maximize_conversion_value":
+        roas = (bidding or {}).get("target_roas")
+        if roas:
+            c.maximize_conversion_value.target_roas = float(roas)
+        else:
+            client.copy_from(
+                c.maximize_conversion_value, client.get_type("MaximizeConversionValue")
+            )
+    elif strategy == "target_spend":
+        client.copy_from(c.target_spend, client.get_type("TargetSpend"))
+    else:  # неизвестная → manual CPC (безопасный дефолт)
+        c.manual_cpc.enhanced_cpc_enabled = False
+
+
+def _apply_url_options_on_create(client, c, url_options: dict | None) -> None:
+    """§19.8 Ad URL options на CampaignOperation.create: tracking_url_template / final_url_suffix /
+    url_custom_parameters. Пустые поля не трогаем."""
+    if not url_options:
+        return
+    tpl = (url_options.get("tracking_url_template") or "").strip()
+    if tpl:
+        c.tracking_url_template = tpl
+    suffix = (url_options.get("final_url_suffix") or "").strip()
+    if suffix:
+        c.final_url_suffix = suffix
+    for k, v in (url_options.get("custom_parameters") or {}).items():
+        cp = client.get_type("CustomParameter")
+        cp.key = str(k)
+        cp.value = str(v)
+        c.url_custom_parameters.append(cp)
 
 
 # ── Создание GDN-кампании из фото (§11): фото→Asset→Display→группа→RDA, всё PAUSED ─

@@ -215,7 +215,7 @@ async def test_rsa_finalize_below_min_alerts():
     await init_db()
     sid = await _make_session(205)  # свежая сессия — 0 одобренных
     cq = FakeCallbackQuery(FakeMessage(chat_id=205))
-    await bm.rsa_finalize(cq, RsaCB(action="finalize", cid=sid))
+    await bm.rsa_finalize(cq, RsaCB(action="finalize", cid=sid), FakeState())
     assert cq.answers and cq.answers[-1][1] is True  # show_alert: ниже минимума
     assert bm._LAST_PENDING.get(205) is None  # create_rsa-черновик НЕ создан
 

@@ -324,3 +324,166 @@ def list_campaign_assets(
             CampaignAssetRow(link_resource_name=ca.resource_name, field_type=ft, label=label)
         )
     return out
+
+
+# ── §19.3: медианы прошлых Search-кампаний для «по аналогии» (Этап 1) ──────────────────
+@dataclass
+class AccountMedians:
+    """Репрезентативные значения аккаунта для заполнения пропусков настроек «по аналогии».
+    None ⇒ данных нет/чтение не удалось (вызывающий откатится на дефолты)."""
+
+    median_daily_budget_micros: int | None
+    avg_cpc_micros: int | None
+    common_match_type: str | None  # exact|phrase|broad — самый частый позитивный тип (по кликам)
+
+
+def _median_int(values: list[int]) -> int | None:
+    vals = sorted(int(v) for v in values if v and int(v) > 0)
+    if not vals:
+        return None
+    n = len(vals)
+    mid = n // 2
+    return vals[mid] if n % 2 else int((vals[mid - 1] + vals[mid]) / 2)
+
+
+def search_campaign_medians(
+    client: GoogleAdsClient, customer_id: str, *, days: int = 90
+) -> AccountMedians:
+    """Медианы активных Search-кампаний аккаунта (§19.3 fallback «по аналогии»). READ-ONLY, замок
+    чтения. Каждый под-запрос изолирован try/except: частичный сбой даёт None этого поля, не роняя
+    остальные. Деньги — в micros (КОД). Пустой аккаунт (свежий тест-MCC) → все поля None."""
+    ensure_read_allowed(customer_id)
+    cid = str(customer_id)
+    ga = client.get_service("GoogleAdsService")
+    n = max(1, int(days))
+    end = date.today() - timedelta(days=1)
+    start = end - timedelta(days=n - 1)
+
+    median_budget: int | None = None
+    try:  # 1) бюджеты ENABLED Search-кампаний → медиана
+        q = (
+            "SELECT campaign_budget.amount_micros FROM campaign "
+            "WHERE campaign.advertising_channel_type = 'SEARCH' "
+            "AND campaign.status = 'ENABLED'"
+        )
+        amounts = [
+            int(row.campaign_budget.amount_micros or 0)
+            for row in ga.search(customer_id=cid, query=q)
+        ]
+        median_budget = _median_int(amounts)
+    except Exception:  # noqa: BLE001 — медианы advisory, поле остаётся None
+        pass
+
+    avg_cpc: int | None = None
+    try:  # 2) суммарный CPC по Search-кампаниям за окно = cost/clicks
+        q = (
+            "SELECT metrics.cost_micros, metrics.clicks FROM campaign "
+            "WHERE campaign.advertising_channel_type = 'SEARCH' "
+            f"AND segments.date BETWEEN '{start.isoformat()}' AND '{end.isoformat()}'"
+        )
+        cost = clicks = 0
+        for row in ga.search(customer_id=cid, query=q):
+            cost += int(row.metrics.cost_micros or 0)
+            clicks += int(row.metrics.clicks or 0)
+        if clicks > 0:
+            avg_cpc = int(cost / clicks)
+    except Exception:  # noqa: BLE001
+        pass
+
+    match_type: str | None = None
+    try:  # 3) самый частый позитивный тип соответствия (по ЧИСЛУ ключей).
+        # ВАЖНО (v24): metrics.* НЕЛЬЗЯ селектить из ad_group_criterion (INCOMPATIBLE) — поэтому
+        # без метрик, взвешиваем просто по количеству ключей каждого типа (проверено live на Draft).
+        q = (
+            "SELECT ad_group_criterion.keyword.match_type "
+            "FROM ad_group_criterion "
+            "WHERE ad_group_criterion.type = 'KEYWORD' "
+            "AND ad_group_criterion.negative = FALSE"
+        )
+        weight: dict[str, int] = {}
+        for row in ga.search(customer_id=cid, query=q):
+            mt = row.ad_group_criterion.keyword.match_type.name
+            if mt and mt not in ("UNSPECIFIED", "UNKNOWN"):
+                weight[mt] = weight.get(mt, 0) + 1
+        if weight:
+            match_type = max(weight, key=lambda k: weight[k]).lower()
+    except Exception:  # noqa: BLE001
+        pass
+
+    return AccountMedians(
+        median_daily_budget_micros=median_budget,
+        avg_cpc_micros=avg_cpc,
+        common_match_type=match_type,
+    )
+
+
+# ── §19.7: переиспользуемые ассеты АККАУНТА (для «использовать текущие ассеты») ────────
+@dataclass
+class ReusableAsset:
+    asset_resource_name: str  # сам ASSET (его линкуем к новой кампании, не link rn)
+    field_type: str  # SITELINK | CALLOUT | STRUCTURED_SNIPPET | CALL | PRICE | PROMOTION | …
+    label: str  # человекочитаемая подпись
+
+
+def list_account_assets(client: GoogleAdsClient, customer_id: str) -> list[ReusableAsset]:
+    """Существующие ассеты аккаунта, пригодные к переиспользованию в новой кампании (§19.7). READ-ONLY.
+
+    Объединяем campaign_asset + customer_asset (поиск показывает на уровне кампаний и аккаунта),
+    дедуп по (asset, field_type). Тянем поля популярных типов для подписи. Сбой одного источника не
+    роняет другой (best-effort)."""
+    ensure_read_allowed(customer_id)
+    cid = str(customer_id)
+    ga = client.get_service("GoogleAdsService")
+    fields = (
+        "asset.resource_name, asset.type, asset.name, "
+        "asset.sitelink_asset.link_text, asset.callout_asset.callout_text, "
+        "asset.structured_snippet_asset.header, asset.structured_snippet_asset.values, "
+        "asset.call_asset.phone_number"
+    )
+    out: list[ReusableAsset] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _ingest(rows, ft_getter) -> None:
+        for row in rows:
+            a = row.asset
+            ft = ft_getter(row)
+            if ft in ("UNSPECIFIED", "UNKNOWN", ""):
+                continue
+            key = (a.resource_name, ft)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(
+                ReusableAsset(
+                    asset_resource_name=a.resource_name, field_type=ft, label=_asset_label(ft, a)
+                )
+            )
+
+    for src, ft_field in (
+        ("campaign_asset", "campaign_asset"),
+        ("customer_asset", "customer_asset"),
+    ):
+        try:
+            q = f"SELECT {src}.field_type, {fields} FROM {src} WHERE {src}.status != 'REMOVED'"
+            _ingest(
+                ga.search(customer_id=cid, query=q),
+                lambda row, _f=ft_field: getattr(getattr(row, _f), "field_type").name,
+            )
+        except Exception:  # noqa: BLE001 — один источник может быть недоступен; берём что есть
+            continue
+    return out
+
+
+def _asset_label(field_type: str, a) -> str:
+    """Подпись ассета по field_type (зеркалит list_campaign_assets)."""
+    if field_type == "SITELINK":
+        return getattr(a.sitelink_asset, "link_text", "") or a.name or "Sitelink"
+    if field_type == "CALLOUT":
+        return getattr(a.callout_asset, "callout_text", "") or a.name or "Callout"
+    if field_type == "STRUCTURED_SNIPPET":
+        ss = a.structured_snippet_asset
+        vals = ", ".join(list(ss.values)[:5])
+        return f"{ss.header}: {vals}" if getattr(ss, "header", "") else (a.name or "Snippet")
+    if field_type == "CALL":
+        return getattr(a.call_asset, "phone_number", "") or a.name or "Call"
+    return a.name or field_type
