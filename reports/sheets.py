@@ -27,6 +27,8 @@ SHEETS_SCOPE = "https://www.googleapis.com/auth/drive.file"
 # Google Sheets»): drive.file видит только созданное нами, readonly — любую доступную пользователю.
 # Требует повторного OAuth-consent с этим scope (см. scripts/get_refresh_token.py).
 SHEETS_READONLY_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
+# Список для OAuth-CONSENT (scripts/get_refresh_token.py), НЕ для refresh: на refresh scope НЕ шлём
+# (см. _build_service — иначе invalid_scope, если токен выдан без readonly).
 SHEETS_SCOPES = [SHEETS_SCOPE, SHEETS_READONLY_SCOPE]
 _TOKEN_URI = "https://oauth2.googleapis.com/token"
 _TITLE_MAXLEN = 100  # лимит длины имени листа в Google Sheets
@@ -97,15 +99,20 @@ def _build_service() -> Any:
 
     from core.config import settings
 
+    # scopes=None НАМЕРЕННО: при refresh-гранте нельзя запрашивать scope ШИРЕ выданного токену —
+    # иначе Google вернёт invalid_scope (Bad Request) и упадёт ВЕСЬ Sheets-экспорт (не только чтение
+    # чужих таблиц). None ⇒ scope в запросе не шлём, токен обновляется с тем набором, что был выдан
+    # на consent: drive.file → создание работает; spreadsheets.readonly появится после re-OAuth и
+    # чтение чужой таблицы (§19.4.1) заработает само. SHEETS_SCOPES — это список для CONSENT
+    # (scripts/get_refresh_token.py), НЕ для refresh. Без re-OAuth чтение чужой таблицы даст 403
+    # (не invalid_scope) — ловим и просим прислать ключи текстом.
     creds = Credentials(
         token=None,
         refresh_token=settings.google_ads_refresh_token.get_secret_value(),
         token_uri=_TOKEN_URI,
         client_id=settings.google_ads_client_id,
         client_secret=settings.google_ads_client_secret.get_secret_value(),
-        scopes=list(
-            SHEETS_SCOPES
-        ),  # create (drive.file) + read любой таблицы (spreadsheets.readonly)
+        scopes=None,
     )
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 

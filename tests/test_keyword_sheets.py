@@ -58,11 +58,39 @@ def test_build_rows_shows_dash_for_missing_metrics():
 
 
 def test_sheets_scopes_include_readonly_for_arbitrary_sheets():
-    # §19.4.1: чтение произвольной таблицы менеджера требует spreadsheets.readonly (drive.file — мало).
+    # §19.4.1: список CONSENT (get_refresh_token) должен включать readonly для чтения чужих таблиц.
     from reports.sheets import SHEETS_SCOPES
 
     assert "https://www.googleapis.com/auth/drive.file" in SHEETS_SCOPES  # создание
     assert "https://www.googleapis.com/auth/spreadsheets.readonly" in SHEETS_SCOPES  # чтение чужих
+
+
+def test_build_service_does_not_over_request_scopes_on_refresh(monkeypatch):
+    """РЕГРЕССИЯ: _build_service НЕ должен слать scope ШИРЕ выданного токену на refresh — иначе
+    Google вернёт invalid_scope и упадёт ВЕСЬ Sheets-экспорт (прод-баг 2026-07). Ждём scopes=None."""
+    import reports.sheets as rs
+
+    captured = {}
+
+    class _FakeCreds:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+    fake_google = SimpleNamespace(oauth2=SimpleNamespace(credentials=SimpleNamespace()))
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+    monkeypatch.setitem(sys.modules, "google.oauth2", fake_google.oauth2)
+    monkeypatch.setitem(
+        sys.modules,
+        "google.oauth2.credentials",
+        SimpleNamespace(Credentials=_FakeCreds),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "googleapiclient.discovery",
+        SimpleNamespace(build=lambda *a, **k: SimpleNamespace()),
+    )
+    rs._build_service()
+    assert captured.get("scopes") is None  # scope на refresh не запрашиваем
 
 
 def test_parse_spreadsheet_id():
