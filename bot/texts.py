@@ -1247,22 +1247,34 @@ def fmt_cc_settings_summary(s: dict, lang: str | None = None) -> str:
     geo = ", ".join(s.get("geo_locations") or []) or "—"
     langs = ", ".join(s.get("languages") or []) or "—"
     cur = (s.get("currency") or "").strip()
-    budget = _thou(int(s.get("budget_daily_micros", 0)) / 1_000_000, 2)
-    cpc = _thou(int(s.get("cpc_bid_micros", 0)) / 1_000_000, 2)
+    cur_s = f" {esc(cur)}" if cur else ""
+    # Честный показ денежных полей: 0 micros = значение неизвестно (пустой аккаунт / нет истории /
+    # тест-аккаунт без метрик) → «нет данных», а НЕ ложный «0.00» (§B.3 — реальные данные).
+    no_data = "no data" if lng == "en" else "нет данных"
+
+    def money(key: str) -> str:
+        micros = int(s.get(key, 0) or 0)
+        if micros <= 0:
+            return no_data
+        return f"{_thou(micros / 1_000_000, 2)}{cur_s}{mk(key)}"
+
+    budget = money("budget_daily_micros")
+    cpc_micros = int(s.get("cpc_bid_micros", 0) or 0)
+    cpc = money("cpc_bid_micros")
+    cpc_prefix = "≈ " if cpc_micros > 0 else ""
     strat = _BIDDING_HUMAN[lng].get(
         s.get("bidding_strategy") or "manual_cpc", s.get("bidding_strategy") or "—"
     )
     mt = match_type_human(s.get("match_type") or "phrase", lng)
     name = esc(s.get("campaign_name") or "—")
-    cur_s = f" {esc(cur)}" if cur else ""
     if lng == "en":
         return (
             "🆕 <b>Campaign (draft)</b>\n"
             f"Name: {name}\n"
             f"Geo: {esc(geo)} · Language: {esc(langs)}\n"
-            f"Type: Search · Daily budget: {budget}{cur_s}{mk('budget_daily_micros')}\n"
+            f"Type: Search · Daily budget: {budget}\n"
             f"Bidding: {esc(strat)}{mk('bidding_strategy')}\n"
-            f"Avg. CPC: ≈ {cpc}{cur_s}{mk('cpc_bid_micros')}\n"
+            f"Avg. CPC: {cpc_prefix}{cpc}\n"
             f"Keyword match type: {esc(mt)}{mk('match_type')}\n\n"
             "Edit by text (e.g. <i>set budget 60</i>) or confirm the settings."
         )
@@ -1270,9 +1282,9 @@ def fmt_cc_settings_summary(s: dict, lang: str | None = None) -> str:
         "🆕 <b>Кампания (черновик)</b>\n"
         f"Название: {name}\n"
         f"ГЕО: {esc(geo)} · Язык: {esc(langs)}\n"
-        f"Тип: Search · Бюджет/день: {budget}{cur_s}{mk('budget_daily_micros')}\n"
+        f"Тип: Search · Бюджет/день: {budget}\n"
         f"Стратегия: {esc(strat)}{mk('bidding_strategy')}\n"
-        f"Ср. CPC: ≈ {cpc}{cur_s}{mk('cpc_bid_micros')}\n"
+        f"Ср. CPC: {cpc_prefix}{cpc}\n"
         f"Тип соответствия ключей: {esc(mt)}{mk('match_type')}\n\n"
         "Можно поправить командой (напр. <i>поставь бюджет 60</i>) или подтвердить настройки."
     )
@@ -1287,6 +1299,9 @@ def fmt_asset_spec_label(spec: dict, lang: str | None = None) -> str:
         "callouts": "Уточнения",
         "structured_snippets": "Структурное описание",
         "business_name": "Название бизнеса",
+        "call": "Телефон",
+        "price": "Цены",
+        "promotion": "Акция",
     }.get(family, family)
     if family == "sitelinks":
         n = len(p.get("sitelinks") or [])
@@ -1297,6 +1312,13 @@ def fmt_asset_spec_label(spec: dict, lang: str | None = None) -> str:
         return f"{fam_h} «{p.get('header', '')}»: " + ", ".join((p.get("values") or [])[:5])
     if family == "business_name":
         return f"{fam_h}: {p.get('business_name', '')}"
+    if family == "call":
+        return f"{fam_h}: {p.get('phone_number', '')}"
+    if family == "price":
+        return f"{fam_h}: {len(p.get('offerings') or [])} оф. ({p.get('currency', '')})"
+    if family == "promotion":
+        pct = p.get("percent_off")
+        return f"{fam_h}: -{int(pct)}% · {p.get('promotion_target', '')}" if pct else fam_h
     return fam_h
 
 

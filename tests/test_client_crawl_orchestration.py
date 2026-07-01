@@ -109,6 +109,93 @@ async def test_fresh_profile_autosaves():
     assert "Home" in msg  # раздел (заголовок страницы)
 
 
+def _result_with_hash(url: str, content_hash: str, title: str = "Home") -> CrawlResult:
+    return CrawlResult(
+        domain="ex.com",
+        pages=[
+            CrawlPage(
+                url=url,
+                title=title,
+                page_type="home",
+                text="dealer",
+                content_hash=content_hash,
+            )
+        ],
+        socials={},
+        phones=[],
+        emails=[],
+    )
+
+
+async def _seed_profile_with_page(cust: str, url: str, content_hash: str) -> None:
+    """Профиль с одной сохранённой страницей и её content_hash (для diff инкрементального краула)."""
+    store = ClientProfileStore()
+    await store.apply_clear(cust)
+    await store.apply_upsert(
+        cust,
+        {"brand": "Kasi"},
+        operation="profile_save",
+        source="crawl",
+        crawl_extra={
+            "website": url,
+            "last_crawled_at_now": True,
+            "site_pages": [
+                {"url": url, "title": "Home", "page_type": "home", "content_hash": content_hash}
+            ],
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_incremental_unchanged_skips_update():
+    """§20.5: инкрементальный перекраул без изменений (тот же content_hash) → профиль НЕ трогаем,
+    proposal не минтится, сообщаем «сайт не изменился»."""
+    await init_db()
+    cust = "6000000003"
+    chat_id = 702
+    url = "https://ex.com/"
+    await _seed_profile_with_page(cust, url, "HASH1")
+    assert await ClientProfileStore().site_page_hashes(cust) == {url: "HASH1"}
+    bm._LAST_PENDING.pop(chat_id, None)
+    bot = FakeBot()
+    with (
+        patched(bm.crawler, "load_robots", _noop_robots),
+        patched(bm.crawler, "fetch_sitemap", _noop_sitemap),
+        patched(bm.crawler, "crawl_site", _fake_crawl(_result_with_hash(url, "HASH1"))),
+        patched(bm, "structure_crawl", _fake_structure(ClientProfileExtract())),
+    ):
+        await bm._run_client_crawl(bot, chat_id, cust, url, mode="incremental")
+
+    assert chat_id not in bm._LAST_PENDING  # proposal НЕ создан
+    assert any("не изменил" in m[1] for m in bot.sent)  # «сайт не изменился»
+
+
+@pytest.mark.asyncio
+async def test_incremental_changed_creates_proposal_with_diff():
+    """§20.5: изменённая страница (другой content_hash) → update-proposal + diff-строка в сводке."""
+    await init_db()
+    cust = "6000000004"
+    chat_id = 703
+    url = "https://ex.com/"
+    await _seed_profile_with_page(cust, url, "HASH1")
+    bm._LAST_PENDING.pop(chat_id, None)
+    bot = FakeBot()
+    extract = ClientProfileExtract(business_desc="обновлённый бизнес")
+    with (
+        patched(bm.crawler, "load_robots", _noop_robots),
+        patched(bm.crawler, "fetch_sitemap", _noop_sitemap),
+        patched(bm.crawler, "crawl_site", _fake_crawl(_result_with_hash(url, "HASH2"))),
+        patched(bm, "structure_crawl", _fake_structure(extract)),
+    ):
+        await bm._run_client_crawl(bot, chat_id, cust, url, mode="incremental")
+
+    cid = bm._LAST_PENDING[chat_id]
+    snap = await ConfirmStore().get_confirmed(cid)
+    assert snap.operation == "profile_update"
+    assert snap.status == "pending"
+    assert any("изменённых: 1" in m[1] for m in bot.sent)  # diff-строка (0 новых, 1 изменённая)
+
+
 @pytest.mark.asyncio
 async def test_existing_profile_creates_update_proposal_and_applies_crawl_extra():
     await init_db()

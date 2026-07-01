@@ -50,6 +50,21 @@ def test_build_rows_has_header_and_relevance():
     assert rows[1][3] == "0.14–0.32"
 
 
+def test_build_rows_shows_dash_for_missing_metrics():
+    # Тест-аккаунт / ключ без метрик: объём 0, competition UNSPECIFIED, ставки 0 → «—», не ложный 0.
+    ideas = [_idea("no metrics kw", avg_monthly_searches=0, competition="UNSPECIFIED")]
+    rows = build_keyword_sheet_rows(ideas, {"no metrics kw": True})
+    assert rows[1] == ["no metrics kw", "—", "—", "—", "✅ Релевантно"]
+
+
+def test_sheets_scopes_include_readonly_for_arbitrary_sheets():
+    # §19.4.1: чтение произвольной таблицы менеджера требует spreadsheets.readonly (drive.file — мало).
+    from reports.sheets import SHEETS_SCOPES
+
+    assert "https://www.googleapis.com/auth/drive.file" in SHEETS_SCOPES  # создание
+    assert "https://www.googleapis.com/auth/spreadsheets.readonly" in SHEETS_SCOPES  # чтение чужих
+
+
 def test_parse_spreadsheet_id():
     assert (
         parse_spreadsheet_id("https://docs.google.com/spreadsheets/d/ABC123_xyz-9/edit#gid=0")

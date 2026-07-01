@@ -309,8 +309,12 @@ def client_card_kb(
         )
         if has_website:
             kb.button(
-                text="🔄 Re-crawl site" if en else "🔄 Перекраулить сайт",
+                text="🔄 Re-crawl (full)" if en else "🔄 Перекраулить полностью",
                 callback_data=ClientCB(action="recrawl"),
+            )
+            kb.button(
+                text="🆕 Re-crawl (new only)" if en else "🆕 Перекраулить только новое",
+                callback_data=ClientCB(action="recrawl", sub="incr"),
             )
         kb.button(
             text="🗑 Clear profile" if en else "🗑 Очистить профиль",
@@ -431,12 +435,19 @@ _CC_ASSET_TYPE_LABELS = {
         "callouts": "🏷 Уточнения (Callouts)",
         "structured_snippets": "📑 Структурные описания",
         "business_name": "🏢 Название бизнеса",
+        # §19.7.2: ФАКТ-семейства — из профиля клиента (§20), без выдумывания.
+        "call": "📞 Телефон (Call)",
+        "price": "💲 Цены (Price)",
+        "promotion": "🎁 Акция (Promotion)",
     },
     "en": {
         "sitelinks": "🔗 Sitelinks",
         "callouts": "🏷 Callouts",
         "structured_snippets": "📑 Structured snippets",
         "business_name": "🏢 Business name",
+        "call": "📞 Call (phone)",
+        "price": "💲 Price",
+        "promotion": "🎁 Promotion",
     },
 }
 

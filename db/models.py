@@ -297,6 +297,9 @@ class ClientSitePage(Base):
     title: Mapped[str | None] = mapped_column(String(512))
     page_type: Mapped[str | None] = mapped_column(String(32))  # home|services|about|contacts|...
     key_links: Mapped[dict | None] = mapped_column(JSON)  # важные внутренние ссылки страницы
+    content_hash: Mapped[str | None] = mapped_column(
+        String(32)
+    )  # §20.5: сигнатура для diff перекраула
     crawled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

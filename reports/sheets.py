@@ -21,8 +21,13 @@ from core.logging import log
 from reports.queries import metric_headers
 from reports.service import ReportData
 
-# drive.file — минимально достаточный scope: доступ только к файлам, созданным приложением.
+# drive.file — минимально достаточный scope для СОЗДАНИЯ таблиц (доступ к файлам, созданным нами).
 SHEETS_SCOPE = "https://www.googleapis.com/auth/drive.file"
+# spreadsheets.readonly — чтобы ЧИТАТЬ произвольную таблицу менеджера (§19.4.1 ввод «Ссылка на
+# Google Sheets»): drive.file видит только созданное нами, readonly — любую доступную пользователю.
+# Требует повторного OAuth-consent с этим scope (см. scripts/get_refresh_token.py).
+SHEETS_READONLY_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
+SHEETS_SCOPES = [SHEETS_SCOPE, SHEETS_READONLY_SCOPE]
 _TOKEN_URI = "https://oauth2.googleapis.com/token"
 _TITLE_MAXLEN = 100  # лимит длины имени листа в Google Sheets
 _FORBIDDEN = set("[]:*?/\\")  # символы, недопустимые в имени листа
@@ -98,7 +103,9 @@ def _build_service() -> Any:
         token_uri=_TOKEN_URI,
         client_id=settings.google_ads_client_id,
         client_secret=settings.google_ads_client_secret.get_secret_value(),
-        scopes=[SHEETS_SCOPE],
+        scopes=list(
+            SHEETS_SCOPES
+        ),  # create (drive.file) + read любой таблицы (spreadsheets.readonly)
     )
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
@@ -151,22 +158,28 @@ def publish_report_to_sheets(
 _KW_HEADERS = ["Keyword", "Avg. searches", "Competition", "Top-of-page bid", "Релевантность"]
 _RELEVANT_MARK = "✅ Релевантно"
 _IRRELEVANT_MARK = "❌ Нерелевантно"
+# «Нет данных» — Google не отдаёт метрики на тест-аккаунтах и по части ключей на проде. Показываем
+# честный прочерк, а НЕ ложный 0/$0.00 (для профессионала это выглядело бы как реальная оценка).
+_NO_DATA = "—"
 
 
 def build_keyword_sheet_rows(ideas, relevance: dict[str, bool]) -> list[list]:
     """Строки таблицы ключей (§19.4.2): шапка + по строке на идею. ideas — ads.keyword_plan.KeywordIdea.
-    Релевантность из relevance (по тексту); отсутствующее → релевантно (advisory). Чистая сборка."""
+    Релевантность из relevance (по тексту); отсутствующее → релевантно (advisory). Чистая сборка.
+    Пустые метрики (объём/конкуренция/ставка = 0/UNSPECIFIED) → «—», не ложный ноль."""
     rows: list[list] = [list(_KW_HEADERS)]
     for it in ideas:
         low = float(getattr(it, "low_bid", 0.0) or 0.0)
         high = float(getattr(it, "high_bid", 0.0) or 0.0)
-        bid = f"{low:.2f}–{high:.2f}" if (low or high) else ""
+        bid = f"{low:.2f}–{high:.2f}" if (low or high) else _NO_DATA
+        vol = int(getattr(it, "avg_monthly_searches", 0) or 0)
+        comp = (getattr(it, "competition", "") or "").upper()
         rel = relevance.get(getattr(it, "text", ""), True)
         rows.append(
             [
                 getattr(it, "text", ""),
-                int(getattr(it, "avg_monthly_searches", 0) or 0),
-                getattr(it, "competition", "") or "",
+                vol if vol > 0 else _NO_DATA,
+                comp if comp and comp != "UNSPECIFIED" else _NO_DATA,
                 bid,
                 _RELEVANT_MARK if rel else _IRRELEVANT_MARK,
             ]
@@ -238,8 +251,9 @@ def read_keyword_column(
     """Прочитать верифицированный список ключей из колонки A таблицы (после правок менеджера).
     Пропускаем строку-шапку; берём непустые значения колонки Keyword. service — для тестов (мок).
 
-    ⚠️ drive.file даёт доступ ТОЛЬКО к файлам, созданным приложением → читаем НАШУ таблицу (которую
-    бот создал на выгрузке). Чужую таблицу менеджера прочитать нельзя (нужен иной scope)."""
+    §19.4.1: со scope spreadsheets.readonly читаем ЛЮБУЮ доступную пользователю таблицу (не только
+    созданную ботом) — менеджер может прислать ссылку на свою таблицу с ключами. Таблица должна быть
+    доступна аккаунту OAuth (свой файл или расшаренный)."""
     svc = service or _build_service()
     start = time.monotonic()
     try:

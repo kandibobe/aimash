@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -64,6 +65,13 @@ _PAGE_TYPE_HINTS = (
 Fetcher = Callable[[str], Awaitable[str]]
 
 
+def _content_hash(title: str, text: str) -> str:
+    """Стабильная сигнатура контента страницы (§20.5 инкрементальный краул): меняется ⇒ страница
+    изменилась. Считаем по тому, что СОХРАНЯЕМ (title + усечённый текст), чтобы сравнение при
+    повторном крауле было apples-to-apples."""
+    return hashlib.sha1(f"{title}\n{text}".encode()).hexdigest()[:16]
+
+
 @dataclass
 class CrawlPage:
     url: str
@@ -71,6 +79,7 @@ class CrawlPage:
     page_type: str = "other"
     text: str = ""
     key_links: list[str] = field(default_factory=list)
+    content_hash: str = ""
 
 
 @dataclass
@@ -107,9 +116,23 @@ class CrawlResult:
                 "title": p.title or None,
                 "page_type": p.page_type,
                 "key_links": p.key_links or None,
+                "content_hash": p.content_hash or None,
             }
             for p in self.pages[:limit]
         ]
+
+    def diff_against(self, prev_hashes: dict[str, str]) -> tuple[list[str], list[str]]:
+        """§20.5: сравнить обойденные страницы с прошлыми хэшами (url→hash). Возвращает
+        (new_urls, changed_urls). Неизменённые не попадают ни туда, ни туда."""
+        new_urls: list[str] = []
+        changed_urls: list[str] = []
+        for p in self.pages:
+            prev = prev_hashes.get(p.url)
+            if prev is None:
+                new_urls.append(p.url)
+            elif p.content_hash and p.content_hash != prev:
+                changed_urls.append(p.url)
+        return new_urls, changed_urls
 
 
 def _norm(url: str) -> str:
@@ -216,13 +239,15 @@ async def crawl_site(
         title, text, links, socials, phones, emails = await asyncio.to_thread(
             _extract, html, url, domain
         )
+        page_text = text[:max_text_chars]
         result.pages.append(
             CrawlPage(
                 url=url,
                 title=title,
                 page_type=_page_type(url, title),
-                text=text[:max_text_chars],
+                text=page_text,
                 key_links=links[:20],
+                content_hash=_content_hash(title, page_text),
             )
         )
         for k, v in socials.items():

@@ -664,8 +664,9 @@ CATALOG: dict[str, dict[str, str]] = {
             "Проверь настройку (docs/DEPLOYMENT.md → Google Sheets):\n"
             "1) включён ли Google Sheets API в Google Cloud — ссылка для включения обычно есть в "
             "тексте ошибки выше (после включения подожди 1–2 мин);\n"
-            "2) есть ли у токена доступ drive.file: `python scripts/get_refresh_token.py` "
-            "(отметь Google Ads и drive.file), затем перезапусти бота.\n"
+            "2) есть ли у токена доступ drive.file (+ spreadsheets.readonly для чтения чужих таблиц): "
+            "`python scripts/get_refresh_token.py` (отметь Google Ads, drive.file и "
+            "spreadsheets.readonly), затем перезапусти бота.\n"
             "📄 Тот же отчёт без этой настройки доступен сразу через /export (.xlsx)."
         ),
         "en": (
@@ -673,8 +674,9 @@ CATALOG: dict[str, dict[str, str]] = {
             "Check the setup (docs/DEPLOYMENT.md → Google Sheets):\n"
             "1) is the Google Sheets API enabled in Google Cloud — the enable link is usually in "
             "the error text above (after enabling, wait 1–2 min);\n"
-            "2) does the token have drive.file access: `python scripts/get_refresh_token.py` "
-            "(select Google Ads and drive.file), then restart the bot.\n"
+            "2) does the token have drive.file (+ spreadsheets.readonly to read others' sheets) access: "
+            "`python scripts/get_refresh_token.py` (select Google Ads, drive.file and "
+            "spreadsheets.readonly), then restart the bot.\n"
             "📄 The same report without this setup is available right away via /export (.xlsx)."
         ),
     },
@@ -799,6 +801,18 @@ CATALOG: dict[str, dict[str, str]] = {
     "cli_crawl_started": {
         "ru": "🕷 Краулю сайт {domain}… Пришлю сводку по готовности.",
         "en": "🕷 Crawling {domain}… I'll send a summary when it's done.",
+    },
+    "cli_recrawl_incr_started": {
+        "ru": "🆕 Проверяю {domain} на новые/изменённые страницы… Пришлю сводку по готовности.",
+        "en": "🆕 Checking {domain} for new/changed pages… I'll send a summary when it's done.",
+    },
+    "cli_crawl_unchanged": {
+        "ru": "✅ Сайт {domain} не изменился ({pages} стр.). Профиль актуален, обновление не требуется.",
+        "en": "✅ Site {domain} is unchanged ({pages} pages). Profile is up to date, no update needed.",
+    },
+    "cli_crawl_diff": {
+        "ru": "🆕 Новых страниц: {new} · ✏️ изменённых: {changed}",
+        "en": "🆕 New pages: {new} · ✏️ changed: {changed}",
     },
     "cli_crawl_profile_updated": {
         "ru": "Профиль клиента обновлён. Готов использовать в кампаниях и объявлениях.",
@@ -947,13 +961,13 @@ CATALOG: dict[str, dict[str, str]] = {
     "cc_kw_read_failed": {
         "ru": (
             "⚠️ Не смог прочитать таблицу: {err}\n"
-            "Пришлите ссылку на таблицу БОТА (drive.file читает только созданные ботом файлы) "
-            "или пришлите ключи текстом."
+            "Проверьте, что таблица доступна аккаунту бота (своя или расшаренная), и что у токена есть "
+            "scope spreadsheets.readonly. Либо пришлите ключи текстом."
         ),
         "en": (
             "⚠️ Couldn't read the sheet: {err}\n"
-            "Send the link to the BOT's sheet (drive.file reads only app-created files) "
-            "or send keywords as text."
+            "Make sure the sheet is accessible to the bot's account (owned or shared) and the token has "
+            "the spreadsheets.readonly scope. Or send keywords as text."
         ),
     },
     "cc_kw_accepted": {
@@ -1035,6 +1049,23 @@ CATALOG: dict[str, dict[str, str]] = {
     "cc_edit_applied": {
         "ru": "✏️ Правка применена. Обновлённая сводка:",
         "en": "✏️ Edit applied. Updated summary:",
+    },
+    # §19.8: после создания черновика (PAUSED) — отдельная прямая команда «Запустить» → ENABLED.
+    "cc_created_launch_prompt": {
+        "ru": (
+            "✅ Черновик кампании создан (статус PAUSED, расход $0).\n"
+            "Запуск — отдельной командой: нажмите «🚀 Запустить кампанию», "
+            "и я покажу «PAUSED → ENABLED» для подтверждения."
+        ),
+        "en": (
+            "✅ Campaign draft created (status PAUSED, $0 spend).\n"
+            "Launch is a separate command: tap “🚀 Launch campaign” and I'll show "
+            "“PAUSED → ENABLED” for confirmation."
+        ),
+    },
+    "cc_launch_stale": {
+        "ru": "🚀 Не нашёл, какую кампанию запускать. Откройте /campaigns → «Возобновить».",
+        "en": "🚀 Couldn't find which campaign to launch. Use /campaigns → “Resume”.",
     },
     # Заглушка для этапов, ещё не подключённых (на случай рассинхрона курсора).
     "cc_next_phase_stub": {

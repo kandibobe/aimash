@@ -154,6 +154,21 @@ def test_assemble_defaults_when_no_median():
     assert out["match_type"] == "phrase"
 
 
+# ── §B.3: честный показ пустых денежных метрик в сводке настроек ──────────────────
+def test_settings_summary_shows_no_data_for_zero_cpc():
+    from bot.texts import fmt_cc_settings_summary
+
+    s = {
+        "campaign_name": "Тест",
+        "budget_daily_micros": 40_000_000,
+        "cpc_bid_micros": 0,  # нет истории/тест-аккаунт → CPC неизвестен
+        "currency": "USD",
+    }
+    out = fmt_cc_settings_summary(s, lang="ru")
+    assert "нет данных" in out  # честный прочерк для CPC
+    assert "≈ 0.00" not in out  # НЕ ложный ноль
+
+
 # ── merge: пред-confirm правка перекрывает только непустые поля ───────────────────
 def test_merge_overrides_only_nonempty():
     base = CampaignSettings(geo_locations=["Кения"], budget_daily_units=40, goal="calls")

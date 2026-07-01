@@ -211,6 +211,34 @@ async def test_stage7_create_builds_composite_proposal():
 
 
 @pytest.mark.asyncio
+async def test_launch_button_mints_resume_proposal():
+    """§19.8: «🚀 Запустить» после создания → resume_campaign proposal (confirm-гейт), не прямой запуск.
+    Кэш имени одноразовый (не запустить дважды по старой кнопке)."""
+    await init_db()
+    chat = 7700206
+    bm._CC_LAUNCH_CACHE[chat] = "Кения · Авто · Search"
+    captured = {}
+
+    async def fake_present(message, *, chat_id, operation, params, summary, cid):
+        captured.update(operation=operation, params=params)
+
+    cq = FakeCallbackQuery(FakeMessage(chat_id=chat))
+    with patched(bm, "_present_proposal", fake_present):
+        await bm.cc_launch(cq, CcCB(action="launch"))
+    assert captured["operation"] == "resume_campaign"
+    assert captured["params"]["campaign"] == "Кения · Авто · Search"
+    assert chat not in bm._CC_LAUNCH_CACHE  # одноразово
+
+    # повторный клик по старой кнопке → нечего запускать (show_alert), proposal не минтится
+    captured.clear()
+    cq2 = FakeCallbackQuery(FakeMessage(chat_id=chat))
+    with patched(bm, "_present_proposal", fake_present):
+        await bm.cc_launch(cq2, CcCB(action="launch"))
+    assert not captured
+    assert cq2.answers and cq2.answers[-1][1] is True  # show_alert
+
+
+@pytest.mark.asyncio
 async def test_stage7_create_blocks_without_ad():
     await init_db()
     chat = 7700205

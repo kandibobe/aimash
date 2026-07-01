@@ -4,13 +4,15 @@
 1. Войди тем Google-аккаунтом (gmail от Антона), у которого есть доступ к Google Ads «Aimash» (775-364-3025).
 2. Если «Google hasn't verified this app» → Advanced → Go to … (норм для своего dev-приложения).
    Если «Access blocked» → добавь этот gmail в Test users в OAuth consent screen (или Publish → In Production).
-3. На экране согласия будут ДВА доступа: Google Ads и «See, edit, create … only files you open with this app»
-   (drive.file). Разреши ОБА — иначе /sheets упадёт с invalid_scope. Скрипт впишет refresh_token в .env
-   (GOOGLE_ADS_REFRESH_TOKEN) — токен не печатается.
+3. На экране согласия будут ТРИ доступа: Google Ads, «… only files you open with this app» (drive.file)
+   и «See all your Google Sheets spreadsheets» (spreadsheets.readonly). Разреши ВСЕ — иначе /sheets
+   упадёт с invalid_scope, а §19.4.1 не прочитает чужую таблицу ключей. Скрипт впишет refresh_token
+   в .env (GOOGLE_ADS_REFRESH_TOKEN) — токен не печатается.
 
-Зачем drive.file: команда /sheets создаёт Google-таблицу с отчётом (reports/sheets.py). Этот scope —
-минимально достаточный (доступ ТОЛЬКО к файлам, созданным приложением; чужие файлы недоступны).
-Google Ads-доступ (adwords) от этого не меняется — токен просто получает ОБА разрешения сразу.
+Зачем drive.file: /sheets и §19.4.2 создают Google-таблицу (reports/sheets.py) — минимально достаточный
+scope (доступ ТОЛЬКО к файлам, созданным приложением). Зачем spreadsheets.readonly: §19.4.1 «Ссылка на
+Google Sheets» — читать ПРОИЗВОЛЬНУЮ таблицу менеджера (drive.file видит только своё). Google Ads-доступ
+(adwords) от этого не меняется — токен получает все разрешения сразу.
 
 Секреты (client_id/secret) берутся из .env, не из кода.
 """
@@ -28,11 +30,13 @@ from google_auth_oauthlib.flow import InstalledAppFlow  # noqa: E402
 
 from core.config import settings  # noqa: E402
 
-# adwords — Google Ads API; drive.file — /sheets-экспорт (reports/sheets.py: SHEETS_SCOPE).
-# Оба scope в ОДНОМ токене: иначе Sheets-рефреш просит drive.file, которого нет в гранте → invalid_scope.
+# adwords — Google Ads API; drive.file — создание таблиц (/sheets, §19.4.2);
+# spreadsheets.readonly — чтение произвольной таблицы менеджера (§19.4.1). Все scope в ОДНОМ токене:
+# иначе Sheets-рефреш просит недостающий scope → invalid_scope. Держим в синхроне с reports.sheets.
 SCOPES = [
     "https://www.googleapis.com/auth/adwords",
     "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
 ]
 ENV_PATH = ROOT / ".env"
 

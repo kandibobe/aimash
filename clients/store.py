@@ -107,6 +107,22 @@ class ClientProfileStore:
                 return None
             return await self._to_dict(s, p)
 
+    async def site_page_hashes(self, customer_id: str) -> dict[str, str]:
+        """§20.5: карта {url → content_hash} сохранённых страниц клиента (для diff при инкрементальном
+        перекрауле). Нет профиля/страниц → {}. Страницы без хэша (старый краул) в карту не попадают."""
+        async with Session() as s:
+            p = await self._load(s, customer_id)
+            if p is None:
+                return {}
+            rows = (
+                await s.execute(
+                    select(ClientSitePage.url, ClientSitePage.content_hash).where(
+                        ClientSitePage.profile_id == p.id
+                    )
+                )
+            ).all()
+        return {url: h for url, h in rows if url and h}
+
     async def accounts_with_profile(self, customer_ids: list[str]) -> set[str]:
         """Из переданных customer_id — те, у кого есть профиль (для отметки ✅ в списке аккаунтов)."""
         if not customer_ids:
@@ -240,6 +256,7 @@ class ClientProfileStore:
                             title=_clean_str(pg.get("title")),
                             page_type=_clean_str(pg.get("page_type")),
                             key_links=pg.get("key_links") or None,
+                            content_hash=_clean_str(pg.get("content_hash")),
                         )
                     )
                 changed.append("site_pages")

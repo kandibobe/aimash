@@ -207,6 +207,9 @@ _RSA_AG_CACHE: dict[int, list[dict]] = {}  # chat_id → группы объяв
 _CC_ACCT_CACHE: dict[
     int, list
 ] = {}  # §19: chat_id → дочерние аккаунты MCC (резолв idx→ChildAccount)
+# §19.8: chat_id → имя только что созданного PAUSED-черновика, чтобы кнопка «🚀 Запустить»
+# смогла собрать resume_campaign proposal по имени (запуск — отдельная прямая команда).
+_CC_LAUNCH_CACHE: dict[int, str] = {}
 # §20: chat_id → аккаунты MCC для раздела «Клиенты» (резолв idx→ChildAccount); буфер накопления
 # текста профиля до «💾 Сохранить» (несколько сообщений подряд, §20.3). В памяти (не источник истины).
 _CLI_ACCT_CACHE: dict[int, list] = {}
@@ -2353,15 +2356,21 @@ def _crawl_findings(result, patch: dict) -> dict:
     }
 
 
-async def _run_client_crawl(bot, chat_id: int, customer_id: str, url: str) -> None:
+async def _run_client_crawl(
+    bot, chat_id: int, customer_id: str, url: str, *, mode: str = "full"
+) -> None:
     """Фоновый обход сайта клиента: crawl_jobs running→done/failed; профиль пуст → auto-save,
     иначе черновик profile_update («было→станет») с confirm-гейтом (§20.4/20.5). Любой сбой не
-    роняет event loop — ошибки редактируются (redact_text) и уходят пользователю понятным текстом."""
+    роняет event loop — ошибки редактируются (redact_text) и уходят пользователю понятным текстом.
+
+    mode='incremental' (§20.5 «только новое»): сравниваем обойденные страницы с прошлым краулом по
+    content_hash. Ничего не изменилось → НЕ трогаем профиль (сообщаем «сайт не изменился»); есть
+    новые/изменённые → обычный update-proposal, но со сводкой diff (сколько новых/изменённых)."""
     from urllib.parse import urlparse
 
     domain = urlparse(url).netloc or url
     job_id = await crawl_jobs.create_running(
-        customer_id=customer_id, chat_id=chat_id, domain=domain, mode="full"
+        customer_id=customer_id, chat_id=chat_id, domain=domain, mode=mode
     )
     with request_scope(f"crawl:{job_id}"):
         try:
@@ -2394,9 +2403,29 @@ async def _run_client_crawl(bot, chat_id: int, customer_id: str, url: str) -> No
                 "site_pages": result.site_pages_payload(),
             }
             before = await CLIENTS.get_by_account(customer_id)
+            # §20.5: инкрементальный перекраул — сравнить с прошлым краулом по content_hash.
+            diff_prefix = ""
+            if mode == "incremental" and before is not None:
+                prev_hashes = await CLIENTS.site_page_hashes(customer_id)
+                new_urls, changed_urls = result.diff_against(prev_hashes)
+                if prev_hashes and not new_urls and not changed_urls:
+                    await crawl_jobs.mark_done(job_id, pages_crawled=result.pages_count)
+                    await bot.send_message(
+                        chat_id,
+                        i18n.t(
+                            "cli_crawl_unchanged",
+                            domain=texts.esc(domain),
+                            pages=result.pages_count,
+                        ),
+                        parse_mode=ParseMode.HTML,
+                    )
+                    return
+                diff_prefix = (
+                    i18n.t("cli_crawl_diff", new=len(new_urls), changed=len(changed_urls)) + "\n\n"
+                )
             await crawl_jobs.mark_done(job_id, pages_crawled=result.pages_count)
             # §20.4: богатая сводка «что нашли» (разделы/услуги/цены/контакты/соцсети).
-            crawl_msg = texts.fmt_crawl_summary(
+            crawl_msg = diff_prefix + texts.fmt_crawl_summary(
                 domain, pages=result.pages_count, **_crawl_findings(result, patch)
             )
             if before is None:
@@ -2457,16 +2486,17 @@ async def _run_client_crawl(bot, chat_id: int, customer_id: str, url: str) -> No
                 pass
 
 
-def _spawn_crawl(bot, chat_id: int, customer_id: str, url: str) -> None:
+def _spawn_crawl(bot, chat_id: int, customer_id: str, url: str, *, mode: str = "full") -> None:
     """Запустить фоновую задачу краула и удержать ссылку (иначе GC соберёт незавершённую задачу)."""
-    task = asyncio.create_task(_run_client_crawl(bot, chat_id, customer_id, url))
+    task = asyncio.create_task(_run_client_crawl(bot, chat_id, customer_id, url, mode=mode))
     _CRAWL_INFLIGHT.add(task)
     task.add_done_callback(_CRAWL_INFLIGHT.discard)
 
 
 @dp.callback_query(ClientCB.filter(F.action == "recrawl"))
-async def cli_recrawl_cb(cq: CallbackQuery, state: FSMContext) -> None:
-    """§20.4: перекраулить сайт клиента (из профиля). Запуск — фоново, сводка по готовности."""
+async def cli_recrawl_cb(cq: CallbackQuery, callback_data: ClientCB, state: FSMContext) -> None:
+    """§20.4/20.5: перекраулить сайт клиента (из профиля). sub='incr' → инкрементальный («только
+    новое», diff по content_hash); иначе полный. Запуск — фоново, сводка по готовности."""
     chat_id = _cq_chat_id(cq)
     customer_id = await _cli_selected_account(state)
     if not customer_id:
@@ -2484,11 +2514,11 @@ async def cli_recrawl_cb(cq: CallbackQuery, state: FSMContext) -> None:
         url = "https://" + str(url).lstrip("/")
     from urllib.parse import urlparse
 
+    mode = "incremental" if callback_data.sub == "incr" else "full"
     await cq.answer()
-    await cq.message.answer(
-        i18n.t("cli_crawl_started", domain=texts.esc(urlparse(url).netloc or url))
-    )
-    _spawn_crawl(cq.message.bot, chat_id, customer_id, url)
+    started_key = "cli_recrawl_incr_started" if mode == "incremental" else "cli_crawl_started"
+    await cq.message.answer(i18n.t(started_key, domain=texts.esc(urlparse(url).netloc or url)))
+    _spawn_crawl(cq.message.bot, chat_id, customer_id, url, mode=mode)
 
 
 @dp.callback_query(CcCB.filter(F.action == "resume"))
@@ -2879,7 +2909,8 @@ async def cc_keywords_text(m: Message, state: FSMContext) -> None:
     from keywords.ingest import DEFAULT_MATCH_TYPE, parse_keywords_text
     from reports.sheets import parse_spreadsheet_id
 
-    # ссылка на Google-таблицу → читаем колонку ключей (drive.file — только файлы, созданные ботом)
+    # ссылка на Google-таблицу → читаем колонку ключей (§19.4.1: со scope spreadsheets.readonly —
+    # любую доступную таблицу менеджера, не только созданную ботом)
     if "spreadsheets" in text.lower() and parse_spreadsheet_id(text):
         from reports.sheets import read_keyword_column
 
@@ -3086,18 +3117,34 @@ async def cc_asset_type(cq: CallbackQuery, callback_data: CcCB, state: FSMContex
     s = draft.wizard_state.get("settings") or {}
     ad = draft.wizard_state.get("ad") or {}
     try:
-        from adcopy.assets_gen import generate_asset
+        from clients.profile_assets import PROFILE_ASSET_FAMILIES, build_profile_asset
 
-        spec = await generate_asset(
-            family,
-            # §19.7.2: как заголовки/описания — наполнение по товару (product) на языке аудитории
-            # целевой страны, а не по имени кампании / языку интерфейса (иначе ассеты не по теме).
-            topic=(s.get("product") or s.get("campaign_name") or ""),
-            url=ad.get("final_url"),
-            profile=await _cc_profile_ctx(draft),  # §20: наполнение ассетов из профиля клиента
-            language=(s.get("target_language") or i18n.current_lang()),
-        )
-    except Exception as e:  # noqa: BLE001 — LLM/валидация наполнения
+        if family in PROFILE_ASSET_FAMILIES:
+            # §19.7.2: call/price/promotion несут ФАКТЫ (телефон/цены/скидка) — строим из РЕАЛЬНОГО
+            # профиля клиента (§20), НЕ через LLM. Нет данных → ValueError → пропуск (не выдумываем).
+            cid = draft.preview_customer_id or DRAFT_ACCOUNT_ID
+            profile = await CLIENTS.get_by_account(cid) or {}
+            spec = build_profile_asset(
+                family,
+                profile,
+                final_url=ad.get("final_url"),
+                country_code=(s.get("geo_country_code") or "UA"),
+                language_code=(s.get("target_language") or "uk"),
+                currency_hint=s.get("currency"),
+            )
+        else:
+            from adcopy.assets_gen import generate_asset
+
+            spec = await generate_asset(
+                family,
+                # §19.7.2: как заголовки/описания — наполнение по товару (product) на языке аудитории
+                # целевой страны, а не по имени кампании / языку интерфейса (иначе ассеты не по теме).
+                topic=(s.get("product") or s.get("campaign_name") or ""),
+                url=ad.get("final_url"),
+                profile=await _cc_profile_ctx(draft),  # §20: наполнение ассетов из профиля клиента
+                language=(s.get("target_language") or i18n.current_lang()),
+            )
+    except Exception as e:  # noqa: BLE001 — LLM/валидация наполнения/нет данных профиля
         await msg.answer(i18n.t("cc_asset_gen_failed", err=ux.err_text(e)))
         await msg.answer(
             i18n.t("cc_assets_pick_type"),
@@ -3330,6 +3377,31 @@ async def cc_create(cq: CallbackQuery, callback_data: CcCB, state: FSMContext) -
         params=validated,
         summary=summary,
         cid=cid,
+    )
+
+
+@dp.callback_query(CcCB.filter(F.action == "launch"))
+async def cc_launch(cq: CallbackQuery, callback_data: CcCB) -> None:
+    """§19.8: «🚀 Запустить» после создания черновика → resume_campaign proposal (confirm-гейт).
+    Запуск = отдельная прямая команда: кнопка лишь СОЗДАЁТ черновик «PAUSED→ENABLED», исполняется
+    только после ✅ (та же ветка, что /campaigns → «Возобновить»). Замок аккаунта не трогаем."""
+    chat_id = _cq_chat_id(cq)
+    name = _CC_LAUNCH_CACHE.get(chat_id)
+    if not name:
+        await cq.answer(i18n.t("cc_launch_stale"), show_alert=True)
+        return
+    try:
+        cid, op, params, summary = _build_proposal("resume_campaign", campaign=name)
+    except Exception as e:  # noqa: BLE001 — валидация схемы
+        await cq.answer(i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
+        return
+    await cq.answer()
+    _CC_LAUNCH_CACHE.pop(chat_id, None)  # одноразово: не запускаем дважды по старой кнопке
+    msg = _cq_msg(cq)
+    if msg is None:
+        return
+    await _present_proposal(
+        msg, chat_id=chat_id, operation=op, params=params, summary=summary, cid=cid
     )
 
 
@@ -4527,6 +4599,16 @@ async def _do_confirm(cq: CallbackQuery, cid: str) -> None:
     # успешную операцию как failed — отдельный try/except, вне ветки record_failure.
     log.info("мутация применена cid=%s chat=%s", cid, chat_id)  # денежный путь — успех в лог
     await _safe_edit(cq, i18n.t("applied", result=texts.esc(result)), parse_mode=ParseMode.HTML)
+    # §19.8: черновик Search-кампании создан (PAUSED) → предлагаем «🚀 Запустить» ОТДЕЛЬНОЙ командой.
+    # Кнопка НЕ запускает сама: минтит resume_campaign proposal (тот же confirm-гейт «PAUSED→ENABLED»).
+    if snap is not None and snap.operation == "create_search_campaign":
+        name = (snap.params or {}).get("campaign_name") or ""
+        msg = _cq_msg(cq)
+        if name and msg is not None:
+            _CC_LAUNCH_CACHE[chat_id] = name
+            await msg.answer(
+                i18n.t("cc_created_launch_prompt"), reply_markup=cc_final_kb(can_launch=True)
+            )
 
 
 async def _do_cancel(cq: CallbackQuery, cid: str) -> None:
