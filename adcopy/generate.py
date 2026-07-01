@@ -26,7 +26,8 @@ class CopyBrief(BaseModel):
 
     topic: str
     keywords: list[str] = Field(default_factory=list, max_length=50)
-    usp: str | None = None  # уникальное торговое предложение
+    usp: str | None = None  # уникальное торговое предложение (обычно из посадочной страницы)
+    profile: str | None = None  # §20: контекст профиля клиента (бренд/бизнес/услуги/УТП/цены)
     tone: str | None = None  # тон (напр. «деловой», «дружелюбный»)
     geo: str | None = None
     language: str = "ru"
@@ -58,6 +59,9 @@ def _user_prompt(brief: CopyBrief, need_h: int, need_d: int) -> str:
     ]
     if brief.keywords:
         parts.append("Ключевые слова: " + ", ".join(brief.keywords) + ".")
+    if brief.profile:
+        # §20: профиль клиента — первым (бренд/УТП авторитетнее лендинга), с капом (токены).
+        parts.append(f"О клиенте: {brief.profile[:1200]}.")
     if brief.usp:
         parts.append(f"УТП: {brief.usp}.")
     if brief.tone:

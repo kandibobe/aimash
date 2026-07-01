@@ -1149,12 +1149,13 @@ async def _rsa_resolve_after_campaign(
 async def _rsa_generate_and_start(target: Message, chat_id: int, state: FSMContext) -> None:
     """Сгенерировать тексты по брифу из state, создать сессию курации, показать итог."""
     data = await state.get_data()
-    # §20→§10: профиль клиента (одно-аккаунтный дефолт — Draft) как контекст УТП генерации.
+    # §20→§10: профиль клиента (одно-аккаунтный дефолт — Draft) как контекст генерации.
     _prof = await _cc_profile_ctx_account(DRAFT_ACCOUNT_ID)
     brief = CopyBrief(
         topic=data.get("topic", ""),
         keywords=list(data.get("keywords") or []),
-        usp=_merge_usp(_prof, data.get("usp") or ""),
+        usp=data.get("usp"),
+        profile=(_prof or None),
         tone=data.get("tone"),
         geo=data.get("geo"),
         language=data.get("language", "ru"),
@@ -1887,14 +1888,6 @@ async def _cc_profile_ctx(draft) -> str:
     return await _cc_profile_ctx_account(draft.preview_customer_id or DRAFT_ACCOUNT_ID)
 
 
-def _merge_usp(profile: str, page_text: str, *, cap: int = 1800) -> str | None:
-    """§19.5: УТП для RSA = профиль клиента (§20) + текст посадочной. Профиль первым (бренд/УТП
-    авторитетнее лендинга). Пусто → None (как раньше). У CopyBrief поля profile нет — вливаем в usp
-    (follow-up: первоклассное CopyBrief.profile)."""
-    parts = [p for p in ((profile or "").strip(), (page_text or "").strip()) if p]
-    return ("\n\n".join(parts)[:cap] or None) if parts else None
-
-
 def _cc_apply_settings_patch(cur: dict, patch) -> dict:
     """Наложить пред-confirm правку («поставь бюджет 60») на собранные настройки. Изменённые поля
     выходят из by_analogy (теперь заданы пользователем). match_type правкой текста не трогаем."""
@@ -2616,7 +2609,8 @@ async def cc_ad_url(m: Message, state: FSMContext) -> None:
     brief = CopyBrief(
         topic=(s.get("campaign_name") or url),
         keywords=kw_list[:20],
-        usp=_merge_usp(prof, page_text),
+        usp=(page_text[:1500] or None),  # УТП с посадочной страницы
+        profile=(prof or None),  # §20: профиль клиента — отдельным первоклассным контекстом
         geo=((s.get("geo_locations") or [""])[0] or None),
         language=i18n.current_lang(),
         n_headlines=RSA_MAX_HEADLINES,

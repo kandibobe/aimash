@@ -69,12 +69,16 @@ class FakeState:
         self._data = {}
 
 
-def test_merge_usp_profile_first_and_cap():
-    assert bm._merge_usp("", "") is None
-    assert bm._merge_usp("PROF", "") == "PROF"
-    merged = bm._merge_usp("PROF", "PAGE")
-    assert merged.startswith("PROF") and "PAGE" in merged
-    assert len(bm._merge_usp("x" * 5000, "y" * 5000, cap=100)) == 100
+def test_copybrief_profile_is_emitted_in_prompt():
+    from adcopy.generate import CopyBrief, _user_prompt
+
+    # профиль — первоклассное поле CopyBrief (§20), выводится отдельно от usp (посадочная)
+    brief = CopyBrief(topic="Авто", profile="Бренд: Kasi Motors", usp="УТП со страницы")
+    prompt = _user_prompt(brief, 15, 4)
+    assert "О клиенте: Бренд: Kasi Motors" in prompt
+    assert "УТП: УТП со страницы" in prompt
+    # без профиля — строка «О клиенте» не появляется (аддитивно, прежнее поведение)
+    assert "О клиенте" not in _user_prompt(CopyBrief(topic="Авто"), 15, 4)
 
 
 @pytest.mark.asyncio
@@ -117,3 +121,48 @@ async def test_cc_kw_generate_passes_profile_to_seeds():
         await bm.cc_kw_generate(FakeCB(chat_id), CcCB(action="kw_generate"), state)
 
     assert "Kasi Motors" in captured["profile"]  # профиль preview-аккаунта дошёл до генератора
+
+
+@pytest.mark.asyncio
+async def test_cc_ad_url_passes_profile_to_rsa_brief():
+    await init_db()
+    chat_id = 721
+    preview = "7000000003"
+    await ClientProfileStore().apply_upsert(
+        preview, {"brand": "Kasi Motors", "business_desc": "автодилер"}, operation="profile_save"
+    )
+    session = await bm.CDRAFTS.create(
+        chat_id=chat_id, customer_id=bm.DRAFT_ACCOUNT_ID, preview_customer_id=preview
+    )
+    await bm.CDRAFTS.patch(
+        session,
+        lambda s: s.__setitem__("settings", {"campaign_name": "Авто Кения"}),
+        expected_chat_id=chat_id,
+    )
+
+    captured: dict = {}
+
+    async def fake_gen(brief):
+        captured["brief"] = brief
+        raise RuntimeError("stop-before-session")  # short-circuit курации/сессии
+
+    async def fake_fetch(url):
+        return "текст посадочной страницы"
+
+    class M:
+        def __init__(self):
+            self.chat = type("C", (), {"id": chat_id})()
+            self.text = "https://kasimotors.co.ke/used-cars"
+            self.answers: list = []
+
+        async def answer(self, text="", **kw):
+            self.answers.append((text, kw))
+            return self
+
+    state = FakeState(cc_session=session)
+    with patched(bm, "_generate_rsa", fake_gen), patched(bm.ingest, "fetch_url_text", fake_fetch):
+        await bm.cc_ad_url(M(), state)
+
+    brief = captured["brief"]
+    assert "Kasi Motors" in (brief.profile or "")  # профиль → первоклассное поле CopyBrief.profile
+    assert "посадочной" in (brief.usp or "")  # усп — с посадочной, отдельно от профиля
