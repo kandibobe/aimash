@@ -26,6 +26,20 @@ from confirm.store import ConfirmStore  # noqa: E402
 from db.session import init_db  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _grant_access(monkeypatch):
+    """Эти тесты проверяют РОУТИНГ визарда «Клиенты», а не замок аккаунта. Гейт доступа делаем
+    детерминированно True: в CI env allow-list пуст → `_cli_check_access` вернул бы False, и
+    хендлеры ушли бы в ранний отказ (не создав ни состояния, ни черновика). Замок покрыт отдельно
+    (ensure_allowed/read_allowed + cross-domain тесты). Draft в проде всегда разрешён — это и
+    моделируем. Без env-зависимости тесты одинаково зелёные локально и в CI."""
+
+    async def _ok(_chat_id, _customer_id):
+        return True
+
+    monkeypatch.setattr(bm, "_cli_check_access", _ok)
+
+
 @contextmanager
 def patched(obj, name, value):
     orig = getattr(obj, name)
