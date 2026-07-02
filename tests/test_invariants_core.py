@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -165,3 +166,42 @@ async def test_on_error_handler_does_not_leak_secret_to_telegram(monkeypatch):
     assert secret not in text, "СЕКРЕТ утёк в Telegram (golden rule #5)"
     assert "refresh_token" not in text, "сырой текст исключения (str(e)) утёк в Telegram"
     assert incident_code in text, "нет кода инцидента — пользователь не сможет сослаться на /diag"
+
+
+# ── Раскладка пакета `adcopy` — top-level, НЕ под ads/ (гард на IDE-дрейф) ─────────
+# Pylance периодически «услужливо» переносит adcopy/ внутрь ads/ (ads↔adcopy — общий
+# префикс) и переписывает импорты на `ads.adcopy.*`, что рушит рантайм (adcopy — плоский
+# top-level пакет, см. pyproject setuptools include). Раньше ловилось только глазами по
+# ModuleNotFoundError. Теперь — красный тест до отгрузки. Правится в одном месте при
+# осознанном переезде пакета.
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def test_adcopy_is_top_level_package_not_under_ads():
+    assert (_REPO_ROOT / "adcopy" / "__init__.py").is_file(), (
+        "пакет adcopy/ пропал из top-level — IDE перенёс его? (см. pyproject packages.find)"
+    )
+    assert not (_REPO_ROOT / "ads" / "adcopy").exists(), (
+        "ads/adcopy/ существует — Pylance снова перенёс adcopy под ads/. Верни в top-level: "
+        "`mv ads/adcopy adcopy` и почини импорты обратно на `from adcopy.`"
+    )
+
+
+def test_no_source_references_ads_adcopy():
+    """Ни один .py в исходниках/тестах не импортирует несуществующий `ads.adcopy.*`."""
+    # Матчим только импорт-стейтмент (from/import + пробел + запрещённый путь), а не голую
+    # подстроку — иначе этот же файл (сообщения/докстринг) ложно триггерит гард сам на себя.
+    bad = re.compile(r"\b(?:from|import)\s+ads\.adcopy\b")
+    offenders: list[str] = []
+    for py in _REPO_ROOT.rglob("*.py"):
+        parts = set(py.parts)
+        if "__pycache__" in parts or ".venv" in parts or "site-packages" in parts:
+            continue
+        text = py.read_text(encoding="utf-8", errors="ignore")
+        if bad.search(text):
+            offenders.append(str(py.relative_to(_REPO_ROOT)))
+    assert not offenders, (
+        "найдены импорты несуществующего `ads.adcopy` (IDE переписал?): "
+        + ", ".join(offenders)
+        + " — верни на `adcopy.`"
+    )
