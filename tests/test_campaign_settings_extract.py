@@ -103,9 +103,13 @@ def test_assemble_tags_by_analogy_when_budget_from_median():
     assert out["budget_daily_micros"] == 40_000_000
     assert out["cpc_bid_micros"] == 180_000
     assert out["match_type"] == "exact"
-    # все три подставлены из медиан → помечены «по аналогии»
+    # все три подставлены из медиан → помечены «по аналогии» (и НЕ «по умолчанию»)
     for key in ("budget_daily_micros", "cpc_bid_micros", "match_type"):
         assert key in out["by_analogy"]
+        assert key not in out["by_default"]
+    # стратегия выведена из цели (calls) → без тегов источника
+    assert "bidding_strategy" not in out["by_analogy"]
+    assert "bidding_strategy" not in out["by_default"]
     # цель calls → maximize_conversions, оплата cpa (§19.3)
     assert out["bidding_strategy"] == "maximize_conversions"
     assert out["payment_model"] == "cpa"
@@ -144,6 +148,7 @@ def test_assemble_explicit_budget_not_by_analogy():
     out = assemble_settings(extracted, median_budget_micros=40_000_000)
     assert out["budget_daily_micros"] == 60_000_000
     assert "budget_daily_micros" not in out["by_analogy"]
+    assert "budget_daily_micros" not in out["by_default"]  # задан пользователем — без тегов
 
 
 def test_assemble_defaults_when_no_median():
@@ -152,6 +157,10 @@ def test_assemble_defaults_when_no_median():
     assert out["budget_daily_micros"] == 10_000_000
     assert out["cpc_bid_micros"] == 500_000
     assert out["match_type"] == "phrase"
+    # …и все помечены ЧЕСТНО «по умолчанию», а не «по аналогии» (истории аккаунта не было)
+    for key in ("budget_daily_micros", "cpc_bid_micros", "match_type", "bidding_strategy"):
+        assert key in out["by_default"], key
+        assert key not in out["by_analogy"], key
 
 
 # ── §19.3: сети / расписание / даты (таблица Этапа 1) ─────────────────────────────
@@ -192,13 +201,15 @@ def test_assemble_networks_schedule_dates():
         ),
         topic="тема",
     )
-    assert out["networks"] == "search_partners" and "networks" not in out["by_analogy"]
-    assert len(out["ad_schedule_blocks"]) == 5 and "ad_schedule" not in out["by_analogy"]
+    assert out["networks"] == "search_partners" and "networks" not in out["by_default"]
+    assert len(out["ad_schedule_blocks"]) == 5 and "ad_schedule" not in out["by_default"]
     assert out["ad_schedule"] == "пн-пт 9-18"
     assert out["start_date"] == "2026-08-01" and out["end_date"] == "2026-09-01"
-    # Дефолты → Search-only, 24/7 (по аналогии), даты None
+    # Дефолты → Search-only, 24/7 «по умолчанию» (статический дефолт — НЕ история аккаунта)
     dflt = assemble_settings(CampaignSettings(), topic="тема")
-    assert dflt["networks"] == "search" and "networks" in dflt["by_analogy"]
+    assert dflt["networks"] == "search" and "networks" in dflt["by_default"]
+    assert "networks" not in dflt["by_analogy"] and "ad_schedule" not in dflt["by_analogy"]
+    assert "ad_schedule" in dflt["by_default"]
     assert dflt["ad_schedule_blocks"] == [] and dflt["ad_schedule"] == "24/7"
     assert dflt["start_date"] is None and dflt["end_date"] is None
     # Конец раньше старта / мусорная дата → отброшены КОДОМ

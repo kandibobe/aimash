@@ -144,7 +144,8 @@ class CcCB(CallbackData, prefix="cc"):
     (action='create') и «Запустить» (action='launch') через confirm-гейт. idx — индекс аккаунта в
     кэше (Этап 0) или под-индекс; sub — тег стадии/под-действие."""
 
-    action: str  # "acct"|"accept"|"skip"|"edit"|"create"|"launch"|"resume"|"new"|"regen"
+    action: str  # "acct"|"page"|"accept"|"skip"|"edit"|"kw_generate"|"kw_confirm"|"use_assets"|
+    # "add_assets"|"asset_type"|"assets_back"|"create"|"launch"|"resume"|"new"
     idx: int = -1
     sub: str = ""
 

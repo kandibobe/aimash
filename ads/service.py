@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 
 from ads import mutations, resolve
-from ads.client import DRAFT_ACCOUNT_ID, build_client
+from ads.client import DRAFT_ACCOUNT_ID, build_client, build_client_async
 
 # ── Единый источник истины: какие операции РЕАЛЬНО исполняются за confirm-гейтом. ──
 # Это потолок возможностей: всё, чего тут нет, агент обязан отклонить ДО показа кнопок
@@ -79,7 +79,7 @@ async def read_before(operation: str, params: dict) -> dict | None:
     if not name:
         return None
     try:
-        client = build_client()
+        client = await build_client_async()  # холодная сборка (после /refresh) — вне loop
         cid = DRAFT_ACCOUNT_ID  # замок: только Aimash Draft
         if operation == "update_budget":
             ref = await asyncio.to_thread(resolve.find_campaign_by_name, client, cid, name)

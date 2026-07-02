@@ -79,6 +79,21 @@ def test_ru_default_unchanged_start_help():
     assert "Что я умею сейчас" in texts.HELP
 
 
+def test_help_mentions_every_bot_command():
+    """Гард от дрейфа: КАЖДАЯ команда из меню (BOT_COMMANDS) упомянута в /help на обоих языках.
+    Иначе флагманские фичи (визард §19, клиенты §20) становятся невидимыми — уже случалось."""
+    from bot.keyboards import BOT_COMMANDS
+
+    for help_text in (texts.HELP, i18n.CATALOG["help"]["en"]):
+        for bc in BOT_COMMANDS:
+            if bc.command in ("start", "help"):
+                continue
+            # /client не должен засчитываться за счёт /clients → граница слова
+            assert re.search(rf"/{bc.command}(?![a-z])", help_text), (
+                f"/{bc.command} отсутствует в /help"
+            )
+
+
 def test_formatter_en_smoke_journal_and_mutation():
     # fmt_mutation_summary под EN-contextvar — узнаваемо английский
     tok = i18n.set_current_lang("en")

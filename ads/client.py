@@ -123,7 +123,7 @@ async def discover_read_children() -> int:
         try:
             from ads.read import list_child_accounts  # ленивый импорт: избегаем цикла с ads.read
 
-            client = build_client(mid)
+            client = await build_client_async(mid)  # холодная сборка (после /refresh) — вне loop
             children = await run_ads_read_call(
                 list_child_accounts, client, mid, label="mcc_discover"
             )
@@ -217,6 +217,19 @@ def build_client(customer_id: str | None = None) -> "GoogleAdsClient":
     client = GoogleAdsClient.load_from_dict(_cfg_for(cid), version=settings.google_ads_api_version)
     _CLIENT_CACHE[cid] = client
     return client
+
+
+async def build_client_async(customer_id: str | None = None) -> "GoogleAdsClient":
+    """`build_client` для async-хендлеров: кэш-хит — мгновенно, ХОЛОДНЫЙ путь (сборка SDK-клиента
+    ~0.5–2 c: первый вызов по аккаунту / после `clear_client_cache` в /refresh) уходит в поток,
+    чтобы не замораживать event loop (латентность — §15). Семантика идентична `build_client`."""
+    import asyncio
+
+    cid = normalize_customer_id(customer_id) if customer_id else DRAFT_ACCOUNT_ID
+    cached = _CLIENT_CACHE.get(cid)
+    if cached is not None:
+        return cached
+    return await asyncio.to_thread(build_client, customer_id)
 
 
 def _cfg_for(cid: str) -> dict:

@@ -204,7 +204,11 @@ async def test_stage1_edit_patches_settings():
         sid,
         lambda s: s.__setitem__(
             "settings",
-            {"budget_daily_micros": 40_000_000, "by_analogy": ["budget_daily_micros"]},
+            {
+                "budget_daily_micros": 40_000_000,
+                "by_analogy": ["budget_daily_micros"],
+                "by_default": ["budget_daily_micros"],
+            },
         ),
     )
     fsm = FakeFSM({"cc_session": sid})
@@ -218,6 +222,7 @@ async def test_stage1_edit_patches_settings():
 
     snap = await bm.CDRAFTS.get(sid)
     assert snap.wizard_state["settings"]["budget_daily_micros"] == 60_000_000
-    # поле теперь задано пользователем → ушло из by_analogy
+    # поле теперь задано пользователем → ушло из ОБОИХ тегов источника
     assert "budget_daily_micros" not in snap.wizard_state["settings"]["by_analogy"]
+    assert "budget_daily_micros" not in snap.wizard_state["settings"]["by_default"]
     assert await _count_proposals(chat) == 0

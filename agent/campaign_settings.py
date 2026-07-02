@@ -286,17 +286,22 @@ def assemble_settings(
 ) -> dict:
     """Слить извлечённое + медианы «по аналогии» + дефолты в финальный settings-словарь визарда.
 
-    Поля, взятые из медиан (а не из описания), перечисляются в by_analogy — чтобы Этап-1 показал
-    менеджеру «(по аналогии)». Деньги/match_type — КОД. Возвращает wizard_state.settings.
+    Источник каждого подставленного поля помечается ЧЕСТНО (§19.3 — менеджер видит, откуда число):
+    - by_analogy — РЕАЛЬНАЯ история аккаунта (GAQL-медианы search_campaign_medians): бюджет/CPC/
+      match_type; в сводке — «(по аналогии)»;
+    - by_default — статический дефолт кода (не из описания и не из истории): сети/расписание/
+      стратегия/бюджет/CPC/match_type без медиан; в сводке — «(по умолчанию)».
+    Деньги/match_type — КОД. Возвращает wizard_state.settings.
 
     §19: помимо прежнего, вычисляет product (ЧТО рекламируем — драйвер seed/RSA), target_language
     (язык АУДИТОРИИ целевой страны — Кения→en, а не язык интерфейса ui_language) и страну — чтобы
     Discover/тексты были релевантны гео, а не выдавали чужой-язычную чепуху."""
     from ads import geo  # локальный импорт: extract-путь не тянет ads/google-ads
 
-    by_analogy: list[str] = []
+    by_analogy: list[str] = []  # из истории аккаунта (GAQL-медианы)
+    by_default: list[str] = []  # статический дефолт кода
 
-    # бюджет: описание → медиана(by_analogy) → дефолт
+    # бюджет: описание → медиана(by_analogy) → дефолт(by_default)
     if extracted.budget_daily_units is not None:
         budget_micros = _units_to_micros(extracted.budget_daily_units)
     elif median_budget_micros:
@@ -304,24 +309,27 @@ def assemble_settings(
         by_analogy.append("budget_daily_micros")
     else:
         budget_micros = _units_to_micros(DEFAULT_DAILY_BUDGET_UNITS)
+        by_default.append("budget_daily_micros")
 
-    # cpc: медиана(by_analogy) → дефолт (из описания CPC обычно не задаётся)
+    # cpc: медиана(by_analogy) → дефолт(by_default) (из описания CPC обычно не задаётся)
     if avg_cpc_micros:
         cpc_micros = int(avg_cpc_micros)
         by_analogy.append("cpc_bid_micros")
     else:
         cpc_micros = _units_to_micros(DEFAULT_CPC_UNITS)
+        by_default.append("cpc_bid_micros")
 
-    # тип соответствия: частый в аккаунте(by_analogy) → дефолт phrase
+    # тип соответствия: частый в аккаунте(by_analogy) → дефолт phrase(by_default)
     if common_match_type:
         match_type = str(common_match_type).lower()
         by_analogy.append("match_type")
     else:
         match_type = DEFAULT_MATCH_TYPE
+        by_default.append("match_type")
 
     strat, tcpa_micros, payment = _derive_bidding(extracted)
     if not extracted.bidding_strategy and not extracted.goal:
-        by_analogy.append("bidding_strategy")
+        by_default.append("bidding_strategy")  # статический дефолт, НЕ история аккаунта
 
     # Страна таргетинга: из ISO-кода модели, иначе из первого распознанного названия локации.
     country_iso = geo.country_iso(extracted.geo_country_code)
@@ -356,15 +364,15 @@ def assemble_settings(
         nm = geo.language_name(target_language)
         languages = [nm] if nm else []
 
-    # §19.3: сети / расписание / даты — из описания, иначе дефолты «по аналогии/по умолчанию».
+    # §19.3: сети / расписание / даты — из описания, иначе статический дефолт «по умолчанию».
     networks = extracted.networks or "search"
     if not extracted.networks:
-        by_analogy.append("networks")
+        by_default.append("networks")
     schedule_blocks = parse_ad_schedule(extracted.ad_schedule)
     if schedule_blocks is None:  # нераспознанная строка → честно откатываемся на 24/7
         schedule_blocks = []
     if not extracted.ad_schedule:
-        by_analogy.append("ad_schedule")
+        by_default.append("ad_schedule")
     start_date = _valid_iso_date(extracted.start_date)
     end_date = _valid_iso_date(extracted.end_date)
     if start_date and end_date and end_date < start_date:
@@ -393,4 +401,5 @@ def assemble_settings(
         "start_date": start_date,  # None ⇒ старт сегодня (дефолт Google)
         "end_date": end_date,  # None ⇒ без даты конца
         "by_analogy": by_analogy,
+        "by_default": by_default,
     }

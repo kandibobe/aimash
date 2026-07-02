@@ -488,10 +488,10 @@ async def _send_status(message: Message) -> None:
     аккаунт ЧТЕНИЯ чата (§6 /account), по умолчанию Draft."""
     acct = await _active_read_account(message.chat.id)
     try:
-        from ads.client import build_client
+        from ads.client import build_client_async
         from ads.read import account_stats
 
-        client = build_client(acct)
+        client = await build_client_async(acct)  # холодная сборка (после /refresh) — вне loop
         async with ux.typing_action(message):  # «печатает…» пока идёт чтение SDK
             st = await run_ads_read_call(account_stats, client, acct, 30, label="account_stats")
             cur = await _read_currency(client, acct)  # §9: валюта в денежных строках
@@ -595,9 +595,9 @@ async def _present_proposal(
         if operation in ("update_budget", "update_bid"):
             acct_cur = ""
             try:
-                from ads.client import build_client
+                from ads.client import build_client_async
 
-                acct_cur = await _read_currency(build_client())
+                acct_cur = await _read_currency(await build_client_async())
             except Exception:  # noqa: BLE001 — валюту не определить → без FX-сверки, не роняем показ
                 acct_cur = ""
             mismatch = currency_mismatch(operation, params, acct_cur)
@@ -756,9 +756,10 @@ async def cancel_cmd(m: Message, state: FSMContext) -> None:
     await m.answer(i18n.t("rejected"))
 
 
-@dp.message(Command("lang"))
+@dp.message(Command("lang", "language"))
 async def lang_cmd(m: Message, command: CommandObject) -> None:
-    """Язык интерфейса RU/EN. С аргументом (/lang en) — сразу; иначе кнопки выбора."""
+    """Язык интерфейса RU/EN. С аргументом (/lang en) — сразу; иначе кнопки выбора.
+    /language — тихий алиас (ТЗ §6 называет команду так; в меню — /lang)."""
     arg = (command.args or "").strip().lower()
     if arg in i18n.LANGS:
         lang = i18n.set_lang(m.chat.id, arg)  # кэш
@@ -941,11 +942,11 @@ async def _present_report_campaigns(m: Message, target: str, acct_row) -> None:
     _REPORT_SEL[m.chat.id] = {"account": cid, "campaign_id": None, "campaign_name": None}
     camps: list[dict] = []
     try:
-        from ads.client import build_client
+        from ads.client import build_client_async
         from ads.read import list_campaigns
 
         camps = await run_ads_read_call(
-            list_campaigns, build_client(cid), cid, label="report_campaigns"
+            list_campaigns, await build_client_async(cid), cid, label="report_campaigns"
         )
     except Exception:  # noqa: BLE001 — нет кампаний/сбой чтения/аккаунт недоступен → только «Весь аккаунт»
         camps = []
@@ -1131,10 +1132,10 @@ async def _run_report(
 ) -> None:
     """Read-only сводка по аккаунту (или одной кампании) за период. Общий код команды/пикера."""
     try:
-        from ads.client import build_client
+        from ads.client import build_client_async
         from reports.service import build_account_report_async, summary_text
 
-        client = build_client(acct)
+        client = await build_client_async(acct)  # холодная сборка — вне loop
         async with ux.typing_action(m):
             # build_account_report_async параллелит 9 GAQL-запросов под семафором (≈2.5-3x быстрее)
             report = await build_account_report_async(client, acct, period, campaign_id=campaign_id)
@@ -1172,11 +1173,11 @@ async def _run_export(
     await m.answer(i18n.t("report_preparing_xlsx"))
     path: str | None = None
     try:
-        from ads.client import build_client
+        from ads.client import build_client_async
         from reports.service import build_account_report_async
         from reports.xlsx import write_report_xlsx
 
-        client = build_client(acct)
+        client = await build_client_async(acct)  # холодная сборка — вне loop
         async with ux.upload_action(m):  # «отправляет документ…» пока строим .xlsx
             report = await build_account_report_async(client, acct, period, campaign_id=campaign_id)
             report.currency = await _read_currency(client, acct)  # §9: валюта денежных метрик
@@ -1216,11 +1217,11 @@ async def _run_sheets(
     """Выгрузить отчёт за период (аккаунт или одна кампания) в Google Sheets, прислать ссылку. Read-only."""
     await m.answer(i18n.t("report_preparing_sheets"))
     try:
-        from ads.client import build_client
+        from ads.client import build_client_async
         from reports.service import build_account_report_async
         from reports.sheets import publish_report_to_sheets
 
-        client = build_client(acct)
+        client = await build_client_async(acct)  # холодная сборка — вне loop
         async with ux.typing_action(m):
             report = await build_account_report_async(client, acct, period, campaign_id=campaign_id)
             report.currency = await _read_currency(client, acct)  # §9: валюта денежных метрик
@@ -1243,7 +1244,6 @@ async def sheets_(m: Message, command: CommandObject) -> None:
         await m.answer(i18n.t("err_period"))
         return
     await _run_sheets(m, period, await _active_read_account(m.chat.id))
-    await _run_sheets(m, period)
 
 
 def _mcc_period_factory(arg: str | None):
@@ -1285,12 +1285,12 @@ async def _send_mcc(m: Message, arg: str | None) -> None:
         return
     await m.answer(i18n.t("mcc_preparing"))
     try:
-        from ads.client import build_client
+        from ads.client import build_client_async
         from ads.read import account_timezone
         from reports.mcc import build_mcc_summary_async
         from reports.service import summary_text_mcc
 
-        client = build_client(manager_id)
+        client = await build_client_async(manager_id)  # холодная сборка — вне loop
         async with ux.typing_action(m):
             summary = await build_mcc_summary_async(
                 client,
@@ -1742,12 +1742,13 @@ async def _kw_run(
     # §8: идеи берём на АКТИВНОМ read-аккаунте (на боевом Keyword Planner даёт реальные метрики; на
     # Draft — нули). Замок чтения держит generate_keyword_ideas (ensure_read_allowed); если активный
     # аккаунт вышел из read-list, _active_read_account сам откатывается на Draft (fail-closed).
-    from ads.client import build_client
+    from ads.client import build_client_async
     from ads.keyword_plan import generate_keyword_ideas
 
     async def _gen(cid: str):
+        client = await build_client_async(cid)  # холодная сборка — вне loop
         return await asyncio.to_thread(
-            generate_keyword_ideas, build_client(cid), cid, seeds=seeds, url=url, language=language
+            generate_keyword_ideas, client, cid, seeds=seeds, url=url, language=language
         )
 
     acct = await _active_read_account(chat_id)
@@ -1816,7 +1817,7 @@ async def _kw_run(
     clusters = rank_clusters(
         clusters, by_text
     )  # §7: приоритезация (объём × интент) — порядок показа
-    currency = await _read_currency(build_client(acct), acct)  # §9: валюта активного аккаунта
+    currency = await _read_currency(await build_client_async(acct), acct)  # §9: валюта аккаунта
     summary = texts.fmt_keywords_summary(
         clusters,
         by_text,
@@ -2441,12 +2442,15 @@ async def _cc_profile_site(draft) -> str | None:
 
 def _cc_apply_settings_patch(cur: dict, patch) -> dict:
     """Наложить пред-confirm правку («поставь бюджет 60») на собранные настройки. Изменённые поля
-    выходят из by_analogy (теперь заданы пользователем). match_type правкой текста не трогаем."""
+    выходят из ОБОИХ тегов источника (by_analogy И by_default — теперь заданы пользователем).
+    match_type правкой текста не трогаем."""
     s = dict(cur)
     by = set(s.get("by_analogy") or [])
+    bd = set(s.get("by_default") or [])
     if patch.budget_daily_units is not None:
         s["budget_daily_micros"] = units_to_micros(patch.budget_daily_units)
         by.discard("budget_daily_micros")
+        bd.discard("budget_daily_micros")
     if patch.geo_locations:
         s["geo_locations"] = list(patch.geo_locations)
     if patch.geo_country_code:
@@ -2465,7 +2469,9 @@ def _cc_apply_settings_patch(cur: dict, patch) -> dict:
         if payment:
             s["payment_model"] = payment
         by.discard("bidding_strategy")
+        bd.discard("bidding_strategy")
     s["by_analogy"] = sorted(by)
+    s["by_default"] = sorted(bd)
     return s
 
 
@@ -2515,8 +2521,9 @@ async def _cc_begin(target: Message, chat_id: int, state: FSMContext) -> None:
 
 
 async def _cc_render_stage(target: Message, chat_id: int, draft, state: FSMContext) -> None:
-    """Отрисовать текущий этап черновика (вход после рестарта/возобновления). Этапы 2–7 пока —
-    честная заглушка следующей фазы (черновик при этом сохранён)."""
+    """Отрисовать текущий этап черновика (вход после рестарта/возобновления): диспетчер по
+    current_step 0–7 — все восемь этапов §19 реализованы (аккаунт → настройки → ключи → RSA →
+    изображения → ассеты → URL-опции → финал)."""
     await state.update_data(cc_session=draft.session_id)
     step = draft.current_step
     if step <= 0:
@@ -2562,8 +2569,8 @@ async def _cc_render_stage(target: Message, chat_id: int, draft, state: FSMConte
     if step == 7:
         await _cc_present_stage7(target, chat_id, draft.session_id, state)
         return
-    await state.clear()
-    await target.answer(i18n.t("cc_next_phase_stub"), reply_markup=main_menu())
+    # set_step пишет только 0–7, сюда попасть нельзя; safety-net — финальная сводка (как cc_skip)
+    await _cc_present_stage7(target, chat_id, draft.session_id, state)
 
 
 async def _cc_entry(m: Message, state: FSMContext) -> None:
@@ -3353,8 +3360,8 @@ async def cc_edit_hint(cq: CallbackQuery, callback_data: CcCB, state: FSMContext
 
 @dp.callback_query(CcCB.filter(F.action == "accept"))
 async def cc_accept(cq: CallbackQuery, callback_data: CcCB, state: FSMContext) -> None:
-    """Этап 1 принят (advisory, НЕ мутация): курсор → этап 2, выходим из FSM (черновик в БД active).
-    Этапы 2–7 подключаются в следующих фазах — честная заглушка."""
+    """Этап 1 принят (advisory, НЕ мутация): курсор → этап 2 (ключевые слова), выходим из FSM
+    (черновик в БД остаётся active и переживает рестарт)."""
     chat_id = _cq_chat_id(cq)
     data = await state.get_data()
     session_id = data.get("cc_session")
