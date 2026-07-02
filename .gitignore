@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+# .env.defaults — несекретные операционные дефолты, деплоятся в прод через env_file (секретов нет):
+!.env.defaults
 google-ads.yaml
 google-ads-oauth*.json
 *.pem

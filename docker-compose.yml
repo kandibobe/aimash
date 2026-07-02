@@ -40,11 +40,18 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Порядок важен: .env.defaults (tracked, несекретные операционные дефолты) — базой;
+    # .env (untracked, секреты + оверрайды) — ПОСЛЕДНИМ, поэтому переопределяет дефолты.
     env_file:
+      - .env.defaults
       - .env
     environment:
       # ВНУТРИ сети compose — имя сервиса + порт 5432 (НЕ хостовый 5433!).
       DATABASE_URL: postgresql+asyncpg://aimash:aimash@postgres:5432/aimash
+      # Фиксируем UTC: APScheduler берёт локальную TZ контейнера, а код трактует naive datetime как
+      # UTC. Явный TZ=UTC делает cron детерминированным независимо от хоста: REPORT_SCHEDULE
+      # '0 1 * * *' = 01:00 UTC = 10:00 JST (10 утра по Японии).
+      TZ: UTC
     restart: unless-stopped
     # Потолок ресурсов одного инстанса (long-poll бот лёгкий; лимит ловит утечку/раздувание).
     # docker compose v2 (не-swarm) применяет deploy.resources.limits для memory/cpus.
