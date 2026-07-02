@@ -5761,32 +5761,6 @@ async def cc_stage_expects_button(m: Message) -> None:
     await m.answer(i18n.t("cc_stage_expects_button"))
 
 
-@dp.message(F.text)
-async def on_text(m: Message, state: FSMContext) -> None:
-    text = m.text or ""
-    # ingest: если в сообщении есть ссылка — прочитаем её и передадим агенту как СПРАВОЧНЫЙ КОНТЕНТ
-    # (best-effort: сбой чтения не ломает обычную команду). Текст на callback/фото-этапах визарда сюда
-    # НЕ доходит — его раньше перехватывает cc_stage_expects_button (B8); прочие визарды — свой стейт.
-    urls = ingest.extract_urls(text)
-    if urls:
-        try:
-            async with ux.typing_action(m):
-                content = await ingest.fetch_url_text(urls[0])
-        except ingest.IngestError as e:
-            await m.answer(
-                i18n.t("ingest_link_failed", err=texts.esc(str(e))), parse_mode=ParseMode.HTML
-            )
-            content = ""
-        if content:
-            await _run_task_with_context(
-                m, instruction=text, context_text=content, source=urls[0], state=state
-            )
-            return
-    async with ux.typing_action(m):  # «печатает…» пока модель парсит команду
-        res = await handle_command(text, chat_id=m.chat.id)
-    await _dispatch_command_result(m, res, state)
-
-
 # ── Inline: выбор кампании и быстрые действия ─────────────────────────────────────
 def _cq_chat_id(cq: CallbackQuery) -> int:
     return cq.message.chat.id if cq.message else cq.from_user.id
@@ -6453,6 +6427,36 @@ async def diag(m: Message) -> None:
         await m.answer(texts.fmt_errors(rows), parse_mode=ParseMode.HTML)
     except Exception as e:  # noqa: BLE001 — диагностика не должна сама падать наружу
         await m.answer(i18n.t("err_journal", err=ux.err_text(e)))
+
+
+# ВАЖНО: catch-all свободного текста регистрируется ПОСЛЕДНИМ message-хендлером (aiogram —
+# «первый совпавший в порядке регистрации»): всё, что окажется ниже, никогда не получит текст.
+# Регрессия этого инварианта уже случалась (/diag и rsa_list_edited были зарегистрированы после
+# catch-all → мертвы в диспатче) — теперь порядок закреплён tests/test_handler_order.py.
+@dp.message(F.text)
+async def on_text(m: Message, state: FSMContext) -> None:
+    text = m.text or ""
+    # ingest: если в сообщении есть ссылка — прочитаем её и передадим агенту как СПРАВОЧНЫЙ КОНТЕНТ
+    # (best-effort: сбой чтения не ломает обычную команду). Текст на callback/фото-этапах визарда сюда
+    # НЕ доходит — его раньше перехватывает cc_stage_expects_button (B8); прочие визарды — свой стейт.
+    urls = ingest.extract_urls(text)
+    if urls:
+        try:
+            async with ux.typing_action(m):
+                content = await ingest.fetch_url_text(urls[0])
+        except ingest.IngestError as e:
+            await m.answer(
+                i18n.t("ingest_link_failed", err=texts.esc(str(e))), parse_mode=ParseMode.HTML
+            )
+            content = ""
+        if content:
+            await _run_task_with_context(
+                m, instruction=text, context_text=content, source=urls[0], state=state
+            )
+            return
+    async with ux.typing_action(m):  # «печатает…» пока модель парсит команду
+        res = await handle_command(text, chat_id=m.chat.id)
+    await _dispatch_command_result(m, res, state)
 
 
 async def main() -> None:
