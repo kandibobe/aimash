@@ -1725,27 +1725,161 @@ def _apply_case(op):
             "strategy": "manual_cpc",
             **base,
         }
+    # ── §аудит-2026-07: недостающие 16 операций — та же негативная матрица для ВСЕХ 29 ──
+    if op == "set_geo_proximity":
+        return mut.apply_set_geo_proximity, {
+            "campaign_id": "7",
+            "radius_km": 20.0,
+            "address": {"city_name": "Kyiv", "country_code": "UA"},
+            **base,
+        }
+    if op == "attach_audience":
+        return mut.apply_attach_audience, {
+            "campaign_id": "7",
+            "audience_resource_names": ["customers/7753643025/userLists/999"],
+            **base,
+        }
+    if op == "add_sitelinks":
+        return mut.apply_add_sitelinks, {
+            "campaign_id": "7",
+            "sitelinks": [{"link_text": "Каталог", "final_url": "https://x.example/c"}],
+            **base,
+        }
+    if op == "add_callouts":
+        return mut.apply_add_callouts, {
+            "campaign_id": "7",
+            "callouts": ["Гарантия 12 мес", "Trade-in"],
+            **base,
+        }
+    if op == "add_structured_snippets":
+        return mut.apply_add_structured_snippets, {
+            "campaign_id": "7",
+            "header": "Models",
+            "values": ["Sedan", "SUV", "Hatchback"],
+            **base,
+        }
+    if op == "attach_image_asset":
+        return mut.apply_attach_image_asset, {
+            "campaign_id": "7",
+            "image_bytes": b"\x89PNG-fake",
+            "name": "img",
+            **base,
+        }
+    if op == "add_call_asset":
+        return mut.apply_add_call_asset, {
+            "campaign_id": "7",
+            "phone_number": "+380 12 345 6789",
+            "country_code": "UA",
+            **base,
+        }
+    if op == "add_promotion":
+        return mut.apply_add_promotion, {
+            "campaign_id": "7",
+            "promotion_target": "Лето",
+            "final_url": "https://x.example/promo",
+            "percent_off": 20.0,
+            **base,
+        }
+    if op == "add_price_asset":
+        return mut.apply_add_price_asset, {
+            "campaign_id": "7",
+            "price_type": "SERVICES",
+            "currency": "USD",
+            "language_code": "uk",
+            "offerings": [
+                {
+                    "header": f"Тариф {i}",
+                    "description": "Описание",
+                    "price_units": 9.99,
+                    "final_url": "https://x.example/p",
+                }
+                for i in range(3)
+            ],
+            **base,
+        }
+    if op == "remove_asset_link":
+        return mut.apply_remove_asset_link, {
+            "link_resource_names": ["customers/7753643025/campaignAssets/1~2~SITELINK"],
+            **base,
+        }
+    if op == "create_rsa":
+        return mut.apply_create_rsa, {
+            "ad_group_id": "77",
+            "headlines": ["Заголовок раз", "Заголовок два", "Заголовок три"],
+            "descriptions": ["Описание первое.", "Описание второе."],
+            "final_url": "https://x.example/",
+            **base,
+        }
+    if op == "remove_keywords":
+        return mut.apply_remove_keywords, {
+            "ad_group_ids": ["77"],
+            "keywords": ["used cars"],
+            "match_type": "phrase",
+            **base,
+        }
+    if op == "create_search_campaign":
+        return mut.apply_create_search_campaign, {
+            "campaign_name": "Тест",
+            "final_url": "https://x.example/",
+            "headlines": ["Заголовок раз", "Заголовок два", "Заголовок три"],
+            "descriptions": ["Описание первое.", "Описание второе."],
+            "budget_daily_micros": 10_000_000,
+            **base,
+        }
+    if op == "create_gdn_campaign":
+        return mut.apply_create_gdn_campaign, {
+            "campaign_name": "Тест GDN",
+            "landscape_bytes": b"img-l",
+            "square_bytes": b"img-s",
+            "headlines": ["Заголовок"],
+            "long_headline": "Длинный заголовок объявления",
+            "descriptions": ["Описание."],
+            "business_name": "Бренд",
+            "final_url": "https://x.example/",
+            "budget_daily_micros": 10_000_000,
+            **base,
+        }
+    if op == "create_demand_gen_campaign":
+        return mut.apply_create_demand_gen_campaign, {
+            "campaign_name": "Тест DG",
+            "youtube_video_id": "dQw4w9WgXcQ",
+            "headlines": ["Заголовок"],
+            "long_headline": "Длинный заголовок объявления",
+            "descriptions": ["Описание."],
+            "business_name": "Бренд",
+            "final_url": "https://x.example/",
+            "budget_daily_micros": 10_000_000,
+            **base,
+        }
+    if op == "create_video_campaign":
+        return mut.apply_create_video_campaign, {
+            "campaign_name": "Тест Video",
+            "youtube_video_id": "dQw4w9WgXcQ",
+            "headlines": ["Заголовок"],
+            "long_headline": "Длинный заголовок объявления",
+            "descriptions": ["Описание."],
+            "business_name": "Бренд",
+            "final_url": "https://x.example/",
+            "budget_daily_micros": 10_000_000,
+            **base,
+        }
     raise AssertionError(op)
 
 
-_ALL_OPS = [
-    "update_budget",
-    "update_bid",
-    "add_keywords",
-    "add_negative_keywords",
-    "remove_negative_keywords",
-    "detach_audience",
-    "resume_campaign",
-    "pause_campaign",
-    "update_campaign",
-    "pause_ad_group",
-    "resume_ad_group",
-    "set_geo_location",
-    "set_bidding_strategy",
-]
+def _all_ops() -> list[str]:
+    """ВСЕ поддержанные операции (ads.service.SUPPORTED_OPERATIONS) — негативная матрица не может
+    молча отстать при добавлении новой операции: незнакомый op уронит _apply_case AssertionError."""
+    from ads.service import SUPPORTED_OPERATIONS
+
+    return sorted(SUPPORTED_OPERATIONS)
+
+
+_ALL_OPS = _all_ops()
 
 
 async def test_all_apply_reject_foreign_account():
+    """29/29: КАЖДАЯ поддержанная операция отвергает чужой аккаунт (замок ensure_allowed) ДО
+    какого-либо SDK/finalize."""
     for op in _ALL_OPS:
         fn, kw = _apply_case(op)
         store = FakeStore(FakeProposal(op, "confirmed", user_initiated=True))
@@ -1759,6 +1893,8 @@ async def test_all_apply_reject_foreign_account():
 
 
 async def test_all_apply_reject_without_confirmation():
+    """29/29: КАЖДАЯ поддержанная операция без подтверждённого черновика (claim=None) —
+    PermissionError, finalize не вызван (golden rule 2)."""
     for op in _ALL_OPS:
         fn, kw = _apply_case(op)
         store = FakeStore(proposal=None)  # нет подтверждённого черновика

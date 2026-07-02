@@ -98,6 +98,20 @@ def test_all_apply_functions_call_ensure_allowed_first():
     )
 
 
+# ── #2 (§аудит-2026-07): КАЖДАЯ apply_* проходит confirm-гейт (_require_confirmation) ──
+def test_all_apply_functions_call_require_confirmation():
+    """Golden rule #2: каждая мутация обязана столбить одноразовый confirmation_id через
+    _require_confirmation (атомарный claim). Раньше инвариант проверял только ensure_allowed —
+    новая apply_* с замком аккаунта, но БЕЗ confirm-гейта прошла бы незамеченной."""
+    funcs = _apply_functions()
+    assert funcs, "не найдено ни одной apply_* — сломан AST-разбор ads/mutations.py?"
+    missing = [f.name for f in funcs if _first_call_line(f, _CONFIRM_GATE) is None]
+    assert not missing, (
+        f"мутации без {_CONFIRM_GATE}() — confirm-гейт (golden rule #2) отсутствует: "
+        f"{sorted(missing)}. Каждая apply_* обязана await _require_confirmation(...)."
+    )
+
+
 # ── #3: набор денежных apply_* == ожидаемый реестр (дрейф → красный тест) ─────────
 def test_money_apply_functions_match_registry_and_guard_user_initiated():
     """Денежные мутации определяем структурно — по ссылке на `user_initiated` (тот самый гард).
