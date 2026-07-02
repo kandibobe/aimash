@@ -1821,16 +1821,24 @@ def _clip(v: object, n: int = 60) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+_DIFF_ITEMS_CAP = 6  # именованных элементов на категорию в diff (дальше «(+N ещё)»)
+
+
 def _profile_field_changes(before: dict, after: dict, lng: str) -> list[str]:
     """§20.5: список per-field изменений «old → new» (esc-нутые строки). Пустой — ничего не меняется
-    (или меняются только неотслеживаемые ключи). Длинные значения усечены (без простыни в чате)."""
+    (или меняются только неотслеживаемые ключи). Длинные значения усечены (без простыни в чате).
+
+    services/contacts — ПОИМЁННО (+«новое», −«удалённое» (только при явном replace), «X»: цена A→B),
+    а не голые счётчики ×N→×M: менеджер должен видеть, ЧТО именно добавится/пропадёт, до «да».
+    notes-append рендерится как «+хвост» (старое не перечитываем)."""
+    from clients.store import contact_key, svc_key  # чистые ключи мерджа — та же семантика
+
     names = {
         "brand": ("бренд", "brand"),
         "business_desc": ("бизнес", "business"),
         "geo": ("гео", "geo"),
         "language": ("язык", "language"),
         "website": ("сайт", "site"),
-        "notes": ("заметки", "notes"),
     }
     out: list[str] = []
     for key, (ru, en) in names.items():
@@ -1840,12 +1848,56 @@ def _profile_field_changes(before: dict, after: dict, lng: str) -> list[str]:
         label = en if lng == "en" else ru
         old_s = f"«{_clip(old)}»" if old else "—"
         out.append(esc(f"{label}: {old_s} → «{_clip(new)}»"))
-    for key, (ru, en) in (
-        ("services", ("услуги", "services")),
-        ("contacts", ("контакты", "contacts")),
-    ):
-        if key in after and after.get(key) is not None:
-            n_old, n_new = len(before.get(key) or []), len(after.get(key) or [])
-            if n_old != n_new:
-                out.append(esc(f"{en if lng == 'en' else ru}: ×{n_old} → ×{n_new}"))
+    # заметки: append-семантика (§20.3) → показываем только ДОБАВЛЕННЫЙ хвост
+    old_n, new_n = str(before.get("notes") or ""), after.get("notes")
+    if new_n is not None and old_n != new_n:
+        label = "notes" if lng == "en" else "заметки"
+        if old_n and str(new_n).startswith(old_n):  # чистый append
+            tail = str(new_n)[len(old_n) :].strip().lstrip("— ").strip()
+            out.append(esc(f"{label}: +«{_clip(tail)}»"))
+        else:
+            old_s = f"«{_clip(old_n)}»" if old_n else "—"
+            out.append(esc(f"{label}: {old_s} → «{_clip(new_n)}»"))
+
+    def _named(key: str, ru: str, en: str, item_key, item_label) -> None:
+        if key not in after or after.get(key) is None:
+            return
+        old_items = {item_key(it): it for it in (before.get(key) or [])}
+        new_items = {item_key(it): it for it in (after.get(key) or [])}
+        added = [new_items[k] for k in new_items if k not in old_items]
+        removed = [old_items[k] for k in old_items if k not in new_items]
+        changed = [
+            (old_items[k], new_items[k])
+            for k in new_items
+            if k in old_items and old_items[k] != new_items[k]
+        ]
+        if not (added or removed or changed):
+            return
+        label = en if lng == "en" else ru
+        bits: list[str] = []
+        for it in added[:_DIFF_ITEMS_CAP]:
+            bits.append(f"+«{_clip(item_label(it), 40)}»")
+        for it in removed[:_DIFF_ITEMS_CAP]:
+            bits.append(f"−«{_clip(item_label(it), 40)}»")
+        for old_it, new_it in changed[:_DIFF_ITEMS_CAP]:
+            if key == "services" and old_it.get("price") != new_it.get("price"):
+                bits.append(
+                    f"«{_clip(new_it.get('name'), 30)}»: {_clip(old_it.get('price') or '—', 20)}"
+                    f" → {_clip(new_it.get('price') or '—', 20)}"
+                )
+            else:
+                bits.append(f"«{_clip(item_label(new_it), 40)}» ✎")
+        overflow = max(0, len(added) + len(removed) + len(changed) - len(bits))
+        if overflow:
+            bits.append(f"(+{overflow} " + ("more)" if lng == "en" else "ещё)"))
+        out.append(esc(f"{label}: " + ", ".join(bits)))
+
+    _named(
+        "services",
+        "услуги",
+        "services",
+        lambda it: svc_key(it.get("name")),
+        lambda it: it.get("name") or "",
+    )
+    _named("contacts", "контакты", "contacts", contact_key, lambda it: it.get("value") or "")
     return out

@@ -54,6 +54,51 @@ async def test_generate_sitelinks_uses_campaign_url():
     assert sl["final_url"] == "https://shop.example"
 
 
+_PAGES = [
+    {"url": "https://shop.example/catalog", "title": "Каталог авто", "page_type": "catalog"},
+    {"url": "https://shop.example/tradein", "title": "Trade-in", "page_type": "services"},
+]
+
+
+@pytest.mark.asyncio
+async def test_generate_sitelinks_uses_crawled_urls():
+    """§20.6: url из карты краула принимается как final_url — ссылки на РЕАЛЬНЫЕ страницы."""
+    content = json.dumps(
+        [
+            {"link_text": "Каталог", "url": "https://shop.example/catalog"},
+            {"link_text": "Trade-in", "url": "https://shop.example/tradein"},
+        ]
+    )
+    with patched(AG, "chat", _chat(content)):
+        spec = await AG.generate_asset(
+            "sitelinks", topic="авто", url="https://shop.example", site_pages=_PAGES
+        )
+    urls = {sl["final_url"] for sl in spec["params"]["sitelinks"]}
+    assert urls == {"https://shop.example/catalog", "https://shop.example/tradein"}
+
+
+@pytest.mark.asyncio
+async def test_generate_sitelinks_invented_url_falls_back_to_base():
+    """golden rule #4/#6: выдуманный моделью url НЕ из allow-set → fallback на base_url."""
+    content = json.dumps([{"link_text": "Акции", "url": "https://shop.example/INVENTED-fake-page"}])
+    with patched(AG, "chat", _chat(content)):
+        spec = await AG.generate_asset(
+            "sitelinks", topic="авто", url="https://shop.example", site_pages=_PAGES
+        )
+    assert spec["params"]["sitelinks"][0]["final_url"] == "https://shop.example"
+
+
+@pytest.mark.asyncio
+async def test_generate_sitelinks_without_pages_unchanged():
+    """Без карты краула — прежнее поведение байт-в-байт (все ссылки на base_url)."""
+    content = json.dumps([{"link_text": "Каталог", "url": "https://anything.example/x"}])
+    with patched(AG, "chat", _chat(content)):
+        spec = await AG.generate_asset(
+            "sitelinks", topic="авто", url="https://shop.example", site_pages=None
+        )
+    assert spec["params"]["sitelinks"][0]["final_url"] == "https://shop.example"
+
+
 @pytest.mark.asyncio
 async def test_generate_snippets_rejects_bad_header():
     content = json.dumps({"header": "НеИзСписка", "values": ["Sedan", "SUV", "Hatchback"]})

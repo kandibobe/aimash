@@ -363,6 +363,20 @@ def client_card_kb(
     return kb.as_markup()
 
 
+def client_show_card_kb(customer_id: str, lang: str | None = None) -> InlineKeyboardMarkup:
+    """§20.2 «📋 Карточка клиента»: один тап к карточке после add/update/краула — без Back→reselect.
+    customer_id в sub (≤10 цифр — влезает в 64 байта callback_data): работает stateless после
+    фонового краула/очистки FSM; доступ re-check'ается fail-closed в _cli_show_card."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="📋 Client card" if en else "📋 Карточка клиента",
+        callback_data=ClientCB(action="card", sub=str(customer_id)),
+    )
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def client_input_kb(lang: str | None = None) -> InlineKeyboardMarkup:
     """§20.3: во время приёма текста профиля — «💾 Сохранить» (извлечь+показать «было→станет» и
     confirm) / «✖ Отмена». Менеджер может прислать несколько сообщений подряд до сохранения."""

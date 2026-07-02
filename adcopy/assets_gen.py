@@ -55,15 +55,38 @@ def _ctx(topic: str, url: str | None, profile: str, language: str) -> str:
     return out
 
 
-async def _gen_sitelinks(topic, url, profile, language) -> dict:
-    data = await _llm(
-        "Ты — специалист по Google Ads. Предложи 4–6 быстрых ссылок (sitelinks) на ключевые "
-        "страницы сайта по теме. Верни СТРОГО JSON-массив объектов "
-        '[{"link_text":"≤25 симв","description1":"≤35","description2":"≤35"}] без пояснений.',
-        _ctx(topic, url, profile, language),
-        "[",
-        "]",
-    )
+async def _gen_sitelinks(
+    topic, url, profile, language, site_pages: list[dict] | None = None
+) -> dict:
+    """§20.6: при наличии карты страниц краула (site_pages из client_site_pages) модель обязана
+    брать url ТОЛЬКО из этого списка — ссылки ведут на РЕАЛЬНЫЕ страницы, а не выдуманные. КОД
+    валидирует возвращённый url по allow-set (не из списка → fallback base_url). Без site_pages —
+    прежнее поведение (все ссылки на base_url)."""
+    pages = [p for p in (site_pages or []) if p.get("url")]
+    allowed = {p["url"] for p in pages}
+    if pages:
+        page_lines = "\n".join(
+            f"{i}. {p['url']} — {p.get('title') or ''} ({p.get('page_type') or 'page'})"
+            for i, p in enumerate(pages, 1)
+        )
+        system = (
+            "Ты — специалист по Google Ads. Предложи 4–6 быстрых ссылок (sitelinks) на ключевые "
+            "страницы сайта по теме. url бери СТРОГО из списка «Реальные страницы сайта» ниже "
+            "(никаких выдуманных путей). Верни СТРОГО JSON-массив объектов "
+            '[{"link_text":"≤25 симв","description1":"≤35","description2":"≤35","url":"из списка"}] '
+            "без пояснений."
+        )
+        user = _ctx(topic, url, profile, language) + (
+            f"\nРеальные страницы сайта (бери url ТОЛЬКО отсюда):\n{page_lines}"
+        )
+    else:
+        system = (
+            "Ты — специалист по Google Ads. Предложи 4–6 быстрых ссылок (sitelinks) на ключевые "
+            "страницы сайта по теме. Верни СТРОГО JSON-массив объектов "
+            '[{"link_text":"≤25 симв","description1":"≤35","description2":"≤35"}] без пояснений.'
+        )
+        user = _ctx(topic, url, profile, language)
+    data = await _llm(system, user, "[", "]")
     base_url = url or ""
     out: list[dict] = []
     for o in data or []:
@@ -72,7 +95,11 @@ async def _gen_sitelinks(topic, url, profile, language) -> dict:
         lt = (o.get("link_text") or "").strip()
         if not lt or not asset_len_ok(lt, "sitelink_text")[0]:
             continue
-        item = {"link_text": lt, "final_url": base_url}
+        # golden rule #4/#6: url из ответа модели принимаем ТОЛЬКО из allow-set краула;
+        # всё прочее (выдумка/мусор) — честный fallback на base_url.
+        page_url = (o.get("url") or "").strip()
+        final_url = page_url if page_url in allowed else base_url
+        item = {"link_text": lt, "final_url": final_url}
         for k, kind in (("description1", "sitelink_desc"), ("description2", "sitelink_desc")):
             d = (o.get(k) or "").strip()
             if d and asset_len_ok(d, kind)[0]:
@@ -158,11 +185,20 @@ _GENERATORS = {
 
 
 async def generate_asset(
-    family: str, *, topic: str, url: str | None = None, profile: str = "", language: str = "ru"
+    family: str,
+    *,
+    topic: str,
+    url: str | None = None,
+    profile: str = "",
+    language: str = "ru",
+    site_pages: list[dict] | None = None,
 ) -> dict:
     """Сгенерировать наполнение ассета семейства family → asset_spec {family, params}. Бросает
-    ValueError, если семейство не автогенерится или наполнение не прошло код-валидацию (длины и т.п.)."""
+    ValueError, если семейство не автогенерится или наполнение не прошло код-валидацию (длины и т.п.).
+    site_pages (§20.6, только sitelinks) — карта страниц краула: ссылки на РЕАЛЬНЫЕ url сайта."""
     gen = _GENERATORS.get(family)
     if gen is None:
         raise ValueError(f"автогенерация не поддержана для семейства «{family}»")
+    if family == "sitelinks":
+        return await _gen_sitelinks(topic, url, profile, language, site_pages=site_pages)
     return await gen(topic, url, profile, language)

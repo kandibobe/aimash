@@ -1071,6 +1071,16 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "🔍 Найдено: {n}. Выберите аккаунт (показаны первые {shown}):",
         "en": "🔍 Found: {n}. Choose an account (showing first {shown}):",
     },
+    # §20.6: sitelinks предложены из РЕАЛЬНОЙ карты страниц краула (не выдуманы LLM)
+    "cc_asset_sitelinks_from_crawl": {
+        "ru": "🔗 Ссылки предложены из реальной карты сайта ({n} стр. из краула §20).",
+        "en": "🔗 Links proposed from the real crawled site map ({n} pages, §20).",
+    },
+    # §20.2: после сохранения/обновления профиля — карточка в один тап
+    "cli_view_card_hint": {
+        "ru": "📋 Профиль сохранён — открыть карточку клиента:",
+        "en": "📋 Profile saved — open the client card:",
+    },
     "cc_accounts_error": {
         "ru": "⚠️ Не удалось получить список аккаунтов MCC: {err}\nПродолжим на основном аккаунте.",
         "en": "⚠️ Couldn't list MCC accounts: {err}\nProceeding with the main account.",

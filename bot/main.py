@@ -59,7 +59,7 @@ from ads.service import execute_confirmed, read_before
 from clients import crawl_jobs, crawler
 from clients.execute import MEMORY_OPERATIONS, execute_confirmed_memory
 from clients.profile_extract import extract_profile, structure_crawl
-from clients.store import ClientProfileStore
+from clients.store import ClientProfileStore, preview_merge
 from agent import router
 from agent.campaign_settings import (
     assemble_settings,
@@ -117,6 +117,7 @@ from bot.keyboards import (
     client_card_kb,
     client_input_kb,
     client_save_kb,
+    client_show_card_kb,
     clients_accounts_kb,
     cc_asset_types_kb,
     cc_assets_kb,
@@ -2674,7 +2675,9 @@ async def _cli_extract_and_propose(bot, chat_id: int, customer_id: str, buf: lis
     patch = extracted.to_patch()
     before = await CLIENTS.get_by_account(customer_id)
     operation = "profile_update" if before is not None else "profile_save"
-    after = {**(before or {}), **patch}
+    # §20.5: preview_merge = ТА ЖЕ семантика, что исполнит apply_upsert (merge по ключу, notes-append)
+    # — «было→станет» не может разойтись с фактическим апдейтом.
+    after = preview_merge(before, patch)
     summary = texts.fmt_client_diff(before, after, customer_id, operation=operation)
     await _present_memory_proposal(
         bot,
@@ -2862,6 +2865,23 @@ async def cli_back_cb(cq: CallbackQuery, state: FSMContext) -> None:
     await _cli_present_accounts(cq.message)
 
 
+@dp.callback_query(ClientCB.filter(F.action == "card"))
+async def cli_card_cb(cq: CallbackQuery, callback_data: ClientCB, state: FSMContext) -> None:
+    """§20.2 «📋 Карточка клиента»: пере-показать карточку одним тапом (после add/update/краула).
+    customer_id — из sub (stateless: работает после фонового краула/рестарта), фолбэк — FSM.
+    Доступ re-check'ается fail-closed внутри _cli_show_card. Read-only."""
+    chat_id = _cq_chat_id(cq)
+    customer_id = normalize_customer_id(callback_data.sub) or await _cli_selected_account(state)
+    msg = _cq_msg(cq)
+    if not customer_id or msg is None:
+        await cq.answer(i18n.t("cli_card_stale"), show_alert=True)
+        return
+    # контекст в FSM — чтобы «Обновить/Перекраулить» с показанной карточки работали сразу
+    await state.update_data(cli_customer_id=customer_id)
+    await cq.answer()
+    await _cli_show_card(msg, chat_id, customer_id)
+
+
 async def _cli_selected_account(state: FSMContext) -> str | None:
     data = await state.get_data()
     return data.get("cli_customer_id")
@@ -2990,8 +3010,12 @@ async def cli_clear_cb(cq: CallbackQuery, state: FSMContext) -> None:
 
 # ── §20.4: краулинг сайта клиента (фоновая задача) ────────────────────────────────
 def _crawl_patch_from_result(extract, result) -> dict:
-    """Слить LLM-профиль (structure_crawl) с код-извлечёнными краулером контактами/соцсетями."""
+    """Слить LLM-профиль (structure_crawl) с код-извлечёнными краулером контактами/соцсетями.
+    Краул НИКОГДА не заменяет категории целиком (replace-флаги снимаем принудительно) — сайт не
+    вправе стереть введённое менеджером руками (§20.5: краул только дополняет/обновляет)."""
     patch = extract.to_patch()
+    patch.pop("replace_services", None)
+    patch.pop("replace_contacts", None)
     socials = {**(patch.get("socials") or {}), **result.socials}
     if socials:
         patch["socials"] = socials
@@ -3099,6 +3123,7 @@ async def _run_client_crawl(
                             pages=result.pages_count,
                         ),
                         parse_mode=ParseMode.HTML,
+                        reply_markup=client_show_card_kb(customer_id),  # §20.2: карточка в 1 тап
                     )
                     return
                 diff_prefix = (
@@ -3150,10 +3175,12 @@ async def _run_client_crawl(
                     chat_id,
                     crawl_msg + "\n\n" + i18n.t("cli_crawl_profile_updated"),
                     parse_mode=ParseMode.HTML,
+                    reply_markup=client_show_card_kb(customer_id),  # §20.2: карточка в 1 тап
                 )
             else:
-                # профиль существует → показать «было→станет» и ждать ✅ (не перезаписываем молча)
-                after = {**before, **patch}
+                # профиль существует → показать «было→станет» и ждать ✅ (не перезаписываем молча).
+                # preview_merge — та же merge-семантика, что исполнит apply_upsert (§20.5).
+                after = preview_merge(before, patch)
                 summary = texts.fmt_client_diff(
                     before, after, customer_id, operation="profile_update"
                 )
@@ -4117,6 +4144,7 @@ async def cc_asset_type(cq: CallbackQuery, callback_data: CcCB, state: FSMContex
     await msg.answer(i18n.t("cc_asset_generating"))
     s = draft.wizard_state.get("settings") or {}
     ad = draft.wizard_state.get("ad") or {}
+    site_pages: list[dict] = []  # §20.6: карта страниц краула (только для family=sitelinks)
     try:
         from clients.profile_assets import PROFILE_ASSET_FAMILIES, build_profile_asset
 
@@ -4136,6 +4164,15 @@ async def cc_asset_type(cq: CallbackQuery, callback_data: CcCB, state: FSMContex
         else:
             from adcopy.assets_gen import generate_asset
 
+            # §20.6: для sitelinks подаём карту РЕАЛЬНЫХ страниц последнего краула (client_site_pages)
+            # — ссылки ведут на существующие url, а не выдуманные LLM. Сбой чтения → [] (fallback).
+            if family == "sitelinks":
+                try:
+                    site_pages = await CLIENTS.top_site_pages(
+                        draft.preview_customer_id or DRAFT_ACCOUNT_ID
+                    )
+                except Exception:  # noqa: BLE001 — карта страниц опциональна, генерацию не роняем
+                    site_pages = []
             spec = await generate_asset(
                 family,
                 # §19.7.2: как заголовки/описания — наполнение по товару (product) на языке аудитории
@@ -4144,6 +4181,7 @@ async def cc_asset_type(cq: CallbackQuery, callback_data: CcCB, state: FSMContex
                 url=ad.get("final_url"),
                 profile=await _cc_profile_ctx(draft),  # §20: наполнение ассетов из профиля клиента
                 language=(s.get("target_language") or i18n.current_lang()),
+                site_pages=site_pages or None,
             )
     except Exception as e:  # noqa: BLE001 — LLM/валидация наполнения/нет данных профиля
         await msg.answer(i18n.t("cc_asset_gen_failed", err=ux.err_text(e)))
@@ -4158,6 +4196,9 @@ async def cc_asset_type(cq: CallbackQuery, callback_data: CcCB, state: FSMContex
     )
     n = len(((snap.wizard_state if snap else {}).get("assets") or {}).get("new") or [])
     await msg.answer(i18n.t("cc_asset_added", label=texts.fmt_asset_spec_label(spec), n=n))
+    if family == "sitelinks" and site_pages:
+        # §20.6: честно сообщаем, что ссылки — из реальной карты сайта (краул), не выдуманы
+        await msg.answer(i18n.t("cc_asset_sitelinks_from_crawl", n=len(site_pages)))
     await msg.answer(
         i18n.t("cc_assets_prompt"), reply_markup=cc_assets_kb(), parse_mode=ParseMode.HTML
     )
@@ -5935,6 +5976,19 @@ async def _do_confirm(cq: CallbackQuery, cid: str) -> bool:
     # успешную операцию как failed — отдельный try/except, вне ветки record_failure.
     log.info("мутация применена cid=%s chat=%s", cid, chat_id)  # денежный путь — успех в лог
     await _safe_edit(cq, i18n.t("applied", result=texts.esc(result)), parse_mode=ParseMode.HTML)
+    # §20.2: профиль сохранён/обновлён → кнопка «📋 Карточка клиента» в 1 тап (кроме clear —
+    # карточки больше нет). Read-only довесок, мутаций не создаёт.
+    if (
+        snap is not None
+        and snap.operation in MEMORY_OPERATIONS
+        and snap.operation != "profile_clear"
+    ):
+        msg = _cq_msg(cq)
+        if msg is not None:
+            await msg.answer(
+                i18n.t("cli_view_card_hint"),
+                reply_markup=client_show_card_kb(snap.customer_id),
+            )
     # §19.8/§11: черновик кампании создан (PAUSED) → предлагаем «🚀 Запустить» ОТДЕЛЬНОЙ командой.
     # Кнопка НЕ запускает сама: минтит resume_campaign proposal (тот же confirm-гейт «PAUSED→ENABLED»).
     # Распространено на ВСЕ создающие кампанию операции (Search/GDN/Demand Gen/Video) — аудит §11.

@@ -7,8 +7,14 @@ store оставался тестируемым офлайн (как bot.campaig
 
 «Один аккаунт — один профиль» (§20.2): ключ — customer_id (UNIQUE). Детали (контакты/услуги/
 страницы) слабо связаны по profile_id без FK-констрейнта (идиома проекта: связь по id, проще heal).
-Мердж на обновлении (§20.5): непустое поле patch перекрывает; непустой список категории заменяет
-её целиком; пустое/None — оставляет как было. PII в логи сырьём не пишем (golden rule #5).
+
+Мердж на обновлении (§20.3/§20.5, «ничего не теряется»): непустое СКАЛЯРНОЕ поле patch перекрывает;
+notes — ДОПИСЫВАЮТСЯ (append, не replace); services/contacts — МЕРДЖ ПО КЛЮЧУ (новое добавляется,
+совпавшее обновляется, остальное СОХРАНЯЕТСЯ). Полная замена категории — только по явным флагам
+patch['replace_services']/['replace_contacts'] (LLM ставит их ТОЛЬКО когда менеджер прямо просит
+«замени/оставь только…»); replace с пустым списком игнорируется (fail-safe: массовое удаление —
+исключительно «🗑 Очистить профиль»). preview_merge() — ЕДИНЫЙ источник истины для «было→станет»
+и исполнения (diff не может разойтись с фактическим апдейтом). PII в логи сырьём не пишем (#5).
 """
 
 from __future__ import annotations
@@ -96,6 +102,106 @@ def _norm_socials(raw: Any) -> dict | None:
     return out or None
 
 
+# ── чистые merge-хелперы (§20.3/§20.5 «ничего не теряется») — офлайн-тестируемы ────
+def svc_key(name: Any) -> str:
+    """Ключ дедупа услуги: нормализованное имя (схлоп пробелов, casefold)."""
+    return " ".join(str(name or "").split()).casefold()
+
+
+def contact_key(c: dict) -> tuple[str, str]:
+    """Ключ дедупа контакта: (kind, нормализованное value)."""
+    return (str(c.get("kind") or "other"), str(c.get("value") or "").strip().casefold())
+
+
+def merge_services(
+    existing: list[dict], incoming: list[dict], *, replace: bool = False
+) -> list[dict]:
+    """Мердж услуг ПО ИМЕНИ: существующие сохраняются (и их порядок), совпавшее по svc_key
+    обновляется непустыми полями incoming, новое добавляется в конец. replace=True → только
+    нормализованный incoming (явная замена по прямой просьбе менеджера)."""
+    if replace:
+        return list(incoming)
+    by_key = {svc_key(sv.get("name")): dict(sv) for sv in existing}
+    order = [svc_key(sv.get("name")) for sv in existing]
+    for inc in incoming:
+        k = svc_key(inc.get("name"))
+        if not k:
+            continue
+        if k in by_key:  # обновить непустыми полями, ничего не потеряв
+            cur = by_key[k]
+            for f in ("description", "price", "category"):
+                if inc.get(f):
+                    cur[f] = inc[f]
+        else:
+            by_key[k] = dict(inc)
+            order.append(k)
+    return [by_key[k] for k in order]
+
+
+def merge_contacts(
+    existing: list[dict], incoming: list[dict], *, replace: bool = False
+) -> list[dict]:
+    """Union контактов с дедупом по (kind, value): существующие сохраняются, новые добавляются.
+    replace=True → только incoming (явная замена)."""
+    if replace:
+        return list(incoming)
+    seen = {contact_key(c) for c in existing}
+    out = [dict(c) for c in existing]
+    for c in incoming:
+        k = contact_key(c)
+        if k[1] and k not in seen:
+            seen.add(k)
+            out.append(dict(c))
+    return out
+
+
+def merge_notes(old: str | None, new: str | None, *, max_chars: int = 4000) -> str | None:
+    """Заметки менеджера ДОПИСЫВАЮТСЯ (catch-all §20.3 — ничего не теряется), не затираются.
+    Идемпотентность: new уже внутри old → old (повторное сохранение того же текста не дублирует).
+    Переполнение — режем ХВОСТОМ (новейшее выживает) с префиксом «…»."""
+    old_s, new_s = (old or "").strip(), (new or "").strip()
+    if not new_s:
+        return old or None
+    if not old_s:
+        return new_s[:max_chars]
+    if new_s in old_s:
+        return old_s
+    merged = f"{old_s}\n— {new_s}"
+    if len(merged) > max_chars:
+        merged = "…" + merged[-(max_chars - 1) :]
+    return merged
+
+
+def preview_merge(before: dict | None, patch: dict) -> dict:
+    """Итог apply_upsert БЕЗ записи: ЕДИНЫЙ источник истины для «было→станет» (bot.main) и
+    исполнения — рендер diff не может разойтись с фактическим апдейтом. Зеркалит apply_upsert:
+    скаляры (непустое перекрывает), notes — merge_notes, socials — dict-merge,
+    services/contacts — merge_* с учётом replace_*-флагов."""
+    base = dict(before or {})
+    out = dict(base)
+    for f in _SCALAR_FIELDS:
+        if f == "notes":
+            continue  # notes — append-семантика ниже
+        val = _clean_str(patch.get(f))
+        if val is not None:
+            out[f] = val
+    out["notes"] = merge_notes(base.get("notes"), _clean_str(patch.get("notes")))
+    socials = _norm_socials(patch.get("socials"))
+    if socials:
+        out["socials"] = {**(base.get("socials") or {}), **socials}
+    contacts = _norm_contacts(patch.get("contacts"))
+    if contacts:
+        out["contacts"] = merge_contacts(
+            list(base.get("contacts") or []), contacts, replace=bool(patch.get("replace_contacts"))
+        )
+    services = _norm_services(patch.get("services"))
+    if services:
+        out["services"] = merge_services(
+            list(base.get("services") or []), services, replace=bool(patch.get("replace_services"))
+        )
+    return out
+
+
 class ClientProfileStore:
     """Хранилище профилей клиентов (§20). Все методы async."""
 
@@ -122,6 +228,40 @@ class ClientProfileStore:
                 )
             ).all()
         return {url: h for url, h in rows if url and h}
+
+    async def top_site_pages(self, customer_id: str, *, limit: int = 8) -> list[dict]:
+        """§20.6: главные страницы последнего краула для sitelinks — [{url,title,page_type}].
+        Порядок — полезность для быстрых ссылок (услуги/каталог/цены… , home ПОСЛЕДНЕЙ — она
+        обычно уже final_url объявления). Нет профиля/краула → [] (генерация откатится на LLM)."""
+        prio = {
+            "services": 0,
+            "catalog": 1,
+            "price": 2,
+            "prices": 2,
+            "about": 3,
+            "contacts": 4,
+            "blog": 5,
+            "other": 6,
+            "home": 7,
+        }
+        async with Session() as s:
+            p = await self._load(s, customer_id)
+            if p is None:
+                return []
+            rows = (
+                await s.execute(
+                    select(
+                        ClientSitePage.url, ClientSitePage.title, ClientSitePage.page_type
+                    ).where(ClientSitePage.profile_id == p.id)
+                )
+            ).all()
+        pages = [
+            {"url": u, "title": t, "page_type": pt}
+            for u, t, pt in rows
+            if u  # пустые url бесполезны для sitelinks
+        ]
+        pages.sort(key=lambda pg: prio.get((pg.get("page_type") or "other").lower(), 6))
+        return pages[:limit]
 
     async def accounts_with_profile(self, customer_ids: list[str]) -> set[str]:
         """Из переданных customer_id — те, у кого есть профиль (для отметки ✅ в списке аккаунтов)."""
@@ -183,9 +323,12 @@ class ClientProfileStore:
         source: str = "text",
         crawl_extra: dict | None = None,
     ) -> dict:
-        """Создать/обновить профиль по patch (мердж §20.5) + записать историю «до». source —
-        text|crawl (для аудита). crawl_extra — {'website','site_pages','last_crawled_at_now'} от
-        краулинга. Возвращает result-словарь (без PII в логах — вернём агрегаты)."""
+        """Создать/обновить профиль по patch (мердж §20.3/§20.5 «ничего не теряется») + записать
+        историю «до». Семантика зеркалит preview_merge (единый источник истины для «было→станет»):
+        скаляры — непустое перекрывает; notes — append; services/contacts — мердж по ключу; полная
+        замена категории — только по явным флагам replace_services/replace_contacts (пустой список
+        при replace игнорируется — fail-safe). source — text|crawl (для аудита). crawl_extra —
+        {'website','site_pages','last_crawled_at_now'}. Возвращает result-словарь (агрегаты, без PII)."""
         async with Session() as s:
             p = await self._load(s, customer_id)
             before = await self._to_dict(s, p) if p is not None else None
@@ -205,10 +348,16 @@ class ClientProfileStore:
 
             changed: list[str] = []
             for f in _SCALAR_FIELDS:
+                if f == "notes":
+                    continue  # notes — append-семантика ниже (catch-all не затирается)
                 val = _clean_str(patch.get(f))
                 if val is not None and getattr(p, f) != val:
                     setattr(p, f, val)
                     changed.append(f)
+            new_notes = merge_notes(p.notes, _clean_str(patch.get("notes")))
+            if new_notes != (p.notes or None):
+                p.notes = new_notes
+                changed.append("notes")
             socials = _norm_socials(patch.get("socials"))
             if socials:
                 p.socials = {**(p.socials or {}), **socials}
@@ -222,27 +371,40 @@ class ClientProfileStore:
                 if crawl_extra.get("last_crawled_at_now"):
                     p.last_crawled_at = func.now()
 
-            # контакты/услуги — заменяем категорию целиком, если patch дал непустой список
+            # контакты/услуги — МЕРДЖ ПО КЛЮЧУ с существующими (replace — только по явному флагу
+            # И непустому списку; delete+reinsert смердженного — идиома слабой связки по id)
             contacts = _norm_contacts(patch.get("contacts"))
             if contacts:
+                merged_c = merge_contacts(
+                    list((before or {}).get("contacts") or []),
+                    contacts,
+                    replace=bool(patch.get("replace_contacts")),
+                )
+                if merged_c != list((before or {}).get("contacts") or []):
+                    changed.append("contacts")
                 await s.execute(delete(ClientContact).where(ClientContact.profile_id == p.id))
-                for c in contacts:
+                for c in merged_c:
                     s.add(ClientContact(profile_id=p.id, kind=c["kind"], value=c["value"]))
-                changed.append("contacts")
             services = _norm_services(patch.get("services"))
             if services:
+                merged_s = merge_services(
+                    list((before or {}).get("services") or []),
+                    services,
+                    replace=bool(patch.get("replace_services")),
+                )
+                if merged_s != list((before or {}).get("services") or []):
+                    changed.append("services")
                 await s.execute(delete(ClientService).where(ClientService.profile_id == p.id))
-                for sv in services:
+                for sv in merged_s:
                     s.add(
                         ClientService(
                             profile_id=p.id,
                             name=sv["name"],
-                            description=sv["description"],
-                            price=sv["price"],
-                            category=sv["category"],
+                            description=sv.get("description"),
+                            price=sv.get("price"),
+                            category=sv.get("category"),
                         )
                     )
-                changed.append("services")
 
             # карта страниц сайта (только краулинг) — заменяем целиком
             pages = (crawl_extra or {}).get("site_pages") or []

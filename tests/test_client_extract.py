@@ -117,3 +117,29 @@ async def test_structure_crawl_injects_website():
     with patched(PE, "chat", _fake_chat(content)):
         p = await structure_crawl(pages_text="страницы сайта…", website="kasimotors.com")
     assert p.website == "kasimotors.com"
+
+
+@pytest.mark.asyncio
+async def test_replace_flags_default_false_and_coerced():
+    """§20.5: replace_*-флаги — fail-safe: дефолт False; всё, кроме литерального true, → False."""
+    with patched(PE, "chat", _fake_chat(_kasi_json())):
+        p = await extract_profile("Клиент Kasi Motors…")
+    assert p.replace_services is False and p.replace_contacts is False
+    patch = p.to_patch()
+    assert "replace_services" not in patch  # False-флаги в patch не кладутся (компактность)
+    assert "replace_contacts" not in patch
+    # мусорные значения модели коэрцируются в False (только литеральный true включает замену)
+    junk = ClientProfileExtract.model_validate(
+        {"services": [{"name": "X"}], "replace_services": "yes", "replace_contacts": 1}
+    )
+    assert junk.replace_services is False and junk.replace_contacts is False
+
+
+@pytest.mark.asyncio
+async def test_replace_flag_true_lands_in_patch():
+    data = json.loads(_kasi_json())
+    data["replace_services"] = True
+    with patched(PE, "chat", _fake_chat(json.dumps(data))):
+        p = await extract_profile("замени услуги: только седаны")
+    assert p.replace_services is True
+    assert p.to_patch()["replace_services"] is True

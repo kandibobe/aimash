@@ -44,6 +44,15 @@ class ClientProfileExtract(BaseModel):
     notes: str | None = None  # заметки менеджера + всё, что не легло в поля (§20.3)
     services: list[ServiceItem] = Field(default_factory=list)
     contacts: list[ContactItem] = Field(default_factory=list)
+    # §20.5: полная ЗАМЕНА категории — только когда менеджер ЯВНО просит («замени услуги на…»,
+    # «оставь только…»). Дефолт False = мердж (ничего не теряется). Fail-safe-коэрция ниже.
+    replace_services: bool = False
+    replace_contacts: bool = False
+
+    @field_validator("replace_services", "replace_contacts", mode="before")
+    @classmethod
+    def _coerce_replace(cls, v):
+        return v is True  # всё, кроме литерального true, → False (мердж; fail-safe)
 
     # Терпимость к кривому ответу модели: не-список/мусорные элементы → отбрасываем, а не роняем
     # весь разбор (field-salvage на уровне поля). Оставляем только dict'ы с обязательным ключом.
@@ -84,7 +93,8 @@ class ClientProfileExtract(BaseModel):
         )
 
     def to_patch(self) -> dict:
-        """dict для clients.store.apply_upsert (мердж §20.5). Пустые/None не кладём — не затирать."""
+        """dict для clients.store.apply_upsert (мердж §20.5). Пустые/None не кладём — не затирать.
+        replace_*-флаги кладём ТОЛЬКО когда True (patch остаётся компактным в proposal.params)."""
         patch: dict[str, Any] = {}
         for f in ("brand", "business_desc", "geo", "language", "website", "notes"):
             v = getattr(self, f)
@@ -94,8 +104,12 @@ class ClientProfileExtract(BaseModel):
             patch["socials"] = dict(self.socials)
         if self.services:
             patch["services"] = [s.model_dump() for s in self.services]
+            if self.replace_services:
+                patch["replace_services"] = True
         if self.contacts:
             patch["contacts"] = [c.model_dump() for c in self.contacts]
+            if self.replace_contacts:
+                patch["replace_contacts"] = True
         return patch
 
 
@@ -112,8 +126,12 @@ _SYSTEM = (
     '"notes": "всё важное, что не легло в поля выше (тон, что подчёркивать/не использовать) или null", '
     '"services": [{"name": "услуга/товар", "description": "или null", "price": "как в тексте, напр. '
     '\'от $4000\', или null", "category": "или null"}], '
-    '"contacts": [{"kind": "phone|email|address|social|messenger", "value": "значение"}]}. '
-    "Цены переноси как текст (символ валюты сохраняй), НЕ считай. Не выдумывай данные, которых нет."
+    '"contacts": [{"kind": "phone|email|address|social|messenger", "value": "значение"}], '
+    '"replace_services": true ТОЛЬКО если менеджер ЯВНО просит заменить/стереть прежний список услуг '
+    "(«замени услуги на…», «оставь только…», «удали все услуги, теперь…»); иначе false, "
+    '"replace_contacts": true по тому же правилу для контактов; иначе false}. '
+    "Цены переноси как текст (символ валюты сохраняй), НЕ считай. Не выдумывай данные, которых нет. "
+    "Обычное дополнение/упоминание новой услуги — это НЕ замена (false): существующие данные сохраняются."
 )
 
 

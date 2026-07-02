@@ -313,3 +313,29 @@ async def test_save_crawl_confirms_then_spawns_crawl():
     assert calls["confirm_cid"] == cid  # текстовый профиль сохранён ПЕРВЫМ (через тот же гейт)
     assert calls["spawn"][0] == DRAFT_ACCOUNT_ID
     assert "kasimotors.co.ke" in calls["spawn"][1]  # затем краул сайта из профиля
+
+
+@pytest.mark.asyncio
+async def test_card_button_reshows_card_stateless():
+    """§20.2 «📋 Карточка клиента»: кнопка с customer_id в sub пере-показывает карточку даже с
+    ПУСТЫМ FSM (stateless — работает после фонового краула/рестарта) и кладёт контекст в FSM."""
+    await init_db()
+    chat_id = 88_101
+    cust = "8000000001"
+    await ClientProfileStore().apply_upsert(
+        cust, {"brand": "Kasi Motors"}, operation="profile_save"
+    )
+    cq = FakeCB(chat_id=chat_id)
+    state = FakeState()  # пустой FSM — контекст берётся из sub
+    await bm.cli_card_cb(cq, ClientCB(action="card", sub=cust), state)
+    assert any("Kasi Motors" in (t or "") for t, _ in cq.message.answers)  # карточка показана
+    assert (await state.get_data()).get("cli_customer_id") == cust  # контекст восстановлен
+
+
+@pytest.mark.asyncio
+async def test_card_button_without_sub_and_fsm_is_stale():
+    await init_db()
+    cq = FakeCB(chat_id=88_102)
+    await bm.cli_card_cb(cq, ClientCB(action="card"), FakeState())
+    assert cq.answers and cq.answers[-1][1] is True  # show_alert (stale)
+    assert not cq.message.answers  # карточка не показана

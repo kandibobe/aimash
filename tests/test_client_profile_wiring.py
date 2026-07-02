@@ -167,3 +167,58 @@ async def test_cc_ad_url_passes_profile_to_rsa_brief():
     brief = captured["brief"]
     assert "Kasi Motors" in (brief.profile or "")  # профиль → первоклассное поле CopyBrief.profile
     assert "посадочной" in (brief.usp or "")  # усп — с посадочной, отдельно от профиля
+
+
+@pytest.mark.asyncio
+async def test_cc_asset_type_sitelinks_gets_crawled_pages():
+    """§20.6: cc_asset_type(family=sitelinks) прокидывает карту страниц краула preview-аккаунта
+    в generate_asset (site_pages) — ссылки предлагаются из РЕАЛЬНЫХ url сайта."""
+    await init_db()
+    chat_id = 721
+    preview = "7000000003"
+    await ClientProfileStore().apply_upsert(
+        preview,
+        {"brand": "Kasi Motors"},
+        operation="profile_save",
+        crawl_extra={
+            "website": "https://kasi.example",
+            "site_pages": [
+                {"url": "https://kasi.example/catalog", "title": "Каталог", "page_type": "catalog"},
+                {"url": "https://kasi.example/", "title": "Главная", "page_type": "home"},
+            ],
+        },
+    )
+    session = await bm.CDRAFTS.create(
+        chat_id=chat_id, customer_id=bm.DRAFT_ACCOUNT_ID, preview_customer_id=preview
+    )
+    await bm.CDRAFTS.patch(
+        session,
+        lambda s: (
+            s.__setitem__("settings", {"campaign_name": "Авто Кения", "product": "авто"}),
+            s["ad"].__setitem__("final_url", "https://kasi.example"),
+        ),
+        expected_chat_id=chat_id,
+    )
+    captured: dict = {}
+
+    async def fake_generate_asset(family, **kw):
+        captured.update(family=family, **kw)
+        return {
+            "family": "sitelinks",
+            "params": {
+                "sitelinks": [{"link_text": "Каталог", "final_url": "https://kasi.example/catalog"}]
+            },
+        }
+
+    import adcopy.assets_gen as AG
+
+    cq = FakeCB(chat_id)
+    with patched(AG, "generate_asset", fake_generate_asset):
+        await bm.cc_asset_type(
+            cq, CcCB(action="asset_type", sub="sitelinks"), FakeState(cc_session=session)
+        )
+    assert captured.get("family") == "sitelinks"
+    pages = captured.get("site_pages") or []
+    assert any(p["url"] == "https://kasi.example/catalog" for p in pages)  # реальные url из краула
+    # сообщение-пометка «из реальной карты сайта» отправлено
+    assert any("карты сайта" in (t or "") for t, _ in cq.message.answers)
