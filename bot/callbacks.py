@@ -59,11 +59,13 @@ class ReportCampCB(CallbackData, prefix="rptc"):
 
 
 class RsaCB(CallbackData, prefix="rsa"):
-    """Поэлементная курация RSA-текстов (ТЗ §10). cid — session_id (hex uuid). kind/idx
+    """Поэлементная курация RSA-текстов (ТЗ §10/§19.5.2). cid — session_id (hex uuid). kind/idx
     указывают элемент: kind 'h'|'d', idx — позиция в сессии. Для массовых действий
-    (approveall/finalize/cancel) kind/idx не используются (дефолты)."""
+    (approveall/aslist/editall/regen/finalize/cancel) kind/idx не используются (дефолты).
+    editall/regen — батч-ряд визарда §19 («Доработать всё» → list-UX, «Сгенерировать заново»)."""
 
-    action: str  # "approve" | "reject" | "refine" | "approveall" | "finalize" | "cancel"
+    action: str  # "approve" | "reject" | "refine" | "review" | "overview" | "approveall" |
+    # "aslist" | "editall" | "regen" | "finalize" | "cancel"
     cid: str
     kind: str = ""  # "h" | "d" | ""
     idx: int = -1

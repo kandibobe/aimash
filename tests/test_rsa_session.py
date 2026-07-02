@@ -97,3 +97,21 @@ async def test_get_missing_session_returns_none():
     await init_db()
     store = SessionStore()
     assert await store.get("nonexistent") is None
+
+
+async def test_replace_all_default_approved_and_mark_pending():
+    """replace_all: дефолт — все approved (list-UX §10); mark="pending" — регенерация §19.5.2
+    (новый набор снова проходит поэлементную курацию, длину пересчитал КОД)."""
+    store, sid = await _make()
+    s = await store.replace_all(
+        sid, ["Новый первый", "Новый второй", "Новый третий"], ["Опис 1", "Опис 2"]
+    )
+    assert [e["text"] for e in s.headlines] == ["Новый первый", "Новый второй", "Новый третий"]
+    assert all(e["state"] == "approved" for e in s.headlines + s.descriptions)
+    assert s.can_finalize() is True
+
+    s = await store.replace_all(sid, list(_H), list(_D), mark="pending")
+    assert all(e["state"] == "pending" for e in s.headlines + s.descriptions)
+    assert all(e["len"] == len(e["text"]) for e in s.headlines)  # длина — КОД, кириллица=1
+    assert s.can_finalize() is False
+    assert s.next_pending() == ("h", 0)

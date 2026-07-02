@@ -1054,8 +1054,22 @@ CATALOG: dict[str, dict[str, str]] = {
     },
     # — §19: визард «Создание кампании» —
     "cc_pick_account": {
-        "ru": "🆕 <b>Создание кампании</b>\nВыбери аккаунт клиента:",
-        "en": "🆕 <b>Create campaign</b>\nChoose the client account:",
+        "ru": (
+            "🆕 <b>Создание кампании</b>\nВыбери аккаунт клиента — или пришли часть названия, "
+            "покажу совпадения (§19.2 поиск):"
+        ),
+        "en": (
+            "🆕 <b>Create campaign</b>\nChoose the client account — or send part of a name "
+            "to search (§19.2):"
+        ),
+    },
+    "cc_acct_search_empty": {
+        "ru": "🔍 По «{q}» ничего не нашёл. Пришлите другую часть названия или выберите из списка.",
+        "en": "🔍 Nothing found for “{q}”. Send another part of the name or pick from the list.",
+    },
+    "cc_acct_search_results": {
+        "ru": "🔍 Найдено: {n}. Выберите аккаунт (показаны первые {shown}):",
+        "en": "🔍 Found: {n}. Choose an account (showing first {shown}):",
     },
     "cc_accounts_error": {
         "ru": "⚠️ Не удалось получить список аккаунтов MCC: {err}\nПродолжим на основном аккаунте.",

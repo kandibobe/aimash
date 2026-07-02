@@ -218,12 +218,24 @@ _RSA_AG_CACHE: dict[int, list[dict]] = {}  # chat_id → группы объяв
 _CC_ACCT_CACHE: dict[
     int, list
 ] = {}  # §19: chat_id → дочерние аккаунты MCC (резолв idx→ChildAccount)
-# §19.8: chat_id → имя только что созданного PAUSED-черновика, чтобы кнопка «🚀 Запустить»
-# смогла собрать resume_campaign proposal по имени (запуск — отдельная прямая команда).
+# §19.8: chat_id → имя только что созданного PAUSED-черновика — LEGACY-фолбэк для кнопок
+# «🚀 Запустить» без sub (сообщения, отправленные до деплоя restart-durability). Новые кнопки
+# несут confirmation_id создания в callback_data и резолвятся из БД (переживают рестарт).
 _CC_LAUNCH_CACHE: dict[int, str] = {}
-# B9: confirmation_id финального proposal → session_id черновика визарда. Черновик гасим (finish)
-# только при успешном подтверждении; при reject он остаётся active и возобновляем «▶️ Продолжить».
-_CC_PROPOSAL_SESSION: dict[str, str] = {}
+# §19.8: одноразовость кнопки запуска ВНУТРИ процесса (confirmation_id создания). После рестарта
+# набор пуст → кнопка сработает ещё раз; это желаемая живучесть: двойной запуск всё равно за
+# confirm-гейтом, а resume уже ENABLED-кампании — no-op.
+_CC_LAUNCH_DONE: set[str] = set()
+# §19.8/§11: операции, создающие кампанию (после успеха предлагаем «🚀 Запустить»). Модульная
+# константа: используется и в _do_confirm (успех create), и в cc_launch (валидация op по sub).
+_CREATE_CAMPAIGN_OPS = frozenset(
+    {
+        "create_search_campaign",
+        "create_gdn_campaign",
+        "create_demand_gen_campaign",
+        "create_video_campaign",
+    }
+)
 # §20: chat_id → аккаунты MCC для раздела «Клиенты» (резолв idx→ChildAccount); буфер накопления
 # текста профиля до «💾 Сохранить» (несколько сообщений подряд, §20.3). В памяти (не источник истины).
 _CLI_ACCT_CACHE: dict[int, list] = {}
@@ -1474,26 +1486,38 @@ async def btn_lang(m: Message) -> None:
 
 
 # ── RSA-генерация (фаза 2.C): /rsa визард → курация → confirm-гейт create_rsa ─────
+def _rsa_is_wizard(session) -> bool:
+    """Сессия курации принадлежит визарду §19 (brief.cc_session)? Тогда клавиатуры получают
+    батч-ряд §19.5.2 («Доработать всё | Сгенерировать заново | Утвердить набор»); /rsa-флоу
+    без cc_session рендерится как раньше."""
+    return bool((session.brief or {}).get("cc_session"))
+
+
 def _rsa_render(session) -> tuple[str, InlineKeyboardMarkup]:
     """По состоянию сессии: следующий pending-элемент с кнопками либо итоговый экран."""
+    wizard = _rsa_is_wizard(session)
     nxt = session.next_pending()
     if nxt is None:
         h, d = session.counts()
         text = texts.fmt_rsa_overview(h, d, len(session.headlines), len(session.descriptions))
-        return text, rsa_overview_kb(session.session_id, session.can_finalize(), has_pending=False)
+        return text, rsa_overview_kb(
+            session.session_id, session.can_finalize(), has_pending=False, wizard=wizard
+        )
     kind, idx = nxt
     items = session.items(kind)
     text = texts.fmt_rsa_element(
         kind, idx, len(items), items[idx], session.campaign, session.ad_group_name
     )
-    return text, rsa_item_kb(session.session_id, kind, idx)
+    return text, rsa_item_kb(session.session_id, kind, idx, wizard=wizard)
 
 
 def _rsa_overview(session) -> tuple[str, InlineKeyboardMarkup]:
     h, d = session.counts()
     has_pending = session.next_pending() is not None
     text = texts.fmt_rsa_overview(h, d, len(session.headlines), len(session.descriptions))
-    return text, rsa_overview_kb(session.session_id, session.can_finalize(), has_pending)
+    return text, rsa_overview_kb(
+        session.session_id, session.can_finalize(), has_pending, wizard=_rsa_is_wizard(session)
+    )
 
 
 async def _rsa_present_list(target: Message, session, state: FSMContext) -> None:
@@ -1508,6 +1532,16 @@ async def _rsa_present_list(target: Message, session, state: FSMContext) -> None
         parse_mode=ParseMode.HTML,
     )
     await target.answer(texts.fmt_rsa_list_block(session))  # плейн-текст — копируется как есть
+
+
+async def _cc_rsa_present_curation(target: Message, session) -> None:
+    """§19.5.2 (визард, Этап 3): показать сгенерированный набор ПОЭЛЕМЕНТНО — (1) весь список с
+    длинами обзорным плейн-текстом, (2) карточка первого pending-элемента с ✅/✏️/❌ + батч-ряд
+    «Доработать всё | Сгенерировать заново | Утвердить набор». Мутаций нет — только курация;
+    утверждённые элементы уйдут в черновик визарда через _cc_finalize_ad."""
+    await target.answer(texts.fmt_rsa_list_block(session))  # обзор всего набора (как в ТЗ §19.5.2)
+    text, kb = _rsa_render(session)  # первый pending-элемент (или итог) — батч-ряд по wizard-флагу
+    await target.answer(text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
 
 async def _rsa_present_final(target: Message, chat_id: int, session, state: FSMContext) -> None:
@@ -2005,7 +2039,7 @@ async def rsa_refine_text(m: Message, state: FSMContext) -> None:
         texts.fmt_rsa_element(
             kind, idx, len(items), items[idx], session.campaign, session.ad_group_name
         ),
-        reply_markup=rsa_item_kb(cid, kind, idx),
+        reply_markup=rsa_item_kb(cid, kind, idx, wizard=_rsa_is_wizard(session)),
         parse_mode=ParseMode.HTML,
     )
 
@@ -3237,6 +3271,12 @@ async def cc_account_cb(cq: CallbackQuery, callback_data: CcCB, state: FSMContex
     Этапу 1 (описание). Аккаунт МУТАЦИИ остаётся Draft (замок не трогаем)."""
     chat_id = _cq_chat_id(cq)
     rows = _CC_ACCT_CACHE.get(chat_id)
+    if rows is None:  # кэш пуст (рестарт процесса) — само-хил: перерисовать пикер, не тупик-alert
+        msg = _cq_msg(cq)
+        if msg is not None and await CDRAFTS.get_active(chat_id):  # черновик в БД жив
+            await cq.answer()
+            await _cc_present_stage0(msg, chat_id)
+            return
     if not _valid_idx(rows, callback_data.idx):
         await cq.answer(i18n.t("cc_draft_stale"), show_alert=True)
         return
@@ -3275,6 +3315,44 @@ async def cc_account_page_cb(cq: CallbackQuery, callback_data: CcCB) -> None:
         page = 0
     await cq.answer()
     await _safe_edit_markup(cq, cc_accounts_kb(rows, page=page))
+
+
+@dp.message(CreateCampaignWizard.account_select)
+async def cc_account_search(m: Message, state: FSMContext) -> None:
+    """Этап 0 (§19.2 «постраничный список / поиск по названию»): свободный текст в состоянии выбора
+    аккаунта = поисковый запрос — фильтруем кэш списка по подстроке имени/id и показываем совпадения
+    (ГЛОБАЛЬНЫЕ индексы → cc_account_cb без изменений). Пока визард на Этапе 0, текст НЕ уходит в
+    NL-агента (как и на других этапах, B8); выход — «✖ Отмена». Read-only."""
+    chat_id = m.chat.id
+    rows = _CC_ACCT_CACHE.get(chat_id)
+    if rows is None:  # кэш потерян (рестарт) — перерисовать пикер заново (само-хил)
+        await _cc_present_stage0(m, chat_id)
+        return
+    q = (m.text or "").strip().lower()
+    if not q:
+        await m.answer(
+            i18n.t("cc_pick_account"), reply_markup=cc_accounts_kb(rows), parse_mode=ParseMode.HTML
+        )
+        return
+    matches = [
+        i
+        for i, r in enumerate(rows)
+        if q in (getattr(r, "name", "") or "").lower() or q in str(getattr(r, "id", ""))
+    ]
+    if not matches:
+        await m.answer(
+            i18n.t("cc_acct_search_empty", q=texts.esc(q[:40])),
+            reply_markup=cc_accounts_kb(rows),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    from bot.keyboards import _ACCT_PAGE, cc_accounts_search_kb
+
+    await m.answer(
+        i18n.t("cc_acct_search_results", n=len(matches), shown=min(len(matches), _ACCT_PAGE)),
+        reply_markup=cc_accounts_search_kb(rows, matches),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 @dp.message(CreateCampaignWizard.settings_desc)
@@ -3462,11 +3540,12 @@ async def cc_ad_url(m: Message, state: FSMContext) -> None:
         )
 
     await CDRAFTS.patch(session_id, _save_ad, expected_chat_id=m.chat.id)
-    # §10 list-UX: правка списком (cc_session хранится в session.brief/черновике → восстановится
-    # в _rsa_present_final даже после clear). state держит RsaList.awaiting_edited для paste-back.
+    # §19.5.2/§10: поэлементная курация (✅/✏️/❌ на каждый элемент) + батч-ряд («Доработать всё» =
+    # list-UX правка, «Сгенерировать заново», «Утвердить набор»). cc_session в session.brief →
+    # финал курации вернётся в визард (_cc_finalize_ad) даже после рестарта.
     await state.clear()
     session = await SESSIONS.get(rsa_session_id)
-    await _rsa_present_list(m, session, state)
+    await _cc_rsa_present_curation(m, session)
 
 
 async def _cc_finalize_ad(target: Message, chat_id: int, session, state) -> None:
@@ -3578,9 +3657,40 @@ async def _cc_image_from_photo(m: Message, state: FSMContext, bot: Bot) -> None:
 
 # ── Этап 2: ключевые слова (свои текстом/ссылкой ИЛИ генерация → Sheets → верификация) ─
 async def _cc_present_stage2(target: Message, chat_id: int, session_id: str, state) -> None:
+    """Этап 2 с учётом сохранённого подсостояния (B3-resume): (а) выгруженная и НЕ верифицированная
+    таблица → вернуться в kw_verify с той же ссылкой; (б) верифицированный список → обзор с гейтом
+    «✅ Подтвердить ключевые слова»; (в) иначе — свежий промпт ввода ключей."""
     await CDRAFTS.set_step(session_id, 2, expected_chat_id=chat_id)
-    await state.set_state(CreateCampaignWizard.keywords)
     await state.update_data(cc_session=session_id)
+    draft = await CDRAFTS.get(session_id, expected_chat_id=chat_id)
+    kw = (draft.wizard_state.get("keywords") or {}) if draft else {}
+    if kw.get("sheet_id") and not kw.get("verified"):
+        # (а) round-trip в полёте: пере-показать ссылку на таблицу и ждать её обратно (kw_verify).
+        # Fallback-URL для черновиков, созданных до появления sheet_url.
+        url = kw.get("sheet_url") or f"https://docs.google.com/spreadsheets/d/{kw['sheet_id']}/edit"
+        await state.set_state(CreateCampaignWizard.kw_verify)
+        await target.answer(i18n.t("cc_kw_sheet_ready", url=url))
+        await target.answer(i18n.t("cc_kw_verify_prompt"), reply_markup=nav_kb())
+        return
+    if kw.get("list") and kw.get("verified"):
+        # (б) список уже верифицирован: обзор + гейт подтверждения (как в _cc_save_keywords).
+        kw_list = list(kw.get("list") or [])
+        mt_label = (
+            i18n.t("cc_kw_mixed_mt")
+            if kw.get("match_types")
+            else texts.match_type_human(kw.get("match_type") or "phrase")
+        )
+        preview = "\n".join(f"  • {texts.esc(k)}" for k in kw_list[:10])
+        if len(kw_list) > 10:
+            preview += "\n " + i18n.t("list_more", n=len(kw_list) - 10)
+        await state.set_state(CreateCampaignWizard.keywords)
+        await target.answer(
+            i18n.t("cc_kw_review", n=len(kw_list), mt=texts.esc(mt_label), preview=preview),
+            reply_markup=cc_kw_confirm_kb(),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    await state.set_state(CreateCampaignWizard.keywords)
     await target.answer(i18n.t("cc_kw_prompt"), reply_markup=cc_kw_kb(), parse_mode=ParseMode.HTML)
 
 
@@ -3760,7 +3870,7 @@ async def cc_kw_generate(cq: CallbackQuery, callback_data: CcCB, state: FSMConte
     s = draft.wizard_state.get("settings") or {}
     try:
         from ads import geo as adsgeo
-        from ads.client import build_client
+        from ads.client import build_client_async
         from ads.keyword_plan import generate_keyword_ideas
         from keywords.filter import filter_relevance
         from keywords.seeds import generate_seed_keywords
@@ -3773,7 +3883,7 @@ async def cc_kw_generate(cq: CallbackQuery, callback_data: CcCB, state: FSMConte
         prof = await _cc_profile_ctx(draft)  # §20: профиль клиента → релевантность подбора
         site = await _cc_profile_site(draft)  # §19.4.2: seed + URL — сайт из §20-профиля
         seeds = await generate_seed_keywords(topic=topic, url=site, profile=prof, language=gen_lang)
-        client = build_client(DRAFT_ACCOUNT_ID)
+        client = await build_client_async(DRAFT_ACCOUNT_ID)  # холодная сборка — вне loop
         ideas = await run_ads_read_call(
             generate_keyword_ideas,
             client,
@@ -3823,8 +3933,12 @@ async def cc_kw_generate(cq: CallbackQuery, callback_data: CcCB, state: FSMConte
             msg, chat_id, session_id, state, relevant, _cc_default_match_type(draft), "generated"
         )
         return
+    # B3-resume: sheet_url тоже в черновик — resume после рестарта переоткроет верификацию с той
+    # же ссылкой (см. _cc_present_stage2), а не молча вернёт на пустой Этап 2.
     await CDRAFTS.patch(
-        session_id, lambda st: st["keywords"].__setitem__("sheet_id", sid), expected_chat_id=chat_id
+        session_id,
+        lambda st: st["keywords"].update({"sheet_id": sid, "sheet_url": url}),
+        expected_chat_id=chat_id,
     )
     await state.set_state(CreateCampaignWizard.kw_verify)
     await state.update_data(cc_session=session_id)
@@ -4284,7 +4398,9 @@ async def cc_create(cq: CallbackQuery, callback_data: CcCB, state: FSMContext) -
     cid = uuid.uuid4().hex
     # B9: НЕ гасим черновик здесь — лишь связываем с proposal. finish произойдёт при УСПЕШНОМ
     # подтверждении (_do_confirm); при reject черновик остаётся active и возобновляем «▶️ Продолжить».
-    _CC_PROPOSAL_SESSION[cid] = session_id
+    # Связка cid→draft живёт в params proposal (БД, прецедент '_before') — переживает рестарт;
+    # execute_confirmed читает params по явным ключам, лишний '_cc_draft' инертен.
+    validated["_cc_draft"] = session_id
     await state.clear()
     await _present_proposal(
         msg,
@@ -4300,9 +4416,30 @@ async def cc_create(cq: CallbackQuery, callback_data: CcCB, state: FSMContext) -
 async def cc_launch(cq: CallbackQuery, callback_data: CcCB) -> None:
     """§19.8: «🚀 Запустить» после создания черновика → resume_campaign proposal (confirm-гейт).
     Запуск = отдельная прямая команда: кнопка лишь СОЗДАЁТ черновик «PAUSED→ENABLED», исполняется
-    только после ✅ (та же ветка, что /campaigns → «Возобновить»). Замок аккаунта не трогаем."""
+    только после ✅ (та же ветка, что /campaigns → «Возобновить»). Замок аккаунта не трогаем.
+
+    Имя кампании резолвим по sub=confirmation_id ПРИМЕНЁННОГО create-proposal из БД (переживает
+    рестарт процесса); legacy-кнопки без sub — из _CC_LAUNCH_CACHE (один релиз). Гарды по sub:
+    владение (chat_id), op ∈ _CREATE_CAMPAIGN_OPS, status='applied', одноразовость в процессе."""
     chat_id = _cq_chat_id(cq)
-    name = _CC_LAUNCH_CACHE.get(chat_id)
+    name: str | None = None
+    create_cid = (callback_data.sub or "").strip()
+    if create_cid:
+        if create_cid in _CC_LAUNCH_DONE:  # одноразовость: не минтим второй запуск той же кнопкой
+            await cq.answer(i18n.t("cc_launch_stale"), show_alert=True)
+            return
+        snap = await STORE.get_confirmed(create_cid)
+        if (
+            snap is None
+            or snap.chat_id != chat_id  # гард владения: чужая кнопка не запускает чужую кампанию
+            or snap.operation not in _CREATE_CAMPAIGN_OPS
+            or snap.status != "applied"  # запуск только РЕАЛЬНО созданного (не pending/failed)
+        ):
+            await cq.answer(i18n.t("cc_launch_stale"), show_alert=True)
+            return
+        name = (snap.params or {}).get("campaign_name") or None
+    else:  # legacy-кнопка (до деплоя restart-durability) — процессный кэш
+        name = _CC_LAUNCH_CACHE.get(chat_id)
     if not name:
         await cq.answer(i18n.t("cc_launch_stale"), show_alert=True)
         return
@@ -4312,6 +4449,8 @@ async def cc_launch(cq: CallbackQuery, callback_data: CcCB) -> None:
         await cq.answer(i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
         return
     await cq.answer()
+    if create_cid:
+        _CC_LAUNCH_DONE.add(create_cid)  # одноразово в процессе (после рестарта — гейт защитит)
     _CC_LAUNCH_CACHE.pop(chat_id, None)  # одноразово: не запускаем дважды по старой кнопке
     msg = _cq_msg(cq)
     if msg is None:
@@ -5799,28 +5938,25 @@ async def _do_confirm(cq: CallbackQuery, cid: str) -> bool:
     # §19.8/§11: черновик кампании создан (PAUSED) → предлагаем «🚀 Запустить» ОТДЕЛЬНОЙ командой.
     # Кнопка НЕ запускает сама: минтит resume_campaign proposal (тот же confirm-гейт «PAUSED→ENABLED»).
     # Распространено на ВСЕ создающие кампанию операции (Search/GDN/Demand Gen/Video) — аудит §11.
-    _CREATE_CAMPAIGN_OPS = {
-        "create_search_campaign",
-        "create_gdn_campaign",
-        "create_demand_gen_campaign",
-        "create_video_campaign",
-    }
     if snap is not None and snap.operation in _CREATE_CAMPAIGN_OPS:
         name = (snap.params or {}).get("campaign_name") or ""
         msg = _cq_msg(cq)
         if name and msg is not None:
-            _CC_LAUNCH_CACHE[chat_id] = name
+            _CC_LAUNCH_CACHE[chat_id] = name  # legacy-фолбэк для кнопок без sub (до деплоя)
             prompt = i18n.t("cc_created_launch_prompt")
             # §19.3: если конверс-стратегия понижена (аккаунт без отслеживания конверсий) — честно
             # сообщаем, а не молча меняем то, что менеджер подтвердил.
             if isinstance(result, dict) and result.get("bidding_note"):
                 prompt = i18n.t("cc_bidding_downgraded") + "\n\n" + prompt
-            await msg.answer(prompt, reply_markup=cc_final_kb(can_launch=True))
+            # Кнопка запуска несёт confirmation_id создания (sub) → работает и после рестарта
+            # (cc_launch резолвит имя из применённого proposal в БД, не из памяти процесса).
+            await msg.answer(prompt, reply_markup=cc_final_kb(can_launch=True, launch_cid=cid))
     # B9: черновик визарда §19 не гасили в cc_create — гасим ТОЛЬКО теперь, после успешного создания.
     # При ❌ (reject) он остаётся active → менеджер возобновляет «▶️ Продолжить» и не теряет всю работу
     # визарда (RSA, ключи, настройки) из-за одного нажатия «Отмена» на финальном гейте.
+    # Связка cid→draft — из params proposal (БД): finish работает и после рестарта процесса.
     if snap is not None and snap.operation == "create_search_campaign":
-        sid = _CC_PROPOSAL_SESSION.pop(cid, None)
+        sid = (snap.params or {}).get("_cc_draft")
         if sid:
             await CDRAFTS.finish(sid, expected_chat_id=chat_id)
     return True
@@ -5849,9 +5985,9 @@ async def _do_cancel(cq: CallbackQuery, cid: str) -> None:
             await asyncio.to_thread(clear_pending_media, lmid)
     await STORE.reject(cid, chat_id=chat_id, actor_user_id=actor_id, actor_username=actor_name)
     _LAST_PENDING.pop(chat_id, None)
-    # B9: отклонение финального proposal НЕ гасит черновик визарда (остаётся active) — снимаем лишь
-    # связку cid→session, чтобы менеджер мог возобновить визард «▶️ Продолжить» и не терять работу.
-    _CC_PROPOSAL_SESSION.pop(cid, None)
+    # B9: отклонение финального proposal НЕ гасит черновик визарда (остаётся active) — менеджер
+    # возобновляет «▶️ Продолжить» и не теряет работу. Связка cid→draft в params отклонённого
+    # proposal инертна (finish читает её ТОЛЬКО на успехе create в _do_confirm).
     await _safe_edit(cq, i18n.t("rejected"))
     await cq.answer(i18n.t("cb_cancelled"))
 
@@ -5967,7 +6103,8 @@ async def rsa_refine(cq: CallbackQuery, callback_data: RsaCB, state: FSMContext)
 
 @dp.callback_query(RsaCB.filter(F.action == "aslist"))
 async def rsa_aslist(cq: CallbackQuery, callback_data: RsaCB, state: FSMContext) -> None:
-    """§10 list-UX «✅ Использовать как есть»: одобрить всё валидное без правок → к завершению."""
+    """§10 list-UX «✅ Использовать как есть» / §19.5.2 «✅ Утвердить набор»: одобрить всё валидное
+    (отклонённые вручную НЕ трогаем) → к завершению (confirm-гейт или черновик визарда)."""
     session = await SESSIONS.approve_all_valid(callback_data.cid, expected_chat_id=_cq_chat_id(cq))
     if session is None:
         await cq.answer(i18n.t("rsa_session_stale"), show_alert=True)
@@ -5981,6 +6118,59 @@ async def rsa_aslist(cq: CallbackQuery, callback_data: RsaCB, state: FSMContext)
     msg = _cq_msg(cq)
     if msg is not None:
         await _rsa_present_final(msg, _cq_chat_id(cq), session, state)
+
+
+@dp.callback_query(RsaCB.filter(F.action == "editall"))
+async def rsa_editall(cq: CallbackQuery, callback_data: RsaCB, state: FSMContext) -> None:
+    """§19.5.2 «✏️ Доработать всё»: переключить курацию в list-UX — весь набор редактируемым
+    списком, менеджер правит текст и присылает обратно (rsa_list_edited). Мутаций нет."""
+    session = await SESSIONS.get(callback_data.cid, expected_chat_id=_cq_chat_id(cq))
+    if session is None:
+        await cq.answer(i18n.t("rsa_session_stale"), show_alert=True)
+        return
+    await cq.answer()
+    msg = _cq_msg(cq)
+    if msg is not None:
+        await _rsa_present_list(msg, session, state)
+
+
+@dp.callback_query(RsaCB.filter(F.action == "regen"))
+async def rsa_regen(cq: CallbackQuery, callback_data: RsaCB, state: FSMContext) -> None:
+    """§19.5.2 «🔁 Сгенерировать заново»: новый набор по ТОМУ ЖЕ брифу → replace_all(mark="pending")
+    → курация заново. Только текст (LLM) — ни SDK, ни proposal; двойной клик гасит Throttle."""
+    chat_id = _cq_chat_id(cq)
+    session = await SESSIONS.get(callback_data.cid, expected_chat_id=chat_id)
+    if session is None:
+        await cq.answer(i18n.t("rsa_session_stale"), show_alert=True)
+        return
+    msg = _cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    await cq.answer()
+    await msg.answer(i18n.t("rsa_generating"))
+    try:
+        # extra-ключи брифа (cc_session и пр.) CopyBrief игнорирует; сбой → остаёмся на текущем наборе
+        brief = CopyBrief(**{k: v for k, v in (session.brief or {}).items() if v is not None})
+        async with ux.typing_action(msg):
+            gen = await _generate_rsa(brief)
+    except Exception as e:  # LLM/сеть/битый бриф
+        await msg.answer(i18n.t("err_text_gen", err=ux.err_text(e)), reply_markup=nav_kb())
+        return
+    if len(gen.headlines) < RSA_MIN_HEADLINES or len(gen.descriptions) < RSA_MIN_DESCRIPTIONS:
+        await msg.answer(i18n.t("search_gen_empty"), reply_markup=nav_kb())
+        return
+    session = await SESSIONS.replace_all(
+        callback_data.cid,
+        gen.headlines,
+        gen.descriptions,
+        expected_chat_id=chat_id,
+        mark="pending",  # новый набор снова проходит поэлементную курацию
+    )
+    if session is None:
+        await msg.answer(i18n.t("rsa_session_stale"))
+        return
+    await _cc_rsa_present_curation(msg, session)
 
 
 @dp.message(RsaList.awaiting_edited)

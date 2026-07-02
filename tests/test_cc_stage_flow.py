@@ -258,13 +258,14 @@ async def test_stage7_create_builds_composite_proposal():
     # подтверждения proposal (при reject возобновляем «▶️ Продолжить»). Гасится в _do_confirm.
     snap = await bm.CDRAFTS.get(sid)
     assert snap.status == "active"
-    assert bm._CC_PROPOSAL_SESSION.get(captured["cid"]) == sid
+    # Связка cid→draft — в params proposal (БД, а не память процесса): переживает рестарт
+    assert p["_cc_draft"] == sid
 
 
 @pytest.mark.asyncio
 async def test_launch_button_mints_resume_proposal():
-    """§19.8: «🚀 Запустить» после создания → resume_campaign proposal (confirm-гейт), не прямой запуск.
-    Кэш имени одноразовый (не запустить дважды по старой кнопке)."""
+    """§19.8 (legacy-кнопка без sub): «🚀 Запустить» → resume_campaign proposal (confirm-гейт),
+    не прямой запуск. Кэш имени одноразовый (не запустить дважды по старой кнопке)."""
     await init_db()
     chat = 7700206
     bm._CC_LAUNCH_CACHE[chat] = "Кения · Авто · Search"
@@ -287,6 +288,203 @@ async def test_launch_button_mints_resume_proposal():
         await bm.cc_launch(cq2, CcCB(action="launch"))
     assert not captured
     assert cq2.answers and cq2.answers[-1][1] is True  # show_alert
+
+
+async def _applied_create_proposal(chat: int, name: str, extra_params: dict | None = None) -> str:
+    """Применённый create_search_campaign proposal в БД (симуляция успешного создания)."""
+    import uuid as _uuid
+
+    cid = _uuid.uuid4().hex
+    await bm.STORE.save_proposal(
+        confirmation_id=cid,
+        operation="create_search_campaign",
+        customer_id=DRAFT_ACCOUNT_ID,
+        params={"campaign_name": name, **(extra_params or {})},
+        summary="тест",
+        chat_id=chat,
+        user_initiated=True,
+    )
+    await bm.STORE.confirm(cid, chat_id=chat)
+    claimed = await bm.STORE.claim(cid, operation="create_search_campaign")
+    assert claimed is not None
+    await bm.STORE.finalize(cid, result="created")  # status → applied
+    return cid
+
+
+@pytest.mark.asyncio
+async def test_launch_button_survives_restart_via_sub():
+    """§19.8 restart-durability: кнопка с sub=confirmation_id создания работает при ПУСТЫХ кэшах
+    процесса (симуляция рестарта) — имя из применённого proposal в БД. Одноразовость и гард
+    владения: повтор → stale; чужой chat_id → stale."""
+    await init_db()
+    chat = 7700216
+    cid = await _applied_create_proposal(chat, "Кения · Рестарт · Search")
+    bm._CC_LAUNCH_CACHE.clear()  # рестарт: процессные кэши пусты
+    bm._CC_LAUNCH_DONE.clear()
+    captured = {}
+
+    async def fake_present(message, *, chat_id, operation, params, summary, cid):
+        captured.update(operation=operation, params=params)
+
+    cq = FakeCallbackQuery(FakeMessage(chat_id=chat))
+    with patched(bm, "_present_proposal", fake_present):
+        await bm.cc_launch(cq, CcCB(action="launch", sub=cid))
+    assert captured["operation"] == "resume_campaign"
+    assert captured["params"]["campaign"] == "Кения · Рестарт · Search"
+
+    # одноразовость в процессе: повторный клик той же кнопкой → stale
+    captured.clear()
+    cq2 = FakeCallbackQuery(FakeMessage(chat_id=chat))
+    with patched(bm, "_present_proposal", fake_present):
+        await bm.cc_launch(cq2, CcCB(action="launch", sub=cid))
+    assert not captured
+    assert cq2.answers and cq2.answers[-1][1] is True
+
+    # гард владения: чужой chat_id не запускает чужую кампанию
+    bm._CC_LAUNCH_DONE.clear()
+    cq3 = FakeCallbackQuery(FakeMessage(chat_id=999_777), uid=999_777)
+    with patched(bm, "_present_proposal", fake_present):
+        await bm.cc_launch(cq3, CcCB(action="launch", sub=cid))
+    assert not captured
+    assert cq3.answers and cq3.answers[-1][1] is True
+
+
+@pytest.mark.asyncio
+async def test_confirm_create_finishes_draft_after_restart():
+    """B9 restart-durability: связка proposal→draft в params (БД) — успешный confirm гасит черновик
+    даже если процессные кэши потеряны (рестарт между «Создать черновик» и ✅)."""
+    await init_db()
+    chat = 7700217
+    sid = await bm.CDRAFTS.create(chat_id=chat, customer_id=DRAFT_ACCOUNT_ID)
+    import uuid as _uuid
+
+    cid = _uuid.uuid4().hex
+    await bm.STORE.save_proposal(
+        confirmation_id=cid,
+        operation="create_search_campaign",
+        customer_id=DRAFT_ACCOUNT_ID,
+        params={"campaign_name": "Кения · Финиш · Search", "_cc_draft": sid},
+        summary="тест",
+        chat_id=chat,
+        user_initiated=True,
+    )
+
+    async def fake_exec(store, c):
+        return "created"
+
+    cq = FakeCallbackQuery(FakeMessage(chat_id=chat))
+    with patched(bm, "execute_confirmed", fake_exec):
+        ok = await bm._do_confirm(cq, cid)
+    assert ok is True
+    snap = await bm.CDRAFTS.get(sid)
+    assert snap.status == "done"  # черновик погашен ПОСЛЕ успешного создания (из params, не кэша)
+
+
+class RecFSM(FakeFSM):
+    """FakeFSM с записью set_state — для проверок resume-подсостояний (B3)."""
+
+    def __init__(self, data=None):
+        super().__init__(data)
+        self.states: list = []
+
+    async def set_state(self, st=None, *a, **k):
+        self.states.append(st)
+
+
+@pytest.mark.asyncio
+async def test_stage2_resume_reenters_kw_verify_with_sheet_link():
+    """B3-resume: выгруженная и НЕ верифицированная таблица → resume Этапа 2 возвращает в kw_verify
+    и пере-показывает ссылку (раньше молча падал в пустой ввод, теряя round-trip)."""
+    await init_db()
+    chat = 7700218
+    sid = await bm.CDRAFTS.create(chat_id=chat, customer_id=DRAFT_ACCOUNT_ID)
+    await bm.CDRAFTS.patch(
+        sid,
+        lambda st: st["keywords"].update(
+            {
+                "sheet_id": "SHEET123",
+                "sheet_url": "https://docs.google.com/spreadsheets/d/SHEET123/edit",
+            }
+        ),
+    )
+    fsm = RecFSM({"cc_session": sid})
+    msg = FakeMessage(chat_id=chat)
+    await bm._cc_present_stage2(msg, chat, sid, fsm)
+    assert fsm.states and fsm.states[-1] is bm.CreateCampaignWizard.kw_verify
+    assert any("SHEET123" in (t or "") for t, _ in msg.answers)  # ссылка пере-показана
+    # тот-же-sheet гард работает после resume: чужая ссылка отклоняется
+    bad = FakeMessage("https://docs.google.com/spreadsheets/d/OTHER99/edit", chat_id=chat)
+    await bm.cc_kw_verify(bad, fsm)
+    assert bad.answers  # cc_kw_wrong_sheet
+    snap = await bm.CDRAFTS.get(sid)
+    assert not snap.wizard_state["keywords"].get("verified")
+
+
+@pytest.mark.asyncio
+async def test_stage2_resume_verified_list_shows_confirm_gate():
+    """B3-resume: верифицированный список → resume показывает обзор с гейтом «✅ Подтвердить»."""
+    await init_db()
+    chat = 7700219
+    sid = await bm.CDRAFTS.create(chat_id=chat, customer_id=DRAFT_ACCOUNT_ID)
+    await bm.CDRAFTS.patch(
+        sid,
+        lambda st: st["keywords"].update(
+            {"list": ["used cars nairobi", "cheap cars"], "match_type": "phrase", "verified": True}
+        ),
+    )
+    fsm = RecFSM({"cc_session": sid})
+    msg = FakeMessage(chat_id=chat)
+    await bm._cc_present_stage2(msg, chat, sid, fsm)
+    assert any("used cars nairobi" in (t or "") for t, _ in msg.answers)  # обзор списка
+    # клавиатура гейта прикреплена (cc_kw_confirm_kb)
+    assert any(kw.get("reply_markup") is not None for _t, kw in msg.answers)
+    assert fsm.states and fsm.states[-1] is bm.CreateCampaignWizard.keywords
+
+
+@pytest.mark.asyncio
+async def test_stage0_account_search_filters_with_global_indices():
+    """§19.2 «поиск по названию»: текст на Этапе 0 фильтрует кэш аккаунтов; кнопки несут
+    ГЛОБАЛЬНЫЙ индекс — выбор из результатов поиска фиксирует ПРАВИЛЬНЫЙ аккаунт."""
+    await init_db()
+    chat = 7700220
+    mk = lambda i, n: type("A", (), {"id": f"11100{i}", "name": n})()  # noqa: E731
+    bm._CC_ACCT_CACHE[chat] = [
+        mk(0, "Alpha Motors"),
+        mk(1, "Beta Shoes"),
+        mk(2, "Kasi Motors"),
+        mk(3, "Gamma Cafe"),
+    ]
+    sid = await bm.CDRAFTS.create(chat_id=chat, customer_id=DRAFT_ACCOUNT_ID)
+    fsm = FakeFSM({"cc_session": sid})
+    msg = FakeMessage("motors", chat_id=chat)
+    await bm.cc_account_search(msg, fsm)
+    assert msg.answers
+    kb = msg.answers[-1][1].get("reply_markup")
+    cbs = [b.callback_data for row in kb.inline_keyboard for b in row if b.callback_data]
+    # совпали Alpha Motors (idx 0) и Kasi Motors (idx 2) — глобальные индексы, не 0/1 результатов
+    assert any(
+        ":0:" in cb or cb.endswith(":0:") or ":0" in cb.split(":")[2]
+        for cb in cbs
+        if cb.startswith("cc:acct")
+    )
+    acct_idx = sorted(int(cb.split(":")[2]) for cb in cbs if cb.startswith("cc:acct"))
+    assert acct_idx == [0, 2]
+    # выбор из результатов → правильный preview_customer_id (Kasi = 111002)
+    cq = FakeCallbackQuery(FakeMessage(chat_id=chat))
+    await bm.cc_account_cb(cq, CcCB(action="acct", idx=2), fsm)
+    snap = await bm.CDRAFTS.get(sid)
+    assert snap.preview_customer_id == "111002"
+
+
+@pytest.mark.asyncio
+async def test_stage0_account_search_no_match_reshows_picker():
+    await init_db()
+    chat = 7700221
+    bm._CC_ACCT_CACHE[chat] = [type("A", (), {"id": "111000", "name": "Alpha"})()]
+    msg = FakeMessage("zzz-нет-такого", chat_id=chat)
+    await bm.cc_account_search(msg, FakeFSM())
+    assert msg.answers  # cc_acct_search_empty + полный пикер
+    assert msg.answers[-1][1].get("reply_markup") is not None
 
 
 @pytest.mark.asyncio

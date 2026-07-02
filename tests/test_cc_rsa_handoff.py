@@ -126,3 +126,138 @@ async def test_stage4_skip_advances_without_proposal():
     assert snap.wizard_state["images"]["skipped"] is True
     assert snap.current_step == 5  # ушли к Этапу 5 (следующая фаза)
     assert await _count_mutation_proposals(chat) == 0
+
+
+# ── §19.5.2: поэлементная курация в визарде (батч-ряд editall/regen/aslist) ───────
+from contextlib import contextmanager  # noqa: E402
+
+
+@contextmanager
+def patched(obj, name, value):
+    orig = getattr(obj, name)
+    setattr(obj, name, value)
+    try:
+        yield
+    finally:
+        setattr(obj, name, orig)
+
+
+def _kb_actions(markup) -> set[str]:
+    """Все callback_data-строки клавиатуры (плоско)."""
+    out: set[str] = set()
+    for row in markup.inline_keyboard:
+        for b in row:
+            if b.callback_data:
+                out.add(b.callback_data)
+    return out
+
+
+async def _mk_wizard_session(chat: int, *, wizard: bool = True) -> tuple[str, str | None]:
+    """Сессия курации: с cc_session (визард §19) или без (standalone /rsa)."""
+    sid = None
+    brief = {"topic": "авто"}
+    if wizard:
+        sid = await bm.CDRAFTS.create(chat_id=chat, customer_id=DRAFT_ACCOUNT_ID)
+        await bm.CDRAFTS.set_step(sid, 3)
+        brief["cc_session"] = sid
+    rsa_sid = await bm.SESSIONS.create(
+        chat_id=chat,
+        customer_id=DRAFT_ACCOUNT_ID,
+        campaign="Кения Авто",
+        ad_group_id="",
+        ad_group_name="Кения Авто",
+        final_url="https://shop.example/used",
+        headlines=["Поддержанные авто", "Проверенные б/у авто", "Авто с гарантией"],
+        descriptions=["Большой выбор авто с пробегом", "Гарантия и проверка перед покупкой"],
+        brief=brief,
+    )
+    return rsa_sid, sid
+
+
+@pytest.mark.asyncio
+async def test_wizard_session_keyboard_has_batch_row():
+    """Сессия визарда → карточка элемента несёт батч-ряд §19.5.2 (editall/regen/aslist)."""
+    await init_db()
+    session = await bm.SESSIONS.get((await _mk_wizard_session(7700103))[0])
+    _text, kb = bm._rsa_render(session)
+    acts = _kb_actions(kb)
+    assert any("editall" in a for a in acts), acts
+    assert any("regen" in a for a in acts), acts
+    assert any("aslist" in a for a in acts), acts
+    # поэлементные кнопки на месте (ТЗ §10): approve/refine/reject
+    for need in ("approve", "refine", "reject"):
+        assert any(f":{need}:" in a or a.startswith(f"rsa:{need}") for a in acts), (need, acts)
+
+
+@pytest.mark.asyncio
+async def test_standalone_session_keyboard_no_batch_row():
+    """Сессия БЕЗ cc_session (/rsa) → батч-ряда визарда нет (list-UX /rsa не менялся)."""
+    await init_db()
+    session = await bm.SESSIONS.get((await _mk_wizard_session(7700104, wizard=False))[0])
+    _text, kb = bm._rsa_render(session)
+    acts = _kb_actions(kb)
+    assert not any("editall" in a for a in acts), acts
+    assert not any("regen" in a for a in acts), acts
+
+
+@pytest.mark.asyncio
+async def test_rsa_regen_replaces_set_as_pending_no_proposal():
+    """🔁 Сгенерировать заново: новый набор в pending (курация заново), НИ одного proposal."""
+    await init_db()
+    chat = 7700105
+    rsa_sid, _sid = await _mk_wizard_session(chat)
+
+    class _Gen:
+        headlines = [f"Новый заголовок {i}" for i in range(1, 6)]
+        descriptions = ["Новое описание один", "Новое описание два"]
+
+    async def _fake_gen(brief):
+        return _Gen()
+
+    cq = FakeCallbackQuery(FakeMessage(chat_id=chat))
+    with patched(bm, "_generate_rsa", _fake_gen):
+        await bm.rsa_regen(cq, RsaCB(action="regen", cid=rsa_sid), FakeFSM())
+
+    session = await bm.SESSIONS.get(rsa_sid)
+    assert [e["text"] for e in session.headlines][:2] == ["Новый заголовок 1", "Новый заголовок 2"]
+    assert all(e["state"] == "pending" for e in session.headlines + session.descriptions)
+    assert session.can_finalize() is False  # ничего не одобрено — только курация
+    assert await _count_mutation_proposals(chat) == 0
+
+
+@pytest.mark.asyncio
+async def test_rsa_editall_switches_to_list_ux():
+    """✏️ Доработать всё: переключение в list-UX (RsaList.awaiting_edited + плейн-список)."""
+    await init_db()
+    chat = 7700106
+    rsa_sid, _sid = await _mk_wizard_session(chat)
+
+    states: list = []
+
+    class RecFSM(FakeFSM):
+        async def set_state(self, st, *a, **k):
+            states.append(st)
+
+    msg = FakeMessage(chat_id=chat)
+    await bm.rsa_editall(FakeCallbackQuery(msg), RsaCB(action="editall", cid=rsa_sid), RecFSM())
+    assert states and states[-1] is bm.RsaList.awaiting_edited
+    # плейн-список для копирования отправлен (без клавиатуры)
+    assert any("Поддержанные авто" in (t or "") for t, _kw in msg.answers)
+    assert await _count_mutation_proposals(chat) == 0
+
+
+@pytest.mark.asyncio
+async def test_rsa_regen_foreign_chat_rejected():
+    """Гард владения: чужой chat_id не может перегенерировать чужую сессию."""
+    await init_db()
+    rsa_sid, _sid = await _mk_wizard_session(7700107)
+    cq = FakeCallbackQuery(FakeMessage(chat_id=999_999), uid=999_999)
+    called = []
+
+    async def _fake_gen(brief):  # не должен вызваться
+        called.append(1)
+
+    with patched(bm, "_generate_rsa", _fake_gen):
+        await bm.rsa_regen(cq, RsaCB(action="regen", cid=rsa_sid), FakeFSM())
+    assert not called
+    assert cq.answers and cq.answers[0][1] is True  # show_alert=True (stale)

@@ -442,6 +442,26 @@ def cc_accounts_kb(rows: list, lang: str | None = None, page: int = 0) -> Inline
     return kb.as_markup()
 
 
+def cc_accounts_search_kb(
+    rows: list, indices: list[int], lang: str | None = None
+) -> InlineKeyboardMarkup:
+    """Этап 0 (§19.2 «поиск по названию»): результаты текстового поиска аккаунта. indices —
+    ГЛОБАЛЬНЫЕ позиции совпадений в _CC_ACCT_CACHE[chat_id] (→ cc_account_cb работает без
+    изменений). Без пагинации: >_ACCT_PAGE совпадений = «уточните запрос» (запрос в callback
+    64 байта не влезает — уточнение и есть пагинация)."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    for i in indices[:_ACCT_PAGE]:
+        r = rows[i]
+        name = _ellipsize(getattr(r, "name", "") or getattr(r, "id", ""))
+        kb.button(
+            text=f"🏢 {name} · {getattr(r, 'id', '')}", callback_data=CcCB(action="acct", idx=i)
+        )
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    kb.adjust(*([1] * min(len(indices), _ACCT_PAGE)), 1)
+    return kb.as_markup()
+
+
 def cc_settings_kb(lang: str | None = None) -> InlineKeyboardMarkup:
     """Этап 1 (§19.3): ✅ Подтвердить / ✏️ Изменить / ❌ Отмена — как в ТЗ. «Изменить» лишь
     подсказывает формат правки (правка — свободным текстом в состоянии, см. bot.main)."""
@@ -533,15 +553,19 @@ def cc_asset_types_kb(lang: str | None = None) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def cc_final_kb(can_launch: bool = False, lang: str | None = None) -> InlineKeyboardMarkup:
+def cc_final_kb(
+    can_launch: bool = False, lang: str | None = None, *, launch_cid: str = ""
+) -> InlineKeyboardMarkup:
     """Этап 7: «✅ Создать черновик» (CcCB create) + «🚀 Запустить» (CcCB launch, только после
-    создания) + «✖ Отмена». Правка — свободным текстом в состоянии."""
+    создания) + «✖ Отмена». Правка — свободным текстом в состоянии. launch_cid — confirmation_id
+    применённого create-proposal: кнопка запуска резолвится из БД и переживает рестарт
+    (32-hex в sub: «cc:launch:-1:<hex>» ≈ 45 байт < лимита 64)."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     if can_launch:
         kb.button(
             text="🚀 Launch campaign" if en else "🚀 Запустить кампанию",
-            callback_data=CcCB(action="launch"),
+            callback_data=CcCB(action="launch", sub=launch_cid),
         )
     else:
         kb.button(
@@ -843,8 +867,28 @@ def report_campaigns_kb(
 
 
 # ── RSA-курация (ТЗ §10): поэлементное подтверждение + массовые действия ──────────
-def rsa_item_kb(cid: str, kind: str, idx: int, lang: str | None = None) -> InlineKeyboardMarkup:
-    """Кнопки одного элемента (заголовок/описание): одобрить/доработать/отклонить + к итогу."""
+def _rsa_batch_row(kb: InlineKeyboardBuilder, cid: str, en: bool) -> None:
+    """§19.5.2 (визард): батч-ряд «Доработать всё | Сгенерировать заново | Утвердить набор».
+    editall → list-UX правка; regen → новый набор в pending; aslist → одобрить всё валидное."""
+    kb.button(
+        text="✏️ Edit all as list" if en else "✏️ Доработать всё",
+        callback_data=RsaCB(action="editall", cid=cid),
+    )
+    kb.button(
+        text="🔁 Regenerate" if en else "🔁 Сгенерировать заново",
+        callback_data=RsaCB(action="regen", cid=cid),
+    )
+    kb.button(
+        text="✅ Approve the set" if en else "✅ Утвердить набор",
+        callback_data=RsaCB(action="aslist", cid=cid),
+    )
+
+
+def rsa_item_kb(
+    cid: str, kind: str, idx: int, lang: str | None = None, *, wizard: bool = False
+) -> InlineKeyboardMarkup:
+    """Кнопки одного элемента (заголовок/описание): одобрить/доработать/отклонить + к итогу.
+    wizard=True (§19.5.2, сессия визарда /newcampaign) — дополнительно батч-ряд."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     kb.button(
@@ -863,7 +907,11 @@ def rsa_item_kb(cid: str, kind: str, idx: int, lang: str | None = None) -> Inlin
         text="📋 To summary" if en else "📋 К итогу",
         callback_data=RsaCB(action="overview", cid=cid),
     )
-    kb.adjust(3, 1)
+    if wizard:
+        _rsa_batch_row(kb, cid, en)
+        kb.adjust(3, 1, 1, 1, 1)
+    else:
+        kb.adjust(3, 1)
     return kb.as_markup()
 
 
@@ -884,10 +932,17 @@ def rsa_aslist_kb(cid: str, lang: str | None = None) -> InlineKeyboardMarkup:
 
 
 def rsa_overview_kb(
-    cid: str, can_finalize: bool, has_pending: bool = True, lang: str | None = None
+    cid: str,
+    can_finalize: bool,
+    has_pending: bool = True,
+    lang: str | None = None,
+    *,
+    wizard: bool = False,
 ) -> InlineKeyboardMarkup:
     """Итог курации: массовое одобрение/просмотр по одному (если есть pending),
-    создание объявления (если набран минимум ≥3 загол./≥2 опис.), отмена."""
+    создание объявления (если набран минимум ≥3 загол./≥2 опис.), отмена.
+    wizard=True (§19.5.2) — батч-ряд вместо «Создать объявление» (finalize визарда = «Утвердить
+    набор», мутации нет — утверждённые тексты уходят в черновик кампании)."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     if has_pending:
@@ -899,7 +954,9 @@ def rsa_overview_kb(
             text="🔍 Review one by one" if en else "🔍 Смотреть по одному",
             callback_data=RsaCB(action="review", cid=cid),
         )
-    if can_finalize:
+    if wizard:
+        _rsa_batch_row(kb, cid, en)
+    elif can_finalize:
         kb.button(
             text="➡️ Create ad" if en else "➡️ Создать объявление",
             callback_data=RsaCB(action="finalize", cid=cid),

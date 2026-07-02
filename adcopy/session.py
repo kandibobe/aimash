@@ -225,17 +225,19 @@ class SessionStore:
         descriptions: list[str],
         *,
         expected_chat_id: int | None = None,
+        mark: str = "approved",
     ) -> CurationSession | None:
         """List-UX (§10): заменить ВЕСЬ набор заголовков/описаний присланным менеджером списком —
-        все как `approved` (менеджер уже отредактировал и прислал финальный список). Длину каждого
-        элемента пересчитывает КОД (кириллица=1). Валидация мин/макс/длины — на стороне вызывающего
-        (bot.main) ДО вызова: сюда приходит уже проверенный набор."""
+        по умолчанию все `approved` (менеджер уже отредактировал и прислал финальный список).
+        mark="pending" — регенерация набора (🔁 в визарде §19.5.2): новый набор снова проходит
+        поэлементную курацию. Длину каждого элемента пересчитывает КОД (кириллица=1). Валидация
+        мин/макс/длины — на стороне вызывающего (bot.main) ДО вызова."""
 
         def _mk(items: list[str], kind: str) -> list[dict]:
             out = []
             for t in items:
                 _ok, n = validate(t, _KIND_VALIDATE[kind])
-                out.append({"text": t, "len": n, "state": "approved"})
+                out.append({"text": t, "len": n, "state": mark})
             return out
 
         def _fn(d: dict) -> None:
