@@ -1,0 +1,471 @@
+"""/campaigns: быстрые действия (пауза/возобновление), гео §3, аудитории, расширения
+
+Хендлеры вынесены из bot/main.py (декомпозиция god-module, предсдаточный аудит 2026-07).
+ВСЕ имена из bot.main берутся через `bm.<name>` (ПОЗДНЕЕ связывание): monkeypatch тестов на
+bot.main продолжает влиять на эти хендлеры, а регистрация происходит при импорте модуля —
+порядок задаёт хвост bot/main.py (инвариант порядка — tests/test_handler_order.py).
+"""
+
+from __future__ import annotations
+
+import bot.main as bm
+
+
+@bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "geo"))
+async def camp_geo(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
+    """Меню кампании → «📍 Гео-таргетинг»: показываем выбор способа (локации/радиус). READ-ONLY:
+    ничего не меняем — адрес/локации вводятся следующим шагом, черновик собирается после (confirm-гейт)."""
+    camps = bm._CAMP_CACHE.get(bm._cq_chat_id(cq))
+    if not bm._valid_idx(camps, callback_data.idx):
+        await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
+        return
+    await cq.answer()
+    name = camps[callback_data.idx]["name"]
+    await bm._safe_edit(
+        cq,
+        bm.i18n.t("geo_mode_pick", camp=bm.texts.esc(name)),
+        reply_markup=bm.geo_mode_kb(callback_data.idx),
+        parse_mode=bm.ParseMode.HTML,
+    )
+
+
+@bm.dp.callback_query(bm.GeoCB.filter(bm.F.action.in_(["loc", "prox"])))
+async def on_geo_mode(cq: bm.CallbackQuery, callback_data: bm.GeoCB, state: bm.FSMContext) -> None:
+    """Способ выбран → ждём текст (локации ИЛИ «город, радиус»). Кампанию резолвим СЕЙЧАС и кладём
+    в state-data (имя стабильно, даже если _CAMP_CACHE сменится до ввода). Сбор ввода — до гейта."""
+    chat_id = bm._cq_chat_id(cq)
+    camps = bm._CAMP_CACHE.get(chat_id)
+    if not bm._valid_idx(camps, callback_data.idx):
+        await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
+        return
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    name = camps[callback_data.idx]["name"]
+    await state.clear()
+    if callback_data.action == "loc":
+        await state.set_state(bm.Geo.awaiting_locations)
+        prompt = "geo_pick_locations"
+    else:
+        await state.set_state(bm.Geo.awaiting_proximity)
+        prompt = "geo_pick_proximity"
+    # geo_idx нужен retry-хендлерам, чтобы собрать Back-цель (меню кампании) даже после
+    # невалидного ввода; имя кампании уже резолвлено в geo_campaign.
+    await state.update_data(geo_campaign=name, geo_idx=callback_data.idx)
+    await cq.answer()
+    # Back → меню кампании (та же цель, что у «‹ Назад» в geo_mode_kb): переиспользуем camp_menu.
+    await msg.answer(
+        bm.i18n.t(prompt),
+        reply_markup=bm.nav_kb(bm.CampCB(action="menu", idx=callback_data.idx)),
+        parse_mode=bm.ParseMode.HTML,
+    )
+
+
+@bm.dp.message(bm.Geo.awaiting_locations)
+async def geo_locations(m: bm.Message, state: bm.FSMContext) -> None:
+    """Локации введены → черновик set_geo_location (заменяет гео кампании целиком, §3). Резолв
+    названий → geoTargetConstant и remove-before-create — в SDK-слое после ✅; здесь только черновик."""
+    locations = bm._parse_geo_locations(m.text or "")
+    if not locations:
+        await m.answer(
+            bm.i18n.t("geo_empty_locations"),
+            reply_markup=await bm._geo_nav_kb(state),
+            parse_mode=bm.ParseMode.HTML,
+        )
+        return  # остаёмся в состоянии — пользователь пришлёт локации ещё раз
+    data = await state.get_data()
+    campaign = (data.get("geo_campaign") or "").strip()
+    if not campaign:
+        await state.clear()
+        await m.answer(bm.i18n.t("geo_stale"))
+        return
+    await state.clear()
+    try:
+        cid, operation, params, summary = bm._build_proposal(
+            "set_geo_location", campaign=campaign, locations=locations
+        )
+    except Exception as e:  # noqa: BLE001 — валидация схемы (>20 локаций / >80 симв.) → понятный ответ
+        await m.answer(bm.i18n.t("cb_error", kind=type(e).__name__))
+        return
+    await bm._present_proposal(
+        m, chat_id=m.chat.id, operation=operation, params=params, summary=summary, cid=cid
+    )
+
+
+@bm.dp.message(bm.Geo.awaiting_proximity)
+async def geo_proximity(m: bm.Message, state: bm.FSMContext) -> None:
+    """«город, радиус_км» введено → черновик set_geo_proximity (радиус-таргетинг, §3). Google геокодит
+    адрес сам; границы радиуса (0, 2000] валидирует схема. Исполнение — только после ✅."""
+    parsed = bm._parse_geo_proximity(m.text or "")
+    if parsed is None:
+        await m.answer(
+            bm.i18n.t("geo_bad_proximity"),
+            reply_markup=await bm._geo_nav_kb(state),
+            parse_mode=bm.ParseMode.HTML,
+        )
+        return  # остаёмся в состоянии — пользователь пришлёт «город, радиус» ещё раз
+    city, radius = parsed
+    data = await state.get_data()
+    campaign = (data.get("geo_campaign") or "").strip()
+    if not campaign:
+        await state.clear()
+        await m.answer(bm.i18n.t("geo_stale"))
+        return
+    await state.clear()
+    try:
+        cid, operation, params, summary = bm._build_proposal(
+            "set_geo_proximity", campaign=campaign, city_name=city, radius_km=radius
+        )
+    except Exception as e:  # noqa: BLE001 — валидация схемы (радиус вне (0,2000] / длина) → понятный ответ
+        await m.answer(bm.i18n.t("cb_error", kind=type(e).__name__))
+        return
+    await bm._present_proposal(
+        m, chat_id=m.chat.id, operation=operation, params=params, summary=summary, cid=cid
+    )
+
+
+@bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "ext"))
+async def camp_ext(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
+    """Меню кампании → «🧩 Расширения»: показать выбор типа. READ-ONLY (ввод/черновик — дальше)."""
+    camps = bm._CAMP_CACHE.get(bm._cq_chat_id(cq))
+    if not bm._valid_idx(camps, callback_data.idx):
+        await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
+        return
+    await cq.answer()
+    name = camps[callback_data.idx]["name"]
+    await bm._safe_edit(
+        cq,
+        bm.i18n.t("ext_menu_pick", camp=bm.texts.esc(name)),
+        reply_markup=bm.ext_menu_kb(callback_data.idx),
+        parse_mode=bm.ParseMode.HTML,
+    )
+
+
+@bm.dp.callback_query(bm.ExtCB.filter(bm.F.action.in_(["sitelink", "callout", "snippet", "image"])))
+async def on_ext_type(cq: bm.CallbackQuery, callback_data: bm.ExtCB, state: bm.FSMContext) -> None:
+    """Тип расширения выбран → ждём ввод (для snippet сначала выбор header кнопками; для image —
+    фото, его перехватывает on_photo по состоянию ExtWizard.awaiting_image)."""
+    chat_id = bm._cq_chat_id(cq)
+    camps = bm._CAMP_CACHE.get(chat_id)
+    if not bm._valid_idx(camps, callback_data.idx):
+        await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
+        return
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    name = camps[callback_data.idx]["name"]
+    await cq.answer()
+    if callback_data.action == "snippet":
+        # header строго из канонического списка → выбираем кнопкой (иначе HEADER_NOT_FOUND)
+        await bm._safe_edit(
+            cq,
+            bm.i18n.t("ext_ask_snippet_header", camp=bm.texts.esc(name)),
+            reply_markup=bm.ext_snippet_header_kb(callback_data.idx),
+            parse_mode=bm.ParseMode.HTML,
+        )
+        return
+    await state.clear()
+    await state.update_data(ext_campaign=name, ext_idx=callback_data.idx)
+    if callback_data.action == "sitelink":
+        await state.set_state(bm.ExtWizard.awaiting_sitelinks)
+        prompt = "ext_ask_sitelinks"
+    elif callback_data.action == "image":
+        await state.set_state(bm.ExtWizard.awaiting_image)
+        prompt = "ext_ask_image"
+    else:
+        await state.set_state(bm.ExtWizard.awaiting_callouts)
+        prompt = "ext_ask_callouts"
+    await msg.answer(
+        bm.i18n.t(prompt),
+        reply_markup=bm.nav_kb(bm.CampCB(action="ext", idx=callback_data.idx)),
+        parse_mode=bm.ParseMode.HTML,
+    )
+
+
+@bm.dp.callback_query(bm.ExtCB.filter(bm.F.action == "snip_h"))
+async def on_ext_snippet_header(
+    cq: bm.CallbackQuery, callback_data: bm.ExtCB, state: bm.FSMContext
+) -> None:
+    """Header структурного описания выбран → ждём значения текстом."""
+    chat_id = bm._cq_chat_id(cq)
+    camps = bm._CAMP_CACHE.get(chat_id)
+    if not bm._valid_idx(camps, callback_data.idx):
+        await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
+        return
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    name = camps[callback_data.idx]["name"]
+    await state.clear()
+    await state.set_state(bm.ExtWizard.awaiting_snippet_values)
+    await state.update_data(
+        ext_campaign=name, ext_idx=callback_data.idx, ext_header=callback_data.sub
+    )
+    await cq.answer()
+    await msg.answer(
+        bm.i18n.t("ext_ask_snippet_values", header=bm.texts.esc(callback_data.sub)),
+        reply_markup=bm.nav_kb(bm.CampCB(action="ext", idx=callback_data.idx)),
+        parse_mode=bm.ParseMode.HTML,
+    )
+
+
+@bm.dp.message(bm.ExtWizard.awaiting_sitelinks)
+async def ext_sitelinks(m: bm.Message, state: bm.FSMContext) -> None:
+    sitelinks = bm._parse_sitelinks(m.text or "")
+    if not sitelinks:
+        await m.answer(
+            bm.i18n.t("ext_bad_sitelinks"),
+            reply_markup=await bm._ext_nav_kb(state),
+            parse_mode=bm.ParseMode.HTML,
+        )
+        return  # остаёмся в состоянии (retry с навигацией)
+    data = await state.get_data()
+    campaign = (data.get("ext_campaign") or "").strip()
+    if not campaign:
+        await state.clear()
+        await m.answer(bm.i18n.t("ext_stale"))
+        return
+    await state.clear()
+    try:
+        cid, operation, params, summary = bm._build_proposal(
+            "add_sitelinks", campaign=campaign, sitelinks=sitelinks
+        )
+    except Exception as e:  # noqa: BLE001 — валидация схемы (длина/URL/desc) → понятный ответ
+        await m.answer(bm.i18n.t("cb_error", kind=type(e).__name__))
+        return
+    await bm._present_proposal(
+        m, chat_id=m.chat.id, operation=operation, params=params, summary=summary, cid=cid
+    )
+
+
+@bm.dp.message(bm.ExtWizard.awaiting_callouts)
+async def ext_callouts(m: bm.Message, state: bm.FSMContext) -> None:
+    callouts = bm._parse_csv_lines(m.text or "")
+    if not callouts:
+        await m.answer(
+            bm.i18n.t("ext_bad_callouts"),
+            reply_markup=await bm._ext_nav_kb(state),
+            parse_mode=bm.ParseMode.HTML,
+        )
+        return
+    data = await state.get_data()
+    campaign = (data.get("ext_campaign") or "").strip()
+    if not campaign:
+        await state.clear()
+        await m.answer(bm.i18n.t("ext_stale"))
+        return
+    await state.clear()
+    try:
+        cid, operation, params, summary = bm._build_proposal(
+            "add_callouts", campaign=campaign, callouts=callouts
+        )
+    except Exception as e:  # noqa: BLE001
+        await m.answer(bm.i18n.t("cb_error", kind=type(e).__name__))
+        return
+    await bm._present_proposal(
+        m, chat_id=m.chat.id, operation=operation, params=params, summary=summary, cid=cid
+    )
+
+
+@bm.dp.message(bm.ExtWizard.awaiting_snippet_values)
+async def ext_snippet_values(m: bm.Message, state: bm.FSMContext) -> None:
+    values = bm._parse_csv_lines(m.text or "")
+    data = await state.get_data()
+    header = (data.get("ext_header") or "").strip()
+    campaign = (data.get("ext_campaign") or "").strip()
+    if len(values) < 3:
+        await m.answer(
+            bm.i18n.t("ext_bad_snippet_values"),
+            reply_markup=await bm._ext_nav_kb(state),
+            parse_mode=bm.ParseMode.HTML,
+        )
+        return
+    if not campaign or not header:
+        await state.clear()
+        await m.answer(bm.i18n.t("ext_stale"))
+        return
+    await state.clear()
+    try:
+        cid, operation, params, summary = bm._build_proposal(
+            "add_structured_snippets", campaign=campaign, header=header, values=values
+        )
+    except Exception as e:  # noqa: BLE001
+        await m.answer(bm.i18n.t("cb_error", kind=type(e).__name__))
+        return
+    await bm._present_proposal(
+        m, chat_id=m.chat.id, operation=operation, params=params, summary=summary, cid=cid
+    )
+
+
+@bm.dp.callback_query(bm.ExtCB.filter(bm.F.action == "show"))
+async def on_ext_show(cq: bm.CallbackQuery, callback_data: bm.ExtCB) -> None:
+    """Показать текущие расширения кампании с кнопками удаления (open-чтение, ничего не меняем)."""
+    chat_id = bm._cq_chat_id(cq)
+    camps = bm._CAMP_CACHE.get(chat_id)
+    if not bm._valid_idx(camps, callback_data.idx):
+        await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
+        return
+    await cq.answer()
+    campaign_id = camps[callback_data.idx].get("id")
+    from ads.client import build_client
+    from ads.read import list_campaign_assets
+
+    try:
+        rows = await bm.run_ads_read_call(
+            list_campaign_assets,
+            build_client(),
+            bm.DRAFT_ACCOUNT_ID,
+            campaign_id,
+            label="list_campaign_assets",
+        )
+    except Exception as e:  # сеть/доступ/SDK
+        await bm._safe_edit(cq, bm.i18n.t("ext_show_error", err=bm.ux.err_text(e)))
+        return
+    if not rows:
+        await bm._safe_edit(
+            cq, bm.i18n.t("ext_empty"), reply_markup=bm.ext_menu_kb(callback_data.idx)
+        )
+        return
+    bm._EXT_CACHE[chat_id] = rows
+    await bm._safe_edit(
+        cq,
+        bm.i18n.t("ext_list_title", n=len(rows)),
+        reply_markup=bm.ext_assets_list_kb(rows, callback_data.idx),
+        parse_mode=bm.ParseMode.HTML,
+    )
+
+
+@bm.dp.callback_query(bm.ExtCB.filter(bm.F.action == "remove"))
+async def on_ext_remove(cq: bm.CallbackQuery, callback_data: bm.ExtCB) -> None:
+    """Кнопка 🗑 у расширения → черновик remove_asset_link (открепить связь, confirm-гейт)."""
+    chat_id = bm._cq_chat_id(cq)
+    rows = bm._EXT_CACHE.get(chat_id)
+    if not bm._valid_idx(rows, callback_data.idx):
+        await cq.answer(bm.i18n.t("ext_list_stale"), show_alert=True)
+        return
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    rn = rows[callback_data.idx].link_resource_name
+    try:
+        cid, operation, params, summary = bm._build_proposal(
+            "remove_asset_link", link_resource_names=[rn]
+        )
+    except Exception as e:  # noqa: BLE001
+        await cq.answer(bm.i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
+        return
+    await cq.answer()
+    await bm._present_proposal(
+        msg, chat_id=chat_id, operation=operation, params=params, summary=summary, cid=cid
+    )
+
+
+@bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "menu"))
+async def camp_menu(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
+    camps = bm._CAMP_CACHE.get(bm._cq_chat_id(cq))
+    if not bm._valid_idx(camps, callback_data.idx):
+        await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
+        return
+    await cq.answer()
+    c = camps[callback_data.idx]
+    await bm._safe_edit(
+        cq,
+        bm.texts.fmt_campaign_header(c),
+        reply_markup=bm.campaign_actions_kb(callback_data.idx, c.get("status", "")),
+        parse_mode=bm.ParseMode.HTML,
+    )
+
+
+@bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "back"))
+async def camp_back(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
+    camps = bm._CAMP_CACHE.get(bm._cq_chat_id(cq))
+    if not camps:
+        await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
+        return
+    await cq.answer()
+    await bm._safe_edit(
+        cq,
+        bm.texts.campaigns_title(bm.DRAFT_ACCOUNT_ID),
+        reply_markup=bm.campaigns_kb(camps),
+        parse_mode=bm.ParseMode.HTML,
+    )
+
+
+@bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "pause"))
+async def camp_pause(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
+    await bm._camp_mutate(cq, callback_data.idx, "pause_campaign")
+
+
+@bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "resume"))
+async def camp_resume(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
+    await bm._camp_mutate(cq, callback_data.idx, "resume_campaign")
+
+
+# ── §3 Аудитории: меню кампании → список аудиторий → черновик attach_audience ───────
+@bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "audience"))
+async def camp_audience(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
+    """Показать доступные аудитории (user_list) для прикрепления к выбранной кампании.
+    READ-ONLY: только список; прикрепление — отдельным черновиком после выбора (confirm-гейт)."""
+    chat_id = bm._cq_chat_id(cq)
+    camps = bm._CAMP_CACHE.get(chat_id)
+    if not bm._valid_idx(camps, callback_data.idx):
+        await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
+        return
+    try:
+        from ads.client import build_client
+        from ads.read import list_audiences
+
+        client = build_client()
+        async with bm.ux.typing_action(cq.message):
+            auds = await bm.run_ads_read_call(
+                list_audiences, client, bm.DRAFT_ACCOUNT_ID, label="list_audiences"
+            )
+    except Exception as e:  # сеть/доступ/SDK
+        await cq.answer(bm.i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
+        return
+    if not auds:
+        await cq.answer(bm.i18n.t("no_audiences"), show_alert=True)
+        return
+    bm._AUD_CACHE[chat_id] = auds
+    await cq.answer()
+    await bm._safe_edit(
+        cq,
+        bm.texts.audiences_title(camps[callback_data.idx]["name"]),
+        reply_markup=bm.audiences_kb(auds, callback_data.idx),
+        parse_mode=bm.ParseMode.HTML,
+    )
+
+
+@bm.dp.callback_query(bm.AudienceCB.filter(bm.F.action == "pick"))
+async def on_audience_pick(cq: bm.CallbackQuery, callback_data: bm.AudienceCB) -> None:
+    """Выбрана аудитория → СОЗДАЁТ черновик attach_audience (как кнопки пауза/возобновление):
+    исполнение только после ✅ через confirm-гейт. Кампания+аудитория резолвятся из кэшей по idx."""
+    chat_id = bm._cq_chat_id(cq)
+    camps = bm._CAMP_CACHE.get(chat_id)
+    auds = bm._AUD_CACHE.get(chat_id)
+    if not bm._valid_idx(camps, callback_data.camp_idx) or not bm._valid_idx(
+        auds, callback_data.idx
+    ):
+        await cq.answer(bm.i18n.t("aud_list_stale"), show_alert=True)
+        return
+    name = camps[callback_data.camp_idx]["name"]
+    aud = auds[callback_data.idx]
+    try:
+        cid, op, params, summary = bm._build_proposal(
+            "attach_audience", campaign=name, audience_resource_names=[aud.resource_name]
+        )
+    except Exception as e:  # валидация схемы
+        await cq.answer(bm.i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
+        return
+    params["_audience_names"] = [aud.name]  # инертно для исполнения; для дружелюбной сводки
+    await cq.answer()
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        return
+    await bm._present_proposal(
+        msg, chat_id=chat_id, operation=op, params=params, summary=summary, cid=cid
+    )

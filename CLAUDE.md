@@ -43,7 +43,7 @@ Python 3.12 · aiogram 3.x (async; один event loop с APScheduler) · `opena
 
 ## Структура
 - `core/` — config, secrets (шифрование), logging.
-- `bot/` — aiogram handlers, keyboards (inline), middleware/whitelist.
+- `bot/` — ядро бота: `main.py` (dp/middleware/shared-хелперы/кэши/confirm-оркестрация) + `handlers/` (доменные модули хендлеров: commands, reports, keywords_flow, campaigns_menu, rsa_flow, search_media, campaign_wizard §19, clients_kb §20, templates_recent, confirm_flow, fallback). Хендлеры читают имена main через `bm.<name>` (позднее связывание — monkeypatch тестов работает); порядок импорта модулей в хвосте main.py = порядок диспатча aiogram, catch-all `on_text` строго последний (инвариант — `tests/test_handler_order.py`). Плюс keyboards (inline), i18n RU/EN, middleware/whitelist.
 - `agent/` — router (OpenRouter), system_prompt (из скилов-инструкций после ревью), tools (Pydantic-схемы read+mutation), loop.
 - `ads/` — auth (OAuth/refresh, login_customer_id=MCC), read (GAQL через paged `Search`; SearchStream осознанно отложен — см. docstring `ads/read.py`), mutations (требуют confirmation_id), keyword_plan, assets.
 - `confirm/` — proposal (diff), gate (логика «да»), audit.

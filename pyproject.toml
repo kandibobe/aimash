@@ -57,11 +57,18 @@ dev = [
 # (ошибка «Multiple top-level packages discovered»). Перечисляем явно; tests/scripts/migrations —
 # не пакеты (в образ всё равно COPY . . попадают, alembic/pytest находят их без установки).
 [tool.setuptools.packages.find]
-include = ["adcopy*", "ads*", "agent*", "bot*", "confirm*", "core*", "db*", "keywords*", "reports*", "scheduler*"]
+include = ["adcopy*", "ads*", "agent*", "bot*", "clients*", "confirm*", "core*", "db*", "keywords*", "reports*", "scheduler*"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.ruff.lint.per-file-ignores]
+# bot/main.py — ядро/namespace бота: его module-scope имена (импорты, хелперы, кэши) читают
+# доменные модули bot/handlers/* через bm.<name> (позднее связывание — так monkeypatch тестов
+# на bot.main продолжает влиять на вынесенные хендлеры). Ruff не видит это использование →
+# F401 здесь ложноположителен; хвостовые импорты bot.handlers регистрируют хендлеры сайд-эффектом.
+"bot/main.py" = ["F401"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

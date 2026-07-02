@@ -1,0 +1,339 @@
+"""§10 быстрый /newsearch + §11 кампании из медиа (GDN из фото, Video/Demand Gen)
+
+Хендлеры вынесены из bot/main.py (декомпозиция god-module, предсдаточный аудит 2026-07).
+ВСЕ имена из bot.main берутся через `bm.<name>` (ПОЗДНЕЕ связывание): monkeypatch тестов на
+bot.main продолжает влиять на эти хендлеры, а регистрация происходит при импорте модуля —
+порядок задаёт хвост bot/main.py (инвариант порядка — tests/test_handler_order.py).
+"""
+
+from __future__ import annotations
+
+import bot.main as bm
+
+
+@bm.dp.message(bm.Command("newsearch"))
+async def newsearch_cmd(m: bm.Message, state: bm.FSMContext) -> None:
+    await state.clear()
+    await state.set_state(bm.SearchWizard.awaiting_brief)
+    await m.answer(
+        bm.i18n.t("search_ask_brief"), reply_markup=bm.nav_kb(), parse_mode=bm.ParseMode.HTML
+    )
+
+
+@bm.dp.message(bm.SearchWizard.awaiting_brief)
+async def search_brief(m: bm.Message, state: bm.FSMContext) -> None:
+    """Бриф → генерация RSA → ЧЕРНОВИК create_search_campaign (как GDN-визард). Кампания PAUSED,
+    исполнение только после ✅ (двойной гейт + user_initiated держит apply_create_search_campaign)."""
+    parsed = bm._parse_search_brief(m.text or "")
+    if parsed is None:
+        await m.answer(
+            bm.i18n.t("search_bad_brief"), reply_markup=bm.nav_kb(), parse_mode=bm.ParseMode.HTML
+        )
+        return  # остаёмся в состоянии — пользователь пришлёт бриф ещё раз (или «✖ Отмена»)
+    name, url, budget_units, topic, keywords = parsed
+    await m.answer(bm.i18n.t("search_generating"))
+    try:
+        draft = await bm._generate_rsa(bm.CopyBrief(topic=topic, n_headlines=15, n_descriptions=4))
+    except Exception as e:  # LLM/сеть
+        await state.clear()
+        await m.answer(bm.i18n.t("err_text_gen", err=bm.ux.err_text(e)))
+        return
+    headlines = list(draft.headlines or [])[: bm.RSA_MAX_HEADLINES]
+    descriptions = list(draft.descriptions or [])[: bm.RSA_MAX_DESCRIPTIONS]
+    if len(headlines) < bm.RSA_MIN_HEADLINES or len(descriptions) < bm.RSA_MIN_DESCRIPTIONS:
+        await state.clear()
+        await m.answer(bm.i18n.t("search_gen_empty"))
+        return
+    params = {
+        "campaign_name": name,
+        "final_url": url,
+        "headlines": headlines,
+        "descriptions": descriptions,
+        "budget_daily_micros": int(round(budget_units * 1_000_000)),
+        "keywords": keywords,
+        "match_type": "phrase",
+        "cpc_bid_micros": 500_000,
+    }
+    try:  # defense-in-depth: схема ещё раз проверит длины/составы/URL/бюджет + нормализует ключи
+        validated: dict = bm.SCHEMAS["create_search_campaign"](**params).model_dump()
+    except Exception as e:
+        await state.clear()
+        await m.answer(bm.i18n.t("err_validate", err=e))
+        return
+    params = validated
+    summary = bm.texts.fmt_search_proposal_summary(
+        name,
+        url,
+        budget_units,
+        validated["headlines"],
+        validated["descriptions"],
+        validated["keywords"],
+        validated["match_type"],
+    )
+    p = bm.Proposal(
+        operation="create_search_campaign", summary=summary, params=params, chat_id=m.chat.id
+    )
+    await state.clear()
+    await bm._present_proposal(
+        m,
+        chat_id=m.chat.id,
+        operation="create_search_campaign",
+        params=params,
+        summary=summary,
+        cid=p.confirmation_id,
+    )
+
+
+@bm.dp.message(bm.F.photo)
+async def on_photo(m: bm.Message, state: bm.FSMContext, bot: bm.Bot) -> None:
+    """Приём фото для GDN-кампании (§11): скачиваем, режем в 1.91:1 + 1:1, запускаем визард.
+    Бинарь НЕ в proposal/логах — подготовленные кадры кладём во временное хранилище по media_id."""
+    if not m.photo:  # фильтр F.photo гарантирует фото, но узкий гард снимает Optional и страхует
+        return
+    # §3-assets: фото в состоянии «жду изображение-ассет» → ветка image-extension (не GDN).
+    if await state.get_state() == bm.ExtWizard.awaiting_image:
+        await bm._ext_image_from_photo(m, state, bot)
+        return
+    # §19 Этап 4: фото в визарде «Создание кампании» → image-ассет в черновик (не GDN).
+    if await state.get_state() == bm.CreateCampaignWizard.images:
+        await bm._cc_image_from_photo(m, state, bot)
+        return
+    # §11: фото в визарде кампании из видео (шаг логотипа DG) → квадратный логотип (не GDN).
+    if await state.get_state() == bm.VideoWizard.awaiting_logo:
+        await bm._video_logo_from_photo(m, state, bot)
+        return
+    # §19.7.1: фото на шаге «Business logo» Этапа 5 → логотип-спек в набор ассетов черновика.
+    if await state.get_state() == bm.CreateCampaignWizard.asset_logo:
+        await bm._cc_asset_logo_from_photo(m, state, bot)
+        return
+    # §19/§11: фото в ЛЮБОМ другом состоянии визардов «Создание кампании»/«кампания из видео» НЕ
+    # должно перехватываться GDN-веткой (она делает state.clear(), теряя черновик). Подсказка.
+    cur_state = await state.get_state()
+    if isinstance(cur_state, str) and cur_state.startswith(("CreateCampaignWizard", "VideoWizard")):
+        await m.answer(bm.i18n.t("cc_photo_wrong_stage"))
+        return
+    prev = await state.get_data()  # новое фото отменяет прежнее → чистим его медиа (без утечки)
+    old_id = prev.get("gdn_media_id")
+    if old_id:
+        await bm.asyncio.to_thread(bm.clear_pending_media, old_id)
+    await state.clear()
+    try:
+        buf = bm.io.BytesIO()
+        await bot.download(m.photo[-1], destination=buf)  # самое большое разрешение
+        landscape, square = await bm.asyncio.to_thread(bm.prepare_display_images, buf.getvalue())
+    except Exception as e:  # сеть/битый файл/не картинка
+        await m.answer(bm.i18n.t("err_photo", err=bm.ux.err_text(e)))
+        return
+    media_id = bm.uuid.uuid4().hex
+    await bm.asyncio.to_thread(bm.save_pending_media, media_id, landscape, square)
+    await state.update_data(gdn_media_id=media_id)
+    await state.set_state(bm.GdnWizard.awaiting_brief)
+    # «✖ Отмена» при выходе чистит pending-media (on_nav_cancel читает gdn_media_id из state).
+    await m.answer(
+        bm.i18n.t("gdn_ask_brief"), reply_markup=bm.nav_kb(), parse_mode=bm.ParseMode.HTML
+    )
+
+
+# ── §11: кампании из видео (Demand Gen / Video) — YouTube-ссылка → тип → бриф → гейт ─
+@bm.dp.message(bm.F.video)
+async def on_video(m: bm.Message, state: bm.FSMContext) -> None:
+    """§11: приём видео → визард кампании из видео. Загрузить файл в Google Ads напрямую нельзя —
+    видео живёт на YouTube (примечание §11), поэтому просим ссылку. §19-визард не перехватываем."""
+    cur_state = await state.get_state()
+    if isinstance(cur_state, str) and cur_state.startswith("CreateCampaignWizard"):
+        await m.answer(bm.i18n.t("cc_photo_wrong_stage"))
+        return
+    await state.clear()
+    await state.set_state(bm.VideoWizard.awaiting_link)
+    await m.answer(
+        bm.i18n.t("video_received"), reply_markup=bm.nav_kb(), parse_mode=bm.ParseMode.HTML
+    )
+
+
+@bm.dp.message(bm.Command("newvideo"))
+async def newvideo_cmd(m: bm.Message, state: bm.FSMContext) -> None:
+    """§11: кампания из видео без загрузки файла — сразу спрашиваем ссылку на YouTube."""
+    await state.clear()
+    await state.set_state(bm.VideoWizard.awaiting_link)
+    await m.answer(
+        bm.i18n.t("video_received"), reply_markup=bm.nav_kb(), parse_mode=bm.ParseMode.HTML
+    )
+
+
+@bm.dp.message(bm.VideoWizard.awaiting_link)
+async def video_link(m: bm.Message, state: bm.FSMContext) -> None:
+    """Ссылка на YouTube (или 11-символьный id) → выбор типа кампании (Demand Gen / Video)."""
+    from ads.assets import parse_youtube_video_id
+
+    vid = parse_youtube_video_id(m.text or "")
+    if not vid:
+        await m.answer(
+            bm.i18n.t("video_bad_link"), reply_markup=bm.nav_kb(), parse_mode=bm.ParseMode.HTML
+        )
+        return  # остаёмся в состоянии — пользователь пришлёт ссылку ещё раз (или «✖ Отмена»)
+    await state.update_data(video_yt=vid)
+    await m.answer(
+        bm.i18n.t("video_pick_type", vid=vid),
+        reply_markup=bm.video_type_kb(),
+        parse_mode=bm.ParseMode.HTML,
+    )
+
+
+@bm.dp.callback_query(bm.VideoCB.filter(bm.F.action.in_({"dg", "video"})))
+async def video_pick_type(
+    cq: bm.CallbackQuery, callback_data: bm.VideoCB, state: bm.FSMContext
+) -> None:
+    """Тип выбран → просим бриф (тот же формат, что GDN: название | сайт | бюджет [| гео])."""
+    data = await state.get_data()
+    if not data.get("video_yt"):
+        await cq.answer(bm.i18n.t("video_session_stale"), show_alert=True)
+        await state.clear()
+        return
+    await state.update_data(video_kind=callback_data.action)
+    await state.set_state(bm.VideoWizard.awaiting_brief)
+    await cq.answer()
+    msg = bm._cq_msg(cq)
+    if msg is not None:
+        await msg.answer(
+            bm.i18n.t("video_ask_brief"), reply_markup=bm.nav_kb(), parse_mode=bm.ParseMode.HTML
+        )
+
+
+@bm.dp.message(bm.VideoWizard.awaiting_brief)
+async def video_brief(m: bm.Message, state: bm.FSMContext) -> None:
+    """Бриф → генерация текстов → (DG: шаг логотипа | Video: сразу confirm-гейт)."""
+    data = await state.get_data()
+    vid, kind = data.get("video_yt"), data.get("video_kind") or "dg"
+    if not vid:
+        await state.clear()
+        await m.answer(bm.i18n.t("video_session_stale"))
+        return
+    parsed = bm._parse_gdn_brief(m.text or "")  # тот же формат «название | url | бюджет [| гео]»
+    if parsed is None:
+        await m.answer(
+            bm.i18n.t("video_ask_brief"), reply_markup=bm.nav_kb(), parse_mode=bm.ParseMode.HTML
+        )
+        return
+    name, url, budget_units, geo_locations = parsed
+    await m.answer(bm.i18n.t("gdn_generating"))
+    try:
+        draft = await bm._generate_rsa(bm.CopyBrief(topic=name, n_headlines=5, n_descriptions=5))
+    except Exception as e:  # LLM/сеть
+        await state.clear()
+        await m.answer(bm.i18n.t("err_text_gen", err=bm.ux.err_text(e)))
+        return
+    # Video responsive: описания консервативно ≤70 (лимит КОДА, ads.mutations.VIDEO_DESCRIPTION_MAX);
+    # длинный заголовок = первое подходящее описание (как GDN), без дубля в descriptions.
+    from adcopy.validate import rsa_len
+
+    all_desc = draft.descriptions[:5]
+    if kind == "video":
+        all_desc = [d for d in all_desc if rsa_len(d) <= bm.VIDEO_DESCRIPTION_MAX]
+    if not draft.headlines or len(all_desc) < 2:
+        await state.clear()
+        await m.answer(bm.i18n.t("gdn_gen_empty"))
+        return
+    params = {
+        "campaign_name": name,
+        "youtube_video_id": vid,
+        "headlines": draft.headlines[:5],
+        "long_headline": draft.descriptions[0],  # ≤90 — валиден для обоих типов
+        "descriptions": all_desc[1:] if all_desc[0] == draft.descriptions[0] else all_desc,
+        "business_name": name[: bm.GDN_BUSINESS_NAME_MAX],
+        "final_url": url,
+        "budget_daily_micros": int(round(budget_units * 1_000_000)),
+        "geo_locations": geo_locations,
+    }
+    if not params["descriptions"]:  # после фильтра ≤70 могло не остаться описаний
+        await state.clear()
+        await m.answer(bm.i18n.t("gdn_gen_empty"))
+        return
+    await state.update_data(video_params=params)
+    if kind == "dg":  # DG: опциональный логотип (фото или «⏭ Пропустить»)
+        await state.set_state(bm.VideoWizard.awaiting_logo)
+        await m.answer(
+            bm.i18n.t("video_ask_logo"),
+            reply_markup=bm.video_logo_kb(),
+            parse_mode=bm.ParseMode.HTML,
+        )
+        return
+    await bm._video_mint_proposal(m, m.chat.id, state, logo_media_id=None)
+
+
+@bm.dp.callback_query(bm.VideoCB.filter(bm.F.action == "logo_skip"))
+async def video_logo_skip(
+    cq: bm.CallbackQuery, callback_data: bm.VideoCB, state: bm.FSMContext
+) -> None:
+    await cq.answer()
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        return
+    await bm._video_mint_proposal(msg, bm._cq_chat_id(cq), state, logo_media_id=None)
+
+
+@bm.dp.message(bm.GdnWizard.awaiting_brief)
+async def gdn_brief(m: bm.Message, state: bm.FSMContext) -> None:
+    data = await state.get_data()
+    media_id = data.get("gdn_media_id")
+    if not media_id:
+        await state.clear()
+        await m.answer(bm.i18n.t("gdn_session_stale"))
+        return
+    parsed = bm._parse_gdn_brief(m.text or "")
+    if parsed is None:
+        await m.answer(
+            bm.i18n.t("gdn_bad_brief"), reply_markup=bm.nav_kb(), parse_mode=bm.ParseMode.HTML
+        )
+        return  # остаёмся в состоянии — пользователь пришлёт бриф ещё раз (или «✖ Отмена»)
+    name, url, budget_units, geo_locations = parsed
+    await m.answer(bm.i18n.t("gdn_generating"))
+    try:
+        draft = await bm._generate_rsa(bm.CopyBrief(topic=name, n_headlines=5, n_descriptions=4))
+    except Exception as e:  # LLM/сеть
+        await bm._gdn_cleanup(state, media_id)
+        await m.answer(bm.i18n.t("err_text_gen", err=bm.ux.err_text(e)))
+        return
+    # Нужно ≥1 заголовка и ≥2 описаний: первое описание идёт в long_headline, остальные — в
+    # descriptions (иначе long_headline дублировал бы единственное описание).
+    if not draft.headlines or len(draft.descriptions) < 2:
+        await bm._gdn_cleanup(state, media_id)
+        await m.answer(bm.i18n.t("gdn_gen_empty"))
+        return
+    headlines = draft.headlines[:5]
+    all_desc = draft.descriptions[:5]
+    long_headline = all_desc[0]  # ≤90, уже провалидировано генератором
+    descriptions = all_desc[1:]  # ≥1 (len(all_desc) ≥ 2) — без дубля long_headline
+    business_name = name[: bm.GDN_BUSINESS_NAME_MAX]
+    budget_micros = int(round(budget_units * 1_000_000))
+    params = {
+        "campaign_name": name,
+        "headlines": headlines,
+        "long_headline": long_headline,
+        "descriptions": descriptions,
+        "business_name": business_name,
+        "final_url": url,
+        "budget_daily_micros": budget_micros,
+        "media_id": media_id,
+        "geo_locations": geo_locations,  # §11: опц. ГЕО (пусто ⇒ без гео)
+    }
+    try:  # defense-in-depth: схема ещё раз проверит длины/составы/URL/бюджет/media_id
+        bm.SCHEMAS["create_gdn_campaign"](**params)
+    except Exception as e:
+        await bm._gdn_cleanup(state, media_id)
+        await m.answer(bm.i18n.t("err_validate", err=e))
+        return
+    summary = bm.texts.fmt_gdn_proposal_summary(
+        name, url, budget_units, headlines, descriptions, business_name, geo_locations
+    )
+    p = bm.Proposal(
+        operation="create_gdn_campaign", summary=summary, params=params, chat_id=m.chat.id
+    )
+    await state.clear()
+    await bm._present_proposal(
+        m,
+        chat_id=m.chat.id,
+        operation="create_gdn_campaign",
+        params=params,
+        summary=summary,
+        cid=p.confirmation_id,
+    )
