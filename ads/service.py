@@ -25,17 +25,22 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
         "add_keywords",
         "remove_keywords",
         "add_negative_keywords",
+        "remove_negative_keywords",
         "pause_campaign",
         "resume_campaign",
+        "update_campaign",
         "pause_ad_group",
         "resume_ad_group",
         "set_geo_proximity",
         "set_geo_location",
         "set_bidding_strategy",
         "attach_audience",
+        "detach_audience",
         "create_rsa",
         "create_gdn_campaign",
         "create_search_campaign",
+        "create_demand_gen_campaign",
+        "create_video_campaign",
         "add_sitelinks",
         "add_callouts",
         "add_structured_snippets",
@@ -55,6 +60,7 @@ _DIFFABLE_OPS = frozenset(
         "update_bid",
         "pause_campaign",
         "resume_campaign",
+        "update_campaign",
         "pause_ad_group",
         "resume_ad_group",
     }
@@ -90,6 +96,11 @@ async def read_before(operation: str, params: dict) -> dict | None:
             if ref is None:
                 return None
             return {"kind": "status", "before_status": ref.status}
+        if operation == "update_campaign":
+            ref = await asyncio.to_thread(resolve.find_campaign_by_name, client, cid, name)
+            if ref is None:
+                return None
+            return {"kind": "name", "before_name": ref.name}
         if operation in ("pause_ad_group", "resume_ad_group"):
             ag = await asyncio.to_thread(
                 resolve.find_ad_group_by_name, client, cid, name, params.get("ad_group", "")
@@ -211,6 +222,21 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             ads_client=client,
         )
 
+    if op == "update_campaign":
+        ref = await asyncio.to_thread(
+            resolve.find_campaign_by_name, client, customer_id, params["campaign"]
+        )
+        if ref is None:
+            raise ValueError(f"кампания '{params['campaign']}' не найдена")
+        return await mutations.apply_update_campaign(
+            customer_id=customer_id,
+            campaign_id=ref.id,
+            new_name=params["new_name"],
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
     if op in ("pause_ad_group", "resume_ad_group"):
         # Статус живёт на ad_group → резолвим конкретную группу по имени ВНУТРИ кампании.
         ag = await asyncio.to_thread(
@@ -315,6 +341,23 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             ads_client=client,
         )
 
+    if op == "remove_negative_keywords":
+        # Симметрично add_negative_keywords: снимаем минус-слова кампании по тексту+типу.
+        ref = await asyncio.to_thread(
+            resolve.find_campaign_by_name, client, customer_id, params["campaign"]
+        )
+        if ref is None:
+            raise ValueError(f"кампания '{params['campaign']}' не найдена")
+        return await mutations.apply_remove_negative_keywords(
+            customer_id=customer_id,
+            campaign_id=ref.id,
+            keywords=params["keywords"],
+            match_type=params["match_type"],
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
     if op == "set_geo_proximity":
         ref = await asyncio.to_thread(
             resolve.find_campaign_by_name, client, customer_id, params["campaign"]
@@ -394,6 +437,9 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
                 business_name=params["business_name"],
                 final_url=params["final_url"],
                 budget_daily_micros=params["budget_daily_micros"],
+                geo_locations=params.get("geo_locations") or [],  # §11: опц. ГЕО
+                geo_country_code=params.get("geo_country_code", "UA"),
+                geo_locale=params.get("geo_locale", "ru"),
                 confirmation_id=confirmation_id,
                 confirm_store=store,
                 ads_client=client,
@@ -402,6 +448,59 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             # успех или сбой — временные файлы чистим (тоже в потоке: .unlink() — диск-I/O)
             await asyncio.to_thread(clear_pending_media, params["media_id"])
 
+    if op == "create_demand_gen_campaign":
+        # §11: Demand Gen из YouTube-видео. Логотип (опц.) — во временном хранилище по
+        # logo_media_id (бинарь НЕ в proposal.params/логах); квадратный кадр — вторым элементом.
+        from ads.assets import clear_pending_media, load_pending_media
+
+        logo_mid = params.get("logo_media_id")
+        logo_bytes = None
+        if logo_mid:
+            _, logo_bytes = await asyncio.to_thread(load_pending_media, logo_mid)
+        try:
+            return await mutations.apply_create_demand_gen_campaign(
+                customer_id=customer_id,
+                campaign_name=params["campaign_name"],
+                youtube_video_id=params["youtube_video_id"],
+                headlines=params["headlines"],
+                long_headline=params["long_headline"],
+                descriptions=params["descriptions"],
+                business_name=params["business_name"],
+                final_url=params["final_url"],
+                budget_daily_micros=params["budget_daily_micros"],
+                logo_bytes=logo_bytes,
+                goal=params.get("goal", "clicks"),
+                geo_locations=params.get("geo_locations") or [],
+                geo_country_code=params.get("geo_country_code", "UA"),
+                geo_locale=params.get("geo_locale", "ru"),
+                confirmation_id=confirmation_id,
+                confirm_store=store,
+                ads_client=client,
+            )
+        finally:
+            if logo_mid:  # успех или сбой — временный логотип чистим
+                await asyncio.to_thread(clear_pending_media, logo_mid)
+
+    if op == "create_video_campaign":
+        # §11: Video-кампания (YouTube). Видео уже на YouTube — временных файлов нет.
+        return await mutations.apply_create_video_campaign(
+            customer_id=customer_id,
+            campaign_name=params["campaign_name"],
+            youtube_video_id=params["youtube_video_id"],
+            headlines=params["headlines"],
+            long_headline=params["long_headline"],
+            descriptions=params["descriptions"],
+            business_name=params["business_name"],
+            final_url=params["final_url"],
+            budget_daily_micros=params["budget_daily_micros"],
+            geo_locations=params.get("geo_locations") or [],
+            geo_country_code=params.get("geo_country_code", "UA"),
+            geo_locale=params.get("geo_locale", "ru"),
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
     if op == "attach_audience":
         ref = await asyncio.to_thread(
             resolve.find_campaign_by_name, client, customer_id, params["campaign"]
@@ -409,6 +508,22 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
         if ref is None:
             raise ValueError(f"кампания '{params['campaign']}' не найдена")
         return await mutations.apply_attach_audience(
+            customer_id=customer_id,
+            campaign_id=ref.id,
+            audience_resource_names=params["audience_resource_names"],
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
+    if op == "detach_audience":
+        # Симметрично attach_audience: снимаем ранее прикреплённые аудитории с кампании.
+        ref = await asyncio.to_thread(
+            resolve.find_campaign_by_name, client, customer_id, params["campaign"]
+        )
+        if ref is None:
+            raise ValueError(f"кампания '{params['campaign']}' не найдена")
+        return await mutations.apply_detach_audience(
             customer_id=customer_id,
             campaign_id=ref.id,
             audience_resource_names=params["audience_resource_names"],
@@ -554,6 +669,7 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
                 budget_daily_micros=params["budget_daily_micros"],
                 keywords=params.get("keywords"),
                 match_type=params.get("match_type", "phrase"),
+                keyword_match_types=params.get("keyword_match_types") or None,  # §19.4.1: mixed
                 cpc_bid_micros=params.get("cpc_bid_micros", 500_000),
                 geo_locations=params.get("geo_locations") or None,
                 geo_country_code=params.get("geo_country_code", "UA"),
@@ -566,6 +682,10 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
                 asset_specs=params.get("asset_specs") or None,
                 existing_asset_links=params.get("existing_asset_links") or None,
                 image_specs=image_specs or None,
+                networks=params.get("networks"),  # §19.3: сети/расписание/даты
+                ad_schedule_blocks=params.get("ad_schedule_blocks") or None,
+                start_date=params.get("start_date"),
+                end_date=params.get("end_date"),
                 confirmation_id=confirmation_id,
                 confirm_store=store,
                 ads_client=client,

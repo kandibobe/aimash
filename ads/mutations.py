@@ -155,6 +155,33 @@ async def apply_resume_campaign(
     return result
 
 
+# ── Переименование кампании (§3 «изменение» кампании) ────────────────────────────
+# Единственная правка уровня campaign, не связанная с деньгами/статусом/стратегией: имя.
+# НЕ денежная операция → user_initiated не требуется (как pause/resume). Оба гейта обязательны.
+async def apply_update_campaign(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    new_name: str,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    ensure_allowed(customer_id)
+    # Валидация В КОДЕ (не доверять модели) — ДО claim, чтобы плохой ввод не «съел» черновик.
+    clean = (new_name or "").strip()
+    if not clean:
+        raise ValueError("новое имя кампании не может быть пустым")
+    if len(clean) > 255:  # потолок Google Ads на имя кампании
+        raise ValueError("имя кампании слишком длинное (>255 символов)")
+    await _require_confirmation(confirm_store, confirmation_id, "update_campaign")
+    result = await run_ads_call(
+        _update_campaign_name_via_sdk, ads_client, customer_id, campaign_id, clean
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
 # ── Пауза/возобновление ГРУППЫ объявлений (§16 AdGroupService) ───────────────────
 # Зеркало pause/resume кампании, но статус живёт на ad_group. Деньги НЕ трогаются →
 # user_initiated не требуется (как и для паузы кампании). Оба гейта обязательны.
@@ -267,6 +294,28 @@ async def apply_add_negative_keywords(
     await _require_confirmation(confirm_store, confirmation_id, "add_negative_keywords")
     result = await run_ads_call(
         _add_negative_keywords_via_sdk, ads_client, customer_id, campaign_id, clean, match_type
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+# ── Удаление минус-слов (симметрично add: по тексту+типу на уровне кампании) ──────
+# НЕ деньги → user_initiated не требуется (как add). Оба гейта обязательны.
+async def apply_remove_negative_keywords(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    keywords: list[str],
+    match_type: str,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    ensure_allowed(customer_id)
+    clean = normalize_keywords(keywords)  # форму/дубли считает КОД — ДО claim
+    await _require_confirmation(confirm_store, confirmation_id, "remove_negative_keywords")
+    result = await run_ads_call(
+        _remove_negative_keywords_via_sdk, ads_client, customer_id, campaign_id, clean, match_type
     )
     await confirm_store.finalize(confirmation_id, result=result)
     return result
@@ -396,7 +445,7 @@ async def apply_attach_audience(
 def _attach_audience_via_sdk(client, customer_id, campaign_id, audience_resource_names) -> dict:
     """Прикрепить аудитории к кампании (campaign_criterion). user_list-ресурс → criterion.user_list,
     audience-ресурс → criterion.audience (тип определяем по сегменту resource_name). Один атомарный
-    mutate из create-операций (как add_keywords). Снятие аудиторий — отдельный remove-флоу."""
+    mutate из create-операций (как add_keywords). Снятие аудиторий — apply_detach_audience."""
     cmp_svc = client.get_service("CampaignService")
     svc = client.get_service("CampaignCriterionService")
     campaign_rn = cmp_svc.campaign_path(str(customer_id), str(campaign_id))
@@ -415,6 +464,76 @@ def _attach_audience_via_sdk(client, customer_id, campaign_id, audience_resource
         "campaign_id": str(campaign_id),
         "attached": [r.resource_name for r in resp.results],
         "count": len(resp.results),
+        "applied": True,
+    }
+
+
+# ── Открепление аудиторий от кампании (симметрично attach) ───────────────────────
+# НЕ деньги → user_initiated не требуется (как attach). Оба гейта обязательны.
+async def apply_detach_audience(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    audience_resource_names: list[str],
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """Открепить ранее прикреплённые аудитории (user_list/audience) от кампании (§3). Обратная к
+    apply_attach_audience. resource_name'ы — те же, что у attach (из ads.read.list_audiences)."""
+    ensure_allowed(customer_id)  # гейт 1 — замок аккаунта
+    _validate_audience_rns(audience_resource_names)  # ДО claim
+    await _require_confirmation(confirm_store, confirmation_id, "detach_audience")  # гейт 2
+    result = await run_ads_call(
+        _detach_audience_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_id,
+        list(audience_resource_names),
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+def _detach_audience_via_sdk(client, customer_id, campaign_id, audience_resource_names) -> dict:
+    """Снять аудитории с кампании: campaign_criterion удаляется ПО resource_name (не по аудитории),
+    поэтому сначала GAQL-резолв прикреплённых USER_LIST/AUDIENCE-критериев кампании → сопоставляем с
+    запрошенными resource_name аудиторий, затем remove-операции. Идемпотентно: повтор снимет лишь
+    оставшиеся; чего не было прикреплено — вернём в not_found (без «тихого» молчания)."""
+    cmp_svc = client.get_service("CampaignService")
+    svc = client.get_service("CampaignCriterionService")
+    ga = client.get_service("GoogleAdsService")
+    campaign_rn = cmp_svc.campaign_path(str(customer_id), str(campaign_id))
+    wanted = {str(rn) for rn in audience_resource_names}
+    to_remove, found = [], set()
+    for row in ga.search(
+        customer_id=str(customer_id),
+        query=(
+            "SELECT campaign_criterion.resource_name, campaign_criterion.user_list.user_list, "
+            "campaign_criterion.audience.audience FROM campaign_criterion "
+            f"WHERE campaign_criterion.campaign = '{gaql_escape(campaign_rn)}' "
+            "AND campaign_criterion.type IN ('USER_LIST', 'AUDIENCE')"
+        ),
+    ):
+        aud = row.campaign_criterion.audience.audience or row.campaign_criterion.user_list.user_list
+        if str(aud) in wanted:
+            to_remove.append(row.campaign_criterion.resource_name)
+            found.add(str(aud))
+    detached = []
+    if to_remove:
+        ops = []
+        for rn in to_remove:
+            op = client.get_type("CampaignCriterionOperation")
+            op.remove = rn
+            ops.append(op)
+        resp = svc.mutate_campaign_criteria(customer_id=str(customer_id), operations=ops)
+        detached = [r.resource_name for r in resp.results]
+    return {
+        "customer_id": str(customer_id),
+        "campaign_id": str(campaign_id),
+        "detached": detached,
+        "count": len(detached),
+        "not_found": sorted(rn for rn in wanted if rn not in found),
         "applied": True,
     }
 
@@ -892,6 +1011,33 @@ def _set_campaign_status_via_sdk(client, customer_id: str, campaign_id: str, sta
     }
 
 
+def _update_campaign_name_via_sdk(
+    client, customer_id: str, campaign_id: str, new_name: str
+) -> dict:
+    """Переименование кампании через CampaignService (зеркало _set_campaign_status_via_sdk, но
+    меняется поле name). update_mask по изменённым полям op.update. Имя кампании в Google Ads
+    уникально в аккаунте → перехватываем DUPLICATE_CAMPAIGN_NAME понятным сообщением."""
+    svc = client.get_service("CampaignService")
+    op = client.get_type("CampaignOperation")
+    op.update.resource_name = svc.campaign_path(str(customer_id), str(campaign_id))
+    op.update.name = new_name
+    client.copy_from(op.update_mask, protobuf_helpers.field_mask(None, op.update._pb))
+    try:
+        svc.mutate_campaigns(customer_id=str(customer_id), operations=[op])
+    except GoogleAdsException as ex:
+        if "DUPLICATE_CAMPAIGN_NAME" in error_code_names(ex):
+            raise ValueError(
+                f"кампания с именем «{new_name}» уже существует в аккаунте — выбери другое имя"
+            ) from ex
+        raise
+    return {
+        "customer_id": customer_id,
+        "campaign_id": str(campaign_id),
+        "new_name": new_name,
+        "applied": True,
+    }
+
+
 def _set_ad_group_status_via_sdk(client, customer_id: str, ad_group_id: str, status) -> dict:
     """Статус ad_group через AdGroupService (зеркало _set_campaign_status_via_sdk). update_mask —
     только status (field_mask по изменённым полям op.update)."""
@@ -1095,6 +1241,55 @@ def _add_negative_keywords_via_sdk(
         "match_type": str(match_type),
         "resource_names": [r.resource_name for r in resp.results],
         "count": len(resp.results),
+        "applied": True,
+    }
+
+
+def _remove_negative_keywords_via_sdk(
+    client, customer_id: str, campaign_id: str, keywords: list, match_type: str
+) -> dict:
+    """Снять минус-слова кампании по тексту+типу (симметрично _remove_keywords_via_sdk, но на
+    campaign_criterion с negative=TRUE). criterion удаляется ПО resource_name → сначала GAQL-резолв
+    text→resource_name, тексты фильтруем в Python (casefold, без интерполяции в GAQL). Идемпотентно."""
+    cmp_svc = client.get_service("CampaignService")
+    svc = client.get_service("CampaignCriterionService")
+    ga = client.get_service("GoogleAdsService")
+    campaign_rn = cmp_svc.campaign_path(str(customer_id), str(campaign_id))
+    mt = str(match_type).upper()  # broad/phrase/exact → BROAD/PHRASE/EXACT
+    wanted = {str(k).casefold() for k in keywords}
+    to_remove, found = [], set()
+    for row in ga.search(
+        customer_id=str(customer_id),
+        query=(
+            "SELECT campaign_criterion.resource_name, campaign_criterion.keyword.text "
+            "FROM campaign_criterion "
+            f"WHERE campaign_criterion.campaign = '{gaql_escape(campaign_rn)}' "
+            # campaign-level KEYWORD criteria — это всегда минус-слова (позитивные живут на ad_group);
+            # negative = true оставляем как явный фильтр (Google-канон, lowercase-литерал GAQL).
+            "AND campaign_criterion.type = 'KEYWORD' AND campaign_criterion.negative = true "
+            f"AND campaign_criterion.keyword.match_type = '{mt}'"
+        ),
+    ):
+        text = row.campaign_criterion.keyword.text
+        if text.casefold() in wanted:
+            to_remove.append(row.campaign_criterion.resource_name)
+            found.add(text.casefold())
+    removed = []
+    if to_remove:
+        ops = []
+        for rn in to_remove:
+            op = client.get_type("CampaignCriterionOperation")
+            op.remove = rn
+            ops.append(op)
+        resp = svc.mutate_campaign_criteria(customer_id=str(customer_id), operations=ops)
+        removed = [r.resource_name for r in resp.results]
+    return {
+        "customer_id": str(customer_id),
+        "campaign_id": str(campaign_id),
+        "match_type": mt,
+        "removed": removed,
+        "count": len(removed),
+        "not_found": sorted(k for k in wanted if k not in found),
         "applied": True,
     }
 
@@ -1385,6 +1580,7 @@ async def apply_create_search_campaign(
     budget_daily_micros: int,
     keywords: list[str] | None = None,
     match_type: str = "phrase",
+    keyword_match_types: list[str] | None = None,
     cpc_bid_micros: int = 500_000,
     # §19 (необязательные, обратно совместимы — без них поведение прежнее):
     geo_locations: list[str] | None = None,
@@ -1398,6 +1594,10 @@ async def apply_create_search_campaign(
     asset_specs: list[dict] | None = None,
     existing_asset_links: list[dict] | None = None,
     image_specs: list[tuple[bytes, str]] | None = None,
+    networks: str | None = None,
+    ad_schedule_blocks: list[dict] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
     confirmation_id: str,
     confirm_store: ConfirmStore,
     ads_client: object,
@@ -1421,7 +1621,29 @@ async def apply_create_search_campaign(
         path2=path2,
         url_options=url_options,
     )
-    clean_kw = normalize_keywords(keywords) if keywords else []
+    # §19.4.1: per-keyword типы (смешанный список). Дедуп ПАРАМИ (текст первым-выигрывает вместе со
+    # своим типом) — обычный normalize_keywords дедупит только тексты и порвал бы склейку 1:1.
+    clean_kw: list[str] = []
+    clean_mts: list[str] | None = None
+    if keywords:
+        if keyword_match_types:
+            if len(keyword_match_types) != len(keywords):
+                raise ValueError(
+                    f"keyword_match_types ({len(keyword_match_types)}) не совпадает по длине с "
+                    f"keywords ({len(keywords)})"
+                )
+            seen: set[str] = set()
+            clean_mts = []
+            for k, kmt in zip(keywords, keyword_match_types):
+                t = assert_keyword_ok(k)
+                if t not in seen:
+                    seen.add(t)
+                    clean_kw.append(t)
+                    clean_mts.append(str(kmt))
+            if not clean_kw:
+                raise ValueError("список ключевых слов пуст после нормализации")
+        else:
+            clean_kw = normalize_keywords(keywords)
     proposal = await _require_confirmation(confirm_store, confirmation_id, "create_search_campaign")
     if not proposal.user_initiated:
         raise PermissionError("создание кампании должно быть прямой командой пользователя")
@@ -1436,6 +1658,7 @@ async def apply_create_search_campaign(
         budget_micros=int(budget_daily_micros),
         keywords=clean_kw,
         match_type=match_type,
+        keyword_match_types=clean_mts,
         cpc_bid_micros=int(cpc_bid_micros),
         geo_locations=geo_locations,
         geo_country_code=geo_country_code,
@@ -1445,6 +1668,10 @@ async def apply_create_search_campaign(
         path1=path1,
         path2=path2,
         url_options=url_options,
+        networks=networks,
+        ad_schedule_blocks=ad_schedule_blocks,
+        start_date=start_date,
+        end_date=end_date,
     )
     # Ассеты + изображения — ПОСЛЕ кампании (PAUSED/$0): сбой одного не роняет кампанию.
     campaign_id = (result.get("campaign") or "").rsplit("/", 1)[-1]
@@ -1558,6 +1785,7 @@ def _create_search_campaign_via_sdk(
     budget_micros: int,
     keywords: list[str],
     match_type: str,
+    keyword_match_types: list[str] | None = None,
     cpc_bid_micros: int,
     geo_locations: list[str] | None = None,
     geo_country_code: str = "UA",
@@ -1567,6 +1795,10 @@ def _create_search_campaign_via_sdk(
     path1: str | None = None,
     path2: str | None = None,
     url_options: dict | None = None,
+    networks: str | None = None,
+    ad_schedule_blocks: list[dict] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict:
     """Синхронная цепочка v24: budget → campaign(SEARCH,PAUSED,стратегия+URL-опции) → ad group(PAUSED)
     → RSA(PAUSED,+display path) → опц. ключи → опц. гео → опц. язык. Статусы PAUSED зашиты в КОДЕ → 0
@@ -1602,7 +1834,14 @@ def _create_search_campaign_via_sdk(
     c.network_settings.target_google_search = True
     c.network_settings.target_search_network = True
     c.network_settings.target_content_network = False
-    c.network_settings.target_partner_search_network = False
+    # §19.3: партнёрские сети — только по явному указанию менеджера (networks='search_partners').
+    c.network_settings.target_partner_search_network = networks == "search_partners"
+    # §19.3: даты запуска (ISO → YYYYMMDD как в официальных примерах). None ⇒ дефолты Google
+    # (старт сегодня, без даты конца).
+    if start_date:
+        c.start_date = str(start_date).replace("-", "")
+    if end_date:
+        c.end_date = str(end_date).replace("-", "")
     _apply_url_options_on_create(client, c, url_options)  # §19.8 tracking/suffix/custom params
     try:  # v24 может требовать декларацию EU-политической рекламы при создании
         c.contains_eu_political_advertising = (
@@ -1666,15 +1905,18 @@ def _create_search_campaign_via_sdk(
     if keywords:
         try:
             crit_svc = client.get_service("AdGroupCriterionService")
-            mt = getattr(client.enums.KeywordMatchTypeEnum, str(match_type).upper())
             enabled = client.enums.AdGroupCriterionStatusEnum.ENABLED
+            # §19.4.1: per-keyword типы (смешанный список) — 1:1 к keywords; иначе единый match_type.
+            per_kw = keyword_match_types if keyword_match_types else [match_type] * len(keywords)
             kops = []
-            for text in keywords:
+            for text, kmt in zip(keywords, per_kw):
                 kop = client.get_type("AdGroupCriterionOperation")
                 kop.create.ad_group = ad_group_rn
                 kop.create.status = enabled
                 kop.create.keyword.text = text
-                kop.create.keyword.match_type = mt
+                kop.create.keyword.match_type = getattr(
+                    client.enums.KeywordMatchTypeEnum, str(kmt).upper()
+                )
                 kops.append(kop)
             kw_created = len(
                 crit_svc.mutate_ad_group_criteria(customer_id=cid, operations=kops).results
@@ -1713,6 +1955,29 @@ def _create_search_campaign_via_sdk(
         except Exception:  # noqa: BLE001 — язык необязателен (по умолчанию все)
             lang_count = 0
 
+    # 8) §19.3: опц. расписание показов (ad_schedule criteria; [] ⇒ 24/7 — критерии не создаются).
+    # Best-effort как гео/язык: сбой НЕ роняет PAUSED-кампанию ($0), schedule=0 сигналит в result.
+    sched_count = 0
+    if ad_schedule_blocks:
+        try:
+            cc_svc = client.get_service("CampaignCriterionService")
+            sops = []
+            for b in ad_schedule_blocks:
+                sop = client.get_type("CampaignCriterionOperation")
+                sop.create.campaign = campaign_rn
+                sched = sop.create.ad_schedule
+                sched.day_of_week = getattr(client.enums.DayOfWeekEnum, str(b["day"]))
+                sched.start_hour = int(b["start_hour"])
+                sched.end_hour = int(b["end_hour"])
+                sched.start_minute = client.enums.MinuteOfHourEnum.ZERO
+                sched.end_minute = client.enums.MinuteOfHourEnum.ZERO
+                sops.append(sop)
+            sched_count = len(
+                cc_svc.mutate_campaign_criteria(customer_id=cid, operations=sops).results
+            )
+        except Exception:  # noqa: BLE001 — расписание необязательно (по умолчанию 24/7)
+            sched_count = 0
+
     result = {
         "customer_id": cid,
         "campaign_name": campaign_name,
@@ -1725,6 +1990,7 @@ def _create_search_campaign_via_sdk(
         "keywords": kw_created,
         "geo": geo_count,
         "languages": lang_count,
+        "ad_schedule": sched_count,  # §19.3: сколько блоков расписания привязано (0 = 24/7)
         "status": "PAUSED",
         "applied": True,
     }
@@ -1877,11 +2143,17 @@ async def apply_create_gdn_campaign(
     final_url: str,
     budget_daily_micros: int,
     cpc_bid_micros: int = 500_000,
+    geo_locations: list[str] | None = None,
+    geo_country_code: str = "UA",
+    geo_locale: str = "ru",
     confirmation_id: str,
     confirm_store: ConfirmStore,
     ads_client: object,
 ) -> dict:
     """Создать GDN-кампанию (Display) из фото за двойным гейтом. Все сущности — PAUSED (0 расхода).
+
+    §11: опц. ГЕО-таргетинг (geo_locations) — часть авто-формируемой структуры; резолв названий и
+    привязку делает КОД (reuse _set_geo_location_via_sdk). Пусто ⇒ без гео (как раньше).
 
     НЕ через run_ads_call: цепочка из 5 создающих вызовов НЕ идемпотентна (авто-ретрай породил бы
     дубли). От повторного исполнения защищает атомарный claim confirm-гейта; при сбое — record_failure,
@@ -1910,6 +2182,9 @@ async def apply_create_gdn_campaign(
         final_url=final_url,
         budget_micros=int(budget_daily_micros),
         cpc_bid_micros=int(cpc_bid_micros),
+        geo_locations=list(geo_locations or []),
+        geo_country_code=geo_country_code,
+        geo_locale=geo_locale,
     )
     await confirm_store.finalize(confirmation_id, result=result)
     return result
@@ -1929,10 +2204,17 @@ def _create_gdn_campaign_via_sdk(
     final_url: str,
     budget_micros: int,
     cpc_bid_micros: int,
+    geo_locations: list[str] | None = None,
+    geo_country_code: str = "UA",
+    geo_locale: str = "ru",
 ) -> dict:
     """Синхронная 5-шаговая цепочка v24 (сверено live): asset×2 → budget → campaign(DISPLAY,PAUSED)
-    → ad group(PAUSED) → responsive_display_ad(PAUSED). Статусы PAUSED зашиты в КОДЕ → 0 расхода.
-    Имя кампании — как у пользователя; бюджет/группа получают stamp-суффикс для уникальности."""
+    → [опц. ГЕО] → ad group(PAUSED) → responsive_display_ad(PAUSED). Статусы PAUSED зашиты в КОДЕ →
+    0 расхода. Имя кампании — как у пользователя; бюджет/группа получают stamp-суффикс.
+
+    §11 ГЕО: после создания кампании (перед группой) резолвим названия локаций → geoTargetConstant и
+    привязываем как campaign criteria через тот же живо-сверенный `_set_geo_location_via_sdk`. Сбой
+    гео НЕ роняет кампанию (best-effort, geo_count=0) — как в create_search_campaign."""
     from ads.assets import upload_image_asset
 
     cid = str(customer_id)
@@ -1990,6 +2272,23 @@ def _create_gdn_campaign_via_sdk(
             pass
         raise
 
+    # 3.5) §11 ГЕО (опц.): резолв названий → geoTargetConstant + привязка к кампании (reuse). Сбой
+    # гео не роняет кампанию (best-effort) — как в create_search_campaign.
+    geo_count = 0
+    if geo_locations:
+        try:
+            geo_res = _set_geo_location_via_sdk(
+                client,
+                cid,
+                campaign_rn.split("/")[-1],  # campaign_id из resource_name
+                list(geo_locations),
+                geo_country_code,
+                geo_locale,
+            )
+            geo_count = int(geo_res.get("count", 0))
+        except Exception:  # noqa: BLE001 — гео best-effort, кампания остаётся (PAUSED, 0 расхода)
+            geo_count = 0
+
     # 4) Группа объявлений (DISPLAY, PAUSED).
     ag_svc = client.get_service("AdGroupService")
     agop = client.get_type("AdGroupOperation")
@@ -2040,6 +2339,486 @@ def _create_gdn_campaign_via_sdk(
         "ad_group": ad_group_rn,
         "ad": ad_rn,
         "image_assets": [land_rn, sq_rn],
+        "headlines": len(headlines),
+        "descriptions": len(descriptions),
+        "geo_count": geo_count,  # §11: сколько локаций привязано (0 = без гео)
+        "status": "PAUSED",
+        "applied": True,
+    }
+
+
+# ── §11: кампании из видео — Demand Gen и Video (YouTube-видео + confirm-гейт) ─────
+# Лимиты Demand Gen video responsive ad: headline ≤40 (наш генератор даёт ≤30 — строже),
+# long headline/description ≤90, business name ≤25. Video responsive ad: headline ≤30,
+# long headline ≤90, description консервативно ≤70 (короче реальных лимитов ряда форматов —
+# перепроверить live по актуальной документации; кириллица=1 считает КОД).
+MEDIA_MAX_HEADLINES = 5
+MEDIA_MAX_DESCRIPTIONS = 5
+VIDEO_DESCRIPTION_MAX = 70
+
+
+def _validate_video_campaign_inputs(
+    headlines: list[str],
+    long_headline: str,
+    descriptions: list[str],
+    business_name: str,
+    final_url: str,
+    budget_daily_micros: int,
+    youtube_video_id: str,
+    *,
+    description_max: int = 90,
+) -> None:
+    """Полная валидация В КОДЕ — ДО claim (golden rule #4). Длины (кириллица=1), составы, URL,
+    бюджет и YouTube id считает/проверяет КОД, не модель."""
+    from ads.assets import parse_youtube_video_id
+
+    if not 1 <= len(headlines) <= MEDIA_MAX_HEADLINES:
+        raise ValueError(f"нужно 1–{MEDIA_MAX_HEADLINES} заголовков (передано {len(headlines)})")
+    if not 1 <= len(descriptions) <= MEDIA_MAX_DESCRIPTIONS:
+        raise ValueError(
+            f"нужно 1–{MEDIA_MAX_DESCRIPTIONS} описаний (передано {len(descriptions)})"
+        )
+    for h in headlines:
+        ok, n = _rsa_validate(h, "headline")  # ≤30, кириллица=1
+        if not ok:
+            raise ValueError(f"заголовок превышает лимит ({n}/30): «{h}»")
+    ok, n = _rsa_validate(long_headline, "description")  # длинный заголовок ≤90
+    if not ok:
+        raise ValueError(f"длинный заголовок превышает лимит ({n}/90)")
+    for d in descriptions:
+        ok, n = _rsa_validate(d, "description")  # ≤90 базово
+        if not ok or n > description_max:
+            raise ValueError(f"описание превышает лимит ({max(n, 0)}/{description_max}): «{d}»")
+    if not business_name or len(business_name) > GDN_BUSINESS_NAME_MAX:
+        raise ValueError(f"название бизнеса 1–{GDN_BUSINESS_NAME_MAX} символов")
+    if not final_url or not str(final_url).startswith(("http://", "https://")):
+        raise ValueError("нужен валидный final_url (http/https)")
+    if budget_daily_micros <= 0:
+        raise ValueError("дневной бюджет должен быть > 0")
+    if budget_daily_micros > MAX_AMOUNT_MICROS:
+        raise ValueError("дневной бюджет подозрительно большой — проверь команду")
+    if not parse_youtube_video_id(youtube_video_id):
+        raise ValueError("не распознан YouTube video id (ссылка YouTube или 11-символьный id)")
+
+
+async def apply_create_demand_gen_campaign(
+    *,
+    customer_id: str,
+    campaign_name: str,
+    youtube_video_id: str,
+    headlines: list[str],
+    long_headline: str,
+    descriptions: list[str],
+    business_name: str,
+    final_url: str,
+    budget_daily_micros: int,
+    logo_bytes: bytes | None = None,
+    goal: str = "clicks",
+    geo_locations: list[str] | None = None,
+    geo_country_code: str = "UA",
+    geo_locale: str = "ru",
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """§11: создать Demand Gen кампанию из YouTube-видео за двойным гейтом. Всё PAUSED (0 расхода).
+
+    Видео живёт на YouTube (примечание ТЗ §11) — API принимает только его id. goal: 'clicks' →
+    Maximize Clicks (работает без conversion tracking — как фикс §19.3), 'conversions' →
+    Maximize Conversions. Логотип (опц.) — квадратный image-ассет. ⚠️ SDK-цепочка собрана по
+    официальному примеру add_demand_gen_campaign.py (v24) — перед сдачей прогнать live smoke на
+    тест-аккаунте (scripts/live_smoke_test.py).
+
+    НЕ через run_ads_call: цепочка создающих вызовов НЕ идемпотентна. От повтора защищает атомарный
+    claim; при сбое — record_failure, осиротевшие PAUSED-сущности безвредны (0 расхода)."""
+    ensure_allowed(customer_id)  # гейт 1 — замок аккаунта
+    _validate_video_campaign_inputs(
+        headlines,
+        long_headline,
+        descriptions,
+        business_name,
+        final_url,
+        budget_daily_micros,
+        youtube_video_id,
+        description_max=90,  # Demand Gen: описания ≤90
+    )
+    if goal not in ("clicks", "conversions"):
+        raise ValueError("goal должен быть 'clicks' или 'conversions'")
+    proposal = await _require_confirmation(
+        confirm_store, confirmation_id, "create_demand_gen_campaign"
+    )
+    # Создание кампании — ТОЛЬКО прямой командой пользователя (как бюджет/GDN).
+    if not proposal.user_initiated:
+        raise PermissionError("создание кампании должно быть прямой командой пользователя")
+    result = await asyncio.to_thread(
+        _create_demand_gen_campaign_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_name=campaign_name,
+        youtube_video_id=youtube_video_id,
+        headlines=headlines,
+        long_headline=long_headline,
+        descriptions=descriptions,
+        business_name=business_name,
+        final_url=final_url,
+        budget_micros=int(budget_daily_micros),
+        logo_bytes=logo_bytes,
+        goal=goal,
+        geo_locations=list(geo_locations or []),
+        geo_country_code=geo_country_code,
+        geo_locale=geo_locale,
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+def _create_demand_gen_campaign_via_sdk(
+    client,
+    customer_id: str,
+    *,
+    campaign_name: str,
+    youtube_video_id: str,
+    headlines: list[str],
+    long_headline: str,
+    descriptions: list[str],
+    business_name: str,
+    final_url: str,
+    budget_micros: int,
+    logo_bytes: bytes | None,
+    goal: str,
+    geo_locations: list[str] | None = None,
+    geo_country_code: str = "UA",
+    geo_locale: str = "ru",
+) -> dict:
+    """Синхронная цепочка v24 (по официальному add_demand_gen_campaign.py; ⚠️ live-сверка перед
+    сдачей): yt-asset → [опц. logo-asset] → budget → campaign(DEMAND_GEN, PAUSED) → [опц. ГЕО] →
+    ad group(PAUSED) → demand_gen_video_responsive_ad(PAUSED). PAUSED зашит в КОДЕ → 0 расхода.
+    Сбой кампании → откат осиротевшего бюджета (как GDN)."""
+    from ads.assets import parse_youtube_video_id, upload_image_asset, upload_youtube_video_asset
+
+    cid = str(customer_id)
+    stamp = str(int(time.time()))
+    vid = parse_youtube_video_id(youtube_video_id) or ""
+
+    # 1) YouTube-видео-ассет (+ опц. логотип 1:1).
+    video_rn = upload_youtube_video_asset(client, cid, vid, f"{campaign_name}_video_{stamp}")
+    logo_rn = None
+    if logo_bytes:
+        logo_rn = upload_image_asset(client, cid, logo_bytes, f"{campaign_name}_logo_{stamp}")
+
+    # 2) Бюджет (DG требует НЕ-shared бюджет).
+    budget_svc = client.get_service("CampaignBudgetService")
+    bop = client.get_type("CampaignBudgetOperation")
+    bop.create.name = f"{campaign_name}_budget_{stamp}"
+    bop.create.amount_micros = int(budget_micros)
+    bop.create.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
+    bop.create.explicitly_shared = False
+    budget_rn = (
+        budget_svc.mutate_campaign_budgets(customer_id=cid, operations=[bop])
+        .results[0]
+        .resource_name
+    )
+
+    # 3) Кампания (DEMAND_GEN, PAUSED). Стратегия: clicks → Maximize Clicks (без conversion
+    # tracking, §19.3-фикс); conversions → Maximize Conversions. Пустые сообщения — copy_from
+    # (паттерн _set_bidding_strategy_via_sdk).
+    camp_svc = client.get_service("CampaignService")
+    cop = client.get_type("CampaignOperation")
+    c = cop.create
+    c.name = campaign_name
+    c.advertising_channel_type = client.enums.AdvertisingChannelTypeEnum.DEMAND_GEN
+    c.status = client.enums.CampaignStatusEnum.PAUSED  # код решает — не показывается до включения
+    c.campaign_budget = budget_rn
+    if goal == "conversions":
+        client.copy_from(c.maximize_conversions, client.get_type("MaximizeConversions"))
+    else:
+        client.copy_from(c.target_spend, client.get_type("TargetSpend"))
+    try:  # v24 может требовать декларацию EU-политической рекламы при создании
+        c.contains_eu_political_advertising = (
+            client.enums.EuPoliticalAdvertisingStatusEnum.DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
+        )
+    except Exception:  # noqa: BLE001 — поле опционально на части аккаунтов
+        pass
+    try:
+        campaign_rn = (
+            camp_svc.mutate_campaigns(customer_id=cid, operations=[cop]).results[0].resource_name
+        )
+    except Exception:
+        try:  # откат осиротевшего бюджета (как GDN), best-effort
+            dop = client.get_type("CampaignBudgetOperation")
+            dop.remove = budget_rn
+            budget_svc.mutate_campaign_budgets(customer_id=cid, operations=[dop])
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+
+    # 3.5) §11 ГЕО (опц., best-effort — как GDN/Search).
+    geo_count = 0
+    if geo_locations:
+        try:
+            geo_res = _set_geo_location_via_sdk(
+                client,
+                cid,
+                campaign_rn.split("/")[-1],
+                list(geo_locations),
+                geo_country_code,
+                geo_locale,
+            )
+            geo_count = int(geo_res.get("count", 0))
+        except Exception:  # noqa: BLE001
+            geo_count = 0
+
+    # 4) Группа объявлений (PAUSED; для DEMAND_GEN тип группы не задаётся — по примеру Google).
+    ag_svc = client.get_service("AdGroupService")
+    agop = client.get_type("AdGroupOperation")
+    ag = agop.create
+    ag.name = f"{campaign_name}_ag_{stamp}"
+    ag.campaign = campaign_rn
+    ag.status = client.enums.AdGroupStatusEnum.PAUSED
+    ad_group_rn = (
+        ag_svc.mutate_ad_groups(customer_id=cid, operations=[agop]).results[0].resource_name
+    )
+
+    # 5) Demand Gen video responsive ad (PAUSED).
+    ad_svc = client.get_service("AdGroupAdService")
+    adop = client.get_type("AdGroupAdOperation")
+    aga = adop.create
+    aga.ad_group = ad_group_rn
+    aga.status = client.enums.AdGroupAdStatusEnum.PAUSED
+    aga.ad.final_urls.append(str(final_url))
+    dg = aga.ad.demand_gen_video_responsive_ad
+
+    def _txt(text):
+        a = client.get_type("AdTextAsset")
+        a.text = text
+        return a
+
+    def _vid_asset(rn):
+        a = client.get_type("AdVideoAsset")
+        a.asset = rn
+        return a
+
+    for h in headlines:
+        dg.headlines.append(_txt(h))
+    dg.long_headlines.append(_txt(long_headline))
+    for d in descriptions:
+        dg.descriptions.append(_txt(d))
+    dg.videos.append(_vid_asset(video_rn))
+    dg.business_name.text = business_name
+    if logo_rn:
+        li = client.get_type("AdImageAsset")
+        li.asset = logo_rn
+        dg.logo_images.append(li)
+    ad_rn = ad_svc.mutate_ad_group_ads(customer_id=cid, operations=[adop]).results[0].resource_name
+
+    return {
+        "customer_id": cid,
+        "campaign_name": campaign_name,
+        "campaign": campaign_rn,
+        "budget": budget_rn,
+        "ad_group": ad_group_rn,
+        "ad": ad_rn,
+        "video_asset": video_rn,
+        "logo_asset": logo_rn,
+        "goal": goal,
+        "geo_count": geo_count,
+        "headlines": len(headlines),
+        "descriptions": len(descriptions),
+        "status": "PAUSED",
+        "applied": True,
+    }
+
+
+async def apply_create_video_campaign(
+    *,
+    customer_id: str,
+    campaign_name: str,
+    youtube_video_id: str,
+    headlines: list[str],
+    long_headline: str,
+    descriptions: list[str],
+    business_name: str,
+    final_url: str,
+    budget_daily_micros: int,
+    geo_locations: list[str] | None = None,
+    geo_country_code: str = "UA",
+    geo_locale: str = "ru",
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """§11: создать Video-кампанию (YouTube) из видео за двойным гейтом. Всё PAUSED (0 расхода).
+
+    Video responsive ad + target CPM (охват). Описания валидируются консервативно ≤70
+    (VIDEO_DESCRIPTION_MAX). ⚠️ SDK-цепочка требует live-сверки на тест-аккаунте перед сдачей.
+
+    НЕ через run_ads_call: цепочка создающих вызовов НЕ идемпотентна. От повтора защищает атомарный
+    claim; при сбое — record_failure, осиротевшие PAUSED-сущности безвредны (0 расхода)."""
+    ensure_allowed(customer_id)  # гейт 1 — замок аккаунта
+    _validate_video_campaign_inputs(
+        headlines,
+        long_headline,
+        descriptions,
+        business_name,
+        final_url,
+        budget_daily_micros,
+        youtube_video_id,
+        description_max=VIDEO_DESCRIPTION_MAX,  # Video: описания ≤70 (консервативно)
+    )
+    proposal = await _require_confirmation(confirm_store, confirmation_id, "create_video_campaign")
+    if not proposal.user_initiated:
+        raise PermissionError("создание кампании должно быть прямой командой пользователя")
+    result = await asyncio.to_thread(
+        _create_video_campaign_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_name=campaign_name,
+        youtube_video_id=youtube_video_id,
+        headlines=headlines,
+        long_headline=long_headline,
+        descriptions=descriptions,
+        business_name=business_name,
+        final_url=final_url,
+        budget_micros=int(budget_daily_micros),
+        geo_locations=list(geo_locations or []),
+        geo_country_code=geo_country_code,
+        geo_locale=geo_locale,
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+def _create_video_campaign_via_sdk(
+    client,
+    customer_id: str,
+    *,
+    campaign_name: str,
+    youtube_video_id: str,
+    headlines: list[str],
+    long_headline: str,
+    descriptions: list[str],
+    business_name: str,
+    final_url: str,
+    budget_micros: int,
+    geo_locations: list[str] | None = None,
+    geo_country_code: str = "UA",
+    geo_locale: str = "ru",
+) -> dict:
+    """Синхронная цепочка v24 (⚠️ live-сверка перед сдачей): yt-asset → budget →
+    campaign(VIDEO, PAUSED, target CPM) → [опц. ГЕО] → ad group(VIDEO_RESPONSIVE, PAUSED) →
+    video_responsive_ad(PAUSED). PAUSED зашит в КОДЕ → 0 расхода. Сбой кампании → откат бюджета."""
+    from ads.assets import parse_youtube_video_id, upload_youtube_video_asset
+
+    cid = str(customer_id)
+    stamp = str(int(time.time()))
+    vid = parse_youtube_video_id(youtube_video_id) or ""
+
+    # 1) YouTube-видео-ассет.
+    video_rn = upload_youtube_video_asset(client, cid, vid, f"{campaign_name}_video_{stamp}")
+
+    # 2) Бюджет.
+    budget_svc = client.get_service("CampaignBudgetService")
+    bop = client.get_type("CampaignBudgetOperation")
+    bop.create.name = f"{campaign_name}_budget_{stamp}"
+    bop.create.amount_micros = int(budget_micros)
+    bop.create.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
+    bop.create.explicitly_shared = False
+    budget_rn = (
+        budget_svc.mutate_campaign_budgets(customer_id=cid, operations=[bop])
+        .results[0]
+        .resource_name
+    )
+
+    # 3) Кампания (VIDEO, PAUSED, target CPM — охватная стратегия видеокампаний).
+    camp_svc = client.get_service("CampaignService")
+    cop = client.get_type("CampaignOperation")
+    c = cop.create
+    c.name = campaign_name
+    c.advertising_channel_type = client.enums.AdvertisingChannelTypeEnum.VIDEO
+    c.status = client.enums.CampaignStatusEnum.PAUSED
+    c.campaign_budget = budget_rn
+    client.copy_from(c.target_cpm, client.get_type("TargetCpm"))
+    try:
+        c.contains_eu_political_advertising = (
+            client.enums.EuPoliticalAdvertisingStatusEnum.DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        campaign_rn = (
+            camp_svc.mutate_campaigns(customer_id=cid, operations=[cop]).results[0].resource_name
+        )
+    except Exception:
+        try:  # откат осиротевшего бюджета, best-effort
+            dop = client.get_type("CampaignBudgetOperation")
+            dop.remove = budget_rn
+            budget_svc.mutate_campaign_budgets(customer_id=cid, operations=[dop])
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+
+    # 3.5) §11 ГЕО (опц., best-effort).
+    geo_count = 0
+    if geo_locations:
+        try:
+            geo_res = _set_geo_location_via_sdk(
+                client,
+                cid,
+                campaign_rn.split("/")[-1],
+                list(geo_locations),
+                geo_country_code,
+                geo_locale,
+            )
+            geo_count = int(geo_res.get("count", 0))
+        except Exception:  # noqa: BLE001
+            geo_count = 0
+
+    # 4) Группа объявлений (VIDEO_RESPONSIVE, PAUSED).
+    ag_svc = client.get_service("AdGroupService")
+    agop = client.get_type("AdGroupOperation")
+    ag = agop.create
+    ag.name = f"{campaign_name}_ag_{stamp}"
+    ag.campaign = campaign_rn
+    ag.status = client.enums.AdGroupStatusEnum.PAUSED
+    ag.type_ = client.enums.AdGroupTypeEnum.VIDEO_RESPONSIVE
+    ad_group_rn = (
+        ag_svc.mutate_ad_groups(customer_id=cid, operations=[agop]).results[0].resource_name
+    )
+
+    # 5) Video responsive ad (PAUSED).
+    ad_svc = client.get_service("AdGroupAdService")
+    adop = client.get_type("AdGroupAdOperation")
+    aga = adop.create
+    aga.ad_group = ad_group_rn
+    aga.status = client.enums.AdGroupAdStatusEnum.PAUSED
+    aga.ad.final_urls.append(str(final_url))
+    vr = aga.ad.video_responsive_ad
+
+    def _txt(text):
+        a = client.get_type("AdTextAsset")
+        a.text = text
+        return a
+
+    for h in headlines:
+        vr.headlines.append(_txt(h))
+    vr.long_headlines.append(_txt(long_headline))
+    for d in descriptions:
+        vr.descriptions.append(_txt(d))
+    va = client.get_type("AdVideoAsset")
+    va.asset = video_rn
+    vr.videos.append(va)
+    vr.business_name.text = business_name
+    ad_rn = ad_svc.mutate_ad_group_ads(customer_id=cid, operations=[adop]).results[0].resource_name
+
+    return {
+        "customer_id": cid,
+        "campaign_name": campaign_name,
+        "campaign": campaign_rn,
+        "budget": budget_rn,
+        "ad_group": ad_group_rn,
+        "ad": ad_rn,
+        "video_asset": video_rn,
+        "geo_count": geo_count,
         "headlines": len(headlines),
         "descriptions": len(descriptions),
         "status": "PAUSED",

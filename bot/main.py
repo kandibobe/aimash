@@ -52,7 +52,7 @@ from ads.assets import (
     save_pending_media,
 )
 from ads.client import DRAFT_ACCOUNT_ID, ensure_read_allowed
-from ads.mutations import GDN_BUSINESS_NAME_MAX
+from ads.mutations import GDN_BUSINESS_NAME_MAX, VIDEO_DESCRIPTION_MAX
 from ads.resolve import currency_mismatch, find_ad_groups
 from ads.service import execute_confirmed, read_before
 from clients import crawl_jobs, crawler
@@ -87,6 +87,7 @@ from bot.callbacks import (
     RsaCB,
     RsaPickCB,
     TemplateCB,
+    VideoCB,
 )
 from bot.keyboards import (
     BOT_COMMANDS,
@@ -99,6 +100,7 @@ from bot.keyboards import (
     BTN_CLIENTS_ALL,
     BTN_KEYWORDS_ALL,
     BTN_LANG_ALL,
+    BTN_MCC_ALL,
     BTN_MODEL_ALL,
     BTN_NEWCAMPAIGN_ALL,
     BTN_REPORT_ALL,
@@ -116,6 +118,7 @@ from bot.keyboards import (
     cc_asset_types_kb,
     cc_assets_kb,
     cc_final_kb,
+    cc_kw_confirm_kb,
     cc_kw_kb,
     cc_resume_kb,
     cc_settings_kb,
@@ -133,6 +136,8 @@ from bot.keyboards import (
     nav_kb,
     recent_kb,
     templates_kb,
+    video_logo_kb,
+    video_type_kb,
     period_kb,
     rsa_item_kb,
     rsa_overview_kb,
@@ -258,6 +263,14 @@ class GdnWizard(StatesGroup):
     awaiting_brief = State()  # ждём «название | url | бюджет» после приёма фото
 
 
+class VideoWizard(StatesGroup):
+    """§11: кампания из видео (Demand Gen / Video). Видео живёт на YouTube — визард просит ссылку."""
+
+    awaiting_link = State()  # ждём ссылку на YouTube (или 11-символьный id)
+    awaiting_brief = State()  # ждём «название | url сайта | бюджет [| гео]» после выбора типа
+    awaiting_logo = State()  # Demand Gen: ждём фото логотипа или «⏭ Пропустить»
+
+
 class ModelWizard(StatesGroup):
     awaiting_model = State()  # ждём свой slug модели OpenRouter для /model
 
@@ -293,6 +306,7 @@ class CreateCampaignWizard(StatesGroup):
     ad_url = State()  # Этап 3: ждём Final URL (далее курация RSA — callback-driven)
     images = State()  # Этап 4: ждём фото или «Пропустить»
     assets = State()  # Этап 5: выбор «текущие/добавить/пропустить» (callback-driven)
+    asset_logo = State()  # Этап 5: выбран Business logo — ждём фото логотипа (1:1)
     url_options = State()  # Этап 6: ждём «tracking | suffix» или «Пропустить»
     final = State()  # Этап 7: сводка; ждём правку-текст или ✅ Создать / 🚀 Запустить
 
@@ -432,23 +446,23 @@ async def _send_help(message: Message) -> None:
 
 
 async def _send_status(message: Message) -> None:
-    """Быстрая сводка по аккаунту за 30 дн. (read-only, без подтверждения)."""
+    """Быстрая сводка по аккаунту за 30 дн. (read-only, без подтверждения). Аккаунт — активный
+    аккаунт ЧТЕНИЯ чата (§6 /account), по умолчанию Draft."""
+    acct = await _active_read_account(message.chat.id)
     try:
         from ads.client import build_client
         from ads.read import account_stats
 
-        client = build_client()
+        client = build_client(acct)
         async with ux.typing_action(message):  # «печатает…» пока идёт чтение SDK
-            st = await run_ads_read_call(
-                account_stats, client, DRAFT_ACCOUNT_ID, 30, label="account_stats"
-            )
-            cur = await _read_currency(client)  # §9: валюта в денежных строках
+            st = await run_ads_read_call(account_stats, client, acct, 30, label="account_stats")
+            cur = await _read_currency(client, acct)  # §9: валюта в денежных строках
     except Exception as e:  # сеть/доступ/SDK
         await message.answer(i18n.t("err_stats", err=ux.err_text(e)))
         return
     await message.answer(
         texts.fmt_stats(
-            DRAFT_ACCOUNT_ID,
+            acct,
             30,
             {
                 "impressions": st.impressions,
@@ -713,6 +727,56 @@ def _valid_model_slug(s: str) -> str | None:
     return s
 
 
+async def _load_selected_account(chat_id: int) -> str | None:
+    """§6 /account: выбранный аккаунт ЧТЕНИЯ этого чата (user_settings.selected_customer_id).
+    None ⇒ Draft (прежнее поведение)."""
+    from sqlalchemy import select
+
+    from db.models import UserSettings
+    from db.session import Session
+
+    async with Session() as s:
+        row = (
+            await s.execute(select(UserSettings).where(UserSettings.chat_id == chat_id))
+        ).scalar_one_or_none()
+        return row.selected_customer_id if row else None
+
+
+async def _save_selected_account(chat_id: int, customer_id: str | None) -> None:
+    """Upsert выбранного аккаунта ЧТЕНИЯ чата (None = сброс на Draft). Переживает рестарт."""
+    from sqlalchemy import select
+
+    from db.models import UserSettings
+    from db.session import Session
+
+    async with Session() as s:
+        row = (
+            await s.execute(select(UserSettings).where(UserSettings.chat_id == chat_id))
+        ).scalar_one_or_none()
+        if row is None:
+            s.add(UserSettings(chat_id=chat_id, selected_customer_id=customer_id))
+        else:
+            row.selected_customer_id = customer_id
+        await s.commit()
+
+
+async def _active_read_account(chat_id: int) -> str:
+    """Активный аккаунт ЧТЕНИЯ чата для /status /report /export /sheets: выбранный через /account
+    (если он всё ещё разрешён на чтение — fail-closed при сужении списков) или Draft. МУТАЦИИ этим
+    НЕ затрагиваются — они всегда на Draft (ensure_allowed, golden rule 9)."""
+    try:
+        cid = await _load_selected_account(chat_id)
+    except Exception:  # noqa: BLE001 — сбой чтения настройки не должен ломать отчёты
+        return DRAFT_ACCOUNT_ID
+    if not cid:
+        return DRAFT_ACCOUNT_ID
+    try:
+        ensure_read_allowed(cid)
+    except PermissionError:  # список чтения сузился → честно откатываемся на Draft
+        return DRAFT_ACCOUNT_ID
+    return cid
+
+
 async def _load_model_override() -> str | None:
     """Сохранённая активная модель из глобальной строки user_settings (None — дефолты по ролям)."""
     from sqlalchemy import select
@@ -846,14 +910,15 @@ async def resume_(m: Message, command: CommandObject) -> None:
     await _slash_mutate(m, command, "resume_campaign")
 
 
-async def _read_currency(client) -> str:
+async def _read_currency(client, customer_id: str | None = None) -> str:
     """Код валюты аккаунта (§9) для денежных метрик. '' при сбое чтения — отчёт/статистику
-    показываем и без валюты (не блокируем). Кэш — в ads.read.account_currency."""
+    показываем и без валюты (не блокируем). Кэш — в ads.read.account_currency.
+    customer_id — активный аккаунт чтения (§6 /account); None ⇒ Draft (прежнее поведение)."""
     from ads.read import account_currency
 
     try:
         return await run_ads_read_call(
-            account_currency, client, DRAFT_ACCOUNT_ID, label="account_currency"
+            account_currency, client, customer_id or DRAFT_ACCOUNT_ID, label="account_currency"
         )
     except Exception:  # noqa: BLE001 — валюта необязательна, не роняем отчёт
         return ""
@@ -888,15 +953,16 @@ async def report_(m: Message, command: CommandObject) -> None:
     except ValueError:
         await m.answer(i18n.t("err_period"))
         return
+    acct = await _active_read_account(m.chat.id)  # §6 /account: аккаунт ЧТЕНИЯ чата
     try:
         from ads.client import build_client
         from reports.service import build_account_report_async, summary_text
 
-        client = build_client()
+        client = build_client(acct)
         async with ux.typing_action(m):
             # build_account_report_async параллелит 9 GAQL-запросов под семафором (≈2.5-3x быстрее)
-            report = await build_account_report_async(client, DRAFT_ACCOUNT_ID, period)
-            report.currency = await _read_currency(client)  # §9: валюта денежных метрик
+            report = await build_account_report_async(client, acct, period)
+            report.currency = await _read_currency(client, acct)  # §9: валюта денежных метрик
     except Exception as e:  # сеть/доступ/SDK
         await m.answer(i18n.t("err_report", err=ux.err_text(e)))
         return
@@ -910,19 +976,20 @@ async def _run_export(m: Message, period) -> None:
 
     await m.answer(i18n.t("report_preparing_xlsx"))
     path: str | None = None
+    acct = await _active_read_account(m.chat.id)  # §6 /account: аккаунт ЧТЕНИЯ чата
     try:
         from ads.client import build_client
         from reports.service import build_account_report_async
         from reports.xlsx import write_report_xlsx
 
-        client = build_client()
+        client = build_client(acct)
         async with ux.upload_action(m):  # «отправляет документ…» пока строим .xlsx
-            report = await build_account_report_async(client, DRAFT_ACCOUNT_ID, period)
-            report.currency = await _read_currency(client)  # §9: валюта денежных метрик
+            report = await build_account_report_async(client, acct, period)
+            report.currency = await _read_currency(client, acct)  # §9: валюта денежных метрик
             fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_report_")
             os.close(fd)
             await asyncio.to_thread(write_report_xlsx, report, path)
-        fname = f"aimash_{DRAFT_ACCOUNT_ID}_{period.date_from}_{period.date_to}.xlsx"
+        fname = f"aimash_{acct}_{period.date_from}_{period.date_to}.xlsx"
         await m.answer_document(FSInputFile(path, filename=fname))
     except Exception as e:  # сеть/доступ/SDK/openpyxl
         await m.answer(i18n.t("err_report_make", err=ux.err_text(e)))
@@ -948,15 +1015,16 @@ async def export_(m: Message, command: CommandObject) -> None:
 async def _run_sheets(m: Message, period) -> None:
     """Выгрузить отчёт за период в Google Sheets, прислать ссылку. Read-only. Общий код."""
     await m.answer(i18n.t("report_preparing_sheets"))
+    acct = await _active_read_account(m.chat.id)  # §6 /account: аккаунт ЧТЕНИЯ чата
     try:
         from ads.client import build_client
         from reports.service import build_account_report_async
         from reports.sheets import publish_report_to_sheets
 
-        client = build_client()
+        client = build_client(acct)
         async with ux.typing_action(m):
-            report = await build_account_report_async(client, DRAFT_ACCOUNT_ID, period)
-            report.currency = await _read_currency(client)  # §9: валюта денежных метрик
+            report = await build_account_report_async(client, acct, period)
+            report.currency = await _read_currency(client, acct)  # §9: валюта денежных метрик
             url = await asyncio.to_thread(publish_report_to_sheets, report)
     except Exception as e:  # сеть/доступ/SDK/нет OAuth-scope Sheets
         await m.answer(i18n.t("err_sheets", err=ux.err_text(e)))
@@ -973,6 +1041,128 @@ async def sheets_(m: Message, command: CommandObject) -> None:
         await m.answer(i18n.t("err_period"))
         return
     await _run_sheets(m, period)
+
+
+def _mcc_period_factory(arg: str | None):
+    """§8: фабрика Period в таймзоне дочернего аккаунта — из ТОГО ЖЕ пресета, что запросил оператор
+    (7/30/90/MTD), но с локальным «сегодня». Для произвольных ISO-дат TZ-нормализация не применяется
+    (абсолютные даты) → None (build_mcc_summary_async откатится на общий period)."""
+    from reports.period import from_preset
+
+    s = (arg or "30").strip()
+
+    def factory(tz_name: str):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        try:
+            today = datetime.now(ZoneInfo(tz_name)).date()
+        except Exception:  # noqa: BLE001 — неизвестная TZ → host-дата (from_preset today=None)
+            today = None
+        try:
+            return from_preset(s, today=today)
+        except ValueError:  # произвольный диапазон / не пресет → без TZ-нормализации
+            return None
+
+    return factory
+
+
+async def _send_mcc(m: Message, arg: str | None) -> None:
+    """§8: сводный отчёт по ВСЕМ дочерним аккаунтам MCC (подытоги по валютам без FX; окно каждого
+    дочернего — в его таймзоне). READ-only. Аккаунты берутся из обхода MCC (discover_read_children)
+    ∪ read-list; мутации не затрагиваются (свой узкий замок)."""
+    try:
+        period = _period_from_arg(arg)
+    except ValueError:
+        await m.answer(i18n.t("err_period"))
+        return
+    manager_id = normalize_customer_id(settings.google_ads_login_customer_id)
+    if not manager_id:
+        await m.answer(i18n.t("mcc_no_manager"))
+        return
+    await m.answer(i18n.t("mcc_preparing"))
+    try:
+        from ads.client import build_client
+        from ads.read import account_timezone
+        from reports.mcc import build_mcc_summary_async
+        from reports.service import summary_text_mcc
+
+        client = build_client(manager_id)
+        async with ux.typing_action(m):
+            summary = await build_mcc_summary_async(
+                client,
+                manager_id,
+                period,
+                tz_of=account_timezone,
+                period_for=_mcc_period_factory(arg),
+            )
+    except Exception as e:  # сеть/доступ/SDK/замок обхода MCC
+        await m.answer(i18n.t("err_mcc", err=ux.err_text(e)))
+        return
+    await m.answer(summary_text_mcc(summary))
+
+
+@dp.message(Command("mcc"))
+async def mcc_(m: Message, command: CommandObject) -> None:
+    """ТЗ §8: сводка по всем дочерним аккаунтам MCC за период (7/30/90/MTD). Read-only."""
+    await _send_mcc(m, command.args)
+
+
+@dp.message(Command("account"))
+async def account_cmd(m: Message, command: CommandObject) -> None:
+    """ТЗ §6 /account <id>: выбрать аккаунт ЧТЕНИЯ для /status /report /export /sheets (per-chat,
+    переживает рестарт). Гейт — ensure_read_allowed (fail-closed). МУТАЦИИ не затрагиваются:
+    они всегда идут на Draft (ensure_allowed, golden rule 9)."""
+    arg = (command.args or "").strip()
+    if not arg:
+        cur = await _active_read_account(m.chat.id)
+        draft_mark = " (Draft)" if cur == DRAFT_ACCOUNT_ID else ""
+        await m.answer(
+            i18n.t("account_current", cid=cur, draft=draft_mark), parse_mode=ParseMode.HTML
+        )
+        return
+    if arg.lower() in ("reset", "draft", "сброс"):
+        await _save_selected_account(m.chat.id, None)
+        await m.answer(i18n.t("account_reset"))
+        return
+    cid = normalize_customer_id(arg)
+    try:
+        ensure_read_allowed(cid)
+    except PermissionError:
+        await m.answer(i18n.t("account_denied", cid=texts.esc(cid)), parse_mode=ParseMode.HTML)
+        return
+    await _save_selected_account(m.chat.id, cid)
+    await m.answer(i18n.t("account_set", cid=cid), parse_mode=ParseMode.HTML)
+
+
+@dp.message(Command("quota"))
+async def quota_cmd(m: Message) -> None:
+    """§3/§15: дневная квота операций Google Ads API (Basic 15 000/сутки) — срез счётчика.
+    Read-only; сам гейт (warn 80% / блок мутаций 95%) живёт в core.quota."""
+    from core import quota as q
+
+    snap = q.snapshot()
+    lim, used = snap["limit"], snap["used"]
+    pct = f"{snap['pct'] * 100:.0f}%"
+    per = "\n".join(
+        f"  • <code>{texts.esc(str(a))}</code>: {n}"
+        for a, n in sorted(snap["by_account"].items(), key=lambda kv: -kv[1])[:10]
+    )
+    if i18n.current_lang() == "en":
+        body = (
+            f"📊 <b>Google Ads API daily quota</b> (window {snap['window_hours']}h)\n"
+            f"Used: {used} / {lim if lim > 0 else '∞'} ({pct})\n"
+            "Mutations are blocked at 95% (reads are never blocked)."
+        )
+    else:
+        body = (
+            f"📊 <b>Дневная квота Google Ads API</b> (окно {snap['window_hours']}ч)\n"
+            f"Израсходовано: {used} / {lim if lim > 0 else '∞'} ({pct})\n"
+            "Мутации блокируются на 95% (чтение не блокируется)."
+        )
+    if per:
+        body += ("\nBy account:\n" if i18n.current_lang() == "en" else "\nПо аккаунтам:\n") + per
+    await m.answer(body, parse_mode=ParseMode.HTML)
 
 
 # ── Reply-кнопки (ОБЯЗАТЕЛЬНО до общего F.text-хендлера — иначе перехватит on_text) ─
@@ -1016,6 +1206,12 @@ async def btn_export(m: Message) -> None:
 @dp.message(F.text.in_(BTN_SHEETS_ALL))
 async def btn_sheets(m: Message) -> None:
     await m.answer(i18n.t("period_pick_sheets"), reply_markup=period_kb("sheets"))
+
+
+@dp.message(F.text.in_(BTN_MCC_ALL))
+async def btn_mcc(m: Message) -> None:
+    """§8: кнопка «MCC (все аккаунты)» = /mcc c дефолтным периодом (30 дн.)."""
+    await _send_mcc(m, None)
 
 
 @dp.message(F.text.in_(BTN_KEYWORDS_ALL))
@@ -1312,14 +1508,17 @@ async def _kw_run(
         rank_clusters,
         suggest_negative_keywords,
     )
+    from keywords.filter import filter_relevance
 
     idea_texts = [i.text for i in ideas]
     src = ", ".join(seeds) or (url or "")
-    # §7: кластеризация по интенту и предложение минус-слов независимы → параллельно. Обе advisory
-    # с внутренним fallback; return_exceptions страхует от пробрасывания (фича не падает).
-    clusters_res, negatives = await asyncio.gather(
+    # §7: кластеризация по интенту, предложение минус-слов и AI-релевантность (§19.4.2) независимы →
+    # параллельно (без наценки латентности к 2 уже идущим). Все advisory с внутренним fallback;
+    # return_exceptions страхует от пробрасывания (фича не падает). topic = сиды/URL пользователя.
+    clusters_res, negatives, relevance = await asyncio.gather(
         cluster_keywords(idea_texts, language),
         suggest_negative_keywords(src, idea_texts, language=language),
+        filter_relevance(texts=idea_texts, topic=src, language=language),
         return_exceptions=True,
     )
     clusters = (
@@ -1329,12 +1528,27 @@ async def _kw_run(
     )
     if not isinstance(negatives, list):
         negatives = []
+    if not isinstance(relevance, dict):  # fail-open: сбой релевантности → всё релевантно
+        relevance = {}
 
     by_text = {i.text: i.avg_monthly_searches for i in ideas}
+    by_idea = {i.text: i for i in ideas}  # §7: конкуренция/ставки/сезон для чат-таблицы
+    # §19.4.2: нерелевантные идеи (модель fail-open ⇒ отсутствующее = релевантно) НЕ теряем из
+    # таблицы/.xlsx (менеджер видит всё), но исключаем из набора «добавить в кампанию».
+    off_topic = {t for t in idea_texts if relevance.get(t, True) is False}
     clusters = rank_clusters(
         clusters, by_text
     )  # §7: приоритезация (объём × интент) — порядок показа
-    summary = texts.fmt_keywords_summary(clusters, by_text, len(ideas), src)
+    currency = await _read_currency(build_client())  # §9: валюта для диапазона ставок в таблице
+    summary = texts.fmt_keywords_summary(
+        clusters,
+        by_text,
+        len(ideas),
+        src,
+        by_idea=by_idea,
+        currency=currency,
+        irrelevant=len(off_topic),
+    )
     if (
         negatives
     ):  # §7 «предложение минус-слов» (advisory; добавление — отдельной командой за гейтом)
@@ -1345,8 +1559,13 @@ async def _kw_run(
             "\n<i>Добавлю отдельной командой — после «да».</i>"
         )
     # §7: предложить ДОБАВИТЬ подобранные ключи в кампанию (только по команде → confirm-гейт).
-    # Берём топ по объёму (схема AddKeywords: ≤50). Кнопка лишь СТАРТУЕТ флоу, ничего не меняет.
-    top_kw = [t for t, _ in sorted(by_text.items(), key=lambda kv: kv[1] or 0, reverse=True)][:50]
+    # Берём топ по объёму (схема AddKeywords: ≤50), исключив помеченные нецелевыми (§19.4.2).
+    # Кнопка лишь СТАРТУЕТ флоу, ничего не меняет.
+    top_kw = [
+        t
+        for t, _ in sorted(by_text.items(), key=lambda kv: kv[1] or 0, reverse=True)
+        if t not in off_topic
+    ][:50]
     token = _kw_add_put(top_kw, src) if top_kw else ""
     await target.answer(
         summary,
@@ -1377,6 +1596,26 @@ async def _kw_run(
         if path and os.path.exists(path):
             try:
                 os.remove(path)
+            except OSError:
+                pass
+    # §7 «CSV/таблица» / §19.4.2 «выгрузка идей — .CSV»: тот же набор плоским CSV (utf-8-sig,
+    # Excel-совместимый). Раньше write_keywords_csv был недостижим из Telegram (аудит M4.3).
+    csv_path: str | None = None
+    try:
+        from keywords.export import write_keywords_csv
+
+        fd, csv_path = tempfile.mkstemp(suffix=".csv", prefix="aimash_keywords_")
+        os.close(fd)
+        await asyncio.to_thread(
+            write_keywords_csv, clusters, ideas, csv_path, seeds=seeds, url=url, language=language
+        )
+        await target.answer_document(FSInputFile(csv_path, filename="aimash_keywords.csv"))
+    except Exception:  # noqa: BLE001 — CSV — дубль данных .xlsx; сбой не критичен, не спамим
+        log.warning("keywords: CSV-экспорт не удался", exc_info=True)
+    finally:
+        if csv_path and os.path.exists(csv_path):
+            try:
+                os.remove(csv_path)
             except OSError:
                 pass
 
@@ -1583,6 +1822,9 @@ async def on_nav_cancel(cq: CallbackQuery, state: FSMContext) -> None:
                 await asyncio.to_thread(clear_pending_media, mid)
         await CDRAFTS.abandon(cc_session, expected_chat_id=_cq_chat_id(cq))
     _PENDING_CONTEXT.pop(_cq_chat_id(cq), None)  # ingest: бросаем недоиспользованный контент файла
+    # §20.3: бросаем накопленный буфер текста профиля клиента (иначе stale-хвост доклеился бы к
+    # СЛЕДУЮЩЕМУ «Добавить информацию» этого чата — аудит M3.13).
+    _CLI_TEXT_BUF.pop(_cq_chat_id(cq), None)
     await state.clear()
     await cq.answer(i18n.t("cb_cancelled"))
     await _safe_edit(cq, i18n.t("wizard_cancelled"))
@@ -1890,6 +2132,17 @@ async def _cc_profile_ctx_account(customer_id: str) -> str:
 async def _cc_profile_ctx(draft) -> str:
     """Профиль клиента выбранного на Этапе-0 §19-аккаунта (preview_customer_id)."""
     return await _cc_profile_ctx_account(draft.preview_customer_id or DRAFT_ACCOUNT_ID)
+
+
+async def _cc_profile_site(draft) -> str | None:
+    """§19.4.2 (seed + URL): сайт клиента из §20-профиля выбранного аккаунта. Нет профиля/сайта или
+    сбой чтения → None (генерация идёт только по seeds — прежнее поведение, аддитивно)."""
+    try:
+        prof = await CLIENTS.get_by_account(draft.preview_customer_id or DRAFT_ACCOUNT_ID)
+        site = (prof or {}).get("website") or ""
+        return site if site.startswith(("http://", "https://")) else None
+    except Exception:  # noqa: BLE001 — сайт не критичен
+        return None
 
 
 def _cc_apply_settings_patch(cur: dict, patch) -> dict:
@@ -2430,13 +2683,41 @@ async def _run_client_crawl(
             )
             if before is None:
                 # свежий профиль + явное действие пользователя (нажал краул) → авто-сохранение
+                crawl_cid = uuid.uuid4().hex  # связывает audit-строку с profile_history
                 await CLIENTS.apply_upsert(
                     customer_id,
                     patch,
                     operation="crawl_save",
+                    confirmation_id=crawl_cid,
                     source="crawl",
                     crawl_extra=crawl_extra,
                 )
+                # §20.7/§12: авто-сохранение — тоже изменение профиля → пишем audit-строку
+                # (кто/когда/что/результат), а не только history+crawl_jobs. Без гейта осознанно:
+                # краул запущен явным действием пользователя, prior-данных не перезаписывает.
+                try:
+                    from db.models import AuditLog
+                    from db.session import Session as _Session
+
+                    async with _Session() as _s:
+                        _s.add(
+                            AuditLog(
+                                confirmation_id=crawl_cid,
+                                operation="crawl_save",
+                                customer_id=str(customer_id),
+                                chat_id=chat_id,
+                                status="applied",
+                                result={
+                                    "pages": result.pages_count,
+                                    "domain": domain,
+                                    "services": len(patch.get("services") or []),
+                                    "contacts": len(patch.get("contacts") or []),
+                                },
+                            )
+                        )
+                        await _s.commit()
+                except Exception:  # noqa: BLE001 — сбой audit-строки не роняет сам краул-сейв
+                    log.exception("crawl_save: audit-строка не записана (job %s)", job_id)
                 await bot.send_message(
                     chat_id,
                     crawl_msg + "\n\n" + i18n.t("cli_crawl_profile_updated"),
@@ -2645,6 +2926,16 @@ async def cc_settings_edit(m: Message, state: FSMContext) -> None:
         reply_markup=cc_settings_kb(),
         parse_mode=ParseMode.HTML,
     )
+
+
+@dp.callback_query(CcCB.filter(F.action == "edit"))
+async def cc_edit_hint(cq: CallbackQuery, callback_data: CcCB, state: FSMContext) -> None:
+    """§19.3: «✏️ Изменить» — подсказка формата правки (сама правка — свободным текстом в том же
+    состоянии; cc_settings_edit применит patch и перерисует сводку). Ничего не меняет."""
+    await cq.answer()
+    msg = _cq_msg(cq)
+    if msg is not None:
+        await msg.answer(i18n.t("cc_edit_hint"), parse_mode=ParseMode.HTML)
 
 
 @dp.callback_query(CcCB.filter(F.action == "accept"))
@@ -2874,27 +3165,96 @@ async def _cc_present_stage2(target: Message, chat_id: int, session_id: str, sta
 
 
 async def _cc_save_keywords(
-    target: Message, chat_id: int, session_id: str, state, kw_list: list[str], mt: str, source: str
+    target: Message,
+    chat_id: int,
+    session_id: str,
+    state,
+    kw_list: list[str],
+    mt: str,
+    source: str,
+    per_kw_mts: list[str] | None = None,
 ) -> None:
-    """Сохранить верифицированный список ключей в черновик и перейти к Этапу 3 (объявление)."""
+    """Сохранить верифицированный список ключей в черновик и перейти к Этапу 3 (объявление).
+
+    §19.4.1: per_kw_mts — типы соответствия 1:1 к kw_list для СМЕШАННОГО списка ([exact] + "phrase"
+    + broad). Дедуп ПАРАМИ (первый выигрывает вместе со своим типом) — иначе дедуп только текстов
+    порвал бы склейку 1:1 в схеме. None/однородный ⇒ скалярный mt (поведение прежнее)."""
     if not kw_list:
         await target.answer(i18n.t("cc_kw_empty"), reply_markup=cc_kw_kb())
         return
+    mixed: list[str] | None = None
+    if per_kw_mts and len(per_kw_mts) == len(kw_list) and len(set(per_kw_mts)) > 1:
+        # Ключ дедупа = strip() — ТА ЖЕ нормализация, что normalize_keywords/assert_keyword_ok
+        # (иначе схема отбросила бы дубль из keywords, а его тип остался бы → рассинхрон 1:1).
+        seen: set[str] = set()
+        dd_kw: list[str] = []
+        dd_mt: list[str] = []
+        for k, kmt in zip(kw_list, per_kw_mts):
+            key = (k or "").strip()
+            if key and key not in seen:
+                seen.add(key)
+                dd_kw.append(key)
+                dd_mt.append(kmt)
+        kw_list, mixed = dd_kw, dd_mt
 
     def _save(st: dict) -> None:
         st["keywords"].update(
-            {"list": kw_list, "match_type": mt, "source": source, "verified": True}
+            {
+                "list": kw_list,
+                "match_type": mt,
+                "match_types": mixed,  # None ⇒ однородный список
+                "source": source,
+                "verified": True,
+            }
         )
 
     await CDRAFTS.patch(session_id, _save, expected_chat_id=chat_id)
-    await target.answer(i18n.t("cc_kw_accepted", n=len(kw_list), mt=texts.match_type_human(mt)))
-    await _cc_present_stage3(target, chat_id, session_id, state)
+    mt_label = i18n.t("cc_kw_mixed_mt") if mixed else texts.match_type_human(mt)
+    # §19.4: явный гейт «✅ Подтвердить ключевые слова» ПЕРЕД Этапом 3 (обзор финального списка).
+    # Замена = прислать новый список (state остаётся на Этапе 2). Превью — первые 10, без простыни.
+    preview = "\n".join(f"  • {texts.esc(k)}" for k in kw_list[:10])
+    if len(kw_list) > 10:
+        preview += f"\n  …ещё {len(kw_list) - 10}"
+    await state.set_state(CreateCampaignWizard.keywords)
+    await state.update_data(cc_session=session_id)
+    await target.answer(
+        i18n.t("cc_kw_review", n=len(kw_list), mt=texts.esc(mt_label), preview=preview),
+        reply_markup=cc_kw_confirm_kb(),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@dp.callback_query(CcCB.filter(F.action == "kw_confirm"))
+async def cc_kw_confirm(cq: CallbackQuery, callback_data: CcCB, state: FSMContext) -> None:
+    """§19.4: «✅ Подтвердить ключевые слова» → Этап 3 (объявление). Кнопка живёт под обзором
+    списка; без сохранённых верифицированных ключей — стейл (черновик устарел/заменён)."""
+    chat_id = _cq_chat_id(cq)
+    data = await state.get_data()
+    session_id = data.get("cc_session")
+    draft = await CDRAFTS.get(session_id, expected_chat_id=chat_id) if session_id else None
+    msg = _cq_msg(cq)
+    if draft is None or msg is None:
+        await cq.answer(i18n.t("cc_draft_stale"), show_alert=True)
+        return
+    kw = draft.wizard_state.get("keywords") or {}
+    if not (kw.get("list") and kw.get("verified")):
+        await cq.answer(i18n.t("cc_kw_empty"), show_alert=True)
+        return
+    await cq.answer()
+    mt_label = (
+        i18n.t("cc_kw_mixed_mt")
+        if kw.get("match_types")
+        else texts.match_type_human(kw.get("match_type") or "phrase")
+    )
+    await msg.answer(i18n.t("cc_kw_accepted", n=len(kw["list"]), mt=mt_label))
+    await _cc_present_stage3(msg, chat_id, session_id, state)
 
 
 @dp.message(CreateCampaignWizard.keywords)
 async def cc_keywords_text(m: Message, state: FSMContext) -> None:
-    """Этап 2 (ввод A): свои ключи текстом ИЛИ ссылкой на Google-таблицу бота. Тип соответствия —
-    по маркерам/инструкции (default phrase). Файлы — пришлите текстом (или используйте генерацию)."""
+    """Этап 2 (ввод A): свои ключи текстом ИЛИ ссылкой на Google-таблицу. Тип соответствия — по
+    маркерам/инструкции (default phrase); смешанные типы сохраняются per-keyword (§19.4.1).
+    Файлы XLSX/CSV/TXT принимает on_document → _cc_keywords_from_document."""
     data = await state.get_data()
     session_id = data.get("cc_session")
     draft = await CDRAFTS.get(session_id, expected_chat_id=m.chat.id) if session_id else None
@@ -2925,7 +3285,8 @@ async def cc_keywords_text(m: Message, state: FSMContext) -> None:
     parsed = parse_keywords_text(text)
     kw_list = [k.text for k in parsed]
     mt = parsed[0].match_type if parsed else DEFAULT_MATCH_TYPE
-    await _cc_save_keywords(m, m.chat.id, session_id, state, kw_list, mt, "text")
+    per_kw = [k.match_type for k in parsed]  # §19.4.1: смешанные типы не схлопываем в первый
+    await _cc_save_keywords(m, m.chat.id, session_id, state, kw_list, mt, "text", per_kw_mts=per_kw)
 
 
 @dp.callback_query(CcCB.filter(F.action == "kw_generate"))
@@ -2956,13 +3317,15 @@ async def cc_kw_generate(cq: CallbackQuery, callback_data: CcCB, state: FSMConte
         gen_lang = s.get("target_language") or i18n.current_lang()
         geo_ids = adsgeo.geo_ids_for_settings(s)
         prof = await _cc_profile_ctx(draft)  # §20: профиль клиента → релевантность подбора
-        seeds = await generate_seed_keywords(topic=topic, profile=prof, language=gen_lang)
+        site = await _cc_profile_site(draft)  # §19.4.2: seed + URL — сайт из §20-профиля
+        seeds = await generate_seed_keywords(topic=topic, url=site, profile=prof, language=gen_lang)
         client = build_client(DRAFT_ACCOUNT_ID)
         ideas = await run_ads_read_call(
             generate_keyword_ideas,
             client,
             DRAFT_ACCOUNT_ID,
             seeds=seeds,
+            url=site,  # §19.4.2: keyword_and_url_seed (seed 10 + URL), None ⇒ только seeds
             language=adsgeo.keyword_ideas_lang(gen_lang),
             geo_ids=geo_ids,  # страна кампании; () (неизвестна) → глобально, а не дефолт-Украина
             label="generate_keyword_ideas",
@@ -2976,6 +3339,20 @@ async def cc_kw_generate(cq: CallbackQuery, callback_data: CcCB, state: FSMConte
     if not ideas:
         await msg.answer(i18n.t("kw_empty"), reply_markup=cc_kw_kb())
         return
+    # §19.4: минус-слова — ADVISORY (сам НЕ добавляю; добавление — отдельной командой за гейтом).
+    try:
+        from keywords.cluster import suggest_negative_keywords
+
+        negs = await suggest_negative_keywords(
+            topic, [i.text for i in ideas], language=gen_lang, limit=10
+        )
+        if negs:
+            await msg.answer(
+                i18n.t("cc_kw_negatives_hint", negs=texts.esc(", ".join(negs))),
+                parse_mode=ParseMode.HTML,
+            )
+    except Exception:  # noqa: BLE001 — совет не критичен
+        pass
     # Пытаемся выгрузить в Google Sheets для ручной верификации; при сбое — fallback без round-trip.
     try:
         from reports.sheets import publish_keywords_to_sheets
@@ -3014,6 +3391,16 @@ async def cc_kw_verify(m: Message, state: FSMContext) -> None:
     if not sid:
         await m.answer(
             i18n.t("cc_kw_read_failed", err="не похоже на ссылку"), reply_markup=nav_kb()
+        )
+        return
+    # §19.4.2 (round-trip): менеджер обязан вернуть ТУ ЖЕ таблицу, что бот создал для верификации.
+    # Чужая ссылка — не «верифицированный список» (можно перепутать таблицу) → просим правильную.
+    expected_sid = (draft.wizard_state.get("keywords") or {}).get("sheet_id")
+    if expected_sid and sid != expected_sid:
+        await m.answer(
+            i18n.t("cc_kw_wrong_sheet", sid=texts.esc(str(expected_sid)[-6:])),
+            reply_markup=nav_kb(),
+            parse_mode=ParseMode.HTML,
         )
         return
     try:
@@ -3099,6 +3486,38 @@ async def cc_assets_back(cq: CallbackQuery, callback_data: CcCB, state: FSMConte
     )
 
 
+async def _cc_asset_logo_from_photo(m: Message, state: FSMContext, bot: Bot) -> None:
+    """§19.7.1: фото логотипа (Этап 5, Business logo) → квадратный кадр 1:1 → временное хранилище →
+    спек {family: business_logo, media_id} в набор ассетов черновика. Бинарь НЕ в params/логах."""
+    data = await state.get_data()
+    session_id = data.get("cc_session")
+    draft = await CDRAFTS.get(session_id, expected_chat_id=m.chat.id) if session_id else None
+    if draft is None:
+        await state.clear()
+        await m.answer(i18n.t("cc_draft_stale"))
+        return
+    try:
+        buf = io.BytesIO()
+        await bot.download(m.photo[-1], destination=buf)
+        _, square = await asyncio.to_thread(prepare_display_images, buf.getvalue())
+    except Exception as e:  # сеть/битый файл/не картинка
+        await m.answer(i18n.t("err_photo", err=ux.err_text(e)))
+        return
+    media_id = uuid.uuid4().hex
+    await asyncio.to_thread(save_pending_media, media_id, square, square)
+    name = (draft.wizard_state.get("settings") or {}).get("campaign_name") or "logo"
+    spec = {"family": "business_logo", "params": {"media_id": media_id, "name": f"{name}_logo"}}
+    await CDRAFTS.patch(
+        session_id, lambda st: st["assets"]["new"].append(spec), expected_chat_id=m.chat.id
+    )
+    await state.set_state(CreateCampaignWizard.assets)
+    await state.update_data(cc_session=session_id)
+    await m.answer(i18n.t("cc_asset_logo_added"))
+    await m.answer(
+        i18n.t("cc_assets_prompt"), reply_markup=cc_assets_kb(), parse_mode=ParseMode.HTML
+    )
+
+
 @dp.callback_query(CcCB.filter(F.action == "asset_type"))
 async def cc_asset_type(cq: CallbackQuery, callback_data: CcCB, state: FSMContext) -> None:
     """Этап 5: тип выбран → автогенерация наполнения → накапливаем в черновик (assets.new). Реальная
@@ -3113,6 +3532,11 @@ async def cc_asset_type(cq: CallbackQuery, callback_data: CcCB, state: FSMContex
         return
     family = callback_data.sub
     await cq.answer()
+    if family == "business_logo":  # §19.7.1: логотип — это ФОТО, не текстовая автогенерация
+        await state.set_state(CreateCampaignWizard.asset_logo)
+        await state.update_data(cc_session=session_id)
+        await msg.answer(i18n.t("cc_asset_logo_prompt"), reply_markup=nav_kb())
+        return
     await msg.answer(i18n.t("cc_asset_generating"))
     s = draft.wizard_state.get("settings") or {}
     ad = draft.wizard_state.get("ad") or {}
@@ -3188,6 +3612,17 @@ async def cc_url_text(m: Message, state: FSMContext) -> None:
         url_opts["tracking_url_template"] = parts[0]
     if len(parts) > 1 and parts[1]:
         url_opts["final_url_suffix"] = parts[1]
+    if len(parts) > 2 and parts[2]:
+        # §19.8: custom parameters — 3-е поле «key=value, key2=value2» (схема/мутация давно
+        # поддерживают; раньше UI их не собирал — аудит M3.10). Валидность ключей проверит
+        # _validate_url_options (латиница/цифры/_, ≤8 штук, значение ≤250).
+        custom: dict[str, str] = {}
+        for pair in parts[2].split(","):
+            k, sep, v = pair.partition("=")
+            if sep and k.strip():
+                custom[k.strip().lstrip("{_").rstrip("}")] = v.strip()
+        if custom:
+            url_opts["custom_parameters"] = custom
     try:
         from ads.mutations import _validate_url_options
 
@@ -3234,6 +3669,9 @@ def _cc_build_create_params(draft) -> dict:
             MAX_CAMPAIGN_KEYWORDS,
             len(kw_all) - MAX_CAMPAIGN_KEYWORDS,
         )
+    # §19.4.1: per-keyword типы (смешанный список) — режем СИНХРОННО с keywords (1:1 к схеме).
+    kw_mts_all = list(kw.get("match_types") or [])
+    kw_mts = kw_mts_all[: len(kw_list)] if kw_mts_all else []
     return {
         "campaign_name": s.get("campaign_name") or "Search",
         "final_url": ad.get("final_url") or "",
@@ -3242,6 +3680,7 @@ def _cc_build_create_params(draft) -> dict:
         "budget_daily_micros": int(s.get("budget_daily_micros") or 0),
         "keywords": kw_list,
         "match_type": kw.get("match_type") or "phrase",
+        "keyword_match_types": kw_mts,
         "cpc_bid_micros": int(s.get("cpc_bid_micros") or 500_000),
         "geo_locations": list(s.get("geo_locations") or []),
         "geo_country_code": geo_cc,
@@ -3254,6 +3693,11 @@ def _cc_build_create_params(draft) -> dict:
         "asset_specs": list(assets.get("new") or []),
         "existing_asset_links": list(assets.get("reuse_links") or []),
         "image_media_ids": list(imgs.get("media_ids") or []),
+        # §19.3: сети / расписание / даты (None/[] ⇒ дефолты: Search-only, 24/7, старт сегодня)
+        "networks": s.get("networks"),
+        "ad_schedule_blocks": list(s.get("ad_schedule_blocks") or []),
+        "start_date": s.get("start_date"),
+        "end_date": s.get("end_date"),
     }
 
 
@@ -3406,12 +3850,13 @@ async def cc_launch(cq: CallbackQuery, callback_data: CcCB) -> None:
 
 
 # ── GDN из фото (§11): приём фото → бриф → черновик за confirm-гейтом ─────────────
-def _parse_gdn_brief(text: str) -> tuple[str, str, float] | None:
-    """«название | url | бюджет» → (name, url, budget_units). None при неверном формате."""
+def _parse_gdn_brief(text: str) -> tuple[str, str, float, list[str]] | None:
+    """«название | url | бюджет [| гео]» → (name, url, budget_units, geo_locations). None при неверном
+    формате. Гео (§11) — опциональное 4-е поле: локации через запятую (пусто ⇒ без гео, как раньше)."""
     parts = [p.strip() for p in (text or "").split("|")]
-    if len(parts) != 3:
+    if len(parts) not in (3, 4):
         return None
-    name, url, budget_s = parts
+    name, url, budget_s = parts[0], parts[1], parts[2]
     if not name or not url.startswith(("http://", "https://")):
         return None
     try:
@@ -3422,7 +3867,9 @@ def _parse_gdn_brief(text: str) -> tuple[str, str, float] | None:
     # Pydantic-сообщения после генерации текстов (golden rule #4: считает КОД).
     if budget <= 0 or budget > MONEY_MAX_UNITS:
         return None
-    return (name, url, budget)
+    geo = [g.strip() for g in parts[3].split(",")] if len(parts) == 4 else []
+    geo = [g for g in geo if g][:50]  # чистим пустые, потолок как в схеме
+    return (name, url, budget, geo)
 
 
 async def _gdn_cleanup(state: FSMContext, media_id: str | None) -> None:
@@ -3446,10 +3893,18 @@ async def on_photo(m: Message, state: FSMContext, bot: Bot) -> None:
     if await state.get_state() == CreateCampaignWizard.images:
         await _cc_image_from_photo(m, state, bot)
         return
-    # §19: фото в ЛЮБОМ другом состоянии визарда «Создание кампании» НЕ должно перехватываться
-    # GDN-веткой (она делает state.clear() и стирает cc_session, теряя черновик). Игнорируем с подсказкой.
+    # §11: фото в визарде кампании из видео (шаг логотипа DG) → квадратный логотип (не GDN).
+    if await state.get_state() == VideoWizard.awaiting_logo:
+        await _video_logo_from_photo(m, state, bot)
+        return
+    # §19.7.1: фото на шаге «Business logo» Этапа 5 → логотип-спек в набор ассетов черновика.
+    if await state.get_state() == CreateCampaignWizard.asset_logo:
+        await _cc_asset_logo_from_photo(m, state, bot)
+        return
+    # §19/§11: фото в ЛЮБОМ другом состоянии визардов «Создание кампании»/«кампания из видео» НЕ
+    # должно перехватываться GDN-веткой (она делает state.clear(), теряя черновик). Подсказка.
     cur_state = await state.get_state()
-    if isinstance(cur_state, str) and cur_state.startswith("CreateCampaignWizard"):
+    if isinstance(cur_state, str) and cur_state.startswith(("CreateCampaignWizard", "VideoWizard")):
         await m.answer(i18n.t("cc_photo_wrong_stage"))
         return
     prev = await state.get_data()  # новое фото отменяет прежнее → чистим его медиа (без утечки)
@@ -3472,6 +3927,190 @@ async def on_photo(m: Message, state: FSMContext, bot: Bot) -> None:
     await m.answer(i18n.t("gdn_ask_brief"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML)
 
 
+# ── §11: кампании из видео (Demand Gen / Video) — YouTube-ссылка → тип → бриф → гейт ─
+@dp.message(F.video)
+async def on_video(m: Message, state: FSMContext) -> None:
+    """§11: приём видео → визард кампании из видео. Загрузить файл в Google Ads напрямую нельзя —
+    видео живёт на YouTube (примечание §11), поэтому просим ссылку. §19-визард не перехватываем."""
+    cur_state = await state.get_state()
+    if isinstance(cur_state, str) and cur_state.startswith("CreateCampaignWizard"):
+        await m.answer(i18n.t("cc_photo_wrong_stage"))
+        return
+    await state.clear()
+    await state.set_state(VideoWizard.awaiting_link)
+    await m.answer(i18n.t("video_received"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML)
+
+
+@dp.message(Command("newvideo"))
+async def newvideo_cmd(m: Message, state: FSMContext) -> None:
+    """§11: кампания из видео без загрузки файла — сразу спрашиваем ссылку на YouTube."""
+    await state.clear()
+    await state.set_state(VideoWizard.awaiting_link)
+    await m.answer(i18n.t("video_received"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML)
+
+
+@dp.message(VideoWizard.awaiting_link)
+async def video_link(m: Message, state: FSMContext) -> None:
+    """Ссылка на YouTube (или 11-символьный id) → выбор типа кампании (Demand Gen / Video)."""
+    from ads.assets import parse_youtube_video_id
+
+    vid = parse_youtube_video_id(m.text or "")
+    if not vid:
+        await m.answer(i18n.t("video_bad_link"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML)
+        return  # остаёмся в состоянии — пользователь пришлёт ссылку ещё раз (или «✖ Отмена»)
+    await state.update_data(video_yt=vid)
+    await m.answer(
+        i18n.t("video_pick_type", vid=vid), reply_markup=video_type_kb(), parse_mode=ParseMode.HTML
+    )
+
+
+@dp.callback_query(VideoCB.filter(F.action.in_({"dg", "video"})))
+async def video_pick_type(cq: CallbackQuery, callback_data: VideoCB, state: FSMContext) -> None:
+    """Тип выбран → просим бриф (тот же формат, что GDN: название | сайт | бюджет [| гео])."""
+    data = await state.get_data()
+    if not data.get("video_yt"):
+        await cq.answer(i18n.t("video_session_stale"), show_alert=True)
+        await state.clear()
+        return
+    await state.update_data(video_kind=callback_data.action)
+    await state.set_state(VideoWizard.awaiting_brief)
+    await cq.answer()
+    msg = _cq_msg(cq)
+    if msg is not None:
+        await msg.answer(
+            i18n.t("video_ask_brief"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML
+        )
+
+
+async def _video_mint_proposal(
+    target: Message, chat_id: int, state: FSMContext, *, logo_media_id: str | None
+) -> None:
+    """Собрать params из state, провалидировать схемой (defense-in-depth) и показать confirm-гейт.
+    Общий хвост для «логотип прислан» / «пропущен» / Video-ветки."""
+    data = await state.get_data()
+    kind = data.get("video_kind") or "dg"
+    params = dict(data.get("video_params") or {})
+    if not params or not data.get("video_yt"):
+        await state.clear()
+        await target.answer(i18n.t("video_session_stale"))
+        return
+    op = "create_demand_gen_campaign" if kind == "dg" else "create_video_campaign"
+    if kind == "dg" and logo_media_id:
+        params["logo_media_id"] = logo_media_id
+    try:  # defense-in-depth: схема ещё раз проверит длины/составы/URL/бюджет/YouTube id
+        validated = SCHEMAS[op](**params).model_dump()
+    except Exception as e:  # noqa: BLE001 — валидация
+        await state.clear()
+        if logo_media_id:
+            await asyncio.to_thread(clear_pending_media, logo_media_id)
+        await target.answer(i18n.t("err_validate", err=ux.err_text(e)))
+        return
+    summary = texts.fmt_video_proposal_summary(
+        kind,
+        params["campaign_name"],
+        params["final_url"],
+        params["youtube_video_id"],
+        params["budget_daily_micros"] / 1_000_000,
+        params["headlines"],
+        params["descriptions"],
+        params["business_name"],
+        params.get("geo_locations") or [],
+        goal=params.get("goal", "clicks"),
+        with_logo=bool(logo_media_id),
+    )
+    p = Proposal(operation=op, summary=summary, params=validated, chat_id=chat_id)
+    await state.clear()
+    await _present_proposal(
+        target,
+        chat_id=chat_id,
+        operation=op,
+        params=validated,
+        summary=summary,
+        cid=p.confirmation_id,
+    )
+
+
+@dp.message(VideoWizard.awaiting_brief)
+async def video_brief(m: Message, state: FSMContext) -> None:
+    """Бриф → генерация текстов → (DG: шаг логотипа | Video: сразу confirm-гейт)."""
+    data = await state.get_data()
+    vid, kind = data.get("video_yt"), data.get("video_kind") or "dg"
+    if not vid:
+        await state.clear()
+        await m.answer(i18n.t("video_session_stale"))
+        return
+    parsed = _parse_gdn_brief(m.text or "")  # тот же формат «название | url | бюджет [| гео]»
+    if parsed is None:
+        await m.answer(i18n.t("video_ask_brief"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML)
+        return
+    name, url, budget_units, geo_locations = parsed
+    await m.answer(i18n.t("gdn_generating"))
+    try:
+        draft = await _generate_rsa(CopyBrief(topic=name, n_headlines=5, n_descriptions=5))
+    except Exception as e:  # LLM/сеть
+        await state.clear()
+        await m.answer(i18n.t("err_text_gen", err=ux.err_text(e)))
+        return
+    # Video responsive: описания консервативно ≤70 (лимит КОДА, ads.mutations.VIDEO_DESCRIPTION_MAX);
+    # длинный заголовок = первое подходящее описание (как GDN), без дубля в descriptions.
+    from adcopy.validate import rsa_len
+
+    all_desc = draft.descriptions[:5]
+    if kind == "video":
+        all_desc = [d for d in all_desc if rsa_len(d) <= VIDEO_DESCRIPTION_MAX]
+    if not draft.headlines or len(all_desc) < 2:
+        await state.clear()
+        await m.answer(i18n.t("gdn_gen_empty"))
+        return
+    params = {
+        "campaign_name": name,
+        "youtube_video_id": vid,
+        "headlines": draft.headlines[:5],
+        "long_headline": draft.descriptions[0],  # ≤90 — валиден для обоих типов
+        "descriptions": all_desc[1:] if all_desc[0] == draft.descriptions[0] else all_desc,
+        "business_name": name[:GDN_BUSINESS_NAME_MAX],
+        "final_url": url,
+        "budget_daily_micros": int(round(budget_units * 1_000_000)),
+        "geo_locations": geo_locations,
+    }
+    if not params["descriptions"]:  # после фильтра ≤70 могло не остаться описаний
+        await state.clear()
+        await m.answer(i18n.t("gdn_gen_empty"))
+        return
+    await state.update_data(video_params=params)
+    if kind == "dg":  # DG: опциональный логотип (фото или «⏭ Пропустить»)
+        await state.set_state(VideoWizard.awaiting_logo)
+        await m.answer(
+            i18n.t("video_ask_logo"), reply_markup=video_logo_kb(), parse_mode=ParseMode.HTML
+        )
+        return
+    await _video_mint_proposal(m, m.chat.id, state, logo_media_id=None)
+
+
+@dp.callback_query(VideoCB.filter(F.action == "logo_skip"))
+async def video_logo_skip(cq: CallbackQuery, callback_data: VideoCB, state: FSMContext) -> None:
+    await cq.answer()
+    msg = _cq_msg(cq)
+    if msg is None:
+        return
+    await _video_mint_proposal(msg, _cq_chat_id(cq), state, logo_media_id=None)
+
+
+async def _video_logo_from_photo(m: Message, state: FSMContext, bot: Bot) -> None:
+    """§11 DG: фото → квадратный кадр 1:1 (логотип) → временное хранилище → confirm-гейт.
+    Бинарь НЕ в proposal/логах — в params идёт только logo_media_id."""
+    try:
+        buf = io.BytesIO()
+        await bot.download(m.photo[-1], destination=buf)
+        _, square = await asyncio.to_thread(prepare_display_images, buf.getvalue())
+    except Exception as e:  # сеть/битый файл/не картинка
+        await m.answer(i18n.t("err_photo", err=ux.err_text(e)))
+        return
+    media_id = uuid.uuid4().hex
+    await asyncio.to_thread(save_pending_media, media_id, square, square)
+    await _video_mint_proposal(m, m.chat.id, state, logo_media_id=media_id)
+
+
 @dp.message(GdnWizard.awaiting_brief)
 async def gdn_brief(m: Message, state: FSMContext) -> None:
     data = await state.get_data()
@@ -3484,7 +4123,7 @@ async def gdn_brief(m: Message, state: FSMContext) -> None:
     if parsed is None:
         await m.answer(i18n.t("gdn_bad_brief"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML)
         return  # остаёмся в состоянии — пользователь пришлёт бриф ещё раз (или «✖ Отмена»)
-    name, url, budget_units = parsed
+    name, url, budget_units, geo_locations = parsed
     await m.answer(i18n.t("gdn_generating"))
     try:
         draft = await _generate_rsa(CopyBrief(topic=name, n_headlines=5, n_descriptions=4))
@@ -3513,6 +4152,7 @@ async def gdn_brief(m: Message, state: FSMContext) -> None:
         "final_url": url,
         "budget_daily_micros": budget_micros,
         "media_id": media_id,
+        "geo_locations": geo_locations,  # §11: опц. ГЕО (пусто ⇒ без гео)
     }
     try:  # defense-in-depth: схема ещё раз проверит длины/составы/URL/бюджет/media_id
         SCHEMAS["create_gdn_campaign"](**params)
@@ -3521,7 +4161,7 @@ async def gdn_brief(m: Message, state: FSMContext) -> None:
         await m.answer(i18n.t("err_validate", err=e))
         return
     summary = texts.fmt_gdn_proposal_summary(
-        name, url, budget_units, headlines, descriptions, business_name
+        name, url, budget_units, headlines, descriptions, business_name, geo_locations
     )
     p = Proposal(operation="create_gdn_campaign", summary=summary, params=params, chat_id=m.chat.id)
     await state.clear()
@@ -4209,10 +4849,35 @@ async def _clone_from_intent(m: Message, brief: dict) -> None:
 
 # ── Свободный текст → агент ───────────────────────────────────────────────────────
 # ── ingest: приём файла → чтение → задача (бриф/ключи/данные для агента) ─────────────
+async def _cc_keywords_from_document(m: Message, state: FSMContext, text: str, name: str) -> None:
+    """§19.4.1 Ввод A (файл): XLSX/CSV/TXT с ключами внутри визарда «Создание кампании» (Этап 2).
+    Текст файла → parse_keywords_text (маркеры типов соответствия работают) → черновик → Этап 3.
+    Раньше присланный файл падал в общий ingest и СБРАСЫВАЛ визард (state.clear) — теряя черновик."""
+    data = await state.get_data()
+    session_id = data.get("cc_session")
+    draft = await CDRAFTS.get(session_id, expected_chat_id=m.chat.id) if session_id else None
+    if draft is None:
+        await state.clear()
+        await m.answer(i18n.t("cc_draft_stale"))
+        return
+    from keywords.ingest import DEFAULT_MATCH_TYPE, parse_keywords_text
+
+    parsed = parse_keywords_text(text)
+    if not parsed:
+        await m.answer(i18n.t("cc_kw_empty"), reply_markup=cc_kw_kb())
+        return
+    await m.answer(i18n.t("cc_kw_file_accepted", name=texts.esc(name)), parse_mode=ParseMode.HTML)
+    kw_list = [k.text for k in parsed]
+    mt = parsed[0].match_type if parsed else DEFAULT_MATCH_TYPE
+    per_kw = [k.match_type for k in parsed]
+    await _cc_save_keywords(m, m.chat.id, session_id, state, kw_list, mt, "file", per_kw_mts=per_kw)
+
+
 @dp.message(F.document)
 async def on_document(m: Message, state: FSMContext, bot: Bot) -> None:
     """Файл (txt/csv/json/.docx/.xlsx) → текст. С подписью — сразу задача; без подписи — спросим
-    задачу (контент в _PENDING_CONTEXT). Это ДАННЫЕ для агента; мутации — за confirm-гейтом."""
+    задачу (контент в _PENDING_CONTEXT). Это ДАННЫЕ для агента; мутации — за confirm-гейтом.
+    §19.4.1: файл в состоянии Этапа-2 визарда — это СПИСОК КЛЮЧЕЙ (не задача агенту)."""
     doc = m.document
     if doc is None:
         return
@@ -4236,6 +4901,11 @@ async def on_document(m: Message, state: FSMContext, bot: Bot) -> None:
         )
         return
     source = doc.file_name or "файл"
+    # §19.4.1: Этап 2 визарда ждёт ключи — файл кормим в черновик, НЕ в общий ingest (и НЕ чистим
+    # состояние: сбой парса оставляет менеджера на Этапе 2 с подсказкой).
+    if await state.get_state() == CreateCampaignWizard.keywords:
+        await _cc_keywords_from_document(m, state, text, source)
+        return
     caption = (m.caption or "").strip()
     await state.clear()
     if caption:
@@ -4599,28 +5269,49 @@ async def _do_confirm(cq: CallbackQuery, cid: str) -> None:
     # успешную операцию как failed — отдельный try/except, вне ветки record_failure.
     log.info("мутация применена cid=%s chat=%s", cid, chat_id)  # денежный путь — успех в лог
     await _safe_edit(cq, i18n.t("applied", result=texts.esc(result)), parse_mode=ParseMode.HTML)
-    # §19.8: черновик Search-кампании создан (PAUSED) → предлагаем «🚀 Запустить» ОТДЕЛЬНОЙ командой.
+    # §19.8/§11: черновик кампании создан (PAUSED) → предлагаем «🚀 Запустить» ОТДЕЛЬНОЙ командой.
     # Кнопка НЕ запускает сама: минтит resume_campaign proposal (тот же confirm-гейт «PAUSED→ENABLED»).
-    if snap is not None and snap.operation == "create_search_campaign":
+    # Распространено на ВСЕ создающие кампанию операции (Search/GDN/Demand Gen/Video) — аудит §11.
+    _CREATE_CAMPAIGN_OPS = {
+        "create_search_campaign",
+        "create_gdn_campaign",
+        "create_demand_gen_campaign",
+        "create_video_campaign",
+    }
+    if snap is not None and snap.operation in _CREATE_CAMPAIGN_OPS:
         name = (snap.params or {}).get("campaign_name") or ""
         msg = _cq_msg(cq)
         if name and msg is not None:
             _CC_LAUNCH_CACHE[chat_id] = name
-            await msg.answer(
-                i18n.t("cc_created_launch_prompt"), reply_markup=cc_final_kb(can_launch=True)
-            )
+            prompt = i18n.t("cc_created_launch_prompt")
+            # §19.3: если конверс-стратегия понижена (аккаунт без отслеживания конверсий) — честно
+            # сообщаем, а не молча меняем то, что менеджер подтвердил.
+            if isinstance(result, dict) and result.get("bidding_note"):
+                prompt = i18n.t("cc_bidding_downgraded") + "\n\n" + prompt
+            await msg.answer(prompt, reply_markup=cc_final_kb(can_launch=True))
 
 
 async def _do_cancel(cq: CallbackQuery, cid: str) -> None:
     chat_id = _cq_chat_id(cq)
     actor_id, actor_name = _actor(cq)
-    # §19: отклонённый черновик create_search_campaign несёт временные изображения по media_id —
-    # чистим их (на success их чистит execute_confirmed; на reject — здесь), иначе осиротеют.
+    # §19/§11: отклонённый черновик create_search/gdn/demand_gen_campaign несёт временные медиа по
+    # media_id — чистим их (на success их чистит execute_confirmed; на reject — здесь), иначе осиротеют.
     snap = await STORE.get_confirmed(cid)
     if snap is not None and snap.operation == "create_search_campaign":
+        from ads.assets import collect_search_campaign_media_ids
+
+        # изображения Этапа 4 + логотипы business_logo из asset-спеков (§19.7.1) — единый сборщик
         await asyncio.to_thread(
-            clear_pending_media_ids, (snap.params or {}).get("image_media_ids") or []
+            clear_pending_media_ids, collect_search_campaign_media_ids(snap.params)
         )
+    if snap is not None and snap.operation == "create_gdn_campaign":
+        mid = (snap.params or {}).get("media_id")
+        if mid:
+            await asyncio.to_thread(clear_pending_media, mid)
+    if snap is not None and snap.operation == "create_demand_gen_campaign":
+        lmid = (snap.params or {}).get("logo_media_id")
+        if lmid:
+            await asyncio.to_thread(clear_pending_media, lmid)
     await STORE.reject(cid, chat_id=chat_id, actor_user_id=actor_id, actor_username=actor_name)
     _LAST_PENDING.pop(chat_id, None)
     await _safe_edit(cq, i18n.t("rejected"))
@@ -4836,6 +5527,14 @@ async def main() -> None:
     except Exception as e:  # БД недоступна: НЕ даём дефолтному excepthook напечатать DSN с паролем
         log.error("init_db не удалось — бот не стартует: %s", type(e).__name__, exc_info=e)
         return
+    try:  # §8/мультиаккаунт: расшифровать per-account OAuth-токены (oauth_tokens) в рантайм-кэш,
+        # чтобы build_client(child) для дочерних под другими MCC брал их refresh-токен/login_customer_id.
+        # Сбой не критичен — Draft/тест-MCC покрыт единым .env-токеном (см. ads.client._cfg_for).
+        from ads.client import load_oauth_cache
+
+        await load_oauth_cache()
+    except Exception as e:  # noqa: BLE001 — per-account креды опциональны (Draft работает на .env)
+        log.warning("oauth: per-account токены не загружены: %s", type(e).__name__)
     try:  # §4: восстановить сохранённые языки интерфейса (user_settings.language), переживает рестарт
         await i18n.load_langs()
     except Exception as e:  # настройка не критична — стартуем на дефолтах (RU)
@@ -4854,6 +5553,14 @@ async def main() -> None:
         await asyncio.to_thread(build_client)  # @lru_cache → все последующие вызовы мгновенны
     except Exception as e:  # cred-сбой на старте не валит бота — реальные вызовы всё равно проверят
         log.warning("прогрев build_client не удался: %s", type(e).__name__)
+    try:  # §8: обойти настроенные MCC и запомнить дочерние как read-allow-list (полный мульти-
+        # аккаунт ЧТЕНИЕ). READ-ONLY, под замком ensure_manager_allowed; сбой не критичен для старта
+        # (без обхода читаем только мутационный аккаунт + env read-list). Мутации не затрагиваются.
+        from ads.client import discover_read_children
+
+        await discover_read_children()
+    except Exception as e:  # noqa: BLE001 — обход дочерних опционален (Draft читается и без него)
+        log.warning("mcc discover: обход дочерних не выполнен: %s", type(e).__name__)
     # Корреляция (§15): request_id ДО whitelist — даже отказ доступа логируется с request_id.
     dp.message.outer_middleware(TraceMiddleware())
     dp.callback_query.outer_middleware(TraceMiddleware())

@@ -1,7 +1,7 @@
 # Aimash — частые команды. Запуск из Git Bash / WSL (`make <target>`).
 # PowerShell-эквиваленты — в README. Python-команды через `python` (venv должен быть активен).
 .DEFAULT_GOAL := help
-.PHONY: help install hooks lint fmt typecheck test run db-up db-down refresh-token check-access mcp-list
+.PHONY: help install hooks lint fmt typecheck test review run db-up db-down refresh-token check-access mcp-list
 
 help:           ## Список команд
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -24,6 +24,11 @@ typecheck:      ## mypy
 
 test:           ## Офлайн safety-тесты
 	pytest -q
+
+review:         ## Ревью текущего диффа ПЕРЕД мержем (headless /code-review, на подписке — токены не тарифицируются)
+	@echo "Ревью текущего диффа. Для ДЕНЕЖНЫХ диффов (ads/mutations.py, confirm/*) прогони глубже:"
+	@echo "  claude -p \"/code-review ultra\"   # облачное мульти-агентное (биллится, запускаешь сам)"
+	claude -p "/code-review high"
 
 run:            ## Запустить Telegram-бота (нужен .env)
 	python -m bot.main

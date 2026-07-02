@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-from adcopy.validate import ASSET_LIMITS, LIMITS, rsa_len
+from adcopy.validate import ASSET_LIMITS, LIMITS, moderation_issues, rsa_len
 
 # Ключи params ассета → тип лимита (ASSET_LIMITS) для ре-валидации длины при замене (§19.8).
 _ASSET_KEY_KIND = {
@@ -65,12 +65,19 @@ def _replace_kind_ok(new_value: str, kind: str | None) -> bool:
 
 
 def _repl_in_str(s: str, old: str, new: str, kind: str | None) -> tuple[str, int]:
-    """Заменить old→new в строке; откатить, если результат не влезает в лимит kind."""
+    """Заменить old→new в строке; откатить, если результат не влезает в лимит kind ИЛИ вносит
+    НОВЫЕ политика-проблемы (§19.8: пере-верификация «длины, политики» и на ручной замене —
+    CAPS/спам-символы ловятся не только на генерации). Уже существующие проблемы не блокируют
+    замену (не ухудшаем — можно)."""
     if old not in s:
         return s, 0
     candidate = s.replace(old, new)
     if not _replace_kind_ok(candidate, kind):
         return s, 0  # после замены поле превысило лимит → не трогаем (golden rule #4)
+    if kind in ("headline", "description") and not set(moderation_issues(candidate)) <= set(
+        moderation_issues(s)
+    ):
+        return s, 0  # замена внесла КАПС/спам, которых не было → не трогаем (политики Google)
     return candidate, 1
 
 

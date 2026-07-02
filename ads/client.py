@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from core.config import normalize_customer_id, settings
@@ -34,6 +35,70 @@ _CLIENT_CACHE: dict[str, "GoogleAdsClient"] = {}
 # ⚠️ Секрет В ПАМЯТИ (не логируем, не в repr) — golden rule #5. Пусто ⇒ build_client падает на
 # .env (обратная совместимость: тест-дочерние под одним MCC покрыты единым токеном).
 _OAUTH_RUNTIME: dict[str, tuple[str, str | None]] = {}
+
+# §8 (полный мульти-аккаунт, ЧТЕНИЕ): дочерние аккаунты, ОБНАРУЖЕННЫЕ обходом разрешённого MCC
+# (`discover_read_children` под замком `ensure_manager_allowed`) на старте бота. Это эффективный
+# read-allow-list, ПРОИЗВОДНЫЙ ОТ КОДА, а не из env-строки: наполняется только листами настроенных
+# MCC (`settings.login_customer_id_set`). Пусто ⇒ ничего не добавляет (fail-closed сохраняется:
+# при отсутствии обхода читаем только мутационный аккаунт + env read-list). ⚠️ МУТАЦИИ этим НЕ
+# затрагиваются — у них свой узкий замок с код-потолком `ALLOWED_CEILING`; чтение дочернего НЕ даёт
+# права его менять (инвариант test_mutation_lock_unchanged_by_read_allowlist).
+_READ_DISCOVERED: set[str] = set()
+
+
+def set_discovered_read_children(ids: Iterable[str]) -> int:
+    """Заменить набор обнаруженных дочерних (read-only §8) на нормализованные `ids`. Возвращает
+    размер набора. Пустой вход очищает набор (вернёт к чтению только мутационного + env read-list)."""
+    _READ_DISCOVERED.clear()
+    for x in ids:
+        cid = normalize_customer_id(x)
+        if cid:
+            _READ_DISCOVERED.add(cid)
+    return len(_READ_DISCOVERED)
+
+
+def discovered_read_children() -> set[str]:
+    """Копия набора обнаруженных обходом MCC дочерних (§8) — для планировщика (кому слать плановый
+    отчёт/аномалии по всем дочерним). Копия, чтобы вызывающий не мутировал внутренний набор."""
+    return set(_READ_DISCOVERED)
+
+
+async def discover_read_children() -> int:
+    """§8: обойти КАЖДЫЙ настроенный MCC (`settings.login_customer_id_set`) через
+    `ads.read.list_child_accounts` (замок обхода `ensure_manager_allowed`) и запомнить лист-аккаунты
+    (не-менеджерские) как эффективный read-allow-list (`_READ_DISCOVERED`). READ-ONLY.
+
+    Вызывать на СТАРТЕ бота (после `load_oauth_cache`, чтобы для не-основных MCC были per-account
+    креды). Сбой обхода одного MCC логируем и ПРОПУСКАЕМ — не роняем старт (тот MCC просто не
+    попадёт в read-набор; сводка честно покажет пропуски). Возвращает число обнаруженных дочерних.
+    Идемпотентна: каждый вызов пересобирает набор заново (перезапуск/перекраул дочерних)."""
+    from core.logging import log
+    from core.resilience import run_ads_read_call
+
+    managers = settings.login_customer_id_set
+    if not managers:
+        return 0  # нет настроенных MCC ⇒ обход невозможен (fail-closed, набор остаётся пустым)
+    found: set[str] = set()
+    for mid in sorted(managers):
+        try:
+            from ads.read import list_child_accounts  # ленивый импорт: избегаем цикла с ads.read
+
+            client = build_client(mid)
+            children = await run_ads_read_call(
+                list_child_accounts, client, mid, label="mcc_discover"
+            )
+        except Exception as e:  # noqa: BLE001 — обход одного MCC не критичен для старта
+            log.warning("mcc discover: MCC %s не обойдён (%s)", mid, type(e).__name__)
+            continue
+        for ch in children:
+            if not ch.manager:
+                cid = normalize_customer_id(ch.id)
+                if cid:
+                    found.add(cid)
+    n = set_discovered_read_children(found)
+    if n:
+        log.info("mcc discover: дочерних аккаунтов доступно на чтение (§8): %d", n)
+    return n
 
 
 def set_oauth_runtime(account: str, refresh_token: str, login_customer_id: str | None) -> None:
@@ -90,28 +155,32 @@ def _env_cfg() -> dict:
 
 
 def build_client(customer_id: str | None = None) -> "GoogleAdsClient":
-    """SDK-клиент для аккаунта. Без аргумента (или Draft) — из .env (байт-в-байт как раньше),
-    кэш по нормализованному id. Импорт SDK ленивый: ensure_allowed/константы доступны без google-ads.
+    """SDK-клиент для аккаунта. Без аргумента (или Draft) — из .env; кэш по нормализованному id.
+    Импорт SDK ленивый: ensure_allowed/константы доступны без google-ads.
 
-    Фаза 1 (сейчас): конфиг всегда из .env — один тест-MCC единым токеном покрывает всех тест-
-    дочерних. Фаза 3 (разные MCC): для не-Draft будет ветка oauth_tokens (per-account refresh-токен
-    + login_customer_id из БД, расшифровка core.secrets). Сигнатура уже принимает customer_id, чтобы
-    16 вызывающих перешли на per-account вызов без новой правки контракта."""
+    §8 (активно): для не-Draft с зарегистрированным per-account токеном (oauth_tokens → _OAUTH_RUNTIME
+    через load_oauth_cache на старте) конфиг берётся из БД (свой refresh-токен + свой login_customer_id,
+    расшифровка core.secrets); иначе — .env (один тест-MCC единым токеном покрывает тест-дочерних).
+    Выбор кредов вынесен в `_cfg_for`. МУТАЦИИ это НЕ расширяет — замок `ensure_allowed`=Draft отдельно."""
     from google.ads.googleads.client import GoogleAdsClient
 
     cid = normalize_customer_id(customer_id) if customer_id else DRAFT_ACCOUNT_ID
     cached = _CLIENT_CACHE.get(cid)
     if cached is not None:
         return cached
-    client = GoogleAdsClient.load_from_dict(_cfg_for(cid))
+    # version= делает `settings.google_ads_api_version` АВТОРИТЕТНЫМ (иначе SDK молча берёт свой
+    # дефолт — сейчас совпадает с пином google-ads>=31.1,<32=v24, но не гарантированно при апгрейде
+    # библиотеки). Рассинхрон версии теперь = явный отказ get_service, а не тихий дрейф. Пин lib и
+    # эту строку перепроверять скилом gads-version (v24 сансет ~май 2027).
+    client = GoogleAdsClient.load_from_dict(_cfg_for(cid), version=settings.google_ads_api_version)
     _CLIENT_CACHE[cid] = client
     return client
 
 
 def _cfg_for(cid: str) -> dict:
-    """Конфиг google-ads для нормализованного cid. Фаза 3: не-Draft с зарегистрированным per-account
-    токеном (oauth_tokens → _OAUTH_RUNTIME через load_oauth_cache) → свой refresh-токен + свой
-    login_customer_id (MCC). Иначе (Draft или нет записи) — .env (один тест-MCC единым токеном
+    """Конфиг google-ads для нормализованного cid. §8 (активно): не-Draft с зарегистрированным
+    per-account токеном (oauth_tokens → _OAUTH_RUNTIME через load_oauth_cache) → свой refresh-токен +
+    свой login_customer_id (MCC). Иначе (Draft или нет записи) — .env (один тест-MCC единым токеном
     покрывает тест-дочерних). Вынесен из build_client, чтобы тестировать выбор кредов без SDK."""
     creds = _OAUTH_RUNTIME.get(cid) if cid != DRAFT_ACCOUNT_ID else None
     if creds is None:
@@ -172,8 +241,10 @@ def ensure_read_allowed(customer_id: str) -> None:
 
     Шире мутационного, но НЕ открытый. Множество разрешённого чтения =
     мутационный allow-list (`settings.allowed_customer_ids`) ∪ read-allow-list
-    (`settings.read_customer_ids` из env `GOOGLE_ADS_READ_CUSTOMER_IDS`). Пустые оба ⇒ отказ
-    (fail-closed). Нормализуем id (только цифры), '775-364-3025' ≡ '7753643025'.
+    (`settings.read_customer_ids` из env `GOOGLE_ADS_READ_CUSTOMER_IDS`) ∪ ОБНАРУЖЕННЫЕ обходом MCC
+    дочерние (`_READ_DISCOVERED`, §8-полный-мульти-аккаунт — заполняется `discover_read_children`
+    на старте под замком `ensure_manager_allowed`). Все три пусты ⇒ отказ (fail-closed). Нормализуем
+    id (только цифры), '775-364-3025' ≡ '7753643025'.
 
     ⚠️ Мутации этим НЕ затрагиваются: у них свой узкий замок `ensure_allowed` с код-потолком
     `ALLOWED_CEILING`. Расширение read-allow-list (перечисление дочерних MCC) НЕ даёт права их
@@ -183,13 +254,13 @@ def ensure_read_allowed(customer_id: str) -> None:
     cid = normalize_customer_id(customer_id)
     mutate = {normalize_customer_id(x) for x in settings.allowed_customer_ids}
     read = {normalize_customer_id(x) for x in settings.read_customer_ids}
-    allowed = mutate | read
+    allowed = mutate | read | _READ_DISCOVERED  # ∪ дочерние, обнаруженные обходом MCC (§8)
 
-    # fail-closed: без явного списка ничего не читаем per-account.
+    # fail-closed: без явного списка И без обнаруженных дочерних ничего не читаем per-account.
     if not allowed:
         raise PermissionError(
-            "ни allowed_customer_ids, ни read_customer_ids не заданы — чтение запрещено "
-            f"(fail-closed). Задай GOOGLE_ADS_ALLOWED_CUSTOMER_IDS={DRAFT_ACCOUNT_ID} в .env"
+            "ни allowed_customer_ids, ни read_customer_ids, ни обход MCC не дали аккаунтов — "
+            f"чтение запрещено (fail-closed). Задай GOOGLE_ADS_ALLOWED_CUSTOMER_IDS={DRAFT_ACCOUNT_ID} в .env"
         )
     if cid not in allowed:
         raise PermissionError(

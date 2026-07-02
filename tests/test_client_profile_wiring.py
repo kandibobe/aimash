@@ -112,8 +112,9 @@ async def test_cc_kw_generate_passes_profile_to_seeds():
 
     captured: dict = {}
 
-    async def fake_seeds(*, topic, profile, language):
+    async def fake_seeds(*, topic, profile, language, url=None):
         captured["profile"] = profile
+        captured["url"] = url  # §19.4.2: сайт из §20-профиля (здесь профиль без сайта → None)
         raise RuntimeError("stop-before-network")  # short-circuit до build_client/Sheets
 
     state = FakeState(cc_session=session)

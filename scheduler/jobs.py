@@ -38,10 +38,13 @@ def _recipients() -> set[int]:
 
 
 def _scheduled_accounts() -> list[str]:
-    """Аккаунты для плановых отчётов/аномалий (§8): мутационный allow-list ∪ read-list (всё, что
-    боту РАЗРЕШЕНО читать). Пусто ⇒ дефолт [Draft] (поведение как раньше — единственный аккаунт).
-    READ-ONLY: scheduler только читает (golden rule #3)."""
-    accts = settings.allowed_customer_ids | settings.read_customer_ids
+    """Аккаунты для плановых отчётов/аномалий (§8): мутационный allow-list ∪ env read-list ∪
+    дочерние, ОБНАРУЖЕННЫЕ обходом MCC на старте (discover_read_children — полный мульти-аккаунт).
+    Пусто ⇒ дефолт [Draft] (поведение как раньше — единственный аккаунт). READ-ONLY: scheduler
+    только читает (golden rule #3)."""
+    from ads.client import discovered_read_children
+
+    accts = settings.allowed_customer_ids | settings.read_customer_ids | discovered_read_children()
     return sorted(accts) if accts else [DRAFT_ACCOUNT_ID]
 
 
@@ -193,13 +196,20 @@ async def cleanup_stale_proposals(
                 if created < cutoff:
                     stale.append((p.confirmation_id, p.chat_id))
         for cid, chat_id in stale:
-            # §19: TTL-просроченный create_search_campaign несёт временные изображения по media_id —
-            # чистим их перед reject (иначе осиротеют на диске).
+            # §19/§11: TTL-просроченные create_search/gdn/demand_gen_campaign несут временные медиа
+            # по media_id — чистим их перед reject (иначе осиротеют на диске).
             snap = await store.get_confirmed(cid)
-            if snap is not None and snap.operation == "create_search_campaign":
-                from ads.assets import clear_pending_media_ids
+            if snap is not None:
+                from ads.assets import clear_pending_media_ids, collect_search_campaign_media_ids
 
-                clear_pending_media_ids((snap.params or {}).get("image_media_ids") or [])
+                p = snap.params or {}
+                if snap.operation == "create_search_campaign":
+                    # изображения Этапа 4 + логотипы business_logo (§19.7.1) — единый сборщик
+                    clear_pending_media_ids(collect_search_campaign_media_ids(p))
+                elif snap.operation == "create_gdn_campaign" and p.get("media_id"):
+                    clear_pending_media_ids([p["media_id"]])
+                elif snap.operation == "create_demand_gen_campaign" and p.get("logo_media_id"):
+                    clear_pending_media_ids([p["logo_media_id"]])
             await store.reject(cid, chat_id=chat_id)  # pending→rejected + audit (одноразово)
         if stale:
             log.info("scheduler: отклонено просроченных черновиков: %d", len(stale))
@@ -235,9 +245,14 @@ async def cleanup_stale_campaign_drafts(
                 if updated < cutoff:
                     d.status = "abandoned"
                     n += 1
-                    orphan_media += (d.wizard_state or {}).get("images", {}).get(
-                        "media_ids", []
-                    ) or []
+                    ws = d.wizard_state or {}
+                    orphan_media += ws.get("images", {}).get("media_ids", []) or []
+                    # §19.7.1: логотипы business_logo из набора ассетов брошенного черновика
+                    for spec in (ws.get("assets") or {}).get("new") or []:
+                        if str(spec.get("family") or "") == "business_logo":
+                            mid = (spec.get("params") or {}).get("media_id")
+                            if mid:
+                                orphan_media.append(str(mid))
             if n:
                 await s.commit()
         if orphan_media:  # §19: чистим временные изображения брошенных черновиков (вне транзакции)

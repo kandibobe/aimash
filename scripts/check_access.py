@@ -38,7 +38,7 @@ def build_client() -> GoogleAdsClient:
     }
     if settings.google_ads_login_customer_id:
         cfg["login_customer_id"] = settings.google_ads_login_customer_id
-    return GoogleAdsClient.load_from_dict(cfg)
+    return GoogleAdsClient.load_from_dict(cfg, version=settings.google_ads_api_version)
 
 
 def read_account(ga, cid: str, label: str) -> None:

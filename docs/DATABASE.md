@@ -3,28 +3,90 @@
 ORM — SQLAlchemy 2.0 ([`db/models.py`](../db/models.py)); схему в проде ведёт **Alembic**
 ([`migrations/`](../migrations/)). Dev/тесты могут работать на SQLite; прод — Postgres 16.
 
-## Схема (5 таблиц)
+## Все таблицы (15)
 
-| Таблица | Назначение | Ключевые поля |
-|---|---|---|
-| `whitelist` | Telegram allow-list (кому разрешён бот) | `chat_id` (unique), `note` |
-| `user_settings` | расписание отчётов, пороги алертов, переопределение модели | `chat_id` (unique), `report_schedule` (cron), `alert_thresholds` (JSON), `model_override` |
-| `proposals` | очередь черновиков изменений (diff «было→станет») | `confirmation_id` (unique), `operation`, `customer_id`, `summary`, `params` (JSON), `user_initiated`, `status` |
-| `audit_log` | журнал всех операций (кто/когда/что/результат) | `confirmation_id`, `operation`, `customer_id`, `chat_id`, `status`, `result` (JSON) |
-| `oauth_tokens` | refresh-токены, **зашифрованные at-rest** | `account` (unique), `refresh_token_enc` |
+Полный перечень моделей из [`db/models.py`](../db/models.py). Каждая таблица подтверждена
+Alembic-миграцией (см. колонку «Миграция»). Колонка «Статус» отражает **реальное** использование
+в рантайме (что читается/пишется кодом), а не намерение.
+
+| Таблица | Назначение | Ключевые поля | Миграция | Статус |
+|---|---|---|---|---|
+| `whitelist` | задумывалась как Telegram allow-list в БД | `chat_id` (unique), `note` | `0001` | **НЕАКТИВНА (dead schema)** — гейтинг идёт по env, не по этой таблице (см. ниже) |
+| `user_settings` | язык, расписание отчётов, пороги алертов, override модели, активный аккаунт | `chat_id` (unique), `report_schedule` (cron), `alert_thresholds` (JSON), `model_override`, `language`, `selected_customer_id` | `0001` (+`0005`,`0007`) | ACTIVE |
+| `proposals` | очередь черновиков изменений Google Ads (diff «было→станет») | `confirmation_id` (unique), `operation`, `customer_id`, `summary`, `params` (JSON), `user_initiated`, `status` | `0001` (+индекс `0003`) | ACTIVE |
+| `audit_log` | журнал всех операций (кто/когда/что/результат), по `confirmation_id` | `confirmation_id`, `operation`, `customer_id`, `chat_id`, `actor_user_id`, `status`, `result` (JSON) | `0001` (+`0004` актор) | ACTIVE |
+| `oauth_tokens` | per-account refresh-токены (§8), **зашифрованы at-rest** | `account` (unique), `refresh_token_enc`, `login_customer_id` | `0001` (+`0008`) | **ACTIVE** — загружается на старте (см. ниже) |
+| `error_events` | перехваченные исключения для триажа (§15), текст **редактирован** | `request_id`, `chat_id`, `customer_id`, `where`, `exc_type`, `message`, `traceback` | `0006` (+`0011`) | ACTIVE |
+| `account_access` | пер-пользовательский доступ к аккаунтам (§12), fail-closed | `chat_id`, `customer_id` (unique пара) | `0009` | ACTIVE |
+| `campaign_templates` | именованные пресеты параметров кампании (§2B) | `chat_id`, `name` (unique пара), `params` (JSON), `source_campaign` | `0010` | ACTIVE |
+| `campaign_drafts` | накопленный черновик 8-этапного визарда «Создание кампании» (§19); переживает рестарт | `session_id` (unique), `chat_id`, `customer_id`, `preview_customer_id`, `current_step`, `wizard_state` (JSON), `status` | `0012` | ACTIVE |
+| `client_profiles` | база знаний о клиенте на `customer_id` (§20): бренд/ниша/гео/сайт | `customer_id` (unique), `brand`, `business_desc`, `geo`, `language`, `website`, `socials` (JSON), `notes`, `last_crawled_at` | `0013` | ACTIVE |
+| `client_contacts` | контакты клиента (§20.7): телефон/e-mail/адрес/соцсеть/мессенджер | `profile_id`, `kind`, `value` | `0013` | ACTIVE |
+| `client_services` | услуги/товары клиента (§20.7): для сниппетов/callouts/релевантности | `profile_id`, `name`, `description`, `price`, `category` | `0013` | ACTIVE |
+| `client_site_pages` | карта страниц сайта после краулинга (§20.7) → будущие sitelinks | `profile_id`, `url`, `title`, `page_type`, `key_links` (JSON), `content_hash` | `0013` (+`0014` hash) | ACTIVE |
+| `crawl_jobs` | журнал задач краулинга сайта (§20.4): статус/страницы/ошибка | `job_id` (unique), `customer_id`, `chat_id`, `domain`, `mode`, `status`, `pages_crawled`, `error` | `0013` | ACTIVE |
+| `client_profile_history` | версии профиля «до» для отката/аудита (§20.5); переживают clear | `customer_id`, `snapshot` (JSON), `operation`, `confirmation_id` | `0013` | ACTIVE |
+
+> Все 15 таблиц объявлены в `db/models.py` и создаются миграциями `0001`–`0014`
+> (`op.create_table(...)`). Инициалка `0001` создаёт 5 базовых таблиц
+> (`whitelist`, `user_settings`, `proposals`, `audit_log`, `oauth_tokens`;
+> [`migrations/versions/0001_initial.py:22-92`](../migrations/versions/0001_initial.py)), остальные —
+> последующими ревизиями.
+
+## `whitelist` — почему НЕАКТИВНА (dead schema)
+
+Модель `Whitelist` определена в [`db/models.py:35`](../db/models.py), но **нигде в коде приложения не
+импортируется и не запрашивается** (единственные упоминания `db.models.Whitelist` — само определение
+и `Base` для `create_all`/миграций). Гейтинг доступа делает `WhitelistMiddleware`, который читает
+allow-list **из env**, а не из БД:
+
+- `WhitelistMiddleware.__call__` берёт `settings.whitelist` и блокирует `uid not in wl`
+  ([`bot/main.py:376-392`](../bot/main.py)) — fail-closed: пустой набор блокирует ВСЕХ.
+- `settings.whitelist` парсится из переменной окружения `TELEGRAM_WHITELIST_CHAT_IDS`
+  ([`core/config.py:57,123-124`](../core/config.py)), не из таблицы.
+- В prod пустой env-whitelist роняет старт (fail-fast, [`core/config.py:199-206`](../core/config.py)).
+
+Итог: таблица `whitelist` существует в схеме (историческое наследие `0001`), но **на поведение бота не
+влияет** — источник истины по доступу это env. Не полагаться на её содержимое.
+
+## `oauth_tokens` — ACTIVE (загрузка на старте)
+
+Per-account OAuth-токены (§8/мультиаккаунт) **загружаются при старте бота**:
+`load_oauth_cache()` вызывается в стартовой последовательности после `init_db()`
+([`bot/main.py:5533-5535`](../bot/main.py)). Функция читает все строки `oauth_tokens`, расшифровывает
+`refresh_token_enc` через `core.secrets.decrypt` и кладёт `(refresh_token, login_customer_id)` в
+рантайм-кэш `_OAUTH_RUNTIME` ([`ads/client.py:112-139`](../ads/client.py)). Далее `build_client(child)`
+для дочерних под другими MCC берёт per-account креды из этого кэша.
+
+Отказоустойчивость: сбой расшифровки ОДНОГО аккаунта логируется и пропускается (не роняет старт;
+[`ads/client.py:130-134`](../ads/client.py)); общий сбой `load_oauth_cache` тоже не критичен — Draft и
+тест-MCC покрыты единым `.env`-токеном ([`bot/main.py:5536-5537`](../bot/main.py),
+`ads/client._env_cfg`). Пусто ⇒ работает Draft на едином `.env`-токене.
+
+Статус at-rest-шифрования как задела под §8 (таблица + `core.secrets`) описан в
+[`core/secrets.py`](../core/secrets.py); замок мутаций (только Draft `7753643025`) от этого не зависит.
 
 ### Где секреты
 Refresh-токены хранятся **только** зашифрованными (`oauth_tokens.refresh_token_enc`,
-`core.secrets.encrypt`). В `proposals.params` и `audit_log.result` секретов **нет** by design —
-туда идут структурированные (Pydantic-валидированные) параметры и результат операции.
+`core.secrets.encrypt`). В `proposals.params` и `audit_log.result` секретов **нет** by design — туда
+идут структурированные (Pydantic-валидированные) параметры и результат операции. PII клиента (§20:
+телефоны/e-mail в `client_contacts`) — не секрет проекта, но в логи сырьём не пишется; текст ошибок в
+`error_events.message`/`crawl_jobs.error` **редактируется** (`core.logging.redact_text`, golden rule #5).
 
-### Жизненный цикл proposal
-`status`: `pending → confirmed → executing → applied` (или `failed` / `rejected`).
-- `user_initiated` дефолтит в **`False`** (fail-closed): только доверенный вход — Telegram-команда
-  человека — ставит `True`. Автосоздатель (scheduler/anomaly), забывший флаг, получит `False`, и
-  бюджет/ставка будут заблокированы гейтом (golden rule #3). Дефолт `True` был бы fail-open.
+## Жизненный цикл proposal
+`status`: `pending → confirmed → executing → applied` (или `failed` / `rejected`)
+([`db/models.py:85-87`](../db/models.py)).
+- `user_initiated` дефолтит в **`False`** (fail-closed; [`db/models.py:84`](../db/models.py)): только
+  доверенный вход — Telegram-команда человека — ставит `True`. Автосоздатель (scheduler/anomaly),
+  забывший флаг, получит `False`, и бюджет/ставка будут заблокированы гейтом (golden rule #3). Дефолт
+  `True` был бы fail-open.
+- Мутация в Google Ads возможна ТОЛЬКО на Draft `7753643025` (`ads.client.ensure_allowed`) и ТОЛЬКО
+  после подтверждения по `confirmation_id` (`confirm.store`) — таблица `proposals` это очередь
+  черновиков, а не исполнение.
 - Подтверждение «тратится» атомарно один раз (`ConfirmStore.claim`) — см. [SECURITY.md](SECURITY.md).
-Истёкшие `pending`-черновики подчищает плановая задача (см. [SCHEDULER.md](SCHEDULER.md)).
+- Истёкшие `pending`-черновики подчищает плановая задача (см. [SCHEDULER.md](SCHEDULER.md)); композитный
+  индекс `ix_proposals_status_created_at` обслуживает этот скан ([`db/models.py:68`](../db/models.py),
+  миграция `0003`).
 
 ## Миграции (Alembic)
 
@@ -35,6 +97,12 @@ alembic downgrade -1                     # откатить последнюю
 alembic current                          # текущая ревизия
 alembic history                          # список ревизий
 ```
+
+Текущая цепочка ревизий: `0001` (init: whitelist/user_settings/proposals/audit_log/oauth_tokens) →
+`0003` (индекс очистки proposals) → `0004` (актор в audit) → `0005` (язык) → `0006` (error_events) →
+`0007` (выбранный аккаунт) → `0008` (login_customer_id в oauth_tokens) → `0009` (account_access) →
+`0010` (campaign_templates) → `0011` (customer_id в error_events) → `0012` (campaign_drafts) →
+`0013` (§20 client KB: 6 таблиц) → `0014` (content_hash в client_site_pages).
 
 ### Добавить миграцию
 ```bash

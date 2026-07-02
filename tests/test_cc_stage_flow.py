@@ -117,7 +117,9 @@ async def _full_draft(chat: int) -> str:
 
 
 @pytest.mark.asyncio
-async def test_stage2_provide_keywords_advances():
+async def test_stage2_provide_keywords_reviews_then_advances():
+    """§19.4: список принят → ОБЗОР с явным гейтом «✅ Подтвердить ключевые слова» (остаёмся на
+    Этапе 2) → по кнопке — Этап 3. Смешанные маркеры сохраняются per-keyword (match_types)."""
     await init_db()
     chat = 7700201
     sid = await bm.CDRAFTS.create(chat_id=chat, customer_id=DRAFT_ACCOUNT_ID)
@@ -126,8 +128,55 @@ async def test_stage2_provide_keywords_advances():
     await bm.cc_keywords_text(FakeMessage("[used cars], cheap cars kenya", chat_id=chat), fsm)
     snap = await bm.CDRAFTS.get(sid)
     assert snap.wizard_state["keywords"]["list"] == ["used cars", "cheap cars kenya"]
-    assert snap.current_step == 3  # ушли к объявлению
+    # §19.4.1: смешанные типы НЕ схлопнуты в первый — сохранены 1:1 к ключам
+    assert snap.wizard_state["keywords"]["match_types"] == ["exact", "phrase"]
+    assert snap.current_step == 2  # ждём явного «✅ Подтвердить ключевые слова»
     assert await _muts(chat) == 0
+    # Явный гейт: кнопка «✅ Подтвердить ключевые слова» → Этап 3
+    cq = FakeCallbackQuery(FakeMessage(chat_id=chat))
+    await bm.cc_kw_confirm(cq, CcCB(action="kw_confirm"), fsm)
+    snap2 = await bm.CDRAFTS.get(sid)
+    assert snap2.current_step == 3  # ушли к объявлению
+    assert await _muts(chat) == 0
+
+
+@pytest.mark.asyncio
+async def test_stage2_file_upload_feeds_keywords():
+    """§19.4.1 Ввод A (файл): XLSX/CSV-текст кормится в черновик через _cc_keywords_from_document
+    (раньше файл падал в общий ingest и сбрасывал визард)."""
+    await init_db()
+    chat = 7700205
+    sid = await bm.CDRAFTS.create(chat_id=chat, customer_id=DRAFT_ACCOUNT_ID)
+    await bm.CDRAFTS.set_step(sid, 2)
+    fsm = FakeFSM({"cc_session": sid})
+    file_text = "used cars nairobi\ncheap cars kenya\n[toyota kenya]"  # как из xlsx/csv-колонки
+    await bm._cc_keywords_from_document(FakeMessage(chat_id=chat), fsm, file_text, "kw.xlsx")
+    snap = await bm.CDRAFTS.get(sid)
+    assert snap.wizard_state["keywords"]["list"] == [
+        "used cars nairobi",
+        "cheap cars kenya",
+        "toyota kenya",
+    ]
+    assert snap.wizard_state["keywords"]["source"] == "file"
+    assert snap.wizard_state["keywords"]["match_types"] == ["phrase", "phrase", "exact"]
+    assert snap.current_step == 2  # обзор + явный гейт, как и для текста
+    assert await _muts(chat) == 0
+
+
+@pytest.mark.asyncio
+async def test_stage2_verify_rejects_foreign_sheet():
+    """§19.4.2 round-trip: менеджер обязан вернуть ТУ ЖЕ таблицу, что создал бот (sheet_id)."""
+    await init_db()
+    chat = 7700206
+    sid = await bm.CDRAFTS.create(chat_id=chat, customer_id=DRAFT_ACCOUNT_ID)
+    await bm.CDRAFTS.set_step(sid, 2)
+    await bm.CDRAFTS.patch(sid, lambda st: st["keywords"].__setitem__("sheet_id", "SHEET-ORIG-1"))
+    fsm = FakeFSM({"cc_session": sid})
+    m = FakeMessage("https://docs.google.com/spreadsheets/d/OTHER-SHEET-9/edit", chat_id=chat)
+    await bm.cc_kw_verify(m, fsm)
+    snap = await bm.CDRAFTS.get(sid)
+    assert not (snap.wizard_state["keywords"] or {}).get("verified")  # чужая таблица не принята
+    assert any("не та таблица" in (t or "") for t, _ in m.answers)
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import io
+import re
 import tempfile
 from pathlib import Path
 
@@ -53,14 +54,26 @@ def _to_jpeg(img: Image.Image) -> bytes:
     return buf.getvalue()
 
 
+# §19.6/§11: потолок размера image-ассета Google Ads — 5120 КБ. Pillow пере-кодирует в JPEG q=88
+# (обычно ≪ лимита), но проверяем ЯВНО (кэп считает КОД, не «повезёт/не повезёт» на выходе кодека).
+MAX_IMAGE_ASSET_BYTES = 5120 * 1024
+
+
 def prepare_display_images(photo_bytes: bytes) -> tuple[bytes, bytes]:
-    """Одно фото → (landscape 1.91:1, square 1:1) JPEG-байты для RDA. ValueError, если не картинка."""
+    """Одно фото → (landscape 1.91:1, square 1:1) JPEG-байты для RDA. ValueError, если не картинка
+    или кадр после пере-кодирования превышает лимит Google (≤5120 КБ)."""
     try:
         img = Image.open(io.BytesIO(photo_bytes))
         img.load()
     except Exception as e:  # noqa: BLE001 — любое не-изображение → понятная ошибка пользователю
         raise ValueError(f"не удалось прочитать изображение: {type(e).__name__}") from e
-    return _to_jpeg(_crop_resize(img, *_LANDSCAPE)), _to_jpeg(_crop_resize(img, *_SQUARE))
+    land, sq = _to_jpeg(_crop_resize(img, *_LANDSCAPE)), _to_jpeg(_crop_resize(img, *_SQUARE))
+    for frame in (land, sq):
+        if len(frame) > MAX_IMAGE_ASSET_BYTES:
+            raise ValueError(
+                f"изображение после обработки {len(frame) // 1024} КБ > лимита Google 5120 КБ"
+            )
+    return land, sq
 
 
 # ── Временное хранилище байтов (между приёмом фото и confirm; переживает рестарт) ─
@@ -99,6 +112,20 @@ def clear_pending_media_ids(media_ids) -> None:
         clear_pending_media(str(mid))
 
 
+def collect_search_campaign_media_ids(params: dict | None) -> list[str]:
+    """§19: ВСЕ временные media_id из params create_search_campaign — изображения Этапа 4
+    (image_media_ids) + логотипы из asset-спеков (§19.7.1 business_logo). Единый сборщик, чтобы
+    чистка на reject/TTL не разъезжалась с составом params при добавлении новых медиа-семейств."""
+    p = params or {}
+    ids = [str(m) for m in (p.get("image_media_ids") or [])]
+    for spec in p.get("asset_specs") or []:
+        if str(spec.get("family") or "") == "business_logo":
+            mid = (spec.get("params") or {}).get("media_id")
+            if mid:
+                ids.append(str(mid))
+    return ids
+
+
 # ── AssetService: загрузка image-ассета (SDK) ────────────────────────────────────
 def upload_image_asset(client, customer_id: str, image_bytes: bytes, name: str) -> str:
     """Загрузить image-ассет, вернуть resource_name. Замок аккаунта — и тут (golden rule #9)."""
@@ -110,5 +137,44 @@ def upload_image_asset(client, customer_id: str, image_bytes: bytes, name: str) 
     op.create.name = name
     op.create.type_ = client.enums.AssetTypeEnum.IMAGE
     op.create.image_asset.data = image_bytes
+    resp = svc.mutate_assets(customer_id=str(customer_id), operations=[op])
+    return resp.results[0].resource_name
+
+
+# ── §11: YouTube-видео-ассет (Demand Gen / Video — видео живёт на YouTube) ────────
+# 11-символьный ID видео YouTube (стандарт: буквы/цифры/-/_).
+_YT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+# Формы ссылок: watch?v=ID · youtu.be/ID · shorts/ID · embed/ID · live/ID.
+_YT_URL_RE = re.compile(
+    r"(?:youtube\.com/(?:watch\?(?:[^#\s]*&)?v=|shorts/|embed/|live/)|youtu\.be/)"
+    r"([A-Za-z0-9_-]{11})(?:[?&#]|$)"
+)
+
+
+def parse_youtube_video_id(url_or_id: str) -> str | None:
+    """Извлечь 11-символьный ID видео из YouTube-ссылки (watch/shorts/embed/live/youtu.be) или
+    принять голый ID. None — не распознано. Чистая функция (без сети)."""
+    s = (url_or_id or "").strip()
+    if _YT_ID_RE.match(s):
+        return s
+    m = _YT_URL_RE.search(s)
+    return m.group(1) if m else None
+
+
+def upload_youtube_video_asset(client, customer_id: str, video_id: str, name: str) -> str:
+    """§11: зарегистрировать YouTube-видео как ассет (AssetService, type=YOUTUBE_VIDEO), вернуть
+    resource_name. Само видео уже размещено на YouTube (примечание ТЗ §11) — API принимает только
+    его ID. Замок аккаунта — и тут (golden rule #9)."""
+    ensure_allowed(customer_id)
+    vid = parse_youtube_video_id(video_id)
+    if not vid:
+        raise ValueError(
+            "не распознан YouTube video id (нужна ссылка YouTube или 11-символьный id)"
+        )
+    svc = client.get_service("AssetService")
+    op = client.get_type("AssetOperation")
+    op.create.name = name
+    op.create.type_ = client.enums.AssetTypeEnum.YOUTUBE_VIDEO
+    op.create.youtube_video_asset.youtube_video_id = vid
     resp = svc.mutate_assets(customer_id=str(customer_id), operations=[op])
     return resp.results[0].resource_name

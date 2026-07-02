@@ -132,6 +132,14 @@ class CcCB(CallbackData, prefix="cc"):
     sub: str = ""
 
 
+class VideoCB(CallbackData, prefix="vid"):
+    """§11: визард кампании из видео (YouTube). Кнопки лишь двигают визард: выбор типа кампании
+    (Demand Gen / Video) и пропуск логотипа. РЕАЛЬНАЯ мутация — только через confirm-гейт
+    (proposal create_demand_gen_campaign / create_video_campaign)."""
+
+    action: str  # "dg" | "video" | "logo_skip"
+
+
 class ClientCB(CallbackData, prefix="cli"):
     """§20: раздел «ℹ️ Информация про клиентов». Контекст (выбранный customer_id) держит FSM —
     в callback_data его НЕ кладём (резолв idx→аккаунт по chat_id через _CLI_ACCT_CACHE, как CcCB).

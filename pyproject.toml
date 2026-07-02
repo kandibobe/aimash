@@ -48,6 +48,9 @@ dev = [
     "ruff==0.14.10",
     "mypy>=1.11",
     "pre-commit>=3.8",        # хуки: gitleaks (секрет-скан) + ruff/ruff-format
+    "hypothesis>=6.100",      # property-based тесты счётчика длины RSA (кириллица=1, CJK=2 —
+                              # golden rule #4): краевые входы (эмодзи/диакритики/границы CJK),
+                              # которые примерами не перебрать. См. tests/test_rsa_length_properties.py
 ]
 
 # Плоская раскладка с несколькими top-level пакетами → setuptools НЕ авто-определит их

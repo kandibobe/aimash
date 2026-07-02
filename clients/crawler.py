@@ -164,7 +164,11 @@ def _page_type(url: str, title: str) -> str:
 
 def _extract(html: str, base_url: str, domain: str) -> tuple:
     """bs4-разбор одной страницы (CPU-bound → вызывать в to_thread). Возвращает
-    (title, text, same_domain_links, socials, phones, emails)."""
+    (title, text, same_domain_links, socials, phones, emails).
+
+    §20.4 «Мета-данные»: meta description и заголовки H1–H3 — явный сигнал тематики страницы —
+    вшиваются В НАЧАЛО text (до усечения crawl_max_text_chars), чтобы LLM-сведе́ние профиля видело
+    их даже на длинных страницах (раньше брались только <title> + сырой текст)."""
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(html, "html.parser")
@@ -182,7 +186,21 @@ def _extract(html: str, base_url: str, domain: str) -> tuple:
             socials.setdefault(_SOCIAL_HOSTS[bare], absu)
         elif _same_domain(absu, domain) and absu not in links:
             links.append(absu)
+    # Мета-описание + H1–H3 (сигнал тематики) — компактным префиксом перед основным текстом.
+    meta_bits: list[str] = []
+    md = soup.find("meta", attrs={"name": "description"})
+    if md and (md.get("content") or "").strip():
+        meta_bits.append(f"Описание страницы: {md['content'].strip()[:300]}")
+    heads = [
+        h.get_text(" ", strip=True)
+        for h in soup.find_all(["h1", "h2", "h3"], limit=12)
+        if h.get_text(strip=True)
+    ]
+    if heads:
+        meta_bits.append("Заголовки: " + " · ".join(h[:80] for h in heads))
     text = _html_to_text(html)
+    if meta_bits:
+        text = "\n".join(meta_bits) + "\n" + text
     phones = list(dict.fromkeys(m.group(0).strip() for m in _PHONE_RE.finditer(text)))
     emails = list(dict.fromkeys(m.group(0).strip() for m in _EMAIL_RE.finditer(text)))
     return title, text, links, socials, phones, emails

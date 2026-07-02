@@ -154,6 +154,62 @@ def test_assemble_defaults_when_no_median():
     assert out["match_type"] == "phrase"
 
 
+# ── §19.3: сети / расписание / даты (таблица Этапа 1) ─────────────────────────────
+def test_parse_ad_schedule_variants():
+    from agent.campaign_settings import parse_ad_schedule
+
+    assert parse_ad_schedule("24/7") == []  # круглосуточно — критерии не создаются
+    assert parse_ad_schedule(None) == []
+    assert parse_ad_schedule("круглосуточно") == []
+    blocks = parse_ad_schedule("пн-пт 9-18")
+    assert blocks is not None and len(blocks) == 5
+    assert blocks[0] == {"day": "MONDAY", "start_hour": 9, "end_hour": 18}
+    assert blocks[-1]["day"] == "FRIDAY"
+    wk = parse_ad_schedule("будни 09:00-18:00")
+    assert wk is not None and [b["day"] for b in wk] == [
+        "MONDAY",
+        "TUESDAY",
+        "WEDNESDAY",
+        "THURSDAY",
+        "FRIDAY",
+    ]
+    lst = parse_ad_schedule("пн, ср, пт 10-20")
+    assert lst is not None and [b["day"] for b in lst] == ["MONDAY", "WEDNESDAY", "FRIDAY"]
+    assert parse_ad_schedule("каждый второй вторник") is None  # нераспознано → None (не молчим)
+    assert parse_ad_schedule("пн-пт 18-9") is None  # start >= end — мусор
+
+
+def test_assemble_networks_schedule_dates():
+    from agent.campaign_settings import CampaignSettings as CS
+
+    # Заданы явно → без «по аналогии», расписание распарсено в блоки, даты валидны
+    out = assemble_settings(
+        CS(
+            networks="search_partners",
+            ad_schedule="пн-пт 9-18",
+            start_date="2026-08-01",
+            end_date="2026-09-01",
+        ),
+        topic="тема",
+    )
+    assert out["networks"] == "search_partners" and "networks" not in out["by_analogy"]
+    assert len(out["ad_schedule_blocks"]) == 5 and "ad_schedule" not in out["by_analogy"]
+    assert out["ad_schedule"] == "пн-пт 9-18"
+    assert out["start_date"] == "2026-08-01" and out["end_date"] == "2026-09-01"
+    # Дефолты → Search-only, 24/7 (по аналогии), даты None
+    dflt = assemble_settings(CampaignSettings(), topic="тема")
+    assert dflt["networks"] == "search" and "networks" in dflt["by_analogy"]
+    assert dflt["ad_schedule_blocks"] == [] and dflt["ad_schedule"] == "24/7"
+    assert dflt["start_date"] is None and dflt["end_date"] is None
+    # Конец раньше старта / мусорная дата → отброшены КОДОМ
+    bad = assemble_settings(
+        CS(start_date="2026-09-01", end_date="2026-08-01"),
+        topic="т",
+    )
+    assert bad["end_date"] is None
+    assert assemble_settings(CS(start_date="не дата"), topic="т")["start_date"] is None
+
+
 # ── §B.3: честный показ пустых денежных метрик в сводке настроек ──────────────────
 def test_settings_summary_shows_no_data_for_zero_cpc():
     from bot.texts import fmt_cc_settings_summary

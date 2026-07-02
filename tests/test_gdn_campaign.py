@@ -111,6 +111,110 @@ async def test_apply_create_gdn_happy_path():
     assert store.finalized is True
 
 
+async def test_apply_create_gdn_passes_geo_to_sdk():
+    """§11: geo_locations из proposal доходят до SDK-цепочки (плюс страна/локаль)."""
+    called = {}
+
+    def fake(client, customer_id, **kw):
+        called.update(**kw)
+        return {
+            "applied": True,
+            "status": "PAUSED",
+            "geo_count": len(kw.get("geo_locations") or []),
+        }
+
+    store = FakeStore(FakeProposal("create_gdn_campaign", "confirmed", user_initiated=True))
+    with patched(mut, "_create_gdn_campaign_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_create_gdn_campaign(
+            customer_id=DRAFT_ACCOUNT_ID,
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+            geo_locations=["Кения", "Найроби"],
+            geo_country_code="KE",
+            geo_locale="en",
+            **_VALID,
+        )
+    assert called["geo_locations"] == ["Кения", "Найроби"]
+    assert called["geo_country_code"] == "KE" and called["geo_locale"] == "en"
+    assert res["geo_count"] == 2
+
+
+def test_create_gdn_via_sdk_invokes_geo_helper_when_provided():
+    """§11: _create_gdn_campaign_via_sdk вызывает reuse-геохелпер с campaign_id и локациями."""
+    geo_calls = {}
+
+    def fake_geo(client, cid, campaign_id, locations, country, locale):
+        geo_calls.update(
+            cid=cid,
+            campaign_id=campaign_id,
+            locations=list(locations),
+            country=country,
+            locale=locale,
+        )
+        return {"count": len(locations)}
+
+    class _Proto(list):
+        """Рекурсивный proto-подобный фейк: любой атрибут — снова _Proto (и это list → .append)."""
+
+        def __getattr__(self, k):
+            v = _Proto()
+            object.__setattr__(self, k, v)
+            return v
+
+    class _AllSvc:
+        def mutate_campaign_budgets(self, customer_id, operations):
+            return _resp(["customers/x/campaignBudgets/9"])
+
+        def mutate_campaigns(self, customer_id, operations):
+            return _resp(["customers/x/campaigns/55"])
+
+        def mutate_ad_groups(self, customer_id, operations):
+            return _resp(["customers/x/adGroups/7"])
+
+        def mutate_ad_group_ads(self, customer_id, operations):
+            return _resp(["customers/x/adGroupAds/7~1"])
+
+    class _Client:
+        enums = _Proto()
+
+        def get_service(self, name):
+            return _AllSvc()
+
+        def get_type(self, name):
+            return _Proto()
+
+    with (
+        patched(mut, "_set_geo_location_via_sdk", fake_geo),
+        patched(
+            __import__("ads.assets", fromlist=["upload_image_asset"]),
+            "upload_image_asset",
+            lambda *a, **k: "customers/x/assets/1",
+        ),
+        allowed_ids(DRAFT_ACCOUNT_ID),
+    ):
+        res = mut._create_gdn_campaign_via_sdk(
+            _Client(),
+            DRAFT_ACCOUNT_ID,
+            campaign_name="Кения авто",
+            landscape_bytes=b"L",
+            square_bytes=b"S",
+            headlines=["Заголовок"],
+            long_headline="Длинный заголовок объявления",
+            descriptions=["Описание"],
+            business_name="Aimash",
+            final_url="https://example.com/",
+            budget_micros=50_000_000,
+            cpc_bid_micros=500_000,
+            geo_locations=["Кения"],
+            geo_country_code="KE",
+            geo_locale="en",
+        )
+    assert geo_calls["campaign_id"] == "55"  # из campaign resource_name
+    assert geo_calls["locations"] == ["Кения"]
+    assert res["geo_count"] == 1
+
+
 async def test_apply_create_gdn_blocked_when_not_user_initiated():
     store = FakeStore(FakeProposal("create_gdn_campaign", "confirmed", user_initiated=False))
     with (
@@ -373,3 +477,48 @@ def test_gdn_schema_validates_and_rejects():
             budget_daily_micros=1,
             media_id="abc",
         )
+
+
+def test_gdn_schema_accepts_geo_locations():
+    """§11: схема принимает опц. geo_locations (пусто по умолчанию)."""
+    from agent.tools.schemas import CreateGdnCampaign
+
+    default = CreateGdnCampaign(
+        campaign_name="X",
+        headlines=["H"],
+        long_headline="L",
+        descriptions=["D"],
+        business_name="B",
+        final_url="https://x/",
+        budget_daily_micros=1,
+        media_id="abc",
+    )
+    assert default.geo_locations == []  # опционально, по умолчанию пусто
+    with_geo = CreateGdnCampaign(
+        campaign_name="X",
+        headlines=["H"],
+        long_headline="L",
+        descriptions=["D"],
+        business_name="B",
+        final_url="https://x/",
+        budget_daily_micros=1,
+        media_id="abc",
+        geo_locations=["Кения", "Найроби"],
+    )
+    assert with_geo.geo_locations == ["Кения", "Найроби"]
+
+
+def test_parse_gdn_brief_optional_geo():
+    """§11: _parse_gdn_brief разбирает опц. 4-е поле «гео» (локации через запятую)."""
+    from bot.main import _parse_gdn_brief
+
+    # без гео (3 поля) — совместимость
+    r3 = _parse_gdn_brief("Весна | https://shop.example | 50")
+    assert r3 is not None and r3[3] == []
+    # с гео (4 поля)
+    r4 = _parse_gdn_brief("Кения авто | https://kasimotors.co.ke | 40 | Кения, Найроби")
+    assert r4 is not None
+    name, url, budget, geo = r4
+    assert budget == 40.0 and geo == ["Кения", "Найроби"]
+    # мусорный формат (2 поля) — None
+    assert _parse_gdn_brief("just text") is None

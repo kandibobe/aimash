@@ -106,10 +106,17 @@ async def build_mcc_summary_async(
     *,
     list_children=list_child_accounts,
     fetch=fetch_totals,
+    tz_of=None,
+    period_for=None,
 ) -> MccSummary:
     """Async-сводка по дочерним MCC — ИДЕНТИЧНА build_mcc_summary по данным, но дочерние читаются
     ПАРАЛЛЕЛЬНО (а не N round-trip подряд). Для ~10 аккаунтов: ceil(N/ADS_MAX_CONCURRENCY) волн
     вместо N последовательных. READ-ONLY; `list_children`/`fetch` инъектируются для тестов.
+
+    §8-нормализация таймзон (опц.): если переданы `tz_of(client, cid) -> tz` и
+    `period_for(tz) -> Period`, окно каждого дочернего строится в ЕГО таймзоне (чтобы не смешивать
+    неполные календарные дни разных TZ). Оба None (дефолт/тесты) ⇒ у всех единый `period` (поведение
+    не меняется). Сбой чтения TZ одного аккаунта → откат на общий `period` (не роняет его строку).
 
     Отличие от build_account_report_async: gather с return_exceptions=True — сбой ОДНОГО дочернего
     (сеть/SDK/таймаут) НЕ роняет всю сводку, а попадает в `summary.errors` (редактированно, без
@@ -129,11 +136,24 @@ async def build_mcc_summary_async(
             summary.skipped.append(ch.id)  # вне read-list — честно отмечаем, не читаем
             continue
         eligible.append(ch)
+
+    async def _fetch_child(ch: ChildAccount):
+        """Прочитать totals одного дочернего в ЕГО таймзоне (§8), если заданы tz_of/period_for."""
+        per = period
+        if tz_of is not None and period_for is not None:
+            try:
+                tz = await run_ads_read_call(tz_of, client, ch.id, label=f"mcc_tz_{ch.id}")
+                if tz:
+                    per = period_for(tz) or period
+            except Exception:  # noqa: BLE001 — TZ не прочитан → общий period (не роняем строку)
+                per = period
+        return await run_ads_read_call(fetch, client, ch.id, per, label=f"mcc_{ch.id}")
+
     # Параллельный фан-аут по разрешённым листам под общим семафором Google Ads (как
     # build_account_report_async). return_exceptions: один упавший аккаунт → строка в errors, а не
     # провал всей сводки (частичный результат для портфеля из ~10 — приемлем, тишина — нет).
     results = await asyncio.gather(
-        *[run_ads_read_call(fetch, client, ch.id, period, label=f"mcc_{ch.id}") for ch in eligible],
+        *[_fetch_child(ch) for ch in eligible],
         return_exceptions=True,
     )
     for ch, res in zip(eligible, results):

@@ -99,6 +99,8 @@ CATALOG: dict[str, dict[str, str]] = {
             "/newsearch — create a search campaign (RSA + keywords), paused — launch separately\n"
             "/keywords — keyword research (volume, competition, clusters) + .xlsx\n"
             "🖼 send a photo — I'll build a display campaign (GDN), created after “yes” (paused)\n"
+            "🎬 send a video or /newvideo — campaign from video: Demand Gen / Video (YouTube, paused)\n"
+            "/mcc [period] — summary across all MCC child accounts (per-currency subtotals)\n"
             "/templates — campaign templates: list and create from a template\n"
             "/savetemplate name [from Campaign] — save settings as a template\n"
             "/recent — recent actions: repeat in one tap (with confirmation)\n"
@@ -317,21 +319,93 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": texts.GDN_ASK_BRIEF,
         "en": (
             "🖼 <b>Photo accepted.</b> I'll build a display campaign (GDN).\n"
-            "Send in a single message: <b>name | link | daily budget</b>.\n"
-            "For example: <code>Spring 2026 | https://shop.example | 50</code>\n\n"
+            "Send in a single message: <b>name | link | daily budget [| geo]</b>.\n"
+            "Geo is optional (comma-separated locations).\n"
+            "For example: <code>Spring 2026 | https://shop.example | 50 | Kenya, Nairobi</code>\n\n"
             "I'll generate the copy myself — I'll show a “before → after” draft before creating."
         ),
     },
     "gdn_bad_brief": {
         "ru": texts.GDN_BAD_BRIEF,
         "en": (
-            "Couldn't parse it. Need <b>name | link | budget</b> (budget is a number).\n"
-            "For example: <code>Summer sale | https://shop.example | 30</code>"
+            "Couldn't parse it. Need <b>name | link | budget [| geo]</b> (budget is a number; "
+            "geo optional).\n"
+            "For example: <code>Summer sale | https://shop.example | 30 | Kenya</code>"
         ),
     },
     "gdn_generating": {
         "ru": texts.GDN_GENERATING,
         "en": "⏳ Generating ad copy…",
+    },
+    # §11: визард кампании из видео (Demand Gen / Video). Убирает «тихий» проигрыш видео.
+    "video_received": {
+        "ru": (
+            "🎬 <b>Видео принято.</b> Кампании из видео (Demand Gen / Video) используют видео, "
+            "размещённое на YouTube — загрузить файл напрямую в Google Ads нельзя.\n"
+            "Пришли <b>ссылку на это видео на YouTube</b> (или его 11-символьный id) — соберу "
+            "черновик кампании. Всё создаётся <b>на паузе</b>; запуск — отдельной командой.\n\n"
+            "Для медийной кампании из <b>картинки</b> (GDN) — пришли фото."
+        ),
+        "en": (
+            "🎬 <b>Video received.</b> Video campaigns (Demand Gen / Video) use a video hosted on "
+            "YouTube — direct file upload into Google Ads isn't possible.\n"
+            "Send a <b>YouTube link</b> to this video (or its 11-char id) and I'll assemble a "
+            "campaign draft. Everything is created <b>paused</b>; launch is a separate command.\n\n"
+            "For a display campaign from an <b>image</b> (GDN) — send a photo."
+        ),
+    },
+    "video_bad_link": {
+        "ru": (
+            "Не распознал ссылку на YouTube. Пришли ссылку вида "
+            "<code>https://youtube.com/watch?v=…</code> / <code>youtu.be/…</code> "
+            "или 11-символьный id видео."
+        ),
+        "en": (
+            "Couldn't parse the YouTube link. Send a link like "
+            "<code>https://youtube.com/watch?v=…</code> / <code>youtu.be/…</code> "
+            "or the 11-char video id."
+        ),
+    },
+    "video_pick_type": {
+        "ru": (
+            "▶️ Видео: <code>{vid}</code>\n"
+            "Какой тип кампании собрать?\n"
+            "• <b>Demand Gen</b> — YouTube/Discover/Gmail, лучший дефолт для лидов и продаж.\n"
+            "• <b>Video</b> — охватная видеокампания (CPM)."
+        ),
+        "en": (
+            "▶️ Video: <code>{vid}</code>\n"
+            "Which campaign type should I build?\n"
+            "• <b>Demand Gen</b> — YouTube/Discover/Gmail, best default for leads and sales.\n"
+            "• <b>Video</b> — reach video campaign (CPM)."
+        ),
+    },
+    "video_ask_brief": {
+        "ru": (
+            "Пришли одним сообщением: <b>название | ссылка на сайт | дневной бюджет [| гео]</b>.\n"
+            "Гео — опционально (локации через запятую).\n"
+            "Например: <code>Кения авто | https://kasimotors.co.ke | 40 | Кения</code>\n\n"
+            "Тексты сгенерирую сам — покажу черновик «было → станет» перед созданием."
+        ),
+        "en": (
+            "Send one message: <b>name | site link | daily budget [| geo]</b>.\n"
+            "Geo is optional (comma-separated locations).\n"
+            "E.g.: <code>Kenya cars | https://kasimotors.co.ke | 40 | Kenya</code>\n\n"
+            "I'll generate the copy myself — you'll see a draft before anything is created."
+        ),
+    },
+    "video_ask_logo": {
+        "ru": (
+            "🖼 Логотип для Demand Gen (опционально, квадратный 1:1): пришли <b>фото</b> "
+            "или нажми «⏭ Пропустить»."
+        ),
+        "en": (
+            "🖼 Logo for Demand Gen (optional, square 1:1): send a <b>photo</b> or press “⏭ Skip”."
+        ),
+    },
+    "video_session_stale": {
+        "ru": "Сессия кампании из видео устарела — пришли ссылку на YouTube заново.",
+        "en": "The video-campaign session is stale — send the YouTube link again.",
     },
     "gdn_gen_empty": {
         "ru": texts.GDN_GEN_EMPTY,
@@ -613,6 +687,56 @@ CATALOG: dict[str, dict[str, str]] = {
     "err_report": {
         "ru": "⚠️ Не удалось построить отчёт: {err}",
         "en": "⚠️ Couldn't build the report: {err}",
+    },
+    # §6 /account: выбор аккаунта ЧТЕНИЯ для отчётов (мутации всегда на Draft)
+    "account_current": {
+        "ru": (
+            "👤 Активный аккаунт отчётов: <code>{cid}</code>{draft}\n"
+            "Сменить: <code>/account 123-456-7890</code> · Сброс: <code>/account reset</code>\n"
+            "⚠️ Только ЧТЕНИЕ (статистика/отчёты). Изменения — всегда на Draft-аккаунте."
+        ),
+        "en": (
+            "👤 Active reports account: <code>{cid}</code>{draft}\n"
+            "Switch: <code>/account 123-456-7890</code> · Reset: <code>/account reset</code>\n"
+            "⚠️ READ-only (stats/reports). Mutations always target the Draft account."
+        ),
+    },
+    "account_set": {
+        "ru": "✅ Аккаунт отчётов: <code>{cid}</code>. /status /report /export /sheets теперь по нему.",
+        "en": "✅ Reports account: <code>{cid}</code>. /status /report /export /sheets now use it.",
+    },
+    "account_reset": {
+        "ru": "↩️ Сброшено: отчёты снова по Draft-аккаунту.",
+        "en": "↩️ Reset: reports use the Draft account again.",
+    },
+    "account_denied": {
+        "ru": (
+            "⛔ Аккаунт <code>{cid}</code> не разрешён на чтение (fail-closed). Доступны: "
+            "Draft, дочерние обнаруженного MCC и GOOGLE_ADS_READ_CUSTOMER_IDS."
+        ),
+        "en": (
+            "⛔ Account <code>{cid}</code> is not read-allowed (fail-closed). Available: "
+            "Draft, discovered MCC children and GOOGLE_ADS_READ_CUSTOMER_IDS."
+        ),
+    },
+    # §8: сводный отчёт по всем дочерним аккаунтам MCC (/mcc)
+    "mcc_preparing": {
+        "ru": "🏢 Собираю сводку по дочерним аккаунтам MCC…",
+        "en": "🏢 Building the MCC child-accounts summary…",
+    },
+    "mcc_no_manager": {
+        "ru": (
+            "⚠️ MCC не настроен: пуст GOOGLE_ADS_LOGIN_CUSTOMER_ID. Сводка по дочерним аккаунтам "
+            "(§8) недоступна без менеджерского аккаунта."
+        ),
+        "en": (
+            "⚠️ MCC is not configured: GOOGLE_ADS_LOGIN_CUSTOMER_ID is empty. The child-accounts "
+            "summary (§8) needs a manager account."
+        ),
+    },
+    "err_mcc": {
+        "ru": "⚠️ Не удалось построить сводку по MCC: {err}",
+        "en": "⚠️ Couldn't build the MCC summary: {err}",
     },
     "err_report_make": {
         "ru": "⚠️ Не удалось сформировать отчёт: {err}",
@@ -978,6 +1102,64 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "Не вижу ни одного валидного ключа. Пришлите ещё раз или нажмите «🔎 Генерация».",
         "en": "No valid keywords found. Send again or tap “🔎 Generate”.",
     },
+    "cc_asset_logo_prompt": {
+        "ru": "🖼 Пришлите <b>фото логотипа</b> (обрежу в 1:1). Или «✖ Отмена».",
+        "en": "🖼 Send the <b>logo photo</b> (I'll crop to 1:1). Or “✖ Cancel”.",
+    },
+    "cc_asset_logo_added": {
+        "ru": "✅ Логотип добавлен в набор ассетов (привяжу при создании кампании).",
+        "en": "✅ Logo added to the asset set (linked when the campaign is created).",
+    },
+    "cc_edit_hint": {
+        "ru": (
+            "✏️ Пришлите правку обычным текстом — например: <i>поставь бюджет 60</i>, "
+            "<i>добавь город Найроби</i>, <i>расписание пн-пт 9-18</i>, <i>старт 2026-08-01</i>. "
+            "Я обновлю сводку."
+        ),
+        "en": (
+            "✏️ Send the edit as plain text — e.g. <i>set budget 60</i>, <i>add city Nairobi</i>, "
+            "<i>schedule Mon-Fri 9-18</i>, <i>start 2026-08-01</i>. I'll refresh the summary."
+        ),
+    },
+    "cc_kw_mixed_mt": {
+        "ru": 'смешанный (по маркерам [точное] / "фразовое" / широкое)',
+        "en": 'mixed (per-keyword markers [exact] / "phrase" / broad)',
+    },
+    # §19.4: явный гейт подтверждения списка ключей перед Этапом 3
+    "cc_kw_review": {
+        "ru": (
+            "🔑 Ключевые слова готовы: <b>{n}</b> (тип соответствия — {mt}).\n{preview}\n"
+            "Подтвердите список или пришлите другой (текстом/файлом/ссылкой)."
+        ),
+        "en": (
+            "🔑 Keywords ready: <b>{n}</b> (match type — {mt}).\n{preview}\n"
+            "Confirm the list or send another one (text/file/link)."
+        ),
+    },
+    "cc_kw_negatives_hint": {
+        "ru": (
+            "💡 Возможные минус-слова (советую, сам НЕ добавляю): {negs}\n"
+            "Добавить можно командой после создания кампании (через подтверждение)."
+        ),
+        "en": (
+            "💡 Suggested negative keywords (advisory, I do NOT add them myself): {negs}\n"
+            "You can add them by command after the campaign is created (with confirmation)."
+        ),
+    },
+    "cc_kw_wrong_sheet": {
+        "ru": (
+            "⚠️ Это не та таблица: я жду ссылку на таблицу, которую создал для верификации "
+            "(id …{sid}). Пришлите её же — отредактированную."
+        ),
+        "en": (
+            "⚠️ That's a different spreadsheet: I expect the link to the sheet I created for "
+            "verification (id …{sid}). Please send that one back — edited."
+        ),
+    },
+    "cc_kw_file_accepted": {
+        "ru": "📎 Файл «{name}» прочитан.",
+        "en": "📎 File “{name}” parsed.",
+    },
     # Этап 5: ассеты
     "cc_assets_prompt": {
         "ru": (
@@ -1018,15 +1200,17 @@ CATALOG: dict[str, dict[str, str]] = {
     "cc_url_prompt": {
         "ru": (
             "🔗 <b>Ad URL options</b> (опционально).\n"
-            "Пришлите шаблон отслеживания и/или суффикс одной строкой через «|»:\n"
-            "<code>{{lpurl}}?utm_source=google | utm_medium=cpc</code>\n"
-            "Или нажмите «⏭ Пропустить»."
+            "Пришлите одной строкой через «|»: шаблон отслеживания | суффикс | custom parameters "
+            "(key=value через запятую):\n"
+            "<code>{{lpurl}}?utm_source=google | utm_medium=cpc | promo=summer, src=tg</code>\n"
+            "Ненужные части оставьте пустыми. Или нажмите «⏭ Пропустить»."
         ),
         "en": (
             "🔗 <b>Ad URL options</b> (optional).\n"
-            "Send a tracking template and/or suffix in one line via “|”:\n"
-            "<code>{{lpurl}}?utm_source=google | utm_medium=cpc</code>\n"
-            "Or tap “⏭ Skip”."
+            "Send one line via “|”: tracking template | suffix | custom parameters "
+            "(comma-separated key=value):\n"
+            "<code>{{lpurl}}?utm_source=google | utm_medium=cpc | promo=summer, src=tg</code>\n"
+            "Leave unused parts empty. Or tap “⏭ Skip”."
         ),
     },
     "cc_url_bad": {
@@ -1066,6 +1250,18 @@ CATALOG: dict[str, dict[str, str]] = {
     "cc_launch_stale": {
         "ru": "🚀 Не нашёл, какую кампанию запускать. Откройте /campaigns → «Возобновить».",
         "en": "🚀 Couldn't find which campaign to launch. Use /campaigns → “Resume”.",
+    },
+    "cc_bidding_downgraded": {
+        "ru": (
+            "ℹ️ Стратегия ставок изменена на «Максимум кликов»: на аккаунте не настроено "
+            "отслеживание конверсий (оно обязательно для «Максимум конверсий»/Target CPA). "
+            "Настройте конверсии в Google Ads, затем смените стратегию командой."
+        ),
+        "en": (
+            "ℹ️ Bidding switched to Maximize Clicks: the account has no conversion tracking "
+            "(required for Maximize Conversions/Target CPA). Set up conversions in Google Ads, "
+            "then change the strategy by command."
+        ),
     },
     # Заглушка для этапов, ещё не подключённых (на случай рассинхрона курсора).
     "cc_next_phase_stub": {

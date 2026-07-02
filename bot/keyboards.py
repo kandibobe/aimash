@@ -29,6 +29,7 @@ from bot.callbacks import (
     RsaCB,
     RsaPickCB,
     TemplateCB,
+    VideoCB,
 )
 
 _NAME_LIMIT = 40
@@ -65,8 +66,12 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="report", description="Сводка за период (7/30/90/MTD)"),
     BotCommand(command="export", description="Глубокий отчёт .xlsx"),
     BotCommand(command="sheets", description="Глубокий отчёт в Google Sheets (ссылка)"),
+    BotCommand(command="mcc", description="Сводка по всем дочерним аккаунтам MCC (§8)"),
+    BotCommand(command="account", description="Аккаунт отчётов (чтение): /account <id> | reset"),
+    BotCommand(command="quota", description="Дневная квота Google Ads API"),
     BotCommand(command="rsa", description="Сгенерировать тексты объявления (RSA)"),
     BotCommand(command="newsearch", description="Создать поисковую кампанию (RSA + ключи)"),
+    BotCommand(command="newvideo", description="Кампания из видео: Demand Gen / Video (YouTube)"),
     BotCommand(command="templates", description="Шаблоны кампаний: список и создание"),
     BotCommand(
         command="savetemplate", description="Сохранить шаблон: /savetemplate имя [from Кампания]"
@@ -95,8 +100,12 @@ BOT_COMMANDS_EN: list[BotCommand] = [
     BotCommand(command="report", description="Period summary (7/30/90/MTD)"),
     BotCommand(command="export", description="Deep report .xlsx"),
     BotCommand(command="sheets", description="Deep report in Google Sheets (link)"),
+    BotCommand(command="mcc", description="All MCC child-accounts summary (§8)"),
+    BotCommand(command="account", description="Reports account (read): /account <id> | reset"),
+    BotCommand(command="quota", description="Google Ads API daily quota"),
     BotCommand(command="rsa", description="Generate ad copy (RSA)"),
     BotCommand(command="newsearch", description="Create a search campaign (RSA + keywords)"),
+    BotCommand(command="newvideo", description="Campaign from video: Demand Gen / Video (YouTube)"),
     BotCommand(command="templates", description="Campaign templates: list and create"),
     BotCommand(
         command="savetemplate", description="Save a template: /savetemplate name [from Campaign]"
@@ -163,6 +172,7 @@ BTN_CAMPAIGNS = {"ru": "📋 Кампании", "en": "📋 Campaigns"}
 BTN_REPORT = {"ru": "📈 Отчёт", "en": "📈 Report"}
 BTN_EXPORT = {"ru": "📄 Экспорт .xlsx", "en": "📄 Export .xlsx"}
 BTN_SHEETS = {"ru": "🟢 Sheets", "en": "🟢 Sheets"}
+BTN_MCC = {"ru": "🏢 MCC (все аккаунты)", "en": "🏢 MCC (all accounts)"}  # §8: сводка по дочерним
 BTN_KEYWORDS = {"ru": "🔑 Ключевые слова", "en": "🔑 Keywords"}
 BTN_RSA = {"ru": "✍️ Тексты (RSA)", "en": "✍️ Ad copy (RSA)"}
 BTN_MODEL = {"ru": "🧠 Модель", "en": "🧠 Model"}
@@ -179,6 +189,7 @@ BTN_CAMPAIGNS_ALL = frozenset(BTN_CAMPAIGNS.values())
 BTN_REPORT_ALL = frozenset(BTN_REPORT.values())
 BTN_EXPORT_ALL = frozenset(BTN_EXPORT.values())
 BTN_SHEETS_ALL = frozenset(BTN_SHEETS.values())
+BTN_MCC_ALL = frozenset(BTN_MCC.values())
 BTN_KEYWORDS_ALL = frozenset(BTN_KEYWORDS.values())
 BTN_RSA_ALL = frozenset(BTN_RSA.values())
 BTN_MODEL_ALL = frozenset(BTN_MODEL.values())
@@ -200,6 +211,7 @@ def main_menu(lang: str | None = None) -> ReplyKeyboardMarkup:
         BTN_REPORT,
         BTN_EXPORT,
         BTN_SHEETS,
+        BTN_MCC,  # §8: сводка по всем дочерним аккаунтам MCC
         BTN_KEYWORDS,
         BTN_RSA,
         BTN_MODEL,
@@ -209,7 +221,7 @@ def main_menu(lang: str | None = None) -> ReplyKeyboardMarkup:
         BTN_HELP,
     ):
         kb.button(text=btn[lng])
-    kb.adjust(1, 1, 2, 3, 2, 2, 3)
+    kb.adjust(1, 1, 2, 3, 3, 2, 3)
     placeholder = "Command or text…" if lng == "en" else "Команда или текст…"
     return kb.as_markup(
         resize_keyboard=True,
@@ -379,16 +391,20 @@ def cc_accounts_kb(rows: list, lang: str | None = None) -> InlineKeyboardMarkup:
 
 
 def cc_settings_kb(lang: str | None = None) -> InlineKeyboardMarkup:
-    """Этап 1: подтвердить настройки (advisory — НЕ мутация, лишь принимает часть черновика) или
-    выйти. Правка — свободным текстом в состоянии (см. bot.main)."""
+    """Этап 1 (§19.3): ✅ Подтвердить / ✏️ Изменить / ❌ Отмена — как в ТЗ. «Изменить» лишь
+    подсказывает формат правки (правка — свободным текстом в состоянии, см. bot.main)."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     kb.button(
         text="✅ Confirm settings" if en else "✅ Подтвердить настройки",
         callback_data=CcCB(action="accept", sub="settings"),
     )
+    kb.button(
+        text="✏️ Edit" if en else "✏️ Изменить",
+        callback_data=CcCB(action="edit", sub="settings"),
+    )
     kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
-    kb.adjust(1)
+    kb.adjust(1, 2)
     return kb.as_markup()
 
 
@@ -435,6 +451,7 @@ _CC_ASSET_TYPE_LABELS = {
         "callouts": "🏷 Уточнения (Callouts)",
         "structured_snippets": "📑 Структурные описания",
         "business_name": "🏢 Название бизнеса",
+        "business_logo": "🖼 Логотип (Business logo)",  # §19.7.1: фото 1:1 → BUSINESS_LOGO
         # §19.7.2: ФАКТ-семейства — из профиля клиента (§20), без выдумывания.
         "call": "📞 Телефон (Call)",
         "price": "💲 Цены (Price)",
@@ -445,6 +462,7 @@ _CC_ASSET_TYPE_LABELS = {
         "callouts": "🏷 Callouts",
         "structured_snippets": "📑 Structured snippets",
         "business_name": "🏢 Business name",
+        "business_logo": "🖼 Business logo",
         "call": "📞 Call (phone)",
         "price": "💲 Price",
         "promotion": "🎁 Promotion",
@@ -489,6 +507,48 @@ def cc_skip_kb(lang: str | None = None) -> InlineKeyboardMarkup:
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     kb.button(text="⏭ Skip" if en else "⏭ Пропустить", callback_data=CcCB(action="skip"))
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def cc_kw_confirm_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """§19.4: явный гейт «✅ Подтвердить ключевые слова» перед Этапом 3. Замена списка — просто
+    прислать новый (state остаётся на Этапе 2); «✖ Отмена» — выход из визарда."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="✅ Confirm keywords" if en else "✅ Подтвердить ключевые слова",
+        callback_data=CcCB(action="kw_confirm"),
+    )
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    kb.adjust(1, 1)
+    return kb.as_markup()
+
+
+def video_type_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """§11: выбор типа кампании из видео — Demand Gen (рекомендуется) или Video (охват, CPM).
+    Кнопки лишь двигают визард; мутация — только через confirm-гейт."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="🎯 Demand Gen (recommended)" if en else "🎯 Demand Gen (рекомендую)",
+        callback_data=VideoCB(action="dg"),
+    )
+    kb.button(
+        text="▶️ Video (reach, CPM)" if en else "▶️ Video (охват, CPM)",
+        callback_data=VideoCB(action="video"),
+    )
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    kb.adjust(1, 1, 1)
+    return kb.as_markup()
+
+
+def video_logo_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """§11 Demand Gen: логотип (опц.) — прислать фото или пропустить."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⏭ Skip" if en else "⏭ Пропустить", callback_data=VideoCB(action="logo_skip"))
     kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
     kb.adjust(2)
     return kb.as_markup()

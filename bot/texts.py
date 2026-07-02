@@ -96,6 +96,8 @@ HELP = (
     "/newsearch — создать поисковую кампанию (RSA + ключи), на паузе — запуск отдельно\n"
     "/keywords — подбор ключевых слов (объём, конкуренция, кластеры) + .xlsx\n"
     "🖼 пришли фото — соберу медийную кампанию (GDN), создам после «да» (на паузе)\n"
+    "🎬 пришли видео или /newvideo — кампания из видео: Demand Gen / Video (YouTube, на паузе)\n"
+    "/mcc [период] — сводка по всем дочерним аккаунтам MCC (подытоги по валютам)\n"
     "/templates — шаблоны кампаний: список и создание по шаблону\n"
     "/savetemplate имя [from Кампания] — сохранить настройки как шаблон\n"
     "/recent — недавние действия: повторить в один тап (с подтверждением)\n"
@@ -239,13 +241,14 @@ RSA_CREATED = "✅ <b>Объявление создано (на паузе).</b>
 # ── GDN из фото (§11) ─────────────────────────────────────────────────────────────
 GDN_ASK_BRIEF = (
     "🖼 <b>Фото принято.</b> Соберу медийную кампанию (GDN).\n"
-    "Пришли одним сообщением: <b>название | ссылка | дневной бюджет</b>.\n"
-    "Например: <code>Весна 2026 | https://shop.example | 50</code>\n\n"
+    "Пришли одним сообщением: <b>название | ссылка | дневной бюджет [| гео]</b>.\n"
+    "Гео — опционально (локации через запятую).\n"
+    "Например: <code>Весна 2026 | https://shop.example | 50 | Кения, Найроби</code>\n\n"
     "Тексты сгенерирую сам — покажу черновик «было → станет» перед созданием."
 )
 GDN_BAD_BRIEF = (
-    "Не разобрал. Нужно <b>название | ссылка | бюджет</b> (бюджет — число).\n"
-    "Например: <code>Летняя распродажа | https://shop.example | 30</code>"
+    "Не разобрал. Нужно <b>название | ссылка | бюджет [| гео]</b> (бюджет — число; гео опц.).\n"
+    "Например: <code>Летняя распродажа | https://shop.example | 30 | Кения</code>"
 )
 GDN_GENERATING = "⏳ Генерирую тексты объявления…"
 GDN_GEN_EMPTY = "Не удалось сгенерировать валидные тексты. Пришли фото и бриф ещё раз."
@@ -469,27 +472,92 @@ def fmt_gdn_proposal_summary(
     headlines: list[str],
     descriptions: list[str],
     business_name: str,
+    geo_locations: list[str] | None = None,
     lang: str | None = None,
 ) -> str:
     """Плейн-текст сводка create_gdn_campaign для confirm-гейта (esc применяется при показе)."""
     h_lines = "\n".join(f"  • {h}" for h in headlines)
     d_lines = "\n".join(f"  • {d}" for d in descriptions)
+    geo = ", ".join(geo_locations) if geo_locations else ""
     if _lang(lang) == "en":
+        geo_line = f"Geo: {geo}\n" if geo else "Geo: all locations (not set)\n"
         return (
             f"Create a display campaign (GDN) “{name}” — paused.\n"
             f"Business: {business_name}\n"
             f"Link: {url}\n"
             f"Daily budget: {budget_units:g}\n"
+            f"{geo_line}"
             "Image: 1 (cropped to 1.91:1 and 1:1)\n\n"
             f"Headlines ({len(headlines)}):\n{h_lines}\n\n"
             f"Descriptions ({len(descriptions)}):\n{d_lines}"
         )
+    geo_line = f"ГЕО: {geo}\n" if geo else "ГЕО: все локации (не задано)\n"
     return (
         f"Создать медийную кампанию (GDN) «{name}» — на паузе.\n"
         f"Бизнес: {business_name}\n"
         f"Ссылка: {url}\n"
         f"Дневной бюджет: {budget_units:g}\n"
+        f"{geo_line}"
         "Изображение: 1 (обрезано в 1.91:1 и 1:1)\n\n"
+        f"Заголовки ({len(headlines)}):\n{h_lines}\n\n"
+        f"Описания ({len(descriptions)}):\n{d_lines}"
+    )
+
+
+def fmt_video_proposal_summary(
+    kind: str,
+    name: str,
+    url: str,
+    youtube_id: str,
+    budget_units: float,
+    headlines: list[str],
+    descriptions: list[str],
+    business_name: str,
+    geo_locations: list[str] | None = None,
+    goal: str = "",
+    with_logo: bool = False,
+    lang: str | None = None,
+) -> str:
+    """§11: плейн-текст сводка create_demand_gen_campaign / create_video_campaign для confirm-гейта
+    (esc применяется при показе). kind: 'dg' | 'video'."""
+    h_lines = "\n".join(f"  • {h}" for h in headlines)
+    d_lines = "\n".join(f"  • {d}" for d in descriptions)
+    geo = ", ".join(geo_locations) if geo_locations else ""
+    en = _lang(lang) == "en"
+    if en:
+        kind_h = "Demand Gen campaign" if kind == "dg" else "Video campaign (reach, CPM)"
+        goal_line = (
+            f"Goal: {'conversions (Maximize Conversions)' if goal == 'conversions' else 'clicks (Maximize Clicks)'}\n"
+            if kind == "dg"
+            else ""
+        )
+        logo_line = ("Logo: yes (1:1)\n" if with_logo else "Logo: no\n") if kind == "dg" else ""
+        geo_line = f"Geo: {geo}\n" if geo else "Geo: all locations (not set)\n"
+        return (
+            f"Create a {kind_h} “{name}” — paused.\n"
+            f"Business: {business_name}\n"
+            f"Site: {url}\n"
+            f"YouTube video: {youtube_id}\n"
+            f"Daily budget: {budget_units:g}\n"
+            f"{goal_line}{logo_line}{geo_line}\n"
+            f"Headlines ({len(headlines)}):\n{h_lines}\n\n"
+            f"Descriptions ({len(descriptions)}):\n{d_lines}"
+        )
+    kind_h = "Demand Gen кампанию" if kind == "dg" else "видеокампанию (охват, CPM)"
+    goal_line = (
+        f"Цель: {'конверсии (Maximize Conversions)' if goal == 'conversions' else 'клики (Maximize Clicks)'}\n"
+        if kind == "dg"
+        else ""
+    )
+    logo_line = ("Логотип: есть (1:1)\n" if with_logo else "Логотип: нет\n") if kind == "dg" else ""
+    geo_line = f"ГЕО: {geo}\n" if geo else "ГЕО: все локации (не задано)\n"
+    return (
+        f"Создать {kind_h} «{name}» — на паузе.\n"
+        f"Бизнес: {business_name}\n"
+        f"Сайт: {url}\n"
+        f"YouTube-видео: {youtube_id}\n"
+        f"Дневной бюджет: {budget_units:g}\n"
+        f"{goal_line}{logo_line}{geo_line}\n"
         f"Заголовки ({len(headlines)}):\n{h_lines}\n\n"
         f"Описания ({len(descriptions)}):\n{d_lines}"
     )
@@ -647,6 +715,12 @@ def fmt_mutation_summary(operation: str, params: dict, lang: str | None = None) 
             return f"Кампания «{c}»: {status_human(b['before_status'], lng)} → {new}"
         verb = "поставить на паузу" if operation == "pause_campaign" else "возобновить"
         return f"Кампания «{c}» — {verb}."
+    if operation == "update_campaign":
+        # §3 «изменение» кампании: переименование. Показываем старое → новое имя.
+        new = params.get("new_name", "")
+        b = _before(params)
+        old = b.get("before_name") if (b and b.get("kind") == "name") else c
+        return f"Кампания «{old}» → переименовать в «{new}»."
     if operation in ("pause_ad_group", "resume_ad_group"):
         ag = params.get("ad_group", "")
         b = _before(params)
@@ -689,21 +763,30 @@ def fmt_mutation_summary(operation: str, params: dict, lang: str | None = None) 
         elif params.get("strategy") == "manual_cpc" and params.get("enhanced_cpc"):
             extra = ", enhanced CPC"
         return f"Кампания «{c}» — стратегия ставок → {strat}{extra}."
-    if operation in ("add_keywords", "remove_keywords", "add_negative_keywords"):
+    if operation in (
+        "add_keywords",
+        "remove_keywords",
+        "add_negative_keywords",
+        "remove_negative_keywords",
+    ):
         kws = params.get("keywords") or []
         mt = match_type_human(params.get("match_type", ""), lng)
-        what = "минус-слов" if operation == "add_negative_keywords" else "ключевых слов"
-        verb = "удалить" if operation == "remove_keywords" else "добавить"
+        negatives = operation in ("add_negative_keywords", "remove_negative_keywords")
+        removals = operation in ("remove_keywords", "remove_negative_keywords")
+        what = "минус-слов" if negatives else "ключевых слов"
+        verb = "удалить" if removals else "добавить"
         head = f"Кампания «{c}» — {verb} {len(kws)} {what} (тип соответствия: {mt}):"
         shown = list(kws)[:KW_INLINE_MAX]
         lines = "\n".join(f"  • {k}" for k in shown)
         if len(kws) > KW_INLINE_MAX:
             lines += f"\n  …ещё {len(kws) - KW_INLINE_MAX} — полный список во вложении .xlsx"
         return f"{head}\n{lines}"
-    if operation == "attach_audience":
+    if operation in ("attach_audience", "detach_audience"):
         names = params.get("_audience_names") or []  # дружелюбные имена (инертны для исполнения)
         rns = params.get("audience_resource_names") or []
         label = ", ".join(str(n) for n in names) if names else f"{len(rns)} шт."
+        if operation == "detach_audience":
+            return f"Кампания «{c}» — открепить аудиторию от таргетинга: {label}."
         return (
             f"Кампания «{c}» — прикрепить аудиторию к таргетингу: {label}. "
             "Показы пойдут выбранной аудитории."
@@ -763,6 +846,11 @@ def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
             return f"Campaign “{c}”: {status_human(b['before_status'], 'en')} → {new}"
         verb = "pause" if operation == "pause_campaign" else "resume"
         return f"Campaign “{c}” — {verb}."
+    if operation == "update_campaign":
+        new = params.get("new_name", "")
+        b = _before(params)
+        old = b.get("before_name") if (b and b.get("kind") == "name") else c
+        return f"Campaign “{old}” → rename to “{new}”."
     if operation in ("pause_ad_group", "resume_ad_group"):
         ag = params.get("ad_group", "")
         b = _before(params)
@@ -801,21 +889,30 @@ def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
         elif params.get("strategy") == "manual_cpc" and params.get("enhanced_cpc"):
             extra = ", enhanced CPC"
         return f"Campaign “{c}” — bidding strategy → {strat}{extra}."
-    if operation in ("add_keywords", "remove_keywords", "add_negative_keywords"):
+    if operation in (
+        "add_keywords",
+        "remove_keywords",
+        "add_negative_keywords",
+        "remove_negative_keywords",
+    ):
         kws = params.get("keywords") or []
         mt = match_type_human(params.get("match_type", ""), "en")
-        what = "negative keywords" if operation == "add_negative_keywords" else "keywords"
-        verb = "remove" if operation == "remove_keywords" else "add"
+        negatives = operation in ("add_negative_keywords", "remove_negative_keywords")
+        removals = operation in ("remove_keywords", "remove_negative_keywords")
+        what = "negative keywords" if negatives else "keywords"
+        verb = "remove" if removals else "add"
         head = f"Campaign “{c}” — {verb} {len(kws)} {what} (match type: {mt}):"
         shown = list(kws)[:KW_INLINE_MAX]
         lines = "\n".join(f"  • {k}" for k in shown)
         if len(kws) > KW_INLINE_MAX:
             lines += f"\n  …{len(kws) - KW_INLINE_MAX} more — full list in the .xlsx attachment"
         return f"{head}\n{lines}"
-    if operation == "attach_audience":
+    if operation in ("attach_audience", "detach_audience"):
         names = params.get("_audience_names") or []
         rns = params.get("audience_resource_names") or []
         label = ", ".join(str(n) for n in names) if names else f"{len(rns)} item(s)"
+        if operation == "detach_audience":
+            return f"Campaign “{c}” — detach audience from targeting: {label}."
         return (
             f"Campaign “{c}” — attach audience to targeting: {label}. "
             "Impressions will go to the chosen audience."
@@ -859,14 +956,50 @@ def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
     return ""  # create_rsa / create_gdn_campaign / unknown — keep caller's summary
 
 
+# §7: короткая метка уровня конкуренции для чат-таблицы (полная — в .xlsx). UNSPECIFIED не показываем.
+_COMP_RU = {"LOW": "конк. низк.", "MEDIUM": "конк. сред.", "HIGH": "конк. выс."}
+_COMP_EN = {"LOW": "comp low", "MEDIUM": "comp med", "HIGH": "comp high"}
+
+
+def _kw_metrics_suffix(idea, currency: str, en: bool) -> str:
+    """§7: компактный хвост строки ключа — конкуренция · ставка top-of-page · пик сезона.
+    Показываем ТОЛЬКО части, по которым есть данные (на тест-аккаунте ставки/сезон часто нулевые →
+    не засоряем строку). Метрики уже посчитаны КОДОМ (ads.keyword_plan), здесь только формат."""
+    if idea is None:
+        return ""
+    parts: list[str] = []
+    comp = (_COMP_EN if en else _COMP_RU).get(getattr(idea, "competition", "") or "")
+    if comp:
+        parts.append(comp)
+    low, high = getattr(idea, "low_bid", 0.0) or 0.0, getattr(idea, "high_bid", 0.0) or 0.0
+    if high > 0:
+        cur = f" {esc(currency)}" if currency else ""
+        parts.append(f"{low:.2f}–{high:.2f}{cur}")
+    peak = getattr(idea, "peak_month", "") or ""
+    if peak:
+        parts.append((f"peak {esc(peak)}") if en else (f"пик {esc(peak)}"))
+    return (" · " + " · ".join(parts)) if parts else ""
+
+
 def fmt_keywords_summary(
-    clusters, by_text: dict, total: int, src: str, lang: str | None = None
+    clusters,
+    by_text: dict,
+    total: int,
+    src: str,
+    lang: str | None = None,
+    *,
+    by_idea: dict | None = None,
+    currency: str = "",
+    irrelevant: int = 0,
 ) -> str:
-    """Сводка keyword research: топ-кластеры с топ-ключами и объёмами. Полная таблица — в .xlsx.
+    """Сводка keyword research: топ-кластеры с топ-ключами и метриками. Полная таблица — в .xlsx.
 
     clusters — объекты с .name/.intent/.keywords (duck-typed); by_text — {ключ: объём/мес}.
-    Усечение (кластеров/ключей) помечается явно, без «тихого» обрезания."""
+    by_idea (§7) — {ключ: KeywordIdea}; если задан, к строке ключа добавляем конкуренцию/ставку/
+    сезон (то, что раньше жило ТОЛЬКО в .xlsx). irrelevant — сколько идей помечено нерелевантными
+    (§19.4.2 AI-релевантность), показываем счётчиком. Усечение помечаем явно, без «тихого» обрезания."""
     max_clusters, max_kw = 8, 6
+    by_idea = by_idea or {}
     if _lang(lang) == "en":
         lines = [
             f"🔍 <b>Keywords</b> — {esc(src)}",
@@ -877,11 +1010,16 @@ def fmt_keywords_summary(
             lines.append(f"<b>{esc(cl.name)}</b>{intent} ({len(cl.keywords)})")
             ordered = sorted(cl.keywords, key=lambda k: by_text.get(k, 0), reverse=True)
             for kw in ordered[:max_kw]:
-                lines.append(f"  • {esc(kw)} — {_thou(by_text.get(kw, 0))}/mo")
+                suffix = _kw_metrics_suffix(by_idea.get(kw), currency, True)
+                lines.append(f"  • {esc(kw)} — {_thou(by_text.get(kw, 0))}/mo{suffix}")
             if len(cl.keywords) > max_kw:
                 lines.append(f"  …{len(cl.keywords) - max_kw} more — see .xlsx")
         if len(clusters) > max_clusters:
             lines.append(f"\n…{len(clusters) - max_clusters} more clusters — see .xlsx")
+        if irrelevant > 0:
+            lines.append(
+                f"\n🚫 {irrelevant} idea(s) flagged likely off-topic — excluded from ‘add’."
+            )
         lines.append(
             "\n<i>This is a suggestion, not an action. Full table is in the attachment.</i>"
         )
@@ -895,11 +1033,14 @@ def fmt_keywords_summary(
         lines.append(f"<b>{esc(cl.name)}</b>{intent} ({len(cl.keywords)})")
         ordered = sorted(cl.keywords, key=lambda k: by_text.get(k, 0), reverse=True)
         for kw in ordered[:max_kw]:
-            lines.append(f"  • {esc(kw)} — {_thou(by_text.get(kw, 0))}/мес")
+            suffix = _kw_metrics_suffix(by_idea.get(kw), currency, False)
+            lines.append(f"  • {esc(kw)} — {_thou(by_text.get(kw, 0))}/мес{suffix}")
         if len(cl.keywords) > max_kw:
             lines.append(f"  …ещё {len(cl.keywords) - max_kw} — см. .xlsx")
     if len(clusters) > max_clusters:
         lines.append(f"\n…ещё {len(clusters) - max_clusters} кластеров — см. .xlsx")
+    if irrelevant > 0:
+        lines.append(f"\n🚫 {irrelevant} идей помечены нецелевыми — исключены из «добавить».")
     lines.append("\n<i>Это подсказка, не действие. Полная таблица — во вложении.</i>")
     return "\n".join(lines)
 
@@ -1267,25 +1408,41 @@ def fmt_cc_settings_summary(s: dict, lang: str | None = None) -> str:
     )
     mt = match_type_human(s.get("match_type") or "phrase", lng)
     name = esc(s.get("campaign_name") or "—")
+    # §19.3 (таблица Этапа 1): оплата, сети, расписание, даты — тоже видимы менеджеру.
+    payment = (s.get("payment_model") or "cpc").upper()
     if lng == "en":
+        nets = "Search + partners" if s.get("networks") == "search_partners" else "Search"
+        sched = esc(s.get("ad_schedule") or "24/7")
+        dates = f"{esc(s.get('start_date') or 'today')} — {esc(s.get('end_date') or 'no end date')}"
         return (
             "🆕 <b>Campaign (draft)</b>\n"
             f"Name: {name}\n"
             f"Geo: {esc(geo)} · Language: {esc(langs)}\n"
             f"Type: Search · Daily budget: {budget}\n"
-            f"Bidding: {esc(strat)}{mk('bidding_strategy')}\n"
+            f"Bidding: {esc(strat)}{mk('bidding_strategy')} · Payment: {esc(payment)}\n"
             f"Avg. CPC: {cpc_prefix}{cpc}\n"
-            f"Keyword match type: {esc(mt)}{mk('match_type')}\n\n"
+            f"Keyword match type: {esc(mt)}{mk('match_type')}\n"
+            f"Networks: {nets}{mk('networks')}\n"
+            f"Ad schedule: {sched}{mk('ad_schedule')}\n"
+            f"Dates: {dates}\n\n"
             "Edit by text (e.g. <i>set budget 60</i>) or confirm the settings."
         )
+    nets = "Search + партнёры" if s.get("networks") == "search_partners" else "Search"
+    sched = esc(s.get("ad_schedule") or "24/7")
+    dates = (
+        f"{esc(s.get('start_date') or 'сегодня')} — {esc(s.get('end_date') or 'без даты конца')}"
+    )
     return (
         "🆕 <b>Кампания (черновик)</b>\n"
         f"Название: {name}\n"
         f"ГЕО: {esc(geo)} · Язык: {esc(langs)}\n"
         f"Тип: Search · Бюджет/день: {budget}\n"
-        f"Стратегия: {esc(strat)}{mk('bidding_strategy')}\n"
+        f"Стратегия: {esc(strat)}{mk('bidding_strategy')} · Оплата: {esc(payment)}\n"
         f"Ср. CPC: {cpc_prefix}{cpc}\n"
-        f"Тип соответствия ключей: {esc(mt)}{mk('match_type')}\n\n"
+        f"Тип соответствия ключей: {esc(mt)}{mk('match_type')}\n"
+        f"Сети: {nets}{mk('networks')}\n"
+        f"Расписание: {sched}{mk('ad_schedule')}\n"
+        f"Даты: {dates}\n\n"
         "Можно поправить командой (напр. <i>поставь бюджет 60</i>) или подтвердить настройки."
     )
 
@@ -1299,6 +1456,7 @@ def fmt_asset_spec_label(spec: dict, lang: str | None = None) -> str:
         "callouts": "Уточнения",
         "structured_snippets": "Структурное описание",
         "business_name": "Название бизнеса",
+        "business_logo": "Логотип",
         "call": "Телефон",
         "price": "Цены",
         "promotion": "Акция",
@@ -1515,4 +1673,46 @@ def fmt_client_diff(
     now = _profile_summary_line(after, lng)
     label_was = "Was" if lng == "en" else "Было"
     label_now = "Becomes" if lng == "en" else "Станет"
-    return f"{head}\n{label_was}: {esc(was)}\n{label_now}: {esc(now)}"
+    out = f"{head}\n{label_was}: {esc(was)}\n{label_now}: {esc(now)}"
+    # §20.5: реальная дельта ПО ПОЛЯМ — менеджер должен видеть, ЧТО меняется («бренд: A → B»),
+    # а не только имя поля (аудит: shallow-merge прятал изменение существующего значения).
+    changes = _profile_field_changes(before or {}, after, lng)
+    if changes:
+        label = "Changes" if lng == "en" else "Изменения"
+        out += f"\n{label}:\n" + "\n".join(f"  • {c}" for c in changes)
+    return out
+
+
+def _clip(v: object, n: int = 60) -> str:
+    s = str(v or "").strip().replace("\n", " ")
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _profile_field_changes(before: dict, after: dict, lng: str) -> list[str]:
+    """§20.5: список per-field изменений «old → new» (esc-нутые строки). Пустой — ничего не меняется
+    (или меняются только неотслеживаемые ключи). Длинные значения усечены (без простыни в чате)."""
+    names = {
+        "brand": ("бренд", "brand"),
+        "business_desc": ("бизнес", "business"),
+        "geo": ("гео", "geo"),
+        "language": ("язык", "language"),
+        "website": ("сайт", "site"),
+        "notes": ("заметки", "notes"),
+    }
+    out: list[str] = []
+    for key, (ru, en) in names.items():
+        old, new = before.get(key), after.get(key)
+        if new is None or old == new:  # None в after = поле не трогается (shallow-merge)
+            continue
+        label = en if lng == "en" else ru
+        old_s = f"«{_clip(old)}»" if old else "—"
+        out.append(esc(f"{label}: {old_s} → «{_clip(new)}»"))
+    for key, (ru, en) in (
+        ("services", ("услуги", "services")),
+        ("contacts", ("контакты", "contacts")),
+    ):
+        if key in after and after.get(key) is not None:
+            n_old, n_new = len(before.get(key) or []), len(after.get(key) or [])
+            if n_old != n_new:
+                out.append(esc(f"{en if lng == 'en' else ru}: ×{n_old} → ×{n_new}"))
+    return out

@@ -360,6 +360,15 @@ def apply_asset_spec_via_sdk(client, customer_id, campaign_id, spec: dict) -> di
         return _add_price_asset_via_sdk(client, customer_id, campaign_id, **p)
     if family == "business_name":
         return _add_business_name_via_sdk(client, customer_id, p["business_name"])
+    if family == "business_logo":
+        # §19.7.1: фото логотипа лежит во временном хранилище по media_id (бинарь НЕ в params);
+        # квадратный кадр 1:1 подготовил бот. После успешной привязки чистим файлы (best-effort).
+        from ads.assets import clear_pending_media, load_pending_media
+
+        _, square = load_pending_media(p["media_id"])
+        res = _add_business_logo_via_sdk(client, customer_id, square, p.get("name") or "logo")
+        clear_pending_media(p["media_id"])
+        return res
     raise ValueError(f"неизвестное семейство ассета: {family}")
 
 

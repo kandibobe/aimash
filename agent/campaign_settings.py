@@ -46,6 +46,12 @@ class CampaignSettings(BaseModel):
     bidding_strategy: Bidding | None = None
     target_cpa_units: float | None = None
     payment_model: Literal["cpc", "cpa"] | None = None
+    # §19.3 (таблица Этапа 1): сети, расписание показов, даты запуска. Все опциональны — None ⇒
+    # дефолты в assemble_settings (Search-only, 24/7, старт сегодня без даты конца).
+    networks: Literal["search", "search_partners"] | None = None
+    ad_schedule: str | None = None  # «пн-пт 9-18» / «24/7» — строку в структуру переводит КОД
+    start_date: str | None = None  # ISO YYYY-MM-DD (валидирует КОД в assemble_settings)
+    end_date: str | None = None
 
     def merge(self, patch: "CampaignSettings") -> "CampaignSettings":
         """Наложить правку (пред-confirm: «поставь бюджет 60»): непустые поля patch перекрывают.
@@ -78,7 +84,12 @@ _SYSTEM = (
     '"bidding_strategy": "manual_cpc|maximize_conversions|maximize_conversion_value|target_spend '
     'или null", '
     '"target_cpa_units": число целевой цены за конверсию или null, '
-    '"payment_model": "cpc|cpa или null"}. '
+    '"payment_model": "cpc|cpa или null", '
+    '"networks": "search|search_partners (search_partners — если явно просят партнёрские сети) '
+    'или null", '
+    "\"ad_schedule\": \"расписание показов как в тексте (напр. 'пн-пт 9-18', '24/7') или null\", "
+    '"start_date": "дата старта ISO ГГГГ-ММ-ДД или null", '
+    '"end_date": "дата окончания ISO ГГГГ-ММ-ДД или null"}. '
     "Деньги указывай числом без символа валюты. Не добавляй полей сверх перечисленных."
 )
 
@@ -128,6 +139,99 @@ async def extract_campaign_settings(description: str, *, language: str = "ru") -
     except Exception:  # noqa: BLE001 — разбор не критичен, есть fallback на медианы/дефолты
         data = None
     return _coerce(data) if data is not None else CampaignSettings()
+
+
+# ── §19.3: расписание показов — строку в структуру переводит КОД (golden rule #4) ──
+_DAY_TOKENS = {
+    "пн": "MONDAY",
+    "вт": "TUESDAY",
+    "ср": "WEDNESDAY",
+    "чт": "THURSDAY",
+    "пт": "FRIDAY",
+    "сб": "SATURDAY",
+    "вс": "SUNDAY",
+    "mon": "MONDAY",
+    "tue": "TUESDAY",
+    "wed": "WEDNESDAY",
+    "thu": "THURSDAY",
+    "fri": "FRIDAY",
+    "sat": "SATURDAY",
+    "sun": "SUNDAY",
+}
+_DAY_ORDER = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
+_ALWAYS = {"", "24/7", "24x7", "24х7", "круглосуточно", "всегда", "always", "all day", "24-7"}
+
+
+def parse_ad_schedule(text: str | None) -> list[dict] | None:
+    """«пн-пт 9-18» / «будни 09:00-18:00» / «24/7» → список блоков [{day, start_hour, end_hour}].
+
+    [] ⇒ показ 24/7 (критерии расписания НЕ создаются — дефолт Google). None ⇒ строка НЕ распознана
+    (вызывающий честно откатится на 24/7 и не будет показывать нераспознанное как применённое).
+    Часы 0–24, day — имя enum DayOfWeek. Считает КОД, не модель."""
+    import re as _re
+
+    s = (text or "").strip().lower().replace("–", "-").replace("—", "-")
+    if s in _ALWAYS:
+        return []
+    m = _re.fullmatch(
+        r"(?P<days>[a-zа-я,\-\s]+?)\s+(?P<h1>\d{1,2})(?::(?P<m1>\d{2}))?\s*-\s*"
+        r"(?P<h2>\d{1,2})(?::(?P<m2>\d{2}))?",
+        s,
+    )
+    if not m:
+        return None
+    h1, h2 = int(m.group("h1")), int(m.group("h2"))
+    if not (0 <= h1 < h2 <= 24):
+        return None
+    days_raw = m.group("days").strip()
+    if days_raw in ("будни", "weekdays", "рабочие дни"):
+        days = _DAY_ORDER[:5]
+    elif days_raw in ("выходные", "weekend", "weekends"):
+        days = _DAY_ORDER[5:]
+    elif "-" in days_raw:  # диапазон «пн-пт»
+        a, _, b = days_raw.partition("-")
+        da, db = _DAY_TOKENS.get(a.strip()[:3]), _DAY_TOKENS.get(b.strip()[:3])
+        if not da or not db:
+            return None
+        ia, ib = _DAY_ORDER.index(da), _DAY_ORDER.index(db)
+        if ia > ib:
+            return None
+        days = _DAY_ORDER[ia : ib + 1]
+    else:  # перечисление «пн, ср, пт» или один день
+        days = []
+        for tok in _re.split(r"[,\s]+", days_raw):
+            d = _DAY_TOKENS.get(tok.strip()[:3])
+            if not d:
+                return None
+            if d not in days:
+                days.append(d)
+        if not days:
+            return None
+    return [{"day": d, "start_hour": h1, "end_hour": h2} for d in days]
+
+
+def schedule_human(blocks: list[dict] | None, raw: str | None = None) -> str:
+    """Человекочитаемое расписание для сводки Этапа 1: [] / None ⇒ «24/7»; иначе исходная строка
+    (если дана) или компактный рендер блоков."""
+    if not blocks:
+        return "24/7"
+    if raw and raw.strip():
+        return raw.strip()
+    days = [b.get("day", "")[:3].capitalize() for b in blocks]
+    b0 = blocks[0]
+    return f"{', '.join(days)} {b0.get('start_hour', 0)}-{b0.get('end_hour', 24)}"
+
+
+def _valid_iso_date(s: str | None) -> str | None:
+    """ISO ГГГГ-ММ-ДД или None (мусор от модели не должен доехать до SDK)."""
+    from datetime import date as _date
+
+    if not s:
+        return None
+    try:
+        return _date.fromisoformat(str(s).strip()).isoformat()
+    except ValueError:
+        return None
 
 
 # ── Сборка итоговых настроек: extracted + медианы «по аналогии» + дефолты ─────────
@@ -252,6 +356,20 @@ def assemble_settings(
         nm = geo.language_name(target_language)
         languages = [nm] if nm else []
 
+    # §19.3: сети / расписание / даты — из описания, иначе дефолты «по аналогии/по умолчанию».
+    networks = extracted.networks or "search"
+    if not extracted.networks:
+        by_analogy.append("networks")
+    schedule_blocks = parse_ad_schedule(extracted.ad_schedule)
+    if schedule_blocks is None:  # нераспознанная строка → честно откатываемся на 24/7
+        schedule_blocks = []
+    if not extracted.ad_schedule:
+        by_analogy.append("ad_schedule")
+    start_date = _valid_iso_date(extracted.start_date)
+    end_date = _valid_iso_date(extracted.end_date)
+    if start_date and end_date and end_date < start_date:
+        end_date = None  # конец раньше старта — мусор от модели, не несём в SDK
+
     return {
         "campaign_name": name,
         "product": theme or None,
@@ -269,5 +387,10 @@ def assemble_settings(
         "payment_model": payment,
         "match_type": match_type,
         "currency": extracted.currency,
+        "networks": networks,
+        "ad_schedule": schedule_human(schedule_blocks, extracted.ad_schedule),
+        "ad_schedule_blocks": schedule_blocks,  # [] ⇒ 24/7 (критерии не создаются)
+        "start_date": start_date,  # None ⇒ старт сегодня (дефолт Google)
+        "end_date": end_date,  # None ⇒ без даты конца
         "by_analogy": by_analogy,
     }

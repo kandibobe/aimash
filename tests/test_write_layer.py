@@ -244,6 +244,175 @@ async def test_apply_add_negative_keywords_happy_path():
     assert store.finalized is True
 
 
+# ── apply_remove_negative_keywords: симметрично add (по тексту+типу), НЕ деньги ───
+async def test_apply_remove_negative_keywords_happy_path():
+    called = {}
+
+    def fake(client, customer_id, campaign_id, keywords, match_type):
+        called.update(campaign_id=campaign_id, keywords=list(keywords), match_type=match_type)
+        return {"applied": True, "removed": ["rn1"], "count": 1, "not_found": []}
+
+    # user_initiated=False: снятие минус-слова — не деньги, гейтом не блокируется.
+    store = FakeStore(FakeProposal("remove_negative_keywords", "confirmed", user_initiated=False))
+    with patched(mut, "_remove_negative_keywords_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_remove_negative_keywords(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_id="23",
+            keywords=["  бесплатно  "],
+            match_type="broad",
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+        )
+    assert res["applied"] is True
+    assert called["campaign_id"] == "23"
+    assert called["keywords"][0] == "бесплатно"  # normalize обрезал пробелы
+    assert store.finalized is True
+
+
+def test_remove_negative_keywords_via_sdk_resolves_text_and_removes_only_matched():
+    rows = [
+        SimpleNamespace(
+            campaign_criterion=SimpleNamespace(
+                resource_name="rn1", keyword=SimpleNamespace(text="бесплатно")
+            )
+        ),
+        SimpleNamespace(
+            campaign_criterion=SimpleNamespace(
+                resource_name="rn2", keyword=SimpleNamespace(text="скачать")
+            )
+        ),
+    ]
+
+    class _GA:
+        def search(self, customer_id, query):
+            return rows
+
+    class _Crit:
+        def mutate_campaign_criteria(self, customer_id, operations):
+            return SimpleNamespace(
+                results=[SimpleNamespace(resource_name=o.remove) for o in operations]
+            )
+
+    class _Cmp:
+        def campaign_path(self, cid, campid):
+            return f"customers/{cid}/campaigns/{campid}"
+
+    class _Client:
+        def get_service(self, name):
+            return {
+                "GoogleAdsService": _GA(),
+                "CampaignCriterionService": _Crit(),
+                "CampaignService": _Cmp(),
+            }[name]
+
+        def get_type(self, name):
+            return SimpleNamespace(remove=None)
+
+    res = mut._remove_negative_keywords_via_sdk(
+        _Client(), DRAFT_ACCOUNT_ID, "23", ["бесплатно"], "broad"
+    )
+    assert res["removed"] == ["rn1"]  # снят только запрошенный «бесплатно», не «скачать»
+    assert res["count"] == 1 and res["not_found"] == []
+
+
+# ── apply_detach_audience: обратная к attach (резолв rn аудитории → criterion → remove) ─
+async def test_apply_detach_audience_happy_path():
+    called = {}
+
+    def fake(client, customer_id, campaign_id, audience_resource_names):
+        called.update(campaign_id=campaign_id, rns=list(audience_resource_names))
+        return {"applied": True, "detached": ["crit1"], "count": 1, "not_found": []}
+
+    store = FakeStore(FakeProposal("detach_audience", "confirmed", user_initiated=False))
+    with patched(mut, "_detach_audience_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_detach_audience(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_id="23",
+            audience_resource_names=["customers/7753643025/userLists/999"],
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+        )
+    assert res["applied"] is True
+    assert called["campaign_id"] == "23"
+    assert store.finalized is True
+
+
+async def test_apply_detach_audience_validates_rns_before_claim():
+    calls = {"n": 0}
+
+    def fake(*a, **k):
+        calls["n"] += 1
+        return {"applied": True}
+
+    store = FakeStore(FakeProposal("detach_audience", "confirmed", user_initiated=True))
+    with patched(mut, "_detach_audience_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        try:
+            await mut.apply_detach_audience(
+                customer_id=DRAFT_ACCOUNT_ID,
+                campaign_id="23",
+                audience_resource_names=["not-an-audience-rn"],  # невалидный → ValueError ДО claim
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=object(),
+            )
+            raise AssertionError("ожидался ValueError (некорректный resource_name)")
+        except ValueError:
+            pass
+    assert calls["n"] == 0 and store.finalized is False
+
+
+def test_detach_audience_via_sdk_resolves_and_removes_only_matched():
+    rows = [
+        SimpleNamespace(
+            campaign_criterion=SimpleNamespace(
+                resource_name="crit1",
+                user_list=SimpleNamespace(user_list="customers/1/userLists/999"),
+                audience=SimpleNamespace(audience=""),
+            )
+        ),
+        SimpleNamespace(
+            campaign_criterion=SimpleNamespace(
+                resource_name="crit2",
+                user_list=SimpleNamespace(user_list="customers/1/userLists/888"),
+                audience=SimpleNamespace(audience=""),
+            )
+        ),
+    ]
+
+    class _GA:
+        def search(self, customer_id, query):
+            return rows
+
+    class _Crit:
+        def mutate_campaign_criteria(self, customer_id, operations):
+            return SimpleNamespace(
+                results=[SimpleNamespace(resource_name=o.remove) for o in operations]
+            )
+
+    class _Cmp:
+        def campaign_path(self, cid, campid):
+            return f"customers/{cid}/campaigns/{campid}"
+
+    class _Client:
+        def get_service(self, name):
+            return {
+                "GoogleAdsService": _GA(),
+                "CampaignCriterionService": _Crit(),
+                "CampaignService": _Cmp(),
+            }[name]
+
+        def get_type(self, name):
+            return SimpleNamespace(remove=None)
+
+    res = mut._detach_audience_via_sdk(
+        _Client(), DRAFT_ACCOUNT_ID, "23", ["customers/1/userLists/999"]
+    )
+    assert res["detached"] == ["crit1"]  # снят только запрошенный список 999, не 888
+    assert res["count"] == 1 and res["not_found"] == []
+
+
 # ── apply_remove_keywords: симметрично add (по тексту+типу), оба гейта ───────────
 async def test_apply_remove_keywords_happy_path():
     called = {}
@@ -343,6 +512,55 @@ async def test_apply_resume_campaign_happy_path():
     assert res["applied"] is True
     assert called["status"] == "ENABLED"  # resume → ENABLED
     assert store.finalized is True
+
+
+# ── apply_update_campaign (§3 «изменение»): переименование, НЕ деньги (без user_initiated) ──
+async def test_apply_update_campaign_happy_path():
+    called = {}
+
+    def fake(client, customer_id, campaign_id, new_name):
+        called.update(customer_id=customer_id, campaign_id=campaign_id, new_name=new_name)
+        return {"applied": True, "new_name": new_name}
+
+    # user_initiated=False намеренно: переименование — не деньги, гейтом user_initiated НЕ блокируется.
+    store = FakeStore(FakeProposal("update_campaign", "confirmed", user_initiated=False))
+    with patched(mut, "_update_campaign_name_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_update_campaign(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_id="23",
+            new_name="  Весна 2026  ",
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+        )
+    assert res["applied"] is True
+    assert called["campaign_id"] == "23"
+    assert called["new_name"] == "Весна 2026"  # код обрезал пробелы ДО SDK
+    assert store.finalized is True
+
+
+async def test_apply_update_campaign_validates_empty_name_before_claim():
+    calls = {"n": 0}
+
+    def fake(*a, **k):
+        calls["n"] += 1
+        return {"applied": True}
+
+    store = FakeStore(FakeProposal("update_campaign", "confirmed", user_initiated=True))
+    with patched(mut, "_update_campaign_name_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        try:
+            await mut.apply_update_campaign(
+                customer_id=DRAFT_ACCOUNT_ID,
+                campaign_id="23",
+                new_name="   ",  # пусто после strip → ValueError ДО claim
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=object(),
+            )
+            raise AssertionError("ожидался ValueError (пустое имя)")
+        except ValueError:
+            pass
+    assert calls["n"] == 0 and store.finalized is False
 
 
 # ── apply_pause_ad_group / apply_resume_ad_group (§16 AdGroupService): оба гейта, без денег ──
@@ -987,6 +1205,29 @@ async def test_set_bidding_strategy_supported_as_proposal():
     assert res["type"] == "proposal" and res["operation"] == "set_bidding_strategy"
 
 
+async def test_update_campaign_supported_as_proposal():
+    """§3 «изменение» кампании: «переименуй X в Y» → черновик update_campaign с кнопками."""
+    import agent.loop as L
+
+    fake = _fake_chat("update_campaign", {"campaign": "Старое имя", "new_name": "Новое имя"})
+    with patched(L, "chat", fake):
+        res = await L.handle_command("переименуй кампанию «Старое имя» в «Новое имя»", chat_id=1)
+    assert res["type"] == "proposal" and res["operation"] == "update_campaign"
+
+
+async def test_remove_negative_keywords_supported_as_proposal():
+    """§3 «минус-слова»: «убери минус-слово X из кампании Y» → черновик remove_negative_keywords."""
+    import agent.loop as L
+
+    fake = _fake_chat(
+        "remove_negative_keywords",
+        {"campaign": "X", "keywords": ["бесплатно"], "match_type": "broad"},
+    )
+    with patched(L, "chat", fake):
+        res = await L.handle_command("убери минус-слово «бесплатно» из кампании X", chat_id=1)
+    assert res["type"] == "proposal" and res["operation"] == "remove_negative_keywords"
+
+
 # ── Валидатор длины ключевых слов (golden rule #4: код, кириллица = 1) ───────────
 def test_assert_keyword_ok_counts_cyrillic_as_one():
     assert mut._assert_keyword_ok("  цветы  ") == "цветы"
@@ -1448,10 +1689,25 @@ def _apply_case(op):
             "match_type": "broad",
             **base,
         }
+    if op == "remove_negative_keywords":
+        return mut.apply_remove_negative_keywords, {
+            "campaign_id": "7",
+            "keywords": ["бесплатно"],
+            "match_type": "broad",
+            **base,
+        }
+    if op == "detach_audience":
+        return mut.apply_detach_audience, {
+            "campaign_id": "7",
+            "audience_resource_names": ["customers/7753643025/userLists/999"],
+            **base,
+        }
     if op == "resume_campaign":
         return mut.apply_resume_campaign, {"campaign_id": "7", **base}
     if op == "pause_campaign":
         return mut.apply_pause_campaign, {"campaign_id": "7", **base}
+    if op == "update_campaign":
+        return mut.apply_update_campaign, {"campaign_id": "7", "new_name": "Новое имя", **base}
     if op == "pause_ad_group":
         return mut.apply_pause_ad_group, {"ad_group_id": "77", **base}
     if op == "resume_ad_group":
@@ -1477,8 +1733,11 @@ _ALL_OPS = [
     "update_bid",
     "add_keywords",
     "add_negative_keywords",
+    "remove_negative_keywords",
+    "detach_audience",
     "resume_campaign",
     "pause_campaign",
+    "update_campaign",
     "pause_ad_group",
     "resume_ad_group",
     "set_geo_location",

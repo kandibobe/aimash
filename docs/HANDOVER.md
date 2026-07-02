@@ -54,8 +54,12 @@ docker compose logs -f bot      # убедиться: "alembic upgrade head" п�
 (`WhitelistMiddleware` и `scheduler` читают `settings.whitelist`). Чтобы пустить пользователей —
 впиши их `chat_id` в `.env` и перезапусти бота. В prod пустой whitelist роняет старт (fail-closed).
 
-> Таблицы `whitelist` и `oauth_tokens` сейчас **не используются рантаймом** (env — источник истины
-> по доступу; refresh-токен — из `.env`). Это задел под мультиюзер/мультиаккаунт; см. раздел 5.
+> Таблица `whitelist` сейчас **не используется рантаймом** (env — источник истины по доступу). Это
+> задел под мультиюзер; см. раздел 5.
+> Таблица `oauth_tokens` **теперь загружается на старте** (`load_oauth_cache` в `bot.main`): если в
+> ней есть записи, `build_client(child)` берёт per-account refresh-токен/`login_customer_id` для
+> дочерних под другими MCC. Пусто ⇒ Draft/тест-MCC работает на едином `.env`-токене (обратная
+> совместимость). Заполнение — `scripts/register_account.py` (шифрование at-rest).
 
 ---
 
@@ -99,17 +103,26 @@ docker compose logs -f bot      # убедиться: "alembic upgrade head" п�
 чтение — `ensure_read_allowed` + env `GOOGLE_ADS_READ_CUSTOMER_IDS` (fail-closed, по умолчанию пуст).
 Это значит: дочерние можно дать **на чтение** под §8, не открывая мутаций на них.
 
-Сделано (read-only фундамент §8):
+Сделано (read-only §8 — реализовано):
 - ✅ раздельные замки чтения/мутаций (`ensure_read_allowed`), инвариант покрыт тестом;
-- ✅ обнаружение дочерних — `ads.read.list_child_accounts` (за `ensure_manager_allowed`).
+- ✅ обнаружение дочерних — `ads.read.list_child_accounts` (за `ensure_manager_allowed`);
+- ✅ **авто-обход дочерних на старте** (`ads.client.discover_read_children`) → эффективный
+  read-allow-list из кода (не только env); мутации не затрагиваются (тест
+  `test_discovered_child_readable_but_not_mutable`);
+- ✅ **сводный отчёт по дочерним (`/mcc`)** — `reports.mcc.build_mcc_summary_async` +
+  `summary_text_mcc`; кнопка меню «🏢 MCC»;
+- ✅ **подытоги по валютам** (без FX — golden rule 4, не выдумываем курсы);
+- ✅ **нормализация таймзон** per-child (`customer.time_zone` → окно в TZ аккаунта);
+- ✅ **плановая рассылка/аномалии** учитывают обнаруженных дочерних (`scheduler._scheduled_accounts`);
+- ✅ **per-account OAuth-токены** загружаются на старте (`load_oauth_cache` в `bot.main.main()`) —
+  для дочерних под разными MCC (шифрование at-rest `oauth_tokens`).
 
-Осталось для боевого MCC (≈ остаток спринта, всё read-only кроме п.5):
-1. сводный отчёт по дочерним (ТЗ §8): `reports/service` строит отчёт на один аккаунт → обход
-   `list_child_accounts` + агрегат + команда бота;
-2. **нормализация валют** (разные дочерние — разные валюты; нельзя суммировать «в лоб»);
-3. **таймзоны per-child** в отчётных периодах;
-4. заполнить `GOOGLE_ADS_READ_CUSTOMER_IDS` дочерними MCC заказчика;
-5. (отдельно, осознанно) если нужны мутации на дочерних — расширить `ALLOWED_CEILING` в коде +
-   живой прогон под confirm-гейтом; (опц.) подключить `oauth_tokens` для токенов по аккаунту.
+Осталось для боевого MCC:
+1. (эксплуатация) зарегистрировать per-account токены дочерних под другими MCC:
+   `scripts/register_account.py` (если у них отдельные refresh-токены/MCC; один тест-MCC покрыт
+   единым `.env`-токеном автоматически);
+2. (опц.) сводный total по единому курсу FX — **сознательно НЕ делаем** (per-currency честнее);
+3. (отдельно, осознанно) если нужны МУТАЦИИ на дочерних — расширить `ALLOWED_CEILING` в коде +
+   живой прогон под confirm-гейтом.
 
-До этого бот: **читает** только перечисленные аккаунты, **меняет** только `7753643025`.
+До этого бот: **читает** дочерние MCC (обход + read-list), **меняет** только `7753643025`.

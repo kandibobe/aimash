@@ -39,5 +39,32 @@
   },
   "env": {
     "ENV": "dev"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/money_path_guard.py",
+            "timeout": 10,
+            "statusMessage": "Строгий режим: проверка денежного пути"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/money_path_guard.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
   }
 }

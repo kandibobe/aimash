@@ -100,6 +100,80 @@ async def test_apply_create_search_happy_path():
     assert store.finalized is True
 
 
+async def test_apply_create_search_mixed_match_types_pair_dedup():
+    """§19.4.1: per-keyword типы доходят до SDK 1:1; дубль ключа выпадает ВМЕСТЕ со своим типом
+    (первый выигрывает) — иначе дедуп только текстов порвал бы склейку по индексу."""
+    called = {}
+
+    def fake(client, customer_id, **kw):
+        called.update(**kw)
+        return {"applied": True, "status": "PAUSED", "campaign": "customers/x/campaigns/1"}
+
+    store = FakeStore(FakeProposal("create_search_campaign", "confirmed", user_initiated=True))
+    with patched(mut, "_create_search_campaign_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        await mut.apply_create_search_campaign(
+            customer_id=DRAFT_ACCOUNT_ID,
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+            keywords=["used cars", "cheap cars", " used cars "],  # дубль (с пробелами)
+            keyword_match_types=["exact", "phrase", "broad"],
+            **_VALID,
+        )
+    assert called["keywords"] == ["used cars", "cheap cars"]
+    assert called["keyword_match_types"] == ["exact", "phrase"]  # broad дубля отброшен вместе с ним
+
+
+async def test_apply_create_search_passes_networks_schedule_dates():
+    """§19.3: сети/расписание/даты доходят до SDK-цепочки."""
+    called = {}
+
+    def fake(client, customer_id, **kw):
+        called.update(**kw)
+        return {"applied": True, "status": "PAUSED", "campaign": "customers/x/campaigns/1"}
+
+    store = FakeStore(FakeProposal("create_search_campaign", "confirmed", user_initiated=True))
+    blocks = [{"day": "MONDAY", "start_hour": 9, "end_hour": 18}]
+    with patched(mut, "_create_search_campaign_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        await mut.apply_create_search_campaign(
+            customer_id=DRAFT_ACCOUNT_ID,
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+            networks="search_partners",
+            ad_schedule_blocks=blocks,
+            start_date="2026-08-01",
+            end_date="2026-09-01",
+            **_VALID,
+        )
+    assert called["networks"] == "search_partners"
+    assert called["ad_schedule_blocks"] == blocks
+    assert called["start_date"] == "2026-08-01" and called["end_date"] == "2026-09-01"
+
+
+async def test_apply_create_search_rejects_mismatched_match_types_length():
+    """Рассинхрон длин keywords/keyword_match_types ловится В КОДЕ ДО claim (SDK не зван)."""
+    calls = {"n": 0}
+
+    def fake(*a, **k):
+        calls["n"] += 1
+        return {"applied": True}
+
+    store = FakeStore(FakeProposal("create_search_campaign", "confirmed", user_initiated=True))
+    with patched(mut, "_create_search_campaign_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        with pytest.raises(ValueError):
+            await mut.apply_create_search_campaign(
+                customer_id=DRAFT_ACCOUNT_ID,
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=object(),
+                keywords=["a", "b"],
+                keyword_match_types=["exact"],  # длина ≠ keywords
+                **_VALID,
+            )
+    assert calls["n"] == 0 and store.finalized is False
+
+
 async def test_apply_create_search_blocked_when_not_user_initiated():
     store = FakeStore(FakeProposal("create_search_campaign", "confirmed", user_initiated=False))
     with (

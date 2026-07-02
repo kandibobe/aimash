@@ -1,6 +1,10 @@
-"""Чтение Google Ads через GAQL/SearchStream. READ-ONLY — ничего не меняет.
+"""Чтение Google Ads через GAQL (GoogleAdsService.Search). READ-ONLY — ничего не меняет.
 
-Предпочитаем SearchStream (страница до 10k строк = 1 операция против дневной квоты).
+Сейчас используем ПАГИНИРОВАННЫЙ Search (`ga.search(...)`): объёмы тест-аккаунта малы, дневная
+квота не является ограничением. SearchStream (страница до 10k строк = 1 операция против квоты) —
+осознанно ОТЛОЖЕН как оптимизация под высокообъёмные боевые аккаунты: у него другая форма ответа
+(батчи с `.results`), переключение ~15 точек чтения несёт риск регрессии и делается отдельно,
+когда появятся реальные объёмы. См. docs/REPORTS.md (раздел «Квота/SearchStream»).
 """
 
 from __future__ import annotations
@@ -118,6 +122,28 @@ def account_currency(client: GoogleAdsClient, customer_id: str) -> str:
     if code:
         _CURRENCY_CACHE[cid] = code  # кэшируем только успешное чтение
     return code
+
+
+_TIMEZONE_CACHE: dict[str, str] = {}  # customer_id → IANA tz (не меняется в рамках сессии)
+
+
+def account_timezone(client: GoogleAdsClient, customer_id: str) -> str:
+    """§8: таймзона аккаунта (напр. 'Africa/Nairobi', 'Europe/Kyiv') — для нормализации окна
+    отчёта по дочерним MCC (чтобы кросс-аккаунтный дайджест сравнивал ОДИН календарный день, а не
+    смешивал неполные). Один GAQL FROM customer, кэш по customer_id. Замок чтения. '' если не
+    прочитать (вызывающий откатится на host-дату)."""
+    ensure_read_allowed(customer_id)
+    cid = str(customer_id)
+    if cid in _TIMEZONE_CACHE:
+        return _TIMEZONE_CACHE[cid]
+    ga = client.get_service("GoogleAdsService")
+    tz = ""
+    for row in ga.search(customer_id=cid, query="SELECT customer.time_zone FROM customer LIMIT 1"):
+        tz = row.customer.time_zone
+        break
+    if tz:
+        _TIMEZONE_CACHE[cid] = tz  # кэшируем только успешное чтение
+    return tz
 
 
 def list_audiences(client: GoogleAdsClient, customer_id: str) -> list[Audience]:

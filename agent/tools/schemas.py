@@ -44,17 +44,22 @@ MUTATION_TOOLS = {
     "add_keywords",
     "remove_keywords",
     "add_negative_keywords",
+    "remove_negative_keywords",
     "pause_campaign",
     "resume_campaign",
+    "update_campaign",
     "pause_ad_group",
     "resume_ad_group",
     "set_geo_proximity",
     "set_geo_location",
     "set_bidding_strategy",
     "attach_audience",
+    "detach_audience",
     "create_rsa",
     "create_gdn_campaign",
     "create_search_campaign",
+    "create_demand_gen_campaign",
+    "create_video_campaign",
     "add_sitelinks",
     "add_callouts",
     "add_structured_snippets",
@@ -161,12 +166,31 @@ class AddNegativeKeywords(BaseModel):
         return normalize_keywords(v)
 
 
+class RemoveNegativeKeywords(BaseModel):
+    # Симметрично AddNegativeKeywords: снять минус-слова кампании по тексту+типу.
+    campaign: str
+    keywords: list[str] = Field(min_length=1, max_length=50)
+    match_type: MatchType = "broad"
+
+    @field_validator("keywords")
+    @classmethod
+    def _kw(cls, v):
+        return normalize_keywords(v)
+
+
 class PauseCampaign(BaseModel):
     campaign: str
 
 
 class ResumeCampaign(BaseModel):
     campaign: str
+
+
+class UpdateCampaign(BaseModel):
+    # §3 «изменение» кампании: переименование. campaign — текущее имя, new_name — новое.
+    # Диапазон длины дублирует валидатор мутации (defense-in-depth: не доверяем модели).
+    campaign: str
+    new_name: str = Field(min_length=1, max_length=255)
 
 
 class PauseAdGroup(BaseModel):
@@ -264,6 +288,25 @@ class AttachAudience(BaseModel):
     """Прикрепить существующие аудитории (user_list/audience) к кампании (§3). Минтуется ботом после
     выбора из списка (resource_name из ads.read.list_audiences), не из LLM напрямую. Не деньги →
     user_initiated не требуется (как гео/ключи)."""
+
+    campaign: str
+    audience_resource_names: list[str] = Field(min_length=1, max_length=20)
+
+    @field_validator("audience_resource_names")
+    @classmethod
+    def _rn(cls, v):
+        out = [s.strip() for s in v if s and s.strip()]
+        if not out:
+            raise ValueError("нужна хотя бы одна аудитория")
+        for rn in out:
+            if "/userLists/" not in rn and "/audiences/" not in rn:
+                raise ValueError(f"некорректный resource_name аудитории: {rn}")
+        return out
+
+
+class DetachAudience(BaseModel):
+    """Открепить ранее прикреплённые аудитории от кампании (§3). Обратная к AttachAudience;
+    минтуется ботом (resource_name из ads.read.list_audiences). Не деньги → user_initiated не нужен."""
 
     campaign: str
     audience_resource_names: list[str] = Field(min_length=1, max_length=20)
@@ -405,6 +448,12 @@ class CreateGdnCampaign(BaseModel):
         gt=0, le=MONEY_MAX_MICROS
     )  # потолок из core.limits (=1M единиц)
     media_id: str = Field(min_length=1, max_length=64)
+    # §11: ГЕО-таргетинг как часть авто-формируемой структуры (аудит: раньше GDN создавался БЕЗ гео →
+    # показ по всем локациям). Опционально (пусто ⇒ поведение как раньше). Резолв названий →
+    # geoTargetConstant делает КОД (reuse _set_geo_location_via_sdk, живо сверенный на Search/§19).
+    geo_locations: list[str] = Field(default_factory=list, max_length=50)
+    geo_country_code: str = "UA"
+    geo_locale: str = "ru"
 
     @field_validator("headlines")
     @classmethod
@@ -441,6 +490,80 @@ class CreateGdnCampaign(BaseModel):
         return v
 
 
+class _MediaVideoCampaignBase(BaseModel):
+    """Общая форма §11-кампаний из видео (Demand Gen / Video). Минтуется ботом после визарда, не из
+    LLM. Длины/составы считает КОД — зеркалит ads.mutations._validate_video_campaign_inputs
+    (defense-in-depth). Бинарь логотипа НЕ здесь — logo_media_id ссылается на временное хранилище."""
+
+    campaign_name: str = Field(min_length=1, max_length=120)
+    youtube_video_id: str = Field(min_length=1, max_length=200)  # ссылка YouTube или 11-симв. id
+    headlines: list[str] = Field(min_length=1, max_length=5)  # каждый ≤30
+    long_headline: str = Field(min_length=1)  # ≤90
+    descriptions: list[str] = Field(min_length=1, max_length=5)  # ≤90 (Video: КОД сузит до ≤70)
+    business_name: str = Field(min_length=1, max_length=25)
+    final_url: str
+    budget_daily_micros: int = Field(gt=0, le=MONEY_MAX_MICROS)  # потолок из core.limits
+    geo_locations: list[str] = Field(default_factory=list, max_length=50)
+    geo_country_code: str = "UA"
+    geo_locale: str = "ru"
+
+    @field_validator("youtube_video_id")
+    @classmethod
+    def _yt(cls, v):
+        from ads.assets import parse_youtube_video_id
+
+        if not parse_youtube_video_id(v):
+            raise ValueError("нужна ссылка на YouTube-видео или его 11-символьный id")
+        return v
+
+    @field_validator("headlines")
+    @classmethod
+    def _h(cls, v):
+        for t in v:
+            _assert_rsa_len([t], "headline")
+        return v
+
+    @field_validator("long_headline")
+    @classmethod
+    def _lh(cls, v):
+        _assert_rsa_len([v], "description")  # длинный заголовок ≤90
+        return v
+
+    @field_validator("descriptions")
+    @classmethod
+    def _d(cls, v):
+        for t in v:
+            _assert_rsa_len([t], "description")
+        return v
+
+    @field_validator("final_url")
+    @classmethod
+    def _url(cls, v):
+        if not v or not str(v).startswith(("http://", "https://")):
+            raise ValueError("нужен валидный final_url (http/https)")
+        return v
+
+
+class CreateDemandGenCampaign(_MediaVideoCampaignBase):
+    """§11: Demand Gen кампания из YouTube-видео. goal: clicks (Maximize Clicks — работает без
+    conversion tracking) | conversions (Maximize Conversions). Логотип опционален (media_id)."""
+
+    goal: Literal["clicks", "conversions"] = "clicks"
+    logo_media_id: str | None = Field(default=None, max_length=64)
+
+    @field_validator("logo_media_id")
+    @classmethod
+    def _lmid(cls, v):
+        if v is not None and not str(v).isalnum():  # идёт в имя файла — защита от traversal
+            raise ValueError("logo_media_id должен быть буквенно-цифровым")
+        return v
+
+
+class CreateVideoCampaign(_MediaVideoCampaignBase):
+    """§11: Video-кампания (YouTube, video responsive ad, target CPM). Описания дополнительно
+    сужает КОД (≤70, ads.mutations.VIDEO_DESCRIPTION_MAX)."""
+
+
 class CreateSearchCampaign(BaseModel):
     """Финальные параметры поисковой (Search) кампании (§3). Минтуется ботом после визарда
     (/newsearch: генерация RSA), не из LLM напрямую. Длину/составы считает КОД — зеркалит
@@ -457,6 +580,11 @@ class CreateSearchCampaign(BaseModel):
     )  # потолок из core.limits (=1M единиц)
     keywords: list[str] = Field(default_factory=list, max_length=MAX_CAMPAIGN_KEYWORDS)
     match_type: MatchType = "phrase"
+    # §19.4.1: per-keyword типы соответствия (смешанный список [exact] + "phrase" + broad).
+    # Пусто ⇒ все ключи получают match_type (поведение прежнее). Длина обязана совпадать с keywords.
+    keyword_match_types: list[MatchType] = Field(
+        default_factory=list, max_length=MAX_CAMPAIGN_KEYWORDS
+    )
     cpc_bid_micros: int = Field(default=500_000, gt=0, le=MONEY_MAX_MICROS)
     # §19 (composite, опциональные — без них поведение прежнее). Глубокую валидацию дублирует
     # ads.mutations._validate_search_inputs (defense-in-depth); здесь — форма + длины path.
@@ -471,6 +599,44 @@ class CreateSearchCampaign(BaseModel):
     asset_specs: list[dict] = Field(default_factory=list, max_length=30)
     existing_asset_links: list[dict] = Field(default_factory=list, max_length=50)
     image_media_ids: list[str] = Field(default_factory=list, max_length=10)
+    # §19.3 (таблица Этапа 1): сети / расписание / даты. Все опциональны — дефолты прежние
+    # (Search-only, 24/7, старт сегодня). ad_schedule_blocks — структура из parse_ad_schedule (КОД).
+    networks: Literal["search", "search_partners"] | None = None
+    ad_schedule_blocks: list[dict] = Field(default_factory=list, max_length=7)
+    start_date: str | None = None  # ISO ГГГГ-ММ-ДД
+    end_date: str | None = None
+
+    @field_validator("start_date", "end_date")
+    @classmethod
+    def _dates(cls, v):
+        if v is None:
+            return None
+        from datetime import date as _date
+
+        try:
+            return _date.fromisoformat(str(v).strip()).isoformat()
+        except ValueError as e:
+            raise ValueError("дата в формате ISO ГГГГ-ММ-ДД") from e
+
+    @field_validator("ad_schedule_blocks")
+    @classmethod
+    def _sched(cls, v):
+        for b in v:
+            day = str(b.get("day", ""))
+            h1, h2 = int(b.get("start_hour", -1)), int(b.get("end_hour", -1))
+            if day not in (
+                "MONDAY",
+                "TUESDAY",
+                "WEDNESDAY",
+                "THURSDAY",
+                "FRIDAY",
+                "SATURDAY",
+                "SUNDAY",
+            ):
+                raise ValueError(f"неизвестный день расписания: {day!r}")
+            if not (0 <= h1 < h2 <= 24):
+                raise ValueError(f"часы расписания вне диапазона 0–24: {h1}-{h2}")
+        return v
 
     @field_validator("final_url")
     @classmethod
@@ -500,6 +666,19 @@ class CreateSearchCampaign(BaseModel):
         if v:
             _assert_rsa_len([v], "path")  # ≤15, кириллица=1 (§19.5.1 — doc error игнорируем)
         return v
+
+    @model_validator(mode="after")
+    def _kw_mts_match(self) -> "CreateSearchCampaign":
+        """§19.4.1: per-keyword типы соответствия либо пусты (все = match_type), либо строго 1:1 к
+        keywords. Считает КОД — рассинхрон длин не должен доехать до SDK (склейка по индексу).
+        ⚠️ normalize_keywords может ДЕДУПЛИЦИРОВАТЬ keywords — тогда 1:1 к исходному списку рвётся;
+        вызывающий (бот) обязан строить оба списка из УЖЕ нормализованного набора."""
+        if self.keyword_match_types and len(self.keyword_match_types) != len(self.keywords):
+            raise ValueError(
+                f"keyword_match_types ({len(self.keyword_match_types)}) не совпадает по длине с "
+                f"keywords ({len(self.keywords)}) — типы соответствия должны идти 1:1 к ключам"
+            )
+        return self
 
 
 # ── §3-assets: текстовые расширения (sitelinks/callouts/structured snippets) ─────────
@@ -741,17 +920,22 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "add_keywords": AddKeywords,
     "remove_keywords": RemoveKeywords,
     "add_negative_keywords": AddNegativeKeywords,
+    "remove_negative_keywords": RemoveNegativeKeywords,
     "pause_campaign": PauseCampaign,
     "resume_campaign": ResumeCampaign,
+    "update_campaign": UpdateCampaign,
     "pause_ad_group": PauseAdGroup,
     "resume_ad_group": ResumeAdGroup,
     "set_geo_proximity": SetGeoProximity,
     "set_geo_location": SetGeoLocation,
     "set_bidding_strategy": SetBiddingStrategy,
     "attach_audience": AttachAudience,
+    "detach_audience": DetachAudience,
     "create_rsa": CreateRsa,
     "create_gdn_campaign": CreateGdnCampaign,
     "create_search_campaign": CreateSearchCampaign,
+    "create_demand_gen_campaign": CreateDemandGenCampaign,
+    "create_video_campaign": CreateVideoCampaign,
     "get_stats": GetStats,
     "generate_rsa": GenerateRsa,
     "keyword_research": KeywordResearch,
@@ -802,8 +986,20 @@ TOOLS: list[dict] = [
         "Добавить минус-слова на уровне указанной кампании. Всегда указывай campaign.",
         AddNegativeKeywords,
     ),
+    _tool(
+        "remove_negative_keywords",
+        "Удалить минус-слова (по тексту+типу) с уровня указанной кампании. Обратная к "
+        "add_negative_keywords. Всегда указывай campaign.",
+        RemoveNegativeKeywords,
+    ),
     _tool("pause_campaign", "Поставить кампанию на паузу.", PauseCampaign),
     _tool("resume_campaign", "Возобновить (включить) кампанию из паузы.", ResumeCampaign),
+    _tool(
+        "update_campaign",
+        "Переименовать кампанию: campaign — текущее имя, new_name — новое. Для команд вида "
+        "«переименуй кампанию X в Y» / «rename campaign X to Y».",
+        UpdateCampaign,
+    ),
     _tool(
         "pause_ad_group",
         "Поставить ОТДЕЛЬНУЮ группу объявлений на паузу. Укажи campaign (кампанию) и ad_group "

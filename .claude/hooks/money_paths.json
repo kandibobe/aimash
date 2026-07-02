@@ -1,0 +1,20 @@
+{
+  "_comment": "Каркасный knob строгого режима. Перенос на другой проект = правка ТОЛЬКО этого файла: глобы путей + имена гейт-функций в напоминаниях. Логика — в money_path_guard.py. critical → PreToolUse спрашивает подтверждение ('ask'); broad → инъекция напоминания без блокировки; и то, и другое → PostToolUse напоминает прогнать safety-тесты.",
+  "critical": [
+    "ads/mutations.py",
+    "ads/client.py",
+    "confirm/**",
+    "core/limits.py",
+    "core/secrets.py",
+    "core/logging.py"
+  ],
+  "broad": [
+    "scheduler/**",
+    "agent/**",
+    "bot/main.py",
+    "adcopy/validate.py"
+  ],
+  "critical_reminder": "ДЕНЕЖНЫЙ путь (золотые правила #1,#3,#9). Перед правкой сохрани инварианты: confirm-гейт + валидный confirmation_id, ensure_allowed(customer_id) ПЕРВЫМ гейтом, user_initiated для денег, редакция секретов (str(e) не наружу). После правки: прогони /confirm-gate-audit и обнови/добавь инвариант-тест в tests/test_invariants_core.py.",
+  "broad_reminder": "Путь рядом с деньгами/безопасностью (scheduler/agent/bot/валидация длины). Держи fail-closed по умолчанию и золотые правила из CLAUDE.md. Бюджет/ставки — только по прямой команде пользователя (никогда из scheduler/anomaly).",
+  "post_reminder": "Ты изменил денежный/безопасный путь. Прогони safety-тесты: pytest tests/test_safety_core.py tests/test_write_layer.py tests/test_invariants_core.py — и, если добавил/изменил мутацию, /confirm-gate-audit."
+}
