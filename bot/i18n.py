@@ -1081,6 +1081,27 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "📋 Профиль сохранён — открыть карточку клиента:",
         "en": "📋 Profile saved — open the client card:",
     },
+    # §UX «что дальше» после успешного создания кампании (все действия — advisory)
+    "cc_created_next_steps": {
+        "ru": (
+            "Следующие шаги — кнопками ниже: запустить (покажу PAUSED → ENABLED на подтверждение), "
+            "посмотреть кампании или добавить минус-слова."
+        ),
+        "en": (
+            "Next steps — use the buttons below: launch (I'll show PAUSED → ENABLED to confirm), "
+            "view campaigns, or add negative keywords."
+        ),
+    },
+    "cc_neg_kw_hint": {
+        "ru": (
+            "➖ Пришли текстом: <i>«добавь минус-слова: слово1, слово2 в кампанию {name}»</i> — "
+            "соберу черновик и спрошу подтверждение (сам ничего не добавляю)."
+        ),
+        "en": (
+            "➖ Send as text: <i>“add negative keywords: word1, word2 to campaign {name}”</i> — "
+            "I'll build a draft and ask you to confirm (I never add them on my own)."
+        ),
+    },
     "cc_accounts_error": {
         "ru": "⚠️ Не удалось получить список аккаунтов MCC: {err}\nПродолжим на основном аккаунте.",
         "en": "⚠️ Couldn't list MCC accounts: {err}\nProceeding with the main account.",

@@ -250,3 +250,71 @@ async def test_legacy_ok_callback_routes_to_confirm():
     with patched(bm, "execute_confirmed", fake_exec):
         await bm.on_confirm_legacy(cq)
     assert (await ConfirmStore().get_confirmed(cid)).status == "applied"
+
+
+# ── §UX-память: последний период отчётов + «что дальше» после создания кампании ────
+async def test_period_memory_roundtrip_survives_restart():
+    """_remember_period персистит пресет в user_settings.ui_prefs; после «рестарта» (чистка
+    процессного кэша) _last_period поднимает его из БД. Произвольные даты НЕ запоминаются."""
+    await init_db()
+    chat = 66_001
+    await bm._remember_period(chat, "7")
+    assert await bm._last_period(chat) == "7"
+    bm._LAST_PERIOD_CODE.clear()  # эмуляция рестарта процесса
+    assert await bm._last_period(chat) == "7"  # поднялось из user_settings.ui_prefs
+    await bm._remember_period(chat, "2026-01-01 2026-02-01")  # диапазон дат — не пресет
+    assert await bm._last_period(chat) == "7"  # не перезаписан мусором
+    await bm._remember_period(chat, "mtd")
+    assert await bm._last_period(chat) == "MTD"  # нормализация регистра
+
+
+def test_period_kb_offers_repeat_first():
+    from bot.keyboards import period_kb
+
+    kb = period_kb("report", last="7")
+    rows = kb.inline_keyboard
+    assert len([b for r in rows for b in r]) == 5  # ↻ + 4 пресета
+    assert "как в прошлый раз" in rows[0][0].text  # первая строка — повтор
+    assert rows[0][0].callback_data.endswith(":7")
+    # без last / с мусорным last — обычная клавиатура из 4 кнопок
+    assert len([b for r in period_kb("report").inline_keyboard for b in r]) == 4
+    assert len([b for r in period_kb("report", last="зюзя").inline_keyboard for b in r]) == 4
+
+
+async def test_post_create_next_steps_advisory_only():
+    """Кнопки «что дальше»: 📋 Кампании — чистое чтение; ➖ Минус-слова — текст-подсказка;
+    НИ одна не минтит proposal (advisory, golden rule 1/3)."""
+    from bot.callbacks import CcCB
+    from bot.keyboards import post_create_kb
+
+    await init_db()
+    chat = 66_002
+    # клавиатура: 3 кнопки (запуск/кампании/минус-слова)
+    kb = post_create_kb("a" * 32)
+    assert len([b for r in kb.inline_keyboard for b in r]) == 3
+
+    called = {}
+
+    async def fake_send_campaigns(msg, chat_id):
+        called["campaigns"] = chat_id
+
+    cq = FakeCallbackQuery(FakeMessage(chat_id=chat))
+    with patched(bm, "_send_campaigns", fake_send_campaigns):
+        await bm.cc_view_camps(cq, CcCB(action="view_camps"))
+    assert called["campaigns"] == chat
+
+    # минус-слова: подсказка отправлена, proposal НЕ создан
+    cq2 = FakeCallbackQuery(FakeMessage(chat_id=chat))
+    await bm.cc_hint_neg(cq2, CcCB(action="hint_neg"))
+    assert cq2.message.answers and "минус-слова" in cq2.message.answers[-1][0]
+    from sqlalchemy import func as _f
+    from sqlalchemy import select as _sel
+
+    from db.models import Proposal as _P
+    from db.session import Session as _S
+
+    async with _S() as s:
+        n = (
+            await s.execute(_sel(_f.count()).select_from(_P).where(_P.chat_id == chat))
+        ).scalar_one()
+    assert int(n) == 0  # ничего не минтили

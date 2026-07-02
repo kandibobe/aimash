@@ -53,6 +53,9 @@ class UserSettings(Base):
     # §8/мультиаккаунт: активный аккаунт чата (читаем/минтуем черновики на нём). NULL → Draft
     # (bot.account_ctx.get_active_account). Перепроверяется ensure_read_allowed + per-user доступом.
     selected_customer_id: Mapped[str | None] = mapped_column(String(20))
+    # §UX-память: JSON-настройки интерфейса per-chat ({"last_report_period": "7"}). Отдельно от
+    # alert_thresholds (тот — пороги scheduler-аномалий, читается целиком jobs._thresholds_by_chat).
+    ui_prefs: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

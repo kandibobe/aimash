@@ -143,6 +143,7 @@ from bot.keyboards import (
     video_logo_kb,
     video_type_kb,
     period_kb,
+    post_create_kb,
     report_accounts_kb,
     report_campaigns_kb,
     rsa_aslist_kb,
@@ -842,6 +843,69 @@ async def _save_selected_account(chat_id: int, customer_id: str | None) -> None:
         await s.commit()
 
 
+# §UX-память: последний выбранный период отчётов (chat_id → код пресета "7"|"30"|"90"|"MTD").
+# In-memory кэш поверх user_settings.ui_prefs (персист переживает рестарт).
+_LAST_PERIOD_CODE: dict[int, str] = {}
+
+
+async def _load_ui_pref(chat_id: int, key: str) -> str | None:
+    """Значение ui_prefs[key] чата из user_settings (JSON). Нет строки/ключа/сбой → None."""
+    from sqlalchemy import select
+
+    from db.models import UserSettings
+    from db.session import Session
+
+    try:
+        async with Session() as s:
+            row = (
+                await s.execute(select(UserSettings).where(UserSettings.chat_id == chat_id))
+            ).scalar_one_or_none()
+            val = (row.ui_prefs or {}).get(key) if row else None
+            return str(val) if val is not None else None
+    except Exception:  # noqa: BLE001 — UX-настройка не критична, отчёт не роняем
+        return None
+
+
+async def _save_ui_pref(chat_id: int, key: str, value: str) -> None:
+    """Upsert ui_prefs[key] чата (переживает рестарт). JSON-колонку переприсваиваем целиком
+    (SQLAlchemy не отслеживает мутацию вложенного dict). Best-effort: сбой не роняет отчёт."""
+    from sqlalchemy import select
+
+    from db.models import UserSettings
+    from db.session import Session
+
+    try:
+        async with Session() as s:
+            row = (
+                await s.execute(select(UserSettings).where(UserSettings.chat_id == chat_id))
+            ).scalar_one_or_none()
+            if row is None:
+                s.add(UserSettings(chat_id=chat_id, ui_prefs={key: value}))
+            else:
+                row.ui_prefs = {**(row.ui_prefs or {}), key: value}
+            await s.commit()
+    except Exception:  # noqa: BLE001 — UX-настройка не критична
+        log.debug("ui_pref не сохранён chat=%s key=%s", chat_id, key)
+
+
+async def _remember_period(chat_id: int, code: str) -> None:
+    """§UX-память: запомнить выбранный ПРЕСЕТ периода (7/30/90/MTD) для кнопки «↻ как в прошлый
+    раз». Произвольные диапазоны дат не запоминаем (разовые)."""
+    from reports.period import PRESET_DAYS
+
+    c = (code or "").strip()
+    if not (c in PRESET_DAYS or c.upper() == "MTD"):
+        return
+    c = c.upper() if c.upper() == "MTD" else c
+    _LAST_PERIOD_CODE[chat_id] = c
+    await _save_ui_pref(chat_id, "last_report_period", c)
+
+
+async def _last_period(chat_id: int) -> str | None:
+    """Последний пресет периода чата: кэш процесса → user_settings.ui_prefs (после рестарта)."""
+    return _LAST_PERIOD_CODE.get(chat_id) or await _load_ui_pref(chat_id, "last_report_period")
+
+
 async def _active_read_account(chat_id: int) -> str:
     """Активный аккаунт ЧТЕНИЯ чата для /status /report /export /sheets: выбранный через /account
     (если он всё ещё разрешён на чтение — fail-closed при сужении списков) или Draft. МУТАЦИИ этим
@@ -1172,6 +1236,7 @@ async def report_(m: Message, command: CommandObject) -> None:
     except ValueError:
         await m.answer(i18n.t("err_period"))
         return
+    await _remember_period(m.chat.id, (command.args or "").strip())  # §UX-память (только пресеты)
     acct = await _active_read_account(m.chat.id)  # быстрый путь: весь активный аккаунт
     await _run_report(m, period, acct, None, None)
 
@@ -1221,6 +1286,7 @@ async def export_(m: Message, command: CommandObject) -> None:
     except ValueError:
         await m.answer(i18n.t("err_period"))
         return
+    await _remember_period(m.chat.id, (command.args or "").strip())  # §UX-память (только пресеты)
     await _run_export(m, period, await _active_read_account(m.chat.id))
 
 
@@ -1256,6 +1322,7 @@ async def sheets_(m: Message, command: CommandObject) -> None:
     except ValueError:
         await m.answer(i18n.t("err_period"))
         return
+    await _remember_period(m.chat.id, (command.args or "").strip())  # §UX-память (только пресеты)
     await _run_sheets(m, period, await _active_read_account(m.chat.id))
 
 
@@ -4501,6 +4568,38 @@ async def cc_launch(cq: CallbackQuery, callback_data: CcCB) -> None:
     )
 
 
+@dp.callback_query(CcCB.filter(F.action == "view_camps"))
+async def cc_view_camps(cq: CallbackQuery, callback_data: CcCB) -> None:
+    """§UX «что дальше»: показать список кампаний (чистое чтение, как /campaigns)."""
+    await cq.answer()
+    msg = _cq_msg(cq)
+    if msg is not None:
+        await _send_campaigns(msg, _cq_chat_id(cq))
+
+
+@dp.callback_query(CcCB.filter(F.action == "hint_neg"))
+async def cc_hint_neg(cq: CallbackQuery, callback_data: CcCB) -> None:
+    """§UX «что дальше»: подсказка, как добавить минус-слова (ТЕКСТ, proposal НЕ минтится —
+    агент предлагает, добавляет только по отдельной команде за confirm-гейтом, ТЗ §7/§19.4).
+    Имя кампании — из применённого create-proposal по sub (как cc_launch), фолбэк — многоточие."""
+    chat_id = _cq_chat_id(cq)
+    await cq.answer()
+    msg = _cq_msg(cq)
+    if msg is None:
+        return
+    name = ""
+    sub = (callback_data.sub or "").strip()
+    if sub:
+        snap = await STORE.get_confirmed(sub)
+        if snap is not None and snap.chat_id == chat_id:
+            name = (snap.params or {}).get("campaign_name") or ""
+    name = name or _CC_LAUNCH_CACHE.get(chat_id) or "…"
+    await msg.answer(
+        i18n.t("cc_neg_kw_hint", name=texts.esc(name)),
+        parse_mode=ParseMode.HTML,
+    )
+
+
 # ── GDN из фото (§11): приём фото → бриф → черновик за confirm-гейтом ─────────────
 def _parse_gdn_brief(text: str) -> tuple[str, str, float, list[str]] | None:
     """«название | url | бюджет [| гео]» → (name, url, budget_units, geo_locations). None при неверном
@@ -5866,7 +5965,8 @@ async def on_report_campaign(cq: CallbackQuery, callback_data: ReportCampCB) -> 
     _REPORT_SEL[chat_id] = sel
     await msg.answer(
         i18n.t(f"period_pick_{callback_data.target}"),
-        reply_markup=period_kb(callback_data.target),
+        # §UX-память: последний пресет — первой кнопкой «↻ как в прошлый раз»
+        reply_markup=period_kb(callback_data.target, last=await _last_period(chat_id)),
     )
 
 
@@ -5882,6 +5982,7 @@ async def period_report(cq: CallbackQuery, callback_data: PeriodCB) -> None:
     except ValueError:
         await msg.answer(i18n.t("err_period"))
         return
+    await _remember_period(_cq_chat_id(cq), callback_data.code)  # §UX-память: «в прошлый раз»
     # ФИКС B2: строим на ВЫБРАННОМ аккаунте/кампании (_report_target), а не на хардкоде Draft.
     acct, campaign_id, campaign_name = await _report_target(_cq_chat_id(cq))
     await _run_report(msg, period, acct, campaign_id, campaign_name)
@@ -5898,6 +5999,7 @@ async def period_export(cq: CallbackQuery, callback_data: PeriodCB) -> None:
     except ValueError:
         await msg.answer(i18n.t("err_period"))
         return
+    await _remember_period(_cq_chat_id(cq), callback_data.code)  # §UX-память
     acct, campaign_id, campaign_name = await _report_target(_cq_chat_id(cq))
     await _run_export(msg, period, acct, campaign_id, campaign_name)
 
@@ -5913,6 +6015,7 @@ async def period_sheets(cq: CallbackQuery, callback_data: PeriodCB) -> None:
     except ValueError:
         await msg.answer(i18n.t("err_period"))
         return
+    await _remember_period(_cq_chat_id(cq), callback_data.code)  # §UX-память
     acct, campaign_id, campaign_name = await _report_target(_cq_chat_id(cq))
     await _run_sheets(msg, period, acct, campaign_id, campaign_name)
 
@@ -5997,14 +6100,14 @@ async def _do_confirm(cq: CallbackQuery, cid: str) -> bool:
         msg = _cq_msg(cq)
         if name and msg is not None:
             _CC_LAUNCH_CACHE[chat_id] = name  # legacy-фолбэк для кнопок без sub (до деплоя)
-            prompt = i18n.t("cc_created_launch_prompt")
+            prompt = i18n.t("cc_created_launch_prompt") + "\n\n" + i18n.t("cc_created_next_steps")
             # §19.3: если конверс-стратегия понижена (аккаунт без отслеживания конверсий) — честно
             # сообщаем, а не молча меняем то, что менеджер подтвердил.
             if isinstance(result, dict) and result.get("bidding_note"):
                 prompt = i18n.t("cc_bidding_downgraded") + "\n\n" + prompt
-            # Кнопка запуска несёт confirmation_id создания (sub) → работает и после рестарта
-            # (cc_launch резолвит имя из применённого proposal в БД, не из памяти процесса).
-            await msg.answer(prompt, reply_markup=cc_final_kb(can_launch=True, launch_cid=cid))
+            # §UX «что дальше»: запуск/кампании/минус-слова — advisory-кнопки; запуск несёт
+            # confirmation_id создания (sub) → работает и после рестарта (резолв из БД).
+            await msg.answer(prompt, reply_markup=post_create_kb(cid))
     # B9: черновик визарда §19 не гасили в cc_create — гасим ТОЛЬКО теперь, после успешного создания.
     # При ❌ (reject) он остаётся active → менеджер возобновляет «▶️ Продолжить» и не теряет всю работу
     # визарда (RSA, ключи, настройки) из-за одного нажатия «Отмена» на финальном гейте.

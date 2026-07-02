@@ -591,6 +591,29 @@ def cc_final_kb(
     return kb.as_markup()
 
 
+def post_create_kb(launch_cid: str = "", lang: str | None = None) -> InlineKeyboardMarkup:
+    """§UX «что дальше» после успешного создания кампании (PAUSED): 🚀 Запустить (существующий
+    confirm-гейт cc_launch, sub=confirmation_id создания) · 📋 Кампании (read-only список) ·
+    ➖ Минус-слова (текст-подсказка, proposal НЕ минтится). ВСЁ advisory — ни одна кнопка не
+    выполняет мутацию без «да» (golden rule 1/3)."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="🚀 Launch campaign" if en else "🚀 Запустить кампанию",
+        callback_data=CcCB(action="launch", sub=launch_cid),
+    )
+    kb.button(
+        text="📋 Campaigns" if en else "📋 Кампании",
+        callback_data=CcCB(action="view_camps"),
+    )
+    kb.button(
+        text="➖ Negative keywords" if en else "➖ Минус-слова",
+        callback_data=CcCB(action="hint_neg", sub=launch_cid),
+    )
+    kb.adjust(1, 2)
+    return kb.as_markup()
+
+
 def cc_skip_kb(lang: str | None = None) -> InlineKeyboardMarkup:
     """Этап 4/6: «⏭ Пропустить» (CcCB skip) + «✖ Отмена». Прикрепление (фото) — отдельным
     сообщением, не кнопкой."""
@@ -827,15 +850,30 @@ def recent_kb(rows: list, lang: str | None = None) -> InlineKeyboardMarkup:
 
 
 # ── Inline: выбор периода (отчёт) ────────────────────────────────────────────────
-def period_kb(target: str, lang: str | None = None) -> InlineKeyboardMarkup:
+def period_kb(
+    target: str, lang: str | None = None, *, last: str | None = None
+) -> InlineKeyboardMarkup:
+    """Выбор периода отчёта. last (§UX-память) — последний выбранный пресет: первой строкой
+    добавляется «↻ N — как в прошлый раз» (тот же PeriodCB, read-only путь). Неизвестный last —
+    игнорируется (fail-safe, обычная клавиатура)."""
+    en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
-    if _lang(lang) == "en":
+    if en:
         items = [("7 days", "7"), ("30 days", "30"), ("90 days", "90"), ("MTD", "MTD")]
     else:
         items = [("7 дней", "7"), ("30 дней", "30"), ("90 дней", "90"), ("MTD", "MTD")]
+    labels = dict((code, label) for label, code in items)
+    has_last = bool(last and last in labels)
+    if has_last:
+        repeat = (
+            f"↻ {labels[last]} — same as last time"
+            if en
+            else f"↻ {labels[last]} — как в прошлый раз"
+        )
+        kb.button(text=repeat, callback_data=PeriodCB(target=target, code=last))
     for label, code in items:
         kb.button(text=label, callback_data=PeriodCB(target=target, code=code))
-    kb.adjust(2, 2)
+    kb.adjust(*((1, 2, 2) if has_last else (2, 2)))
     return kb.as_markup()
 
 
