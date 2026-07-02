@@ -54,6 +54,10 @@ class _FakeClient:
 | Редакция секретов (логи + Telegram) | `test_logging_redaction`, `test_ux_helpers` |
 | Prod fail-fast (ключ/whitelist) | `test_config_failfast` |
 | GAQL-инъекция (`_gaql_escape`) | `test_ads_resolve` |
+| §19 визард (этапы/состояние/composite/откат/micros) | `test_cc_stage_flow`, `test_campaign_wizard_state`, `test_cc_composite_create`, `test_search_campaign`, `test_predelivery_fixes` |
+| §20 клиенты (профиль/краул/confirm/cross-domain) | `test_client_store`, `test_client_extract`, `test_client_crawler`, `test_client_crawl_orchestration`, `test_client_confirm`, `test_client_wizard` |
+| Квота API / анти-спам throttle | `test_quota`, `test_throttle` |
+| Предсдаточные фиксы (B1–B15: откат/micros/❌-строки/charset/пагинация/`/cancel`/inflight) | `test_predelivery_fixes` |
 
 ## Добавляешь новую мутацию — добавь тесты
 Минимальный набор (зеркаль `test_write_layer`), скил `new-mutation` ведёт по шаблону:

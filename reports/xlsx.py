@@ -168,6 +168,11 @@ def build_mcc_workbook(summary) -> Workbook:
     iss = wb.create_sheet(title="Пропущено и ошибки")
     iss.append(["Тип", "Аккаунт", "Причина"])
     _style_header_row(iss, 3)
+    for ch in getattr(summary, "inactive", []):
+        name = getattr(ch, "name", "") or ch.id
+        iss.append(
+            ["неактивный (не ENABLED)", f"{name} ({ch.id})", getattr(ch, "status", "") or ""]
+        )
     for cid in summary.skipped:
         iss.append(["пропущен (нет доступа на чтение)", cid, ""])
     for cid in summary.managers:

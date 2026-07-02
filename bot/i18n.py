@@ -52,6 +52,15 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "🟢 За какой период Google Sheets?",
         "en": "🟢 For what period the Google Sheets?",
     },
+    # — §8/§9: пикер отчётов (аккаунт → кампания → период) —
+    "report_pick_account": {
+        "ru": "🏢 По какому аккаунту отчёт?",
+        "en": "🏢 Which account should I report on?",
+    },
+    "report_pick_campaign": {
+        "ru": "📋 Весь аккаунт или конкретная кампания?",
+        "en": "📋 Whole account or a specific campaign?",
+    },
     # — подсказки /pause /resume без имени кампании —
     "slash_pause_hint": {
         "ru": "Укажи кампанию: <code>/pause Название кампании</code> — чтобы приостановить.",
@@ -178,6 +187,24 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "Пришли НАЗВАНИЕ кампании одним сообщением (например: <code>Search Spring</code>).",
         "en": "Send the campaign NAME in a single message (e.g. <code>Search Spring</code>).",
     },
+    "kw_add_edit_prompt": {
+        "ru": (
+            "✍️ <b>Ключи для «{camp}» — списком.</b>\n"
+            "Скопируй список ниже, отредактируй (по одному в строке или через запятую — удали лишние, "
+            "добавь свои) и пришли <b>обратно одним сообщением</b>. Потом выберешь тип соответствия, "
+            "и я покажу «было → станет» перед добавлением."
+        ),
+        "en": (
+            "✍️ <b>Keywords for “{camp}” — as a list.</b>\n"
+            "Copy the list below, edit it (one per line or comma-separated — remove extras, add your "
+            "own) and send it <b>back in one message</b>. Then pick the match type and I'll show the "
+            "diff before adding."
+        ),
+    },
+    "kw_add_list_empty": {
+        "ru": "Список пуст. Пришли ключи (по одному в строке или через запятую).",
+        "en": "The list is empty. Send keywords (one per line or comma-separated).",
+    },
     "kw_add_pick_match": {
         "ru": "🔑 Тип соответствия для «{camp}» ({n} ключ.):",
         "en": "🔑 Match type for “{camp}” ({n} kw):",
@@ -301,6 +328,21 @@ CATALOG: dict[str, dict[str, str]] = {
     "rsa_refine_prompt": {
         "ru": texts.RSA_REFINE_PROMPT,
         "en": "✏️ What should I fix in this element? Send a short edit as text.",
+    },
+    "rsa_list_prompt": {
+        "ru": (
+            "✍️ <b>Заголовки и описания — списком.</b>\n"
+            "Скопируй список ниже, отредактируй (по одному в строке, нумерацию/заголовки секций "
+            "оставь) и пришли <b>обратно одним сообщением</b>. Я проверю длину (кириллица = 1 символ) "
+            "и покажу «было → станет» перед созданием.\n"
+            "Или нажми «✅ Использовать как есть»."
+        ),
+        "en": (
+            "✍️ <b>Headlines &amp; descriptions — as a list.</b>\n"
+            "Copy the list below, edit it (one per line, keep the numbering/section headers) and send "
+            "it <b>back in one message</b>. I'll check the length (Cyrillic = 1 char) and show the "
+            "diff before creating.\nOr tap “✅ Use as is”."
+        ),
     },
     "rsa_refine_too_long": {
         "ru": texts.RSA_REFINE_TOO_LONG,
@@ -930,6 +972,14 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "🆕 Проверяю {domain} на новые/изменённые страницы… Пришлю сводку по готовности.",
         "en": "🆕 Checking {domain} for new/changed pages… I'll send a summary when it's done.",
     },
+    "cli_crawl_already": {
+        "ru": "🕷 Обход сайта {domain} уже идёт — дождитесь сводки, второй запуск не нужен.",
+        "en": "🕷 Crawl of {domain} is already running — wait for the summary, no need to start again.",
+    },
+    "cli_autosaved": {
+        "ru": "💾 Авто-сохранение по таймауту: показал черновик профиля — подтвердите «да» ниже.",
+        "en": "💾 Auto-save on idle: here's the profile draft — confirm “yes” below.",
+    },
     "cli_crawl_unchanged": {
         "ru": "✅ Сайт {domain} не изменился ({pages} стр.). Профиль актуален, обновление не требуется.",
         "en": "✅ Site {domain} is unchanged ({pages} pages). Profile is up to date, no update needed.",
@@ -1101,6 +1151,34 @@ CATALOG: dict[str, dict[str, str]] = {
     "cc_kw_empty": {
         "ru": "Не вижу ни одного валидного ключа. Пришлите ещё раз или нажмите «🔎 Генерация».",
         "en": "No valid keywords found. Send again or tap “🔎 Generate”.",
+    },
+    "cc_kw_dropped": {
+        "ru": "⚠️ Отброшено невалидных ключей: {n} (слишком длинные / &gt;10 слов / мусор).",
+        "en": "⚠️ Dropped invalid keywords: {n} (too long / &gt;10 words / junk).",
+    },
+    "cc_keywords_truncated": {
+        "ru": "⚠️ Ключей {total} — больше потолка. В кампанию войдут первые {kept}, остальные отброшены.",
+        "en": "⚠️ {total} keywords exceed the cap. The first {kept} will be used, the rest are dropped.",
+    },
+    "cc_stage_expects_button": {
+        "ru": "На этом шаге я жду нажатие кнопки (или фото, если это этап изображений/логотипа), а не текст.",
+        "en": "This step expects a button tap (or a photo on the image/logo step), not text.",
+    },
+    "cc_kw_not_a_link": {
+        "ru": "Не вижу корректную ссылку на Google-таблицу (http/https). Пришлите ссылку ещё раз.",
+        "en": "That's not a valid Google Sheets link (http/https). Please send the link again.",
+    },
+    "list_more": {"ru": " …ещё {n}", "en": " …{n} more"},
+    "file_fallback": {"ru": "файл", "en": "file"},
+    "kw_negatives_advisory": {
+        "ru": (
+            "\n\n🚫 <b>Минус-слова</b> (предложение): {shown}{more}"
+            "\n<i>Добавлю отдельной командой — после «да».</i>"
+        ),
+        "en": (
+            "\n\n🚫 <b>Negative keywords</b> (suggested): {shown}{more}"
+            "\n<i>I'll add them via a separate command — after your “yes”.</i>"
+        ),
     },
     "cc_asset_logo_prompt": {
         "ru": "🖼 Пришлите <b>фото логотипа</b> (обрежу в 1:1). Или «✖ Отмена».",

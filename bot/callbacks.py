@@ -37,8 +37,25 @@ class AudienceCB(CallbackData, prefix="aud"):
 class PeriodCB(CallbackData, prefix="per"):
     """Выбор периода для отчёта/статистики (пресеты ТЗ §9)."""
 
-    target: str  # "report" | "export" | "status"
+    target: str  # "report" | "export" | "status" | "sheets"
     code: str  # "7" | "30" | "90" | "MTD"
+
+
+class ReportAcctCB(CallbackData, prefix="rpta"):
+    """§8: выбор АККАУНТА для отчёта/экспорта (/report /export /sheets). idx — позиция в
+    _REPORT_ACCT_CACHE[chat_id]; customer_id в callback_data НЕ кладём (64 байта + резолв по chat_id).
+    Пикер перечисляет только read-allowed аккаунты (граница доступа), при выборе — авто-грант."""
+
+    target: str  # "report" | "export" | "sheets"
+    idx: int
+
+
+class ReportCampCB(CallbackData, prefix="rptc"):
+    """§8/§9: выбор КАМПАНИИ (или всего аккаунта) для отчёта. idx=-1 ⇒ весь аккаунт; иначе позиция
+    в _REPORT_CAMP_CACHE[chat_id]. Следующий шаг — период (PeriodCB), отчёт скоупится campaign_id."""
+
+    target: str  # "report" | "export" | "sheets"
+    idx: int = -1
 
 
 class RsaCB(CallbackData, prefix="rsa"):

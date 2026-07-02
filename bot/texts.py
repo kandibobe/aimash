@@ -6,6 +6,7 @@ EN-локализацию (ТЗ §4). Формат — HTML (parse_mode='HTML' �
 from __future__ import annotations
 
 import html
+import re
 
 
 def esc(s: object) -> str:
@@ -58,6 +59,23 @@ BOT_DESCRIPTION = (
     "• бюджет, ставки, ключевые и минус-слова, пауза кампаний\n"
     "• генерация RSA-текстов, подбор ключевых слов\n\n"
     "Я исполнитель, не автопилот. Каждое действие пишется в журнал. /start"
+)
+
+BOT_SHORT_DESCRIPTION_EN = (
+    "Manage Google Ads right in Telegram — in plain text. "
+    "Any change happens only after your “yes”. 🙂"
+)
+
+BOT_DESCRIPTION_EN = (
+    "Aimash — your Google Ads assistant right in Telegram.\n\n"
+    "I read your campaigns and suggest changes, but you decide. Before any budget, bid or "
+    "keyword edit I show “before → after” and ask for confirmation. Nothing changes without "
+    "your “yes” — it's your money.\n\n"
+    "What I can do:\n"
+    "• stats and period reports (.xlsx and Google Sheets)\n"
+    "• budget, bids, keywords and negatives, pausing campaigns\n"
+    "• RSA copy generation, keyword research\n\n"
+    "I'm an executor, not an autopilot. Every action is logged. /start"
 )
 
 
@@ -336,6 +354,91 @@ def fmt_rsa_proposal_summary(
         f"Заголовки ({len(headlines)}):\n{h_lines}\n\n"
         f"Описания ({len(descriptions)}):\n{d_lines}"
     )
+
+
+def fmt_rsa_list_block(session, lang: str | None = None) -> str:
+    """List-UX (§10): ВЕСЬ набор заголовков+описаний одним РЕДАКТИРУЕМЫМ текстом (ПЛЕЙН, без HTML —
+    менеджер копирует ровно то, что видит), с нумерацией и подсказкой длины [n/лимит]. Правит по
+    строке и присылает обратно — разбирает parse_rsa_paste. Секции-заголовки помогают парсеру."""
+    from adcopy.validate import LIMITS, rsa_len
+
+    en = _lang(lang) == "en"
+    hl, dl = LIMITS["headline"], LIMITS["description"]
+    h_hdr = f"HEADLINES (≤{hl}):" if en else f"ЗАГОЛОВКИ (≤{hl}):"
+    d_hdr = f"DESCRIPTIONS (≤{dl}):" if en else f"ОПИСАНИЯ (≤{dl}):"
+    lines = [h_hdr]
+    for i, e in enumerate(session.headlines):
+        t = e.get("text", "")
+        lines.append(f"{i + 1}. {t}  [{rsa_len(t)}/{hl}]")
+    lines.append("")
+    lines.append(d_hdr)
+    for i, e in enumerate(session.descriptions):
+        t = e.get("text", "")
+        lines.append(f"{i + 1}. {t}  [{rsa_len(t)}/{dl}]")
+    return "\n".join(lines)
+
+
+def fmt_kw_candidates(keywords: list[str]) -> str:
+    """List-UX §7: кандидаты-ключи одним РЕДАКТИРУЕМЫМ текстом — по одному в строке (плейн, без HTML:
+    менеджер копирует, удаляет лишние/добавляет свои и присылает обратно)."""
+    return "\n".join(keywords)
+
+
+def _rsa_section(line: str) -> str | None:
+    """Строка-заголовок секции ('ЗАГОЛОВКИ (≤30):' → 'h'; 'ОПИСАНИЯ (≤90):' → 'd'). Требуем И начало
+    с маркера, И признак ИМЕННО заголовка ('≤' или хвостовое ':') — иначе контент-строка, начинающаяся
+    со слова «Заголовок…»/«Описание…» (реальный текст объявления), ложно съедалась бы как секция."""
+    u = (line or "").strip().upper()
+    if "≤" not in u and not u.endswith(":"):  # не похоже на заголовок секции — это контент
+        return None
+    if u.startswith("ЗАГОЛОВК") or u.startswith("HEADLINE"):
+        return "h"
+    if u.startswith("ОПИСАН") or u.startswith("DESCRIPTION"):
+        return "d"
+    return None
+
+
+def _rsa_clean_line(line: str) -> str:
+    """Снять с присланной строки нумерацию '1.'/'1)', хвост-аннотацию '[n/m]' и обрамляющие кавычки."""
+    s = re.sub(r"^\s*\d+[.)]\s*", "", line or "")  # нумерация в начале
+    s = re.sub(r"\s*\[\s*\d+\s*/\s*\d+\s*\]\s*$", "", s)  # хвост [n/m]
+    return s.strip().strip('«»"“”').strip()
+
+
+def parse_rsa_paste(text: str) -> tuple[list[str], list[str]]:
+    """Разобрать присланный менеджером список обратно в (headlines, descriptions). Толерантно:
+    • если есть строки-заголовки секций — делим по ним; • иначе делим по ПЕРВОЙ пустой строке
+    (до неё заголовки, после — описания). В строках снимаем нумерацию/аннотацию/кавычки, пустые и
+    заголовочные строки пропускаем. Валидацию количества/длины делает вызывающий (bot.main)."""
+    raw_lines = (text or "").split("\n")
+    if any(_rsa_section(ln) for ln in raw_lines):
+        headlines: list[str] = []
+        descriptions: list[str] = []
+        bucket: str | None = None
+        for ln in raw_lines:
+            sec = _rsa_section(ln)
+            if sec:
+                bucket = sec
+                continue
+            clean = _rsa_clean_line(ln)
+            if clean and bucket is not None:
+                (headlines if bucket == "h" else descriptions).append(clean)
+        return headlines, descriptions
+    # Без заголовков: две группы, разделённые ПЕРВОЙ пустой строкой (заголовки → описания).
+    groups: list[list[str]] = [[], []]
+    gi = 0
+    saw_content = False
+    for ln in raw_lines:
+        if ln.strip() == "":
+            if saw_content and gi == 0:
+                gi = 1  # первая пустая строка после контента → переключаемся на описания
+            continue
+        clean = _rsa_clean_line(ln)
+        if not clean:
+            continue
+        saw_content = True
+        groups[gi].append(clean)
+    return groups[0], groups[1]
 
 
 SEARCH_ASK_BRIEF = (
@@ -1448,19 +1551,33 @@ def fmt_cc_settings_summary(s: dict, lang: str | None = None) -> str:
 
 
 def fmt_asset_spec_label(spec: dict, lang: str | None = None) -> str:
-    """Короткая подпись нового ассета (§19.7.2) для сообщения «добавлен ассет: …». Plain text."""
+    """Короткая подпись нового ассета (§19.7.2) для сообщения «добавлен ассет: …». Plain text, RU/EN."""
+    en = _lang(lang) == "en"
     family = str(spec.get("family") or "")
     p = spec.get("params") or {}
-    fam_h = {
-        "sitelinks": "Доп. ссылки",
-        "callouts": "Уточнения",
-        "structured_snippets": "Структурное описание",
-        "business_name": "Название бизнеса",
-        "business_logo": "Логотип",
-        "call": "Телефон",
-        "price": "Цены",
-        "promotion": "Акция",
-    }.get(family, family)
+    fam_h = (
+        {
+            "sitelinks": "Sitelinks",
+            "callouts": "Callouts",
+            "structured_snippets": "Structured snippet",
+            "business_name": "Business name",
+            "business_logo": "Logo",
+            "call": "Phone",
+            "price": "Prices",
+            "promotion": "Promotion",
+        }
+        if en
+        else {
+            "sitelinks": "Доп. ссылки",
+            "callouts": "Уточнения",
+            "structured_snippets": "Структурное описание",
+            "business_name": "Название бизнеса",
+            "business_logo": "Логотип",
+            "call": "Телефон",
+            "price": "Цены",
+            "promotion": "Акция",
+        }
+    ).get(family, family)
     if family == "sitelinks":
         n = len(p.get("sitelinks") or [])
         return f"{fam_h} ({n})"
@@ -1473,7 +1590,8 @@ def fmt_asset_spec_label(spec: dict, lang: str | None = None) -> str:
     if family == "call":
         return f"{fam_h}: {p.get('phone_number', '')}"
     if family == "price":
-        return f"{fam_h}: {len(p.get('offerings') or [])} оф. ({p.get('currency', '')})"
+        off = "offers" if en else "оф."
+        return f"{fam_h}: {len(p.get('offerings') or [])} {off} ({p.get('currency', '')})"
     if family == "promotion":
         pct = p.get("percent_off")
         return f"{fam_h}: -{int(pct)}% · {p.get('promotion_target', '')}" if pct else fam_h

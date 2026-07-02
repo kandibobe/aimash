@@ -125,10 +125,25 @@ def _search(client, customer_id: str, query: str):
     return client.get_service("GoogleAdsService").search(customer_id=str(customer_id), query=query)
 
 
-# ── Totals (агрегат за период; resource customer) ───────────────────────────────
-def fetch_totals(client, customer_id: str, period) -> Metrics:
+def _where(period, campaign_id: str | None) -> str:
+    """WHERE-фрагмент периода + (опц.) фильтр по кампании. campaign_id приводим к int — защита от
+    инъекции в GAQL (id всегда числовой). None ⇒ фрагмент БАЙТ-в-БАЙТ как раньше (обратная совм.)."""
+    w = period.gaql_between()
+    if campaign_id:
+        w += f" AND campaign.id = {int(campaign_id)}"
+    return w
+
+
+def _totals_source(campaign_id: str | None) -> str:
+    """Ресурс для агрегатов/сегментных разбивок: FROM customer (весь аккаунт) или FROM campaign
+    (когда скоуп по кампании — campaign.id не выбирается из customer, а metrics/segments одинаковы)."""
+    return "campaign" if campaign_id else "customer"
+
+
+# ── Totals (агрегат за период; resource customer / campaign при скоупе) ──────────
+def fetch_totals(client, customer_id: str, period, campaign_id: str | None = None) -> Metrics:
     ensure_read_allowed(customer_id)
-    q = f"SELECT {_METRICS_SELECT} FROM customer WHERE {period.gaql_between()}"
+    q = f"SELECT {_METRICS_SELECT} FROM {_totals_source(campaign_id)} WHERE {_where(period, campaign_id)}"
     total = Metrics()
     for row in _search(client, customer_id, q):
         total.add(_metrics(row.metrics))
@@ -136,11 +151,13 @@ def fetch_totals(client, customer_id: str, period) -> Metrics:
 
 
 # ── Разбивки ────────────────────────────────────────────────────────────────────
-def fetch_by_campaign(client, customer_id: str, period) -> Breakdown:
+def fetch_by_campaign(
+    client, customer_id: str, period, campaign_id: str | None = None
+) -> Breakdown:
     ensure_read_allowed(customer_id)
     q = (
         f"SELECT campaign.name, campaign.status, {_METRICS_SELECT} FROM campaign "
-        f"WHERE {period.gaql_between()} ORDER BY metrics.cost_micros DESC"
+        f"WHERE {_where(period, campaign_id)} ORDER BY metrics.cost_micros DESC"
     )
     rows = [
         ((r.campaign.name, _enum_name(r.campaign.status)), _metrics(r.metrics))
@@ -149,11 +166,13 @@ def fetch_by_campaign(client, customer_id: str, period) -> Breakdown:
     return Breakdown("campaign", "Кампании", ["Кампания", "Статус"], rows)
 
 
-def fetch_by_ad_group(client, customer_id: str, period) -> Breakdown:
+def fetch_by_ad_group(
+    client, customer_id: str, period, campaign_id: str | None = None
+) -> Breakdown:
     ensure_read_allowed(customer_id)
     q = (
         f"SELECT campaign.name, ad_group.name, ad_group.status, {_METRICS_SELECT} "
-        f"FROM ad_group WHERE {period.gaql_between()} ORDER BY metrics.cost_micros DESC"
+        f"FROM ad_group WHERE {_where(period, campaign_id)} ORDER BY metrics.cost_micros DESC"
     )
     rows = [
         (
@@ -165,12 +184,12 @@ def fetch_by_ad_group(client, customer_id: str, period) -> Breakdown:
     return Breakdown("ad_group", "Группы объявлений", ["Кампания", "Группа", "Статус"], rows)
 
 
-def fetch_by_keyword(client, customer_id: str, period) -> Breakdown:
+def fetch_by_keyword(client, customer_id: str, period, campaign_id: str | None = None) -> Breakdown:
     ensure_read_allowed(customer_id)
     q = (
         "SELECT campaign.name, ad_group.name, ad_group_criterion.keyword.text, "
         f"ad_group_criterion.keyword.match_type, {_METRICS_SELECT} FROM keyword_view "
-        f"WHERE {period.gaql_between()} ORDER BY metrics.cost_micros DESC LIMIT {TOP_N}"
+        f"WHERE {_where(period, campaign_id)} ORDER BY metrics.cost_micros DESC LIMIT {TOP_N}"
     )
     rows = [
         (
@@ -188,12 +207,12 @@ def fetch_by_keyword(client, customer_id: str, period) -> Breakdown:
     return Breakdown("keyword", "Ключевые слова", ["Кампания", "Группа", "Ключ", "Тип"], rows, note)
 
 
-def fetch_by_ad(client, customer_id: str, period) -> Breakdown:
+def fetch_by_ad(client, customer_id: str, period, campaign_id: str | None = None) -> Breakdown:
     ensure_read_allowed(customer_id)
     q = (
         "SELECT campaign.name, ad_group.name, ad_group_ad.ad.id, ad_group_ad.ad.type, "
         f"{_METRICS_SELECT} FROM ad_group_ad "
-        f"WHERE {period.gaql_between()} ORDER BY metrics.cost_micros DESC LIMIT {TOP_N}"
+        f"WHERE {_where(period, campaign_id)} ORDER BY metrics.cost_micros DESC LIMIT {TOP_N}"
     )
     rows = [
         (
@@ -211,9 +230,12 @@ def fetch_by_ad(client, customer_id: str, period) -> Breakdown:
     return Breakdown("ad", "Объявления", ["Кампания", "Группа", "ID объявления", "Тип"], rows, note)
 
 
-def fetch_by_device(client, customer_id: str, period) -> Breakdown:
+def fetch_by_device(client, customer_id: str, period, campaign_id: str | None = None) -> Breakdown:
     ensure_read_allowed(customer_id)
-    q = f"SELECT segments.device, {_METRICS_SELECT} FROM customer WHERE {period.gaql_between()}"
+    q = (
+        f"SELECT segments.device, {_METRICS_SELECT} FROM {_totals_source(campaign_id)} "
+        f"WHERE {_where(period, campaign_id)}"
+    )
     rows = [
         ((_enum_name(r.segments.device),), _metrics(r.metrics))
         for r in _search(client, customer_id, q)
@@ -222,11 +244,11 @@ def fetch_by_device(client, customer_id: str, period) -> Breakdown:
     return Breakdown("device", "Устройства", ["Устройство"], rows)
 
 
-def fetch_by_network(client, customer_id: str, period) -> Breakdown:
+def fetch_by_network(client, customer_id: str, period, campaign_id: str | None = None) -> Breakdown:
     ensure_read_allowed(customer_id)
     q = (
-        f"SELECT segments.ad_network_type, {_METRICS_SELECT} FROM customer "
-        f"WHERE {period.gaql_between()}"
+        f"SELECT segments.ad_network_type, {_METRICS_SELECT} FROM {_totals_source(campaign_id)} "
+        f"WHERE {_where(period, campaign_id)}"
     )
     rows = [
         ((_enum_name(r.segments.ad_network_type),), _metrics(r.metrics))
@@ -236,11 +258,11 @@ def fetch_by_network(client, customer_id: str, period) -> Breakdown:
     return Breakdown("network", "Сети", ["Сеть"], rows)
 
 
-def fetch_by_day(client, customer_id: str, period) -> Breakdown:
+def fetch_by_day(client, customer_id: str, period, campaign_id: str | None = None) -> Breakdown:
     ensure_read_allowed(customer_id)
     q = (
-        f"SELECT segments.date, {_METRICS_SELECT} FROM customer "
-        f"WHERE {period.gaql_between()} ORDER BY segments.date"
+        f"SELECT segments.date, {_METRICS_SELECT} FROM {_totals_source(campaign_id)} "
+        f"WHERE {_where(period, campaign_id)} ORDER BY segments.date"
     )
     rows = [((r.segments.date,), _metrics(r.metrics)) for r in _search(client, customer_id, q)]
     return Breakdown("day", "По дням", ["Дата"], rows)

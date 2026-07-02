@@ -50,12 +50,23 @@ def patched(obj, name, value):
         setattr(obj, name, orig)
 
 
+class FakeBot:
+    """§20.3/B13: _present_memory_proposal и авто-сохранение шлют черновик через bot.send_message."""
+
+    def __init__(self):
+        self.sent: list = []
+
+    async def send_message(self, chat_id, text: str = "", **kw):
+        self.sent.append((chat_id, text, kw))
+        return SimpleNamespace(chat=SimpleNamespace(id=chat_id))
+
+
 class FakeMessage:
     def __init__(self, chat_id: int = 100, text: str = ""):
         self.chat = type("C", (), {"id": chat_id})()
         self.text = text
         self.caption = None
-        self.bot = None  # §20.3: _spawn_crawl читает cq.message.bot (в тесте не нужен реальный)
+        self.bot = FakeBot()  # §20: _present_memory_proposal/_spawn_crawl читают cq.message.bot
         self.answers: list = []
 
     async def answer(self, text: str = "", **kw):
@@ -287,9 +298,11 @@ async def test_save_crawl_confirms_then_spawns_crawl():
 
     async def fake_do_confirm(cq, c):
         calls["confirm_cid"] = c
+        return True  # B4: краул стартует ТОЛЬКО при успешном confirm (возврат bool)
 
-    def fake_spawn(bot, cid_chat, customer_id, url):
+    def fake_spawn(bot, cid_chat, customer_id, url, **kw):
         calls["spawn"] = (customer_id, url)
+        return True  # B15: _spawn_crawl возвращает bool (False = уже идёт краул этого аккаунта)
 
     state = FakeState()
     with patched(bm, "_do_confirm", fake_do_confirm), patched(bm, "_spawn_crawl", fake_spawn):

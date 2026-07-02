@@ -26,6 +26,8 @@ from bot.callbacks import (
     NavCB,
     PeriodCB,
     RecentCB,
+    ReportAcctCB,
+    ReportCampCB,
     RsaCB,
     RsaPickCB,
     TemplateCB,
@@ -293,17 +295,34 @@ def confirm_kb(cid: str, lang: str | None = None) -> InlineKeyboardMarkup:
 
 # ── §20: «Информация про клиентов» ───────────────────────────────────────────────
 def clients_accounts_kb(
-    rows: list, with_profile: set[str], lang: str | None = None
+    rows: list, with_profile: set[str], lang: str | None = None, page: int = 0
 ) -> InlineKeyboardMarkup:
-    """§20.2: список аккаунтов MCC для выбора клиента. У аккаунтов с заполненным профилем — ✅.
-    idx — позиция в _CLI_ACCT_CACHE[chat_id]; customer_id в callback_data не кладём (как cc)."""
+    """§20.2: список аккаунтов MCC для выбора клиента, ПОСТРАНИЧНО (B7). У аккаунтов с заполненным
+    профилем — ✅. idx — ГЛОБАЛЬНАЯ позиция в _CLI_ACCT_CACHE[chat_id]; customer_id не кладём (как cc)."""
     kb = InlineKeyboardBuilder()
-    for i, r in enumerate(rows):
+    total = len(rows)
+    page, pages, start = _acct_page(total, page)
+    shown = 0
+    for i in range(start, min(start + _ACCT_PAGE, total)):
+        r = rows[i]
         name = _ellipsize(getattr(r, "name", "") or getattr(r, "id", ""))
         cid = getattr(r, "id", "")
         mark = "✅ " if cid in with_profile else "▫️ "
         kb.button(text=f"{mark}{name} · {cid}", callback_data=ClientCB(action="acct", idx=i))
-    kb.adjust(1)
+        shown += 1
+    nav: list[tuple[str, ClientCB]] = []
+    if page > 0:
+        nav.append(("‹", ClientCB(action="page", sub=str(page - 1))))
+    if pages > 1:
+        nav.append((f"{page + 1}/{pages}", ClientCB(action="page", sub=str(page))))  # индикатор
+    if page < pages - 1:
+        nav.append(("›", ClientCB(action="page", sub=str(page + 1))))
+    for text, cb in nav:
+        kb.button(text=text, callback_data=cb)
+    sizes = [1] * shown
+    if nav:
+        sizes.append(len(nav))
+    kb.adjust(*(sizes or [1]))
     return kb.as_markup()
 
 
@@ -376,17 +395,48 @@ def client_save_kb(cid: str, lang: str | None = None) -> InlineKeyboardMarkup:
 
 
 # ── §19: визард «Создание кампании» ──────────────────────────────────────────────
-def cc_accounts_kb(rows: list, lang: str | None = None) -> InlineKeyboardMarkup:
-    """Этап 0: выбор аккаунта клиента (read-only превью). idx — позиция в _CC_ACCT_CACHE[chat_id];
-    customer_id в callback_data НЕ кладём. rows — объекты с .name/.id (ads.read.ChildAccount)."""
+_ACCT_PAGE = (
+    8  # аккаунтов на страницу пикера (§19/§20): с запасом под лимит inline-клавиатуры Telegram
+)
+
+
+def _acct_page(total: int, page: int) -> tuple[int, int, int]:
+    """Нормализовать номер страницы пикера аккаунтов → (page, pages, start). B7: >100 кнопок не
+    влезают в один inline-markup (REPLY_MARKUP_TOO_LONG) — режем на страницы по _ACCT_PAGE."""
+    pages = max(1, (total + _ACCT_PAGE - 1) // _ACCT_PAGE)
+    page = max(0, min(page, pages - 1))
+    return page, pages, page * _ACCT_PAGE
+
+
+def cc_accounts_kb(rows: list, lang: str | None = None, page: int = 0) -> InlineKeyboardMarkup:
+    """Этап 0: выбор аккаунта клиента (read-only превью), ПОСТРАНИЧНО (B7). idx — ГЛОБАЛЬНАЯ позиция в
+    _CC_ACCT_CACHE[chat_id]; customer_id в callback_data НЕ кладём. rows — ChildAccount (.name/.id)."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
-    for i, r in enumerate(rows):
+    total = len(rows)
+    page, pages, start = _acct_page(total, page)
+    shown = 0
+    for i in range(start, min(start + _ACCT_PAGE, total)):
+        r = rows[i]
         name = _ellipsize(getattr(r, "name", "") or getattr(r, "id", ""))
         cid = getattr(r, "id", "")
         kb.button(text=f"🏢 {name} · {cid}", callback_data=CcCB(action="acct", idx=i))
+        shown += 1
+    nav: list[tuple[str, CcCB]] = []
+    if page > 0:
+        nav.append(("‹", CcCB(action="page", sub=str(page - 1))))
+    if pages > 1:
+        nav.append((f"{page + 1}/{pages}", CcCB(action="page", sub=str(page))))  # индикатор (no-op)
+    if page < pages - 1:
+        nav.append(("›", CcCB(action="page", sub=str(page + 1))))
+    for text, cb in nav:
+        kb.button(text=text, callback_data=cb)
     kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
-    kb.adjust(1)
+    sizes = [1] * shown
+    if nav:
+        sizes.append(len(nav))
+    sizes.append(1)  # ряд Cancel
+    kb.adjust(*sizes)
     return kb.as_markup()
 
 
@@ -749,6 +799,47 @@ def period_kb(target: str, lang: str | None = None) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def report_accounts_kb(rows: list, target: str, lang: str | None = None) -> InlineKeyboardMarkup:
+    """§8: выбор аккаунта для отчёта/экспорта. rows — ChildAccount-подобные (.name/.id/.currency);
+    idx → позиция в _REPORT_ACCT_CACHE[chat_id] (customer_id в callback_data НЕ кладём). target —
+    какой поток (report|export|sheets), чтобы после выбора продолжить именно его."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    for i, r in enumerate(rows):
+        name = _ellipsize(getattr(r, "name", "") or getattr(r, "id", ""))
+        cid = getattr(r, "id", "")
+        cur = getattr(r, "currency", "") or ""
+        suffix = f" · {cur}" if cur else ""
+        kb.button(
+            text=f"🏢 {name} · {cid}{suffix}", callback_data=ReportAcctCB(target=target, idx=i)
+        )
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def report_campaigns_kb(
+    camps: list[dict], target: str, lang: str | None = None
+) -> InlineKeyboardMarkup:
+    """§9: «Весь аккаунт» (idx=-1) + список кампаний (idx → _REPORT_CAMP_CACHE[chat_id]). Маркер
+    статуса нейтрален (данные не переводятся). Следующий шаг — period_kb(target)."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="📊 Whole account" if en else "📊 Весь аккаунт",
+        callback_data=ReportCampCB(target=target, idx=-1),
+    )
+    for i, c in enumerate(camps):
+        mark = {"ENABLED": "▶️", "PAUSED": "⏸"}.get(c.get("status", ""), "•")
+        kb.button(
+            text=f"{mark} {_ellipsize(c['name'])}",
+            callback_data=ReportCampCB(target=target, idx=i),
+        )
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 # ── RSA-курация (ТЗ §10): поэлементное подтверждение + массовые действия ──────────
 def rsa_item_kb(cid: str, kind: str, idx: int, lang: str | None = None) -> InlineKeyboardMarkup:
     """Кнопки одного элемента (заголовок/описание): одобрить/доработать/отклонить + к итогу."""
@@ -771,6 +862,22 @@ def rsa_item_kb(cid: str, kind: str, idx: int, lang: str | None = None) -> Inlin
         callback_data=RsaCB(action="overview", cid=cid),
     )
     kb.adjust(3, 1)
+    return kb.as_markup()
+
+
+def rsa_aslist_kb(cid: str, lang: str | None = None) -> InlineKeyboardMarkup:
+    """List-UX (§10): под редактируемым списком — «✅ Использовать как есть» (одобрить всё валидное
+    без правок) и «❌ Отмена». Правка — присылается ТЕКСТОМ обратно (rsa_list_edited)."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="✅ Use as is" if en else "✅ Использовать как есть",
+        callback_data=RsaCB(action="aslist", cid=cid),
+    )
+    kb.button(
+        text="❌ Cancel" if en else "❌ Отмена", callback_data=RsaCB(action="cancel", cid=cid)
+    )
+    kb.adjust(1)
     return kb.as_markup()
 
 

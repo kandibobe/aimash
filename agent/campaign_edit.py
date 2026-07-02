@@ -61,7 +61,13 @@ def _replace_kind_ok(new_value: str, kind: str | None) -> bool:
     limit = LIMITS.get(kind) or ASSET_LIMITS.get(kind)
     if limit is None:
         return True
-    return rsa_len(new_value) <= limit
+    if rsa_len(new_value) > limit:
+        return False
+    # §19.5.1 (B12): сегмент display path не может содержать пробелы/слэши — «avto/kenya» влезает в
+    # 15 символов, но SDK отклонит RSA. Ловим на замене, чтобы не уронить создание кампании.
+    if kind == "path" and re.search(r"[\s/\\]", new_value):
+        return False
+    return True
 
 
 def _repl_in_str(s: str, old: str, new: str, kind: str | None) -> tuple[str, int]:

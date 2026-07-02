@@ -7,9 +7,9 @@ Telegram-бот, который по командам на естественн�
 
 ## Статус
 Фазы 0–3 в основном реализованы (точный статус — по коммитам; роадмап в плане может отставать от кода).
-- **Готово:** чтение MCC (GAQL) + whitelist + Postgres/Alembic; confirm-гейт + запись (бюджет, ставка CPC и стратегия ставок, ключи, минус-слова, пауза/возобновление, ГЕО-радиус и ГЕО-локация, аудитории) с audit; генерация RSA-текстов с поэлементным подтверждением; **создание кампаний — Search и GDN (из фото), всё на паузе** (§11); глубокие отчёты (`.xlsx` и Google Sheets) + сравнение период-к-периоду; keyword research + AI-кластеризация; планировщик отчётов/аномалий (read-only).
-- **Инфраструктура/безопасность:** Docker + bot-сервис; CI (ruff/mypy/coverage); ретраи+таймауты к Google Ads/OpenRouter; редакция секретов в логах + логирование запросов; анти-спам throttling; prod fail-fast на ключ шифрования.
-- **Следующие шаги:** полный EN-интерфейс (§4); снятие замка на 1 аккаунт → сводный отчёт по дочерним MCC (§8).
+- **Готово:** чтение MCC (GAQL) + whitelist + Postgres/Alembic; confirm-гейт + запись (бюджет, ставка CPC и стратегия ставок, ключи, минус-слова, пауза/возобновление, ГЕО-радиус и ГЕО-локация, аудитории) с audit; генерация RSA-текстов с поэлементным подтверждением; **создание кампаний — Search (§19 визард), GDN, Video и Demand Gen из фото/видео, всё на паузе** (§11); глубокие отчёты (`.xlsx` и Google Sheets) + сравнение период-к-периоду; **сводный отчёт по дочерним MCC `/mcc`** (§8, подытоги по валютам); keyword research + AI-кластеризация; **§20 «Информация про клиентов»** (`/clients`: профиль + краулинг сайта → контекст генерации); двуязычный интерфейс **RU/EN** (`/lang`); планировщик отчётов/аномалий (read-only).
+- **Инфраструктура/безопасность:** Docker + bot-сервис; CI (ruff/mypy/coverage); ретраи+таймауты к Google Ads/OpenRouter; редакция секретов в логах + логирование запросов; анти-спам throttling; дневная квота API (`/quota`); prod fail-fast на ключ шифрования.
+- **Открытый объём (вне текущей сдачи):** снятие замка → **мутации** на дочерних MCC (сейчас читаются, но мутируется только Draft, §8); распределённая квота на мульти-реплике; UAC исключён (нет приложения у клиента).
 
 ## Команды бота
 | Команда | Что делает |
@@ -19,14 +19,19 @@ Telegram-бот, который по командам на естественн�
 | `/campaigns` | список кампаний + быстрые действия |
 | `/pause Название`, `/resume Название` | пауза/возобновление кампании (через confirm-гейт) |
 | `/report [7\|30\|90\|MTD]` | сводка за период (итоги + сравнение + топ-кампании) |
+| `/mcc [дни]` | §8: сводный отчёт по всем дочерним аккаунтам MCC (подытоги по валютам) |
+| `/account <id>` \| `/account reset` | переключить аккаунт ЧТЕНИЯ для `/status` `/report` `/export` `/sheets` |
 | `/export [...]` | глубокий отчёт `.xlsx` вложением |
 | `/sheets [...]` | глубокий отчёт в Google Sheets (ссылка; нужен OAuth-scope `drive.file`, см. `docs/DEPLOYMENT.md`) |
 | `/rsa` | генерация RSA-текстов с поэлементным подтверждением |
 | `/newcampaign` | §19: пошаговый визард создания Search-кампании (черновик PAUSED) |
+| `/newvideo` | §11: кампания из видео (Demand Gen / Video), черновик PAUSED |
 | `/clients`, `/client <id>` | §20: информация про клиентов — профиль на аккаунт (текст + краулинг сайта), контекст генерации |
 | `/keywords` | подбор ключевых слов (объём/конкуренция/кластеры) + `.xlsx` |
-| `/lang [ru\|en]` | язык интерфейса |
-| `/cancel` | отменить текущий черновик |
+| `/quota` | дневная квота Google Ads API (на 95% мутации блокируются) |
+| `/journal`, `/diag` | аудит-журнал действий · последние ошибки (§15) |
+| `/lang [ru\|en]`, `/model`, `/balance` | язык интерфейса · выбор модели ИИ · баланс OpenRouter |
+| `/cancel` | отменить текущий черновик / свернуть активный визард |
 | свободный текст | NL-команда → агент (бюджет/ставка/ключи/…) |
 
 Любое изменение — только после «да» (показ «было → станет»); анти-спам throttling ограничивает частоту команд. Деплой/OAuth/Sheets-scope — `docs/DEPLOYMENT.md`.
@@ -62,7 +67,7 @@ cp .env.example .env          # затем заполнить .env (см. зам
 | Линт/формат | `make lint` / `make fmt` | `ruff check .` / `ruff format .` |
 | Хуки по всем файлам | `make hooks` | `pre-commit run --all-files` |
 | Dev-Postgres вверх/вниз | `make db-up` / `make db-down` | `docker compose up -d postgres` / `docker compose down` |
-| Миграции | `make` (Alembic) | `alembic upgrade head` |
+| Миграции | — (нет make-цели) | `alembic upgrade head` |
 | Бот | `make run` | `python -m bot.main` |
 | Проверка доступа (read-only) | `make check-access` | `python scripts/check_access.py` |
 | MCP-статус | `make mcp-list` | `claude mcp list` |
@@ -95,17 +100,18 @@ python scripts/ab_test_models.py
 
 ## Структура
 ```
-core/      config, secrets (шифрование), logging (редакция секретов), resilience (ретраи/таймауты)
-bot/       aiogram handlers, inline-кнопки, whitelist, ux (typing/диагностика), i18n, throttle
-agent/     router (OpenRouter), system_prompt, tools (Pydantic), loop
-ads/       auth, read (GAQL), mutations (требуют confirmation_id), keyword_plan, assets (§11)
-adcopy/    генерация RSA-текстов + валидация длины (кириллица=1) + курация
-reports/   глубокие отчёты: queries (GAQL), service, xlsx, sheets, period
-keywords/  подбор ключей + AI-кластеризация по интенту + .xlsx
-scheduler/ плановые отчёты/аномалии/очистка (READ-ONLY, golden rule #3)
+core/      config, secrets (шифрование), logging (редакция секретов), resilience (ретраи/таймауты), quota
+bot/       aiogram handlers, inline-кнопки, whitelist, ux, i18n (RU/EN), throttle, campaign_wizard (§19 store)
+agent/     router (OpenRouter), system_prompt, tools (Pydantic), loop, campaign_settings/campaign_edit (§19)
+ads/       auth, read (GAQL), mutations (требуют confirmation_id), keyword_plan, assets, extensions (§11/§19)
+adcopy/    генерация RSA-текстов + валидация длины (кириллица=1) + курация + assets_gen (§19.7)
+reports/   глубокие отчёты: queries (GAQL), service, xlsx, sheets, period, mcc (§8)
+keywords/  подбор ключей + AI-кластеризация по интенту + .xlsx + ingest (парс списков)
+clients/   §20: профиль клиента (store), LLM-разбор (profile_extract), краулер сайта (crawler), execute (memory-гейт)
+scheduler/ плановые отчёты/аномалии/очистка черновиков и зависших краулов (READ-ONLY, golden rule #3)
 confirm/   proposal (diff), gate (логика «да»), audit
-db/        SQLAlchemy модели + Alembic
-scripts/   ab_test_models.py — A/B-тест моделей
+db/        SQLAlchemy модели + Alembic (migrations/)
+scripts/   ab_test_models.py — A/B-тест моделей; check_access, get_refresh_token, backup_db
 ```
 
 ## Правила разработки

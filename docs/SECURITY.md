@@ -9,9 +9,12 @@
 > ссылки не «протухали». Точные строки даны только для стабильных файлов.
 
 ## Текущая фаза (важно для модели угроз)
-Сейчас разрешён **ровно один** аккаунт — `Aimash (Draft)` = `7753643025` — и **только TEST MCC** при
-разработке. Это осознанная тест-фазная позиция; продуктовая цель (полный MCC, ТЗ §8) включается
-**осознанным** расширением кода, не строкой в `.env` (см. правило 9).
+**МУТАЦИИ** разрешены на **ровно одном** аккаунте — `Aimash (Draft)` = `7753643025` — и **только TEST
+MCC** при разработке. **ЧТЕНИЕ** — шире: раздельный чокпойнт `ensure_read_allowed` пускает
+мутационный аккаунт ∪ `GOOGLE_ADS_READ_CUSTOMER_IDS` ∪ дочерние, обнаруженные обходом MCC на старте
+(§8 read реализован: `/mcc`, per-currency сводки, per-child таймзоны). Мутация на дочернем всё равно
+упрётся в `ensure_allowed` (инварианты `test_mutation_lock_unchanged_by_read_allowlist`). Открытие
+**мутаций** на полном MCC — **осознанным** расширением кода, не строкой в `.env` (см. правило 9).
 
 ---
 
@@ -27,7 +30,7 @@
 | 6 | **Модель не трогает SDK напрямую** (Pydantic → валидация → diff → «да» → SDK) | `agent/tools/schemas.py` (типизированные схемы) → `ads/mutations.py` (валидация диапазонов) → confirm → SDK; capability-guard `ads/service.py` | `test_write_layer` (capability-guard), `test_bot_integration` |
 | 7 | **Только TEST MCC при разработке** | `ENV=dev` по умолчанию; замок аккаунта на `7753643025` (правило 9) | покрыто правилом 9 + `test_config_failfast` |
 | 8 | **Жёсткий allow-list операций** | `ads/service.py` исполняет только поддержанные операции (отклоняет неизвестную ДО кнопок и в `execute_confirmed`) | `test_write_layer` (отклонение неподдержанной операции) |
-| 9 | **Замок единственного аккаунта** `7753643025` | [`ads/client.py:44` `ensure_allowed`](../ads/client.py#L44) и [`:73` `ensure_manager_allowed`](../ads/client.py#L73); потолок [`ALLOWED_CEILING` (`:24`)](../ads/client.py#L24) | `test_safety_core` (потолок/fail-closed/чужой), **`test_ads_resolve` + `test_ads_read`** (резолв и чтение отклоняют чужой аккаунт) |
+| 9 | **Замок аккаунта** `7753643025` (мутации) + раздельное чтение (§8) | `ads/client.py::ensure_allowed` (мутации), `ensure_read_allowed` (per-account чтение = мутационный ∪ read-env ∪ дочерние обхода), `ensure_manager_allowed` (обход MCC); потолок `ALLOWED_CEILING` зашит в коде | `test_safety_core` (потолок/fail-closed/чужой), `test_mutation_lock_unchanged_by_read_allowlist`, `test_discovered_child_readable_but_not_mutable`, `test_ads_resolve`, `test_ads_read` |
 | 10 | **Fail-closed везде** (никогда fail-open) | `bot/main.py::WhitelistMiddleware` (`if uid not in wl` — блок при пустом); `core/config.py` prod fail-fast (нет ключа/whitelist → `ValueError`); `user_initiated` дефолт `False`; пустой allow-list → отказ | `test_whitelist`, `test_config_failfast`, `test_safety_core` |
 
 ---
@@ -67,6 +70,19 @@ allowed` отдельно гейтит обход MCC. Расширение кр
 `WHERE name = '...'`, чтобы имя кампании нельзя было превратить в инъекцию. Покрыто в
 `test_ads_resolve` (в т.ч. кейс с попыткой вырваться из литерала).
 
+### §20 «Клиенты» — отдельный memory-домен за тем же гейтом
+Изменения профиля клиента (save/update/clear) — это мутации **локальной БД**, не Google Ads. Они
+идут через **тот же** confirm-гейт («было→станет» + «да»), но исполняются отдельным исполнителем
+`clients/execute.py::execute_confirmed_memory` (множество `MEMORY_OPERATIONS`), а НЕ через
+`ads.mutations`. Cross-domain инвариант: memory-операция, поданная в ads-исполнитель, и наоборот →
+`PermissionError` (`test_client_confirm`). Замок аккаунта Draft к профилям неприменим (это не деньги).
+PII клиентов (телефоны/e-mail) в БД: в контекст генерации НЕ кладутся (`profile_context_text`), в
+`crawl_jobs.error` редактируются; **бэкапы БД содержат PII** — хранить защищённо ([BACKUP.md](BACKUP.md)).
+
+### Анти-спам (rate limiting)
+`bot/throttle.py` ограничивает частоту сообщений на chat_id (ТЗ §12) — защита от флуда и случайного
+цикла кнопок. Покрыто `test_throttle`.
+
 ---
 
 ## Что НЕ покрыто / границы (честно)
@@ -75,8 +91,9 @@ allowed` отдельно гейтит обход MCC. Расширение кр
   не может выполнить мутацию без «да» пользователя и не выйдет за разрешённый аккаунт.
 - **Ротация Fernet-ключа — ручная** (перешифровать `oauth_tokens` старым→новым ключом; см.
   [DEPLOYMENT.md](DEPLOYMENT.md#генерация-fernet-ключа)).
-- **Один аккаунт — тест-фаза.** Полный MCC (несколько дочерних, сводный отчёт, нормализация
-  валют/таймзон) — позже, осознанным расширением `ALLOWED_CEILING`.
+- **Мутации — один аккаунт (тест-фаза).** Чтение дочерних MCC (сводный отчёт `/mcc`, нормализация
+  валют/таймзон) уже реализовано (§8 read); **мутации** на дочерних по-прежнему заблокированы —
+  открытие только осознанным расширением `ALLOWED_CEILING`.
 - **Read-путь зависит от живого SDK** в проде; офлайн он покрыт юнит-тестами на фейковом клиенте
   (`test_ads_read`, `test_ads_resolve`), но не заменяет smoke-проверку доступа
   (`scripts/check_access.py`, read-only) на реальном TEST-аккаунте.

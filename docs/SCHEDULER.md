@@ -8,14 +8,17 @@
 [`tests/test_scheduler.py`](../tests/test_scheduler.py).
 
 ## Задачи и кадэнс (`scheduler/service.py`)
-| Задача | Триггер по умолчанию | Что делает |
-|---|---|---|
-| `run_scheduled_report` | cron **09:00** ежедневно | плановый отчёт за последние 7 дн. → рассылка whitelisted-операторам |
-| `run_anomaly_check` | каждые **6 ч** | week-over-week сравнение, алерт при спайке расхода / падении конверсий |
-| `cleanup_stale_proposals` | каждые **60 мин** | просроченные `pending`-черновики → `rejected` (с аудитом) |
+| Задача | Триггер по умолчанию | env | Что делает |
+|---|---|---|---|
+| `run_scheduled_report` | cron **09:00** ежедневно | `REPORT_SCHEDULE` | плановый отчёт за последние 7 дн. → рассылка whitelisted-операторам |
+| `run_anomaly_check` | каждые **6 ч** | `ANOMALY_INTERVAL_HOURS` | week-over-week сравнение, алерт при спайке расхода / падении конверсий |
+| `cleanup_stale_proposals` | каждые **60 мин** | `CLEANUP_INTERVAL_MINUTES` | просроченные `pending`-черновики → `rejected` (с аудитом) |
+| `cleanup_stale_campaign_drafts` | каждые **60 мин** | `CAMPAIGN_DRAFT_TTL_HOURS` (72) | §19: активные черновики визарда старше TTL → `abandoned` (переживают рестарт, но не вечно) |
+| `reconcile_stale_crawls` | каждые **60 мин** | `CRAWL_STALE_MINUTES` (30) | §20.4: зависшие `running` crawl_jobs (процесс умер на рестарте) → `failed` |
 
-Кадэнс пока зашит в `service.py` (позже — настраиваемо). Получатели рассылок — `settings.whitelist`
-(операторы бота); пустой whitelist → задача просто пропускается.
+Кадэнс задаётся из env (не зашит): cron отчётов — `REPORT_SCHEDULE`; интервалы — `ANOMALY_INTERVAL_HOURS`
+и `CLEANUP_INTERVAL_MINUTES` (последний — общий кадэнс всех трёх очисток). Получатели рассылок —
+`settings.whitelist` (операторы бота); пустой whitelist → задача просто пропускается.
 
 ## Детектор аномалий (`scheduler/anomaly.py`)
 `detect_anomalies(current, previous, thresholds)` — **чистая логика** (без SDK/сети, полностью
@@ -36,11 +39,18 @@
 общие, но алерты считаются для каждого получателя со своими порогами (иначе — дефолтные). Это
 **только чтение** настроек — аккаунт не трогается.
 
-## Очистка черновиков (`cleanup_stale_proposals`)
-`pending`-черновики старше `PROPOSAL_TTL_HOURS=24` переводятся в `rejected` (с audit-записью).
-Это безопасно: они **не подтверждались** → SDK не звался → деньги не тратились. Возраст
-сравнивается в Python (наивный `created_at` из SQLite трактуется как UTC) — корректно и на SQLite,
-и на Postgres (tz-aware). Жизненный цикл proposal — [DATABASE.md](DATABASE.md).
+## Очистка (три задачи, общий кадэнс `CLEANUP_INTERVAL_MINUTES`)
+- **`cleanup_stale_proposals`** — `pending`-черновики мутаций старше `PROPOSAL_TTL_HOURS=24` →
+  `rejected` (с audit). Безопасно: они **не подтверждались** → SDK не звался → деньги не тратились.
+- **`cleanup_stale_campaign_drafts`** (§19) — активные черновики визарда старше
+  `CAMPAIGN_DRAFT_TTL_HOURS=72` → `abandoned`. Черновик визарда переживает рестарт и Sheets
+  round-trip, но не живёт вечно. Это НЕ proposal (Google Ads не трогается).
+- **`reconcile_stale_crawls`** (§20.4) — `running` crawl_jobs старше `CRAWL_STALE_MINUTES=30` →
+  `failed`: краул — in-process asyncio-задача, умирает с процессом; на рестарте «висящие» задачи
+  честно помечаются провалом (иначе остались бы `running` навсегда).
+
+Возраст сравнивается в Python (наивный `created_at` из SQLite трактуется как UTC) — корректно и на
+SQLite, и на Postgres (tz-aware). Жизненный цикл proposal — [DATABASE.md](DATABASE.md).
 
 ## Устойчивость
 Один недоступный чат **не роняет** рассылку (исключение на отправку логируется редактированно и

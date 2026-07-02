@@ -24,7 +24,7 @@ cp .env.example .env
 |---|---|---|
 | `ENV` | нет | `dev` (только TEST MCC) или `prod` (включает fail-fast по ключу шифрования) |
 | `TELEGRAM_BOT_TOKEN` | **да** | токен бота |
-| `TELEGRAM_WHITELIST_CHAT_IDS` | нет | `123,456` — кому разрешён бот (пусто = отвечает ВСЕМ) |
+| `TELEGRAM_WHITELIST_CHAT_IDS` | нет | `123,456` — кому разрешён бот. **Пусто = fail-closed: бот не отвечает НИКОМУ** (в `prod` пустой список роняет старт — `core/config.py`). НЕ «отвечает всем». |
 | `OPENROUTER_API_KEY` | **да** | ключ OpenRouter (LLM) |
 | `OPENROUTER_BASE_URL` | нет | `https://openrouter.ai/api/v1` |
 | `LLM_PARSING` / `LLM_COPY` / `LLM_FALLBACK` | нет | модели (сменяемы) |
@@ -37,6 +37,18 @@ cp .env.example .env
 | `SECRETS_ENCRYPTION_KEY` | **да** | Fernet-ключ шифрования токенов at-rest (обязателен в prod) |
 | `DATABASE_URL` | нет | строка подключения (в compose задаётся на `postgres:5432`) |
 | `LOG_LEVEL` / `LOG_FORMAT` | нет | `INFO` / `text` (в prod рекомендуется `json`) |
+| `GOOGLE_ADS_READ_CUSTOMER_IDS` | нет | доп. дочерние аккаунты для ЧТЕНИЯ (§8), CSV. Мутации по-прежнему только Draft |
+| `GOOGLE_ADS_LOGIN_CUSTOMER_IDS` | нет | доп. MCC для обхода дочерних (§8), CSV |
+| `GOOGLE_ADS_API_VERSION` | нет | `v24` (мажор API; SDK-пин — в `pyproject.toml`) |
+| `GOOGLE_ADS_DAILY_OP_LIMIT` | нет | `15000` — дневной лимит операций API; на 95% мутации блокируются (`/quota`) |
+| `SENTRY_DSN` / `SENTRY_TRACES_SAMPLE_RATE` | DSN — да | опц. телеметрия ошибок (`""` = выкл.) |
+| `REPORT_SCHEDULE` | нет | `0 9 * * *` — cron плановых отчётов (§14) |
+| `ANOMALY_INTERVAL_HOURS` / `CLEANUP_INTERVAL_MINUTES` | нет | `6` / `60` — кадэнс аномалий и очистки просроченного (§14) |
+| `CAMPAIGN_DRAFT_TTL_HOURS` | нет | `72` — TTL черновика визарда §19 (переживает рестарт; старше → abandoned) |
+| `CRAWL_MAX_PAGES` / `CRAWL_MAX_DEPTH` | нет | `50` / `3` — потолок страниц и глубина краула сайта (§20.4) |
+| `CRAWL_TIME_BUDGET_S` / `CRAWL_DELAY_S` | нет | `90` / `0.5` — общий бюджет времени и вежливая пауза между запросами (§20.4) |
+| `CRAWL_MAX_TEXT_CHARS` / `CRAWL_STALE_MINUTES` | нет | `5000` / `30` — текста со страницы; порог реконсиляции зависших crawl_jobs (§20) |
+| `CLIENT_TEXT_IDLE_S` | нет | `60` — авто-сохранение накопленного текста профиля по таймауту (§20.3); `0` = выкл. |
 
 ### Генерация Fernet-ключа
 ```bash
@@ -148,7 +160,7 @@ docker image prune -f
 - [ ] `SECRETS_ENCRYPTION_KEY` — валидный Fernet-ключ, из секрет-менеджера (не из репо).
 - [ ] `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=7753643025` (пусто = fail-closed; потолок `ALLOWED_CEILING`
       зашит в `ads/client.py` и `.env` его не расширит).
-- [ ] `TELEGRAM_WHITELIST_CHAT_IDS` задан (пусто = бот отвечает всем).
+- [ ] `TELEGRAM_WHITELIST_CHAT_IDS` задан (пусто = fail-closed: бот молчит всем; в `prod` пустой список роняет старт).
 - [ ] `LOG_FORMAT=json`, проверена редакция секретов в логах (`core/logging.py`).
 - [ ] Все секреты — через секрет-менеджер, не в `.env` на диске.
 - [ ] gitleaks чист; в контексте сборки нет кред-файлов (см. `.dockerignore`).

@@ -279,17 +279,28 @@ def read_keyword_column(
     out: list[str] = []
     seen: set[str] = set()
     header = {h.casefold() for h in _KW_HEADERS}
+    skipped_irrelevant = 0
     for i, row in enumerate(values):
         cell = (row[0] if row else "").strip()
         if not cell:
             continue
         if i == 0 and cell.casefold() in header:  # шапка
             continue
+        # §19.4.2: колонка «Релевантность» (E) — подсказка бота. Строку, ЯВНО помеченную ботом
+        # «❌ Нерелевантно» и НЕ переопределённую менеджером, в кампанию не берём (safety-net против
+        # «проверил пометки, но забыл удалить строки»). Хочет оставить — меняет пометку на ✅ или чистит.
+        relevance = (row[4] if len(row) > 4 else "").strip()
+        if relevance.startswith("❌"):
+            skipped_irrelevant += 1
+            continue
         key = cell.casefold()
         if key not in seen:
             seen.add(key)
             out.append(cell)
     log.info(
-        "sheets-kw-read: ok за %dмс (ключей=%d)", int((time.monotonic() - start) * 1000), len(out)
+        "sheets-kw-read: ok за %dмс (ключей=%d, отброшено ❌=%d)",
+        int((time.monotonic() - start) * 1000),
+        len(out),
+        skipped_irrelevant,
     )
     return out

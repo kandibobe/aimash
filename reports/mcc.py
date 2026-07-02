@@ -46,9 +46,20 @@ class MccSummary:
     subtotals: list[CurrencySubtotal] = field(default_factory=list)  # агрегат по валюте
     skipped: list[str] = field(default_factory=list)  # id листов вне read-list (fail-closed)
     managers: list[str] = field(default_factory=list)  # id менеджерских (нет собственных метрик)
+    # Неактивные листы (status != ENABLED: CANCELED/SUSPENDED/CLOSED/…): их НЕ запрашиваем на метрики
+    # (запрос упал бы или вернул нули) → они больше НЕ попадают в errors. Показываем именами отдельной
+    # секцией (это и есть большинство прежних «ошибок чтения»). Храним ChildAccount ради имени/статуса.
+    inactive: list[ChildAccount] = field(default_factory=list)
     # Частичные сбои чтения дочернего (сеть/SDK/таймаут): (id, редактированная причина). Сбой одного
     # аккаунта НЕ топит всю сводку (build_mcc_summary_async, return_exceptions) — но и не молчит.
     errors: list[tuple[str, str]] = field(default_factory=list)
+
+
+def _is_active(ch: ChildAccount) -> bool:
+    """Аккаунт активен (есть смысл запрашивать метрики). Только ENABLED. Прочие статусы
+    (CANCELED/SUSPENDED/CLOSED/UNKNOWN/UNSPECIFIED) → неактивен: метрику НЕ тянем (иначе строка в
+    errors или нулевой шум), показываем отдельной секцией «неактивные»."""
+    return (ch.status or "").upper() == "ENABLED"
 
 
 def aggregate_by_currency(children: list[ChildReport]) -> list[CurrencySubtotal]:
@@ -94,6 +105,9 @@ def build_mcc_summary(
         except PermissionError:
             summary.skipped.append(ch.id)  # вне read-list — честно отмечаем, не читаем
             continue
+        if not _is_active(ch):
+            summary.inactive.append(ch)  # CANCELED/SUSPENDED/… — не метрику, не «ошибка»
+            continue
         summary.children.append(ChildReport(account=ch, totals=fetch(client, ch.id, period)))
     summary.subtotals = aggregate_by_currency(summary.children)
     return summary
@@ -134,6 +148,9 @@ async def build_mcc_summary_async(
             ensure_read_allowed(ch.id)
         except PermissionError:
             summary.skipped.append(ch.id)  # вне read-list — честно отмечаем, не читаем
+            continue
+        if not _is_active(ch):
+            summary.inactive.append(ch)  # CANCELED/SUSPENDED/… — не метрику, не «ошибка»
             continue
         eligible.append(ch)
 

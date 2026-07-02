@@ -929,6 +929,11 @@ def _validate_rsa_inputs(
             ok, n = _rsa_validate(p, "path")
             if not ok:
                 raise ValueError(f"{label} превышает 15 ({n}): «{p}»")
+            # §19.5.1 (B12): сегмент display path без пробелов/слэшей — иначе SDK отклонит RSA.
+            if re.search(r"[\s/\\]", p):
+                raise ValueError(
+                    f"{label} содержит пробел или слэш (недопустимо в display path): «{p}»"
+                )
 
 
 async def apply_create_rsa(
@@ -1096,7 +1101,9 @@ def _apply_bid_via_sdk(client, customer_id: str, campaign_id: str, bids: list) -
     for ad_group_id, micros in bids:
         op = client.get_type("AdGroupOperation")
         op.update.resource_name = svc.ad_group_path(str(customer_id), str(ad_group_id))
-        op.update.cpc_bid_micros = int(micros)
+        op.update.cpc_bid_micros = _round_micros(
+            micros
+        )  # кратно биллинг-единице (иначе API reject)
         client.copy_from(op.update_mask, protobuf_helpers.field_mask(None, op.update._pb))
         ops.append(op)
     try:
@@ -1632,12 +1639,15 @@ async def apply_create_search_campaign(
                     f"keyword_match_types ({len(keyword_match_types)}) не совпадает по длине с "
                     f"keywords ({len(keywords)})"
                 )
-            seen: set[str] = set()
+            # B11: дедуп по ПАРЕ (текст, тип). Google Ads допускает один текст с разными типами
+            # соответствия в одной группе — дедуп только по тексту молча терял бы второй тип.
+            seen: set[tuple[str, str]] = set()
             clean_mts = []
             for k, kmt in zip(keywords, keyword_match_types):
                 t = assert_keyword_ok(k)
-                if t not in seen:
-                    seen.add(t)
+                pair = (t, str(kmt))
+                if pair not in seen:
+                    seen.add(pair)
                     clean_kw.append(t)
                     clean_mts.append(str(kmt))
             if not clean_kw:
@@ -1774,6 +1784,22 @@ def _resolve_language_ids(languages: list[str] | None) -> list[int]:
     return out
 
 
+# Минимальная биллинг-единица Google Ads для бид/бюджета — 10 000 micros (0.01 валюты). Значения,
+# не кратные единице (например CPC = cost/clicks из медиан «по аналогии», §19.3), API отклоняет.
+_MICROS_UNIT = 10_000
+
+
+def _round_micros(value: int) -> int:
+    """Округлить денежную величину (micros) до кратной минимальной биллинг-единице (10 000 micros =
+    0.01 валюты). Google Ads отклоняет бид/бюджет, не кратный единице. Положительное значение не
+    обнуляем (минимум — одна единица), 0/отрицательное возвращаем как есть (валидируется выше)."""
+    v = int(value)
+    if v <= 0:
+        return v
+    r = round(v / _MICROS_UNIT) * _MICROS_UNIT
+    return r if r > 0 else _MICROS_UNIT
+
+
 def _create_search_campaign_via_sdk(
     client,
     customer_id: str,
@@ -1811,7 +1837,7 @@ def _create_search_campaign_via_sdk(
     budget_svc = client.get_service("CampaignBudgetService")
     bop = client.get_type("CampaignBudgetOperation")
     bop.create.name = f"{campaign_name}_budget_{stamp}"
-    bop.create.amount_micros = int(budget_micros)
+    bop.create.amount_micros = _round_micros(budget_micros)  # кратно биллинг-единице (§19.3)
     bop.create.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
     bop.create.explicitly_shared = False
     budget_rn = (
@@ -1863,40 +1889,76 @@ def _create_search_campaign_via_sdk(
         raise
     campaign_id = campaign_rn.rsplit("/", 1)[-1]
 
-    # 3) Группа объявлений (SEARCH_STANDARD, PAUSED).
-    ag_svc = client.get_service("AdGroupService")
-    agop = client.get_type("AdGroupOperation")
-    ag = agop.create
-    ag.name = f"{campaign_name}_ag_{stamp}"
-    ag.campaign = campaign_rn
-    ag.status = client.enums.AdGroupStatusEnum.PAUSED
-    ag.type_ = client.enums.AdGroupTypeEnum.SEARCH_STANDARD
-    ag.cpc_bid_micros = int(cpc_bid_micros)
-    ad_group_rn = (
-        ag_svc.mutate_ad_groups(customer_id=cid, operations=[agop]).results[0].resource_name
-    )
+    def _rollback_partial(created_ad_group_rn: str | None) -> None:
+        """Откат осиротевших сущностей при сбое шага 3/4: удаляем группу (если создана), кампанию и
+        бюджет. Иначе на аккаунте остаётся мусорная PAUSED-кампания ($0), а имя занято → повтор визарда
+        падает на DUPLICATE_CAMPAIGN_NAME. Каждое удаление изолировано, чтобы сбой отката не маскировал
+        исходную ошибку. Ключи/гео/язык ниже — best-effort и до сюда не доходят."""
+        if created_ad_group_rn:
+            try:
+                op = client.get_type("AdGroupOperation")
+                op.remove = created_ad_group_rn
+                client.get_service("AdGroupService").mutate_ad_groups(
+                    customer_id=cid, operations=[op]
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            op = client.get_type("CampaignOperation")
+            op.remove = campaign_rn
+            camp_svc.mutate_campaigns(customer_id=cid, operations=[op])
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            op = client.get_type("CampaignBudgetOperation")
+            op.remove = budget_rn
+            budget_svc.mutate_campaign_budgets(customer_id=cid, operations=[op])
+        except Exception:  # noqa: BLE001
+            pass
 
-    # 4) RSA-объявление (PAUSED, опц. display path).
-    ad_svc = client.get_service("AdGroupAdService")
-    adop = client.get_type("AdGroupAdOperation")
-    aga = adop.create
-    aga.ad_group = ad_group_rn
-    aga.status = client.enums.AdGroupAdStatusEnum.PAUSED
-    aga.ad.final_urls.append(str(final_url))
-    rsa = aga.ad.responsive_search_ad
-    for text in headlines:
-        a = client.get_type("AdTextAsset")
-        a.text = text
-        rsa.headlines.append(a)
-    for text in descriptions:
-        a = client.get_type("AdTextAsset")
-        a.text = text
-        rsa.descriptions.append(a)
-    if path1:
-        rsa.path1 = path1
-        if path2:  # path2 допустим только при заданном path1 (прото v24)
-            rsa.path2 = path2
-    ad_rn = ad_svc.mutate_ad_group_ads(customer_id=cid, operations=[adop]).results[0].resource_name
+    # 3) Группа объявлений (SEARCH_STANDARD, PAUSED) + 4) RSA. Обёрнуты в единый try: сбой любой из
+    # операций откатывает бюджет+кампанию(+группу) — не оставляем мусорную PAUSED-кампанию и не
+    # занимаем имя. Ключи/гео/язык (шаги 5–8) — best-effort и кампанию не роняют.
+    ad_group_rn: str | None = None
+    try:
+        ag_svc = client.get_service("AdGroupService")
+        agop = client.get_type("AdGroupOperation")
+        ag = agop.create
+        ag.name = f"{campaign_name}_ag_{stamp}"
+        ag.campaign = campaign_rn
+        ag.status = client.enums.AdGroupStatusEnum.PAUSED
+        ag.type_ = client.enums.AdGroupTypeEnum.SEARCH_STANDARD
+        ag.cpc_bid_micros = _round_micros(cpc_bid_micros)  # кратно биллинг-единице (§19.3 CPC)
+        ad_group_rn = (
+            ag_svc.mutate_ad_groups(customer_id=cid, operations=[agop]).results[0].resource_name
+        )
+
+        # 4) RSA-объявление (PAUSED, опц. display path).
+        ad_svc = client.get_service("AdGroupAdService")
+        adop = client.get_type("AdGroupAdOperation")
+        aga = adop.create
+        aga.ad_group = ad_group_rn
+        aga.status = client.enums.AdGroupAdStatusEnum.PAUSED
+        aga.ad.final_urls.append(str(final_url))
+        rsa = aga.ad.responsive_search_ad
+        for text in headlines:
+            a = client.get_type("AdTextAsset")
+            a.text = text
+            rsa.headlines.append(a)
+        for text in descriptions:
+            a = client.get_type("AdTextAsset")
+            a.text = text
+            rsa.descriptions.append(a)
+        if path1:
+            rsa.path1 = path1
+            if path2:  # path2 допустим только при заданном path1 (прото v24)
+                rsa.path2 = path2
+        ad_rn = (
+            ad_svc.mutate_ad_group_ads(customer_id=cid, operations=[adop]).results[0].resource_name
+        )
+    except Exception:
+        _rollback_partial(ad_group_rn)  # чистим бюджет+кампанию(+группу), затем пробрасываем ошибку
+        raise
 
     # 5) Опциональные ключевые слова в группу. Best-effort, как гео/язык ниже: сбой добавления
     # ключей (квота/битый ключ) НЕ роняет уже созданную PAUSED-кампанию ($0), иначе остались бы
@@ -2228,7 +2290,7 @@ def _create_gdn_campaign_via_sdk(
     budget_svc = client.get_service("CampaignBudgetService")
     bop = client.get_type("CampaignBudgetOperation")
     bop.create.name = f"{campaign_name}_budget_{stamp}"
-    bop.create.amount_micros = int(budget_micros)
+    bop.create.amount_micros = _round_micros(budget_micros)  # кратно биллинг-единице (§19.3)
     bop.create.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
     bop.create.explicitly_shared = False
     budget_rn = (
@@ -2297,7 +2359,9 @@ def _create_gdn_campaign_via_sdk(
     ag.campaign = campaign_rn
     ag.status = client.enums.AdGroupStatusEnum.PAUSED
     ag.type_ = client.enums.AdGroupTypeEnum.DISPLAY_STANDARD
-    ag.cpc_bid_micros = int(cpc_bid_micros)
+    ag.cpc_bid_micros = _round_micros(
+        cpc_bid_micros
+    )  # кратно биллинг-единице (§19.3 CPC «по аналогии»)
     ad_group_rn = (
         ag_svc.mutate_ad_groups(customer_id=cid, operations=[agop]).results[0].resource_name
     )
@@ -2510,7 +2574,7 @@ def _create_demand_gen_campaign_via_sdk(
     budget_svc = client.get_service("CampaignBudgetService")
     bop = client.get_type("CampaignBudgetOperation")
     bop.create.name = f"{campaign_name}_budget_{stamp}"
-    bop.create.amount_micros = int(budget_micros)
+    bop.create.amount_micros = _round_micros(budget_micros)  # кратно биллинг-единице (§19.3)
     bop.create.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
     bop.create.explicitly_shared = False
     budget_rn = (
@@ -2720,7 +2784,7 @@ def _create_video_campaign_via_sdk(
     budget_svc = client.get_service("CampaignBudgetService")
     bop = client.get_type("CampaignBudgetOperation")
     bop.create.name = f"{campaign_name}_budget_{stamp}"
-    bop.create.amount_micros = int(budget_micros)
+    bop.create.amount_micros = _round_micros(budget_micros)  # кратно биллинг-единице (§19.3)
     bop.create.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
     bop.create.explicitly_shared = False
     budget_rn = (

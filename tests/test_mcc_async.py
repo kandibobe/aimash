@@ -97,7 +97,7 @@ async def test_summary_text_mcc_renders_currencies_and_counts():
     text = summary_text_mcc(summary, lang="ru")
     assert f"MCC {MGR}" in text
     assert "USD" in text and "EUR" in text
-    assert "Аккаунтов с данными: 2" in text
+    assert "Аккаунтов с данными: <b>2</b>" in text  # HTML parse_mode (§8 читаемая сводка)
 
 
 async def test_build_mcc_workbook_has_three_sheets():

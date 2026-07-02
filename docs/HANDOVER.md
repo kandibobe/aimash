@@ -87,11 +87,14 @@ docker compose logs -f bot      # убедиться: "alembic upgrade head" п�
 - [ ] `gitleaks` чист; `git log -p -- .env` пуст (`.env` никогда не коммитился).
 - [ ] **Prod fail-fast:** `ENV=prod` с пустым `SECRETS_ENCRYPTION_KEY` → старт падает; пустой
       whitelist → падает.
-- [ ] `alembic heads` == один (`0005`); `upgrade head` чистый; `downgrade -1` → `upgrade` обратимы.
+- [ ] `alembic heads` == **ровно один** head (текущий — см. `migrations/versions/`, сейчас `0014`);
+      `upgrade head` чистый; `downgrade -1` → `upgrade` обратимы.
 - [ ] **Autogenerate-дрейф = 0** на чистой Postgres (`alembic revision --autogenerate` ничего не
       предлагает — ни DROP, ни ADD).
 - [ ] Бэкап настроен и **restore протестирован**.
-- [ ] `/lang en` переключает **весь** интерфейс (после завершения EN-локализации).
+- [ ] `/lang en` переключает **весь** интерфейс (EN-каталог `bot/i18n.py` полон; проверяемо).
+- [ ] **§19 визард** (`/newcampaign`) и **§20 «Клиенты»** (`/clients`) проверены по [UAT_PLAN.md](UAT_PLAN.md).
+      §20 хранит **PII клиентов** (телефоны/e-mail) в БД — бэкапы БД содержат PII, храните защищённо.
 - [ ] Прод-чеклист [DEPLOYMENT.md §6](DEPLOYMENT.md#6-prod-чеклист) пройден полностью.
 
 ---

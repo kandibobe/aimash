@@ -363,6 +363,17 @@ class AccountMedians:
     common_match_type: str | None  # exact|phrase|broad — самый частый позитивный тип (по кликам)
 
 
+def _round_micros(value: int) -> int:
+    """Округлить денежную величину (micros) до кратной минимальной биллинг-единице Google Ads
+    (10 000 micros = 0.01 валюты). Медиана/среднее из истории (cost/clicks) обычно не кратны — API
+    отклонит такой бид/бюджет. Округляем, чтобы превью «по аналогии» совпало с реально созданным."""
+    v = int(value)
+    if v <= 0:
+        return v
+    r = round(v / 10_000) * 10_000
+    return r if r > 0 else 10_000
+
+
 def _median_int(values: list[int]) -> int | None:
     vals = sorted(int(v) for v in values if v and int(v) > 0)
     if not vals:
@@ -396,7 +407,8 @@ def search_campaign_medians(
             int(row.campaign_budget.amount_micros or 0)
             for row in ga.search(customer_id=cid, query=q)
         ]
-        median_budget = _median_int(amounts)
+        m = _median_int(amounts)
+        median_budget = _round_micros(m) if m else m  # кратно биллинг-единице (превью = создание)
     except Exception:  # noqa: BLE001 — медианы advisory, поле остаётся None
         pass
 
@@ -412,7 +424,9 @@ def search_campaign_medians(
             cost += int(row.metrics.cost_micros or 0)
             clicks += int(row.metrics.clicks or 0)
         if clicks > 0:
-            avg_cpc = int(cost / clicks)
+            avg_cpc = _round_micros(
+                int(cost / clicks)
+            )  # кратно биллинг-единице (превью = создание)
     except Exception:  # noqa: BLE001
         pass
 

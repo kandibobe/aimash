@@ -101,8 +101,9 @@ async def test_apply_create_search_happy_path():
 
 
 async def test_apply_create_search_mixed_match_types_pair_dedup():
-    """§19.4.1: per-keyword типы доходят до SDK 1:1; дубль ключа выпадает ВМЕСТЕ со своим типом
-    (первый выигрывает) — иначе дедуп только текстов порвал бы склейку по индексу."""
+    """§19.4.1 / B11: per-keyword типы доходят до SDK 1:1; дедуп по ПАРЕ (текст, тип). Google Ads
+    допускает один текст с РАЗНЫМИ типами соответствия в одной группе — поэтому «used cars» [exact]
+    и «used cars» [broad] обе сохраняются (это разные критерии), а точный дубль пары схлопывается."""
     called = {}
 
     def fake(client, customer_id, **kw):
@@ -116,12 +117,18 @@ async def test_apply_create_search_mixed_match_types_pair_dedup():
             confirmation_id="ok",
             confirm_store=store,
             ads_client=object(),
-            keywords=["used cars", "cheap cars", " used cars "],  # дубль (с пробелами)
-            keyword_match_types=["exact", "phrase", "broad"],
+            # (used cars, exact), (cheap cars, phrase), (used cars, broad) — три РАЗНЫЕ пары;
+            # плюс точный дубль пары (used cars, exact) в конце — он и должен схлопнуться.
+            keywords=["used cars", "cheap cars", " used cars ", "used cars"],
+            keyword_match_types=["exact", "phrase", "broad", "exact"],
             **_VALID,
         )
-    assert called["keywords"] == ["used cars", "cheap cars"]
-    assert called["keyword_match_types"] == ["exact", "phrase"]  # broad дубля отброшен вместе с ним
+    assert called["keywords"] == ["used cars", "cheap cars", "used cars"]
+    assert called["keyword_match_types"] == [
+        "exact",
+        "phrase",
+        "broad",
+    ]  # дубль пары exact отброшен
 
 
 async def test_apply_create_search_passes_networks_schedule_dates():

@@ -145,6 +145,56 @@ async def test_kw_add_flow_builds_pending_add_keywords_only():
     assert token not in bm._KW_ADD  # сессия израсходована
 
 
+async def test_kw_add_list_step_parses_edited_keywords_into_proposal():
+    """§7 list-UX: кампания → редактируемый список → менеджер прислал СВОЙ список → тип → черновик
+    add_keywords содержит ОТРЕДАКТИРОВАННЫЕ ключи (а не исходные), дедуплицированные, ≤50."""
+    await init_db()
+    bm._KW_ADD.clear()
+    chat_id = 30_710
+    token = bm._kw_add_put(["купить телефон", "смартфон"], "телефон")
+
+    state = FakeState()
+    await bm.on_kw_add_start(
+        FakeCallbackQuery(FakeMessage(chat_id=chat_id)), KwAddCB(action="start", token=token), state
+    )
+    # кампания → теперь ведёт к списку ключей (list-UX), а не сразу к типу
+    await bm.kw_add_campaign(FakeMessage(chat_id=chat_id, text="Search Spring"), state)
+    assert await state.get_state() == bm.KwAdd.awaiting_keywords
+
+    # менеджер прислал отредактированный список (по строке + запятая, с дублем)
+    await bm.kw_add_keywords(
+        FakeMessage(chat_id=chat_id, text="ремонт окон, окна пвх\nустановка окон\nремонт окон"),
+        state,
+    )
+    assert bm._KW_ADD[token]["keywords"] == ["ремонт окон", "окна пвх", "установка окон"]
+
+    await bm.on_kw_add_match(
+        FakeCallbackQuery(FakeMessage(chat_id=chat_id)),
+        KwAddCB(action="match", token=token, mt="exact"),
+    )
+    cid = bm._LAST_PENDING.get(chat_id)
+    assert cid is not None
+    snap = await ConfirmStore().get_confirmed(cid)
+    assert snap.operation == "add_keywords"
+    assert set(snap.params["keywords"]) == {"ремонт окон", "окна пвх", "установка окон"}
+    assert snap.params["match_type"] == "exact"
+
+
+async def test_kw_add_list_empty_stays_in_state():
+    """Пустой присланный список → остаёмся в awaiting_keywords (менеджер пришлёт снова)."""
+    await init_db()
+    bm._KW_ADD.clear()
+    chat_id = 30_711
+    token = bm._kw_add_put(["купить телефон"], "телефон")
+    state = FakeState()
+    await bm.on_kw_add_start(
+        FakeCallbackQuery(FakeMessage(chat_id=chat_id)), KwAddCB(action="start", token=token), state
+    )
+    await bm.kw_add_campaign(FakeMessage(chat_id=chat_id, text="Search"), state)
+    await bm.kw_add_keywords(FakeMessage(chat_id=chat_id, text="   ,  \n "), state)
+    assert await state.get_state() == bm.KwAdd.awaiting_keywords  # не вышли из шага
+
+
 async def test_kw_add_match_with_stale_token_no_proposal():
     await init_db()
     bm._KW_ADD.clear()

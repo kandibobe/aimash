@@ -1,8 +1,9 @@
 # §18 — Чек-лист приёмки Aimash
 
 Источник истины по критериям — [`ТЗ.md` §18](../ТЗ.md) («Результат и критерии приёмки»).
-Ниже каждый критерий сопоставлен с **реальной** реализацией (`file:line`) и **реальным** тестом,
-который её доказывает. Все ссылки проверены по коду на дату документа.
+Ниже каждый критерий сопоставлен с **реальной** реализацией и **реальным** тестом, который её
+доказывает. Дополнения §19/§20 — в конце. Точечные `file:line` со временем дрейфуют при правках;
+где важна устойчивость, ссылаемся по **имени функции** (grep надёжнее номера строки).
 
 Легенда статусов:
 
@@ -219,6 +220,59 @@ GDN / Video / Demand Gen, а UAC не реализуется намеренно.
 
 ---
 
+## §19 — Флоу создания Search-кампании (`/newcampaign`)
+
+**Статус: ✅** (все обязательные пункты; известные отклонения — в шапке [`ТЗ.md`](../ТЗ.md)).
+Ссылки — по **именам функций** (устойчиво к сдвигу строк): смотри `bot/main.py` (хендлеры `cc_*`),
+`bot/campaign_wizard/store.py`, `agent/campaign_settings.py`, `ads/mutations.py`.
+
+- **19.2 Этап 0 (выбор аккаунта):** `_cc_present_stage0` → `cc_accounts_kb` (постраничный пикер,
+  B7); выбор фиксируется в `campaign_drafts` (`set_preview`). Черновик переживает рестарт.
+- **19.3 Этап 1 (описание → настройки):** `extract_campaign_settings` (LLM) + fallback «по аналогии»
+  из медиан аккаунта (`ads/read.py::search_campaign_medians`, деньги кратны биллинг-единице — B2);
+  правки командой (`_cc_apply_settings_patch`); кнопки ✅/✏️/❌.
+- **19.4 Этап 2 (ключи):** свои — текст/файл XLSX·CSV/ссылка Sheets/`_cc_keywords_from_document`;
+  генерация — `cc_kw_generate` → `KeywordPlanIdeaService` → фильтр релевантности → Google Sheets →
+  round-trip `cc_kw_verify` (сверка `sheet_id`; ❌-строки и мусорные ключи отфильтровываются — B5);
+  тип соответствия — подтверждённый на Этапе 1 (B6). Явный гейт `cc_kw_confirm`.
+- **19.5 Этап 3 (RSA):** Final URL → авто display path (`adcopy/display_path.py`, кириллица=1;
+  charset-валидация — B12) → 15 заголовков / 4 описания, поэлементная курация ✅/✏️/❌ (§10).
+- **19.6 Этап 4 (изображения):** `_cc_present_stage4` (гейта доступности нет — известное упрощение).
+- **19.7 Этап 5 (ассеты):** «текущие» (`cc_use_assets`) / «новые» из профиля §20 (`cc_asset_type`).
+- **19.8 Этап 6–7 (URL-опции, финал):** `cc_url_text` (tracking/suffix) → финальная сводка →
+  правки командой (`agent/campaign_edit.py`) → **один composite proposal** `create_search_campaign`
+  (всё PAUSED; при сбое шага — полный откат бюджет+кампания+группа, B1); запуск — отдельной
+  командой `cc_launch` → `resume_campaign` (тот же confirm-гейт). Черновик гасится только при
+  успешном подтверждении (B9).
+- **Тесты:** `tests/test_cc_stage_flow.py`, `tests/test_campaign_wizard_state.py`,
+  `tests/test_cc_composite_create.py`, `tests/test_search_campaign.py`, `tests/test_cc_display_path.py`,
+  `tests/test_predelivery_fixes.py` (откат/micros/charset/пагинация/match_type).
+
+---
+
+## §20 — Информация про клиентов (`/clients`, `/client <id>`)
+
+**Статус: ✅** (все 7 критериев §20.9). Ссылки — `bot/main.py` (`cli_*`), `clients/*`.
+
+- **20.2 Меню/список аккаунтов** с ✅ у заполненных: `_cli_present_accounts` → `clients_accounts_kb`
+  (постраничный, B7); контекст customer_id в FSM (один аккаунт — один профиль, UNIQUE в БД).
+- **20.3 Приём текста:** накопление нескольких сообщений (`cli_accumulate_text`) до «💾 Сохранить»
+  **или авто-сохранения по таймауту** (`client_text_idle_s`, B13); LLM-разбор `extract_profile` →
+  «было→станет» + confirm-гейт (memory-домен, `clients/execute.py`, вне `ads.mutations`).
+- **20.4 Краулер:** `clients/crawler.py` (BFS от главной + sitemap, robots.txt, лимиты `CRAWL_*`,
+  извлечение услуг/цен/контактов/мета) → `structure_crawl` (LLM) → сводка; фон, дедуп по
+  customer_id (B15).
+- **20.5 Обновление/перекраул:** мердж непустых полей (`clients/store.py::apply_upsert`),
+  инкрементальный перекраул по `content_hash` (`diff_against`), история версий (`client_profile_history`).
+- **20.6 Профиль в генерации:** `profile_context_text` → RSA/ассеты/seed-ключи (PII не кладём).
+- **20.7 Хранение:** таблицы `client_profiles`/`client_contacts`/`client_services`/`client_site_pages`/
+  `client_profile_history`/`crawl_jobs` (миграции `0013`/`0014`); изменения — в audit log.
+- **Тесты:** `tests/test_client_store.py`, `tests/test_client_extract.py`, `tests/test_client_crawler.py`,
+  `tests/test_client_crawl_orchestration.py`, `tests/test_client_confirm.py`, `tests/test_client_wizard.py`,
+  `tests/test_client_profile_wiring.py`.
+
+---
+
 ## Золотые правила безопасности (проверены по коду)
 
 | Правило | Реализация | Тест |
@@ -232,8 +286,9 @@ GDN / Video / Demand Gen, а UAC не реализуется намеренно.
 
 ### Сводка по статусам
 
-- ✅ критерии 1, 2, 3, 4, 6, 7, 8, 9.
-- ⚠️ критерий 5 — Search/GDN реализованы (GDN помечен «сверено live» в коде,
-  `ads/mutations.py:2016`); Video и Demand Gen реализованы полностью в коде, но их SDK-цепочки по
-  собственным комментариям требуют **живой сверки на тест-аккаунте перед сдачей**
-  (`ads/mutations.py:2458`, `ads/mutations.py:2299`). UAC исключён из объёма намеренно.
+- ✅ критерии §18: 1, 2, 3, 4, 6, 7, 8, 9; дополнения **§19** (визард) и **§20** (клиенты).
+- ⚠️ критерий 5 — Search/GDN реализованы (GDN помечен «сверено live» в коде —
+  `apply_create_gdn_campaign`); **Video и Demand Gen** реализованы полностью в коде
+  (`apply_create_video_campaign` / `apply_create_demand_gen_campaign`), но их SDK-цепочки по
+  собственным комментариям требуют **живой сверки на тест-аккаунте перед сдачей** (см.
+  [UAT_PLAN.md](UAT_PLAN.md), Сессия 2B). UAC исключён из объёма намеренно.

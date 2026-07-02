@@ -173,6 +173,34 @@ def proposal_fits(rendered: str) -> bool:
     return len(rendered) <= SAFE_LIMIT
 
 
+def split_by_lines(text: str, limit: int = SAFE_LIMIT) -> list[str]:
+    """Разбить длинный текст на куски ≤limit по границам СТРОК (не рвём строку/HTML-тег посередине).
+    Для /mcc и подобных построчных сводок: каждый кусок — самостоятельное сообщение. Одиночная
+    строка длиннее limit (редко) отдаётся как есть (Telegram сам отклонит — но не рвём разметку)."""
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    buf = ""
+    for line in text.split("\n"):
+        candidate = f"{buf}\n{line}" if buf else line
+        if len(candidate) > limit and buf:
+            chunks.append(buf)
+            buf = line
+        else:
+            buf = candidate
+    if buf:
+        chunks.append(buf)
+    return chunks
+
+
+async def send_html_chunks(message: object, text: str, limit: int = SAFE_LIMIT) -> None:
+    """Отправить длинный HTML-текст несколькими сообщениями (parse_mode=HTML), деля по строкам."""
+    from aiogram.enums import ParseMode
+
+    for chunk in split_by_lines(text, limit):
+        await message.answer(chunk, parse_mode=ParseMode.HTML)  # type: ignore[attr-defined]
+
+
 async def send_proposal_text(
     message: object,
     *,

@@ -240,7 +240,7 @@ async def test_stage7_create_builds_composite_proposal():
     captured = {}
 
     async def fake_present(message, *, chat_id, operation, params, summary, cid):
-        captured.update(operation=operation, params=params)
+        captured.update(operation=operation, params=params, cid=cid)
 
     cq = FakeCallbackQuery(FakeMessage(chat_id=chat))
     with patched(bm, "_present_proposal", fake_present):
@@ -254,9 +254,11 @@ async def test_stage7_create_builds_composite_proposal():
     assert p["bidding"]["strategy"] == "maximize_conversions"
     assert p["path1"] == "Used-Cars"
     assert p["url_options"] is None  # не задавали
-    # черновик визарда помечен done
+    # B9: черновик визарда НЕ гасится на «Создать черновик» — остаётся active до УСПЕШНОГО
+    # подтверждения proposal (при reject возобновляем «▶️ Продолжить»). Гасится в _do_confirm.
     snap = await bm.CDRAFTS.get(sid)
-    assert snap.status == "done"
+    assert snap.status == "active"
+    assert bm._CC_PROPOSAL_SESSION.get(captured["cid"]) == sid
 
 
 @pytest.mark.asyncio

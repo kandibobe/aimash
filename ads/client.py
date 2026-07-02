@@ -18,10 +18,21 @@ from core.config import normalize_customer_id, settings
 if TYPE_CHECKING:
     from google.ads.googleads.client import GoogleAdsClient
 
+    from ads.read import ChildAccount
+
 # Aimash (Draft account), 775-364-3025 — ЕДИНСТВЕННЫЙ аккаунт, на котором разрешены МУТАЦИИ.
 DRAFT_ACCOUNT_ID = "7753643025"
 # Жёсткий потолок МУТАЦИЙ: env (allowed_customer_ids) не может выйти за этот набор.
 # Расширение круга мутаций = ОСОЗНАННАЯ правка этого файла (см. docstring модуля).
+#
+# ⚠️ БУДУЩЕЕ ВКЛЮЧЕНИЕ МУТАЦИЙ на 2-м аккаунте (напр. Aimash 676-404-0266 = 6764040266) —
+# НЕ включено намеренно (заказчик: пока только ЧТЕНИЕ везде, деньги на боевом не трогаем). Чтобы
+# включить, ВСЕ 3 точки должны быть протянуты вместе (не по одной) + новые инвариант-тесты:
+#   1) сюда: ALLOWED_CEILING = frozenset({DRAFT_ACCOUNT_ID, "6764040266"});
+#   2) ads/service.py:read_before — cid хардкодит Draft → принять активный мутационный аккаунт;
+#   3) ads/service.py:execute_confirmed — customer_id хардкодит Draft → читать аккаунт из
+#      proposal.params и заново ensure_allowed(cid) перед исполнением; bot _build_proposal штампует
+#      активный мутационный аккаунт в params. Бюджет из scheduler остаётся заблокирован (user_initiated).
 ALLOWED_CEILING = frozenset({DRAFT_ACCOUNT_ID})
 
 # Кэш SDK-клиентов по нормализованному customer_id. Раньше был @lru_cache(maxsize=1) — один клиент
@@ -45,10 +56,20 @@ _OAUTH_RUNTIME: dict[str, tuple[str, str | None]] = {}
 # права его менять (инвариант test_mutation_lock_unchanged_by_read_allowlist).
 _READ_DISCOVERED: set[str] = set()
 
+# §8 (полный мульти-аккаунт, UI-пикер): МЕТА обнаруженных дочерних (id → ChildAccount с именем/
+# валютой/статусом) — ТОЛЬКО для ОТОБРАЖЕНИЯ в пикере аккаунтов (/report /export /sheets /account),
+# чтобы не крутить обход MCC повторно на каждый /report. ⚠️ НЕ авторизация: доступ по-прежнему решает
+# `ensure_read_allowed` (id-набор `_READ_DISCOVERED` + env + мутационный). Пустой meta ⇒ пикер падает
+# на id-метки, доступ НЕ открывается. Наполняется вместе с `_READ_DISCOVERED` в `discover_read_children`.
+_READ_CHILDREN_META: dict[str, "ChildAccount"] = {}
+
 
 def set_discovered_read_children(ids: Iterable[str]) -> int:
     """Заменить набор обнаруженных дочерних (read-only §8) на нормализованные `ids`. Возвращает
-    размер набора. Пустой вход очищает набор (вернёт к чтению только мутационного + env read-list)."""
+    размер набора. Пустой вход очищает набор (вернёт к чтению только мутационного + env read-list).
+
+    ⚠️ id-only контракт СОХРАНЁН (тесты зовут с plain-id/пустым списком). Meta-набор для пикера —
+    ОТДЕЛЬНЫЙ сеттер `set_discovered_read_children_meta` (наполняет `discover_read_children`)."""
     _READ_DISCOVERED.clear()
     for x in ids:
         cid = normalize_customer_id(x)
@@ -57,10 +78,28 @@ def set_discovered_read_children(ids: Iterable[str]) -> int:
     return len(_READ_DISCOVERED)
 
 
+def set_discovered_read_children_meta(children: Iterable["ChildAccount"]) -> int:
+    """Заменить МЕТА обнаруженных дочерних (только для отображения в пикере). Ключ — нормализованный
+    id, значение — ChildAccount (имя/валюта/статус). Идемпотентно (полная пересборка). НЕ влияет на
+    авторизацию (её держит `_READ_DISCOVERED`/`ensure_read_allowed`)."""
+    _READ_CHILDREN_META.clear()
+    for ch in children:
+        cid = normalize_customer_id(ch.id)
+        if cid:
+            _READ_CHILDREN_META[cid] = ch
+    return len(_READ_CHILDREN_META)
+
+
 def discovered_read_children() -> set[str]:
     """Копия набора обнаруженных обходом MCC дочерних (§8) — для планировщика (кому слать плановый
     отчёт/аномалии по всем дочерним). Копия, чтобы вызывающий не мутировал внутренний набор."""
     return set(_READ_DISCOVERED)
+
+
+def discovered_read_children_meta() -> dict[str, "ChildAccount"]:
+    """Копия МЕТА обнаруженных дочерних (id → ChildAccount) — для пикера аккаунтов в боте. Копия
+    словаря (значения-датаклассы разделяемы — их не мутируем). Пусто, пока не прошёл обход MCC."""
+    return dict(_READ_CHILDREN_META)
 
 
 async def discover_read_children() -> int:
@@ -79,6 +118,7 @@ async def discover_read_children() -> int:
     if not managers:
         return 0  # нет настроенных MCC ⇒ обход невозможен (fail-closed, набор остаётся пустым)
     found: set[str] = set()
+    found_meta: dict[str, "ChildAccount"] = {}  # id → ChildAccount (для пикера; не авторизация)
     for mid in sorted(managers):
         try:
             from ads.read import list_child_accounts  # ленивый импорт: избегаем цикла с ads.read
@@ -95,7 +135,9 @@ async def discover_read_children() -> int:
                 cid = normalize_customer_id(ch.id)
                 if cid:
                     found.add(cid)
+                    found_meta[cid] = ch  # имя/валюта/статус для UI-пикера
     n = set_discovered_read_children(found)
+    set_discovered_read_children_meta(found_meta.values())  # meta для пикера (не влияет на доступ)
     if n:
         log.info("mcc discover: дочерних аккаунтов доступно на чтение (§8): %d", n)
     return n
