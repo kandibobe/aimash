@@ -497,6 +497,7 @@ async def _send_status(message: Message) -> None:
             cur = await _read_currency(client, acct)  # §9: валюта в денежных строках
     except Exception as e:  # сеть/доступ/SDK
         await message.answer(i18n.t("err_stats", err=ux.err_text(e)))
+        await _heal_if_stuck_global(message, acct)  # само-восстановление залипшего аккаунта
         return
     await message.answer(
         texts.fmt_stats(
@@ -844,6 +845,24 @@ async def _active_read_account(chat_id: int) -> str:
     return cid
 
 
+async def _heal_if_stuck_global(m: Message, acct: str) -> None:
+    """Само-восстановление «залипшего» аккаунта чтения. Если read упал на НЕ-Draft аккаунте, который
+    сейчас выбран ГЛОБАЛЬНО (/account), — сбрасываем выбор на Draft и сообщаем. Так один недоступный
+    аккаунт (обычно «customer not enabled»: не под настроенным MCC/деактивирован) не «залипает» и не
+    ломает следующие /status /report /keywords. Разовый выбор в пикере (не глобальный) НЕ трогаем."""
+    if acct == DRAFT_ACCOUNT_ID:
+        return
+    if acct != await _active_read_account(
+        m.chat.id
+    ):  # это не глобальный выбор (пик в /report) — не трогаем
+        return
+    try:
+        await _save_selected_account(m.chat.id, None)
+    except Exception:  # noqa: BLE001 — сброс best-effort, не роняем обработку ошибки
+        pass
+    await m.answer(i18n.t("acct_reset_auto", acct=texts.esc(acct)), parse_mode=ParseMode.HTML)
+
+
 def _read_account_rows(chat_id: int) -> list:
     """§8: все аккаунты, доступные оператору на ЧТЕНИЕ (для пикера /report /export /sheets): Draft +
     мутационный список + env read-list + обнаруженные дочерние (с именами/валютой из meta). Дедуп по
@@ -909,22 +928,16 @@ async def _start_report_picker(m: Message, target: str) -> None:
 
 
 async def _present_report_campaigns(m: Message, target: str, acct_row) -> None:
-    """После выбора аккаунта: персистим его как активный (как /account, переживает рестарт) + авто-
-    грант (согласованность с core.access), затем показываем «Весь аккаунт» + список кампаний."""
+    """После выбора аккаунта: запомнить его ТОЛЬКО для ЭТОГО отчёта (_REPORT_SEL, в памяти) и показать
+    «Весь аккаунт» + список кампаний. ВАЖНО: НЕ трогаем глобальный активный аккаунт (_save_selected_
+    account) — иначе выбор аккаунта для разового отчёта «залипал» бы на /keywords и /status и один
+    недоступный аккаунт ломал бы всё. Глобальный аккаунт чтения переключает только команда /account."""
     cid = normalize_customer_id(getattr(acct_row, "id", "") or DRAFT_ACCOUNT_ID)
     try:
         ensure_read_allowed(cid)  # TOCTOU: обход мог измениться между рендером и тапом
     except PermissionError:
         await m.answer(i18n.t("account_denied", cid=texts.esc(cid)), parse_mode=ParseMode.HTML)
         return
-    await _save_selected_account(m.chat.id, None if cid == DRAFT_ACCOUNT_ID else cid)
-    if cid != DRAFT_ACCOUNT_ID:  # авто-грант: чтобы и core.access.get_active_account видел выбор
-        try:
-            from core.access import grant_account_access
-
-            await grant_account_access(m.chat.id, cid)
-        except Exception:  # noqa: BLE001 — грант необязателен для read-пути (_active_read_account)
-            pass
     _REPORT_SEL[m.chat.id] = {"account": cid, "campaign_id": None, "campaign_name": None}
     camps: list[dict] = []
     try:
@@ -934,7 +947,7 @@ async def _present_report_campaigns(m: Message, target: str, acct_row) -> None:
         camps = await run_ads_read_call(
             list_campaigns, build_client(cid), cid, label="report_campaigns"
         )
-    except Exception:  # noqa: BLE001 — нет кампаний/сбой чтения → только «Весь аккаунт»
+    except Exception:  # noqa: BLE001 — нет кампаний/сбой чтения/аккаунт недоступен → только «Весь аккаунт»
         camps = []
     _REPORT_CAMP_CACHE[m.chat.id] = camps
     await m.answer(i18n.t("report_pick_campaign"), reply_markup=report_campaigns_kb(camps, target))
@@ -1128,6 +1141,7 @@ async def _run_report(
             report.currency = await _read_currency(client, acct)  # §9: валюта денежных метрик
     except Exception as e:  # сеть/доступ/SDK
         await m.answer(i18n.t("err_report", err=ux.err_text(e)))
+        await _heal_if_stuck_global(m, acct)  # само-восстановление залипшего аккаунта
         return
     await m.answer(summary_text(report) + _scope_note(campaign_name))
 
@@ -1323,6 +1337,26 @@ async def account_cmd(m: Message, command: CommandObject) -> None:
         return
     await _save_selected_account(m.chat.id, cid)
     await m.answer(i18n.t("account_set", cid=cid), parse_mode=ParseMode.HTML)
+
+
+@dp.message(Command("refresh"))
+async def refresh_(m: Message) -> None:
+    """§8: обновить данные БЕЗ рестарта бота. Пере-обход дочерних MCC (список аккаунтов для пикера +
+    имена/валюты) и сброс кэшей: SDK-клиенты (подхватить ставший доступным аккаунт), валюты/таймзоны.
+    Нужно после изменения аккаунтов/доступов в Google Ads или правки GOOGLE_ADS_READ_CUSTOMER_IDS."""
+    from ads.client import clear_client_cache, discover_read_children
+    from ads.read import clear_read_caches
+
+    await m.answer(i18n.t("refresh_working"))
+    try:
+        clear_client_cache()  # пересобрать клиентов (новый токен/ставший доступным аккаунт)
+        clear_read_caches()  # сбросить кэш валют/таймзон (могли закэшироваться пустыми)
+        async with ux.typing_action(m):
+            n = await discover_read_children()  # пере-обнаружить дочерние MCC (read-list + meta)
+    except Exception as e:  # сеть/доступ/SDK
+        await m.answer(i18n.t("err_refresh", err=ux.err_text(e)))
+        return
+    await m.answer(i18n.t("refresh_done", n=n), parse_mode=ParseMode.HTML)
 
 
 @dp.message(Command("quota"))
@@ -1708,23 +1742,39 @@ async def _kw_run(
     # §8: идеи берём на АКТИВНОМ read-аккаунте (на боевом Keyword Planner даёт реальные метрики; на
     # Draft — нули). Замок чтения держит generate_keyword_ideas (ensure_read_allowed); если активный
     # аккаунт вышел из read-list, _active_read_account сам откатывается на Draft (fail-closed).
+    from ads.client import build_client
+    from ads.keyword_plan import generate_keyword_ideas
+
+    async def _gen(cid: str):
+        return await asyncio.to_thread(
+            generate_keyword_ideas, build_client(cid), cid, seeds=seeds, url=url, language=language
+        )
+
     acct = await _active_read_account(chat_id)
     try:
-        from ads.client import build_client
-        from ads.keyword_plan import generate_keyword_ideas
-
-        client = build_client(acct)
-        ideas = await asyncio.to_thread(
-            generate_keyword_ideas,
-            client,
-            acct,
-            seeds=seeds,
-            url=url,
-            language=language,
-        )
+        ideas = await _gen(acct)
     except Exception as e:  # сеть/доступ/SDK/валидация ввода
-        await target.answer(i18n.t("err_kw", err=ux.err_text(e)))
-        return
+        # РЕЗИЛЬЕНТНОСТЬ: если активный (не Draft) аккаунт недоступен для Keyword Planner (напр.
+        # «customer not enabled» — он не под настроенным MCC/деактивирован), НЕ роняем подбор, а
+        # честно откатываемся на Draft, чтобы менеджер всё равно получил идеи. Ошибку показываем
+        # только если и Draft не сработал.
+        if acct != DRAFT_ACCOUNT_ID:
+            await target.answer(
+                i18n.t("kw_acct_fallback", acct=texts.esc(acct)), parse_mode=ParseMode.HTML
+            )
+            try:  # сбрасываем залипший глобальный выбор, чтобы дальше не долбить недоступный аккаунт
+                await _save_selected_account(chat_id, None)
+            except Exception:  # noqa: BLE001 — сброс best-effort
+                pass
+            acct = DRAFT_ACCOUNT_ID
+            try:
+                ideas = await _gen(acct)
+            except Exception as e2:
+                await target.answer(i18n.t("err_kw", err=ux.err_text(e2)))
+                return
+        else:
+            await target.answer(i18n.t("err_kw", err=ux.err_text(e)))
+            return
     if not ideas:
         await target.answer(i18n.t("kw_empty"))
         return

@@ -127,3 +127,37 @@ def test_read_account_rows_lists_draft_and_read_ids():
     ids = {r.id for r in rows}
     assert DRAFT in ids
     assert extra in ids  # §8: 676-404-0266 доступен на чтение через env read-list
+
+
+# ── Само-восстановление: read упал на залипшем не-Draft аккаунте → сброс глобального выбора на Draft ──
+class _FakeMsg:
+    def __init__(self, chat_id: int):
+        self.chat = type("C", (), {"id": chat_id})()
+        self.answers: list = []
+
+    async def answer(self, text: str = "", **kw):
+        self.answers.append(text)
+
+
+async def test_heal_resets_stuck_global_account_to_draft():
+    import bot.main as bm
+    from db.session import init_db
+
+    await init_db()
+    chat_id = 55_001
+    extra = "6764040266"
+    with _ids(allowed=DRAFT, read=extra):
+        await bm._save_selected_account(chat_id, extra)  # залипший глобальный выбор
+        assert await bm._active_read_account(chat_id) == extra  # активен недоступный аккаунт
+        await bm._heal_if_stuck_global(_FakeMsg(chat_id), extra)  # имитируем сбой read → heal
+        assert await bm._active_read_account(chat_id) == DRAFT  # вернулись на Draft
+
+
+async def test_heal_noop_when_account_is_draft():
+    import bot.main as bm
+    from db.session import init_db
+
+    await init_db()
+    msg = _FakeMsg(55_002)
+    await bm._heal_if_stuck_global(msg, DRAFT)  # Draft — сбрасывать нечего
+    assert msg.answers == []

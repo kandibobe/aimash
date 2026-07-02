@@ -146,6 +146,13 @@ def account_timezone(client: GoogleAdsClient, customer_id: str) -> str:
     return tz
 
 
+def clear_read_caches() -> None:
+    """Сбросить кэши валют/таймзон аккаунтов (сессионные). Нужно, когда аккаунт стал доступен/сменил
+    валюту/таймзону БЕЗ рестарта бота (команда /refresh) — иначе отдали бы устаревшее пустое значение."""
+    _CURRENCY_CACHE.clear()
+    _TIMEZONE_CACHE.clear()
+
+
 def list_audiences(client: GoogleAdsClient, customer_id: str) -> list[Audience]:
     """Доступные аудитории аккаунта (user_list) для прикрепления к кампании (§3). Только белый
     список (замок аккаунта). Берём открытые для членства списки ремаркетинга/аудиторий."""

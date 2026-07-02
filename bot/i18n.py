@@ -213,6 +213,18 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "Список подобранных ключей устарел — запусти /keywords заново.",
         "en": "The researched keyword list expired — run /keywords again.",
     },
+    "kw_acct_fallback": {
+        "ru": (
+            "⚠️ Аккаунт <code>{acct}</code> недоступен для подбора (не под настроенным MCC или "
+            "деактивирован). Подбираю по Draft. Чтобы вернуть аккаунт чтения по умолчанию: "
+            "<code>/account reset</code>."
+        ),
+        "en": (
+            "⚠️ Account <code>{acct}</code> isn't accessible for research (not under the configured "
+            "MCC or deactivated). Falling back to Draft. To reset the default read account: "
+            "<code>/account reset</code>."
+        ),
+    },
     # — §3: гео-таргетинг кампании из меню (локации / радиус → confirm-гейт) —
     "geo_mode_pick": {
         "ru": "📍 Гео-таргетинг кампании «{camp}». Как зададим географию?",
@@ -750,6 +762,36 @@ CATALOG: dict[str, dict[str, str]] = {
     "account_reset": {
         "ru": "↩️ Сброшено: отчёты снова по Draft-аккаунту.",
         "en": "↩️ Reset: reports use the Draft account again.",
+    },
+    "refresh_working": {
+        "ru": "🔄 Обновляю аккаунты и сбрасываю кэши…",
+        "en": "🔄 Refreshing accounts and clearing caches…",
+    },
+    "refresh_done": {
+        "ru": (
+            "✅ Обновлено без рестарта. Дочерних аккаунтов на чтение: <b>{n}</b>.\n"
+            "Кэши SDK-клиентов и валют сброшены — /report /keywords /mcc возьмут свежие данные."
+        ),
+        "en": (
+            "✅ Refreshed without a restart. Readable child accounts: <b>{n}</b>.\n"
+            "SDK-client and currency caches cleared — /report /keywords /mcc will use fresh data."
+        ),
+    },
+    "err_refresh": {
+        "ru": "⚠️ Не удалось обновить: {err}",
+        "en": "⚠️ Couldn't refresh: {err}",
+    },
+    "acct_reset_auto": {
+        "ru": (
+            "↩️ Аккаунт <code>{acct}</code> недоступен для чтения (не под настроенным MCC или "
+            "деактивирован) — вернул аккаунт отчётов на Draft. Проверь, что аккаунт под тем же MCC "
+            "(GOOGLE_ADS_LOGIN_CUSTOMER_ID), либо задай его MCC в GOOGLE_ADS_LOGIN_CUSTOMER_IDS."
+        ),
+        "en": (
+            "↩️ Account <code>{acct}</code> isn't readable (not under the configured MCC or "
+            "deactivated) — reverted the reports account to Draft. Check it's under the same MCC "
+            "(GOOGLE_ADS_LOGIN_CUSTOMER_ID), or set its MCC in GOOGLE_ADS_LOGIN_CUSTOMER_IDS."
+        ),
     },
     "account_denied": {
         "ru": (
