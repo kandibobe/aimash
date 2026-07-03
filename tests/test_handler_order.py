@@ -47,3 +47,42 @@ def test_state_and_command_handlers_precede_catchall():
         assert names.index(critical) < idx_text, (
             f"{critical} зарегистрирован ПОСЛЕ catch-all on_text — текст до него не дойдёт"
         )
+
+
+# ── 4A: HANDLER_MODULES — единственный источник порядка (star-импорты выпилены) ──────
+def test_handler_modules_registry_invariants():
+    """menu_guard — первым (3A), fallback — последним; без дублей."""
+    from bot.handlers import HANDLER_MODULES
+
+    assert HANDLER_MODULES[0] == "menu_guard", "3A: гард кнопок меню обязан идти первым"
+    assert HANDLER_MODULES[-1] == "fallback", "catch-all on_text обязан регистрироваться последним"
+    assert len(set(HANDLER_MODULES)) == len(HANDLER_MODULES), "дубль модуля в HANDLER_MODULES"
+
+
+def test_no_star_imports_in_main():
+    """Гард класса: порядко-зависимые `from bot.handlers.X import *` не должны вернуться в
+    bot/main.py (их перестановка тихо скрамблила диспатч — prod-инцидент 2026-07-03).
+    Матчим ИМПОРТ-СТЕЙТМЕНТ (начало строки), не подстроку — докстринги не триггерят."""
+    import re
+
+    src = (Path(__file__).resolve().parents[1] / "bot" / "main.py").read_text(encoding="utf-8")
+    assert not re.search(r"^from\s+\S+\s+import\s+\*", src, re.M), (
+        "star-импорт вернулся в bot/main.py — порядок диспатча снова хрупкий (см. HANDLER_MODULES)"
+    )
+
+
+def test_menu_guard_precedes_state_handlers():
+    """3A: гард кнопок меню — раньше текстовых state-хендлеров визардов (иначе кнопку съест ввод)."""
+    names = _message_handler_names()
+    gpos = names.index("btn_guard_menu")
+    for state_handler in ("cc_settings_desc", "cli_accumulate_text", "gdn_brief", "kw_seeds"):
+        if state_handler in names:
+            assert gpos < names.index(state_handler), (
+                f"btn_guard_menu должен стоять РАНЬШЕ {state_handler}"
+            )
+
+
+def test_reexported_handler_names_present():
+    """Ре-экспорт (4A): тесты/скрипты зовут хендлеры как bot.main.<handler> — выборочная проверка."""
+    for name in ("on_text", "account_cmd", "btn_report", "cc_final_edit", "grant_cmd"):
+        assert hasattr(bm, name), f"bot.main.{name} пропал после рефактора ре-экспорта"

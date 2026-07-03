@@ -2589,9 +2589,10 @@ async def apply_create_demand_gen_campaign(
 
     Видео живёт на YouTube (примечание ТЗ §11) — API принимает только его id. goal: 'clicks' →
     Maximize Clicks (работает без conversion tracking — как фикс §19.3), 'conversions' →
-    Maximize Conversions. Логотип (опц.) — квадратный image-ассет. ⚠️ SDK-цепочка собрана по
-    официальному примеру add_demand_gen_campaign.py (v24) — перед сдачей прогнать live smoke на
-    тест-аккаунте (scripts/live_smoke_test.py).
+    Maximize Conversions. Логотип — квадратный image-ассет: live API ТРЕБУЕТ ≥1 logo_images
+    (без него отклоняет объявление, TOO_FEW). ✅ SDK-цепочка СВЕРЕНА LIVE 2026-07-03
+    (scripts/live_smoke_video_dg.py): создание PAUSED + перечитка из API прошли; попутные
+    live-требования — ad.name обязателен, минимальный дневной бюджет DG (AUD-аккаунт) = 8 единиц.
 
     НЕ через run_ads_call: цепочка создающих вызовов НЕ идемпотентна. От повтора защищает атомарный
     claim; при сбое — record_failure, осиротевшие PAUSED-сущности безвредны (0 расхода)."""
@@ -2743,12 +2744,15 @@ def _create_demand_gen_campaign_via_sdk(
         ag_svc.mutate_ad_groups(customer_id=cid, operations=[agop]).results[0].resource_name
     )
 
-    # 5) Demand Gen video responsive ad (PAUSED).
+    # 5) Demand Gen video responsive ad (PAUSED). Live-сверка 2026-07-03: API ТРЕБУЕТ ad.name
+    # (REQUIRED «The required field was not present») и ≥1 logo_images (collection_size TOO_FEW)
+    # — DG без логотипа объявление не создаст (визард/схема должны дать логотип).
     ad_svc = client.get_service("AdGroupAdService")
     adop = client.get_type("AdGroupAdOperation")
     aga = adop.create
     aga.ad_group = ad_group_rn
     aga.status = client.enums.AdGroupAdStatusEnum.PAUSED
+    aga.ad.name = f"{campaign_name}_ad_{stamp}"  # live: обязательное поле для DG-объявления
     aga.ad.final_urls.append(str(final_url))
     dg = aga.ad.demand_gen_video_responsive_ad
 
@@ -2773,7 +2777,37 @@ def _create_demand_gen_campaign_via_sdk(
         li = client.get_type("AdImageAsset")
         li.asset = logo_rn
         dg.logo_images.append(li)
-    ad_rn = ad_svc.mutate_ad_group_ads(customer_id=cid, operations=[adop]).results[0].resource_name
+    try:
+        ad_rn = (
+            ad_svc.mutate_ad_group_ads(customer_id=cid, operations=[adop]).results[0].resource_name
+        )
+    except Exception:
+        # Live-находка 2026-07-03: сбой ad-шага оставлял осиротевшие budget+campaign+ad_group.
+        # Кампания без объявления бесполезна → откатываем всё (best-effort, зеркало
+        # _rollback_partial у Search; порядок: группа → кампания → бюджет).
+        try:
+            agdel = client.get_type("AdGroupOperation")
+            agdel.remove = ad_group_rn
+            client.get_service("AdGroupService").mutate_ad_groups(
+                customer_id=cid, operations=[agdel]
+            )
+        except Exception:  # noqa: BLE001 — откат best-effort (сирота PAUSED безвредна)
+            pass
+        try:
+            cdel = client.get_type("CampaignOperation")
+            cdel.remove = campaign_rn
+            client.get_service("CampaignService").mutate_campaigns(
+                customer_id=cid, operations=[cdel]
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            bdel = client.get_type("CampaignBudgetOperation")
+            bdel.remove = budget_rn
+            budget_svc.mutate_campaign_budgets(customer_id=cid, operations=[bdel])
+        except Exception:  # noqa: BLE001
+            pass
+        raise
 
     return {
         "customer_id": cid,
@@ -2814,7 +2848,11 @@ async def apply_create_video_campaign(
     """§11: создать Video-кампанию (YouTube) из видео за двойным гейтом. Всё PAUSED (0 расхода).
 
     Video responsive ad + target CPM (охват). Описания валидируются консервативно ≤70
-    (VIDEO_DESCRIPTION_MAX). ⚠️ SDK-цепочка требует live-сверки на тест-аккаунте перед сдачей.
+    (VIDEO_DESCRIPTION_MAX). ⚠️ LIVE-СВЕРКА 2026-07-03: Google API отклоняет создание
+    VIDEO-кампаний на стандартном доступе — MUTATE_NOT_ALLOWED (trigger «VIDEO»): создание
+    видеокампаний через API доступно только по allowlist Google. Код корректен и остаётся
+    (заявка на allowlist — операционный шаг заказчика); РАБОЧИЙ путь «кампания из видео»
+    сегодня — Demand Gen (сверен live, рекомендован в /newvideo).
 
     НЕ через run_ads_call: цепочка создающих вызовов НЕ идемпотентна. От повтора защищает атомарный
     claim; при сбое — record_failure, осиротевшие PAUSED-сущности безвредны (0 расхода)."""
@@ -2949,12 +2987,14 @@ def _create_video_campaign_via_sdk(
         ag_svc.mutate_ad_groups(customer_id=cid, operations=[agop]).results[0].resource_name
     )
 
-    # 5) Video responsive ad (PAUSED).
+    # 5) Video responsive ad (PAUSED). ad.name — как в DG (live: REQUIRED у DG; ставим и здесь —
+    # поле легально для всех Ad и снимает тот же класс отказа на Video).
     ad_svc = client.get_service("AdGroupAdService")
     adop = client.get_type("AdGroupAdOperation")
     aga = adop.create
     aga.ad_group = ad_group_rn
     aga.status = client.enums.AdGroupAdStatusEnum.PAUSED
+    aga.ad.name = f"{campaign_name}_ad_{stamp}"
     aga.ad.final_urls.append(str(final_url))
     vr = aga.ad.video_responsive_ad
 
@@ -2972,7 +3012,36 @@ def _create_video_campaign_via_sdk(
     va.asset = video_rn
     vr.videos.append(va)
     vr.business_name.text = business_name
-    ad_rn = ad_svc.mutate_ad_group_ads(customer_id=cid, operations=[adop]).results[0].resource_name
+    try:
+        ad_rn = (
+            ad_svc.mutate_ad_group_ads(customer_id=cid, operations=[adop]).results[0].resource_name
+        )
+    except Exception:
+        # Зеркало DG-отката (live-находка): кампания без объявления бесполезна — чистим
+        # группу → кампанию → бюджет (best-effort; сирота PAUSED безвредна).
+        try:
+            agdel = client.get_type("AdGroupOperation")
+            agdel.remove = ad_group_rn
+            client.get_service("AdGroupService").mutate_ad_groups(
+                customer_id=cid, operations=[agdel]
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            cdel = client.get_type("CampaignOperation")
+            cdel.remove = campaign_rn
+            client.get_service("CampaignService").mutate_campaigns(
+                customer_id=cid, operations=[cdel]
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            bdel = client.get_type("CampaignBudgetOperation")
+            bdel.remove = budget_rn
+            budget_svc.mutate_campaign_budgets(customer_id=cid, operations=[bdel])
+        except Exception:  # noqa: BLE001
+            pass
+        raise
 
     return {
         "customer_id": cid,

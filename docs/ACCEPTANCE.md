@@ -287,8 +287,37 @@ GDN / Video / Demand Gen, а UAC не реализуется намеренно.
 ### Сводка по статусам
 
 - ✅ критерии §18: 1, 2, 3, 4, 6, 7, 8, 9; дополнения **§19** (визард) и **§20** (клиенты).
-- ⚠️ критерий 5 — Search/GDN реализованы (GDN помечен «сверено live» в коде —
-  `apply_create_gdn_campaign`); **Video и Demand Gen** реализованы полностью в коде
-  (`apply_create_video_campaign` / `apply_create_demand_gen_campaign`), но их SDK-цепочки по
-  собственным комментариям требуют **живой сверки на тест-аккаунте перед сдачей** (см.
-  [UAT_PLAN.md](UAT_PLAN.md), Сессия 2B). UAC исключён из объёма намеренно.
+- ✅/⚠️ критерий 5 — **live-сверка выполнена 2026-07-03** (`scripts/live_smoke_video_dg.py`):
+  - **Search/GDN** — сверены live ранее; **Demand Gen — СВЕРЕН LIVE** ✅: кампания создана
+    PAUSED через полный confirm-гейт, перечитана из API (status=PAUSED, channel=DEMAND_GEN),
+    удалена. Попутно закрыты live-требования API: обязательный `ad.name`, обязательный
+    `logo_images` (≥1), минимальный дневной бюджет DG (AUD) = 8 единиц, откат
+    budget+campaign+ad_group при сбое ad-шага.
+  - **Video** — код полный и корректный, но Google API отклоняет создание VIDEO-кампаний на
+    стандартном доступе (`MUTATE_NOT_ALLOWED`, trigger «VIDEO»): видеокампании через API —
+    только по allowlist Google. **Это ограничение платформы, не дефект** — фиксируется как
+    известное; рабочий путь «кампания из видео» — Demand Gen (рекомендован в /newvideo).
+    При необходимости Video заказчик подаёт заявку на allowlist.
+  - UAC исключён из объёма намеренно.
+
+### Дельты предсдаточного аудита 2026-07-03 (волны 1–4, «доводка до идеала»)
+
+Закрыты пробелы ТЗ, найденные полным аудитом (детали — HANDOVER §7a, MUTATIONS «Закрыто…»):
+
+- **§3 «чтение … ГЕО»** — `ads.read.read_campaign_targeting` + показ текущего гео в меню
+  кампании (раньше гео только писалось). Тесты `test_ads_read.py::test_read_campaign_targeting_*`.
+- **§7 параметры research** — ГЕО/язык/сеть/период доступны пользователю в `/keywords`
+  (экран параметров; раньше все четыре были зашиты). Тесты `test_keyword_plan_params.py`.
+- **§12 полнота журнала** — зависшие `executing` (крэш посреди мутации) → `needs_review` в
+  audit + уведомление (`reconcile_stale_executing`). Тесты `test_reconcile_executing.py`.
+- **§14 пороги per-chat** — команда `/alerts` (раньше заявлены, но точки входа не было).
+- **§4 get_stats** — резолв аккаунта из аргумента (id/имя) вместо молчаливого первого
+  разрешённого. Тесты `test_agent_loop.py::test_get_stats_*`.
+- **Мультиаккаунт-подготовка** (мутации НЕ включены): исполнение по `proposal.customer_id`
+  (`test_execute_account_binding.py`), грант-aware доступ (`ACCOUNT_ACCESS_MODE`,
+  `/grant /revoke /accounts /whoami`), `/mcc` по всем MCC, пикеры из discovered-meta.
+- **UX**: кнопки меню работают во время визардов (`test_menu_guard.py`), «‹ Назад»/крошки в
+  визарде, пагинация пикеров, хаб «➕ Ещё», человекочитаемые итоги операций
+  (`test_result_humanizer.py`), warnings частичного успеха composite-create.
+- **Надёжность SDK**: partial_failure батчей ключей (`test_partial_failure.py`), честный учёт
+  квоты по операциям, превью==созданное (micros кратны биллинг-единице), drop офлайн-бэклога.

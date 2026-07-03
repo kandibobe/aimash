@@ -11,8 +11,7 @@ Alembic-миграцией (см. колонку «Миграция»). Коло
 
 | Таблица | Назначение | Ключевые поля | Миграция | Статус |
 |---|---|---|---|---|
-| `whitelist` | задумывалась как Telegram allow-list в БД | `chat_id` (unique), `note` | `0001` | **НЕАКТИВНА (dead schema)** — гейтинг идёт по env, не по этой таблице (см. ниже) |
-| `user_settings` | язык, расписание отчётов, пороги алертов, override модели, активный аккаунт | `chat_id` (unique), `report_schedule` (cron), `alert_thresholds` (JSON), `model_override`, `language`, `selected_customer_id` | `0001` (+`0005`,`0007`) | ACTIVE |
+| `user_settings` | язык, пороги алертов (`/alerts`), override модели, активный аккаунт, ui_prefs | `chat_id` (unique), `report_schedule` (RESERVED — код не читает; глобальное расписание — env), `alert_thresholds` (JSON, пишет `/alerts`), `model_override`, `language`, `selected_customer_id`, `ui_prefs` (JSON) | `0001` (+`0005`,`0007`,`0015`) | ACTIVE |
 | `proposals` | очередь черновиков изменений Google Ads (diff «было→станет») | `confirmation_id` (unique), `operation`, `customer_id`, `summary`, `params` (JSON), `user_initiated`, `status` | `0001` (+индекс `0003`) | ACTIVE |
 | `audit_log` | журнал всех операций (кто/когда/что/результат), по `confirmation_id` | `confirmation_id`, `operation`, `customer_id`, `chat_id`, `actor_user_id`, `status`, `result` (JSON) | `0001` (+`0004` актор) | ACTIVE |
 | `oauth_tokens` | per-account refresh-токены (§8), **зашифрованы at-rest** | `account` (unique), `refresh_token_enc`, `login_customer_id` | `0001` (+`0008`) | **ACTIVE** — загружается на старте (см. ниже) |
@@ -27,27 +26,19 @@ Alembic-миграцией (см. колонку «Миграция»). Коло
 | `crawl_jobs` | журнал задач краулинга сайта (§20.4): статус/страницы/ошибка | `job_id` (unique), `customer_id`, `chat_id`, `domain`, `mode`, `status`, `pages_crawled`, `error` | `0013` | ACTIVE |
 | `client_profile_history` | версии профиля «до» для отката/аудита (§20.5); переживают clear | `customer_id`, `snapshot` (JSON), `operation`, `confirmation_id` | `0013` | ACTIVE |
 
-> Все 15 таблиц объявлены в `db/models.py` и создаются миграциями `0001`–`0014`
-> (`op.create_table(...)`). Инициалка `0001` создаёт 5 базовых таблиц
-> (`whitelist`, `user_settings`, `proposals`, `audit_log`, `oauth_tokens`;
+> Все 14 таблиц объявлены в `db/models.py` и создаются миграциями `0001`–`0016`
+> (`op.create_table(...)`). Инициалка `0001` создаёт базовые таблицы
+> (`user_settings`, `proposals`, `audit_log`, `oauth_tokens` + историческую `whitelist`;
 > [`migrations/versions/0001_initial.py:22-92`](../migrations/versions/0001_initial.py)), остальные —
 > последующими ревизиями.
 
-## `whitelist` — почему НЕАКТИВНА (dead schema)
+## `whitelist` — УДАЛЕНА (миграция `0016_drop_whitelist`)
 
-Модель `Whitelist` определена в [`db/models.py:35`](../db/models.py), но **нигде в коде приложения не
-импортируется и не запрашивается** (единственные упоминания `db.models.Whitelist` — само определение
-и `Base` для `create_all`/миграций). Гейтинг доступа делает `WhitelistMiddleware`, который читает
-allow-list **из env**, а не из БД:
-
-- `WhitelistMiddleware.__call__` берёт `settings.whitelist` и блокирует `uid not in wl`
-  ([`bot/main.py:376-392`](../bot/main.py)) — fail-closed: пустой набор блокирует ВСЕХ.
-- `settings.whitelist` парсится из переменной окружения `TELEGRAM_WHITELIST_CHAT_IDS`
-  ([`core/config.py:57,123-124`](../core/config.py)), не из таблицы.
-- В prod пустой env-whitelist роняет старт (fail-fast, [`core/config.py:199-206`](../core/config.py)).
-
-Итог: таблица `whitelist` существует в схеме (историческое наследие `0001`), но **на поведение бота не
-влияет** — источник истины по доступу это env. Не полагаться на её содержимое.
+Историческая таблица `0001` никогда не читалась рантаймом и создавала иллюзию БД-allow-list —
+удалена на предсдаточном аудите 2026-07. Гейтинг доступа к БОТУ делает `WhitelistMiddleware` из
+env `TELEGRAM_WHITELIST_CHAT_IDS` (fail-closed: пустой набор блокирует всех; в prod пустой роняет
+старт). Пер-пользовательский доступ к АККАУНТАМ — таблица `account_access` (`/grant`, `/revoke`;
+режим — env `ACCOUNT_ACCESS_MODE`).
 
 ## `oauth_tokens` — ACTIVE (загрузка на старте)
 
@@ -102,7 +93,8 @@ alembic history                          # список ревизий
 `0003` (индекс очистки proposals) → `0004` (актор в audit) → `0005` (язык) → `0006` (error_events) →
 `0007` (выбранный аккаунт) → `0008` (login_customer_id в oauth_tokens) → `0009` (account_access) →
 `0010` (campaign_templates) → `0011` (customer_id в error_events) → `0012` (campaign_drafts) →
-`0013` (§20 client KB: 6 таблиц) → `0014` (content_hash в client_site_pages).
+`0013` (§20 client KB: 6 таблиц) → `0014` (content_hash в client_site_pages) →
+`0015` (ui_prefs в user_settings) → `0016` (drop мёртвой whitelist) — **head**.
 
 ### Добавить миграцию
 ```bash

@@ -50,12 +50,14 @@ docker compose logs -f bot      # убедиться: "alembic upgrade head" п�
 бота; падение миграции = контейнер не поднимается, fail-fast). Бот — long-poll (HTTP-порта нет).
 
 ### Whitelist — это `.env`, а не таблица БД
-Доступ к боту гейтится по `TELEGRAM_WHITELIST_CHAT_IDS` (env), а **не** по таблице `whitelist` в БД
+Доступ к боту гейтится по `TELEGRAM_WHITELIST_CHAT_IDS` (env), а **не** по БД
 (`WhitelistMiddleware` и `scheduler` читают `settings.whitelist`). Чтобы пустить пользователей —
 впиши их `chat_id` в `.env` и перезапусти бота. В prod пустой whitelist роняет старт (fail-closed).
 
-> Таблица `whitelist` сейчас **не используется рантаймом** (env — источник истины по доступу). Это
-> задел под мультиюзер; см. раздел 5.
+> Мёртвая таблица `whitelist` **удалена** (миграция `0016_drop_whitelist`) — она никогда не
+> читалась рантаймом и создавала иллюзию БД-allow-list. Мультиюзер-доступ к АККАУНТАМ — таблица
+> `account_access` + команды `/grant`, `/revoke` (админы — env `ADMIN_CHAT_IDS`; режим изоляции —
+> env `ACCOUNT_ACCESS_MODE=auto|enforced|legacy`, дефолт auto: первый грант включает enforcement).
 > Таблица `oauth_tokens` **теперь загружается на старте** (`load_oauth_cache` в `bot.main`): если в
 > ней есть записи, `build_client(child)` берёт per-account refresh-токен/`login_customer_id` для
 > дочерних под другими MCC. Пусто ⇒ Draft/тест-MCC работает на едином `.env`-токене (обратная
@@ -87,8 +89,8 @@ docker compose logs -f bot      # убедиться: "alembic upgrade head" п�
 - [ ] `gitleaks` чист; `git log -p -- .env` пуст (`.env` никогда не коммитился).
 - [ ] **Prod fail-fast:** `ENV=prod` с пустым `SECRETS_ENCRYPTION_KEY` → старт падает; пустой
       whitelist → падает.
-- [ ] `alembic heads` == **ровно один** head (текущий — см. `migrations/versions/`, сейчас `0014`);
-      `upgrade head` чистый; `downgrade -1` → `upgrade` обратимы.
+- [ ] `alembic heads` == **ровно один** head (текущий — см. `migrations/versions/`, сейчас
+      `0016_drop_whitelist`); `upgrade head` чистый; `downgrade -1` → `upgrade` обратимы.
 - [ ] **Autogenerate-дрейф = 0** на чистой Postgres (`alembic revision --autogenerate` ничего не
       предлагает — ни DROP, ни ADD).
 - [ ] Бэкап настроен и **restore протестирован**.
@@ -140,12 +142,35 @@ docker compose logs -f bot      # убедиться: "alembic upgrade head" п�
   `UPDATE … WHERE status='confirmed'`) в тестах гоняется на temp-SQLite (один писатель); в проде —
   Postgres. Семантика UPDATE-rowcount одинакова, но рекомендуется отдельная CI-lane с Postgres для
   конкурентных сценариев confirm-гейта (double-click/двойной воркер) перед масштабированием.
-- **Live SDK-смоук Video/Demand Gen** — код полный, цепочки помечены «требует live-сверки»
-  (см. [UAT_PLAN.md](UAT_PLAN.md), Сессия 2B) — прогнать на тест-аккаунте перед сдачей.
+- **Live SDK-смоук Video/Demand Gen — ВЫПОЛНЕН 2026-07-03** (`scripts/live_smoke_video_dg.py`):
+  Demand Gen сверен live ✅ (PAUSED-кампания создана/перечитана/удалена; попутно закрыты
+  live-требования ad.name/logo_images/мин-бюджет). Video — ограничение Google API
+  (MUTATE_NOT_ALLOWED: создание VIDEO-кампаний только по allowlist) — не дефект кода;
+  рабочий путь из видео — Demand Gen. Детали — ACCEPTANCE §18#5.
 - **A/B быстрой parse-модели** (`scripts/ab_test_models.py`, метрика TTFT) — последний открытый
   пункт латентности: `llm_parsing` в `core/config.py` помечен как кандидат на замену по данным.
 - **2FA для критических операций** (ТЗ §12 «опционально») — не реализовано осознанно: whitelist +
   confirm-гейт + замок аккаунта покрывают модель угроз тест-фазы; вернуться при боевом MCC.
+
+## 7a. Третий предсдаточный проход — «доводка до идеала» (2026-07-03, волны 1–4)
+
+Полный аудит (9 агентов) → 4 волны исправлений (12 major + ~25 minor). Ключевое:
+
+- **Надёжность confirm-пути:** зависшие `executing`-черновики (крэш посреди мутации) →
+  терминальный `needs_review` + уведомление владельца + /diag (`reconcile_stale_executing`,
+  env `EXECUTING_STALE_MINUTES`); partial_failure для батчей ключей («добавлено M, отклонено K»);
+  честный учёт квоты по операциям батча; превью==созданное (micros кратны биллинг-единице);
+  `drop_pending_updates` на старте; `SELECT FOR UPDATE` в сторе визарда.
+- **Мультиаккаунт-подготовка (мутации НЕ включены):** исполнение привязано к
+  `proposal.customer_id` с повторным `ensure_allowed`; грант-aware доступ на всех путях чтения
+  (`ACCOUNT_ACCESS_MODE`); `/grant /revoke /accounts /whoami`; `get_stats` резолвит аккаунт;
+  чтение текущего ГЕО кампании (§3); `/mcc` по всем настроенным MCC.
+- **UX:** кнопки меню работают во время визардов (menu_guard, работа не теряется); фикс
+  footgun'а финальной правки §19.8; warnings частичного успеха создания кампании;
+  «‹ Назад»/крошки в визарде; пагинация пикеров; хаб «➕ Ещё»; параметры keyword research §7
+  (ГЕО/язык/сеть/период); `/alerts` (пороги аномалий per-chat); валюта и язык в рассылках.
+- **Архитектура:** порядок диспатча — `bot/handlers/__init__.py::HANDLER_MODULES` (star-импорты
+  выпилены); FSM-состояния — `bot/states.py`; мёртвая таблица `whitelist` удалена (head `0016`).
 
 ## 7. Второй предсдаточный проход (аудит 2026-07-03)
 

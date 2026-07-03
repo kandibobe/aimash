@@ -85,6 +85,27 @@ PII клиентов (телефоны/e-mail) в БД: в контекст ге
 
 ---
 
+## Двухслойный доступ ЧТЕНИЯ (2026-07, мультиаккаунт-подготовка)
+
+Доступ оператора к аккаунту на чтение = **глобальный read-замок** (`ensure_read_allowed`:
+allow ∪ env read-list ∪ discovered дочерние) × **пер-пользовательский грант** (`account_access`,
+`core.access.ensure_account_allowed_for_user`) — enforced на ВСЕХ путях чтения (/status /report
+/export /sheets /account, пикеры, get_stats агента, §20). Режимы (`ACCOUNT_ACCESS_MODE`):
+`auto` (дефолт: пустая таблица грантов = legacy-проход, первый `/grant` включает enforcement),
+`enforced`, `legacy`. Draft доступен всем whitelisted в любом режиме. Гранты выдаёт админ
+(`ADMIN_CHAT_IDS`, fail-closed: пусто = команды недоступны). **Грант чтения НЕ открывает
+мутации** — их потолок `ALLOWED_CEILING` отдельный (тест `test_grant_does_not_open_mutations`).
+Исполнение мутации привязано к `proposal.customer_id` с повторным `ensure_allowed`
+(`tests/test_execute_account_binding.py`).
+
+## PII клиентов (§20) — egress
+
+Телефоны/e-mail извлекаются краулером ДЕТЕРМИНИРОВАННО (regex) и **НЕ включаются** в текст,
+уходящий во внешний LLM (`CrawlResult.combined_text`); соцсети (публичные хэндлы) включаются.
+Residual: контакт, встречающийся в самом тексте страницы, может попасть в LLM-payload —
+осознанное ограничение. PII хранится в БД (`client_contacts`) — бэкапы содержат PII, храните
+защищённо (см. HANDOVER).
+
 ## Что НЕ покрыто / границы (честно)
 - **Доверие к LLM ограничено, но не нулевое.** Модель может предложить любой черновик; защита —
   confirm-гейт + замок аккаунта + allow-list операций + валидация диапазонов кодом. Промпт-инъекция

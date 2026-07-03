@@ -15,10 +15,12 @@
 | `cleanup_stale_proposals` | каждые **60 мин** | `CLEANUP_INTERVAL_MINUTES` | просроченные `pending`-черновики → `rejected` (с аудитом) |
 | `cleanup_stale_campaign_drafts` | каждые **60 мин** | `CAMPAIGN_DRAFT_TTL_HOURS` (72) | §19: активные черновики визарда старше TTL → `abandoned` (переживают рестарт, но не вечно) |
 | `reconcile_stale_crawls` | каждые **60 мин** | `CRAWL_STALE_MINUTES` (30) | §20.4: зависшие `running` crawl_jobs (процесс умер на рестарте) → `failed` |
+| `reconcile_stale_executing` | каждые **60 мин** + прогон сразу на старте | `EXECUTING_STALE_MINUTES` (30) | §12: `executing`-черновики (крэш ПОСЛЕ claim — исход мутации в Ads НЕИЗВЕСТЕН) → терминальный `needs_review` + audit + уведомление владельца; НЕ авто-ретрай |
 
 Кадэнс задаётся из env (не зашит): cron отчётов — `REPORT_SCHEDULE`; интервалы — `ANOMALY_INTERVAL_HOURS`
-и `CLEANUP_INTERVAL_MINUTES` (последний — общий кадэнс всех трёх очисток). Получатели рассылок —
-`settings.whitelist` (операторы бота); пустой whitelist → задача просто пропускается.
+и `CLEANUP_INTERVAL_MINUTES` (последний — общий кадэнс всех очисток/реконсиляций). Получатели —
+`settings.whitelist`; пустой whitelist → задача пропускается. Дайджест/алерты локализуются
+per-recipient (язык из `/lang`), денежные суммы несут код валюты аккаунта.
 
 ## Детектор аномалий (`scheduler/anomaly.py`)
 `detect_anomalies(current, previous, thresholds)` — **чистая логика** (без SDK/сети, полностью
@@ -35,9 +37,10 @@
 Деления на ноль нет: при `prev<=0` процент = `None` (сигнал не строится).
 
 ### Пороги per-chat
-Переопределяются на пользователя через `UserSettings.alert_thresholds` (JSON). Метрики аккаунта
+Переопределяются на пользователя через `UserSettings.alert_thresholds` (JSON) — **точка входа:
+команда `/alerts`** (пресеты + ручной ввод «✏️»; диапазоны валидирует код). Метрики аккаунта
 общие, но алерты считаются для каждого получателя со своими порогами (иначе — дефолтные). Это
-**только чтение** настроек — аккаунт не трогается.
+**только чтение** настроек Google Ads — аккаунт не трогается.
 
 ## Очистка (три задачи, общий кадэнс `CLEANUP_INTERVAL_MINUTES`)
 - **`cleanup_stale_proposals`** — `pending`-черновики мутаций старше `PROPOSAL_TTL_HOURS=24` →

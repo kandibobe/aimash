@@ -22,7 +22,6 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     BotCommandScopeAllPrivateChats,
     CallbackQuery,
@@ -270,101 +269,27 @@ _REPORT_CAMP_CACHE: dict[int, list[dict]] = {}  # chat_id → кампании �
 _REPORT_SEL: dict[int, dict] = {}  # chat_id → {"account", "campaign_id", "campaign_name"}
 
 
-class ClientInfoWizard(StatesGroup):
-    """§20: приём информации о клиенте текстом. FSM хранит только выбранный аккаунт {cli_customer_id}
-    и режим {cli_mode: add|update}; накопленный текст — в _CLI_TEXT_BUF[chat_id] до «💾 Сохранить»."""
-
-    awaiting_text = State()  # ждём текст(ы) профиля; накапливаем до Сохранить/Отмена
-
-
-class RsaWizard(StatesGroup):
-    awaiting_brief = State()  # ждём «тематика | url» для генерации
-
-
-class RsaRefine(StatesGroup):
-    awaiting_text = State()  # ждём правку для доработки одного элемента
-
-
-class RsaList(StatesGroup):
-    awaiting_edited = State()  # §10 list-UX: ждём отредактированный СПИСОК заголовков/описаний
-
-
-class KwWizard(StatesGroup):
-    awaiting_seeds = State()  # ждём сид-слова и/или URL для подбора ключей
-    params = State()  # 3F (§7): экран параметров research (ГЕО/язык/сеть/период)
-    awaiting_geo = State()  # 3F: ручной ввод страны для ГЕО подбора
-
-
-class KwAdd(StatesGroup):
-    awaiting_campaign = State()  # §7: ждём название кампании для добавления подобранных ключей
-    awaiting_keywords = State()  # §7 list-UX: ждём отредактированный СПИСОК ключей (правка+назад)
-
-
-class Geo(StatesGroup):
-    # §3: способ выбран в меню → ждём текст. campaign лежит в state-data (geo_campaign).
-    awaiting_locations = State()  # ждём локации через запятую (страна/город/регион)
-    awaiting_proximity = State()  # ждём «город, радиус_км» для радиус-таргетинга
-
-
-class SearchWizard(StatesGroup):
-    awaiting_brief = State()  # ждём «название | url | бюджет [| тематика [| ключи]]» (/newsearch)
-
-
-class GdnWizard(StatesGroup):
-    awaiting_brief = State()  # ждём «название | url | бюджет» после приёма фото
-
-
-class VideoWizard(StatesGroup):
-    """§11: кампания из видео (Demand Gen / Video). Видео живёт на YouTube — визард просит ссылку."""
-
-    awaiting_link = State()  # ждём ссылку на YouTube (или 11-символьный id)
-    awaiting_brief = State()  # ждём «название | url сайта | бюджет [| гео]» после выбора типа
-    awaiting_logo = State()  # Demand Gen: ждём фото логотипа или «⏭ Пропустить»
-
-
-class ModelWizard(StatesGroup):
-    awaiting_model = State()  # ждём свой slug модели OpenRouter для /model
-
-
-class AlertsWizard(StatesGroup):
-    awaiting_value = State()  # 3H (M10): /alerts «✏️» — ждём число порога (field в state-data)
-
-
-class TplWizard(StatesGroup):
-    awaiting_name = State()  # §2B: создание из шаблона — ждём ИМЯ новой кампании (token в state)
-
-
-class IngestWizard(StatesGroup):
-    awaiting_task = (
-        State()
-    )  # ingest: файл принят без подписи → ждём задачу (контент в _PENDING_CONTEXT)
-
-
-class ExtWizard(StatesGroup):
-    # §3-assets: тип расширения выбран в меню → ждём текст/фото. Кампания в state-data (ext_campaign).
-    awaiting_sitelinks = State()  # «Текст | url [| описание1 [| описание2]]» построчно
-    awaiting_callouts = State()  # уточнения через запятую/строки
-    awaiting_snippet_values = State()  # значения через запятую (header выбран кнопкой → ext_header)
-    awaiting_image = State()  # ждём фото для image-ассета (перехват в on_photo по состоянию)
-
-
-class CreateCampaignWizard(StatesGroup):
-    """§19: guided-визард создания Search-кампании. FSM хранит только курсор {cc_session} —
-    накопленный черновик живёт в campaign_drafts (переживает рестарт). 8 этапов: 0 аккаунт →
-    1 настройки → 2 ключи → 3 объявление → 4 изображения → 5 ассеты → 6 URL-опции → 7 финал."""
-
-    account_select = State()  # Этап 0: показан список аккаунтов, ждём выбор
-    settings_desc = State()  # Этап 1: ждём свободное описание кампании
-    settings_confirm = State()  # Этап 1: показаны настройки, ждём правку-текст или ✅
-    keywords = State()  # Этап 2: ждём свои ключи (текст/файл/ссылка) ИЛИ кнопку «Генерация»
-    kw_verify = State()  # Этап 2: ждём ссылку на отредактированную таблицу (round-trip)
-    ad_url = State()  # Этап 3: ждём Final URL (далее курация RSA — callback-driven)
-    images = State()  # Этап 4: ждём фото или «Пропустить»
-    assets = State()  # Этап 5: выбор «текущие/добавить/пропустить» (callback-driven)
-    asset_logo = State()  # Этап 5: выбран Business logo — ждём фото логотипа (1:1)
-    url_options = State()  # Этап 6: ждём «tracking | suffix» или «Пропустить»
-    final = State()  # Этап 7: сводка; ждём правку-текст или ✅ Создать / 🚀 Запустить
-
+# 4A: FSM-состояния всех визардов вынесены в bot/states.py (декомпозиция god-module).
+# Явный ре-импорт сохраняет имена атрибутами bot.main -> bm.<Wizard> в хендлерах и monkeypatch
+# тестов работают без изменений (позднее связывание).
+from bot.states import (  # noqa: E402
+    AlertsWizard,
+    ClientInfoWizard,
+    CreateCampaignWizard,
+    ExtWizard,
+    Geo,
+    GdnWizard,
+    IngestWizard,
+    KwAdd,
+    KwWizard,
+    ModelWizard,
+    RsaList,
+    RsaRefine,
+    RsaWizard,
+    SearchWizard,
+    TplWizard,
+    VideoWizard,
+)
 
 # Глобальные настройки бота (модель ИИ и т.п.) живут в одной строке user_settings с этим chat_id.
 # Модель — общая на процесс (места вызова chat() в adcopy/keywords не знают chat_id), поэтому
@@ -3524,38 +3449,31 @@ async def _rsa_edit_overview(cq: CallbackQuery, session) -> None:
     await _safe_edit(cq, text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
 
-# ── Регистрация хендлеров по доменам (вынос из этого файла; порядок импорта = порядок
-# диспатча aiogram — menu_guard СТРОГО первым (3A: кнопки меню раньше state-хендлеров визардов),
-# catch-all on_text в fallback СТРОГО последним; инвариант закреплён
-# tests/test_handler_order.py). Позднее связывание: модули читают имена через bm.<name>. ──
-from bot.handlers import (  # noqa: E402
-    menu_guard,
-    commands,
-    reports,
-    keywords_flow,
-    campaigns_menu,
-    rsa_flow,
-    search_media,
-    campaign_wizard,
-    clients_kb,
-    templates_recent,
-    confirm_flow,
-    fallback,
-)
+# ── 4A: регистрация хендлеров по доменам — ЕДИНСТВЕННЫЙ источник порядка теперь
+# bot/handlers/__init__.py::HANDLER_MODULES (menu_guard первым, fallback/on_text последним;
+# инвариант закреплён tests/test_handler_order.py). Раньше порядок держали 12 хрупких
+# star-импортов: перестановка строк (IDE/мерж/автофикс) тихо скрамблила диспатч.
+# Позднее связывание: модули читают имена main через bm.<name> — сохранено. ──
+def _reexport_handlers(mods: list) -> None:
+    """Ре-экспорт публичных функций хендлер-модулей в globals() bot.main: тесты/скрипты зовут
+    их как bot.main.<handler> (прежняя семантика `from ... import *`). setdefault — имя main
+    всегда побеждает при конфликте (и логируем: тень хендлера — почти наверняка ошибка)."""
+    g = globals()
+    for mod in mods:
+        for name, obj in vars(mod).items():
+            if name.startswith("_") or getattr(obj, "__module__", None) != mod.__name__:
+                continue
+            if name in g and g[name] is not obj:
+                log.warning(
+                    "реэкспорт хендлеров: имя %s из %s затенено — пропущено", name, mod.__name__
+                )
+                continue
+            g[name] = obj
 
-# Ре-экспорт публичных имён хендлеров: тесты/скрипты зовут их как bot.main.<handler>.
-from bot.handlers.menu_guard import *  # noqa: E402,F403
-from bot.handlers.commands import *  # noqa: E402,F403
-from bot.handlers.reports import *  # noqa: E402,F403
-from bot.handlers.keywords_flow import *  # noqa: E402,F403
-from bot.handlers.campaigns_menu import *  # noqa: E402,F403
-from bot.handlers.rsa_flow import *  # noqa: E402,F403
-from bot.handlers.search_media import *  # noqa: E402,F403
-from bot.handlers.campaign_wizard import *  # noqa: E402,F403
-from bot.handlers.clients_kb import *  # noqa: E402,F403
-from bot.handlers.templates_recent import *  # noqa: E402,F403
-from bot.handlers.confirm_flow import *  # noqa: E402,F403
-from bot.handlers.fallback import *  # noqa: E402,F403
+
+from bot import handlers as _handlers  # noqa: E402
+
+_reexport_handlers(_handlers.register_all())
 
 
 async def main() -> None:

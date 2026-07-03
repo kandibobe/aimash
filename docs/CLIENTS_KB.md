@@ -170,9 +170,14 @@ whitelisted. `CLIENTS = ClientProfileStore()` — синглтон стора в
   не отдаёт.
 - **`crawl_jobs.error` редактируется** через `redact_text` (без секретов/PII), сообщения об ошибке
   краула пользователю — только `type(e).__name__` под `redact_text` + `texts.esc`.
+- **Egress в LLM (аудит 2026-07)**: телефоны/e-mail извлекаются краулером детерминированно
+  (regex) и **НЕ включаются** в `combined_text`, уходящий во внешний LLM (OpenRouter); соцсети
+  (публичные хэндлы) включаются. Residual: контакт в самом тексте страницы может попасть в
+  payload — осознанное ограничение.
 - **Cross-domain инвариант**: memory-операция не пройдёт через ads-исполнитель, и наоборот — оба
   fail-closed по спискам операций (`MEMORY_OPERATIONS` vs `SUPPORTED_OPERATIONS`). `claim` атомарен
-  (одноразовый confirmed→executing) — защита от replay/гонок.
+  (одноразовый confirmed→executing) — защита от replay/гонок. Доступ к аккаунту перепроверяется
+  и НА ИСПОЛНЕНИИ memory-операции (TOCTOU: read-замок + пер-пользовательский грант).
 
 ## 9. Тесты
 
