@@ -318,3 +318,62 @@ async def test_post_create_next_steps_advisory_only():
             await s.execute(_sel(_f.count()).select_from(_P).where(_P.chat_id == chat))
         ).scalar_one()
     assert int(n) == 0  # ничего не минтили
+
+
+# ── §UX-память: последний аккаунт + resume визарда из /start + крошка шага ──────────
+async def test_account_memory_roundtrip_survives_restart():
+    """_remember_account персистит нормализованный id в ui_prefs; после «рестарта» (чистка
+    кэша) _last_account поднимает его из БД. Мусор без цифр — не запоминается."""
+    await init_db()
+    chat = 66_101
+    await bm._remember_account(chat, "775-364-3025")
+    assert await bm._last_account(chat) == "7753643025"  # нормализован
+    bm._LAST_ACCOUNT.clear()  # эмуляция рестарта процесса
+    assert await bm._last_account(chat) == "7753643025"  # из user_settings.ui_prefs
+    await bm._remember_account(chat, "не-цифры")  # нормализуется в '' → игнор
+    assert await bm._last_account(chat) == "7753643025"  # не затёрт мусором
+
+
+def test_report_accounts_kb_offers_last_account_first():
+    from types import SimpleNamespace
+
+    from bot.keyboards import report_accounts_kb
+
+    rows = [
+        SimpleNamespace(id="1112223334", name="Acct A", currency="USD"),
+        SimpleNamespace(id="7753643025", name="Draft", currency="USD"),
+    ]
+    kb = report_accounts_kb(rows, "report", last="775-364-3025")  # last в разделённом формате
+    flat = [b for r in kb.inline_keyboard for b in r]
+    assert "как в прошлый раз" in flat[0].text  # первой строкой — повтор аккаунта
+    assert "Draft" in flat[0].text
+    # без last — обычный список (2 аккаунта + отмена = 3), без «↻»
+    plain = [b for r in report_accounts_kb(rows, "report").inline_keyboard for b in r]
+    assert not any("как в прошлый раз" in b.text for b in plain)
+
+
+async def test_offer_wizard_resume_only_when_active_draft():
+    from types import SimpleNamespace
+
+    async def has_draft(chat_id):
+        return SimpleNamespace(current_step=3)
+
+    async def no_draft(chat_id):
+        return None
+
+    msg = FakeMessage(chat_id=66_102)
+    with patched(bm.CDRAFTS, "get_active", has_draft):
+        await bm._offer_wizard_resume(msg)
+    assert msg.answers and "3/7" in msg.answers[-1][0]  # подсказка с номером этапа
+
+    msg2 = FakeMessage(chat_id=66_103)
+    with patched(bm.CDRAFTS, "get_active", no_draft):
+        await bm._offer_wizard_resume(msg2)
+    assert msg2.answers == []  # нет черновика → молчим
+
+
+def test_cc_crumb_shows_step_out_of_seven():
+    assert "3/7" in bm._cc_crumb(3)
+    assert "🆕" in bm._cc_crumb(1)
+    assert "7/7" in bm._cc_crumb(99)  # кламп сверху
+    assert "1/7" in bm._cc_crumb(0)  # кламп снизу

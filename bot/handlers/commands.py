@@ -27,11 +27,13 @@ async def start(m: bm.Message) -> None:
             )
             if sent.photo:  # кэшируем file_id — следующие /start без перезаливки PNG
                 bm._welcome_file_id = sent.photo[-1].file_id
+            await bm._offer_wizard_resume(m)  # §UX-память: продолжить незавершённый визард
             return
         except Exception as e:  # сеть/Telegram/битый файл — деградируем до текста, не падаем
             bm.log.warning("welcome-баннер не отправлен (%s) — шлю текст", type(e).__name__)
             bm._welcome_file_id = None
     await m.answer(start_text, reply_markup=kb, parse_mode=bm.ParseMode.HTML)
+    await bm._offer_wizard_resume(m)  # §UX-память: продолжить незавершённый визард
 
 
 @bm.dp.message(bm.Command("help"))

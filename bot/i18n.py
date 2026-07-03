@@ -1147,6 +1147,15 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "У вас есть незавершённый черновик кампании (этап {step}/7). Продолжить или начать заново?",
         "en": "You have an unfinished campaign draft (step {step}/7). Resume or start over?",
     },
+    "start_resume_hint": {
+        "ru": "▶️ У вас есть незавершённая кампания (этап {step}/7). Продолжить?",
+        "en": "▶️ You have an unfinished campaign (step {step}/7). Resume?",
+    },
+    # Хлебная крошка этапа визарда §19 — префикс к промптам этапов (пользователь видит прогресс).
+    "cc_step_crumb": {
+        "ru": "🆕 Кампания · шаг {step}/7\n\n",
+        "en": "🆕 Campaign · step {step}/7\n\n",
+    },
     "cc_settings_saved": {
         "ru": "✅ Настройки приняты.",
         "en": "✅ Settings accepted.",

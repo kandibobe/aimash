@@ -824,6 +824,24 @@ async def _last_period(chat_id: int) -> str | None:
     return _LAST_PERIOD_CODE.get(chat_id) or await _load_ui_pref(chat_id, "last_report_period")
 
 
+_LAST_ACCOUNT: dict[int, str] = {}
+
+
+async def _remember_account(chat_id: int, customer_id: str) -> None:
+    """§UX-память: запомнить последний ВЫБРАННЫЙ в пикере аккаунт отчёта (для кнопки «↻ как в
+    прошлый раз»). Только валидный нормализованный id (Draft тоже помним — частый одно-акк. кейс)."""
+    cid = normalize_customer_id(customer_id)
+    if not cid:
+        return
+    _LAST_ACCOUNT[chat_id] = cid
+    await _save_ui_pref(chat_id, "last_account", cid)
+
+
+async def _last_account(chat_id: int) -> str | None:
+    """Последний выбранный аккаунт чата: кэш процесса → ui_prefs (после рестарта)."""
+    return _LAST_ACCOUNT.get(chat_id) or await _load_ui_pref(chat_id, "last_account")
+
+
 async def _active_read_account(chat_id: int) -> str:
     """Активный аккаунт ЧТЕНИЯ чата для /status /report /export /sheets: выбранный через /account
     (если он всё ещё разрешён на чтение — fail-closed при сужении списков) или Draft. МУТАЦИИ этим
@@ -920,7 +938,11 @@ async def _start_report_picker(m: Message, target: str) -> None:
     if len(rows) == 1:
         await _present_report_campaigns(m, target, rows[0])
         return
-    await m.answer(i18n.t("report_pick_account"), reply_markup=report_accounts_kb(rows, target))
+    await m.answer(
+        i18n.t("report_pick_account"),
+        # §UX-память: последний выбранный аккаунт — первой кнопкой «↻ как в прошлый раз»
+        reply_markup=report_accounts_kb(rows, target, last=await _last_account(m.chat.id)),
+    )
 
 
 async def _present_report_campaigns(m: Message, target: str, acct_row) -> None:
@@ -935,6 +957,7 @@ async def _present_report_campaigns(m: Message, target: str, acct_row) -> None:
         await m.answer(i18n.t("account_denied", cid=texts.esc(cid)), parse_mode=ParseMode.HTML)
         return
     _REPORT_SEL[m.chat.id] = {"account": cid, "campaign_id": None, "campaign_name": None}
+    await _remember_account(m.chat.id, cid)  # §UX-память: «↻ аккаунт как в прошлый раз»
     camps: list[dict] = []
     try:
         from ads.client import build_client_async
@@ -1813,6 +1836,12 @@ async def _cc_begin(target: Message, chat_id: int, state: FSMContext) -> None:
     await _cc_present_stage0(target, chat_id)
 
 
+def _cc_crumb(step: int) -> str:
+    """Хлебная крошка этапа визарда «🆕 Кампания · шаг N/7\\n\\n» — единый префикс к промптам
+    этапов (§UX: пользователь видит, где он и сколько осталось). step клампится в 1–7."""
+    return i18n.t("cc_step_crumb", step=max(1, min(step, 7)))
+
+
 async def _cc_render_stage(target: Message, chat_id: int, draft, state: FSMContext) -> None:
     """Отрисовать текущий этап черновика (вход после рестарта/возобновления): диспетчер по
     current_step 0–7 — все восемь этапов §19 реализованы (аккаунт → настройки → ключи → RSA →
@@ -1864,6 +1893,22 @@ async def _cc_render_stage(target: Message, chat_id: int, draft, state: FSMConte
         return
     # set_step пишет только 0–7, сюда попасть нельзя; safety-net — финальная сводка (как cc_skip)
     await _cc_present_stage7(target, chat_id, draft.session_id, state)
+
+
+async def _offer_wizard_resume(m: Message) -> None:
+    """§UX-подсказка на /start: если у чата есть незавершённый черновик визарда — мягко предложить
+    продолжить (advisory, read-only; НИЧЕГО не создаёт — только кнопки возобновления/старта заново).
+    Реюз cc_resume_kb (те же CcCB-хендлеры, что в _cc_entry). Сбой БД — молча пропускаем."""
+    try:
+        draft = await CDRAFTS.get_active(m.chat.id)
+    except Exception:  # noqa: BLE001 — подсказка необязательна, /start не должен падать из-за неё
+        return
+    if draft is None:
+        return
+    await m.answer(
+        i18n.t("start_resume_hint", step=max(1, draft.current_step)),
+        reply_markup=cc_resume_kb(),
+    )
 
 
 async def _cc_entry(m: Message, state: FSMContext) -> None:
@@ -2288,7 +2333,9 @@ async def _cc_present_stage3(target: Message, chat_id: int, session_id: str, sta
     await CDRAFTS.set_step(session_id, 3, expected_chat_id=chat_id)
     await state.set_state(CreateCampaignWizard.ad_url)
     await state.update_data(cc_session=session_id)
-    await target.answer(i18n.t("cc_ask_url"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML)
+    await target.answer(
+        _cc_crumb(3) + i18n.t("cc_ask_url"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML
+    )
 
 
 async def _cc_finalize_ad(target: Message, chat_id: int, session, state) -> None:
@@ -2317,7 +2364,9 @@ async def _cc_present_stage4(target: Message, chat_id: int, session_id: str, sta
     await state.set_state(CreateCampaignWizard.images)
     await state.update_data(cc_session=session_id)
     await target.answer(
-        i18n.t("cc_images_prompt"), reply_markup=cc_skip_kb(), parse_mode=ParseMode.HTML
+        _cc_crumb(4) + i18n.t("cc_images_prompt"),
+        reply_markup=cc_skip_kb(),
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -2394,7 +2443,9 @@ async def _cc_present_stage2(target: Message, chat_id: int, session_id: str, sta
         )
         return
     await state.set_state(CreateCampaignWizard.keywords)
-    await target.answer(i18n.t("cc_kw_prompt"), reply_markup=cc_kw_kb(), parse_mode=ParseMode.HTML)
+    await target.answer(
+        _cc_crumb(2) + i18n.t("cc_kw_prompt"), reply_markup=cc_kw_kb(), parse_mode=ParseMode.HTML
+    )
 
 
 def _cc_default_match_type(draft) -> str:
@@ -2493,7 +2544,9 @@ async def _cc_present_stage5(target: Message, chat_id: int, session_id: str, sta
     await state.set_state(CreateCampaignWizard.assets)
     await state.update_data(cc_session=session_id)
     await target.answer(
-        i18n.t("cc_assets_prompt"), reply_markup=cc_assets_kb(), parse_mode=ParseMode.HTML
+        _cc_crumb(5) + i18n.t("cc_assets_prompt"),
+        reply_markup=cc_assets_kb(),
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -2525,7 +2578,9 @@ async def _cc_asset_logo_from_photo(m: Message, state: FSMContext, bot: Bot) -> 
     await state.update_data(cc_session=session_id)
     await m.answer(i18n.t("cc_asset_logo_added"))
     await m.answer(
-        i18n.t("cc_assets_prompt"), reply_markup=cc_assets_kb(), parse_mode=ParseMode.HTML
+        _cc_crumb(5) + i18n.t("cc_assets_prompt"),
+        reply_markup=cc_assets_kb(),
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -2535,7 +2590,7 @@ async def _cc_present_stage6(target: Message, chat_id: int, session_id: str, sta
     await state.set_state(CreateCampaignWizard.url_options)
     await state.update_data(cc_session=session_id)
     await target.answer(
-        i18n.t("cc_url_prompt"), reply_markup=cc_skip_kb(), parse_mode=ParseMode.HTML
+        _cc_crumb(6) + i18n.t("cc_url_prompt"), reply_markup=cc_skip_kb(), parse_mode=ParseMode.HTML
     )
 
 

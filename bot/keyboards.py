@@ -877,12 +877,28 @@ def period_kb(
     return kb.as_markup()
 
 
-def report_accounts_kb(rows: list, target: str, lang: str | None = None) -> InlineKeyboardMarkup:
+def report_accounts_kb(
+    rows: list, target: str, lang: str | None = None, *, last: str | None = None
+) -> InlineKeyboardMarkup:
     """§8: выбор аккаунта для отчёта/экспорта. rows — ChildAccount-подобные (.name/.id/.currency);
     idx → позиция в _REPORT_ACCT_CACHE[chat_id] (customer_id в callback_data НЕ кладём). target —
-    какой поток (report|export|sheets), чтобы после выбора продолжить именно его."""
+    какой поток (report|export|sheets), чтобы после выбора продолжить именно его. last (§UX-память) —
+    последний выбранный аккаунт: если он в списке, первой кнопкой «↻ как в прошлый раз» (тот же
+    ReportAcctCB на его idx). Неизвестный/отсутствующий last — игнорируется (обычный список)."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
+    last_idx = None
+    if last:
+        last_n = "".join(ch for ch in str(last) if ch.isdigit())
+        for i, r in enumerate(rows):
+            if "".join(ch for ch in str(getattr(r, "id", "")) if ch.isdigit()) == last_n:
+                last_idx = i
+                break
+    if last_idx is not None:
+        r = rows[last_idx]
+        nm = _ellipsize(getattr(r, "name", "") or getattr(r, "id", ""))
+        repeat = f"↻ {nm} — same as last time" if en else f"↻ {nm} — как в прошлый раз"
+        kb.button(text=repeat, callback_data=ReportAcctCB(target=target, idx=last_idx))
     for i, r in enumerate(rows):
         name = _ellipsize(getattr(r, "name", "") or getattr(r, "id", ""))
         cid = getattr(r, "id", "")
