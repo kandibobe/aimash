@@ -130,37 +130,45 @@ class Settings(BaseSettings):
 
     @property
     def allowed_customer_ids(self) -> set[str]:
-        """Аккаунты, которые боту РАЗРЕШЕНО трогать (нормализованные). Замок — в ads.client."""
+        """Аккаунты, которые боту РАЗРЕШЕНО трогать (нормализованные). Замок — в ads.client.
+        Фильтруем по НОРМАЛИЗОВАННОМУ результату (не по сырому `x.strip()`): мусорный токен без
+        цифр (inline-комментарий/плейсхолдер из .env) нормализуется в '' и НЕ должен попасть в
+        множество — иначе '' протекает в замки (см. login_customer_id_set)."""
         return {
-            normalize_customer_id(x)
+            n
             for x in self.google_ads_allowed_customer_ids.split(",")
-            if x.strip()
+            if (n := normalize_customer_id(x))
         }
 
     @property
     def read_customer_ids(self) -> set[str]:
         """§8: аккаунты, доступные на ЧТЕНИЕ помимо мутационного allow-list (сводка по дочерним
-        MCC), нормализованные. Замок чтения — ads.client.ensure_read_allowed (fail-closed)."""
+        MCC), нормализованные. Замок чтения — ads.client.ensure_read_allowed (fail-closed).
+        Фильтр по нормализованному результату (мусор без цифр → '' → отбрасывается)."""
         return {
-            normalize_customer_id(x)
+            n
             for x in self.google_ads_read_customer_ids.split(",")
-            if x.strip()
+            if (n := normalize_customer_id(x))
         }
 
     @property
     def login_customer_id_set(self) -> set[str]:
         """Все MCC (нормализованные), под которыми разрешён обход/логин (§8). Основной
         login_customer_id ∪ доп. список google_ads_login_customer_ids. Замок обхода —
-        ads.client.ensure_manager_allowed (fail-closed на пустом множестве)."""
-        base = (
-            {normalize_customer_id(self.google_ads_login_customer_id)}
-            if self.google_ads_login_customer_id
-            else set()
-        )
+        ads.client.ensure_manager_allowed (fail-closed на пустом множестве).
+
+        КРИТИЧНО: фильтруем по НОРМАЛИЗОВАННОМУ результату, а не по сырому `x.strip()`. Раньше
+        непустой мусор без цифр (напр. inline-комментарий из .env.defaults, «просочившийся» как
+        значение) проходил `x.strip()`, но `normalize_customer_id(x) == ''` — и '' попадал в
+        множество. Тогда стартовый discover_read_children делал ga.search(customer_id='') →
+        GoogleAdsException «Invalid customer ID ''», а ensure_manager_allowed fail-open на ''.
+        Фильтр по нормализованному значению убирает класс целиком (происхождение мусора неважно)."""
+        base_n = normalize_customer_id(self.google_ads_login_customer_id)
+        base = {base_n} if base_n else set()
         extra = {
-            normalize_customer_id(x)
+            n
             for x in self.google_ads_login_customer_ids.split(",")
-            if x.strip()
+            if (n := normalize_customer_id(x))
         }
         return base | extra
 

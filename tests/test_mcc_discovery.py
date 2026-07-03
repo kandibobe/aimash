@@ -56,6 +56,16 @@ def _login(value: str):
 
 
 @contextmanager
+def _login_plural(value: str):
+    prev = settings.google_ads_login_customer_ids
+    settings.google_ads_login_customer_ids = value
+    try:
+        yield
+    finally:
+        settings.google_ads_login_customer_ids = prev
+
+
+@contextmanager
 def _fake_hierarchy(children: list[ChildAccount]):
     """Подменить build_client (без SDK) и list_child_accounts (фейковая иерархия). discover
     импортирует list_child_accounts из ads.read по имени в момент вызова → патч ловится."""
@@ -159,10 +169,68 @@ def test_async_summary_uses_per_account_timezone_window():
     assert {c.account.id for c in summary.children} == {DRAFT, CH1}
 
 
+# ── Регресс: нормализованно-пустой id не протекает в замки/обход (golden rule #10) ──
+# Прод-баг: inline-комментарий из .env.defaults «просачивался» как значение
+# GOOGLE_ADS_LOGIN_CUSTOMER_IDS; `x.strip()` его пропускал, но normalize→'' → '' попадал в
+# login_customer_id_set → discover делал ga.search(customer_id='') (Invalid customer ID '') и
+# ensure_manager_allowed был fail-open на ''. Ниже — гард на весь класс.
+def test_login_set_drops_non_digit_garbage_token():
+    with (
+        _login("7753643025"),
+        _login_plural("# доп. MCC для обхода (CSV); пусто = только основной"),
+    ):
+        s = settings.login_customer_id_set
+        assert "" not in s, "нормализованно-пустой id протёк в множество MCC (fail-open класс)"
+        assert s == {"7753643025"}  # только валидный основной; мусор без цифр отброшен
+
+
+def test_login_set_empty_when_only_garbage():
+    with _login("# comment"), _login_plural(""):
+        # мусор без цифр → пустое множество → обход невозможен (fail-closed)
+        assert settings.login_customer_id_set == set()
+
+
+def test_ensure_manager_allowed_rejects_empty_id():
+    # golden rule #10: пустой/ненормализуемый manager_id — явный отказ, НЕ fail-open.
+    with _login("7753643025"):
+        for bad in ("", "   ", "# not an id"):
+            try:
+                ac.ensure_manager_allowed(bad)
+                raise AssertionError(f"ensure_manager_allowed({bad!r}) не отказал — fail-open!")
+            except PermissionError:
+                pass
+
+
+def test_discover_never_searches_empty_customer_id():
+    # Стартовый обход не делает ga.search(customer_id='') из-за мусорного логина.
+    seen: list[str] = []
+    orig_build, orig_list = ac.build_client, ar.list_child_accounts
+    ac.build_client = lambda cid=None: object()
+
+    def _capture(_client, mid):
+        seen.append(mid)
+        return [_child(CH1, "USD")]
+
+    ar.list_child_accounts = _capture
+    try:
+        with _login("7753643025"), _login_plural("garbage-no-digits"):
+            asyncio.run(ac.discover_read_children())
+        assert "" not in seen, "пустой customer_id ушёл в поиск (регресс fail-open)"
+        assert seen == ["7753643025"]  # обойдён только валидный MCC
+    finally:
+        ac.build_client = orig_build
+        ar.list_child_accounts = orig_list
+        ac.set_discovered_read_children([])
+
+
 if __name__ == "__main__":
     test_discover_populates_leaves_only()
     test_discovered_child_readable_but_not_mutable()
     test_discover_fail_closed_without_managers()
     test_ensure_read_allowed_fail_closed_when_all_empty()
     test_async_summary_uses_per_account_timezone_window()
+    test_login_set_drops_non_digit_garbage_token()
+    test_login_set_empty_when_only_garbage()
+    test_ensure_manager_allowed_rejects_empty_id()
+    test_discover_never_searches_empty_customer_id()
     print("OK: §8 discovery + TZ-нормализация")

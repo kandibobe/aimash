@@ -120,6 +120,8 @@ async def discover_read_children() -> int:
     found: set[str] = set()
     found_meta: dict[str, "ChildAccount"] = {}  # id → ChildAccount (для пикера; не авторизация)
     for mid in sorted(managers):
+        if not mid:
+            continue  # defense-in-depth: пустой id (мусор из конфига) — не делаем ga.search('')
         try:
             from ads.read import list_child_accounts  # ленивый импорт: избегаем цикла с ads.read
 
@@ -335,6 +337,11 @@ def ensure_manager_allowed(manager_id: str) -> None:
     под РАЗНЫМИ MCC — поэтому множество, а не один скаляр (легаси-скаляр в него вложен).
     """
     mid = normalize_customer_id(manager_id)
+    if not mid:
+        # Defense-in-depth (golden rule #10, fail-closed): пустой/ненормализуемый manager_id —
+        # это НЕ валидный MCC. Раньше '' мог оказаться членом множества и пройти проверку ниже
+        # (fail-open) → ga.search(customer_id='') падал в проде. Явно отказываем ДО членства.
+        raise PermissionError("manager_id пуст/не нормализуется — обход MCC запрещён (fail-closed)")
     configured = settings.login_customer_id_set
     if not configured:
         raise PermissionError(
