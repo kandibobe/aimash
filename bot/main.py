@@ -360,6 +360,20 @@ GLOBAL_SETTINGS_CHAT_ID = 0
 
 dp = Dispatcher()
 
+# ── КРИТИЧНО: обход double-import при `python -m bot.main` (prod-инцидент 2026-07-03) ──────
+# `python -m bot.main` исполняет ЭТОТ файл как модуль `__main__`. Хендлеры в bot/handlers/*
+# делают `import bot.main as bm`; без этой строки Python НЕ находит 'bot.main' в sys.modules и
+# ИСПОЛНЯЕТ файл ПОВТОРНО отдельным модулем → получаются ДВА разных Dispatcher (main() поллит
+# пустой → «бот молчит») И ломается ПОРЯДОК регистрации (циклический ре-импорт ставит fallback/
+# on_text ПЕРЕД командами → /start и др. проглатывает LLM-фолбэк). Регистрируем этот модуль под
+# именем 'bot.main' ДО импорта хендлеров → `import bot.main` вернёт ЭТОТ объект (тот же dp, тот
+# же порядок). При обычном импорте 'bot.main' уже в sys.modules → setdefault это no-op (тесты/
+# скрипты, зовущие `import bot.main`, не затронуты). Инвариант закреплён tests/test_entrypoint_dp.py.
+if __name__ == "__main__":  # срабатывает только при `python -m bot.main`
+    import sys as _sys
+
+    _sys.modules.setdefault("bot.main", _sys.modules["__main__"])
+
 
 def _event_chat_id(event: object) -> int | None:
     """chat_id из Message- или CallbackQuery-подобного события (дакт-тайпинг, как bot.throttle —
@@ -3428,6 +3442,23 @@ async def main() -> None:
         sched = setup_scheduler(bot)
     except Exception as e:  # планировщик опционален — бот работает и без него
         log.warning("scheduler не запущен: %s: %s", type(e).__name__, e)
+    # Fail-fast против double-import gotcha (см. алиас sys.modules у dp и блок __main__): поллить
+    # dp без хендлеров = молча глотать ВСЕ апдейты; неверный порядок = catch-all on_text проглотит
+    # команды/визарды. Лучше ГРОМКО упасть на старте, чем «работать» неправильно (prod-инцидент
+    # 2026-07-03). Инвариант зеркалит tests/test_handler_order.py + tests/test_entrypoint_dp.py.
+    _msg_handlers = [h.callback.__name__ for h in dp.message.handlers]
+    if not _msg_handlers:
+        raise RuntimeError(
+            "dp.message без хендлеров — сломана регистрация (вероятно double-import при "
+            "`python -m bot.main`: второй модуль с пустым dp). См. алиас sys.modules у dp."
+        )
+    if _msg_handlers[-1] != "on_text":
+        _pos = _msg_handlers.index("on_text") if "on_text" in _msg_handlers else "ОТСУТСТВУЕТ"
+        raise RuntimeError(
+            f"catch-all on_text НЕ последний message-хендлер (позиция {_pos} из {len(_msg_handlers)}): "
+            "команды/визарды будут проглочены LLM-фолбэком. Обычно это скрамбл порядка от "
+            "циклического double-import при `python -m bot.main`. См. алиас sys.modules у dp."
+        )
     log.info("Aimash bot запущен (polling).")
     # start_polling сам ставит обработчики SIGINT/SIGTERM и завершается штатно по сигналу;
     # finally гарантирует graceful-освобождение ресурсов (P2 lifecycle), что бы ни остановило polling.
@@ -3451,4 +3482,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    # dp/хендлеры уже корректны: алиас sys.modules у `dp` (см. выше) регистрирует ЭТОТ модуль как
+    # 'bot.main', поэтому `import bot.main` в bot/handlers/* видит ТОТ ЖЕ dp — один Dispatcher,
+    # правильный порядок хендлеров. main() поллит именно его (гарды в main() это подстрахуют).
     asyncio.run(main())
