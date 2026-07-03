@@ -131,6 +131,45 @@ async def test_read_account_rows_lists_draft_and_read_ids():
     assert extra in ids  # §8: 676-404-0266 доступен на чтение через env read-list (legacy-проход)
 
 
+async def test_read_account_rows_sorted_draft_active_then_name():
+    # D2: Draft первым, затем активные (ENABLED) по алфавиту, затем неактивные — предсказуемо
+    # для человека (раньше был порядок по числовому id).
+    import bot.main as bm
+    from ads.client import set_discovered_read_children, set_discovered_read_children_meta
+    from db.session import init_db
+
+    await init_db()
+    ids = ["9000000001", "9000000002", "9000000003"]
+    metas = [
+        ChildAccount(
+            id="9000000001", name="Zebra", currency="USD", manager=False, level=1, status="ENABLED"
+        ),
+        ChildAccount(
+            id="9000000002", name="Alpha", currency="USD", manager=False, level=1, status="ENABLED"
+        ),
+        ChildAccount(
+            id="9000000003",
+            name="AAA Paused",
+            currency="USD",
+            manager=False,
+            level=1,
+            status="PAUSED",
+        ),
+    ]
+    set_discovered_read_children(ids)
+    set_discovered_read_children_meta(metas)
+    try:
+        with _ids(allowed=DRAFT, read=""):
+            rows = await bm._read_account_rows(chat_id=1)
+    finally:
+        set_discovered_read_children([])
+        set_discovered_read_children_meta([])
+    assert str(rows[0].id) == DRAFT  # Draft закреплён первым
+    names_after_draft = [r.name for r in rows[1:]]
+    # ENABLED по имени (Alpha, Zebra) → неактивный (AAA Paused) в самом низу, несмотря на имя
+    assert names_after_draft == ["Alpha", "Zebra", "AAA Paused"]
+
+
 async def test_read_account_rows_filters_by_grant_when_enforced(monkeypatch):
     """2B: при активном enforcement (есть гранты) пикер показывает не-Draft ТОЛЬКО грантованным."""
     import bot.main as bm

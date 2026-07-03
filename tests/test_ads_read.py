@@ -164,6 +164,33 @@ def test_list_campaigns_rejects_foreign_account():
             list_campaigns(_FakeClient([]), "1234567890")
 
 
+def test_list_campaigns_sorted_active_first_then_name():
+    # D3: активные (ENABLED) — первыми, затем по имени; PAUSED ниже даже если алфавитно раньше.
+    rows = [
+        _campaign_row(cid="1", name="Яндекс", status="ENABLED"),
+        _campaign_row(cid="2", name="Alpha", status="PAUSED"),
+        _campaign_row(cid="3", name="Бета", status="ENABLED"),
+        _campaign_row(cid="4", name="Zulu", status="REMOVED"),
+    ]
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        out = list_campaigns(_FakeClient(rows), DRAFT_ACCOUNT_ID)
+    names = [c["name"] for c in out]
+    # ENABLED (Бета, Яндекс — по алфавиту) → PAUSED (Alpha) → REMOVED (Zulu)
+    assert names == ["Бета", "Яндекс", "Alpha", "Zulu"]
+
+
+def test_list_campaigns_channel_filter_in_query():
+    # B2: RSA-флоу просит только Search — фильтр уходит в GAQL WHERE.
+    client = _FakeClient([])
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        list_campaigns(client, DRAFT_ACCOUNT_ID, channel_type="SEARCH")
+    assert "advertising_channel_type = 'SEARCH'" in client._ga.last_query
+    # без фильтра WHERE по каналу нет (пикеры отчётов показывают все кампании)
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        list_campaigns(client, DRAFT_ACCOUNT_ID)
+    assert "advertising_channel_type" not in client._ga.last_query
+
+
 # ── list_child_accounts: обход MCC за ensure_manager_allowed ──────────────────────
 def test_list_child_accounts_maps_rows():
     rows = [_child_row(cid="7753643025", name="Aimash Draft", cur="USD")]

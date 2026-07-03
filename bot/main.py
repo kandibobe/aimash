@@ -139,6 +139,8 @@ from bot.keyboards import (
     ext_snippet_header_kb,
     geo_mode_kb,
     kw_add_kb,
+    kw_geo_kb,
+    kw_params_kb,
     lang_kb,
     main_menu,
     more_menu_kb,
@@ -165,7 +167,7 @@ from confirm.gate import Proposal, build_summary
 from confirm.store import ConfirmStore
 from core import ingest
 from core.access import ensure_account_allowed_for_user
-from core.ads_errors import humanize_google_ads_error
+from core.ads_errors import humanize_google_ads_error, is_account_access_error
 from core.config import normalize_customer_id, settings
 from core.context import new_request_id, request_scope, reset_context, set_context
 from core.errors import capture_exception
@@ -196,6 +198,11 @@ _LAST_PENDING: dict[int, str] = {}  # chat_id → confirmation_id последн
 # §2B: params последнего черновика create_search_campaign на чат — материал для /savetemplate
 # «сохранить как шаблон». В памяти (как _LAST_PENDING); секретов нет.
 _LAST_SEARCH_PARAMS: dict[int, dict] = {}
+# C1 (гибрид): пер-чат контекст диалога для разрешения ссылок-местоимений («эта кампания»).
+# {chat_id: {"campaign": str, "customer_id": str, "history": [последние реплики пользователя]}}.
+# В памяти (теряется при рестарте — это ок, не источник истины). Секретов нет.
+_CHAT_CTX: dict[int, dict] = {}
+_CHAT_CTX_HISTORY = 4  # сколько последних реплик пользователя держим для контекста
 _TPL_CACHE: dict[int, list] = {}  # chat_id → последний показанный список шаблонов (резолв idx→имя)
 _RECENT_CACHE: dict[
     int, list
@@ -600,6 +607,52 @@ def _build_proposal(operation: str, **args) -> tuple[str, str, dict, str]:
     return p.confirmation_id, operation, params, summary
 
 
+# ── C1/C3 (гибрид): пер-чат контекст диалога для разрешения ссылок-местоимений ──────
+def _campaign_name_from_params(operation: str, params: dict) -> str:
+    """Извлечь имя кампании из params черновика (разные операции — разные ключи). '' если нет."""
+    if not isinstance(params, dict):
+        return ""
+    for key in ("campaign", "campaign_name", "name", "source_campaign", "new_name"):
+        v = params.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def _chat_ctx_note(
+    chat_id: int,
+    *,
+    campaign: str | None = None,
+    customer_id: str | None = None,
+    user_text: str | None = None,
+) -> None:
+    """C1: обновить пер-чат контекст диалога (последняя кампания/аккаунт + история реплик)."""
+    ctx = _CHAT_CTX.setdefault(chat_id, {"campaign": "", "customer_id": "", "history": []})
+    if campaign and campaign.strip():
+        ctx["campaign"] = campaign.strip()
+    if customer_id and str(customer_id).strip():
+        ctx["customer_id"] = str(customer_id).strip()
+    if user_text and user_text.strip():
+        hist = ctx.setdefault("history", [])
+        hist.append(user_text.strip())
+        del hist[:-_CHAT_CTX_HISTORY]  # держим только последние N реплик
+
+
+def _build_agent_context(chat_id: int) -> dict:
+    """C1/C3: собрать context для handle_command — последняя кампания/аккаунт + история реплик.
+    Fallback last_campaign: пер-чат ctx → params последнего create_search_campaign."""
+    ctx = _CHAT_CTX.get(chat_id) or {}
+    last_campaign = ctx.get("campaign") or ""
+    if not last_campaign:
+        sp = _LAST_SEARCH_PARAMS.get(chat_id) or {}
+        last_campaign = sp.get("campaign_name") or sp.get("name") or ""
+    return {
+        "last_campaign": last_campaign,
+        "last_account": ctx.get("customer_id") or _LAST_ACCOUNT.get(chat_id) or "",
+        "history": list(ctx.get("history") or []),
+    }
+
+
 async def _present_proposal(
     message: Message,
     *,
@@ -659,6 +712,11 @@ async def _present_proposal(
         user_initiated=True,
     )
     _LAST_PENDING[chat_id] = cid
+    # C1: запоминаем кампанию/аккаунт этого черновика — чтобы следующий ход «измени гео ЭТОЙ
+    # кампании» резолвился по контексту (детерминированная подстановка в agent.loop).
+    _chat_ctx_note(
+        chat_id, campaign=_campaign_name_from_params(operation, params), customer_id=customer_id
+    )
     # §2B: запоминаем params последнего create_search_campaign (клон/новая кампания) — для
     # /savetemplate «сохранить как шаблон». _before инертен для шаблона → исключаем.
     if operation == "create_search_campaign":
@@ -1023,6 +1081,16 @@ async def _read_account_rows(chat_id: int) -> list:
                     id=cid, name=cid, currency="", manager=False, level=0, status="ENABLED"
                 )
             )
+
+    # D2: предсказуемый для человека порядок — Draft всегда первым, затем активные (ENABLED), затем
+    # по имени (раньше был sorted() по числовому id → «случайный» для оператора). Сортируем ГОТОВЫЕ
+    # строки перед возвратом → idx-кэши пикеров согласованы с показанным порядком (callback idx→row).
+    def _acct_sort_key(row):
+        is_draft = 0 if normalize_customer_id(str(row.id)) == DRAFT_ACCOUNT_ID else 1
+        active = 0 if (getattr(row, "status", "") or "").upper() == "ENABLED" else 1
+        return (is_draft, active, (getattr(row, "name", "") or "").casefold())
+
+    rows.sort(key=_acct_sort_key)
     return rows
 
 
@@ -1238,7 +1306,9 @@ async def _run_export(
         fname = f"aimash_{acct}{scope}_{period.date_from}_{period.date_to}.xlsx"
         await m.answer_document(FSInputFile(path, filename=fname))
     except Exception as e:  # сеть/доступ/SDK/openpyxl
-        await m.answer(i18n.t("err_report_make", err=ux.err_text(e)))
+        # A4: аккаунт деактивирован/нет прав → честная причина (не общее «не удалось сформировать»)
+        key = "err_account_inactive" if is_account_access_error(e) else "err_report_make"
+        await m.answer(i18n.t(key, err=ux.err_text(e)))
     finally:
         if path and os.path.exists(path):
             try:
@@ -1263,7 +1333,10 @@ async def _run_sheets(
             report.currency = await _read_currency(client, acct)  # §9: валюта денежных метрик
             url = await asyncio.to_thread(publish_report_to_sheets, report)
     except Exception as e:  # сеть/доступ/SDK/нет OAuth-scope Sheets
-        await m.answer(i18n.t("err_sheets", err=ux.err_text(e)))
+        # A4: если корень — деактивированный/недоступный аккаунт (ошибка Ads, НЕ Sheets-scope),
+        # не показываем сбивающую подсказку про drive.file — даём честную причину.
+        key = "err_account_inactive" if is_account_access_error(e) else "err_sheets"
+        await m.answer(i18n.t(key, err=ux.err_text(e)))
         return
     await m.answer(i18n.t("sheets_ready", url=url))
 
@@ -1474,6 +1547,14 @@ async def _rsa_resolve_after_campaign(
         await target.answer(i18n.t("rsa_no_adgroups"))
         await state.clear()
         return
+    # B2: RSA валиден ТОЛЬКО в Search-стандартной группе. Не-Search (DSA/Display/Video/PMax) группы
+    # отсеиваем ДО создания — иначе Google отвергал бы «operation not allowed for the given context».
+    search_groups = [g for g in groups if g.accepts_rsa()]
+    if not search_groups:
+        await target.answer(i18n.t("rsa_not_search"))
+        await state.clear()
+        return
+    groups = search_groups
     if len(groups) == 1:
         g = groups[0]
         await state.update_data(ad_group_id=str(g.id), ad_group_name=g.name)
@@ -2238,7 +2319,8 @@ async def _cli_show_card(target: Message, chat_id: int, customer_id: str) -> Non
     has_website = bool(profile and profile.get("website"))
     await target.answer(
         texts.fmt_client_card(profile, customer_id),
-        reply_markup=client_card_kb(profile is not None, has_website),
+        # C4: customer_id в кнопки add/update → приём текста профиля restart-safe (не зависит от FSM)
+        reply_markup=client_card_kb(profile is not None, has_website, customer_id=customer_id),
         parse_mode=ParseMode.HTML,
     )
 
@@ -3245,8 +3327,12 @@ async def _run_task_with_context(
 ) -> None:
     """Задача + СПРАВОЧНЫЙ КОНТЕНТ (из файла/ссылки) → агент → роутинг исхода (как on_text).
     Мутации всё равно за confirm-гейтом — контент это данные, не команды."""
+    ctx = _build_agent_context(m.chat.id)  # C1/C3: последняя кампания/аккаунт + история реплик
     async with ux.typing_action(m):
-        res = await handle_command(instruction, chat_id=m.chat.id, context_text=context_text)
+        res = await handle_command(
+            instruction, chat_id=m.chat.id, context_text=context_text, context=ctx
+        )
+    _chat_ctx_note(m.chat.id, user_text=instruction)  # текущая инструкция → история для след. хода
     await m.answer(i18n.t("ingest_used", source=texts.esc(source)), parse_mode=ParseMode.HTML)
     # Внешний контент = поверхность prompt-injection → денежные черновики получат предупреждение.
     await _dispatch_command_result(m, res, state, external_context=True)

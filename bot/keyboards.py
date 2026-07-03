@@ -237,29 +237,42 @@ ALL_MENU_BUTTONS: frozenset[str] = (
 
 
 def main_menu(lang: str | None = None) -> ReplyKeyboardMarkup:
-    """Полное нижнее меню: все основные функции одним тапом (мутации — через цель в /campaigns)."""
+    """Полное нижнее меню: все основные функции одним тапом (мутации — через цель в /campaigns).
+
+    D1: кнопки сгруппированы по смыслу построчно (у reply-клавиатуры нет заголовков секций —
+    группируем раскладкой adjust): создание/управление · быстрая статистика · отчёты · инструменты ·
+    настройки · служебное. Порядок логичнее «плоской» сетки; набор кнопок и BTN_*_ALL не меняются
+    (хендлеры матчат по тексту, а не по позиции)."""
     lng = _lang(lang)
     kb = ReplyKeyboardBuilder()
     for btn in (
-        BTN_NEWCAMPAIGN,  # §19: guided-визард создания кампании — отдельной первой строкой
-        BTN_CLIENTS,  # §20: информация про клиентов (профили/сайты)
-        BTN_STATUS,
-        BTN_CAMPAIGNS,
+        # ── создание/управление ──
+        BTN_NEWCAMPAIGN,  # §19: guided-визард создания кампании
+        BTN_CAMPAIGNS,  # список кампаний + быстрые действия
+        # ── быстрый обзор ──
+        BTN_STATUS,  # статистика за 30 дней (полная строка)
+        # ── отчёты/экспорт ──
         BTN_REPORT,
         BTN_EXPORT,
         BTN_SHEETS,
         BTN_MCC,  # §8: сводка по всем дочерним аккаунтам MCC
+        # ── инструменты ──
         BTN_KEYWORDS,
         BTN_RSA,
+        BTN_CLIENTS,  # §20: информация про клиентов (профили/сайты)
+        # ── настройки ИИ ──
         BTN_MODEL,
         BTN_BALANCE,
+        # ── служебное ──
         BTN_JOURNAL,
         BTN_LANG,
         BTN_HELP,
         BTN_MORE,  # 3E: хаб вторичных флоу (/newsearch /newvideo /templates /recent /quota /alerts)
     ):
         kb.button(text=btn[lng])
-    kb.adjust(1, 1, 2, 3, 3, 2, 4)
+    kb.adjust(
+        2, 1, 4, 3, 2, 4
+    )  # создание · статистика · отчёты · инструменты · настройки · служебное
     placeholder = "Command or text…" if lng == "en" else "Команда или текст…"
     return kb.as_markup(
         resize_keyboard=True,
@@ -485,16 +498,25 @@ def clients_accounts_kb(
 
 
 def client_card_kb(
-    has_profile: bool, has_website: bool = False, lang: str | None = None
+    has_profile: bool,
+    has_website: bool = False,
+    lang: str | None = None,
+    customer_id: str = "",
 ) -> InlineKeyboardMarkup:
     """§20.2: кнопки карточки клиента. Есть профиль → Обновить/Очистить (+Перекраулить, если есть
-    сайт); нет → Добавить. Краулинг/изменения памяти — фоново/через confirm-гейт (см. bot.main)."""
+    сайт); нет → Добавить. Краулинг/изменения памяти — фоново/через confirm-гейт (см. bot.main).
+
+    C4: customer_id несём в sub у add/update (≤10 цифр — влезает в 64 байта callback_data), чтобы
+    приём текста профиля выставлял FSM-состояние даже когда volatile FSM-данные потеряны (рестарт/
+    idle-автосейв/suspend меню). Раньше пустой cli_customer_id → ранний return без set_state →
+    следующий текст с URL уходил в агент-задачу, а не в накопление профиля (баг из живого теста)."""
     en = _lang(lang) == "en"
+    sub = str(customer_id or "")
     kb = InlineKeyboardBuilder()
     if has_profile:
         kb.button(
             text="✏️ Update info" if en else "✏️ Обновить инфу",
-            callback_data=ClientCB(action="update"),
+            callback_data=ClientCB(action="update", sub=sub),
         )
         if has_website:
             kb.button(
@@ -512,7 +534,7 @@ def client_card_kb(
     else:
         kb.button(
             text="➕ Add info" if en else "➕ Добавить информацию",
-            callback_data=ClientCB(action="add"),
+            callback_data=ClientCB(action="add", sub=sub),
         )
     kb.button(text="‹ Back" if en else "‹ Назад", callback_data=ClientCB(action="back"))
     kb.adjust(1)

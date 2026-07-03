@@ -44,6 +44,51 @@ def error_code_names(exc: object) -> set[str]:
 _error_code_name = error_code_name
 
 
+# Коды/статусы «аккаунт недоступен на чтение» — ОЖИДАЕМОЕ состояние (деактивирован / нет прав /
+# не рекламный), а не дефект бота. На плановых путях (scheduler) их логируем info, а НЕ как error
+# (иначе /diag и Sentry тонут в повторах каждый цикл); в UI показываем причину «аккаунт отключён»,
+# а не подсказку про Sheets-scope (§15).
+_ACCESS_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        "CUSTOMER_NOT_ENABLED",  # AuthorizationError: аккаунт не активирован/деактивирован
+        "USER_PERMISSION_DENIED",  # AuthorizationError: нет прав у вызывающего
+        "NOT_ADS_USER",  # AuthorizationError: у пользователя нет доступа к Google Ads
+        "CUSTOMER_NOT_FOUND",  # HeaderError/AuthorizationError
+        "MISSING_TOS",  # не приняты условия использования
+    }
+)
+
+
+def _grpc_status_name(exc: object) -> str:
+    """Имя gRPC-статуса (напр. 'PERMISSION_DENIED') из _InactiveRpcError. GoogleAdsException хранит
+    исходный RpcError на .error; у него (или у самого exc) есть .code() → StatusCode. '' если нет."""
+    for obj in (exc, getattr(exc, "error", None)):
+        code = getattr(obj, "code", None)
+        if callable(code):
+            try:
+                nm = getattr(code(), "name", None)
+            except Exception:  # noqa: BLE001 — дакт-фейк без вызываемого code()
+                nm = None
+            if nm:
+                return str(nm)
+    return ""
+
+
+def is_account_access_error(exc: BaseException) -> bool:
+    """True, если ошибка означает «аккаунт недоступен на чтение» (деактивирован / нет прав / не
+    рекламный). Ловит и gRPC-уровень PERMISSION_DENIED (_InactiveRpcError.code()), и коды
+    GoogleAdsFailure (CUSTOMER_NOT_ENABLED и т.п.), и текстовый fallback. Дакт-безопасно для тестов.
+
+    Используется: scheduler (не журналить ожидаемый отказ каждый цикл) и Sheets/xlsx-экспорт
+    (честная причина «аккаунт отключён», а не подсказка про Sheets-scope)."""
+    if error_code_names(exc) & _ACCESS_ERROR_CODES:
+        return True
+    if _grpc_status_name(exc) == "PERMISSION_DENIED":
+        return True
+    msg = str(getattr(exc, "message", "") or exc).lower()
+    return "not yet enabled" in msg or "has been deactivated" in msg
+
+
 def partial_failure_errors(client: object, response: object) -> list[tuple[int, str, str]]:
     """[(op_index, code_name, message)] из response.partial_failure_error (google.rpc.Status).
 

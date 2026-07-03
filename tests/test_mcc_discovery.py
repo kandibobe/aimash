@@ -103,6 +103,33 @@ def test_discover_populates_leaves_only():
         assert ac.discovered_read_children() == {CH1, CH2}
 
 
+def test_discover_skips_inactive_children():
+    # A3: не-ENABLED дочерние (CANCELED/SUSPENDED/CLOSED) НЕ попадают в read-набор — их запрос
+    # всё равно упёрся бы в PERMISSION_DENIED/CUSTOMER_NOT_ENABLED (флудило scheduler+/diag).
+    def _child_status(cid: str, status: str) -> ChildAccount:
+        return ChildAccount(
+            id=cid, name=f"acct-{cid}", currency="USD", manager=False, level=1, status=status
+        )
+
+    children = [
+        _child_status(CH1, "ENABLED"),  # активный лист — добавляется
+        _child_status(CH2, "CANCELED"),  # деактивирован — пропускается
+        _child_status("3334445556", "SUSPENDED"),  # приостановлен — пропускается
+        _child_status("4445556667", "CLOSED"),  # закрыт — пропускается
+    ]
+    with _login(MGR), _fake_hierarchy(children):
+        n = asyncio.run(ac.discover_read_children())
+        assert n == 1
+        assert ac.discovered_read_children() == {CH1}
+        # неактивный дочерний НЕ читается через discovered-набор (env read-list его не включал)
+        with _ids(allowed=DRAFT, read=""):
+            try:
+                ac.ensure_read_allowed(CH2)
+                raise AssertionError("неактивный дочерний просочился в read-замок")
+            except PermissionError:
+                pass
+
+
 def test_discovered_child_readable_but_not_mutable():
     # ⚠️ КЛЮЧЕВОЙ инвариант: обнаруженный дочерний читается, но мутации на нём запрещены.
     children = [_child(CH1, "USD"), _child(CH2, "EUR")]

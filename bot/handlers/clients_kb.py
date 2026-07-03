@@ -108,7 +108,12 @@ async def cli_add_update_cb(
 ) -> None:
     """§20.3: перейти в режим приёма текста профиля (accumulate до «💾 Сохранить»)."""
     chat_id = bm._cq_chat_id(cq)
-    customer_id = await bm._cli_selected_account(state)
+    # C4: аккаунт берём ИЗ callback (restart-safe), иначе из FSM. Раньше при пустом FSM (рестарт/
+    # idle-автосейв/suspend меню) был ранний return БЕЗ set_state → следующий текст с URL уходил в
+    # агент-задачу вместо накопления профиля (баг из живого теста). Теперь кнопка несёт customer_id.
+    customer_id = bm.normalize_customer_id(callback_data.sub) or await bm._cli_selected_account(
+        state
+    )
     if not customer_id:
         await cq.answer(bm.i18n.t("cli_card_stale"), show_alert=True)
         return

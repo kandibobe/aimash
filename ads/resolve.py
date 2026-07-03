@@ -31,6 +31,18 @@ class AdGroupRef:
     status: str
     cpc_bid_micros: int
     campaign_id: str
+    # B2: тип группы (SEARCH_STANDARD/SEARCH_DYNAMIC_ADS/DISPLAY_STANDARD/…) и канал кампании
+    # (SEARCH/DISPLAY/VIDEO/…). RSA валиден ТОЛЬКО в SEARCH_STANDARD внутри SEARCH-кампании —
+    # иначе Google отвергает создание. Дефолты пустые: прочие вызовы (pause/bid) поля игнорируют.
+    ad_group_type: str = ""
+    channel_type: str = ""
+
+    def accepts_rsa(self) -> bool:
+        """True, если в эту группу можно добавить Responsive Search Ad (Search-стандарт)."""
+        return (
+            self.channel_type.upper() == "SEARCH"
+            and self.ad_group_type.upper() == "SEARCH_STANDARD"
+        )
 
 
 def gaql_escape(value: str) -> str:
@@ -77,7 +89,8 @@ def find_ad_groups(
     safe = gaql_escape(campaign_name)
     q = (
         "SELECT ad_group.id, ad_group.name, ad_group.status, ad_group.cpc_bid_micros, "
-        "ad_group.resource_name, campaign.id FROM ad_group "
+        "ad_group.resource_name, ad_group.type, campaign.id, "
+        "campaign.advertising_channel_type FROM ad_group "
         f"WHERE campaign.name = '{safe}' ORDER BY ad_group.id"
     )
     out: list[AdGroupRef] = []
@@ -90,6 +103,13 @@ def find_ad_groups(
                 status=row.ad_group.status.name,
                 cpc_bid_micros=row.ad_group.cpc_bid_micros,
                 campaign_id=str(row.campaign.id),
+                # getattr с дефолтом: реальный SDK-enum несёт .name; тест-фейки/старые строки без
+                # этих полей → пусто (accepts_rsa() тогда False, вызывающий покажет rsa_not_search).
+                ad_group_type=getattr(getattr(row.ad_group, "type_", None), "name", "") or "",
+                channel_type=getattr(
+                    getattr(row.campaign, "advertising_channel_type", None), "name", ""
+                )
+                or "",
             )
         )
     return out

@@ -300,6 +300,39 @@ GDN / Video / Demand Gen, а UAC не реализуется намеренно.
     При необходимости Video заказчик подаёт заявку на allowlist.
   - UAC исключён из объёма намеренно.
 
+### Дельты пост-тестового прохода 2026-07-03 (баги живого теста + UX/контекст)
+
+Закрыты дефекты и недоработки, найденные владельцем при живом тесте (скриншоты/журнал):
+
+- **A1 §7** — экран параметров подбора ключей был мёртв (`AttributeError: kw_params_kb`): забыт
+  импорт `kw_params_kb`/`kw_geo_kb` в `bot/main.py`. Гард класса — `tests/test_late_binding.py`
+  (AST-скан: каждое `bm.<name>` в хендлерах существует на `bot.main`).
+- **A2 §15** — `provider.sort: Invalid input` (400 OpenRouter на каждом парсинге): валидация
+  `openrouter_parsing_provider_sort` в `core/config.py` (только price|throughput|latency|пусто).
+  Тесты `test_config_failfast.py::test_provider_sort_*`.
+- **A3 §14/§15** — журнал завален `scheduler:anomaly … PERMISSION_DENIED`: `discover_read_children`
+  пропускает не-ENABLED дочерние (`ads/client.py`); scheduler логирует ожидаемый отказ как info, не
+  как error (`core/ads_errors.is_account_access_error`). Тесты `test_mcc_discovery.py::test_discover_skips_inactive_children`,
+  `test_ads_errors_classify.py`.
+- **A4 §9/§15** — Sheets/xlsx по деактивированному аккаунту показывал подсказку про Sheets-scope
+  (сбивало): теперь честная причина «аккаунт отключён/деактивирован» (`err_account_inactive`).
+- **B1 §10** — RSA-описания стабильно переполняли 90 символов → флоу сдавался: добавлен ремонт-проход
+  (LLM «сократи до ≤90») + детерминированный трим-фолбэк, гарантирующий минимум (`adcopy/generate.py`).
+  Тесты `test_adcopy_generate.py::test_overlong_descriptions_recovered_*`.
+- **B2 §10/§11** — «The operation is not allowed for the given context» при создании RSA: пикер
+  показывает только Search-кампании, резолв групп отсекает не-`SEARCH_STANDARD` (`accepts_rsa`),
+  а `_create_rsa_via_sdk` переводит context-ошибку в понятный текст. Тесты `test_ads_resolve.py::test_accepts_rsa_*`,
+  `test_rsa_create.py::test_create_rsa_translates_context_error_*`, `test_ads_read.py::test_list_campaigns_channel_filter_in_query`.
+- **C1–C3 §4** — «измени гео **этой** кампании» давало черновик с буквальным «этой кампании» и терял
+  контекст между ходами: пер-чат контекст диалога (`_CHAT_CTX`) + детерминированная подстановка
+  местоимения + короткое окно истории для модели (гибрид). Тесты `test_agent_loop.py::test_pronoun_campaign_*`.
+- **C4 §20.3** — «➕ Добавить информацию» терял следующий текст (уходил в агент-задачу): кнопка
+  несёт `customer_id` (restart-safe), приём текста всегда выставляет FSM-состояние. Тесты
+  `test_client_wizard.py::test_add_button_carries_customer_id_restart_safe`.
+- **D §6** — меню перегруппировано по смыслу (одним тапом); пикеры аккаунтов/кампаний отсортированы
+  «активные → по имени» (Draft первым). Тесты `test_campaign_scope_and_picker.py::test_read_account_rows_sorted_*`,
+  `test_ads_read.py::test_list_campaigns_sorted_active_first_then_name`.
+
 ### Дельты предсдаточного аудита 2026-07-03 (волны 1–4, «доводка до идеала»)
 
 Закрыты пробелы ТЗ, найденные полным аудитом (детали — HANDOVER §7a, MUTATIONS «Закрыто…»):

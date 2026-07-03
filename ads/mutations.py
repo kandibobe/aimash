@@ -1601,7 +1601,25 @@ def _create_rsa_via_sdk(
         rsa.path1 = path1
         if path2:  # path2 допустим только при заданном path1 (прото v24)
             rsa.path2 = path2
-    resp = svc.mutate_ad_group_ads(customer_id=str(customer_id), operations=[op])
+    try:
+        resp = svc.mutate_ad_group_ads(customer_id=str(customer_id), operations=[op])
+    except GoogleAdsException as ex:
+        # B2: если группа НЕ Search-стандартная (DSA/Display/Video/PMax), Google отвергает создание
+        # RSA как «The operation is not allowed for the given context». Обычно отсекается ещё в
+        # пикере (accepts_rsa), но перехватываем и на SDK-шаге → понятная причина вместо сырого API.
+        codes = error_code_names(ex)
+        ctx_codes = {
+            "OPERATION_NOT_PERMITTED_FOR_CONTEXT",
+            "OPERATION_NOT_PERMITTED_FOR_REMOVED_RESOURCE",
+            "CANNOT_CREATE_AD_FOR_AD_GROUP",
+        }
+        if codes & ctx_codes or "not allowed for the given context" in str(ex).lower():
+            raise ValueError(
+                "нельзя создать адаптивное поисковое объявление в этой группе — она не "
+                "Search-стандартная (DSA/Display/Video/PMax). Выбери поисковую кампанию со "
+                "стандартной группой объявлений."
+            ) from ex
+        raise
     return {
         "customer_id": customer_id,
         "ad_group_id": str(ad_group_id),

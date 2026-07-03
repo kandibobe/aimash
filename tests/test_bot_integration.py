@@ -101,7 +101,7 @@ class FakeFSM:
 
 
 def _proposal_handler(cid: str):
-    async def _h(text, chat_id):
+    async def _h(text, chat_id, **kwargs):  # **kwargs: терпим к новому context (C1/C3)
         return {
             "type": "proposal",
             "operation": "resume_campaign",
@@ -193,7 +193,7 @@ async def test_confirm_stale_cid_alerts_and_skips_execute():
 async def test_on_text_text_decline_creates_no_proposal():
     await init_db()
 
-    async def _decline(text, chat_id):
+    async def _decline(text, chat_id, **kwargs):  # **kwargs: терпим к новому context (C1/C3)
         return {"type": "text", "text": "Операция «X» пока не поддерживается."}
 
     msg = FakeMessage("сделай X", chat_id=104, bot=FakeBot())

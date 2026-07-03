@@ -16,6 +16,11 @@ def normalize_customer_id(customer_id: str) -> str:
     return "".join(ch for ch in str(customer_id) if ch.isdigit())
 
 
+# OpenRouter provider.sort принимает ТОЛЬКО эти значения (или пусто = роутинг по умолчанию).
+# Любое иное значение в .env → BadRequestError 400 «provider.sort: Invalid input».
+_VALID_PROVIDER_SORTS: frozenset[str] = frozenset({"", "price", "throughput", "latency"})
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -259,6 +264,26 @@ class Settings(BaseSettings):
                     f"В prod обязательны: {', '.join(missing)} — иначе бот не сможет работать с "
                     "Google Ads (fail-fast на старте, а не на первом вызове API)."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _normalize_provider_sort(self) -> "Settings":
+        """OpenRouter `provider.sort` принимает только price|throughput|latency (или пусто = ВЫКЛ).
+        Кривое значение из .env раньше улетало в API как есть → BadRequestError 400
+        «provider.sort: Invalid input» на КАЖДОМ парсинге команды (денежный путь). Нормализуем
+        (strip/lower) и коэрсим невалидное → "" (ВЫКЛ) с warning — денежный путь становится
+        fail-safe к опечатке/лишним кавычкам в .env, а не роняет весь парсинг."""
+        raw = (self.openrouter_parsing_provider_sort or "").strip().lower()
+        if raw not in _VALID_PROVIDER_SORTS:
+            import logging
+
+            logging.getLogger("aimash.config").warning(
+                "OPENROUTER_PARSING_PROVIDER_SORT=%r невалидно (допустимо: price|throughput|latency "
+                "или пусто) — отключаю provider.sort, чтобы не ловить 400 от OpenRouter.",
+                self.openrouter_parsing_provider_sort,
+            )
+            raw = ""
+        self.openrouter_parsing_provider_sort = raw
         return self
 
 

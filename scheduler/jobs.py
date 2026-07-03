@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 
 from ads.client import DRAFT_ACCOUNT_ID, build_client_async
 from confirm.store import ConfirmStore
+from core.ads_errors import is_account_access_error
 from core.config import settings
 from core.context import request_scope, reset_context, set_context
 from core.errors import capture_exception
@@ -94,9 +95,18 @@ async def run_scheduled_report(bot) -> None:
                 for lang in langs:
                     blocks[lang].append(summary_text(report, lang))
             except Exception as e:  # сеть/доступ/SDK — фиксируем (§15), остальные аккаунты живут
-                await capture_exception(e, where=f"scheduler:report:{acct}")
-                for lang in langs:
-                    blocks[lang].append(f"⚠️ Аккаунт {acct}: отчёт недоступен (см. /diag)")
+                if is_account_access_error(e):
+                    # A3: аккаунт деактивирован/нет прав — ОЖИДАЕМО (не дефект). Не пишем в /diag
+                    # каждый цикл и не пугаем оператора блоком; тихо пропускаем из дайджеста.
+                    log.info(
+                        "scheduler report: аккаунт %s недоступен на чтение (ожидаемо, пропуск): %s",
+                        acct,
+                        type(e).__name__,
+                    )
+                else:
+                    await capture_exception(e, where=f"scheduler:report:{acct}")
+                    for lang in langs:
+                        blocks[lang].append(f"⚠️ Аккаунт {acct}: отчёт недоступен (см. /diag)")
             finally:
                 reset_context(tok)
         if not any(blocks.values()):
@@ -186,7 +196,16 @@ async def run_anomaly_check(bot) -> None:
                     currency = ""
                 metrics[acct] = (cur, prev, currency)
             except Exception as e:  # сеть/доступ/SDK — фиксируем (§15), остальные аккаунты живут
-                await capture_exception(e, where=f"scheduler:anomaly:{acct}")
+                if is_account_access_error(e):
+                    # A3: деактивирован/нет прав — ОЖИДАЕМО. Раньше это писалось в /diag+Sentry как
+                    # error на КАЖДЫЙ такой аккаунт КАЖДЫЙ цикл (журнал в скринах был им завален).
+                    log.info(
+                        "scheduler anomaly: аккаунт %s недоступен на чтение (ожидаемо, пропуск): %s",
+                        acct,
+                        type(e).__name__,
+                    )
+                else:
+                    await capture_exception(e, where=f"scheduler:anomaly:{acct}")
             finally:
                 reset_context(tok)
         if not metrics:

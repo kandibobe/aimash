@@ -339,3 +339,29 @@ async def test_card_button_without_sub_and_fsm_is_stale():
     await bm.cli_card_cb(cq, ClientCB(action="card"), FakeState())
     assert cq.answers and cq.answers[-1][1] is True  # show_alert (stale)
     assert not cq.message.answers  # карточка не показана
+
+
+@pytest.mark.asyncio
+async def test_add_button_carries_customer_id_restart_safe():
+    """C4: «➕ Добавить информацию» несёт customer_id в sub → приём текста выставляет
+    ClientInfoWizard.awaiting_text даже с ПУСТЫМ FSM (рестарт/idle/suspend меню). Раньше пустой FSM
+    давал ранний return БЕЗ set_state → следующий текст с URL уходил в агент-задачу (баг из теста)."""
+    await init_db()
+    chat_id = 88_201
+    cust = "8000000002"
+    cq = FakeCB(chat_id=chat_id)
+    state = FakeState()  # ПУСТОЙ FSM — customer_id только из callback sub
+    await bm.cli_add_update_cb(cq, ClientCB(action="add", sub=cust), state)
+    assert await state.get_state() == bm.ClientInfoWizard.awaiting_text
+    assert (await state.get_data()).get("cli_customer_id") == cust
+
+
+@pytest.mark.asyncio
+async def test_add_button_without_sub_and_empty_fsm_is_stale():
+    # без sub И без FSM подставить аккаунт неоткуда → честный stale, состояние НЕ выставляем
+    await init_db()
+    cq = FakeCB(chat_id=88_202)
+    state = FakeState()
+    await bm.cli_add_update_cb(cq, ClientCB(action="add"), state)
+    assert cq.answers and cq.answers[-1][1] is True  # show_alert (stale)
+    assert await state.get_state() is None

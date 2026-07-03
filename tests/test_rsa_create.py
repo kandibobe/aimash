@@ -279,6 +279,81 @@ async def test_execute_confirmed_routes_create_rsa():
     assert captured["customer_id"] == DRAFT_ACCOUNT_ID
 
 
+# ── B2: перевод «operation not allowed for the given context» → понятный ValueError ──
+class _FakeErrorCode:
+    """Дакт-эквивалент protobuf error_code с активным oneof (error_code_name читает через WhichOneof)."""
+
+    def __init__(self, name):
+        self.op = SimpleNamespace(name=name)
+
+    def WhichOneof(self, _field):
+        return "op"
+
+
+class _FakeGAE(mut.GoogleAdsException):
+    """GoogleAdsException-подобная (подкласс → ловится except GoogleAdsException) с duck-failure."""
+
+    def __init__(self, code_name, msg="boom"):
+        Exception.__init__(self, msg)
+        self._msg = msg
+        self.failure = SimpleNamespace(
+            errors=[SimpleNamespace(error_code=_FakeErrorCode(code_name), message=msg)]
+        )
+        self.error = None
+        self.request_id = "req"
+
+    def __str__(self):
+        return self._msg
+
+
+def _rsa_sdk_client(raise_exc):
+    """Минимальный фейк-клиент для _create_rsa_via_sdk, чей mutate поднимает raise_exc."""
+    rsa = SimpleNamespace(headlines=[], descriptions=[], path1="", path2="")
+    ad = SimpleNamespace(final_urls=[], responsive_search_ad=rsa)
+    op = SimpleNamespace(create=SimpleNamespace(ad=ad, ad_group="", status=None))
+
+    class _AGAd:
+        def mutate_ad_group_ads(self, customer_id, operations):
+            raise raise_exc
+
+    class _AG:
+        def ad_group_path(self, cid, agid):
+            return f"customers/{cid}/adGroups/{agid}"
+
+    class _Client:
+        enums = SimpleNamespace(AdGroupAdStatusEnum=SimpleNamespace(PAUSED="PAUSED"))
+
+        def get_service(self, name):
+            return _AGAd() if name == "AdGroupAdService" else _AG()
+
+        def get_type(self, name):
+            return op if name == "AdGroupAdOperation" else SimpleNamespace(text="")
+
+    return _Client()
+
+
+def test_create_rsa_translates_context_error_to_value_error():
+    exc = _FakeGAE(
+        "OPERATION_NOT_PERMITTED_FOR_CONTEXT", "The operation is not allowed for the given context"
+    )
+    client = _rsa_sdk_client(exc)
+    try:
+        mut._create_rsa_via_sdk(client, DRAFT_ACCOUNT_ID, "42", _H3, _D2, _URL, None, None)
+        raise AssertionError("ожидался ValueError (context error переведён)")
+    except ValueError as e:
+        assert "Search" in str(e) and "стандарт" in str(e).lower()
+
+
+def test_create_rsa_reraises_unrelated_ads_exception():
+    exc = _FakeGAE("DUPLICATE_AD", "some other error")
+    client = _rsa_sdk_client(exc)
+    try:
+        mut._create_rsa_via_sdk(client, DRAFT_ACCOUNT_ID, "42", _H3, _D2, _URL, None, None)
+        raise AssertionError("ожидался проброс GoogleAdsException (не context error)")
+    except mut.GoogleAdsException:
+        pass  # неизвестная ошибка НЕ маскируется под ValueError — пробрасывается как есть
+
+
 async def test_execute_confirmed_rejects_rsa_curation_session():
     cp = SimpleNamespace(operation="rsa_curation", status="confirmed", params={})
 

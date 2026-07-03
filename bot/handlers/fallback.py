@@ -150,6 +150,8 @@ async def on_text(m: bm.Message, state: bm.FSMContext) -> None:
                 m, instruction=text, context_text=content, source=urls[0], state=state
             )
             return
+    ctx = bm._build_agent_context(m.chat.id)  # C1/C3: контекст диалога (последняя кампания/история)
     async with bm.ux.typing_action(m):  # «печатает…» пока модель парсит команду
-        res = await bm.handle_command(text, chat_id=m.chat.id)
+        res = await bm.handle_command(text, chat_id=m.chat.id, context=ctx)
+    bm._chat_ctx_note(m.chat.id, user_text=text)  # текущая реплика → история для след. хода
     await bm._dispatch_command_result(m, res, state)

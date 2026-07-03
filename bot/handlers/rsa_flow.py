@@ -28,8 +28,14 @@ async def rsa_cmd(m: bm.Message, state: bm.FSMContext) -> None:
         client = await build_client_async()
         # как остальной read-слой: таймаут+ретрай транзиентных под семафором Google Ads
         # (а не «голый» to_thread — иначе зависший SearchStream не капается и копит in-flight).
+        # B2: RSA живёт только в Search-кампаниях → показываем ТОЛЬКО их (иначе объявление уходило
+        # в не-Search группу и Google отвергал «operation not allowed for the given context»).
         camps = await bm.run_ads_read_call(
-            list_campaigns, client, bm.DRAFT_ACCOUNT_ID, label="list_campaigns"
+            list_campaigns,
+            client,
+            bm.DRAFT_ACCOUNT_ID,
+            label="list_campaigns",
+            channel_type="SEARCH",
         )
     except Exception as e:  # сеть/доступ/SDK
         await m.answer(bm.i18n.t("err_campaigns", err=bm.ux.err_text(e)))

@@ -98,6 +98,26 @@ def test_dev_without_google_ads_ok():
     assert s.is_prod is False
 
 
+def test_provider_sort_valid_values_normalized():
+    """price|throughput|latency допустимы; регистр/пробелы нормализуются (strip+lower)."""
+    for raw, want in (("latency", "latency"), (" Throughput ", "throughput"), ("PRICE", "price")):
+        s = Settings(env="dev", openrouter_parsing_provider_sort=raw, _env_file=None)
+        assert s.openrouter_parsing_provider_sort == want
+
+
+def test_provider_sort_empty_stays_off():
+    s = Settings(env="dev", openrouter_parsing_provider_sort="", _env_file=None)
+    assert s.openrouter_parsing_provider_sort == ""
+
+
+def test_provider_sort_invalid_coerced_to_off():
+    """Кривое значение (напр. 'speed', 'fastest', опечатка) → '' (ВЫКЛ), НЕ роняет старт —
+    иначе улетело бы в OpenRouter → 400 'provider.sort: Invalid input' на каждом парсинге."""
+    for bad in ("speed", "fastest", "throughput;", "'latency'", "quality"):
+        s = Settings(env="dev", openrouter_parsing_provider_sort=bad, _env_file=None)
+        assert s.openrouter_parsing_provider_sort == "", f"{bad!r} должно коэрситься в ''"
+
+
 def test_require_dev_env_blocks_outside_dev(monkeypatch):
     """Гард dev-скриптов прямой записи (golden rule #10): вне ENV=dev — SystemExit; в dev — ок."""
     import core.config as cfg

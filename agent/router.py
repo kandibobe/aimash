@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 from openai import AsyncOpenAI
 
-from core.config import settings
+from core.config import _VALID_PROVIDER_SORTS, settings
 from core.resilience import (
     LLM_TIMEOUT_S,
     call_llm,
@@ -171,8 +171,10 @@ async def chat(
     # OpenRouter выберет быстрейший эндпоинт ТОЙ ЖЕ модели (вес не меняется → текст-нейтрально).
     # Config-gated, по умолчанию ВЫКЛ (settings.openrouter_parsing_provider_sort=""). Копирайт не
     # трогаем. Веса/качество модели неизменны — это выбор эндпоинта, не модели.
+    # Config уже нормализует значение (core.config._normalize_provider_sort); membership-check тут —
+    # defense-in-depth: даже при подменённых в тестах/скриптах settings кривой sort НЕ улетит в API.
     sort = settings.openrouter_parsing_provider_sort
-    if role == "parsing" and sort:
+    if role == "parsing" and sort and sort in _VALID_PROVIDER_SORTS:
         extra_body["provider"] = {"sort": sort}
     kwargs["extra_body"] = extra_body
     # call_llm: zero-arg фабрика — tenacity создаёт свежую корутину на каждую попытку.

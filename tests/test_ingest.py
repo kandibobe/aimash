@@ -226,7 +226,7 @@ async def test_on_document_with_caption_runs_task():
 
     captured = {}
 
-    async def fake_handle(instruction, *, chat_id=0, context_text=None):
+    async def fake_handle(instruction, *, chat_id=0, context_text=None, **kwargs):
         captured.update(instruction=instruction, context_text=context_text)
         return {"type": "text", "text": "ok"}
 
@@ -243,7 +243,7 @@ async def test_on_document_without_caption_asks_then_runs():
 
     captured = {}
 
-    async def fake_handle(instruction, *, chat_id=0, context_text=None):
+    async def fake_handle(instruction, *, chat_id=0, context_text=None, **kwargs):
         captured.update(instruction=instruction, context_text=context_text)
         return {"type": "text", "text": "ok"}
 

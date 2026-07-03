@@ -234,3 +234,68 @@ async def test_get_stats_ambiguous_name_asks(monkeypatch):
     finally:
         set_discovered_read_children([])
         set_discovered_read_children_meta([])
+
+
+# ── C1-C3 (гибрид): контекст диалога + подстановка местоимения-кампании ──────────────
+def test_is_pronoun_campaign_detection():
+    # местоимения/пусто → True; реальные имена → False
+    assert L._is_pronoun_campaign("")
+    assert L._is_pronoun_campaign("эта кампания")
+    assert L._is_pronoun_campaign("этой кампании")
+    assert L._is_pronoun_campaign("текущую кампанию")
+    assert L._is_pronoun_campaign("this campaign")
+    assert L._is_pronoun_campaign("эту")
+    assert not L._is_pronoun_campaign("Brand Search")
+    assert not L._is_pronoun_campaign("Текущая акция")  # реальное имя, нет слова «кампания»
+    assert not L._is_pronoun_campaign(
+        "Летняя кампания 2026"
+    )  # имя со словом «кампания», без демонстратива
+
+
+async def test_pronoun_campaign_resolved_from_context():
+    # «поставь на паузу ЭТУ кампанию» + контекст → реальное имя в черновике (скрин из живого теста)
+    fake, _ = _chat_returning(_msg([_tc("pause_campaign", {"campaign": "этой кампании"})]))
+    ctx = {"last_campaign": "Deep Lake Immersion", "last_account": "", "history": []}
+    with patched(L, "chat", fake):
+        out = await L.handle_command("поставь на паузу эту кампанию", chat_id=1, context=ctx)
+    assert out["type"] == "proposal"
+    assert out["params"]["campaign"] == "Deep Lake Immersion"
+
+
+async def test_real_campaign_name_not_overwritten_by_context():
+    fake, _ = _chat_returning(_msg([_tc("pause_campaign", {"campaign": "Brand Search"})]))
+    ctx = {"last_campaign": "Deep Lake", "history": []}
+    with patched(L, "chat", fake):
+        out = await L.handle_command("пауза Brand Search", chat_id=1, context=ctx)
+    assert out["params"]["campaign"] == "Brand Search"  # реальное имя не трогаем
+
+
+async def test_no_context_leaves_pronoun_as_is():
+    # без контекста подставлять нечего → буквальный текст (ниже сработает обычный резолв/ошибка)
+    fake, _ = _chat_returning(_msg([_tc("pause_campaign", {"campaign": "этой кампании"})]))
+    with patched(L, "chat", fake):
+        out = await L.handle_command("пауза этой кампании", chat_id=1)
+    assert out["params"]["campaign"] == "этой кампании"
+
+
+def test_conversation_context_block():
+    block = L._conversation_context_block(
+        {"last_campaign": "Deep Lake", "history": ["сделай отчёт"]}
+    )
+    assert block and "Deep Lake" in block and "КОНТЕКСТ ДИАЛОГА" in block
+    assert L._conversation_context_block(None) is None
+    assert L._conversation_context_block({}) is None
+
+
+async def test_context_block_passed_to_model():
+    captured = {}
+
+    async def _chat(messages, **kwargs):
+        captured["messages"] = messages
+        return _msg([_tc("ask_clarification", {"question": "?"})])
+
+    ctx = {"last_campaign": "Deep Lake", "history": ["сделай отчёт"]}
+    with patched(L, "chat", _chat):
+        await L.handle_command("измени гео", chat_id=1, context=ctx)
+    joined = " ".join(m["content"] for m in captured["messages"])
+    assert "Deep Lake" in joined and "КОНТЕКСТ ДИАЛОГА" in joined

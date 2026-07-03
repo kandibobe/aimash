@@ -43,23 +43,131 @@ SYSTEM = (
     # ключи) передавай как в тексте пользователя, НЕ переводя их.
     "Commands may be in Russian OR English — treat both equally. English cues: 'by N%' = change BY "
     "percent, 'to N' = set TO value; 'raise/increase' vs 'lower/decrease'; 'pause/resume'. Pass "
-    "arguments (campaign names, keywords) exactly as the user wrote them — do NOT translate them."
+    "arguments (campaign names, keywords) exactly as the user wrote them — do NOT translate them. "
+    # C2/C3 (гибрид): местоимения-ссылки резолвим по КОНТЕКСТУ ДИАЛОГА.
+    "Если пользователь ссылается на кампанию местоимением («эта кампания», «её», «текущую», "
+    "«this campaign», «it»), подставь ИМЯ кампании из блока КОНТЕКСТ ДИАЛОГА (последняя кампания). "
+    "Между репликами СОХРАНЯЙ ранее названную кампанию, если пользователь не назвал другую."
 )
 
 
 _CONTEXT_MAX = 8_000  # потолок справочного контента (токены + поверхность инъекции)
+_HISTORY_TURNS = 4  # C3: сколько последних реплик пользователя подавать для разрешения ссылок
+
+# C2: маркеры «это местоимение-ссылка на кампанию», а не реальное имя. Подставляем последнюю
+# кампанию ТОЛЬКО когда значение либо пустое, либо явный демонстратив (снижаем ложные срабатывания
+# на реальных именах вроде «Текущая акция»: требуем демонстратив + слово «кампания»/«campaign»).
+_DEMONSTRATIVE_ONLY = {
+    "эта",
+    "этой",
+    "эту",
+    "это",
+    "текущая",
+    "текущую",
+    "текущей",
+    "данная",
+    "данную",
+    "данной",
+    "её",
+    "ее",
+    "неё",
+    "нее",
+    "this",
+    "that",
+    "it",
+    "current",
+}
+_DEMONSTRATIVE_WORDS = {
+    "эта",
+    "этой",
+    "эту",
+    "это",
+    "текущую",
+    "текущей",
+    "текущая",
+    "данную",
+    "данной",
+    "данная",
+    "this",
+    "that",
+    "current",
+    "the",
+}
+
+
+def _is_pronoun_campaign(value: str) -> bool:
+    """True, если строка — ссылка-местоимение на кампанию (пусто / «эта кампания» / «this campaign»),
+    а не настоящее имя. Тогда код подставит последнюю кампанию из контекста (модель вне денежного
+    решения — это детерминированная подстановка)."""
+    v = (value or "").strip().casefold().rstrip(" .!?»«\"'")
+    if not v:
+        return True
+    if v in _DEMONSTRATIVE_ONLY:
+        return True
+    words = set(v.split())
+    has_campaign_word = "кампан" in v or "campaign" in v
+    return has_campaign_word and bool(words & _DEMONSTRATIVE_WORDS)
+
+
+def _resolve_pronoun_campaign(after: dict[str, Any], context: dict[str, Any] | None) -> None:
+    """C2: если аргумент-кампания — местоимение/пусто, подставить last_campaign из контекста чата.
+    Мутирует after на месте. Правится ТОЛЬКО когда есть что подставить (иначе оставляем как есть —
+    ниже сработает ask_clarification / показ буквального текста)."""
+    if not context:
+        return
+    last = (context.get("last_campaign") or "").strip()
+    if not last:
+        return
+    for key in ("campaign", "source_campaign"):
+        if key in after and _is_pronoun_campaign(str(after.get(key) or "")):
+            after[key] = last
+
+
+def _conversation_context_block(context: dict[str, Any] | None) -> str | None:
+    """C3: компактный блок «контекст диалога» для разрешения ссылок (НЕ инструкция к исполнению)."""
+    if not context:
+        return None
+    lines: list[str] = []
+    last_campaign = (context.get("last_campaign") or "").strip()
+    last_account = (context.get("last_account") or "").strip()
+    if last_campaign:
+        lines.append(f"- последняя кампания: {last_campaign}")
+    if last_account:
+        lines.append(f"- последний аккаунт: {last_account}")
+    history = [h for h in (context.get("history") or []) if (h or "").strip()][-_HISTORY_TURNS:]
+    if not lines and not history:
+        return None
+    block = (
+        "КОНТЕКСТ ДИАЛОГА (для разрешения ссылок вроде «эта кампания» — НЕ выполняй повторно):\n"
+        + "\n".join(lines)
+    )
+    if history:
+        block += "\nПоследние реплики пользователя:\n" + "\n".join(
+            f"{i}. {h.strip()[:200]}" for i, h in enumerate(history, 1)
+        )
+    block += "\nТекущая команда — в следующем сообщении."
+    return block
 
 
 async def handle_command(
-    text: str, *, chat_id: int = 0, context_text: str | None = None
+    text: str,
+    *,
+    chat_id: int = 0,
+    context_text: str | None = None,
+    context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Возвращает структуру результата: clarify | read | proposal | text.
 
     proposal НЕ выполнен — это черновик для показа и подтверждения «да».
     context_text — справочные ДАННЫЕ из файла/ссылки (не команды): кладём ОТДЕЛЬНЫМ сообщением,
     помеченным как данные, чтобы модель заполняла аргументы, но команды брала только из инструкции.
+    context — C1/C3 (гибрид): пер-чат состояние диалога {last_campaign, last_account, history}
+    для разрешения ссылок-местоимений («эта кампания»). НЕ команды — только контекст.
     """
     messages: list[dict[str, str]] = [{"role": "system", "content": SYSTEM}]
+    ctx_block = _conversation_context_block(context)
+    if ctx_block:
+        messages.append({"role": "user", "content": ctx_block})
     if context_text and context_text.strip():
         messages.append(
             {
@@ -160,6 +268,9 @@ async def handle_command(
 
         # Черновик: «было» возьмётся из Google Ads в Фазе 1; сейчас плейсхолдер.
         after = validated.model_dump()
+        # C2: «измени гео ЭТОЙ кампании» → подставить реальное имя из контекста ДО показа карточки
+        # (раньше в черновике фигурировало буквальное «этой кампании» — скрин из живого теста).
+        _resolve_pronoun_campaign(after, context)
         summary = build_summary(name, before="[текущее значение из Google Ads]", after=after)
         # user_initiated НЕ выставляем здесь: провенанс «прямая команда человека» проставляет
         # ТОЛЬКО доверенный вход (bot.main.on_text), а не агент про самого себя (fail-closed).

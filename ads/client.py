@@ -135,11 +135,19 @@ async def discover_read_children() -> int:
             log.warning("mcc discover: MCC %s не обойдён (%s)", mid, type(e).__name__)
             continue
         for ch in children:
-            if not ch.manager:
-                cid = normalize_customer_id(ch.id)
-                if cid:
-                    found.add(cid)
-                    found_meta[cid] = ch  # имя/валюта/статус для UI-пикера
+            if ch.manager:
+                continue
+            # §8/A3: не-ENABLED дочерние (CANCELED/SUSPENDED/CLOSED/…) НЕ кладём в read-набор —
+            # их запрос всё равно упрётся в PERMISSION_DENIED / CUSTOMER_NOT_ENABLED (это флудило
+            # scheduler-аномалии и /diag каждый цикл) и они не нужны в пикерах отчётов/экспорта.
+            # /mcc-сводка их всё равно покажет отдельной секцией «неактивные» (reports.mcc._is_active),
+            # т.к. заново обходит MCC. Мутационный замок (ensure_allowed) — отдельный, не затронут.
+            if (ch.status or "").upper() != "ENABLED":
+                continue
+            cid = normalize_customer_id(ch.id)
+            if cid:
+                found.add(cid)
+                found_meta[cid] = ch  # имя/валюта/статус для UI-пикера
     n = set_discovered_read_children(found)
     set_discovered_read_children_meta(found_meta.values())  # meta для пикера (не влияет на доступ)
     if n:

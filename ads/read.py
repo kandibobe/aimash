@@ -176,15 +176,38 @@ def list_audiences(client: GoogleAdsClient, customer_id: str) -> list[Audience]:
     return out
 
 
-def list_campaigns(client: GoogleAdsClient, customer_id: str) -> list[dict]:
-    """Список кампаний аккаунта (id, имя, статус). Только для белого списка."""
+def list_campaigns(
+    client: GoogleAdsClient, customer_id: str, *, channel_type: str | None = None
+) -> list[dict]:
+    """Список кампаний аккаунта (id, имя, статус). Только для белого списка.
+
+    channel_type (напр. 'SEARCH') — фильтр по типу канала: RSA-флоу показывает ТОЛЬКО Search-
+    кампании (B2), иначе объявление уходило в не-Search группу → «operation not allowed for the
+    given context» на создании. Пусто (дефолт) — все кампании (пикеры отчётов/экспорта).
+
+    Порядок (B2/D3): активные (ENABLED) первыми, затем по имени — предсказуемо для человека
+    (раньше ORDER BY campaign.id давал «случайный» для оператора порядок)."""
     ensure_read_allowed(customer_id)
     ga = client.get_service("GoogleAdsService")
-    q = "SELECT campaign.id, campaign.name, campaign.status FROM campaign ORDER BY campaign.id"
-    return [
+    where = ""
+    if channel_type:
+        where = f" WHERE campaign.advertising_channel_type = '{channel_type}'"
+    q = f"SELECT campaign.id, campaign.name, campaign.status FROM campaign{where}"
+    rows = [
         {"id": str(r.campaign.id), "name": r.campaign.name, "status": r.campaign.status.name}
         for r in ga.search(customer_id=str(customer_id), query=q)
     ]
+    return sorted(
+        rows, key=lambda c: (_campaign_status_rank(c["status"]), (c["name"] or "").casefold())
+    )
+
+
+# Порядок статусов для пикеров: активные → приостановленные → прочие (REMOVED/UNKNOWN).
+_CAMPAIGN_STATUS_ORDER = {"ENABLED": 0, "PAUSED": 1}
+
+
+def _campaign_status_rank(status: str) -> int:
+    return _CAMPAIGN_STATUS_ORDER.get((status or "").upper(), 2)
 
 
 # ── §2A: чтение полного конфига кампании для клонирования («как в кампании X») ────────

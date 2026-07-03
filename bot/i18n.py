@@ -481,6 +481,19 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": texts.RSA_NO_ADGROUPS,
         "en": "The campaign has no ad groups — create a group first.",
     },
+    # B2: у кампании есть группы, но ни одна не Search-стандартная (DSA/Display/Video/PMax) —
+    # адаптивное поисковое объявление туда добавить нельзя (Google отвергнет).
+    "rsa_not_search": {
+        "ru": (
+            "⚠️ В этой кампании нет стандартной поисковой группы объявлений — адаптивное "
+            "поисковое объявление (RSA) сюда добавить нельзя. Выбери Search-кампанию или создай "
+            "поисковую кампанию через ➕ Создание кампании."
+        ),
+        "en": (
+            "⚠️ This campaign has no standard Search ad group — a Responsive Search Ad can't be "
+            "added here. Pick a Search campaign or create one via ➕ Create campaign."
+        ),
+    },
     "rsa_ask_brief": {
         "ru": texts.RSA_ASK_BRIEF,
         "en": (
@@ -1068,6 +1081,22 @@ CATALOG: dict[str, dict[str, str]] = {
             "`python scripts/get_refresh_token.py` (select Google Ads, drive.file and "
             "spreadsheets.readonly), then restart the bot.\n"
             "📄 The same report without this setup is available right away via /export (.xlsx)."
+        ),
+    },
+    # A4: честная причина, когда аккаунт деактивирован/нет прав (ошибка от Google Ads, НЕ Sheets-
+    # scope). Раньше по такой ошибке показывалась подсказка про drive.file — вводило в заблуждение.
+    "err_account_inactive": {
+        "ru": (
+            "⚠️ Аккаунт недоступен: он отключён, деактивирован или у бота нет прав на его чтение.\n"
+            "{err}\n"
+            "Это не проблема настройки Sheets — выбери другой аккаунт или проверь его статус в "
+            "Google Ads (активен ли, привязан ли к нашему MCC)."
+        ),
+        "en": (
+            "⚠️ Account unavailable: it is disabled, deactivated, or the bot has no read access.\n"
+            "{err}\n"
+            "This is not a Sheets setup issue — pick another account or check its status in "
+            "Google Ads (is it active and linked to our MCC)."
         ),
     },
     # — agent.loop: пользовательские тексты (системный промпт НЕ переводим — он для модели) —

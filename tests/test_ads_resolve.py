@@ -75,7 +75,16 @@ def _campaign_row(*, cid="123", name="Бренд", status="ENABLED", budget_micr
     )
 
 
-def _ad_group_row(*, agid="42", name="Группа", status="ENABLED", cpc=500_000, camp_id="123"):
+def _ad_group_row(
+    *,
+    agid="42",
+    name="Группа",
+    status="ENABLED",
+    cpc=500_000,
+    camp_id="123",
+    ag_type="SEARCH_STANDARD",
+    channel="SEARCH",
+):
     return SimpleNamespace(
         ad_group=SimpleNamespace(
             id=int(agid),
@@ -83,8 +92,12 @@ def _ad_group_row(*, agid="42", name="Группа", status="ENABLED", cpc=500_0
             status=SimpleNamespace(name=status),
             cpc_bid_micros=cpc,
             resource_name=f"customers/{DRAFT_ACCOUNT_ID}/adGroups/{agid}",
+            type_=SimpleNamespace(name=ag_type),
         ),
-        campaign=SimpleNamespace(id=int(camp_id)),
+        campaign=SimpleNamespace(
+            id=int(camp_id),
+            advertising_channel_type=SimpleNamespace(name=channel),
+        ),
     )
 
 
@@ -205,3 +218,39 @@ def test_find_ad_groups_rejects_foreign_account():
     with allowed_ids(DRAFT_ACCOUNT_ID):
         with pytest.raises(PermissionError):
             find_ad_groups(client, "1234567890", "Бренд")
+
+
+# ── B2: тип группы/канала для гейта RSA (accepts_rsa) ────────────────────────────
+def test_find_ad_groups_maps_type_and_channel():
+    rows = [_ad_group_row(ag_type="SEARCH_STANDARD", channel="SEARCH")]
+    client = _FakeClient(rows)
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        g = find_ad_groups(client, DRAFT_ACCOUNT_ID, "Бренд")[0]
+    assert g.ad_group_type == "SEARCH_STANDARD" and g.channel_type == "SEARCH"
+    assert "ad_group.type" in client._ga.last_query
+    assert "campaign.advertising_channel_type" in client._ga.last_query
+
+
+def test_accepts_rsa_only_for_search_standard():
+    def g(ag_type, channel):
+        return find_ad_groups(
+            _FakeClient([_ad_group_row(ag_type=ag_type, channel=channel)]),
+            DRAFT_ACCOUNT_ID,
+            "Бренд",
+        )[0]
+
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        assert g("SEARCH_STANDARD", "SEARCH").accepts_rsa() is True
+        assert g("SEARCH_DYNAMIC_ADS", "SEARCH").accepts_rsa() is False  # DSA — только expanded DSA
+        assert g("DISPLAY_STANDARD", "DISPLAY").accepts_rsa() is False
+        assert g("VIDEO_RESPONSIVE", "VIDEO").accepts_rsa() is False
+
+
+def test_accepts_rsa_false_when_type_unknown():
+    # старые строки/фейки без type_/channel → пусто → accepts_rsa False (вызывающий покажет причину)
+    from ads.resolve import AdGroupRef
+
+    ref = AdGroupRef(
+        id="1", resource_name="rn", name="g", status="ENABLED", cpc_bid_micros=0, campaign_id="2"
+    )
+    assert ref.accepts_rsa() is False
