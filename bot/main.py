@@ -413,6 +413,33 @@ class TraceMiddleware(BaseMiddleware):
             reset_context(token)
 
 
+# Кому уже отправили вежливый отказ (один раз на chat_id за жизнь процесса) — чтобы не спамить.
+# Множество, а не cooldown-словарь: проще и без импорта time. Cap — анти-DoS от ротации chat_id.
+_WL_REFUSED: set[int] = set()
+_WL_REFUSED_CAP = 10_000
+
+
+async def _maybe_refuse_unlisted(event: object, uid: int | None) -> None:
+    """Один вежливый отказ не-whitelisted пользователю (private Message) с его chat_id — чтобы
+    легитимный новый человек знал, что делать (передать ID админу), а не думал, что бот сломан.
+    Не ослабляет замок: хендлер всё равно не вызывается (return в middleware). Молча для callback/
+    не-private/без chat_id и при повторе. Cap множества — защита от флуда чужими chat_id."""
+    if uid is None or getattr(event, "chat", None) is None:  # только Message-like (есть .answer)
+        return
+    if _event_chat_type(event) != "private":
+        return
+    answer = getattr(event, "answer", None)
+    if not callable(answer) or uid in _WL_REFUSED or len(_WL_REFUSED) >= _WL_REFUSED_CAP:
+        return
+    _WL_REFUSED.add(uid)
+    # LangMiddleware ещё не отработал (он ПОСЛЕ whitelist) → берём язык Telegram-клиента (или RU).
+    tg_lang = getattr(getattr(event, "from_user", None), "language_code", None)
+    try:
+        await answer(i18n.t("access_denied", (tg_lang or "")[:2], chat_id=uid))
+    except Exception:  # noqa: BLE001 — уведомление необязательно, не роняем обработку апдейта
+        pass
+
+
 class WhitelistMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: TelegramObject, data):
         # Fail-closed (как ads.client.ensure_allowed): пустой whitelist => блок ВСЕХ, а не fail-open.
@@ -421,6 +448,7 @@ class WhitelistMiddleware(BaseMiddleware):
         wl = settings.whitelist
         if uid not in wl:
             log.warning("заблокирован chat_id %s (не в whitelist)", uid)
+            await _maybe_refuse_unlisted(event, uid)
             return
         # ТОЛЬКО private-чаты: whitelist — по chat_id, а в группе chat_id ОДИН на всех участников →
         # любой из них нажал бы ✅ и двинул деньги (актор берётся из from_user). В private chat_id ==

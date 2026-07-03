@@ -870,6 +870,11 @@ CATALOG: dict[str, dict[str, str]] = {
     "val_too_short": {"ru": "не короче {n} символов", "en": "at least {n} characters"},
     "val_missing": {"ru": "обязательное поле", "en": "required field"},
     "val_more": {"ru": "…и ещё {n}", "en": "…and {n} more"},
+    # Отказ не-whitelisted пользователю (bot.main.WhitelistMiddleware) — с его chat_id для админа.
+    "access_denied": {
+        "ru": "⛔ Доступ к боту не выдан.\nПередайте администратору ваш ID: {chat_id}",
+        "en": "⛔ Bot access is not granted.\nSend your ID to the administrator: {chat_id}",
+    },
     "err_photo": {
         "ru": "⚠️ Не удалось обработать фото: {err}",
         "en": "⚠️ Couldn't process the photo: {err}",

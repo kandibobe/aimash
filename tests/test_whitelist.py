@@ -45,6 +45,22 @@ def _counter():
     return state, handler
 
 
+def _msg_answerable(chat_id: int, ctype: str = "private", lang: str | None = None):
+    """Message-фейк с .answer (записывает отправленное) + from_user.language_code — для проверки
+    вежливого отказа не-whitelisted."""
+    sent: list[str] = []
+
+    async def answer(text, **kw):
+        sent.append(text)
+
+    ev = SimpleNamespace(
+        chat=SimpleNamespace(id=chat_id, type=ctype),
+        from_user=SimpleNamespace(language_code=lang),
+        answer=answer,
+    )
+    return ev, sent
+
+
 async def test_blocks_non_whitelisted_chat():
     mw = bm.WhitelistMiddleware()
     state, handler = _counter()
@@ -90,3 +106,47 @@ async def test_blocks_whitelisted_group_chat():
         assert state["n"] == 0
         await mw(handler, _msg(7, "private"), {})  # тот же id в private → проходит
         assert state["n"] == 1
+
+
+# ── Вежливый отказ не-whitelisted (§UX): один раз на chat_id, private-only, замок цел ──
+async def test_unlisted_private_gets_one_refusal_with_id():
+    bm._WL_REFUSED.clear()
+    mw = bm.WhitelistMiddleware()
+    state, handler = _counter()
+    ev, sent = _msg_answerable(999)
+    with _whitelist("7"):
+        await mw(handler, ev, {})  # 1-й контакт → отказ
+        await mw(handler, ev, {})  # повтор → тишина (уже отказали)
+    assert state["n"] == 0  # хендлер не вызван — замок не ослаблен
+    assert len(sent) == 1  # ровно один отказ
+    assert "999" in sent[0] and "⛔" in sent[0]  # с его chat_id
+
+
+async def test_unlisted_group_stays_silent():
+    bm._WL_REFUSED.clear()
+    mw = bm.WhitelistMiddleware()
+    state, handler = _counter()
+    ev, sent = _msg_answerable(999, ctype="group")
+    with _whitelist("7"):
+        await mw(handler, ev, {})
+    assert state["n"] == 0
+    assert sent == []  # не-private → без отказа (whitelist по chat_id бессмыслен в группе)
+
+
+async def test_unlisted_callback_stays_silent():
+    bm._WL_REFUSED.clear()
+    mw = bm.WhitelistMiddleware()
+    state, handler = _counter()
+    with _whitelist("7"):
+        await mw(handler, _callback(999, "private"), {})  # callback (нет .chat/.answer) → тишина
+    assert state["n"] == 0
+
+
+async def test_unlisted_refusal_honors_telegram_lang_en():
+    bm._WL_REFUSED.clear()
+    mw = bm.WhitelistMiddleware()
+    state, handler = _counter()
+    ev, sent = _msg_answerable(999, lang="en-US")
+    with _whitelist("7"):
+        await mw(handler, ev, {})
+    assert "not granted" in sent[0].lower()  # EN по language_code Telegram-клиента
