@@ -28,11 +28,11 @@ async def savetemplate_cmd(m: bm.Message, command: bm.CommandObject) -> None:
     from db.templates import save_template
 
     if source:
-        from ads.client import build_client
+        from ads.client import build_client_async
         from ads.read import read_campaign_config
 
         try:
-            client = build_client()
+            client = await build_client_async()
             cfg = await bm.run_ads_read_call(
                 read_campaign_config,
                 client,
@@ -131,13 +131,13 @@ async def tpl_name(m: bm.Message, state: bm.FSMContext) -> None:
         await m.answer(bm.i18n.t("tpl_not_found"))
         return
     await state.clear()
-    from ads.client import build_client
+    from ads.client import build_client_async
     from ads.resolve import find_campaign_by_name
 
     try:
         existing = await bm.run_ads_read_call(
             find_campaign_by_name,
-            build_client(),
+            await build_client_async(),
             bm.DRAFT_ACCOUNT_ID,
             new_name,
             label="find_campaign_by_name",

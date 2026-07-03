@@ -40,6 +40,11 @@ def patched(obj, name, value):
         setattr(obj, name, orig)
 
 
+async def _fake_client_async(*a, **k):
+    # execute_confirmed зовёт await build_client_async() (сборка SDK вне loop) — фейк-заглушка.
+    return object()
+
+
 # ── Локальные фейки aiogram ──────────────────────────────────────────────────────
 class FakeBot:
     async def send_chat_action(self, *a, **k):
@@ -313,7 +318,7 @@ async def test_on_confirm_runs_real_execute_confirmed_gates():
     cq = FakeCallbackQuery(FakeMessage(chat_id=300, bot=FakeBot()))
     with (
         _allowed_draft(),
-        patched(svc, "build_client", lambda: object()),
+        patched(svc, "build_client_async", _fake_client_async),
         patched(resolve, "find_campaign_by_name", lambda *a, **k: fake_ref),
         patched(mut, "_apply_budget_via_sdk", fake_sdk),
     ):
@@ -456,7 +461,7 @@ async def test_scheduler_style_budget_blocked_through_execute_confirmed():
     cq = FakeCallbackQuery(FakeMessage(chat_id=310, bot=FakeBot()))
     with (
         _allowed_draft(),
-        patched(svc, "build_client", lambda: object()),
+        patched(svc, "build_client_async", _fake_client_async),
         patched(resolve, "find_campaign_by_name", lambda *a, **k: fake_ref),
         patched(mut, "_apply_budget_via_sdk", fake_sdk),
     ):

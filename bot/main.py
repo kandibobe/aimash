@@ -562,10 +562,10 @@ async def _send_journal(message: Message) -> None:
 async def _send_campaigns(message: Message, chat_id: int) -> None:
     """Список кампаний + inline-кнопки выбора. Кэшируем список по chat_id для резолва idx→имя."""
     try:
-        from ads.client import build_client
+        from ads.client import build_client_async
         from ads.read import list_campaigns
 
-        client = build_client()
+        client = await build_client_async()
         async with ux.typing_action(message):
             camps = await run_ads_read_call(
                 list_campaigns, client, DRAFT_ACCOUNT_ID, label="list_campaigns"
@@ -1282,11 +1282,11 @@ async def _rsa_resolve_after_campaign(
     target: Message, chat_id: int, campaign: str, state: FSMContext
 ) -> None:
     """Кампания выбрана/задана: резолвим группы. 1 → дальше; >1 → выбор; 0 → ошибка."""
-    from ads.client import build_client
+    from ads.client import build_client_async
 
     await state.update_data(campaign=campaign)
     try:
-        client = build_client()
+        client = await build_client_async()
         groups = await run_ads_read_call(
             find_ad_groups, client, DRAFT_ACCOUNT_ID, campaign, label="find_ad_groups"
         )
@@ -1375,10 +1375,10 @@ async def _rsa_start_from_intent(m: Message, brief: dict, state: FSMContext) -> 
         await _rsa_resolve_after_campaign(m, m.chat.id, brief["campaign"], state)
         return
     try:  # кампания не указана — показать выбор (бриф уже в state)
-        from ads.client import build_client
+        from ads.client import build_client_async
         from ads.read import list_campaigns
 
-        client = build_client()
+        client = await build_client_async()
         # как остальной read-слой: таймаут+ретрай транзиентных под семафором Google Ads
         # (а не «голый» to_thread — иначе зависший SearchStream не капается и копит in-flight).
         camps = await run_ads_read_call(
@@ -1667,11 +1667,11 @@ def _cc_draft_account_row():
 async def _cc_read_medians(customer_id: str):
     """Медианы прошлых Search-кампаний аккаунта (§19.3 «по аналогии»). Любой сбой/запрет чтения →
     пустые медианы (визард деградирует на дефолты, не падает)."""
-    from ads.client import build_client
+    from ads.client import build_client_async
     from ads.read import AccountMedians, search_campaign_medians
 
     try:
-        client = build_client(customer_id)
+        client = await build_client_async(customer_id)
         return await run_ads_read_call(
             search_campaign_medians, client, customer_id, label="search_campaign_medians"
         )
@@ -1745,10 +1745,10 @@ async def _cc_present_stage0(target: Message, chat_id: int) -> None:
     единственный Draft, чтобы визард не падал (мутации всё равно только на Draft)."""
     rows: list = []
     try:
-        from ads.client import build_client
+        from ads.client import build_client_async
         from ads.read import list_child_accounts
 
-        client = build_client()
+        client = await build_client_async()
         async with ux.typing_action(target):
             children = await run_ads_read_call(
                 list_child_accounts,
@@ -1955,10 +1955,10 @@ async def _cli_read_accounts(target: Message, chat_id: int) -> list:
     """Дочерние аккаунты MCC для раздела «Клиенты» (как §19 Этап 0). Сбой/нет MCC → Draft."""
     rows: list = []
     try:
-        from ads.client import build_client
+        from ads.client import build_client_async
         from ads.read import list_child_accounts
 
-        client = build_client()
+        client = await build_client_async()
         async with ux.typing_action(target):
             children = await run_ads_read_call(
                 list_child_accounts,
@@ -2875,12 +2875,12 @@ async def _clone_from_intent(m: Message, brief: dict) -> None:
     if not new_name or not source:
         await m.answer(i18n.t("clone_bad_args"))
         return
-    from ads.client import build_client
+    from ads.client import build_client_async
     from ads.read import read_campaign_config
     from ads.resolve import find_campaign_by_name
 
     try:
-        client = build_client()
+        client = await build_client_async()
         cfg = await run_ads_read_call(
             read_campaign_config, client, DRAFT_ACCOUNT_ID, source, label="read_campaign_config"
         )

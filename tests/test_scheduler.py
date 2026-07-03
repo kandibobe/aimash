@@ -19,6 +19,11 @@ def _m(cost: float, conv: float):
     return SimpleNamespace(cost=cost, conversions=conv)
 
 
+async def _fake_client_async(*a, **k):
+    # scheduler зовёт await build_client_async(acct) (холодная сборка вне loop) — фейк-заглушка.
+    return None
+
+
 # ── Аномалии (чистая логика, без SDK) ────────────────────────────────────────────
 def test_anomaly_spend_spike():
     alerts = detect_anomalies(_m(200, 5), _m(100, 5))  # +100% расход
@@ -130,8 +135,8 @@ async def test_anomaly_thresholds_read_from_user_settings(monkeypatch):
 
     # Расход +100% (100 → 200), конверсии без изменений. fetch_totals: 1-й вызов cur, 2-й prev.
     seq = iter([_m(200, 5), _m(100, 5)])
-    # build_client теперь per-account (принимает customer_id) → лямбда глотает аргументы.
-    monkeypatch.setattr(jobs, "build_client", lambda *a, **k: None)
+    # build_client_async теперь per-account (принимает customer_id) → async-фейк глотает аргументы.
+    monkeypatch.setattr(jobs, "build_client_async", _fake_client_async)
     monkeypatch.setattr(jobs, "fetch_totals", lambda *a, **k: next(seq))
     monkeypatch.setattr(jobs, "_recipients", lambda: {1, 2})
     # Один аккаунт (метрики аккаунта общие, пороги — per-chat): seq из 2 значений = cur+prev.
@@ -159,7 +164,7 @@ async def test_scheduled_report_multi_account_one_digest(monkeypatch):
 
     A, B = "1112223334", "2223334445"
     monkeypatch.setattr(jobs, "_scheduled_accounts", lambda: [A, B])
-    monkeypatch.setattr(jobs, "build_client", lambda *a, **k: None)
+    monkeypatch.setattr(jobs, "build_client_async", _fake_client_async)
 
     async def fake_report(_client, acct, _period, **k):
         return f"R:{acct}"
@@ -185,7 +190,7 @@ async def test_anomaly_multi_account_one_message(monkeypatch):
 
     A, B = "1112223334", "2223334445"
     monkeypatch.setattr(jobs, "_scheduled_accounts", lambda: [A, B])
-    monkeypatch.setattr(jobs, "build_client", lambda *a, **k: None)
+    monkeypatch.setattr(jobs, "build_client_async", _fake_client_async)
     # Оба аккаунта со всплеском расхода (+100%): curA,prevA, curB,prevB.
     seq = iter([_m(200, 5), _m(100, 5), _m(300, 5), _m(150, 5)])
     monkeypatch.setattr(jobs, "fetch_totals", lambda *a, **k: next(seq))

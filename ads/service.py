@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 
 from ads import mutations, resolve
-from ads.client import DRAFT_ACCOUNT_ID, build_client, build_client_async
+from ads.client import DRAFT_ACCOUNT_ID, build_client_async
 
 # ── Единый источник истины: какие операции РЕАЛЬНО исполняются за confirm-гейтом. ──
 # Это потолок возможностей: всё, чего тут нет, агент обязан отклонить ДО показа кнопок
@@ -174,7 +174,7 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             f"операция '{op}' не поддерживается (capability-guard) — выполнение отклонено"
         )
 
-    client = build_client()
+    client = await build_client_async()
     customer_id = DRAFT_ACCOUNT_ID  # замок: только Aimash Draft
 
     if op == "update_budget":

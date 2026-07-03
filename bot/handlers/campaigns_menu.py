@@ -310,13 +310,13 @@ async def on_ext_show(cq: bm.CallbackQuery, callback_data: bm.ExtCB) -> None:
         return
     await cq.answer()
     campaign_id = camps[callback_data.idx].get("id")
-    from ads.client import build_client
+    from ads.client import build_client_async
     from ads.read import list_campaign_assets
 
     try:
         rows = await bm.run_ads_read_call(
             list_campaign_assets,
-            build_client(),
+            await build_client_async(),
             bm.DRAFT_ACCOUNT_ID,
             campaign_id,
             label="list_campaign_assets",
@@ -416,10 +416,10 @@ async def camp_audience(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
         await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
         return
     try:
-        from ads.client import build_client
+        from ads.client import build_client_async
         from ads.read import list_audiences
 
-        client = build_client()
+        client = await build_client_async()
         async with bm.ux.typing_action(cq.message):
             auds = await bm.run_ads_read_call(
                 list_audiences, client, bm.DRAFT_ACCOUNT_ID, label="list_audiences"

@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
-from ads.client import DRAFT_ACCOUNT_ID, build_client
+from ads.client import DRAFT_ACCOUNT_ID, build_client_async
 from confirm.store import ConfirmStore
 from core.config import settings
 from core.context import request_scope, reset_context, set_context
@@ -73,7 +73,8 @@ async def run_scheduled_report(bot) -> None:
         for acct in accounts:
             tok = set_context(customer_id=acct)  # §8: ошибки/логи этого аккаунта атрибутируются
             try:
-                client = build_client(acct)  # per-account (Фаза 3: свой токен/MCC из oauth_tokens)
+                # per-account (Фаза 3: свой токен/MCC из oauth_tokens); холодная сборка вне loop
+                client = await build_client_async(acct)
                 report = await build_account_report_async(client, acct, period)
                 blocks.append(summary_text(report))
             except Exception as e:  # сеть/доступ/SDK — фиксируем (§15), остальные аккаунты живут
@@ -135,7 +136,7 @@ async def run_anomaly_check(bot) -> None:
         for acct in accounts:
             tok = set_context(customer_id=acct)  # §8: per-account атрибуция ошибок/логов
             try:
-                client = build_client(acct)
+                client = await build_client_async(acct)
                 cur = await run_ads_read_call(
                     fetch_totals, client, acct, period, label=f"anom_{acct}"
                 )

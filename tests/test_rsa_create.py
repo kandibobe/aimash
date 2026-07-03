@@ -70,6 +70,11 @@ def patched(obj, name, value):
         setattr(obj, name, orig)
 
 
+async def _fake_client_async(*a, **k):
+    # execute_confirmed зовёт await build_client_async() (сборка SDK вне loop) — фейк-заглушка.
+    return object()
+
+
 async def _call(
     store,
     *,
@@ -263,7 +268,7 @@ async def test_execute_confirmed_routes_create_rsa():
             return cp
 
     with (
-        patched(svc, "build_client", lambda: object()),
+        patched(svc, "build_client_async", _fake_client_async),
         patched(mut, "apply_create_rsa", fake_apply),
     ):
         res = await svc.execute_confirmed(_S(), "cid")

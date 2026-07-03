@@ -596,10 +596,10 @@ async def cc_use_assets(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.
     read_cid = bm.DRAFT_ACCOUNT_ID
     rows: list = []
     try:
-        from ads.client import build_client
+        from ads.client import build_client_async
         from ads.read import list_account_assets
 
-        client = build_client(read_cid)
+        client = await build_client_async(read_cid)
         rows = await bm.run_ads_read_call(
             list_account_assets, client, read_cid, label="list_account_assets"
         )

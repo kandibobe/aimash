@@ -22,10 +22,10 @@ async def rsa_cmd(m: bm.Message, state: bm.FSMContext) -> None:
     """Визард генерации RSA: выбор кампании → группы → бриф → курация → создание."""
     await state.clear()
     try:
-        from ads.client import build_client
+        from ads.client import build_client_async
         from ads.read import list_campaigns
 
-        client = build_client()
+        client = await build_client_async()
         # как остальной read-слой: таймаут+ретрай транзиентных под семафором Google Ads
         # (а не «голый» to_thread — иначе зависший SearchStream не капается и копит in-flight).
         camps = await bm.run_ads_read_call(
