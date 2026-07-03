@@ -258,6 +258,38 @@ class ConfirmStore:
             s.add(_audit(p, p.chat_id, "applied", result=result))
             await s.commit()
 
+    async def mark_needs_review(self, confirmation_id: str, *, error: str) -> bool:
+        """executing → needs_review (АТОМАРНО, одноразово; для реконсиляции зависших мутаций).
+
+        Процесс упал ПОСЛЕ claim, посреди SDK-вызова: исход НЕИЗВЕСТЕН — изменение могло
+        примениться в Google Ads. Поэтому НЕ 'failed' (это утверждало бы «не применено»), а
+        честный терминальный needs_review: оператор сверяет аккаунт вручную. Терминальность
+        конструктивна: claim требует 'confirmed', finalize — 'executing' → needs_review никем
+        не «воскрешается» (replay-защита сохранена).
+
+        CAS: UPDATE … WHERE status='executing' — параллельный finalize/record_failure ЖИВОГО
+        процесса выигрывает гонку (rowcount=0 → False, без спурьёзной audit-строки).
+        Пишет audit-строку 'needs_review' с редактированной ошибкой (golden rule #5)."""
+        async with Session() as s:
+            res = await s.execute(
+                update(Proposal)
+                .where(
+                    Proposal.confirmation_id == confirmation_id,
+                    Proposal.status == "executing",
+                )
+                .values(status="needs_review", decided_at=func.now())
+            )
+            # cast: DML возвращает CursorResult (есть .rowcount); async-стаб видит общий Result.
+            if cast(CursorResult, res).rowcount != 1:  # живой процесс успел finalize/failed
+                await s.rollback()
+                return False
+            p = (
+                await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
+            ).scalar_one()
+            s.add(_audit(p, p.chat_id, "needs_review", result={"error": redact_text(str(error))}))
+            await s.commit()
+            return True
+
     async def record_failure(self, confirmation_id: str, *, error: str) -> None:
         """Ошибка выполнения → failed (терминальный) + audit failed.
 
@@ -307,7 +339,7 @@ class AuditEvent:
     """Одна строка журнала изменений для показа (ТЗ §12: что/когда/кто/результат). Без секретов."""
 
     created_at: datetime | None
-    status: str  # applied | failed | rejected
+    status: str  # applied | failed | rejected | needs_review
     operation: str
     actor_user_id: int | None
     actor_username: str | None
@@ -316,10 +348,10 @@ class AuditEvent:
 
 
 async def list_recent_audit(limit: int = 15) -> list[AuditEvent]:
-    """Последние ЗНАЧИМЫЕ события журнала (applied/failed/rejected) — «что и когда изменилось»
-    (ТЗ §12/§18), reverse-chron. «Кто» для applied/failed (там actor=NULL — см. db.models.AuditLog)
-    восстанавливаем из связанной по confirmation_id строки confirmed/rejected, где actor записан.
-    Read-only, секретов нет (result уже отредактирован на записи record_failure)."""
+    """Последние ЗНАЧИМЫЕ события журнала (applied/failed/rejected/needs_review) — «что и когда
+    изменилось» (ТЗ §12/§18), reverse-chron. «Кто» для applied/failed (там actor=NULL — см.
+    db.models.AuditLog) восстанавливаем из связанной по confirmation_id строки confirmed/rejected,
+    где actor записан. Read-only, секретов нет (result отредактирован на записи)."""
     limit = max(1, min(int(limit), 50))
     async with Session() as s:
         rows = list(
@@ -340,7 +372,7 @@ async def list_recent_audit(limit: int = 15) -> list[AuditEvent]:
             actor[r.confirmation_id] = (r.actor_user_id, r.actor_username)
     out: list[AuditEvent] = []
     for r in rows:
-        if r.status not in ("applied", "failed", "rejected"):
+        if r.status not in ("applied", "failed", "rejected", "needs_review"):
             continue
         au, an = r.actor_user_id, r.actor_username
         if au is None and not an:  # applied/failed: actor восстановим из confirmed-строки

@@ -137,7 +137,7 @@ async def handle_command(
                     "text": i18n.t("loop_bad_args", name=name, errors=e.errors()),
                 }
             return {"type": "clone_intent", "brief": validated.model_dump()}
-        return await _do_read(name, args)
+        return await _do_read(name, args, chat_id)
 
     if name in MUTATION_TOOLS:
         # Capability-guard: операцию, которую код НЕ исполняет, отклоняем ДО показа кнопок.
@@ -177,25 +177,32 @@ async def handle_command(
     return {"type": "text", "text": i18n.t("loop_unknown_tool", name=name)}
 
 
-async def _do_read(name: str, args: dict[str, Any]) -> dict[str, Any]:
+async def _do_read(name: str, args: dict[str, Any], chat_id: int = 0) -> dict[str, Any]:
     """Живое чтение Google Ads (read-only). google-ads SDK синхронный → через to_thread.
 
-    Пока белый список = 1 тестовый аккаунт, читаем его. Когда список расширится —
-    добавить резолв 'account' → customer_id из allowed.
-    """
-    from core.config import settings
+    Аккаунт РЕЗОЛВИТСЯ из аргумента модели (id или имя дочернего) через композитный замок
+    (read-замок × пер-юзер грант, core.access.resolve_read_account); пусто → активный аккаунт
+    чата (тот же резолв, что /report). Запрещённый/неизвестный аккаунт → внятный отказ, а НЕ
+    молчаливая подмена первым разрешённым (раньше NL-запрос статистики чужого аккаунта тихо
+    показывал другой — денежные цифры без источника)."""
+    from core.access import resolve_read_account
 
-    allowed = sorted(settings.allowed_customer_ids)
-    if not allowed:
-        return {"type": "text", "text": i18n.t("loop_no_accounts")}
-    cid = allowed[0]
+    try:
+        cid = await resolve_read_account(chat_id, args.get("account"))
+    except PermissionError:
+        return {
+            "type": "text",
+            "text": i18n.t("loop_account_denied", account=str(args.get("account") or "")),
+        }
+    except LookupError as e:
+        return {"type": "text", "text": i18n.t("loop_account_not_found", detail=str(e))}
     days = int(args.get("period_days") or 30)
     try:
         from ads.client import build_client_async
         from ads.read import account_currency, account_stats
         from core.resilience import run_ads_read_call
 
-        client = await build_client_async()
+        client = await build_client_async(cid)  # per-account OAuth (раньше строился без cid)
         # run_ads_read_call: таймаут+ретрай транзиентных/TimeoutError под семафором Google Ads —
         # ограничивает хвост (зависший read капается на ADS_TIMEOUT_S, единичный блип → авторетрай).
         st = await run_ads_read_call(account_stats, client, cid, days, label="account_stats")

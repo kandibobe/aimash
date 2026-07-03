@@ -30,11 +30,17 @@ from ads import extensions
 from ads.client import ensure_allowed
 from ads.resolve import gaql_escape  # единый GAQL-эскейп для literal-WHERE (defense-in-depth)
 from ads.validation import assert_keyword_ok, normalize_keywords
-from core.ads_errors import error_code_names  # единый источник имён кодов ошибок Google Ads
+from core.ads_errors import (  # единый источник имён кодов ошибок Google Ads
+    error_code_names,
+    partial_failure_errors,
+)
+from core.logging import redact_text  # причины отказов partial_failure — без секретов (правило #5)
 from core.limits import (
+    BILLING_UNIT_MICROS,
     MAX_RADIUS_KM,
     MONEY_MAX_MICROS,
     MONEY_MAX_UNITS,
+    round_micros,
 )  # единый источник порогов (defense-in-depth)
 from core.resilience import run_ads_call  # таймаут+ретрай на самом SDK-вызове (не на гейтах)
 
@@ -249,7 +255,14 @@ async def apply_update_bid(
     if not proposal.user_initiated:
         raise PermissionError("изменение ставки должно быть прямой командой пользователя")
 
-    result = await run_ads_call(_apply_bid_via_sdk, ads_client, customer_id, campaign_id, bids)
+    result = await run_ads_call(
+        _apply_bid_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_id,
+        bids,
+        op_count=max(1, len(bids)),  # квота §3: по операции на каждую группу
+    )
     await confirm_store.finalize(confirmation_id, result=result)
     return result
 
@@ -272,7 +285,13 @@ async def apply_add_keywords(
     clean = normalize_keywords(keywords)
     await _require_confirmation(confirm_store, confirmation_id, "add_keywords")
     result = await run_ads_call(
-        _add_keywords_via_sdk, ads_client, customer_id, ad_group_ids, clean, match_type
+        _add_keywords_via_sdk,
+        ads_client,
+        customer_id,
+        ad_group_ids,
+        clean,
+        match_type,
+        op_count=len(ad_group_ids) * len(clean),  # квота §3: каждая mutate-операция батча
     )
     await confirm_store.finalize(confirmation_id, result=result)
     return result
@@ -293,7 +312,13 @@ async def apply_add_negative_keywords(
     clean = normalize_keywords(keywords)  # длину/дубли считает КОД — ДО claim
     await _require_confirmation(confirm_store, confirmation_id, "add_negative_keywords")
     result = await run_ads_call(
-        _add_negative_keywords_via_sdk, ads_client, customer_id, campaign_id, clean, match_type
+        _add_negative_keywords_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_id,
+        clean,
+        match_type,
+        op_count=len(clean),  # квота §3: каждая mutate-операция батча
     )
     await confirm_store.finalize(confirmation_id, result=result)
     return result
@@ -315,7 +340,13 @@ async def apply_remove_negative_keywords(
     clean = normalize_keywords(keywords)  # форму/дубли считает КОД — ДО claim
     await _require_confirmation(confirm_store, confirmation_id, "remove_negative_keywords")
     result = await run_ads_call(
-        _remove_negative_keywords_via_sdk, ads_client, customer_id, campaign_id, clean, match_type
+        _remove_negative_keywords_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_id,
+        clean,
+        match_type,
+        op_count=len(clean),  # квота §3: оценка сверху (резолв может найти меньше)
     )
     await confirm_store.finalize(confirmation_id, result=result)
     return result
@@ -1128,16 +1159,39 @@ def _apply_bid_via_sdk(client, customer_id: str, campaign_id: str, bids: list) -
     }
 
 
+def _rejected_from_partial_failure(
+    client, resp, meta: list[tuple[str, str]], *, key: str
+) -> list[dict]:
+    """Атрибуция partial_failure-ошибок к операциям батча: op_index → meta[i]=(ad_group_id, text).
+    reason редактируется (golden rule #5: серверный message может нести чувствительное)."""
+    rejected: list[dict] = []
+    for idx, code, msg in partial_failure_errors(client, resp):
+        ag, text = meta[idx] if 0 <= idx < len(meta) else ("", "")
+        reason = redact_text((f"{msg} [{code}]" if code else msg).strip() or "отклонено сервером")
+        row: dict = {key: text, "reason": reason}
+        if ag:
+            row["ad_group_id"] = ag
+        rejected.append(row)
+    return rejected
+
+
 def _add_keywords_via_sdk(
     client, customer_id: str, ad_group_ids: list, keywords: list, match_type: str
 ) -> dict:
     """Создаёт позитивные ключевые слова (ad_group_criterion) во ВСЕХ группах кампании.
-    CREATE — БЕЗ update_mask. Метод mutate_ad_group_criteria (мн.ч.), тип Operation (ед.ч.)."""
+    CREATE — БЕЗ update_mask. Метод mutate_ad_group_criteria (мн.ч.), тип Operation (ед.ч.).
+
+    partial_failure=True: одна плохая позиция (policy/серверный дубль) НЕ валит весь батч —
+    валидные ключи применяются, отклонённые возвращаются в result['rejected'] с причиной.
+    Все отклонены ⇒ ValueError (честный failed — не применено ничего). Скоуп partial_failure
+    осознанно узкий: только пользовательские батчи ключей/минус-слов; remove_* (резолвят
+    существующие) и ассет-батчи остаются whole-batch (fail loud)."""
     ag_svc = client.get_service("AdGroupService")
     svc = client.get_service("AdGroupCriterionService")
     mt = getattr(client.enums.KeywordMatchTypeEnum, str(match_type).upper())
     enabled = client.enums.AdGroupCriterionStatusEnum.ENABLED
     ops = []
+    meta: list[tuple[str, str]] = []  # meta[i] = (ad_group_id, text) операции i — атрибуция отказов
     for ad_group_id in ad_group_ids:
         ag_rn = ag_svc.ad_group_path(str(customer_id), str(ad_group_id))
         for text in keywords:
@@ -1147,15 +1201,30 @@ def _add_keywords_via_sdk(
             op.create.keyword.text = text
             op.create.keyword.match_type = mt
             ops.append(op)
-    resp = svc.mutate_ad_group_criteria(customer_id=str(customer_id), operations=ops)
-    return {
+            meta.append((str(ad_group_id), str(text)))
+    req = client.get_type("MutateAdGroupCriteriaRequest")
+    req.customer_id = str(customer_id)
+    req.operations.extend(ops)
+    req.partial_failure = True
+    resp = svc.mutate_ad_group_criteria(request=req)
+    # При partial_failure сервер отдаёт results с ПУСТЫМ resource_name на отклонённых позициях.
+    created = [r.resource_name for r in resp.results if getattr(r, "resource_name", "")]
+    rejected = _rejected_from_partial_failure(client, resp, meta, key="keyword")
+    if rejected and not created:
+        reasons = "; ".join(r["reason"] for r in rejected[:3])
+        raise ValueError(f"Google Ads отклонил все ключи ({len(rejected)}): {reasons}")
+    result = {
         "customer_id": customer_id,
         "ad_group_ids": [str(a) for a in ad_group_ids],
         "match_type": str(match_type),
-        "created": [r.resource_name for r in resp.results],
-        "count": len(resp.results),
+        "created": created,
+        "count": len(created),
         "applied": True,
     }
+    if rejected:
+        result["rejected"] = rejected
+        result["rejected_count"] = len(rejected)
+    return result
 
 
 # ── Удаление ключевых слов (симметрично add: по тексту+типу из групп кампании) ────
@@ -1175,7 +1244,13 @@ async def apply_remove_keywords(
     clean = normalize_keywords(keywords)  # длину/форму/дубли считает КОД — ДО claim
     await _require_confirmation(confirm_store, confirmation_id, "remove_keywords")
     result = await run_ads_call(
-        _remove_keywords_via_sdk, ads_client, customer_id, ad_group_ids, clean, match_type
+        _remove_keywords_via_sdk,
+        ads_client,
+        customer_id,
+        ad_group_ids,
+        clean,
+        match_type,
+        op_count=len(clean),  # квота §3: оценка сверху (резолв может найти меньше)
     )
     await confirm_store.finalize(confirmation_id, result=result)
     return result
@@ -1228,12 +1303,16 @@ def _add_negative_keywords_via_sdk(
     client, customer_id: str, campaign_id: str, keywords: list, match_type: str
 ) -> dict:
     """Минус-слова НА УРОВНЕ КАМПАНИИ (campaign_criterion, negative=True — обязателен, immutable).
-    CREATE — БЕЗ update_mask. Это НЕ shared negative list (другой флоу через SharedSetService)."""
+    CREATE — БЕЗ update_mask. Это НЕ shared negative list (другой флоу через SharedSetService).
+
+    partial_failure=True (зеркало _add_keywords_via_sdk): плохая позиция не валит батч —
+    отклонённые в result['rejected'], все отклонены ⇒ ValueError (честный failed)."""
     svc = client.get_service("CampaignCriterionService")
     cmp_svc = client.get_service("CampaignService")
     campaign_rn = cmp_svc.campaign_path(str(customer_id), str(campaign_id))
     mt = getattr(client.enums.KeywordMatchTypeEnum, str(match_type).upper())
     ops = []
+    meta: list[tuple[str, str]] = []  # ("", text): уровень кампании — без ad_group_id
     for text in keywords:
         op = client.get_type("CampaignCriterionOperation")
         op.create.campaign = campaign_rn
@@ -1241,15 +1320,29 @@ def _add_negative_keywords_via_sdk(
         op.create.keyword.text = text
         op.create.keyword.match_type = mt
         ops.append(op)
-    resp = svc.mutate_campaign_criteria(customer_id=str(customer_id), operations=ops)
-    return {
+        meta.append(("", str(text)))
+    req = client.get_type("MutateCampaignCriteriaRequest")
+    req.customer_id = str(customer_id)
+    req.operations.extend(ops)
+    req.partial_failure = True
+    resp = svc.mutate_campaign_criteria(request=req)
+    created = [r.resource_name for r in resp.results if getattr(r, "resource_name", "")]
+    rejected = _rejected_from_partial_failure(client, resp, meta, key="keyword")
+    if rejected and not created:
+        reasons = "; ".join(r["reason"] for r in rejected[:3])
+        raise ValueError(f"Google Ads отклонил все минус-слова ({len(rejected)}): {reasons}")
+    result = {
         "customer_id": customer_id,
         "campaign_id": str(campaign_id),
         "match_type": str(match_type),
-        "resource_names": [r.resource_name for r in resp.results],
-        "count": len(resp.results),
+        "resource_names": created,
+        "count": len(created),
         "applied": True,
     }
+    if rejected:
+        result["rejected"] = rejected
+        result["rejected_count"] = len(rejected)
+    return result
 
 
 def _remove_negative_keywords_via_sdk(
@@ -1786,18 +1879,10 @@ def _resolve_language_ids(languages: list[str] | None) -> list[int]:
 
 # Минимальная биллинг-единица Google Ads для бид/бюджета — 10 000 micros (0.01 валюты). Значения,
 # не кратные единице (например CPC = cost/clicks из медиан «по аналогии», §19.3), API отклоняет.
-_MICROS_UNIT = 10_000
-
-
-def _round_micros(value: int) -> int:
-    """Округлить денежную величину (micros) до кратной минимальной биллинг-единице (10 000 micros =
-    0.01 валюты). Google Ads отклоняет бид/бюджет, не кратный единице. Положительное значение не
-    обнуляем (минимум — одна единица), 0/отрицательное возвращаем как есть (валидируется выше)."""
-    v = int(value)
-    if v <= 0:
-        return v
-    r = round(v / _MICROS_UNIT) * _MICROS_UNIT
-    return r if r > 0 else _MICROS_UNIT
+# Единый источник округления — core.limits.round_micros; алиасы сохраняют прежние имена
+# (_MICROS_UNIT/_round_micros) для call-sites и тестов.
+_MICROS_UNIT = BILLING_UNIT_MICROS
+_round_micros = round_micros
 
 
 def _create_search_campaign_via_sdk(

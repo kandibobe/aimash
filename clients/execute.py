@@ -1,10 +1,12 @@
 """§20: исполнитель подтверждённых memory-операций (профиль клиента) за confirm-гейтом.
 
 Домен «memory» отделён от домена «google-ads» (ads.service.execute_confirmed): операции профиля
-(save/update/clear) — это ЛОКАЛЬНАЯ БД, а не Google Ads. Замок аккаунта (ads.client.ensure_allowed)
-и SDK к ним НЕ применяются. Форма зеркалит ads.service.execute_confirmed:
+(save/update/clear) — это ЛОКАЛЬНАЯ БД, а не Google Ads. МУТАЦИОННЫЙ замок (ads.client.
+ensure_allowed) и SDK к ним НЕ применяются, но READ-доступ к аккаунту ПЕРЕПРОВЕРЯЕТСЯ на
+исполнении (ensure_read_allowed + пер-пользовательский грант — TOCTOU: между показом и ✅ доступ
+могли отозвать). Форма зеркалит ads.service.execute_confirmed:
   get_confirmed → status=='confirmed' → op ∈ MEMORY_OPERATIONS (defense-in-depth) →
-  claim (АТОМАРНО, одноразово — защита от replay) → writer (clients.store) → finalize (+audit).
+  re-check доступа → claim (АТОМАРНО, одноразово — replay) → writer (clients.store) → finalize.
 
 bot.main._do_confirm маршрутизирует ✅ сюда, если proposal.operation ∈ MEMORY_OPERATIONS, иначе в
 ads.service.execute_confirmed. Ошибка внутри пробрасывается — _do_confirm пишет record_failure.
@@ -35,6 +37,18 @@ async def execute_confirmed_memory(store, confirmation_id: str) -> dict:
         raise PermissionError(
             f"операция '{op}' не относится к домену профиля (memory) — выполнение отклонено"
         )
+
+    # TOCTOU-перепроверка доступа НА ИСПОЛНЕНИИ (зеркало ads-пути, где ensure_allowed стоит в
+    # apply_*): грант могли отозвать между показом черновика и ✅. Композит тот же, что гейтит UI
+    # (_cli_check_access): глобальный read-замок + пер-пользовательский грант. Стоит ДО claim,
+    # чтобы отказ доступа не «съел» одноразовый черновик (fail-closed, как валидация до claim в
+    # ads.mutations). Мутационный замок ensure_allowed по-прежнему неприменим — это локальная БД.
+    from ads.client import ensure_read_allowed  # lazy: модуль остаётся дешёвым
+    from core.access import ensure_account_allowed_for_user
+
+    target_cid = (p.params or {}).get("customer_id") or p.customer_id
+    ensure_read_allowed(target_cid)  # PermissionError → fail-closed
+    await ensure_account_allowed_for_user(p.chat_id, target_cid)
 
     # Атомарно застолбить (confirmed→executing, одноразово). Второй вызов (повтор/гонка) → None.
     claimed = await store.claim(confirmation_id, operation=op)

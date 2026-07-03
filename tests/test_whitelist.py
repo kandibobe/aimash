@@ -150,3 +150,21 @@ async def test_unlisted_refusal_honors_telegram_lang_en():
     with _whitelist("7"):
         await mw(handler, ev, {})
     assert "not granted" in sent[0].lower()  # EN по language_code Telegram-клиента
+
+
+async def test_unlisted_warning_logged_once(caplog):
+    """1F10: WARNING «не в whitelist» пишется ОДИН раз на chat_id; повторы — debug (не шум)."""
+    import logging
+
+    mw = bm.WhitelistMiddleware()
+    _state, handler = _counter()
+    uid = 424242
+    bm._WL_LOGGED.discard(uid)  # чистый старт для этого uid (set живёт на процесс)
+    with _whitelist("7"), caplog.at_level(logging.WARNING, logger="aimash"):
+        await mw(handler, _msg(uid), {})
+        await mw(handler, _msg(uid), {})
+        await mw(handler, _msg(uid), {})
+    warnings = [
+        r for r in caplog.records if r.levelno == logging.WARNING and str(uid) in r.getMessage()
+    ]
+    assert len(warnings) == 1, f"ожидался ровно 1 WARNING на chat_id, получено {len(warnings)}"

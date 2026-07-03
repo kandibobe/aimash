@@ -7,6 +7,13 @@ Sheets. Это НЕ proposal: в Google Ads ничего не меняется, 
 Паттерн мутации JSON-колонки скопирован с adcopy.session.SessionStore: deepcopy → mutate →
 reassign → flag_modified (JSON-колонка не отслеживает изменения вложенных структур). Все мутации
 имеют гард владения expected_chat_id (мультиоператор: чужой session_id не подойдёт по WHERE).
+
+Конкуренция (lost update): aiogram диспатчит апдейты параллельными задачами, а ThrottleMiddleware
+пропускает burst — два почти одновременных патча одного чата могли перетереть друг друга
+(read-modify-write JSON). Мутирующие пути (_load(for_update=True) в patch/set_step/set_preview/
+_set_status) берут SELECT … FOR UPDATE: на Postgres — row-lock до commit (второй патч ждёт и
+читает уже свежее состояние), на SQLite (dev/тесты) FOR UPDATE молча игнорируется (single-writer
+и так сериализует). Тот же паттерн — кандидат для adcopy.session.SessionStore (отдельный шаг).
 """
 
 from __future__ import annotations
@@ -16,11 +23,30 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import Select, select
 from sqlalchemy.orm.attributes import flag_modified
 
 from db.models import CampaignDraft
 from db.session import Session
+
+
+def _draft_select(
+    session_id: str,
+    expected_chat_id: int | None,
+    *,
+    active_only: bool = False,
+    for_update: bool = False,
+) -> Select:
+    """Сборка SELECT черновика (вынесена из _load для юнит-теста компиляции FOR UPDATE)."""
+    conds = [CampaignDraft.session_id == session_id]
+    if expected_chat_id is not None:
+        conds.append(CampaignDraft.chat_id == expected_chat_id)
+    if active_only:  # правки — только на активный черновик (done/abandoned не воскрешаем)
+        conds.append(CampaignDraft.status == "active")
+    stmt = select(CampaignDraft).where(*conds)
+    if for_update:  # row-lock на Postgres; SQLite молча игнорирует (single-writer)
+        stmt = stmt.with_for_update()
+    return stmt
 
 
 def empty_wizard_state() -> dict:
@@ -147,7 +173,7 @@ class CampaignDraftStore:
         active_only: правки идут ТОЛЬКО на active-черновик (поздний колбэк после abandon/done —
         None, как обещает контракт; иначе scheduler-abandon с живым FSM «воскресил» бы черновик)."""
         async with Session() as s:
-            p = await self._load(s, session_id, expected_chat_id, active_only=True)
+            p = await self._load(s, session_id, expected_chat_id, active_only=True, for_update=True)
             if p is None:
                 return None
             # deepcopy + flag_modified: JSON-колонка не помечается dirty при мутации вложенного.
@@ -170,7 +196,7 @@ class CampaignDraftStore:
         """Зафиксировать выбранный на Этапе-0 дочерний аккаунт (read-only превью). Аккаунт МУТАЦИИ
         (customer_id) НЕ трогаем — он всегда Draft."""
         async with Session() as s:
-            p = await self._load(s, session_id, expected_chat_id, active_only=True)
+            p = await self._load(s, session_id, expected_chat_id, active_only=True, for_update=True)
             if p is None:
                 return None
             p.preview_customer_id = preview_customer_id
@@ -181,7 +207,7 @@ class CampaignDraftStore:
         self, session_id: str, step: int, *, expected_chat_id: int | None = None
     ) -> DraftSnapshot | None:
         async with Session() as s:
-            p = await self._load(s, session_id, expected_chat_id, active_only=True)
+            p = await self._load(s, session_id, expected_chat_id, active_only=True, for_update=True)
             if p is None:
                 return None
             p.current_step = int(step)
@@ -197,7 +223,7 @@ class CampaignDraftStore:
     # ── внутреннее ──────────────────────────────────────────────────────────────
     async def _set_status(self, session_id: str, status: str, expected_chat_id: int | None) -> None:
         async with Session() as s:
-            p = await self._load(s, session_id, expected_chat_id)
+            p = await self._load(s, session_id, expected_chat_id, for_update=True)
             if p is None:
                 return
             p.status = status
@@ -205,11 +231,14 @@ class CampaignDraftStore:
 
     @staticmethod
     async def _load(
-        s, session_id: str, expected_chat_id: int | None, *, active_only: bool = False
+        s,
+        session_id: str,
+        expected_chat_id: int | None,
+        *,
+        active_only: bool = False,
+        for_update: bool = False,
     ) -> CampaignDraft | None:
-        conds = [CampaignDraft.session_id == session_id]
-        if expected_chat_id is not None:
-            conds.append(CampaignDraft.chat_id == expected_chat_id)
-        if active_only:  # правки — только на активный черновик (done/abandoned не воскрешаем)
-            conds.append(CampaignDraft.status == "active")
-        return (await s.execute(select(CampaignDraft).where(*conds))).scalar_one_or_none()
+        stmt = _draft_select(
+            session_id, expected_chat_id, active_only=active_only, for_update=for_update
+        )
+        return (await s.execute(stmt)).scalar_one_or_none()

@@ -15,16 +15,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from google.ads.googleads.errors import GoogleAdsException  # noqa: E402
 
 from ads.client import build_client, ensure_allowed  # noqa: E402
-from core.config import settings  # noqa: E402
+from core.config import require_dev_env  # noqa: E402
 
 TEST = "7753643025"
 
 
 def main() -> None:
-    # Фикстура: пишет в Google Ads НАПРЯМУЮ, минуя confirm-гейт. Только для dev/тест-аккаунта.
-    if settings.is_prod:
-        print("⛔ Только для ENV=dev — прямая запись без confirm-гейта в prod запрещена.")
-        sys.exit(1)
+    # Фикстура: пишет в Google Ads НАПРЯМУЮ, минуя confirm-гейт. ТОЛЬКО ENV=dev (golden rule #10):
+    # require_dev_env — единый гейт всех dev-фикстур (не `if is_prod` — staging тоже запрещён).
+    require_dev_env()
     ensure_allowed(TEST)
     client = build_client()
     suffix = uuid.uuid4().hex[:6]

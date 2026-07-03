@@ -119,6 +119,7 @@ CATALOG: dict[str, dict[str, str]] = {
             "/client &lt;id&gt; — client card by account id\n\n"
             "<b>⚙️ Settings and service</b>\n"
             "/account &lt;id&gt; | reset — read account for reports/keywords (default Draft)\n"
+            "/accounts — my accessible accounts · /whoami — my chat_id and access mode\n"
             "/refresh — refresh the account list and caches without a restart\n"
             "/model — choose the AI model (OpenRouter) · /balance — AI budget: balance and spend\n"
             "/lang — interface language (RU/EN)\n"
@@ -264,6 +265,14 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "Не разобрал. Формат: «город, радиус_км», например: <code>Киев, 10</code>.",
         "en": "Couldn't parse it. Format: “city, radius_km”, e.g.: <code>Kyiv, 10</code>.",
     },
+    "mcc_manager_failed": {
+        "ru": "⚠️ MCC <code>{mid}</code>: сводка недоступна (см. /diag).",
+        "en": "⚠️ MCC <code>{mid}</code>: summary unavailable (see /diag).",
+    },
+    "geo_read_failed": {
+        "ru": "<i>Текущее гео прочитать не удалось — изменение всё равно доступно.</i>",
+        "en": "<i>Couldn't read the current geo — you can still change it.</i>",
+    },
     "geo_stale": {
         "ru": "Сессия гео устарела — открой меню кампании в /campaigns заново.",
         "en": "The geo session expired — reopen the campaign menu via /campaigns.",
@@ -272,6 +281,84 @@ CATALOG: dict[str, dict[str, str]] = {
     "proposal_pending": {
         "ru": texts.PROPOSAL_PENDING,
         "en": "📝 <b>Change draft</b>\n\n{summary}\n\nConfirm? <i>(draft valid for 24h)</i>",
+    },
+    # — 2C: гранты аккаунтов (/grant /revoke /accounts /whoami) —
+    "admin_only": {
+        "ru": "⛔ Команда доступна только администратору бота (ADMIN_CHAT_IDS).",
+        "en": "⛔ This command is for the bot administrator only (ADMIN_CHAT_IDS).",
+    },
+    "grant_bad_args": {
+        "ru": "Формат: <code>/grant &lt;chat_id&gt; &lt;customer_id&gt;</code> — выдать доступ к аккаунту.",
+        "en": "Usage: <code>/grant &lt;chat_id&gt; &lt;customer_id&gt;</code> — grant account access.",
+    },
+    "grant_unknown_account": {
+        "ru": (
+            "Аккаунт <code>{cid}</code> не входит в читаемые ботом (read-замок). Проверь id или "
+            "выполни /refresh (пере-обход MCC)."
+        ),
+        "en": (
+            "Account <code>{cid}</code> is not readable by the bot (read lock). Check the id or "
+            "run /refresh (re-discover MCC)."
+        ),
+    },
+    "grant_ok": {
+        "ru": "✅ Грант выдан: chat <code>{chat}</code> → аккаунт <code>{cid}</code> (чтение).",
+        "en": "✅ Granted: chat <code>{chat}</code> → account <code>{cid}</code> (read).",
+    },
+    "grant_enforcement_note": {
+        "ru": (
+            "⚠️ Это ПЕРВЫЙ грант — включён режим пер-пользовательской изоляции: не-Draft аккаунты "
+            "теперь видны операторам только по грантам (/whoami покажет режим)."
+        ),
+        "en": (
+            "⚠️ This is the FIRST grant — per-user isolation is now enforced: non-Draft accounts "
+            "are visible to operators only via grants (/whoami shows the mode)."
+        ),
+    },
+    "revoke_ok": {
+        "ru": "✅ Грант снят: chat <code>{chat}</code> ✕ аккаунт <code>{cid}</code>.",
+        "en": "✅ Revoked: chat <code>{chat}</code> ✕ account <code>{cid}</code>.",
+    },
+    "accounts_title": {
+        "ru": "🏢 <b>Твои аккаунты (чтение)</b> · {n}:",
+        "en": "🏢 <b>Your accounts (read)</b> · {n}:",
+    },
+    "whoami_text": {
+        "ru": (
+            "🪪 <b>Ты</b>\n"
+            "chat_id: <code>{chat}</code>\n"
+            "Активный аккаунт чтения: <code>{active}</code>\n"
+            "Режим изоляции: <code>{mode}</code> · enforcement: {enforced}\n"
+            "Админ: {admin}"
+        ),
+        "en": (
+            "🪪 <b>You</b>\n"
+            "chat_id: <code>{chat}</code>\n"
+            "Active read account: <code>{active}</code>\n"
+            "Isolation mode: <code>{mode}</code> · enforcement: {enforced}\n"
+            "Admin: {admin}"
+        ),
+    },
+    "kw_partial_rejected": {
+        "ru": (
+            "⚠️ Часть позиций Google Ads отклонил: применено <b>{ok}</b>, отклонено <b>{bad}</b>. "
+            "Причины (первые):"
+        ),
+        "en": (
+            "⚠️ Google Ads rejected some items: applied <b>{ok}</b>, rejected <b>{bad}</b>. "
+            "Reasons (first):"
+        ),
+    },
+    "external_context_money_warn": {
+        "ru": (
+            "⚠️ <b>Черновик создан при наличии внешнего контента (файл/ссылка)</b> — сумма могла "
+            "быть предложена этим контентом, а не тобой. Проверь цифры перед подтверждением."
+        ),
+        "en": (
+            "⚠️ <b>This draft was created with external content present (file/link)</b> — the "
+            "amount may have been suggested by that content, not you. Verify the numbers before "
+            "confirming."
+        ),
     },
     "proposal_long_header": {
         "ru": (
@@ -951,6 +1038,20 @@ CATALOG: dict[str, dict[str, str]] = {
     "loop_read_error": {
         "ru": "ошибка чтения Google Ads: {detail}",
         "en": "Google Ads read error: {detail}",
+    },
+    "loop_account_denied": {
+        "ru": (
+            "⛔ Аккаунт «{account}» не разрешён тебе на чтение. Доступные — /accounts; "
+            "доступ выдаёт админ (/grant)."
+        ),
+        "en": (
+            "⛔ You don't have read access to account “{account}”. See /accounts; "
+            "access is granted by the admin (/grant)."
+        ),
+    },
+    "loop_account_not_found": {
+        "ru": "❓ Не понял, какой аккаунт: {detail}. Список — /accounts.",
+        "en": "❓ Couldn't resolve the account: {detail}. See /accounts.",
     },
     # — bot.ux: короткие подсказки к временным ошибкам (_err_hint) —
     "hint_timeout": {

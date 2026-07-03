@@ -55,6 +55,28 @@ def test_round_micros_snaps_to_billing_unit():
         assert rm(987_654) % 10_000 == 0
 
 
+def test_round_micros_single_source_in_core_limits():
+    """1F5: единый источник округления — core.limits.round_micros; алиасы read/mutations = он же."""
+    from core.limits import round_micros as rm_core
+
+    from ads.mutations import _round_micros as rm_mut
+    from ads.read import _round_micros as rm_read
+
+    assert rm_mut is rm_core and rm_read is rm_core
+
+
+def test_units_to_micros_snaps_to_billing_unit():
+    """1F5: пользовательский ввод бюджета/CPC → micros, кратные биллинг-единице (превью == создание).
+    Раньше 5.005 → 5_005_000 micros (не кратно 10 000) — сервер мог отклонить."""
+    from agent.campaign_settings import units_to_micros
+
+    assert units_to_micros(5.005) % 10_000 == 0
+    assert units_to_micros(1.23456) % 10_000 == 0
+    assert units_to_micros(40.0) == 40_000_000  # ровные значения не искажаются
+    assert units_to_micros(0) == 0  # ноль остаётся нулём (валидация выше)
+    assert units_to_micros(0.004) in (0, 10_000)  # суб-единица: не отрицательное, кратное
+
+
 # ── B1: сбой шага 3/4 composite-создания откатывает бюджет+кампанию(+группу) ──────
 def _results(rn: str):
     return SimpleNamespace(results=[SimpleNamespace(resource_name=rn)])

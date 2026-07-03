@@ -1,10 +1,10 @@
 """Оркестратор выполнения подтверждённого черновика: резолв (имя→id/бюджет) → gated apply_*.
 
 Вызывается из бота на «да». Чтение SDK (резолв) — синхронное → asyncio.to_thread.
-Аккаунт всегда Aimash Draft (замок в ads.client). Поддержаны (SUPPORTED_OPERATIONS):
-update_budget, update_bid, add_keywords, remove_keywords, add_negative_keywords, pause_campaign,
-resume_campaign, set_geo_proximity, set_geo_location, set_bidding_strategy, attach_audience,
-create_rsa, create_gdn_campaign, create_search_campaign.
+Аккаунт исполнения — из proposal.customer_id (штампует доверенный вход бота; сегодня всегда
+Aimash Draft) с ПОВТОРНЫМ ensure_allowed на исполнении (fail-closed, замок в ads.client).
+Поддержаны (SUPPORTED_OPERATIONS): update_budget, update_bid, add/remove keywords и negative,
+pause/resume, гео, стратегии, аудитории, RSA/кампании, ассеты-расширения.
 """
 
 from __future__ import annotations
@@ -12,7 +12,8 @@ from __future__ import annotations
 import asyncio
 
 from ads import mutations, resolve
-from ads.client import DRAFT_ACCOUNT_ID, build_client_async
+from ads.client import DRAFT_ACCOUNT_ID, build_client_async, ensure_allowed
+from core.config import normalize_customer_id
 
 # ── Единый источник истины: какие операции РЕАЛЬНО исполняются за confirm-гейтом. ──
 # Это потолок возможностей: всё, чего тут нет, агент обязан отклонить ДО показа кнопок
@@ -67,11 +68,13 @@ _DIFFABLE_OPS = frozenset(
 )
 
 
-async def read_before(operation: str, params: dict) -> dict | None:
+async def read_before(operation: str, params: dict, customer_id: str | None = None) -> dict | None:
     """READ-ONLY снимок ТЕКУЩЕГО значения для показа реального «было→станет» (§5) и как база
     оптимистичной сверки при исполнении (TOCTOU). None — операция без diff (создание/ключи),
     кампания не найдена или чтение не удалось (вызывающий честно покажет diff без «было»).
 
+    customer_id — аккаунт черновика (дефолт Draft: сегодня мутации только на нём; при будущем
+    расширении потолка вызывающий передаёт активный мутационный аккаунт — см. ads/client.py:28).
     Возвращаемый dict кладётся в proposals.params['_before'] и сверяется в execute_confirmed."""
     if operation not in _DIFFABLE_OPS:
         return None
@@ -79,8 +82,8 @@ async def read_before(operation: str, params: dict) -> dict | None:
     if not name:
         return None
     try:
-        client = await build_client_async()  # холодная сборка (после /refresh) — вне loop
-        cid = DRAFT_ACCOUNT_ID  # замок: только Aimash Draft
+        cid = normalize_customer_id(customer_id) if customer_id else DRAFT_ACCOUNT_ID
+        client = await build_client_async(cid)  # холодная сборка (после /refresh) — вне loop
         if operation == "update_budget":
             ref = await asyncio.to_thread(resolve.find_campaign_by_name, client, cid, name)
             if ref is None:
@@ -174,8 +177,14 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             f"операция '{op}' не поддерживается (capability-guard) — выполнение отклонено"
         )
 
-    client = await build_client_async()
-    customer_id = DRAFT_ACCOUNT_ID  # замок: только Aimash Draft
+    # Аккаунт исполнения — ИЗ ЧЕРНОВИКА (штампует доверенный вход бота при показе), а не хардкод:
+    # хранимый customer_id теперь authoritative. Повторный ensure_allowed ЗДЕСЬ (fail-closed:
+    # пустой/чужой штамп → PermissionError ДО build_client и ДО apply_* — черновик падает, не съев
+    # одноразовый claim и не тронув SDK). Сегодня штамп всегда Draft → поведение идентично; при
+    # будущем расширении потолка (ads/client.py:28) достаточно правки ALLOWED_CEILING + штампа.
+    customer_id = normalize_customer_id(p.customer_id)
+    ensure_allowed(customer_id)
+    client = await build_client_async(customer_id)
 
     if op == "update_budget":
         ref = await asyncio.to_thread(

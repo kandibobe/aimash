@@ -19,7 +19,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from agent.router import chat
-from core.limits import MONEY_MAX_UNITS
+from core.limits import MONEY_MAX_UNITS, round_micros
 
 # Дефолты, если ни описание, ни медианы аккаунта не дали значения (нейтральные, безопасные на
 # тест-аккаунте; cpc зеркалит дефолт ads.mutations.apply_create_search_campaign).
@@ -270,9 +270,11 @@ def units_to_micros(units: float) -> int:
 
 
 def _units_to_micros(units: float) -> int:
-    """Единицы валюты → micros, с клампом «границы абсурда» (core.limits)."""
+    """Единицы валюты → micros: кламп «границы абсурда» (core.limits) + округление до
+    биллинг-единицы 10 000 micros — иначе Google Ads отклонит бид/бюджет с суб-центовой
+    точностью и «превью ≠ созданное». 0 остаётся 0 (валидируется выше)."""
     u = max(0.0, min(float(units), float(MONEY_MAX_UNITS)))
-    return int(round(u * 1_000_000))
+    return round_micros(int(round(u * 1_000_000)))
 
 
 def assemble_settings(

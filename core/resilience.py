@@ -140,12 +140,14 @@ async def run_ads_call(
     *args: object,
     label: str | None = None,
     account: str | None = None,
+    op_count: int = 1,
     **kwargs: object,
 ) -> T:
     """Замена `asyncio.to_thread(fn, *args)` для синхронных вызовов google-ads SDK (МУТАЦИИ):
     таймаут на попытку + ретрай транзиентных ошибок с backoff+jitter. Логирует запрос к
     Google Ads API (имя, длительность, исход — БЕЗ секретов; ТЗ §15). Сигнатура совместима
-    с to_thread (call-site не меняется); `label` — опц. имя для лога, `account` — для квоты.
+    с to_thread (call-site не меняется); `label` — опц. имя для лога, `account` — для квоты,
+    `op_count` — фактическое число mutate-операций батча (Google тарифицирует каждую).
 
     Квота (§3): ПЕРЕД вызовом check_mutation_allowed — на ≥95% дневного лимита бросает
     QuotaExceededError (fail-closed, до SDK, без трат). Успешную операцию учитываем (record)."""
@@ -172,7 +174,7 @@ async def run_ads_call(
     except Exception as e:
         log.warning("ads-call %s: %s за %dмс", name, type(e).__name__, _ms(start))
         raise
-    quota.record(account, kind="mutate")  # учёт операции в дневной квоте (§3)
+    quota.record(account, kind="mutate", count=op_count)  # учёт операций батча в квоте (§3)
     log.info("ads-call %s: ok за %dмс", name, _ms(start))
     return result
 

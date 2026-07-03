@@ -1,34 +1,76 @@
 """Пер-пользовательский доступ к аккаунтам + активный аккаунт чата (§8/§12, мультиоператор).
 
-Бэкенд (БД), который UI бота (/account) зовёт, чтобы:
+Бэкенд (БД), который UI бота (/account, пикеры, /grant) зовёт, чтобы:
   • узнать/сменить активный аккаунт чата (get/set_active_account → UserSettings.selected_customer_id);
   • проверить, имеет ли оператор право на аккаунт (ensure_account_allowed_for_user → account_access);
-  • выдать/снять грант и перечислить доступные аккаунты.
+  • выдать/снять грант и перечислить доступные аккаунты;
+  • зарезолвить аккаунт из свободного ввода/аргумента агента (resolve_read_account).
 
 Замки КОМПОЗИТНЫЕ и fail-closed:
   • глобальный read-замок ads.client.ensure_read_allowed (что боту вообще разрешено читать);
   • пер-пользовательский грант (этот модуль) — кто из операторов какой аккаунт ведёт.
-Draft (DRAFT_ACCOUNT_ID) доступен всем whitelisted без отдельного гранта (обратная совместимость:
-одно-операторный режим работает без записей в account_access). Прочие — только по явному гранту.
+Draft (DRAFT_ACCOUNT_ID) доступен всем whitelisted без отдельного гранта в ЛЮБОМ режиме.
+
+Режимы enforcement (env ACCOUNT_ACCESS_MODE, см. core.config):
+  auto (дефолт) — пустая таблица account_access ⇒ legacy-проход (все whitelisted видят весь
+  read-list — текущее одно-операторное поведение); ПЕРВЫЙ грант включает enforcement для всех.
+  enforced — строгий даже с пустой таблицей. legacy — пер-юзер замок выключен осознанно.
 """
 
 from __future__ import annotations
 
+import time
+
 from sqlalchemy import delete, select
 
 from ads.client import DRAFT_ACCOUNT_ID, ensure_read_allowed
-from core.config import normalize_customer_id
+from core.config import normalize_customer_id, settings
 from core.logging import log
 from db.models import AccountAccess, UserSettings
 from db.session import Session
 
+# Кэш «есть ли хоть один грант» (режим auto): (deadline_monotonic, value). TTL короткий — граница
+# между «пусто» и «первый грант» сдвигается редко; grant/revoke инвалидируют кэш немедленно.
+_ENF_TTL_S = 60.0
+_enf_cache: tuple[float, bool] | None = None
+
+
+def _invalidate_enforcement_cache() -> None:
+    global _enf_cache
+    _enf_cache = None
+
+
+async def per_user_enforcement_active() -> bool:
+    """Активна ли пер-пользовательская изоляция. enforced → True; legacy → False; auto → есть ли
+    хоть один грант в account_access (кэш _ENF_TTL_S; grant/revoke инвалидируют). Невалидный режим
+    трактуем как auto (warning один раз на процесс не делаем — значение читается часто)."""
+    global _enf_cache
+    mode = (settings.account_access_mode or "auto").strip().lower()
+    if mode == "enforced":
+        return True
+    if mode == "legacy":
+        return False
+    now = time.monotonic()
+    if _enf_cache is not None and _enf_cache[0] > now:
+        return _enf_cache[1]
+    async with Session() as s:
+        row = (await s.execute(select(AccountAccess.id).limit(1))).first()
+    active = row is not None
+    _enf_cache = (now + _ENF_TTL_S, active)
+    return active
+
 
 async def ensure_account_allowed_for_user(chat_id: int, customer_id: str) -> None:
-    """Пер-пользовательский замок (fail-closed). Draft — всем whitelisted (без записи). Прочие —
-    только при явном гранте в account_access. Нет гранта ⇒ PermissionError."""
+    """Пер-пользовательский замок. Draft — всем whitelisted (без записи). Прочие — по явному
+    гранту в account_access, КОГДА enforcement активен (см. режимы в докстринге модуля); в
+    legacy-проходе (auto + пустая таблица) не-Draft пропускается — глобальный read-замок
+    ensure_read_allowed остаётся на вызывающем. Нет гранта при активном enforcement ⇒
+    PermissionError (fail-closed)."""
     cid = normalize_customer_id(customer_id)
     if cid == DRAFT_ACCOUNT_ID:
         return
+    if not await per_user_enforcement_active():
+        return  # legacy-проход: пер-юзер изоляция не включена (авторитетен глобальный замок)
     async with Session() as s:
         row = (
             await s.execute(
@@ -42,7 +84,8 @@ async def ensure_account_allowed_for_user(chat_id: int, customer_id: str) -> Non
 
 
 async def grant_account_access(chat_id: int, customer_id: str) -> None:
-    """Выдать оператору доступ к аккаунту (идемпотентно — повтор не создаёт дубль)."""
+    """Выдать оператору доступ к аккаунту (идемпотентно — повтор не создаёт дубль).
+    ⚠️ В режиме auto ПЕРВЫЙ грант включает enforcement для всех операторов."""
     cid = normalize_customer_id(customer_id)
     async with Session() as s:
         exists = (
@@ -55,6 +98,7 @@ async def grant_account_access(chat_id: int, customer_id: str) -> None:
         if exists is None:
             s.add(AccountAccess(chat_id=chat_id, customer_id=cid))
             await s.commit()
+    _invalidate_enforcement_cache()
 
 
 async def revoke_account_access(chat_id: int, customer_id: str) -> None:
@@ -67,6 +111,7 @@ async def revoke_account_access(chat_id: int, customer_id: str) -> None:
             )
         )
         await s.commit()
+    _invalidate_enforcement_cache()
 
 
 async def list_user_account_ids(chat_id: int) -> list[str]:
@@ -107,10 +152,11 @@ async def get_active_account(chat_id: int) -> str:
     return cid
 
 
-async def set_active_account(chat_id: int, customer_id: str) -> None:
-    """Установить активный аккаунт чата (upsert UserSettings.selected_customer_id). Валидацию права
-    делает вызывающий (UI) до вызова — здесь только персист (переживает рестарт)."""
-    cid = normalize_customer_id(customer_id)
+async def set_active_account(chat_id: int, customer_id: str | None) -> None:
+    """Установить активный аккаунт чата (upsert UserSettings.selected_customer_id). None/пусто —
+    сброс на Draft (хранится NULL). Валидацию права делает вызывающий (UI) до вызова — здесь
+    только персист (переживает рестарт)."""
+    cid = normalize_customer_id(customer_id) if customer_id else None
     async with Session() as s:
         row = (
             await s.execute(select(UserSettings).where(UserSettings.chat_id == chat_id))
@@ -120,3 +166,39 @@ async def set_active_account(chat_id: int, customer_id: str) -> None:
         else:
             row.selected_customer_id = cid
         await s.commit()
+
+
+async def resolve_read_account(chat_id: int, raw: str | None) -> str:
+    """Резолв аккаунта ЧТЕНИЯ из свободного ввода (аргумент агента get_stats / текст команды).
+
+    • пусто → активный аккаунт чата (get_active_account — тот же резолв, что /report);
+    • цифры/id с разделителями → normalize + КОМПОЗИТНЫЙ замок (read + пер-юзер), иначе
+      PermissionError (fail-closed — НЕ подменяем молча другим аккаунтом);
+    • текст без цифр → матч по имени среди обнаруженных дочерних (discovered_read_children_meta):
+      точное совпадение (casefold), затем УНИКАЛЬНАЯ подстрока; неоднозначно/не найдено →
+      LookupError со списком кандидатов (вызывающий покажет уточнение)."""
+    text = str(raw or "").strip()
+    if not text:
+        return await get_active_account(chat_id)
+    cid = normalize_customer_id(text)
+    if cid:  # похоже на id
+        ensure_read_allowed(cid)
+        await ensure_account_allowed_for_user(chat_id, cid)
+        return cid
+    # матч по имени (только читаемые дочерние из meta — не открывает ничего сверх замков)
+    from ads.client import discovered_read_children_meta
+
+    needle = text.casefold()
+    meta = discovered_read_children_meta()
+    exact = [c for c, ch in meta.items() if (ch.name or "").casefold() == needle]
+    candidates = exact or [c for c, ch in meta.items() if needle in (ch.name or "").casefold()]
+    if len(candidates) != 1:
+        names = sorted((meta[c].name or c) for c in candidates)[:5]
+        raise LookupError(
+            f"аккаунт по имени {text!r} не найден однозначно"
+            + (f" (кандидаты: {', '.join(names)})" if names else "")
+        )
+    cid = candidates[0]
+    ensure_read_allowed(cid)
+    await ensure_account_allowed_for_user(chat_id, cid)
+    return cid

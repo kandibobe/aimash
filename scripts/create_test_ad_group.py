@@ -25,14 +25,13 @@ from google.ads.googleads.errors import GoogleAdsException  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID, build_client, ensure_allowed  # noqa: E402
 from ads.read import list_campaigns  # noqa: E402
 from ads.resolve import find_ad_groups, find_campaign_by_name  # noqa: E402
-from core.config import settings  # noqa: E402
+from core.config import require_dev_env  # noqa: E402
 
 
 def main() -> None:
-    # Фикстура: пишет в Google Ads НАПРЯМУЮ, минуя confirm-гейт. Только для dev/тест-аккаунта.
-    if settings.is_prod:
-        print("⛔ Только для ENV=dev — прямая запись без confirm-гейта в prod запрещена.")
-        sys.exit(1)
+    # Фикстура: пишет в Google Ads НАПРЯМУЮ, минуя confirm-гейт. ТОЛЬКО ENV=dev (golden rule #10):
+    # require_dev_env — единый гейт всех dev-фикстур (не `if is_prod` — staging тоже запрещён).
+    require_dev_env()
     ensure_allowed(DRAFT_ACCOUNT_ID)  # замок: только Aimash Draft
     client = build_client()
 

@@ -185,3 +185,121 @@ def test_list_child_accounts_rejects_foreign_manager():
     with login_customer_id(DRAFT_ACCOUNT_ID):
         with pytest.raises(PermissionError):
             list_child_accounts(_FakeClient([]), "1234567890")
+
+
+# ── 2E (§3): чтение текущего таргетинга кампании (гео/радиус/языки) ─────────────────
+def _targeting_client(criterion_rows, geo_names=None, lang_names=None):
+    from types import SimpleNamespace as NS
+
+    geo_names = geo_names or {}
+    lang_names = lang_names or {}
+
+    class _GA:
+        def search(self, customer_id, query):
+            if "FROM campaign_criterion" in query:
+                return criterion_rows
+            if "FROM geo_target_constant" in query:
+                return [
+                    NS(geo_target_constant=NS(resource_name=rn, name=nm))
+                    for rn, nm in geo_names.items()
+                ]
+            if "FROM language_constant" in query:
+                return [
+                    NS(language_constant=NS(resource_name=rn, name=nm))
+                    for rn, nm in lang_names.items()
+                ]
+            raise AssertionError(f"неожиданный GAQL: {query}")
+
+    class _Client:
+        def get_service(self, name):
+            assert name == "GoogleAdsService"
+            return _GA()
+
+    return _Client()
+
+
+def _crit(tname, **kw):
+    from types import SimpleNamespace as NS
+
+    base = {
+        "type_": NS(name=tname),
+        "negative": kw.pop("negative", False),
+        "location": NS(geo_target_constant=kw.pop("geo_rn", "")),
+        "language": NS(language_constant=kw.pop("lang_rn", "")),
+        "proximity": NS(
+            radius=kw.pop("radius", 0),
+            radius_units=NS(name=kw.pop("units", "KILOMETERS")),
+            address=NS(
+                city_name=kw.pop("city", ""),
+                country_code=kw.pop("country", ""),
+            ),
+            geo_point=NS(
+                latitude_in_micro_degrees=kw.pop("lat", 0),
+                longitude_in_micro_degrees=kw.pop("lng", 0),
+            ),
+        ),
+    }
+    return NS(campaign_criterion=NS(**base))
+
+
+def test_read_campaign_targeting_parses_all_types(monkeypatch):
+    from ads.read import read_campaign_targeting
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "google_ads_allowed_customer_ids", "7753643025")
+    rows = [
+        _crit("LOCATION", geo_rn="geoTargetConstants/2804"),
+        _crit("LOCATION", geo_rn="geoTargetConstants/2840", negative=True),
+        _crit("PROXIMITY", city="Kyiv", country="UA", radius=30),
+        _crit("LANGUAGE", lang_rn="languageConstants/1031"),
+    ]
+    client = _targeting_client(
+        rows,
+        geo_names={
+            "geoTargetConstants/2804": "Ukraine",
+            "geoTargetConstants/2840": "United States",
+        },
+        lang_names={"languageConstants/1031": "Russian"},
+    )
+    t = read_campaign_targeting(client, "7753643025", 42)
+    assert t.locations == ["Ukraine"]
+    assert t.negative_locations == ["United States"]
+    assert t.proximity == ["Kyiv (UA), 30 км"]
+    assert t.languages == ["Russian"]
+
+
+def test_read_campaign_targeting_empty_means_all(monkeypatch):
+    from ads.read import read_campaign_targeting
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "google_ads_allowed_customer_ids", "7753643025")
+    t = read_campaign_targeting(_targeting_client([]), "7753643025", 42)
+    assert t.locations == [] and t.proximity == [] and t.languages == []
+
+
+def test_read_campaign_targeting_locked():
+    import pytest
+
+    from ads.read import read_campaign_targeting
+
+    with pytest.raises(PermissionError):  # conftest: пустой allow/read-list → fail-closed
+        read_campaign_targeting(_targeting_client([]), "9998887776", 42)
+
+
+def test_fmt_campaign_targeting_renders():
+    from ads.read import CampaignTargeting
+    from bot import texts
+
+    out = texts.fmt_campaign_targeting(
+        CampaignTargeting(
+            locations=["Ukraine"],
+            negative_locations=[],
+            proximity=["Kyiv (UA), 30 км"],
+            languages=[],
+        )
+    )
+    assert "Ukraine" in out and "30" in out and "все языки" in out
+    empty = texts.fmt_campaign_targeting(
+        CampaignTargeting(locations=[], negative_locations=[], proximity=[], languages=[])
+    )
+    assert "все регионы" in empty

@@ -104,3 +104,22 @@ async def test_fetch_error_does_not_crash():
     urls = {p.url for p in result.pages}
     assert "https://e.com/good" in urls  # битая /broken пропущена, обход продолжился
     assert "https://e.com/broken" not in urls
+
+
+def test_combined_text_excludes_contacts_pii():
+    """1F12: телефоны/e-mail НЕ уходят во внешний LLM (combined_text) — они извлекаются
+    детерминированно кодом и попадают в патч профиля без LLM. Соцсети (публичные хэндлы) остаются."""
+    from clients.crawler import CrawlPage, CrawlResult
+
+    r = CrawlResult(
+        domain="ex.com",
+        pages=[CrawlPage(url="https://ex.com/", title="Home", page_type="home", text="Про нас")],
+        socials={"instagram": "https://instagram.com/brand"},
+        phones=["+380671234567"],
+        emails=["owner@ex.com"],
+    )
+    text = r.combined_text()
+    assert "+380671234567" not in text
+    assert "owner@ex.com" not in text
+    assert "instagram.com/brand" in text  # соцсети — не PII, остаются
+    assert "Про нас" in text

@@ -62,7 +62,7 @@ async def test_list_recent_audit_outcomes_with_actor_resolution():
     assert by_cid[cid_f].status == "failed" and by_cid[cid_f].actor_username == "cara"
 
     # Промежуточные confirmed-строки НЕ показываются как события журнала.
-    assert all(e.status in ("applied", "failed", "rejected") for e in events)
+    assert all(e.status in ("applied", "failed", "rejected", "needs_review") for e in events)
     # failed несёт причину (редактированную на записи) в result.
     assert isinstance(by_cid[cid_f].result, dict) and by_cid[cid_f].result.get("error")
 

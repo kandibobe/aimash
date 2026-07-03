@@ -13,17 +13,41 @@ import bot.main as bm
 
 @bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "geo"))
 async def camp_geo(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
-    """Меню кампании → «📍 Гео-таргетинг»: показываем выбор способа (локации/радиус). READ-ONLY:
-    ничего не меняем — адрес/локации вводятся следующим шагом, черновик собирается после (confirm-гейт)."""
+    """Меню кампании → «📍 Гео-таргетинг»: ПОКАЗЫВАЕМ текущее гео/языки (§3 «чтение … ГЕО» —
+    2E) и выбор способа изменения (локации/радиус). READ-ONLY: ничего не меняем — адрес/локации
+    вводятся следующим шагом, черновик собирается после (confirm-гейт). Сбой чтения текущего гео
+    НЕ блокирует изменение (fail-safe: меню показывается с пометкой)."""
     camps = bm._CAMP_CACHE.get(bm._cq_chat_id(cq))
     if not bm._valid_idx(camps, callback_data.idx):
         await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
         return
     await cq.answer()
     name = camps[callback_data.idx]["name"]
+    camp_id = camps[callback_data.idx].get("id")
+    current = ""
+    if camp_id:
+        try:
+            from ads.client import DRAFT_ACCOUNT_ID, build_client_async
+            from ads.read import read_campaign_targeting
+            from core.resilience import run_ads_read_call
+
+            # /campaigns сегодня Draft-only (меню действий = мутации) — читаем его же.
+            t = await run_ads_read_call(
+                read_campaign_targeting,
+                await build_client_async(),
+                DRAFT_ACCOUNT_ID,
+                camp_id,
+                label="campaign_targeting",
+            )
+            current = bm.texts.fmt_campaign_targeting(t)
+        except Exception:  # noqa: BLE001 — показ текущего гео best-effort, меню не блокируем
+            current = bm.i18n.t("geo_read_failed")
+    text = bm.i18n.t("geo_mode_pick", camp=bm.texts.esc(name))
+    if current:
+        text = current + "\n\n" + text
     await bm._safe_edit(
         cq,
-        bm.i18n.t("geo_mode_pick", camp=bm.texts.esc(name)),
+        text,
         reply_markup=bm.geo_mode_kb(callback_data.idx),
         parse_mode=bm.ParseMode.HTML,
     )

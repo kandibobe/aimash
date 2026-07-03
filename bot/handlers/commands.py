@@ -207,6 +207,9 @@ async def account_cmd(m: bm.Message, command: bm.CommandObject) -> None:
     cid = bm.normalize_customer_id(arg)
     try:
         bm.ensure_read_allowed(cid)
+        from core.access import ensure_account_allowed_for_user
+
+        await ensure_account_allowed_for_user(m.chat.id, cid)  # пер-юзер грант (2B, fail-closed)
     except PermissionError:
         await m.answer(
             bm.i18n.t("account_denied", cid=bm.texts.esc(cid)), parse_mode=bm.ParseMode.HTML
@@ -214,6 +217,101 @@ async def account_cmd(m: bm.Message, command: bm.CommandObject) -> None:
         return
     await bm._save_selected_account(m.chat.id, cid)
     await m.answer(bm.i18n.t("account_set", cid=cid), parse_mode=bm.ParseMode.HTML)
+
+
+# ── 2C: пер-пользовательские гранты аккаунтов (админ) + самодиагностика доступа ──
+def _is_admin(chat_id: int) -> bool:
+    """Админ бота (env ADMIN_CHAT_IDS). Пусто ⇒ никто (fail-closed, фича опциональна)."""
+    return chat_id in bm.settings.admin_ids
+
+
+@bm.dp.message(bm.Command("grant"))
+async def grant_cmd(m: bm.Message, command: bm.CommandObject) -> None:
+    """/grant <chat_id> <customer_id> — выдать оператору доступ к аккаунту ЧТЕНИЯ (только админ).
+    cid обязан пройти глобальный read-замок (гранты только на реально читаемое). МУТАЦИИ гранты
+    НЕ открывают (замок ensure_allowed/ALLOWED_CEILING отдельный, golden rule 9)."""
+    if not _is_admin(m.chat.id):
+        await m.answer(bm.i18n.t("admin_only"))
+        return
+    parts = (command.args or "").split()
+    if len(parts) != 2 or not parts[0].lstrip("-").isdigit():
+        await m.answer(bm.i18n.t("grant_bad_args"), parse_mode=bm.ParseMode.HTML)
+        return
+    target_chat, raw_cid = int(parts[0]), parts[1]
+    cid = bm.normalize_customer_id(raw_cid)
+    try:
+        bm.ensure_read_allowed(cid)  # гранты только на читаемое (fail-closed; подсказка /refresh)
+    except PermissionError:
+        await m.answer(
+            bm.i18n.t("grant_unknown_account", cid=bm.texts.esc(cid or raw_cid)),
+            parse_mode=bm.ParseMode.HTML,
+        )
+        return
+    from core.access import grant_account_access, per_user_enforcement_active
+
+    was_enforced = await per_user_enforcement_active()
+    await grant_account_access(target_chat, cid)
+    note = "" if was_enforced else "\n" + bm.i18n.t("grant_enforcement_note")
+    await m.answer(
+        bm.i18n.t("grant_ok", chat=target_chat, cid=cid) + note, parse_mode=bm.ParseMode.HTML
+    )
+
+
+@bm.dp.message(bm.Command("revoke"))
+async def revoke_cmd(m: bm.Message, command: bm.CommandObject) -> None:
+    """/revoke <chat_id> <customer_id> — снять грант (только админ). Активный аккаунт оператора
+    сам откатится на Draft при следующем чтении (get_active_account перепроверяет грант)."""
+    if not _is_admin(m.chat.id):
+        await m.answer(bm.i18n.t("admin_only"))
+        return
+    parts = (command.args or "").split()
+    if len(parts) != 2 or not parts[0].lstrip("-").isdigit():
+        await m.answer(bm.i18n.t("grant_bad_args"), parse_mode=bm.ParseMode.HTML)
+        return
+    target_chat, cid = int(parts[0]), bm.normalize_customer_id(parts[1])
+    from core.access import revoke_account_access
+
+    await revoke_account_access(target_chat, cid)
+    await m.answer(bm.i18n.t("revoke_ok", chat=target_chat, cid=cid), parse_mode=bm.ParseMode.HTML)
+
+
+@bm.dp.message(bm.Command("accounts"))
+async def accounts_cmd(m: bm.Message) -> None:
+    """/accounts — аккаунты, доступные ЭТОМУ оператору на чтение (граница = read-замок × грант),
+    с именами из meta обхода MCC. Draft помечен."""
+    rows = await bm._read_account_rows(m.chat.id)
+    lines = []
+    for r in rows:
+        mark = " · Draft ✅" if bm.normalize_customer_id(r.id) == bm.DRAFT_ACCOUNT_ID else ""
+        name = r.name if r.name and r.name != r.id else ""
+        cur = f" ({r.currency})" if getattr(r, "currency", "") else ""
+        lines.append(f"• <code>{bm.texts.esc(str(r.id))}</code> {bm.texts.esc(name)}{cur}{mark}")
+    await m.answer(
+        bm.i18n.t("accounts_title", n=len(rows)) + "\n" + "\n".join(lines),
+        parse_mode=bm.ParseMode.HTML,
+    )
+
+
+@bm.dp.message(bm.Command("whoami"))
+async def whoami_cmd(m: bm.Message) -> None:
+    """/whoami — chat_id, активный аккаунт чтения, режим пер-юзер изоляции, admin-флаг.
+    Помогает узнать chat_id для /grant и понять, почему аккаунт не виден."""
+    from core.access import per_user_enforcement_active
+
+    active = await bm._active_read_account(m.chat.id)
+    mode = (bm.settings.account_access_mode or "auto").strip().lower()
+    enforced = await per_user_enforcement_active()
+    await m.answer(
+        bm.i18n.t(
+            "whoami_text",
+            chat=m.chat.id,
+            active=active,
+            mode=mode,
+            enforced="✅" if enforced else "—",
+            admin="✅" if _is_admin(m.chat.id) else "—",
+        ),
+        parse_mode=bm.ParseMode.HTML,
+    )
 
 
 @bm.dp.message(bm.Command("refresh"))

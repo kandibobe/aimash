@@ -3,7 +3,8 @@
 READ-ONLY + уведомления. ⛔ НИКОГДА не импортирует ads.mutations и не вызывает
 execute_confirmed / apply_* — планировщик не меняет аккаунт (golden rule #3). Очистка лишь
 ОТКЛОНЯЕТ (reject, с аудитом) старые pending-черновики: они не подтверждались → SDK не звался →
-деньги не тратились, отклонить безопасно.
+деньги не тратились, отклонить безопасно. Реконсиляция зависших executing (needs_review) — тоже
+только запись в ЛОКАЛЬНУЮ БД + уведомление (НЕ авто-ретрай: мутации не идемпотентны).
 """
 
 from __future__ import annotations
@@ -262,6 +263,76 @@ async def cleanup_stale_campaign_drafts(
             clear_pending_media_ids(orphan_media)
         if n:
             log.info("scheduler: брошено просроченных черновиков визарда: %d", n)
+        return n
+
+
+async def reconcile_stale_executing(
+    bot=None, *, now: datetime | None = None, stale_minutes: int | None = None
+) -> int:
+    """Черновики, зависшие в 'executing' дольше N мин: процесс упал ПОСЛЕ claim, ПОСРЕДИ мутации —
+    исход НЕИЗВЕСТЕН (SDK мог применить изменение в Google Ads). НЕ авто-ретраим (мутации не
+    идемпотентны, golden rule) — помечаем needs_review (mark_needs_review, атомарный CAS) +
+    audit-строка (§12: полнота журнала, событие видно в /journal) + error_event (/diag) +
+    уведомление владельца в чат. Пометка — запись в ЛОКАЛЬНУЮ БД, не мутация Ads (golden rule #3).
+
+    Возраст — от decided_at (момент claim; fallback created_at), наивный datetime трактуем как UTC
+    (SQLite/Postgres). Порог N (settings.executing_stale_minutes, дефолт 30) ≫ худшего run_ads_call
+    (4 попытки × 60с + backoff ≈ 5 мин) — живой процесс не зацепим; гонку с его finalize выигрывает
+    finalize (CAS mark_needs_review вернёт False). bot=None (тесты) → без уведомлений."""
+    stale = settings.executing_stale_minutes if stale_minutes is None else stale_minutes
+    with request_scope("scheduler:reconcile-executing"):
+        cutoff = (now or datetime.now(timezone.utc)) - timedelta(minutes=stale)
+        store = ConfirmStore()
+        async with Session() as s:
+            rows = (
+                (await s.execute(select(Proposal).where(Proposal.status == "executing")))
+                .scalars()
+                .all()
+            )
+            stale_rows: list[tuple[str, str, str, int]] = []
+            for p in rows:
+                ts = p.decided_at or p.created_at  # decided_at = момент claim
+                if ts is None:
+                    continue
+                if ts.tzinfo is None:  # SQLite хранит наивный UTC
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts < cutoff:
+                    stale_rows.append((p.confirmation_id, p.operation, p.customer_id, p.chat_id))
+        n = 0
+        for cid, op, customer_id, chat_id in stale_rows:
+            err = (
+                f"исполнение прервано (процесс упал посреди мутации, зависло >{stale} мин) — "
+                "исход в Google Ads НЕИЗВЕСТЕН, сверь аккаунт вручную; авто-повтора не будет"
+            )
+            if not await store.mark_needs_review(cid, error=err):
+                continue  # живой процесс успел finalize/failed — не наша строка
+            n += 1
+            await capture_exception(
+                RuntimeError(
+                    f"proposal {cid} завис в executing (op={op}, аккаунт {customer_id}) — "
+                    "исход мутации неизвестен, сверь в Google Ads"
+                ),
+                where="scheduler:reconcile-executing",
+            )
+            if bot is not None:
+                try:
+                    await bot.send_message(
+                        chat_id,
+                        "⚠️ Операция "
+                        f"«{op}» была прервана рестартом бота посреди выполнения — "
+                        "применилось ли изменение в Google Ads, НЕИЗВЕСТНО.\n"
+                        "Проверь аккаунт вручную (журнал: /journal). Авто-повтора не будет — "
+                        "если изменение не применилось, дай команду заново.",
+                    )
+                except Exception as e:  # один недоступный чат не должен ронять реконсиляцию
+                    log.warning(
+                        "scheduler: needs_review-уведомление не доставлено в %s: %s: %s",
+                        chat_id,
+                        type(e).__name__,
+                        e,
+                    )
+        if n:
+            log.warning("scheduler: зависших executing-черновиков помечено needs_review: %d", n)
         return n
 
 

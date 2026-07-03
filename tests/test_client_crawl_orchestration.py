@@ -197,10 +197,16 @@ async def test_incremental_changed_creates_proposal_with_diff():
 
 
 @pytest.mark.asyncio
-async def test_existing_profile_creates_update_proposal_and_applies_crawl_extra():
+async def test_existing_profile_creates_update_proposal_and_applies_crawl_extra(monkeypatch):
     await init_db()
     cust = "6000000002"
     chat_id = 701
+    # 1F3: execute_confirmed_memory перепроверяет read-замок + пер-пользовательский грант
+    from core.access import grant_account_access
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "google_ads_read_customer_ids", cust)
+    await grant_account_access(chat_id, cust)
     store = ClientProfileStore()
     await store.apply_clear(cust)
     await store.apply_upsert(cust, {"brand": "Old"}, operation="profile_save")  # уже есть профиль

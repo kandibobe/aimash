@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -75,6 +77,18 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
         id="reconcile_stale_crawls",
         replace_existing=True,
         misfire_grace_time=600,
+    )
+    sched.add_job(
+        # §12: зависшие executing-черновики (процесс упал посреди мутации) → needs_review +
+        # уведомление владельца. next_run_time=now: рестарт — именно момент рождения зависших,
+        # прогоняем сразу, не ждём первый интервал.
+        jobs.reconcile_stale_executing,
+        IntervalTrigger(minutes=settings.cleanup_interval_minutes),
+        args=[bot],
+        id="reconcile_stale_executing",
+        replace_existing=True,
+        misfire_grace_time=600,
+        next_run_time=datetime.now(timezone.utc),
     )
     sched.start()
     log.info(

@@ -55,6 +55,17 @@ class Settings(BaseSettings):
     # Telegram
     telegram_bot_token: SecretStr = SecretStr("")
     telegram_whitelist_chat_ids: str = ""  # "123,456"
+    # Пер-пользовательская изоляция аккаунтов ЧТЕНИЯ (core.access, таблица account_access):
+    #   auto (дефолт) — пустая таблица грантов ⇒ legacy-проход (все whitelisted видят весь
+    #                   read-list; поведение одно-операторного режима), ПЕРВЫЙ грант включает
+    #                   enforcement для всех;
+    #   enforced      — строгий режим даже с пустой таблицей (не-Draft только по гранту);
+    #   legacy        — осознанное отключение пер-юзер изоляции (только глобальный read-замок).
+    # Draft доступен всем whitelisted в любом режиме. Невалидное значение → warning + auto.
+    account_access_mode: str = "auto"
+    # Админы бота (CSV chat_id): им доступны /grant /revoke (управление грантами account_access).
+    # Пусто ⇒ админ-команды недоступны НИКОМУ (fail-closed; фича опциональна — не роняем prod).
+    admin_chat_ids: str = ""
 
     # Google Ads
     google_ads_developer_token: SecretStr = SecretStr("")
@@ -115,6 +126,11 @@ class Settings(BaseSettings):
     # §20: зависшая (running) crawl_jobs старше N минут → failed на реконсиляции (in-process задача
     # умерла с процессом на рестарте). Кадэнс — cleanup_interval_minutes (та же очистка).
     crawl_stale_minutes: int = 30
+    # §12: черновик в 'executing' старше N минут (процесс упал ПОСЛЕ claim, посреди мутации —
+    # исход в Google Ads неизвестен) → needs_review на реконсиляции + уведомление владельца
+    # (scheduler.jobs.reconcile_stale_executing). Порог ≫ худшего run_ads_call (4 попытки × 60с
+    # + backoff ≈ 5 мин) — живой процесс не зацепим. Кадэнс — cleanup_interval_minutes.
+    executing_stale_minutes: int = 30
     # §20.3: сколько ждём молча после последнего сообщения профиля до авто-сохранения (менеджер
     # может слать инфу несколькими сообщениями подряд — накапливаем в буфер, потом извлекаем).
     client_text_idle_s: int = 60
@@ -122,6 +138,17 @@ class Settings(BaseSettings):
     @property
     def whitelist(self) -> set[int]:
         return {int(x) for x in self.telegram_whitelist_chat_ids.split(",") if x.strip()}
+
+    @property
+    def admin_ids(self) -> set[int]:
+        """Админы бота (/grant /revoke). Пусто ⇒ никому (fail-closed). Нечисловой мусор отбрасываем
+        (как whitelist, но без падения — фича опциональна)."""
+        out: set[int] = set()
+        for x in self.admin_chat_ids.split(","):
+            x = x.strip()
+            if x.lstrip("-").isdigit():
+                out.add(int(x))
+        return out
 
     @property
     def model_choice_list(self) -> list[str]:

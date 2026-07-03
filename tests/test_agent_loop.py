@@ -122,3 +122,115 @@ async def test_unknown_tool_name():
     with patched(L, "chat", fake):
         out = await L.handle_command("...")
     assert out["type"] == "text" and "неизвестный инструмент" in out["text"]
+
+
+# ── 2D: get_stats резолвит аккаунт (не молчаливый allowed[0]) ─────────────────────
+def _fake_stats_env(monkeypatch, seen: dict):
+    """Подменить чтение SDK: фиксируем, какой cid реально читается."""
+    import ads.read as ar
+    from ads.client import DRAFT_ACCOUNT_ID  # noqa: F401
+    from types import SimpleNamespace as NS
+
+    def _stats(client, cid, days):
+        seen["cid"] = cid
+        return NS(impressions=1, clicks=1, cost=1.0, conversions=0.0, conv_value=0.0)
+
+    monkeypatch.setattr(ar, "account_stats", _stats)
+    monkeypatch.setattr(ar, "account_currency", lambda client, cid: "USD")
+
+    async def _client(cid=None):
+        seen["client_cid"] = cid
+        return object()
+
+    import ads.client as ac
+
+    monkeypatch.setattr(ac, "build_client_async", _client)
+
+
+async def test_get_stats_honors_account_argument(monkeypatch):
+    """NL «статистика аккаунта X» читает ИМЕННО X (id нормализован), а не первый разрешённый."""
+    from core.config import settings
+
+    extra = "6764040266"
+    monkeypatch.setattr(settings, "account_access_mode", "legacy")
+    monkeypatch.setattr(settings, "google_ads_allowed_customer_ids", "7753643025")
+    monkeypatch.setattr(settings, "google_ads_read_customer_ids", extra)
+    seen: dict = {}
+    _fake_stats_env(monkeypatch, seen)
+    fake, _ = _chat_returning(_msg([_tc("get_stats", {"account": "676-404-0266"})]))
+    with patched(L, "chat", fake):
+        out = await L.handle_command("покажи статистику аккаунта 676-404-0266", chat_id=42)
+    assert out["type"] == "read" and out["account"] == extra
+    assert seen["cid"] == extra and seen["client_cid"] == extra  # per-account клиент
+
+
+async def test_get_stats_denied_account_refuses(monkeypatch):
+    """Запрещённый аккаунт → внятный отказ (НЕ подмена другим аккаунтом)."""
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "google_ads_allowed_customer_ids", "7753643025")
+    monkeypatch.setattr(settings, "google_ads_read_customer_ids", "")
+    seen: dict = {}
+    _fake_stats_env(monkeypatch, seen)
+    fake, _ = _chat_returning(_msg([_tc("get_stats", {"account": "9998887776"})]))
+    with patched(L, "chat", fake):
+        out = await L.handle_command("статистика 9998887776", chat_id=42)
+    assert out["type"] == "text"
+    assert "cid" not in seen  # чтение не выполнялось
+
+
+async def test_get_stats_defaults_to_chat_active_account(monkeypatch):
+    """Без аргумента account → активный аккаунт чата (Draft по умолчанию)."""
+    from core.config import settings
+    from db.session import init_db
+
+    await init_db()  # get_active_account читает user_settings
+    monkeypatch.setattr(settings, "google_ads_allowed_customer_ids", "7753643025")
+    seen: dict = {}
+    _fake_stats_env(monkeypatch, seen)
+    fake, _ = _chat_returning(_msg([_tc("get_stats", {})]))
+    with patched(L, "chat", fake):
+        out = await L.handle_command("покажи статистику", chat_id=43)
+    assert out["type"] == "read" and out["account"] == "7753643025"
+
+
+async def test_get_stats_ambiguous_name_asks(monkeypatch):
+    """Имя, матчащее несколько дочерних → уточнение (LookupError → text), не угадывание."""
+    from ads.client import set_discovered_read_children, set_discovered_read_children_meta
+    from ads.read import ChildAccount
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "account_access_mode", "legacy")
+    monkeypatch.setattr(settings, "google_ads_allowed_customer_ids", "7753643025")
+    set_discovered_read_children(["1111111111", "2222222222"])
+    set_discovered_read_children_meta(
+        [
+            ChildAccount(
+                id="1111111111",
+                name="Kasi A",
+                currency="USD",
+                manager=False,
+                level=1,
+                status="ENABLED",
+            ),
+            ChildAccount(
+                id="2222222222",
+                name="Kasi B",
+                currency="USD",
+                manager=False,
+                level=1,
+                status="ENABLED",
+            ),
+        ]
+    )
+    try:
+        seen: dict = {}
+        _fake_stats_env(monkeypatch, seen)
+        fake, _ = _chat_returning(_msg([_tc("get_stats", {"account": "Kasi"})]))
+        with patched(L, "chat", fake):
+            out = await L.handle_command("статистика Kasi", chat_id=44)
+        assert out["type"] == "text" and "accounts" in out["text"].lower() or "Kasi" in out["text"]
+        assert "cid" not in seen
+    finally:
+        set_discovered_read_children([])
+        set_discovered_read_children_meta([])

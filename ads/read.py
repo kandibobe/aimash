@@ -16,6 +16,7 @@ from google.ads.googleads.client import GoogleAdsClient
 
 from ads.client import ensure_manager_allowed, ensure_read_allowed
 from ads.resolve import gaql_escape
+from core.limits import round_micros
 
 
 @dataclass
@@ -219,14 +220,110 @@ class CampaignConfig:
 _MATCH_TYPE_MAP = {"BROAD": "broad", "PHRASE": "phrase", "EXACT": "exact"}
 
 
+@dataclass
+class CampaignTargeting:
+    """Текущий таргетинг кампании для показа (§3 «чтение … ГЕО»). Пустые списки = «все регионы/
+    языки» (кампания без критериев показывается всем) — это НЕ ошибка."""
+
+    locations: list[str]  # позитивные LOCATION → человекочитаемые имена geo_target_constant
+    negative_locations: list[str]  # исключённые LOCATION
+    proximity: list[str]  # «Kyiv (UA), 30 км» / «lat,lng, 30 км»
+    languages: list[str]  # имена language_constant
+
+
+def read_campaign_targeting(
+    client: GoogleAdsClient, customer_id: str, campaign_id: str | int
+) -> CampaignTargeting:
+    """Текущее ГЕО (локации/радиусы) и языки кампании (§3: чтение гео — раньше нигде не
+    показывалось, только писалось). READ-ONLY, замок чтения. GAQL-веер: campaign_criterion →
+    резолв имён geo_target_constant/language_constant (resource_name'ы приходят из API, но
+    эскейпим как литералы — defense-in-depth). Вызывающий оборачивает в run_ads_read_call."""
+    ensure_read_allowed(customer_id)
+    cid = str(customer_id)
+    ga = client.get_service("GoogleAdsService")
+    q = (
+        "SELECT campaign_criterion.type, campaign_criterion.negative, "
+        "campaign_criterion.location.geo_target_constant, "
+        "campaign_criterion.proximity.radius, campaign_criterion.proximity.radius_units, "
+        "campaign_criterion.proximity.address.city_name, "
+        "campaign_criterion.proximity.address.country_code, "
+        "campaign_criterion.proximity.geo_point.latitude_in_micro_degrees, "
+        "campaign_criterion.proximity.geo_point.longitude_in_micro_degrees, "
+        "campaign_criterion.language.language_constant "
+        "FROM campaign_criterion "
+        f"WHERE campaign.id = {int(campaign_id)} "
+        "AND campaign_criterion.type IN ('LOCATION', 'PROXIMITY', 'LANGUAGE') "
+        "AND campaign_criterion.status != 'REMOVED'"
+    )
+    loc_rns: list[tuple[str, bool]] = []  # (resource_name, negative)
+    lang_rns: list[str] = []
+    proximity: list[str] = []
+    for row in ga.search(customer_id=cid, query=q):
+        crit = row.campaign_criterion
+        tname = getattr(getattr(crit, "type_", None), "name", "") or str(getattr(crit, "type_", ""))
+        if tname == "LOCATION":
+            rn = str(getattr(crit.location, "geo_target_constant", "") or "")
+            if rn:
+                loc_rns.append((rn, bool(getattr(crit, "negative", False))))
+        elif tname == "PROXIMITY":
+            prox = crit.proximity
+            radius = getattr(prox, "radius", 0)
+            units = getattr(getattr(prox, "radius_units", None), "name", "") or ""
+            unit_h = "км" if units == "KILOMETERS" else ("миль" if units == "MILES" else units)
+            addr = getattr(prox, "address", None)
+            city = str(getattr(addr, "city_name", "") or "") if addr is not None else ""
+            country = str(getattr(addr, "country_code", "") or "") if addr is not None else ""
+            gp = getattr(prox, "geo_point", None)
+            if city:
+                where = f"{city} ({country})" if country else city
+            elif gp is not None and getattr(gp, "latitude_in_micro_degrees", 0):
+                lat = int(gp.latitude_in_micro_degrees) / 1_000_000
+                lng = int(gp.longitude_in_micro_degrees) / 1_000_000
+                where = f"{lat:.4f},{lng:.4f}"
+            else:
+                where = "?"
+            proximity.append(f"{where}, {radius:g} {unit_h}".strip())
+        elif tname == "LANGUAGE":
+            rn = str(getattr(crit.language, "language_constant", "") or "")
+            if rn:
+                lang_rns.append(rn)
+
+    def _resolve_names(resource: str, field: str, rns: list[str]) -> dict[str, str]:
+        """resource_name → человекочитаемое имя (одним IN-запросом; пусто → {})."""
+        if not rns:
+            return {}
+        vals = ", ".join(f"'{gaql_escape(rn)}'" for rn in sorted(set(rns)))
+        qq = (
+            f"SELECT {resource}.resource_name, {resource}.name FROM {resource} "
+            f"WHERE {resource}.resource_name IN ({vals})"
+        )
+        out: dict[str, str] = {}
+        for row in ga.search(customer_id=cid, query=qq):
+            node = getattr(row, field)
+            out[str(node.resource_name)] = str(node.name)
+        return out
+
+    geo_names = _resolve_names(
+        "geo_target_constant", "geo_target_constant", [r for r, _ in loc_rns]
+    )
+    lang_names = _resolve_names("language_constant", "language_constant", lang_rns)
+    return CampaignTargeting(
+        locations=[geo_names.get(rn, rn) for rn, neg in loc_rns if not neg],
+        negative_locations=[geo_names.get(rn, rn) for rn, neg in loc_rns if neg],
+        proximity=proximity,
+        languages=[lang_names.get(rn, rn) for rn in lang_rns],
+    )
+
+
 def read_campaign_config(
     client: GoogleAdsClient, customer_id: str, campaign_name: str
 ) -> CampaignConfig | None:
     """Полный (клонируемый) конфиг кампании по ИМЕНИ. READ-ONLY, замок чтения (ensure_read_allowed).
     None — кампания не найдена. Google не отдаёт всё одной строкой → GAQL-веер: кампания+бюджет+
     канал; группы (имя/cpc); позитивные ключи по группам (текст+тип); RSA-тексты по группам
-    (headlines/descriptions/final_url/path). Гео/минус-слова/стратегия/аудитории НЕ читаются в v1 —
-    клон в create_search_campaign их не переносит (вызывающий честно сообщает об этом)."""
+    (headlines/descriptions/final_url/path). Гео/минус-слова/стратегия/аудитории в КЛОН не
+    переносятся (вызывающий честно сообщает); ПОКАЗ текущего гео/языков есть отдельно —
+    read_campaign_targeting (§3)."""
     ensure_read_allowed(customer_id)
     cid = str(customer_id)
     ga = client.get_service("GoogleAdsService")
@@ -370,15 +467,11 @@ class AccountMedians:
     common_match_type: str | None  # exact|phrase|broad — самый частый позитивный тип (по кликам)
 
 
-def _round_micros(value: int) -> int:
-    """Округлить денежную величину (micros) до кратной минимальной биллинг-единице Google Ads
-    (10 000 micros = 0.01 валюты). Медиана/среднее из истории (cost/clicks) обычно не кратны — API
-    отклонит такой бид/бюджет. Округляем, чтобы превью «по аналогии» совпало с реально созданным."""
-    v = int(value)
-    if v <= 0:
-        return v
-    r = round(v / 10_000) * 10_000
-    return r if r > 0 else 10_000
+# Единый источник округления до биллинг-единицы — core.limits.round_micros (алиас сохраняет
+# прежнее имя для call-sites и тестов). Медиана/среднее из истории (cost/clicks) обычно не кратны
+# 10 000 micros — API отклонит такой бид/бюджет; округляем, чтобы превью «по аналогии» совпало
+# с реально созданным.
+_round_micros = round_micros
 
 
 def _median_int(values: list[int]) -> int | None:

@@ -1,8 +1,7 @@
 """Модели БД (SQLAlchemy 2.0). Миграции — Alembic (migrations/).
 
 Таблицы:
-- whitelist        — разрешённые chat_id (Telegram allow-list)
-- user_settings    — расписание отчётов, пороги алертов, переопределение модели
+- user_settings    — пороги алертов, язык, активный аккаунт, ui_prefs (+report_schedule — RESERVED)
 - proposals        — очередь черновиков изменений (diff «было→станет», статус, customer_id)
 - audit_log        — все операции: кто/когда/что/результат, по confirmation_id (БЕЗ секретов)
 - oauth_tokens     — refresh-токены, ШИФРОВАННЫЕ at-rest (core.secrets.encrypt)
@@ -32,13 +31,9 @@ class Base(DeclarativeBase):
     pass
 
 
-class Whitelist(Base):
-    __tablename__ = "whitelist"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    chat_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True, nullable=False)
-    note: Mapped[str | None] = mapped_column(String(255))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+# Таблица whitelist УДАЛЕНА (миграция 0016): она никогда не читалась рантаймом — реальный
+# allow-list всегда был env TELEGRAM_WHITELIST_CHAT_IDS (bot.main.WhitelistMiddleware). Мёртвая
+# схема создавала иллюзию БД-allow-list. Мультиюзер-доступ к АККАУНТАМ — таблица account_access.
 
 
 class UserSettings(Base):
@@ -46,7 +41,9 @@ class UserSettings(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     chat_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True, nullable=False)
-    report_schedule: Mapped[str | None] = mapped_column(String(128))  # cron-строка планового отчёта
+    # RESERVED (задел под per-user cron): код НЕ читает; глобальное расписание — env REPORT_SCHEDULE
+    # (scheduler.service.report_trigger). Не дропаем: batch-миграция на SQLite разрушительна.
+    report_schedule: Mapped[str | None] = mapped_column(String(128))
     alert_thresholds: Mapped[dict | None] = mapped_column(JSON)  # пороги аномалий
     model_override: Mapped[str | None] = mapped_column(String(128))  # переопределение LLM (опц.)
     language: Mapped[str | None] = mapped_column(String(8))  # язык интерфейса RU/EN (§4); NULL → RU
@@ -87,7 +84,7 @@ class Proposal(Base):
     user_initiated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(
         String(16), default="pending", nullable=False
-    )  # pending|confirmed|executing|applied|failed|rejected
+    )  # pending|confirmed|executing|applied|failed|rejected|needs_review
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -107,7 +104,7 @@ class AuditLog(Base):
     actor_username: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(
         String(16), nullable=False
-    )  # confirmed|rejected|applied|failed
+    )  # confirmed|rejected|applied|failed|needs_review
     result: Mapped[dict | None] = mapped_column(JSON)  # результат операции (БЕЗ секретов)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

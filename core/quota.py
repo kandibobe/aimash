@@ -50,14 +50,18 @@ def _limit() -> int:
     return int(settings.google_ads_daily_op_limit or 0)
 
 
-def record(account: str | None = None, *, kind: str = "read") -> None:
-    """Зафиксировать одну выполненную операцию (read|mutate). Fail-safe: ошибки глотаем."""
+def record(account: str | None = None, *, kind: str = "read", count: int = 1) -> None:
+    """Зафиксировать выполненные операции (read|mutate). `count` — фактическое число операций
+    батча (Google тарифицирует КАЖДУЮ mutate-операцию, а не вызов: батч из 50 ключей = 50).
+    Чтение учитывается по вызовам (count=1) — число страниц заранее неизвестно; это осознанный
+    недоучёт read-пути (гард ранний, авторитетен серверный лимит). Fail-safe: ошибки глотаем."""
     try:
+        n = max(1, min(int(count), 100_000))  # кламп: защита от мусорного count
         with _lock:
             now = time.time()
-            _events.append(now)
+            _events.extend([now] * n)
             if account:
-                _by_account.setdefault(account, deque()).append(now)
+                _by_account.setdefault(account, deque()).extend([now] * n)
             _prune(now)
     except Exception:  # noqa: BLE001 — трекинг не должен ронять основной путь
         pass

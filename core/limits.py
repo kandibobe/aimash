@@ -21,3 +21,20 @@ MONEY_MAX_MICROS: int = MONEY_MAX_UNITS * 1_000_000
 
 # Потолок радиуса proximity-таргетинга (км) — лимит Google Ads. Один источник для схемы и мутации.
 MAX_RADIUS_KM: int = 2000
+
+# Минимальная биллинг-единица Google Ads для бид/бюджета: 10 000 micros = 0.01 валюты.
+# Значения, не кратные единице, API отклоняет — округляем ДО отправки, чтобы превью == созданному.
+BILLING_UNIT_MICROS: int = 10_000
+
+
+def round_micros(value: int) -> int:
+    """Округлить денежную величину (micros) до кратной BILLING_UNIT_MICROS.
+
+    Единый источник для всех денежных путей (медианы «по аналогии» в ads.read, SDK-граница в
+    ads.mutations, пользовательский ввод в agent.campaign_settings). Положительное значение не
+    обнуляем (минимум — одна единица); 0/отрицательное возвращаем как есть (валидируется выше)."""
+    v = int(value)
+    if v <= 0:
+        return v
+    r = round(v / BILLING_UNIT_MICROS) * BILLING_UNIT_MICROS
+    return r if r > 0 else BILLING_UNIT_MICROS

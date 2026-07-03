@@ -226,3 +226,23 @@ async def test_stage1_edit_patches_settings():
     assert "budget_daily_micros" not in snap.wizard_state["settings"]["by_analogy"]
     assert "budget_daily_micros" not in snap.wizard_state["settings"]["by_default"]
     assert await _count_proposals(chat) == 0
+
+
+def test_draft_select_compiles_for_update_on_postgres():
+    """1F8: мутирующие пути стора берут SELECT … FOR UPDATE (row-lock на Postgres против
+    lost update при параллельных патчах); без флага FOR UPDATE отсутствует. На SQLite
+    FOR UPDATE молча игнорируется — поэтому проверяем КОМПИЛЯЦИЮ на postgresql-диалекте."""
+    from sqlalchemy.dialects import postgresql
+
+    from bot.campaign_wizard.store import _draft_select
+
+    with_lock = str(
+        _draft_select("sid", 1, active_only=True, for_update=True).compile(
+            dialect=postgresql.dialect()
+        )
+    )
+    without_lock = str(
+        _draft_select("sid", 1, active_only=True).compile(dialect=postgresql.dialect())
+    )
+    assert "FOR UPDATE" in with_lock
+    assert "FOR UPDATE" not in without_lock

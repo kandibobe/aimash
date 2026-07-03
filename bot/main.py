@@ -432,6 +432,9 @@ class TraceMiddleware(BaseMiddleware):
 # Множество, а не cooldown-словарь: проще и без импорта time. Cap — анти-DoS от ротации chat_id.
 _WL_REFUSED: set[int] = set()
 _WL_REFUSED_CAP = 10_000
+# Про кого уже был WARNING «не в whitelist» (дедуп лога: упорный чужой флуд не зашумляет журнал —
+# один WARNING на chat_id, повторы уходят в debug). Cap тот же (анти-DoS ротацией chat_id).
+_WL_LOGGED: set[int | None] = set()
 
 
 async def _maybe_refuse_unlisted(event: object, uid: int | None) -> None:
@@ -462,7 +465,12 @@ class WhitelistMiddleware(BaseMiddleware):
         uid = _event_chat_id(event)
         wl = settings.whitelist
         if uid not in wl:
-            log.warning("заблокирован chat_id %s (не в whitelist)", uid)
+            # Дедуп: один WARNING на chat_id (упорный флуд чужого — debug, не шум в журнале).
+            if uid not in _WL_LOGGED and len(_WL_LOGGED) < _WL_REFUSED_CAP:
+                _WL_LOGGED.add(uid)
+                log.warning("заблокирован chat_id %s (не в whitelist)", uid)
+            else:
+                log.debug("заблокирован chat_id %s (не в whitelist, повтор)", uid)
             await _maybe_refuse_unlisted(event, uid)
             return
         # ТОЛЬКО private-чаты: whitelist — по chat_id, а в группе chat_id ОДИН на всех участников →
@@ -627,6 +635,22 @@ async def _send_campaigns(message: Message, chat_id: int) -> None:
     )
 
 
+# Денежные операции (UI-слой): для них при внешнем контенте (файл/ссылка) в сводку добавляется
+# предупреждение (см. _present_proposal). Зеркалит реестр _EXPECTED_MONEY_OPS в
+# tests/test_invariants_core.py (имена op без префикса apply_) — дрейф ловит тест.
+_MONEY_OPS_UI: frozenset[str] = frozenset(
+    {
+        "update_budget",
+        "update_bid",
+        "set_bidding_strategy",
+        "create_search_campaign",
+        "create_gdn_campaign",
+        "create_demand_gen_campaign",
+        "create_video_campaign",
+    }
+)
+
+
 def _build_proposal(operation: str, **args) -> tuple[str, str, dict, str]:
     """Детерминированно собрать черновик мутации (как agent.loop, но БЕЗ LLM) — для кнопок.
     Валидация схемой обязательна. Возвращает (confirmation_id, operation, params, summary)."""
@@ -638,14 +662,31 @@ def _build_proposal(operation: str, **args) -> tuple[str, str, dict, str]:
 
 
 async def _present_proposal(
-    message: Message, *, chat_id: int, operation: str, params: dict, summary: str, cid: str
+    message: Message,
+    *,
+    chat_id: int,
+    operation: str,
+    params: dict,
+    summary: str,
+    cid: str,
+    external_context: bool = False,
+    customer_id: str = DRAFT_ACCOUNT_ID,
 ) -> None:
     """Сохранить черновик и показать с кнопками ✅/❌. user_initiated=True ставит ДОВЕРЕННЫЙ слой
-    (входящее действие whitelisted-человека), НЕ агент про себя (golden rule #3, fail-closed)."""
+    (входящее действие whitelisted-человека), НЕ агент про себя (golden rule #3, fail-closed).
+
+    customer_id — аккаунт МУТАЦИИ, штампуемый в черновик (authoritative: execute_confirmed
+    исполняет именно его, с повторным ensure_allowed). Дефолт Draft — единственный разрешённый
+    сегодня; будущий мультиаккаунт передаёт активный мутационный аккаунт (ads/client.py:28).
+
+    external_context=True — предложение родилось при наличии СПРАВОЧНОГО контента из файла/ссылки
+    (prompt-injection поверхность): для ДЕНЕЖНЫХ операций префиксуем сводку предупреждением
+    «сумма могла быть предложена внешним контентом» (попадает и в audit-summary). Механику
+    user_initiated НЕ меняем — последний гейт всё равно человек с diff и ✅."""
     # §5: читаем ТЕКУЩЕЕ значение (бюджет/ставку/статус) ДО показа → реальный diff «было → станет»
     # и снимок-база для оптимистичной сверки при исполнении (TOCTOU). read_before fail-safe (None).
     async with ux.typing_action(message):
-        before = await read_before(operation, params)
+        before = await read_before(operation, params, customer_id=customer_id)
         # P0 (golden rule #4): денежная команда в валюте ≠ валюте аккаунта → отказ с уточнением ДО
         # показа кнопок (FX не делаем; иначе «было→станет» соврал бы про сумму). Валюта — best-effort:
         # неизвестна (нет клиента/сбой read) ⇒ не блокируем (и чужую валюту на показе не печатаем).
@@ -666,10 +707,13 @@ async def _present_proposal(
     # Человекочитаемая сводка по operation+params (деньги — реальное «40.00 → 48.00 (+20%)»).
     # Для create_rsa/create_gdn у вызывающего свой богатый summary → fmt вернёт "".
     display = texts.fmt_mutation_summary(operation, params) or summary
+    if external_context and operation in _MONEY_OPS_UI:
+        # Денежное предложение при внешнем контенте — усиленное предупреждение В СВОДКЕ (и в audit).
+        display = i18n.t("external_context_money_warn") + "\n\n" + display
     await STORE.save_proposal(
         confirmation_id=cid,
         operation=operation,
-        customer_id=DRAFT_ACCOUNT_ID,
+        customer_id=customer_id,  # штамп аккаунта мутации (authoritative для execute_confirmed)
         params=params,
         summary=display,
         chat_id=chat_id,
@@ -743,37 +787,12 @@ def _valid_model_slug(s: str) -> str | None:
     return s
 
 
-async def _load_selected_account(chat_id: int) -> str | None:
-    """§6 /account: выбранный аккаунт ЧТЕНИЯ этого чата (user_settings.selected_customer_id).
-    None ⇒ Draft (прежнее поведение)."""
-    from sqlalchemy import select
-
-    from db.models import UserSettings
-    from db.session import Session
-
-    async with Session() as s:
-        row = (
-            await s.execute(select(UserSettings).where(UserSettings.chat_id == chat_id))
-        ).scalar_one_or_none()
-        return row.selected_customer_id if row else None
-
-
 async def _save_selected_account(chat_id: int, customer_id: str | None) -> None:
-    """Upsert выбранного аккаунта ЧТЕНИЯ чата (None = сброс на Draft). Переживает рестарт."""
-    from sqlalchemy import select
+    """Upsert выбранного аккаунта ЧТЕНИЯ чата (None = сброс на Draft). Переживает рестарт.
+    Тонкий делегат core.access.set_active_account — единая точка персиста (2B)."""
+    from core.access import set_active_account
 
-    from db.models import UserSettings
-    from db.session import Session
-
-    async with Session() as s:
-        row = (
-            await s.execute(select(UserSettings).where(UserSettings.chat_id == chat_id))
-        ).scalar_one_or_none()
-        if row is None:
-            s.add(UserSettings(chat_id=chat_id, selected_customer_id=customer_id))
-        else:
-            row.selected_customer_id = customer_id
-        await s.commit()
+    await set_active_account(chat_id, customer_id)
 
 
 # §UX-память: последний выбранный период отчётов (chat_id → код пресета "7"|"30"|"90"|"MTD").
@@ -902,19 +921,16 @@ async def _load_report_recall(chat_id: int) -> dict | None:
 
 async def _active_read_account(chat_id: int) -> str:
     """Активный аккаунт ЧТЕНИЯ чата для /status /report /export /sheets: выбранный через /account
-    (если он всё ещё разрешён на чтение — fail-closed при сужении списков) или Draft. МУТАЦИИ этим
-    НЕ затрагиваются — они всегда на Draft (ensure_allowed, golden rule 9)."""
+    или Draft. Делегат core.access.get_active_account — ЕДИНСТВЕННАЯ точка резолва (2B): она
+    перепроверяет И глобальный read-замок, И пер-пользовательский грант (fail-closed → Draft при
+    сужении списков ИЛИ отзыве гранта). МУТАЦИИ этим НЕ затрагиваются — они всегда на Draft
+    (ensure_allowed, golden rule 9)."""
+    from core.access import get_active_account
+
     try:
-        cid = await _load_selected_account(chat_id)
+        return await get_active_account(chat_id)
     except Exception:  # noqa: BLE001 — сбой чтения настройки не должен ломать отчёты
         return DRAFT_ACCOUNT_ID
-    if not cid:
-        return DRAFT_ACCOUNT_ID
-    try:
-        ensure_read_allowed(cid)
-    except PermissionError:  # список чтения сузился → честно откатываемся на Draft
-        return DRAFT_ACCOUNT_ID
-    return cid
 
 
 async def _heal_if_stuck_global(m: Message, acct: str) -> None:
@@ -935,14 +951,17 @@ async def _heal_if_stuck_global(m: Message, acct: str) -> None:
     await m.answer(i18n.t("acct_reset_auto", acct=texts.esc(acct)), parse_mode=ParseMode.HTML)
 
 
-def _read_account_rows(chat_id: int) -> list:
-    """§8: все аккаунты, доступные оператору на ЧТЕНИЕ (для пикера /report /export /sheets): Draft +
-    мутационный список + env read-list + обнаруженные дочерние (с именами/валютой из meta). Дедуп по
-    нормализованному id; КАЖДЫЙ прогоняется через ensure_read_allowed ⇒ список доказуемо ⊆ read-замка
-    (пикер = граница доступа, не открывает ничего сверх него). chat_id пока не сужает (одно-оператор.
-    чтение), оставлен под пер-юзер. Пустой обход MCC ⇒ как минимум Draft (список НИКОГДА не пуст)."""
+async def _read_account_rows(chat_id: int) -> list:
+    """§8: аккаунты, доступные ЭТОМУ оператору на ЧТЕНИЕ (для пикеров /report /export /sheets и
+    Этапа-0 §19 / §20): Draft + мутационный список + env read-list + обнаруженные дочерние (с
+    именами/валютой из meta). Дедуп по нормализованному id; КАЖДЫЙ прогоняется через
+    ensure_read_allowed И пер-пользовательский грант (core.access, 2B) ⇒ список доказуемо ⊆ обоих
+    замков (пикер = граница доступа). В legacy-проходе (auto + пустая таблица грантов) пер-юзер
+    фильтр пропускает всё — прежнее одно-операторное поведение. Пустой обход MCC ⇒ как минимум
+    Draft (список НИКОГДА не пуст)."""
     from ads.client import discovered_read_children, discovered_read_children_meta
     from ads.read import ChildAccount
+    from core.access import ensure_account_allowed_for_user
 
     meta = discovered_read_children_meta()
     candidate = [DRAFT_ACCOUNT_ID] + sorted(
@@ -956,6 +975,7 @@ def _read_account_rows(chat_id: int) -> list:
             continue
         try:
             ensure_read_allowed(cid)  # доказуемо ⊆ read-замка (fail-closed)
+            await ensure_account_allowed_for_user(chat_id, cid)  # пер-юзер грант (2B)
         except PermissionError:
             continue
         seen.add(cid)
@@ -981,6 +1001,9 @@ async def _report_target(chat_id: int) -> tuple[str, str | None, str | None]:
         acct = normalize_customer_id(sel["account"])
         try:
             ensure_read_allowed(acct)
+            from core.access import ensure_account_allowed_for_user
+
+            await ensure_account_allowed_for_user(chat_id, acct)  # пер-юзер грант (2B, TOCTOU)
         except PermissionError:
             return DRAFT_ACCOUNT_ID, None, None
         return acct, sel.get("campaign_id"), sel.get("campaign_name")
@@ -990,7 +1013,7 @@ async def _report_target(chat_id: int) -> tuple[str, str | None, str | None]:
 async def _start_report_picker(m: Message, target: str) -> None:
     """Показать выбор аккаунта для отчёта/экспорта (target = report|export|sheets). Аккаунты — все
     read-allowed (граница доступа). Один аккаунт (только Draft) ⇒ сразу к выбору кампании."""
-    rows = _read_account_rows(m.chat.id)
+    rows = await _read_account_rows(m.chat.id)
     _REPORT_ACCT_CACHE[m.chat.id] = rows
     _REPORT_SEL.pop(m.chat.id, None)  # начинаем выбор заново
     if len(rows) == 1:
@@ -1011,6 +1034,9 @@ async def _present_report_campaigns(m: Message, target: str, acct_row) -> None:
     cid = normalize_customer_id(getattr(acct_row, "id", "") or DRAFT_ACCOUNT_ID)
     try:
         ensure_read_allowed(cid)  # TOCTOU: обход мог измениться между рендером и тапом
+        from core.access import ensure_account_allowed_for_user
+
+        await ensure_account_allowed_for_user(m.chat.id, cid)  # пер-юзер грант (2B, TOCTOU)
     except PermissionError:
         await m.answer(i18n.t("account_denied", cid=texts.esc(cid)), parse_mode=ParseMode.HTML)
         return
@@ -1233,39 +1259,47 @@ def _mcc_period_factory(arg: str | None):
 
 
 async def _send_mcc(m: Message, arg: str | None) -> None:
-    """§8: сводный отчёт по ВСЕМ дочерним аккаунтам MCC (подытоги по валютам без FX; окно каждого
-    дочернего — в его таймзоне). READ-only. Аккаунты берутся из обхода MCC (discover_read_children)
-    ∪ read-list; мутации не затрагиваются (свой узкий замок)."""
+    """§8: сводный отчёт по ВСЕМ дочерним аккаунтам ВСЕХ настроенных MCC (2F: раньше — только
+    основной login_customer_id; вторичные из GOOGLE_ADS_LOGIN_CUSTOMER_IDS не попадали в /mcc,
+    хотя scheduler и пикеры их видели). Подытоги по валютам без FX; окно каждого дочернего — в
+    его таймзоне. READ-only. Сбой одного MCC → предупреждение в дайджесте, остальные живут
+    (зеркало discover_read_children)."""
     try:
         period = _period_from_arg(arg)
     except ValueError:
         await m.answer(i18n.t("err_period"))
         return
-    manager_id = normalize_customer_id(settings.google_ads_login_customer_id)
-    if not manager_id:
+    managers = sorted(settings.login_customer_id_set)
+    if not managers:
         await m.answer(i18n.t("mcc_no_manager"))
         return
     await m.answer(i18n.t("mcc_preparing"))
-    try:
-        from ads.client import build_client_async
-        from ads.read import account_timezone
-        from reports.mcc import build_mcc_summary_async
-        from reports.service import summary_text_mcc
+    from ads.client import build_client_async
+    from ads.read import account_timezone
+    from reports.mcc import build_mcc_summary_async
+    from reports.service import summary_text_mcc
 
-        client = await build_client_async(manager_id)  # холодная сборка — вне loop
-        async with ux.typing_action(m):
-            summary = await build_mcc_summary_async(
-                client,
-                manager_id,
-                period,
-                tz_of=account_timezone,
-                period_for=_mcc_period_factory(arg),
-            )
-    except Exception as e:  # сеть/доступ/SDK/замок обхода MCC
-        await m.answer(i18n.t("err_mcc", err=ux.err_text(e)))
+    parts: list[str] = []
+    async with ux.typing_action(m):
+        for manager_id in managers:
+            try:
+                client = await build_client_async(manager_id)  # холодная сборка — вне loop
+                summary = await build_mcc_summary_async(
+                    client,
+                    manager_id,
+                    period,
+                    tz_of=account_timezone,
+                    period_for=_mcc_period_factory(arg),
+                )
+                parts.append(summary_text_mcc(summary))
+            except Exception as e:  # сеть/доступ/SDK — один MCC не валит остальные
+                await capture_exception(e, where=f"mcc:{manager_id}")
+                parts.append(i18n.t("mcc_manager_failed", mid=texts.esc(manager_id)))
+    if not parts:
+        await m.answer(i18n.t("err_mcc", err=""))
         return
     # HTML + деление по строкам: у большого MCC сводка длиннее лимита Telegram (полная — в /export).
-    await ux.send_html_chunks(m, summary_text_mcc(summary))
+    await ux.send_html_chunks(m, "\n\n———\n\n".join(parts))
 
 
 # ── RSA-генерация (фаза 2.C): /rsa визард → курация → confirm-гейт create_rsa ─────
@@ -1850,23 +1884,14 @@ def _cc_apply_settings_patch(cur: dict, patch) -> dict:
 
 
 async def _cc_present_stage0(target: Message, chat_id: int) -> None:
-    """Этап 0: дочерние аккаунты MCC (read-only превью) кнопками. Сбой/нет MCC → деградируем на
+    """Этап 0: аккаунты, доступные ЭТОМУ оператору на чтение (2F: из discovered-meta ВСЕХ
+    настроенных MCC + пер-юзер фильтр, как пикер /report — раньше живой обход только основного
+    MCC: вторичные не попадали + лишний SDK-вызов на каждый вход). Сбой/пусто → деградация на
     единственный Draft, чтобы визард не падал (мутации всё равно только на Draft)."""
     rows: list = []
     try:
-        from ads.client import build_client_async
-        from ads.read import list_child_accounts
-
-        client = await build_client_async()
-        async with ux.typing_action(target):
-            children = await run_ads_read_call(
-                list_child_accounts,
-                client,
-                settings.google_ads_login_customer_id,
-                label="list_child_accounts",
-            )
-        rows = [c for c in children if not getattr(c, "manager", False)]
-    except Exception as e:  # noqa: BLE001 — нет MCC/доступа → деградация на Draft
+        rows = [r for r in await _read_account_rows(chat_id) if not getattr(r, "manager", False)]
+    except Exception as e:  # noqa: BLE001 — сбой перечисления → деградация на Draft
         await target.answer(i18n.t("cc_accounts_error", err=ux.err_text(e)))
     if not rows:
         rows = [_cc_draft_account_row()]
@@ -2083,22 +2108,12 @@ def _cli_arm_idle(bot, chat_id: int, customer_id: str) -> None:
 
 
 async def _cli_read_accounts(target: Message, chat_id: int) -> list:
-    """Дочерние аккаунты MCC для раздела «Клиенты» (как §19 Этап 0). Сбой/нет MCC → Draft."""
+    """Аккаунты для раздела «Клиенты» (как §19 Этап 0): из discovered-meta всех MCC + пер-юзер
+    фильтр (2F, единый перечислитель _read_account_rows). Сбой/пусто → Draft."""
     rows: list = []
     try:
-        from ads.client import build_client_async
-        from ads.read import list_child_accounts
-
-        client = await build_client_async()
-        async with ux.typing_action(target):
-            children = await run_ads_read_call(
-                list_child_accounts,
-                client,
-                settings.google_ads_login_customer_id,
-                label="list_child_accounts",
-            )
-        rows = [c for c in children if not getattr(c, "manager", False)]
-    except Exception as e:  # noqa: BLE001 — нет MCC/доступа → деградация на Draft
+        rows = [r for r in await _read_account_rows(chat_id) if not getattr(r, "manager", False)]
+    except Exception as e:  # noqa: BLE001 — сбой перечисления → деградация на Draft
         await target.answer(i18n.t("cli_accounts_error", err=ux.err_text(e)))
     if not rows:
         rows = [_cc_draft_account_row()]
@@ -3096,8 +3111,12 @@ async def _cc_keywords_from_document(m: Message, state: FSMContext, text: str, n
     await _cc_save_keywords(m, m.chat.id, session_id, state, kw_list, mt, "file", per_kw_mts=per_kw)
 
 
-async def _dispatch_command_result(m: Message, res: dict, state: FSMContext) -> None:
-    """Единый роутинг исхода handle_command (используют on_text, ingest-флоу файла/ссылки)."""
+async def _dispatch_command_result(
+    m: Message, res: dict, state: FSMContext, *, external_context: bool = False
+) -> None:
+    """Единый роутинг исхода handle_command (используют on_text, ingest-флоу файла/ссылки).
+    external_context=True — команда шла со СПРАВОЧНЫМ контентом (файл/ссылка): денежные черновики
+    получают предупреждение в сводке (см. _present_proposal)."""
     t = res.get("type")
     if t == "proposal":
         await _present_proposal(
@@ -3107,6 +3126,7 @@ async def _dispatch_command_result(m: Message, res: dict, state: FSMContext) -> 
             params=res.get("params", {}),
             summary=res["summary"],
             cid=res["confirmation_id"],
+            external_context=external_context,
         )
     elif t == "rsa_intent":
         await _rsa_start_from_intent(m, res.get("brief", {}), state)
@@ -3142,7 +3162,8 @@ async def _run_task_with_context(
     async with ux.typing_action(m):
         res = await handle_command(instruction, chat_id=m.chat.id, context_text=context_text)
     await m.answer(i18n.t("ingest_used", source=texts.esc(source)), parse_mode=ParseMode.HTML)
-    await _dispatch_command_result(m, res, state)
+    # Внешний контент = поверхность prompt-injection → денежные черновики получат предупреждение.
+    await _dispatch_command_result(m, res, state, external_context=True)
 
 
 # ── Inline: выбор кампании и быстрые действия ─────────────────────────────────────
@@ -3241,6 +3262,22 @@ async def _do_confirm(cq: CallbackQuery, cid: str) -> bool:
     # успешную операцию как failed — отдельный try/except, вне ветки record_failure.
     log.info("мутация применена cid=%s chat=%s", cid, chat_id)  # денежный путь — успех в лог
     await _safe_edit(cq, i18n.t("applied", result=texts.esc(result)), parse_mode=ParseMode.HTML)
+    # partial_failure (батчи ключей/минус-слов): часть позиций отклонена сервером — честно
+    # перечисляем причины (не молчим об «усечённом» успехе). Причины уже отредактированы.
+    if isinstance(result, dict) and result.get("rejected"):
+        rej = result["rejected"]
+        reasons = "\n".join(
+            f"• {texts.esc(str(r.get('keyword', '')))} — {texts.esc(str(r.get('reason', '')))}"
+            for r in rej[:3]
+        )
+        msg = _cq_msg(cq)
+        if msg is not None:
+            await msg.answer(
+                i18n.t("kw_partial_rejected", ok=result.get("count", 0), bad=len(rej))
+                + "\n"
+                + reasons,
+                parse_mode=ParseMode.HTML,
+            )
     # §20.2: профиль сохранён/обновлён → кнопка «📋 Карточка клиента» в 1 тап (кроме clear —
     # карточки больше нет). Read-only довесок, мутаций не создаёт.
     if (
@@ -3463,6 +3500,14 @@ async def main() -> None:
     # start_polling сам ставит обработчики SIGINT/SIGTERM и завершается штатно по сигналу;
     # finally гарантирует graceful-освобождение ресурсов (P2 lifecycle), что бы ни остановило polling.
     try:
+        # Офлайн-бэклог НЕ переигрываем (drop_pending_updates): NL-команды многочасовой давности
+        # на денежном пути опасны («подними бюджет», отправленный вчера, не должен ожить после
+        # рестарта). Потерянный ✅-callback безопасен: claim одноразовый, пользователь нажмёт снова.
+        # В aiogram 3.x у start_polling нет параметра — канонично через delete_webhook.
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+        except Exception as e:  # noqa: BLE001 — сбой очистки бэклога не должен ронять старт
+            log.warning("drop_pending_updates не выполнен: %s", type(e).__name__)
         await dp.start_polling(bot)
     finally:
         if sched is not None:

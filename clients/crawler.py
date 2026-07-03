@@ -95,15 +95,17 @@ class CrawlResult:
         return len(self.pages)
 
     def combined_text(self, max_chars: int = 8000) -> str:
-        """Единый текст для LLM-сведе́ния: заголовки+текст страниц + найденные контакты/соцсети."""
+        """Единый текст для LLM-сведе́ния: заголовки+текст страниц + соцсети.
+
+        PII-egress (golden rule #5 расширительно): телефоны/e-mail НЕ включаются — они уже
+        извлечены детерминированно регексами краулера (self.phones/self.emails) и попадают в патч
+        профиля КОДОМ (_crawl_patch_from_result), LLM для них не нужен. Соцсети — публичные хэндлы
+        бренда, не PII. Residual: контакт может встретиться в самом тексте страницы — это
+        задокументировано (docs/CLIENTS_KB.md, «Egress в LLM»)."""
         parts: list[str] = []
         for p in self.pages:
             head = f"# {p.title or p.url} ({p.page_type})"
             parts.append(f"{head}\n{p.text}".strip())
-        if self.phones:
-            parts.append("Телефоны: " + ", ".join(self.phones[:10]))
-        if self.emails:
-            parts.append("E-mail: " + ", ".join(self.emails[:10]))
         if self.socials:
             parts.append("Соцсети: " + ", ".join(f"{k}: {v}" for k, v in self.socials.items()))
         return "\n\n".join(parts).strip()[:max_chars]

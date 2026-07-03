@@ -44,6 +44,40 @@ def error_code_names(exc: object) -> set[str]:
 _error_code_name = error_code_name
 
 
+def partial_failure_errors(client: object, response: object) -> list[tuple[int, str, str]]:
+    """[(op_index, code_name, message)] из response.partial_failure_error (google.rpc.Status).
+
+    Официальный паттерн Google: при partial_failure=True сервер кладёт отказ в
+    partial_failure_error.details[] (Any → GoogleAdsFailure.deserialize), а индекс отклонённой
+    операции батча — err.location.field_path_elements[0].index. Нет partial_failure
+    (status пуст / code==0) ⇒ []. Дакт-безопасно: тест-фейк может нести errors прямо на detail."""
+    status = getattr(response, "partial_failure_error", None)
+    if status is None or not getattr(status, "code", 0):
+        return []
+    out: list[tuple[int, str, str]] = []
+    for detail in getattr(status, "details", None) or []:
+        try:
+            failure = client.get_type("GoogleAdsFailure").deserialize(detail.value)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — тест-фейк: detail сам несёт errors
+            failure = detail if hasattr(detail, "errors") else None
+        for err in getattr(failure, "errors", None) or []:
+            idx = -1
+            elems = list(getattr(getattr(err, "location", None), "field_path_elements", None) or [])
+            if elems:
+                try:
+                    idx = int(getattr(elems[0], "index", -1))
+                except (TypeError, ValueError):
+                    idx = -1
+            out.append(
+                (
+                    idx,
+                    error_code_name(getattr(err, "error_code", None)),
+                    str(getattr(err, "message", "") or ""),
+                )
+            )
+    return out
+
+
 def _request_id(exc: object) -> str:
     rid = getattr(exc, "request_id", None)
     return str(rid) if rid else ""

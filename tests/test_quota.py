@@ -66,3 +66,34 @@ def test_snapshot_shape_and_by_account():
         assert snap["limit"] == 1000 and snap["used"] == 3
         assert snap["by_account"]["111"] == 2 and snap["by_account"]["222"] == 1
         assert snap["window_hours"] == 24
+
+
+def test_record_count_batch():
+    """1F4: батч из N операций = N событий квоты (Google тарифицирует каждую mutate-операцию)."""
+    with _limit(100):
+        quota.record("111", kind="mutate", count=50)
+        assert abs(quota.usage_pct() - 0.5) < 1e-9
+        assert quota.snapshot()["by_account"]["111"] == 50
+        # кламп: мусорный count не ломает счётчик (минимум 1)
+        quota.record(kind="read", count=0)
+        assert quota.snapshot()["used"] == 51
+
+
+async def test_run_ads_call_passes_op_count_to_quota(monkeypatch):
+    """run_ads_call прокидывает op_count в quota.record (учёт батча, §3)."""
+    from core import resilience
+
+    seen: dict = {}
+
+    def _fake_record(account=None, *, kind="read", count=1):
+        seen.update(account=account, kind=kind, count=count)
+
+    monkeypatch.setattr(quota, "record", _fake_record)
+    monkeypatch.setattr(quota, "check_mutation_allowed", lambda account=None: None)
+
+    def _sdk_call():
+        return {"ok": True}
+
+    res = await resilience.run_ads_call(_sdk_call, account="777", op_count=42)
+    assert res == {"ok": True}
+    assert seen == {"account": "777", "kind": "mutate", "count": 42}

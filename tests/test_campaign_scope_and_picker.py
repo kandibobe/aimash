@@ -118,15 +118,37 @@ def test_inactive_child_goes_to_inactive_bucket_not_errors():
 
 
 # ── Пикер: перечислитель аккаунтов = Draft + read-list, все проходят ensure_read_allowed ──
-def test_read_account_rows_lists_draft_and_read_ids():
+async def test_read_account_rows_lists_draft_and_read_ids():
     import bot.main as bm
+    from db.session import init_db
 
+    await init_db()
     extra = "6764040266"
     with _ids(allowed=DRAFT, read=extra):
-        rows = bm._read_account_rows(chat_id=1)
+        rows = await bm._read_account_rows(chat_id=1)
     ids = {r.id for r in rows}
     assert DRAFT in ids
-    assert extra in ids  # §8: 676-404-0266 доступен на чтение через env read-list
+    assert extra in ids  # §8: 676-404-0266 доступен на чтение через env read-list (legacy-проход)
+
+
+async def test_read_account_rows_filters_by_grant_when_enforced(monkeypatch):
+    """2B: при активном enforcement (есть гранты) пикер показывает не-Draft ТОЛЬКО грантованным."""
+    import bot.main as bm
+    from core.access import grant_account_access, revoke_account_access
+    from db.session import init_db
+
+    await init_db()
+    extra = "6764040266"
+    granted_chat, other_chat = 77_101, 77_102
+    with _ids(allowed=DRAFT, read=extra):
+        await grant_account_access(granted_chat, extra)  # первый грант включает enforcement
+        try:
+            ids_granted = {r.id for r in await bm._read_account_rows(granted_chat)}
+            ids_other = {r.id for r in await bm._read_account_rows(other_chat)}
+        finally:
+            await revoke_account_access(granted_chat, extra)  # вернуть legacy другим тестам
+    assert extra in ids_granted and DRAFT in ids_granted
+    assert extra not in ids_other and DRAFT in ids_other  # Draft виден всем, чужой — нет
 
 
 # ── Само-восстановление: read упал на залипшем не-Draft аккаунте → сброс глобального выбора на Draft ──

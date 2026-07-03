@@ -205,3 +205,122 @@ def test_no_source_references_ads_adcopy():
         + ", ".join(offenders)
         + " — верни на `adcopy.`"
     )
+
+
+# ── #10: КАЖДЫЙ dev-скрипт с прямой записью (мимо confirm-гейта) гейтится require_dev_env ──
+# Гард на КЛАСС: новый demo/фикстура-скрипт с mutate_* без require_dev_env() провалит тест.
+# Allow-list — скрипты, идущие ЧЕРЕЗ полный confirm-гейт (save_proposal→confirm→execute):
+# им dev-гард не нужен (сам гейт и замок аккаунта уже защищают денежный путь).
+_GATED_SCRIPT_ALLOWLIST = {"live_smoke_test.py", "live_smoke_video_dg.py"}
+
+
+def test_direct_write_scripts_call_require_dev_env():
+    scripts_dir = _REPO_ROOT / "scripts"
+    direct_write = re.compile(r"\.mutate_\w+\(")  # прямой вызов Mutate-сервиса SDK
+    offenders: list[str] = []
+    for py in scripts_dir.glob("*.py"):
+        if py.name in _GATED_SCRIPT_ALLOWLIST:
+            continue
+        text = py.read_text(encoding="utf-8", errors="ignore")
+        if direct_write.search(text) and "require_dev_env()" not in text:
+            offenders.append(py.name)
+    assert not offenders, (
+        f"скрипты с прямой записью в Google Ads БЕЗ require_dev_env(): {offenders} — "
+        "golden rule #10: прямая запись мимо confirm-гейта разрешена только при ENV=dev "
+        "(вызови require_dev_env() первой строкой main())"
+    )
+
+
+# ── #5 (регресс-инвариант): GoogleAdsException с токеном → REDACTED и в чат, и в audit ──
+async def test_google_ads_exception_with_token_redacted_in_chat_and_audit():
+    """Сырой GoogleAdsException может нести креды в message. Инвариант: на ОБЕИХ границах
+    (текст пользователю и audit_log) секрет заменён на REDACTED, request_id сохранён (не секрет —
+    нужен саппорту). Ловит будущий рефактор, случайно открывший утечку."""
+    import uuid
+
+    from bot import ux
+    from confirm.store import ConfirmStore
+    from core.ads_errors import humanize_google_ads_error
+    from db.session import init_db
+
+    secret = "1//0SECRETrefreshTOKENvalue123"  # gitleaks:allow — форма refresh-токена
+
+    class _Code:
+        name = "AUTHENTICATION_ERROR"
+
+    class _Err:
+        message = f"auth failed refresh_token={secret} denied"
+        error_code = _Code()
+
+    class _Failure:
+        errors = [_Err()]
+
+    class _FakeAdsExc(Exception):
+        failure = _Failure()
+        request_id = "AbCd123"
+
+    exc = _FakeAdsExc("raw")
+
+    # Граница 1: текст пользователю (humanize + err_text)
+    for text in (humanize_google_ads_error(exc), ux.err_text(exc)):
+        assert secret not in text, "секрет утёк в текст пользователю (golden rule #5)"
+        assert "REDACTED" in text
+        assert "AbCd123" in text or "request_id" not in text  # request_id сохранён, если печатается
+
+    # Граница 2: audit_log (record_failure редактирует на записи в БД)
+    await init_db()
+    store = ConfirmStore()
+    cid = uuid.uuid4().hex
+    await store.save_proposal(
+        confirmation_id=cid,
+        operation="update_budget",
+        customer_id="7753643025",
+        params={},
+        summary="s",
+        chat_id=1,
+        user_initiated=True,
+    )
+    assert await store.confirm(cid, chat_id=1)
+    await store.record_failure(cid, error=f"auth failed refresh_token={secret} denied")
+
+    from sqlalchemy import select
+
+    from db.models import AuditLog
+    from db.session import Session
+
+    async with Session() as s:
+        row = (
+            await s.execute(
+                select(AuditLog).where(AuditLog.confirmation_id == cid, AuditLog.status == "failed")
+            )
+        ).scalar_one()
+    err_text_db = str(row.result.get("error", ""))
+    assert secret not in err_text_db, "секрет утёк в audit_log (golden rule #5)"
+    assert "REDACTED" in err_text_db
+
+
+# ── #3 (UI-зеркало): _MONEY_OPS_UI в bot.main синхронен реестру денежных операций ──
+def test_money_ops_ui_mirror_matches_registry():
+    """bot.main._MONEY_OPS_UI (предупреждение о внешнем контенте) обязан зеркалить
+    _EXPECTED_MONEY_OPS (без префикса apply_) — дрейф реестров ловится здесь."""
+    import bot.main as bm
+
+    expected = {name.removeprefix("apply_") for name in _EXPECTED_MONEY_OPS}
+    assert set(bm._MONEY_OPS_UI) == expected, (
+        f"_MONEY_OPS_UI={sorted(bm._MONEY_OPS_UI)} разошёлся с реестром денежных операций "
+        f"{sorted(expected)} — обнови оба осознанно"
+    )
+
+
+# ── 1F7: офлайн-бэклог Telegram не переигрывается после рестарта ───────────────────
+def test_polling_drops_pending_updates():
+    """bot/main.py обязан вызывать delete_webhook(drop_pending_updates=True) ДО start_polling:
+    NL-команды многочасовой давности на денежном пути опасны. Слабая (текстовая), но
+    класс-фиксирующая проверка — снятие вызова ломает тест."""
+    src = (_REPO_ROOT / "bot" / "main.py").read_text(encoding="utf-8")
+    drop_pos = src.find("delete_webhook(drop_pending_updates=True)")
+    poll_pos = src.find("await dp.start_polling(bot)")
+    assert drop_pos != -1, "drop_pending_updates(True) пропал из bot/main.py (1F7)"
+    assert poll_pos != -1 and drop_pos < poll_pos, (
+        "drop_pending_updates должен идти ДО start_polling"
+    )

@@ -252,6 +252,7 @@ async def test_execute_confirmed_routes_create_rsa():
     cp = SimpleNamespace(
         operation="create_rsa",
         status="confirmed",
+        customer_id=DRAFT_ACCOUNT_ID,  # 2A: execute_confirmed берёт аккаунт из черновика
         params={
             "ad_group_id": "42",
             "campaign": "X",
@@ -270,6 +271,7 @@ async def test_execute_confirmed_routes_create_rsa():
     with (
         patched(svc, "build_client_async", _fake_client_async),
         patched(mut, "apply_create_rsa", fake_apply),
+        allowed_ids(DRAFT_ACCOUNT_ID),  # 2A: повторный ensure_allowed на исполнении
     ):
         res = await svc.execute_confirmed(_S(), "cid")
     assert res["applied"] is True

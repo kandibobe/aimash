@@ -31,6 +31,15 @@ ACCT = "1112223334"
 CHAT = 555
 
 
+@pytest.fixture(autouse=True)
+def _enforced_mode(monkeypatch):
+    """Тесты этого модуля описывают СТРОГУЮ пер-юзер семантику — фиксируем режим enforced.
+    В дефолтном auto пустая таблица грантов даёт legacy-проход (обратная совместимость
+    одно-операторного режима) и смазала бы ассерты «без гранта — отказ». Режимы auto/legacy
+    покрыты отдельными тестами ниже."""
+    monkeypatch.setattr(settings, "account_access_mode", "enforced")
+
+
 @contextmanager
 def _read(read_ids: str, allowed: str = DRAFT):
     pa, pr = settings.google_ads_allowed_customer_ids, settings.google_ads_read_customer_ids
@@ -154,6 +163,120 @@ async def test_set_active_account_upsert_branches():
         ).scalar_one()
     assert n == 1  # ровно одна строка — update не сделал дубль
     await revoke_account_access(chat, ACCT)
+
+
+# ── 2B: режимы пер-юзер изоляции (auto / enforced / legacy) ───────────────────────
+async def test_auto_mode_empty_table_is_legacy_pass(monkeypatch):
+    """auto + ни одного гранта в таблице → legacy-проход: не-Draft НЕ требует гранта
+    (текущее одно-операторное поведение сохраняется до первого /grant)."""
+    from core import access as acc
+    from db.models import AccountAccess
+    from db.session import Session
+
+    await init_db()
+    monkeypatch.setattr(settings, "account_access_mode", "auto")
+    # гарантируем пустую таблицу (общая temp-БД сессии) + сброс кэша enforcement
+    from sqlalchemy import delete
+
+    async with Session() as s:
+        await s.execute(delete(AccountAccess))
+        await s.commit()
+    acc._invalidate_enforcement_cache()
+
+    assert await acc.per_user_enforcement_active() is False
+    await ensure_account_allowed_for_user(9001, ACCT)  # НЕ бросает (legacy-проход)
+
+
+async def test_first_grant_activates_enforcement(monkeypatch):
+    """auto: ПЕРВЫЙ грант включает enforcement — другой оператор теряет legacy-проход."""
+    from core import access as acc
+    from db.models import AccountAccess
+    from db.session import Session
+
+    await init_db()
+    monkeypatch.setattr(settings, "account_access_mode", "auto")
+    from sqlalchemy import delete
+
+    async with Session() as s:
+        await s.execute(delete(AccountAccess))
+        await s.commit()
+    acc._invalidate_enforcement_cache()
+
+    await grant_account_access(9002, ACCT)  # первый грант (инвалидирует кэш сам)
+    try:
+        assert await acc.per_user_enforcement_active() is True
+        await ensure_account_allowed_for_user(9002, ACCT)  # грантованный — ок
+        with pytest.raises(PermissionError):
+            await ensure_account_allowed_for_user(9003, ACCT)  # другой — отказ
+    finally:
+        await revoke_account_access(9002, ACCT)
+
+
+async def test_env_enforced_denies_non_draft_with_empty_table(monkeypatch):
+    """enforced: строгий режим даже с пустой таблицей (не-Draft без гранта — отказ)."""
+    monkeypatch.setattr(settings, "account_access_mode", "enforced")
+    await init_db()
+    with pytest.raises(PermissionError):
+        await ensure_account_allowed_for_user(9004, ACCT)
+    await ensure_account_allowed_for_user(9004, DRAFT)  # Draft — всегда
+
+
+async def test_legacy_mode_disables_per_user_lock(monkeypatch):
+    """legacy: пер-юзер замок осознанно выключен (только глобальный read-замок на вызывающем)."""
+    monkeypatch.setattr(settings, "account_access_mode", "legacy")
+    await init_db()
+    await ensure_account_allowed_for_user(9005, ACCT)  # не бросает
+
+
+async def test_grant_does_not_open_mutations():
+    """Зеркало ключевого инварианта (golden rule 9): грант ЧТЕНИЯ на дочерний НЕ открывает
+    мутации — ensure_allowed (потолок ALLOWED_CEILING=Draft) всё равно отказывает."""
+    from ads.client import ensure_allowed
+
+    await init_db()
+    await grant_account_access(9006, ACCT)
+    try:
+        with _read(read_ids=ACCT):
+            await ensure_account_allowed_for_user(9006, ACCT)  # чтение — ок
+            with pytest.raises(PermissionError):
+                ensure_allowed(ACCT)  # мутация — отказ (потолок в коде)
+    finally:
+        await revoke_account_access(9006, ACCT)
+
+
+async def test_resolve_read_account_paths(monkeypatch):
+    """2D-бэкенд: пусто → активный аккаунт; id → композитный замок; имя → уникальный матч по meta;
+    неоднозначно → LookupError; запрещён → PermissionError (не молчаливая подмена)."""
+    from ads.client import set_discovered_read_children, set_discovered_read_children_meta
+    from ads.read import ChildAccount
+    from core.access import resolve_read_account
+
+    await init_db()
+    monkeypatch.setattr(settings, "account_access_mode", "legacy")  # изолируем от грантов
+    chat = 9007
+    ch_a = ChildAccount(
+        id=ACCT, name="Kasi Motors", currency="USD", manager=False, level=1, status="ENABLED"
+    )
+    ch_b = ChildAccount(
+        id="9998887776", name="Kasi Parts", currency="USD", manager=False, level=1, status="ENABLED"
+    )
+    set_discovered_read_children([ACCT, "9998887776"])
+    set_discovered_read_children_meta([ch_a, ch_b])
+    try:
+        with _read(read_ids=""):
+            assert await resolve_read_account(chat, None) == DRAFT  # пусто → активный (Draft)
+            assert await resolve_read_account(chat, "111-222-3334") == ACCT  # id нормализован
+            assert await resolve_read_account(chat, "Kasi Motors") == ACCT  # точное имя
+            assert await resolve_read_account(chat, "motors") == ACCT  # уникальная подстрока
+            with pytest.raises(LookupError):
+                await resolve_read_account(chat, "Kasi")  # неоднозначно (2 кандидата)
+        with _read(read_ids="", allowed=""):  # всё пусто → read-замок отказывает
+            set_discovered_read_children([])
+            with pytest.raises(PermissionError):
+                await resolve_read_account(chat, ACCT)
+    finally:
+        set_discovered_read_children([])
+        set_discovered_read_children_meta([])
 
 
 async def test_get_active_account_corner_cases():

@@ -125,6 +125,7 @@ HELP = (
     "/client &lt;id&gt; — карточка клиента по номеру аккаунта\n\n"
     "<b>⚙️ Настройки и сервис</b>\n"
     "/account &lt;id&gt; | reset — аккаунт чтения для отчётов/ключей (по умолч. Draft)\n"
+    "/accounts — мои доступные аккаунты · /whoami — мой chat_id и режим доступа\n"
     "/refresh — обновить список аккаунтов и кэши без рестарта\n"
     "/model — выбрать модель ИИ (OpenRouter) · /balance — бюджет ИИ: баланс и траты\n"
     "/lang — язык интерфейса (RU/EN)\n"
@@ -1315,6 +1316,7 @@ _AUDIT_STATUS = {
     "applied": ("✅", "применено"),
     "failed": ("⚠️", "ошибка"),
     "rejected": ("❌", "отклонено"),
+    "needs_review": ("⚠️", "требует проверки"),
 }
 # Человекочитаемые имена операций для журнала (как в keyboards/loop, без технических slug'ов).
 _OP_HUMAN = {
@@ -1337,6 +1339,7 @@ _AUDIT_STATUS_EN = {
     "applied": ("✅", "applied"),
     "failed": ("⚠️", "failed"),
     "rejected": ("❌", "rejected"),
+    "needs_review": ("⚠️", "needs review"),
 }
 _OP_HUMAN_EN = {
     "update_budget": "budget",
@@ -1418,7 +1421,7 @@ def fmt_journal(events, lang: str | None = None) -> str:
         when = e.created_at.strftime("%d.%m %H:%M") if e.created_at else "—"
         who = _journal_actor(e.actor_user_id, e.actor_username)
         L.append(f"{emoji} <b>{esc(op)}</b> — {status} · {when} UTC · {who}")
-        if e.status == "failed" and isinstance(e.result, dict):
+        if e.status in ("failed", "needs_review") and isinstance(e.result, dict):
             err = str(e.result.get("error") or "").strip()
             if err:
                 L.append(f"    ↳ {esc(err[:120])}")
@@ -1427,6 +1430,30 @@ def fmt_journal(events, lang: str | None = None) -> str:
         L.append("<i>Full history and “before→after” are stored in the DB (audit_log).</i>")
     else:
         L.append("<i>Полная история и «было→станет» хранятся в БД (audit_log).</i>")
+    return "\n".join(L)
+
+
+def fmt_campaign_targeting(t, lang: str | None = None) -> str:
+    """Текущий таргетинг кампании (§3 «чтение … ГЕО», 2E): локации/исключения/радиусы/языки.
+    t — ads.read.CampaignTargeting. Пустые списки = «все регионы/языки» (честно показываем)."""
+    en = _lang(lang) == "en"
+    L: list[str] = ["📍 <b>Current targeting</b>" if en else "📍 <b>Текущий таргетинг</b>"]
+    if t.locations:
+        label = "Locations" if en else "Локации"
+        L.append(f"• {label}: {esc(', '.join(t.locations[:10]))}")
+    if t.negative_locations:
+        label = "Excluded" if en else "Исключены"
+        L.append(f"• {label}: {esc(', '.join(t.negative_locations[:10]))}")
+    if t.proximity:
+        label = "Radius" if en else "Радиус"
+        L.append(f"• {label}: {esc('; '.join(t.proximity[:5]))}")
+    if not (t.locations or t.negative_locations or t.proximity):
+        L.append("• " + ("all regions (no geo criteria)" if en else "все регионы (гео не задано)"))
+    if t.languages:
+        label = "Languages" if en else "Языки"
+        L.append(f"• {label}: {esc(', '.join(t.languages[:10]))}")
+    else:
+        L.append("• " + ("all languages" if en else "все языки"))
     return "\n".join(L)
 
 

@@ -26,13 +26,15 @@ DRAFT_ACCOUNT_ID = "7753643025"
 # Расширение круга мутаций = ОСОЗНАННАЯ правка этого файла (см. docstring модуля).
 #
 # ⚠️ БУДУЩЕЕ ВКЛЮЧЕНИЕ МУТАЦИЙ на 2-м аккаунте (напр. Aimash 676-404-0266 = 6764040266) —
-# НЕ включено намеренно (заказчик: пока только ЧТЕНИЕ везде, деньги на боевом не трогаем). Чтобы
-# включить, ВСЕ 3 точки должны быть протянуты вместе (не по одной) + новые инвариант-тесты:
+# НЕ включено намеренно (заказчик: пока только ЧТЕНИЕ везде, деньги на боевом не трогаем).
+# Исполнение УЖЕ привязано к proposal.customer_id (предсдаточный спринт 2026-07):
+# ads/service.py:read_before принимает customer_id, execute_confirmed читает аккаунт из черновика
+# и ЗАНОВО ensure_allowed(cid) на исполнении (fail-closed; инварианты —
+# tests/test_execute_account_binding.py). Чтобы включить мутации на новом аккаунте, осталось:
 #   1) сюда: ALLOWED_CEILING = frozenset({DRAFT_ACCOUNT_ID, "6764040266"});
-#   2) ads/service.py:read_before — cid хардкодит Draft → принять активный мутационный аккаунт;
-#   3) ads/service.py:execute_confirmed — customer_id хардкодит Draft → читать аккаунт из
-#      proposal.params и заново ensure_allowed(cid) перед исполнением; bot _build_proposal штампует
-#      активный мутационный аккаунт в params. Бюджет из scheduler остаётся заблокирован (user_initiated).
+#   2) bot/main._present_proposal — штамповать активный МУТАЦИОННЫЙ аккаунт (параметр customer_id
+#      уже есть, дефолт Draft) вместо дефолта.
+# Бюджет из scheduler остаётся заблокирован (user_initiated).
 ALLOWED_CEILING = frozenset({DRAFT_ACCOUNT_ID})
 
 # Кэш SDK-клиентов по нормализованному customer_id. Раньше был @lru_cache(maxsize=1) — один клиент
