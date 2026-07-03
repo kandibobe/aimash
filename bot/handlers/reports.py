@@ -16,6 +16,11 @@ async def report_(m: bm.Message, command: bm.CommandObject) -> None:
     """Read-only сводка по аккаунту за период. Без аргумента — пикер (аккаунт → кампания → период);
     с аргументом-периодом — быстрый путь на активном аккаунте ЧТЕНИЯ (§6 /account)."""
     if not (command.args or "").strip():
+        recall = await bm._load_report_recall(m.chat.id)  # §UX-память: «↻ повторить прошлый»
+        if recall:
+            await m.answer(
+                bm.i18n.t("report_repeat_last"), reply_markup=bm.report_recall_kb(recall)
+            )
         await bm._start_report_picker(m, "report")  # §8: выбор аккаунта/кампании
         return
     try:
@@ -28,6 +33,7 @@ async def report_(m: bm.Message, command: bm.CommandObject) -> None:
     )  # §UX-память (только пресеты)
     acct = await bm._active_read_account(m.chat.id)  # быстрый путь: весь активный аккаунт
     await bm._run_report(m, period, acct, None, None)
+    await bm._save_report_recall(m.chat.id, acct, None, None, (command.args or "").strip())
 
 
 @bm.dp.message(bm.Command("export"))
@@ -99,6 +105,28 @@ async def on_report_account(cq: bm.CallbackQuery, callback_data: bm.ReportAcctCB
     msg = bm._cq_msg(cq)
     if msg is None:
         return
+    if callback_data.idx == -2:  # §UX-память: «↻ повторить прошлый отчёт» (аккаунт+кампания+период)
+        recall = await bm._load_report_recall(bm._cq_chat_id(cq))
+        if not recall:
+            await msg.answer(bm.i18n.t("stale"))
+            return
+        acct = bm.normalize_customer_id(recall["account"])
+        try:
+            bm.ensure_read_allowed(acct)  # fail-closed: не строим по неразрешённому аккаунту
+        except PermissionError:
+            await msg.answer(
+                bm.i18n.t("account_denied", cid=bm.texts.esc(acct)), parse_mode=bm.ParseMode.HTML
+            )
+            return
+        try:
+            period = bm._period_from_arg(recall["period"])
+        except ValueError:
+            await msg.answer(bm.i18n.t("err_period"))
+            return
+        await bm._run_report(
+            msg, period, acct, recall.get("campaign_id"), recall.get("campaign_name")
+        )
+        return
     rows = bm._REPORT_ACCT_CACHE.get(bm._cq_chat_id(cq)) or []
     if not (0 <= callback_data.idx < len(rows)):
         await msg.answer(bm.i18n.t("stale"))
@@ -148,6 +176,9 @@ async def period_report(cq: bm.CallbackQuery, callback_data: bm.PeriodCB) -> Non
     # ФИКС B2: строим на ВЫБРАННОМ аккаунте/кампании (_report_target), а не на хардкоде Draft.
     acct, campaign_id, campaign_name = await bm._report_target(bm._cq_chat_id(cq))
     await bm._run_report(msg, period, acct, campaign_id, campaign_name)
+    await bm._save_report_recall(  # §UX-память: «↻ повторить прошлый отчёт»
+        bm._cq_chat_id(cq), acct, campaign_id, campaign_name, callback_data.code
+    )
 
 
 @bm.dp.callback_query(bm.PeriodCB.filter(bm.F.target == "export"))

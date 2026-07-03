@@ -377,3 +377,45 @@ def test_cc_crumb_shows_step_out_of_seven():
     assert "🆕" in bm._cc_crumb(1)
     assert "7/7" in bm._cc_crumb(99)  # кламп сверху
     assert "1/7" in bm._cc_crumb(0)  # кламп снизу
+
+
+# ── §UX-память: «↻ повторить прошлый отчёт» (аккаунт+кампания+период) ───────────────
+async def test_report_recall_roundtrip_presets_only():
+    await init_db()
+    chat = 66_201
+    await bm._save_report_recall(chat, "775-364-3025", "42", "Search-Brand", "30")
+    r = await bm._load_report_recall(chat)
+    assert r["account"] == "7753643025"  # нормализован
+    assert r["campaign_id"] == "42" and r["campaign_name"] == "Search-Brand" and r["period"] == "30"
+    # произвольный диапазон дат — не пресет → не перезаписываем recall
+    await bm._save_report_recall(chat, "7753643025", None, None, "2026-01-01 2026-02-01")
+    assert (await bm._load_report_recall(chat))["period"] == "30"
+
+
+def test_report_recall_kb_one_button_with_details():
+    from bot.keyboards import report_recall_kb
+
+    kb = report_recall_kb(
+        {"account": "7753643025", "campaign_id": "42", "campaign_name": "Brand", "period": "30"}
+    )
+    flat = [b for r in kb.inline_keyboard for b in r]
+    assert len(flat) == 1
+    assert flat[0].callback_data == "rpta:report:-2"  # сентинел «повторить»
+    assert "3025" in flat[0].text and "Brand" in flat[0].text and "30" in flat[0].text
+
+
+async def test_report_recall_button_reruns_saved_report():
+    from bot.callbacks import ReportAcctCB
+
+    await init_db()
+    chat = 66_202
+    await bm._save_report_recall(chat, "7753643025", "42", "Brand", "7")
+    ran: dict = {}
+
+    async def fake_run(m, period, acct, cid, cname):
+        ran.update(acct=acct, cid=cid, cname=cname)
+
+    cq = FakeCallbackQuery(FakeMessage(chat_id=chat))
+    with patched(bm, "_run_report", fake_run), patched(bm, "ensure_read_allowed", lambda cid: None):
+        await bm.on_report_account(cq, ReportAcctCB(target="report", idx=-2))
+    assert ran == {"acct": "7753643025", "cid": "42", "cname": "Brand"}  # ровно сохранённый отчёт

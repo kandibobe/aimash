@@ -877,6 +877,21 @@ def period_kb(
     return kb.as_markup()
 
 
+def report_recall_kb(recall: dict, lang: str | None = None) -> InlineKeyboardMarkup:
+    """§UX-память: одна кнопка «↻ Повторить прошлый отчёт» с деталями (аккаунт…хвост / кампания /
+    период). idx=-2 — сентинел «повторить» для on_report_account (рядом с idx=-1 «весь аккаунт»)."""
+    en = _lang(lang) == "en"
+    acct = str(recall.get("account", ""))[-4:]
+    camp = recall.get("campaign_name") or ("All" if en else "Вся")
+    per = str(recall.get("period", ""))
+    per_lbl = per if per == "MTD" else (f"{per}d" if en else f"{per} дн")
+    label = f"↻ …{acct} · {_ellipsize(str(camp), 18)} · {per_lbl}"
+    kb = InlineKeyboardBuilder()
+    kb.button(text=label, callback_data=ReportAcctCB(target="report", idx=-2))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def report_accounts_kb(
     rows: list, target: str, lang: str | None = None, *, last: str | None = None
 ) -> InlineKeyboardMarkup:

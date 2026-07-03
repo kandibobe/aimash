@@ -1156,6 +1156,10 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "🆕 Кампания · шаг {step}/7\n\n",
         "en": "🆕 Campaign · step {step}/7\n\n",
     },
+    "report_repeat_last": {
+        "ru": "↻ Повторить прошлый отчёт или выбрать заново?",
+        "en": "↻ Repeat the last report or pick again?",
+    },
     "cc_settings_saved": {
         "ru": "✅ Настройки приняты.",
         "en": "✅ Settings accepted.",

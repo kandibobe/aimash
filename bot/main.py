@@ -146,6 +146,7 @@ from bot.keyboards import (
     post_create_kb,
     report_accounts_kb,
     report_campaigns_kb,
+    report_recall_kb,
     rsa_aslist_kb,
     rsa_item_kb,
     rsa_overview_kb,
@@ -840,6 +841,49 @@ async def _remember_account(chat_id: int, customer_id: str) -> None:
 async def _last_account(chat_id: int) -> str | None:
     """Последний выбранный аккаунт чата: кэш процесса → ui_prefs (после рестарта)."""
     return _LAST_ACCOUNT.get(chat_id) or await _load_ui_pref(chat_id, "last_account")
+
+
+async def _save_report_recall(
+    chat_id: int, account: str, campaign_id: str | None, campaign_name: str | None, period_code: str
+) -> None:
+    """§UX-память: запомнить последний ПОСТРОЕННЫЙ отчёт (аккаунт+кампания+период) для кнопки
+    «↻ повторить прошлый отчёт». Только пресетный период (произвольные диапазоны — разовые). Аккаунт
+    ПЕРЕ-проверяется на чтении при повторе (не тут). JSON-блоб в ui_prefs (переживает рестарт)."""
+    import json
+
+    from reports.period import PRESET_DAYS
+
+    code = (period_code or "").strip()
+    norm = code.upper() if code.upper() == "MTD" else code
+    if not (norm in PRESET_DAYS or norm == "MTD"):
+        return
+    acct = normalize_customer_id(account)
+    if not acct:
+        return
+    payload = json.dumps(
+        {
+            "account": acct,
+            "campaign_id": campaign_id,
+            "campaign_name": campaign_name,
+            "period": norm,
+        }
+    )
+    await _save_ui_pref(chat_id, "last_report_sel", payload)
+
+
+async def _load_report_recall(chat_id: int) -> dict | None:
+    """Последний построенный отчёт чата (аккаунт+кампания+период) из ui_prefs — для «↻ повторить».
+    None, если ничего не сохранено / блоб битый / нет обязательных полей."""
+    import json
+
+    raw = await _load_ui_pref(chat_id, "last_report_sel")
+    if not raw:
+        return None
+    try:
+        d = json.loads(raw)
+    except Exception:  # noqa: BLE001 — битый блоб → как будто памяти нет
+        return None
+    return d if isinstance(d, dict) and d.get("account") and d.get("period") else None
 
 
 async def _active_read_account(chat_id: int) -> str:
