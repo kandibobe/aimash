@@ -110,6 +110,57 @@ def err_text(e: BaseException) -> str:
     return redact_text(f"{type(e).__name__}: {e}") + _err_hint(e)
 
 
+# Локализованные фразы для частых типов ошибок валидации Pydantic (§UX: без сырого дампа/англ.).
+# type ошибки Pydantic → (i18n-ключ фразы, поле в ctx с лимитом). None-поле = фраза без числа.
+_VAL_RULE_KEYS: dict[str, tuple[str, str | None]] = {
+    "less_than_equal": ("val_le", "le"),
+    "greater_than_equal": ("val_ge", "ge"),
+    "less_than": ("val_lt", "lt"),
+    "greater_than": ("val_gt", "gt"),
+    "string_too_long": ("val_too_long", "max_length"),
+    "string_too_short": ("val_too_short", "min_length"),
+    "missing": ("val_missing", None),
+}
+
+
+def _val_rule(err: dict) -> str:
+    """Одна ошибка Pydantic → короткая локализованная фраза правила. Незнакомый тип →
+    редактированный msg самого Pydantic (fallback, англ., но без служебного хвоста [type=…])."""
+    spec = _VAL_RULE_KEYS.get(err.get("type", ""))
+    if spec is None:
+        return redact_text(str(err.get("msg", "")))
+    key, ctx_field = spec
+    if ctx_field is None:
+        return i18n.t(key)
+    limit = (err.get("ctx") or {}).get(ctx_field, "?")
+    return i18n.t(key, n=limit)
+
+
+def humanize_validation(e: BaseException) -> str:
+    """Человекочитаемая ошибка валидации Pydantic вместо сырого многострочного дампа
+    («N validation errors for X … [type=…, input_value=…]»), который непонятен пользователю и
+    всегда по-английски. Собираем «поле: правило» по e.errors() (первые 6). Не-Pydantic
+    исключение → обычный безопасный err_text. Возвращает ТЕЛО — call-site оборачивает его в
+    i18n-шаблон err_validate."""
+    errs = getattr(e, "errors", None)
+    if not callable(errs):
+        return err_text(e)
+    try:
+        items = list(e.errors())  # type: ignore[call-arg]
+    except Exception:  # noqa: BLE001 — не Pydantic-подобное → безопасный путь
+        return err_text(e)
+    if not items:
+        return err_text(e)
+    lines = []
+    for it in items[:6]:
+        loc = ".".join(str(p) for p in it.get("loc", ()) if p != "__root__") or "?"
+        lines.append(f"• {loc}: {_val_rule(it)}")
+    more = len(items) - 6
+    if more > 0:
+        lines.append(i18n.t("val_more", n=more))
+    return "\n".join(lines)
+
+
 def typing_action(event: object):  # noqa: ANN201 — возвращает async-CM
     return chat_action(event, ChatAction.TYPING)
 

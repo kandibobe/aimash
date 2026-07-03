@@ -857,9 +857,19 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "⚠️ Ad-copy generation failed: {err}",
     },
     "err_validate": {
-        "ru": "⚠️ Параметры не прошли валидацию: {err}",
-        "en": "⚠️ Parameters failed validation: {err}",
+        "ru": "⚠️ Параметры не прошли валидацию:\n{err}",
+        "en": "⚠️ Parameters failed validation:\n{err}",
     },
+    # Короткие локализованные фразы правил валидации (bot.ux.humanize_validation) — вместо
+    # сырого многострочного дампа Pydantic. {n} — числовой лимит из ctx ошибки.
+    "val_le": {"ru": "должно быть ≤ {n}", "en": "must be ≤ {n}"},
+    "val_ge": {"ru": "должно быть ≥ {n}", "en": "must be ≥ {n}"},
+    "val_lt": {"ru": "должно быть < {n}", "en": "must be < {n}"},
+    "val_gt": {"ru": "должно быть > {n}", "en": "must be > {n}"},
+    "val_too_long": {"ru": "не длиннее {n} символов", "en": "at most {n} characters"},
+    "val_too_short": {"ru": "не короче {n} символов", "en": "at least {n} characters"},
+    "val_missing": {"ru": "обязательное поле", "en": "required field"},
+    "val_more": {"ru": "…и ещё {n}", "en": "…and {n} more"},
     "err_photo": {
         "ru": "⚠️ Не удалось обработать фото: {err}",
         "en": "⚠️ Couldn't process the photo: {err}",

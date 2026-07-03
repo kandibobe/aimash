@@ -137,3 +137,27 @@ async def test_send_proposal_text_attaches_txt_and_cleans_up():
     assert msg.answers[0][1].get("reply_markup") == "KB"
     doc = msg.documents[0][0]  # FSInputFile
     assert not os.path.exists(doc.path)  # temp удалён в finally
+
+
+# ── humanize_validation: человеческая ошибка вместо сырого дампа Pydantic ──────────
+def test_humanize_validation_localizes_and_hides_raw_dump():
+    from pydantic import BaseModel, Field, ValidationError
+
+    class _M(BaseModel):
+        budget: int = Field(le=1_000_000)
+        name: str = Field(min_length=3)
+
+    out = ""
+    try:
+        _M(budget=5_000_000, name="a")
+    except ValidationError as e:
+        out = ux.humanize_validation(e)
+    assert "budget" in out and "name" in out  # оба поля названы
+    assert "≤ 1000000" in out  # RU-дефолт: локализованное правило вместо англ. дампа
+    assert "validation error" not in out.lower()  # нет заголовка «N validation errors for …»
+    assert "input_value" not in out  # нет служебного хвоста [type=…, input_value=…]
+
+
+def test_humanize_validation_non_pydantic_falls_back_to_err_text():
+    out = ux.humanize_validation(ValueError("plain boom"))
+    assert "plain boom" in out  # обычное исключение → безопасный err_text

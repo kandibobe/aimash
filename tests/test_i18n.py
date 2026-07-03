@@ -94,6 +94,18 @@ def test_help_mentions_every_bot_command():
             )
 
 
+def test_bot_command_descriptions_have_no_internal_markers():
+    """Описания команд в меню Telegram (то, что видит пользователь под «/») НЕ должны содержать
+    внутренние ссылки на разделы ТЗ (§19/§20/§8) — это выглядело как черновик разработчика."""
+    from bot.keyboards import BOT_COMMANDS, BOT_COMMANDS_EN
+
+    for menu in (BOT_COMMANDS, BOT_COMMANDS_EN):
+        for bc in menu:
+            assert "§" not in bc.description, (
+                f"/{bc.command}: §-маркер в пользовательском описании ({bc.description!r})"
+            )
+
+
 def test_formatter_en_smoke_journal_and_mutation():
     # fmt_mutation_summary под EN-contextvar — узнаваемо английский
     tok = i18n.set_current_lang("en")

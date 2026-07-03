@@ -2860,7 +2860,7 @@ async def _search_params_from_cfg(
     try:  # defense-in-depth: схема ещё раз проверит длины/составы/URL/бюджет + нормализует ключи
         validated: dict = SCHEMAS["create_search_campaign"](**params).model_dump()
     except Exception as e:
-        raise _SearchBuildError("err_validate", err=e) from e
+        raise _SearchBuildError("err_validate", err=ux.humanize_validation(e)) from e
     return validated, float(budget), dropped, regenerated
 
 
@@ -2986,7 +2986,11 @@ async def _dispatch_command_result(m: Message, res: dict, state: FSMContext) -> 
             parse_mode=ParseMode.HTML,
         )
     else:
-        await m.answer(res.get("text", "(пусто)"))
+        text = res.get("text")
+        if not text:  # пустой ответ агента — не показываем «(пусто)», даём локализованную подсказку
+            log.debug("agent-loop: пустой text в ответе (op=%s)", res.get("type"))
+            text = i18n.t("loop_unrecognized")
+        await m.answer(text)
 
 
 async def _run_task_with_context(

@@ -152,7 +152,7 @@ async def tpl_name(m: bm.Message, state: bm.FSMContext) -> None:
     try:  # ре-валидация (схема могла измениться с момента сохранения)
         validated: dict = bm.SCHEMAS["create_search_campaign"](**params).model_dump()
     except Exception as e:
-        await m.answer(bm.i18n.t("err_validate", err=e))
+        await m.answer(bm.i18n.t("err_validate", err=bm.ux.humanize_validation(e)))
         return
     budget_units = validated["budget_daily_micros"] / 1_000_000
     summary = bm.texts.fmt_search_proposal_summary(

@@ -58,7 +58,7 @@ async def search_brief(m: bm.Message, state: bm.FSMContext) -> None:
         validated: dict = bm.SCHEMAS["create_search_campaign"](**params).model_dump()
     except Exception as e:
         await state.clear()
-        await m.answer(bm.i18n.t("err_validate", err=e))
+        await m.answer(bm.i18n.t("err_validate", err=bm.ux.humanize_validation(e)))
         return
     params = validated
     summary = bm.texts.fmt_search_proposal_summary(
@@ -320,7 +320,7 @@ async def gdn_brief(m: bm.Message, state: bm.FSMContext) -> None:
         bm.SCHEMAS["create_gdn_campaign"](**params)
     except Exception as e:
         await bm._gdn_cleanup(state, media_id)
-        await m.answer(bm.i18n.t("err_validate", err=e))
+        await m.answer(bm.i18n.t("err_validate", err=bm.ux.humanize_validation(e)))
         return
     summary = bm.texts.fmt_gdn_proposal_summary(
         name, url, budget_units, headlines, descriptions, business_name, geo_locations

@@ -1,8 +1,8 @@
 """Сборка глубокого отчёта по аккаунту: totals + сравнение период-к-периоду + разбивки.
 
 READ-ONLY. SDK-вызовы синхронные → бот оборачивает build_account_report в asyncio.to_thread.
-Экспорт в .xlsx — reports.xlsx. Google Sheets отложен (под-шаг, нужен живой OAuth scope
-spreadsheets/drive.file — валидируется только на боевом OAuth, как A-geo).
+Экспорт в .xlsx — reports.xlsx. Экспорт в Google Sheets — reports.sheets (publish_report_to_sheets,
+вкладка на разбивку), команда /sheets; scope spreadsheets/drive.file проверяется на боевом OAuth.
 """
 
 from __future__ import annotations
