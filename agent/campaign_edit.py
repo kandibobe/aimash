@@ -53,6 +53,33 @@ def parse_replace_edit(text: str) -> tuple[str, str] | None:
     return None
 
 
+# 3B (footgun финальной правки): «смени бюджет с 40 на 60» матчится и как literal-replace
+# («40»→«60» бьёт по заголовку «Скидка 40%», бюджет НЕ меняется). Маркеры настроек переводят
+# команду СНАЧАЛА в settings-извлечение; literal replace — только для чистого текста.
+_SETTINGS_MARKERS = re.compile(
+    r"\b(бюджет\w*|budget|ставк\w*|бид\w*|\bcpc\b|\bbid\b|"
+    r"гео\b|geo\b|стран\w*|город\w*|city|country|язык\w*|language|"
+    r"стратег\w*|strategy|расписан\w*|schedule|сет(?:ь|и|ей|ям)\b|network|"
+    r"валют\w*|currency|дат[аыу]\b|date|match\s*type|тип\w*\s+соответств\w*)",
+    re.IGNORECASE,
+)
+
+
+def is_settings_edit(text: str) -> bool:
+    """Есть ли в команде маркер НАСТРОЕК кампании (бюджет/ставка/гео/язык/…)? Такие правки идут
+    через extract_campaign_settings РАНЬШЕ буквальной замены (3B)."""
+    return bool(_SETTINGS_MARKERS.search(text or ""))
+
+
+_NUMERIC_RE = re.compile(r"^[\d\s.,]+(?:\$|€|грн|uah|usd|eur)?$", re.IGNORECASE)
+
+
+def is_numeric_pair(old: str, new: str) -> bool:
+    """Оба операнда замены — чистые числа/деньги («с 40 на 60»)? Почти наверняка правка настроек,
+    а не текста объявления: literal replace по «40» задел бы «Скидка 40%» (3B)."""
+    return bool(_NUMERIC_RE.match((old or "").strip()) and _NUMERIC_RE.match((new or "").strip()))
+
+
 def _replace_kind_ok(new_value: str, kind: str | None) -> bool:
     """Влезает ли значение после замены в лимит поля (None — без лимита: URL/телефон и т.п.).
     Лимит ищем в RSA-лимитах (headline/description/path) и в лимитах ассетов (callout/sitelink/…)."""

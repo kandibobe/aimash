@@ -58,6 +58,42 @@ class ReportCampCB(CallbackData, prefix="rptc"):
     idx: int = -1
 
 
+class KwCfgCB(CallbackData, prefix="kwc"):
+    """3F (§7): экран параметров keyword research (/keywords). Тапы лишь меняют state-data
+    (ГЕО/язык/сеть/период) и перерисовывают сводку; сам подбор — «🚀 Подобрать» (run). Read-only."""
+
+    field: str  # "geo" | "geo_pick" | "lang" | "net" | "period" | "run"
+    value: str = ""  # geo_pick: ISO страны | "any" | "custom"
+
+
+class AlertCB(CallbackData, prefix="alr"):
+    """3H (M10): настройка порогов аномалий (/alerts). Пороги — НАСТРОЙКИ БОТА (UserSettings.
+    alert_thresholds), не Google Ads: confirm-гейт не нужен (как /lang, /model). field:
+    spike|drop|minspend|reset; value — пресет («25»/«50»…) или 'custom' (ручной ввод через FSM)."""
+
+    field: str
+    value: str = ""
+
+
+class MoreCB(CallbackData, prefix="more"):
+    """3E: inline-хаб «➕ Ещё» — вторичные флоу, у которых не было входа из главного меню
+    (обнаружимость: раньше только слэш-командой). Кнопка лишь МАРШРУТИЗИРУЕТ в тот же entry,
+    что и команда; мутаций не создаёт."""
+
+    action: str  # "newsearch" | "newvideo" | "templates" | "recent" | "quota" | "alerts"
+
+
+class PageCB(CallbackData, prefix="pg"):
+    """3E: перелистывание постраничных пикеров отчётов/кампаний (защита от
+    REPLY_MARKUP_TOO_LONG на >100 строк — как B7-пагинация в визарде §19/§20).
+    kind: 'rpta' (аккаунты отчёта) | 'rptc' (кампании отчёта) | 'camp' (/campaigns).
+    target — поток report|export|sheets (для rpta/rptc; у camp пуст)."""
+
+    kind: str
+    target: str = ""
+    page: int = 0
+
+
 class RsaCB(CallbackData, prefix="rsa"):
     """Поэлементная курация RSA-текстов (ТЗ §10/§19.5.2). cid — session_id (hex uuid). kind/idx
     указывают элемент: kind 'h'|'d', idx — позиция в сессии. Для массовых действий

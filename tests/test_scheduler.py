@@ -170,7 +170,7 @@ async def test_scheduled_report_multi_account_one_digest(monkeypatch):
         return f"R:{acct}"
 
     monkeypatch.setattr(jobs, "build_account_report_async", fake_report)
-    monkeypatch.setattr(jobs, "summary_text", lambda r: r)  # r == "R:<acct>"
+    monkeypatch.setattr(jobs, "summary_text", lambda r, lang=None: r)  # r=="R:<acct>" (3H: +lang)
     monkeypatch.setattr(jobs, "_recipients", lambda: {1})
 
     sent: list[tuple[int, str]] = []

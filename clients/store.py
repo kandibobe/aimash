@@ -108,9 +108,25 @@ def svc_key(name: Any) -> str:
     return " ".join(str(name or "").split()).casefold()
 
 
+# 3G: телефоноподобные kind'ы — value нормализуется до цифр («+38 (067) 123-45-67» ≡ «0671234567»
+# по хвосту-10; иначе краул и ручной ввод плодили дубли одного номера в client_contacts).
+_PHONE_KINDS = frozenset({"phone", "tel", "telephone", "whatsapp", "viber", "телефон"})
+
+
+def _norm_phone(v: str) -> str:
+    digits = "".join(ch for ch in str(v or "") if ch.isdigit())
+    return digits[-10:] if len(digits) > 10 else digits  # 380671234567 ≡ 0671234567 (хвост-10)
+
+
 def contact_key(c: dict) -> tuple[str, str]:
-    """Ключ дедупа контакта: (kind, нормализованное value)."""
-    return (str(c.get("kind") or "other"), str(c.get("value") or "").strip().casefold())
+    """Ключ дедупа контакта: (kind, нормализованное value). Телефоны — по цифрам (хвост-10);
+    прочее (email/site/соцсети) — trim+casefold. Оригинальное value в выводе сохраняется —
+    нормализация только для ключа."""
+    kind = str(c.get("kind") or "other")
+    v = str(c.get("value") or "")
+    if kind.casefold() in _PHONE_KINDS:
+        return (kind, _norm_phone(v) or v.strip().casefold())
+    return (kind, v.strip().casefold())
 
 
 def merge_services(

@@ -70,25 +70,49 @@ async def run_scheduled_report(bot) -> None:
             log.info("scheduler: нет аккаунтов для отчёта (allow/read-list пусты) — пропуск")
             return
         period = last_n_days(REPORT_WINDOW_DAYS)
-        blocks: list[str] = []
+        # 3H: блоки собираем per-lang (у операторов может быть RU и EN): summary_text локализуется,
+        # а валюта аккаунта дочитывается per-account (раньше суммы шли голыми числами без кода).
+        from bot import i18n
+
+        langs = {i18n.get_lang(chat_id) for chat_id in _recipients()} or {"ru"}
+        blocks: dict[str, list[str]] = {lang: [] for lang in langs}
         for acct in accounts:
             tok = set_context(customer_id=acct)  # §8: ошибки/логи этого аккаунта атрибутируются
             try:
                 # per-account (Фаза 3: свой токен/MCC из oauth_tokens); холодная сборка вне loop
                 client = await build_client_async(acct)
-                report = await build_account_report_async(client, acct, period)
-                blocks.append(summary_text(report))
+                currency = ""
+                try:  # валюта best-effort: без неё показываем числа без кода (как раньше)
+                    from ads.read import account_currency
+
+                    currency = await run_ads_read_call(
+                        account_currency, client, acct, label=f"sched_cur_{acct}"
+                    )
+                except Exception:  # noqa: BLE001
+                    currency = ""
+                report = await build_account_report_async(client, acct, period, currency=currency)
+                for lang in langs:
+                    blocks[lang].append(summary_text(report, lang))
             except Exception as e:  # сеть/доступ/SDK — фиксируем (§15), остальные аккаунты живут
                 await capture_exception(e, where=f"scheduler:report:{acct}")
-                blocks.append(f"⚠️ Аккаунт {acct}: отчёт недоступен (см. /diag)")
+                for lang in langs:
+                    blocks[lang].append(f"⚠️ Аккаунт {acct}: отчёт недоступен (см. /diag)")
             finally:
                 reset_context(tok)
-        if not blocks:
+        if not any(blocks.values()):
             return
-        digest = "🗓 Плановый отчёт\n\n" + "\n\n———\n\n".join(blocks)
-        if len(digest) > _DIGEST_MAX:  # анти-спам: не дробим на N сообщений, усечём с пометкой
-            digest = digest[:_DIGEST_MAX] + "\n\n…(усечено — полный отчёт по аккаунту: /report)"
-        await _broadcast(bot, digest)
+        digests: dict[str, str] = {}
+        for lang, parts in blocks.items():
+            header = "🗓 Scheduled report" if lang == "en" else "🗓 Плановый отчёт"
+            digest = header + "\n\n" + "\n\n———\n\n".join(parts)
+            if len(digest) > _DIGEST_MAX:  # анти-спам: не дробим на N сообщений, усечём с пометкой
+                digest = digest[:_DIGEST_MAX] + "\n\n…(усечено — полный отчёт по аккаунту: /report)"
+            digests[lang] = digest
+        for chat_id in _recipients():
+            try:
+                await bot.send_message(chat_id, digests[i18n.get_lang(chat_id)])
+            except Exception as e:  # один недоступный чат не должен ронять рассылку
+                log.warning("scheduler: не доставлено в %s: %s: %s", chat_id, type(e).__name__, e)
 
 
 async def _thresholds_by_chat(chat_ids: set[int]) -> dict[int, dict | None]:
@@ -108,14 +132,21 @@ async def _thresholds_by_chat(chat_ids: set[int]) -> dict[int, dict | None]:
     return {cid: thr for cid, thr in rows}
 
 
-def _format_alerts_multi(account_alerts: list[tuple[str, list]]) -> str:
+def _format_alerts_multi(account_alerts: list[tuple[str, list]], lang: str = "ru") -> str:
     """Единое сообщение об аномалиях по НЕСКОЛЬКИМ аккаунтам (§8, анти-спам: один месседж на
-    оператора, а не по сообщению на аккаунт). Каждый блок помечен аккаунтом."""
-    parts = [f"🔔 <b>Аномалии</b> (за {ANOMALY_WINDOW_DAYS} дн. к предыдущему периоду):"]
+    оператора, а не по сообщению на аккаунт). Каждый блок помечен аккаунтом. 3H: заголовок/
+    подпись локализованы per-recipient (тексты алертов — RU-детектор, суммы несут код валюты)."""
+    if lang == "en":
+        parts = [f"🔔 <b>Anomalies</b> (last {ANOMALY_WINDOW_DAYS}d vs previous period):"]
+    else:
+        parts = [f"🔔 <b>Аномалии</b> (за {ANOMALY_WINDOW_DAYS} дн. к предыдущему периоду):"]
     for acct, alerts in account_alerts:
-        parts.append(f"\n<b>Аккаунт {acct}</b>:")
+        parts.append(f"\n<b>{'Account' if lang == 'en' else 'Аккаунт'} {acct}</b>:")
         parts.extend("• " + a.message for a in alerts)
-    parts.append("\n<i>Это только сигнал — сам я ничего не меняю. Реши и дай команду.</i>")
+    if lang == "en":
+        parts.append("\n<i>This is only a signal — I never change anything myself.</i>")
+    else:
+        parts.append("\n<i>Это только сигнал — сам я ничего не меняю. Реши и дай команду.</i>")
     return "\n".join(parts)
 
 
@@ -132,7 +163,7 @@ async def run_anomaly_check(bot) -> None:
         if not accounts:
             return
         period = last_n_days(ANOMALY_WINDOW_DAYS)
-        # cur/prev на каждый аккаунт; сбой одного фиксируем и пропускаем (остальные считаем).
+        # cur/prev (+валюта, 3H) на каждый аккаунт; сбой одного фиксируем и пропускаем.
         metrics: dict[str, tuple] = {}
         for acct in accounts:
             tok = set_context(customer_id=acct)  # §8: per-account атрибуция ошибок/логов
@@ -144,27 +175,40 @@ async def run_anomaly_check(bot) -> None:
                 prev = await run_ads_read_call(
                     fetch_totals, client, acct, period.previous(), label=f"anom_prev_{acct}"
                 )
-                metrics[acct] = (cur, prev)
+                currency = ""
+                try:  # 3H: код валюты в суммах алерта (best-effort)
+                    from ads.read import account_currency
+
+                    currency = await run_ads_read_call(
+                        account_currency, client, acct, label=f"anom_cur_{acct}"
+                    )
+                except Exception:  # noqa: BLE001
+                    currency = ""
+                metrics[acct] = (cur, prev, currency)
             except Exception as e:  # сеть/доступ/SDK — фиксируем (§15), остальные аккаунты живут
                 await capture_exception(e, where=f"scheduler:anomaly:{acct}")
             finally:
                 reset_context(tok)
         if not metrics:
             return
+        from bot import i18n
+
         thresholds = await _thresholds_by_chat(recipients)
         # Пороги per-chat → для каждого получателя собираем алерты по всем аккаунтам в ОДНО сообщение.
         for chat_id in recipients:
             thr = thresholds.get(chat_id)
             acct_alerts: list[tuple[str, list]] = []
-            for acct, (cur, prev) in metrics.items():
-                alerts = detect_anomalies(cur, prev, thr)
+            for acct, (cur, prev, currency) in metrics.items():
+                alerts = detect_anomalies(cur, prev, thr, currency=currency)
                 if alerts:
                     acct_alerts.append((acct, alerts))
             if not acct_alerts:
                 continue
             try:
                 await bot.send_message(
-                    chat_id, _format_alerts_multi(acct_alerts), parse_mode="HTML"
+                    chat_id,
+                    _format_alerts_multi(acct_alerts, lang=i18n.get_lang(chat_id)),
+                    parse_mode="HTML",
                 )
             except Exception as e:  # один недоступный чат не должен ронять остальные
                 log.warning(

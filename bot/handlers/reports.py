@@ -97,6 +97,43 @@ async def btn_mcc(m: bm.Message) -> None:
     await bm._send_mcc(m, None)
 
 
+# ── 3E: перелистывание постраничных пикеров (rpta/rptc/camp) ───────────────────────
+@bm.dp.callback_query(bm.PageCB.filter())
+async def on_page_nav(cq: bm.CallbackQuery, callback_data: bm.PageCB) -> None:
+    """Ряд «‹ · N/M · ›» пикеров: перерисовать разметку той же страницы кэша. Кэш потерян
+    (рестарт) → stale-alert (паттерн cc_account_page_cb)."""
+    chat_id = bm._cq_chat_id(cq)
+    kind, page = callback_data.kind, max(0, int(callback_data.page))
+    if kind == "rpta":
+        rows = bm._REPORT_ACCT_CACHE.get(chat_id)
+        if not rows:
+            await cq.answer(bm.i18n.t("stale"), show_alert=True)
+            return
+        markup = bm.report_accounts_kb(
+            rows,
+            callback_data.target,
+            last=await bm._last_account(chat_id),
+            page=page,
+        )
+    elif kind == "rptc":
+        camps = bm._REPORT_CAMP_CACHE.get(chat_id)
+        if camps is None:
+            await cq.answer(bm.i18n.t("stale"), show_alert=True)
+            return
+        markup = bm.report_campaigns_kb(camps, callback_data.target, page=page)
+    elif kind == "camp":
+        camps = bm._CAMP_CACHE.get(chat_id)
+        if not camps:
+            await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
+            return
+        markup = bm.campaigns_kb(camps, page=page)
+    else:  # неизвестный kind (старые кнопки после апгрейда) — тихий stale
+        await cq.answer(bm.i18n.t("stale"), show_alert=True)
+        return
+    await cq.answer()
+    await bm._safe_edit_markup(cq, markup)
+
+
 # ── Inline: выбор АККАУНТА → КАМПАНИИ → периода для отчёта (§8/§9) ─────────────────
 @bm.dp.callback_query(bm.ReportAcctCB.filter())
 async def on_report_account(cq: bm.CallbackQuery, callback_data: bm.ReportAcctCB) -> None:

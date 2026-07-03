@@ -148,6 +148,8 @@ def summary_text(report: ReportData, lang: str | None = None) -> str:
             f"Cost {_money(t.cost, cur)} · CPC {_money(t.avg_cpc, cur)} · "
             f"Conv. {t.conversions:.1f} · CPA {_money(t.cpa, cur)} · ROAS {t.roas:.2f}",
         ]
+        if t.conv_value > 0:  # §9: ценность конверсий — была в xlsx/Sheets, но не в тексте
+            lines.append(f"Conv. value {_money(t.conv_value, cur)}")
         if report.prev_totals is not None:
             pr = report.prev_totals
             lines.append(
@@ -170,6 +172,8 @@ def summary_text(report: ReportData, lang: str | None = None) -> str:
         f"Расход {_money(t.cost, cur)} · CPC {_money(t.avg_cpc, cur)} · Конв. {t.conversions:.1f} · "
         f"CPA {_money(t.cpa, cur)} · ROAS {t.roas:.2f}",
     ]
+    if t.conv_value > 0:  # §9: ценность конверсий — была в xlsx/Sheets, но не в тексте
+        lines.append(f"Ценность {_money(t.conv_value, cur)}")
     if report.prev_totals is not None:
         pr = report.prev_totals
         lines.append(
@@ -224,22 +228,37 @@ def summary_text_mcc(summary, lang: str | None = None) -> str:
                 f"CPA {_money(t.cpa, cur)} · ROAS {t.roas:.2f}"
             )
 
-    # Список аккаунтов по расходу (через все валюты; валюта у каждого, без суммирования).
-    ranked = sorted(summary.children, key=lambda c: c.totals.cost_micros, reverse=True)
-    if ranked:
+    # Список аккаунтов ПО ВАЛЮТНЫМ СЕКЦИЯМ (3H: кросс-валютное ранжирование по сырым cost_micros
+    # вводило в заблуждение — большой номинал «дешёвой» валюты вставал выше). Порядок секций —
+    # как в subtotals (валюты по расходу); внутри секции — по расходу убыв. Общий кап строк прежний.
+    if summary.children:
         lines.append("")
         lines.append(f"📊 <b>{L['accounts']}</b>")
-        for cr in ranked[:MCC_MAX_ACCT_LINES]:
-            cur = cr.account.currency or "?"
-            name = _esc(getattr(cr.account, "name", "") or cr.account.id)
-            m = cr.totals
-            lines.append(
-                f"• <b>{name}</b> ({cur}): {L['cost']} <b>{_money(m.cost, cur)}</b> · "
-                f"{L['clicks']} {_thou(m.clicks)} · {L['conv']} {m.conversions:.1f} · "
-                f"CTR {m.ctr * 100:.1f}%"
-            )
-        if len(ranked) > MCC_MAX_ACCT_LINES:
-            lines.append(f"  <i>{L['more'].format(n=len(ranked) - MCC_MAX_ACCT_LINES)}</i>")
+        by_cur: dict[str, list] = {}
+        for cr in summary.children:
+            by_cur.setdefault(cr.account.currency or "?", []).append(cr)
+        cur_order = [s.currency for s in summary.subtotals] or sorted(by_cur)
+        shown = 0
+        for cur in cur_order:
+            group = sorted(by_cur.get(cur, []), key=lambda c: c.totals.cost_micros, reverse=True)
+            if not group or shown >= MCC_MAX_ACCT_LINES:
+                continue
+            if len(by_cur) > 1:
+                lines.append(f"<i>{cur}:</i>")
+            for cr in group:
+                if shown >= MCC_MAX_ACCT_LINES:
+                    break
+                name = _esc(getattr(cr.account, "name", "") or cr.account.id)
+                m = cr.totals
+                lines.append(
+                    f"• <b>{name}</b> ({cur}): {L['cost']} <b>{_money(m.cost, cur)}</b> · "
+                    f"{L['clicks']} {_thou(m.clicks)} · {L['conv']} {m.conversions:.1f} · "
+                    f"CTR {m.ctr * 100:.1f}%"
+                )
+                shown += 1
+        rest = len(summary.children) - shown
+        if rest > 0:
+            lines.append(f"  <i>{L['more'].format(n=rest)}</i>")
 
     # Неактивные (не ENABLED) — ИМЕНАМИ + статус (это и есть большинство прежних «ошибок чтения»).
     inactive = getattr(summary, "inactive", [])

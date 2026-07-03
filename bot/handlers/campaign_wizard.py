@@ -82,6 +82,25 @@ async def cc_account_cb(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.
     )
 
 
+@bm.dp.callback_query(bm.CcCB.filter(bm.F.action == "back"))
+async def cc_back(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.FSMContext) -> None:
+    """3D: «‹ Назад» — на предыдущий этап визарда. НАВИГАЦИЯ, не откат: данные черновика
+    (ключи/RSA/настройки) НЕ стираются — _cc_render_stage показывает сохранённое подсостояние
+    (напр. подтверждённый список ключей на Этапе 2). Раньше единственным «назад» была полная
+    отмена с потерей маршрута."""
+    chat_id = bm._cq_chat_id(cq)
+    msg = bm._cq_msg(cq)
+    draft = await bm.CDRAFTS.get_active(chat_id)
+    if draft is None or msg is None:
+        await cq.answer(bm.i18n.t("cc_draft_stale"), show_alert=True)
+        return
+    prev = max(0, int(draft.current_step) - 1)
+    snap = await bm.CDRAFTS.set_step(draft.session_id, prev, expected_chat_id=chat_id)
+    await cq.answer()
+    if snap is not None:
+        await bm._cc_render_stage(msg, chat_id, snap, state)
+
+
 @bm.dp.callback_query(bm.CcCB.filter(bm.F.action == "page"))
 async def cc_account_page_cb(cq: bm.CallbackQuery, callback_data: bm.CcCB) -> None:
     """B7: перелистывание постраничного пикера аккаунтов Этапа 0 — перерисовываем ту же разметку."""
@@ -172,7 +191,7 @@ async def cc_settings_desc(m: bm.Message, state: bm.FSMContext) -> None:
     )
     await state.set_state(bm.CreateCampaignWizard.settings_confirm)
     await m.answer(
-        bm.texts.fmt_cc_settings_summary(settings_dict),
+        bm._cc_crumb(1) + bm.texts.fmt_cc_settings_summary(settings_dict),
         reply_markup=bm.cc_settings_kb(),
         parse_mode=bm.ParseMode.HTML,
     )
@@ -205,7 +224,7 @@ async def cc_settings_edit(m: bm.Message, state: bm.FSMContext) -> None:
         session_id, lambda s: s.__setitem__("settings", merged), expected_chat_id=m.chat.id
     )
     await m.answer(
-        bm.texts.fmt_cc_settings_summary(merged),
+        bm._cc_crumb(1) + bm.texts.fmt_cc_settings_summary(merged),
         reply_markup=bm.cc_settings_kb(),
         parse_mode=bm.ParseMode.HTML,
     )
@@ -775,8 +794,15 @@ async def cc_url_text(m: bm.Message, state: bm.FSMContext) -> None:
 
 @bm.dp.message(bm.CreateCampaignWizard.final)
 async def cc_final_edit(m: bm.Message, state: bm.FSMContext) -> None:
-    """Этап 7: правка командой в свободной форме (§19.8). Сначала — буквальная замена «X на Y» по
-    текстам объявления/ассетов/URL (КОД, ре-валидация длин); иначе — правка настроек (LLM-извлечение).
+    """Этап 7: правка командой в свободной форме (§19.8). Порядок (3B, footgun-фикс):
+    1) команда с МАРКЕРОМ настроек (бюджет/ставка/гео/язык/…) или чисто-числовой парой «с 40 на
+       60» → СНАЧАЛА LLM-извлечение настроек (раньше literal replace «40»→«60» тихо портил
+       заголовок «Скидка 40%», а бюджет не менялся);
+    2) чистый текст «смени X на Y» → буквальная замена по текстам объявления/ассетов/URL
+       (КОД, ре-валидация длин);
+    3) settings-извлечение дало пусто, а пара была → фолбэк на literal (путь «смени цену
+       „от 40$“ на „от 60$“» в price-ассете сохранён);
+    4) оба мимо → честное «не понял» (НЕ пере-сводка, будто что-то поменялось).
     Это правка черновика, НЕ мутация (confirmation_id не тратится)."""
     data = await state.get_data()
     session_id = data.get("cc_session")
@@ -788,11 +814,19 @@ async def cc_final_edit(m: bm.Message, state: bm.FSMContext) -> None:
     text = (m.text or "").strip()
     if not text:
         return
-    # 1) «смени X на Y» — буквальная замена по текстам черновика (телефон/описание/заголовок/URL).
-    from agent.campaign_edit import apply_text_replace, parse_replace_edit
+    from agent.campaign_edit import (
+        apply_text_replace,
+        is_numeric_pair,
+        is_settings_edit,
+        parse_replace_edit,
+    )
 
     rep = parse_replace_edit(text)
-    if rep is not None:
+    settings_intent = is_settings_edit(text) or (rep is not None and is_numeric_pair(*rep))
+
+    async def _try_replace() -> bool:
+        if rep is None:
+            return False
         old, new = rep
         applied = {"n": 0}
 
@@ -800,10 +834,16 @@ async def cc_final_edit(m: bm.Message, state: bm.FSMContext) -> None:
             applied["n"] = apply_text_replace(st, old, new)
 
         await bm.CDRAFTS.patch(session_id, _do, expected_chat_id=m.chat.id)
-        if applied["n"]:
+        return bool(applied["n"])
+
+    # 1/2) чистый текст без settings-намерения → literal replace сразу
+    if rep is not None and not settings_intent:
+        if await _try_replace():
             await bm._cc_resummarize(m, session_id, m.chat.id)
             return
         # ничего не заменилось → пробуем как правку настроек ниже
+
+    # settings-извлечение (LLM)
     await m.answer(bm.i18n.t("cc_extracting"))
     try:
         patch = await bm.extract_campaign_settings(text, language=bm.i18n.current_lang())
@@ -811,6 +851,14 @@ async def cc_final_edit(m: bm.Message, state: bm.FSMContext) -> None:
         await m.answer(
             bm.i18n.t("err_text_gen", err=bm.ux.err_text(e)), reply_markup=bm.cc_final_kb()
         )
+        return
+    if patch.is_empty():
+        # 3) извлечение пустое: если была пара «X на Y» с settings-маркером — фолбэк на literal
+        if settings_intent and rep is not None and await _try_replace():
+            await bm._cc_resummarize(m, session_id, m.chat.id)
+            return
+        # 4) оба мимо → честно признаёмся (пере-сводка создала бы иллюзию применённой правки)
+        await m.answer(bm.i18n.t("cc_edit_not_understood"), reply_markup=bm.cc_final_kb())
         return
     merged = bm._cc_apply_settings_patch(draft.wizard_state.get("settings") or {}, patch)
     await bm.CDRAFTS.patch(

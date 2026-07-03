@@ -138,7 +138,7 @@ async def cli_accumulate_text(m: bm.Message, state: bm.FSMContext) -> None:
     # покажем «было→станет» + confirm, как ручное «Сохранить»). customer_id — из FSM.
     customer_id = await bm._cli_selected_account(state)
     if customer_id:
-        bm._cli_arm_idle(m.bot, chat_id, customer_id)
+        bm._cli_arm_idle(m.bot, chat_id, customer_id, state)  # 3G: автосейв закроет накопление
     await m.answer(
         bm.i18n.t("cli_accumulating", n=len(buf), chars=chars), reply_markup=bm.client_input_kb()
     )
@@ -158,13 +158,21 @@ async def cli_save_cb(cq: bm.CallbackQuery, state: bm.FSMContext) -> None:
         return
     bm._cli_cancel_idle(chat_id)  # ручное сохранение — гасим таймер авто-сохранения (B13)
     await cq.answer()
-    await cq.message.answer(bm.i18n.t("cli_extracting"))
-    # выходим из режима накопления (черновик показан; исполнение — по ✅). §20.3: сайт в тексте →
-    # «🕷 Сохранить и краулить» (внутри _cli_extract_and_propose).
-    bm._CLI_TEXT_BUF.pop(chat_id, None)
-    await state.clear()
-    if not await bm._cli_extract_and_propose(cq.message.bot, chat_id, customer_id, buf):
-        await cq.message.answer(bm.i18n.t("cli_extract_empty"), reply_markup=bm.client_input_kb())
+    # 3G: тот же замок, что у idle-автосейва — буфер потребляется ровно один раз (при гонке
+    # «таймер уже стрельнул» вторая сторона увидит пустой буфер и выйдет тихо).
+    async with bm._cli_lock(chat_id):
+        buf = bm._CLI_TEXT_BUF.pop(chat_id, None) or buf
+        if not buf:
+            await cq.message.answer(bm.i18n.t("cli_nothing_to_save"))
+            return
+        await cq.message.answer(bm.i18n.t("cli_extracting"))
+        # выходим из режима накопления (черновик показан; исполнение — по ✅). §20.3: сайт в тексте →
+        # «🕷 Сохранить и краулить» (внутри _cli_extract_and_propose).
+        await state.clear()
+        if not await bm._cli_extract_and_propose(cq.message.bot, chat_id, customer_id, buf):
+            await cq.message.answer(
+                bm.i18n.t("cli_extract_empty"), reply_markup=bm.client_input_kb()
+            )
 
 
 @bm.dp.callback_query(bm.ClientCB.filter(bm.F.action == "save_crawl"))

@@ -11,13 +11,33 @@ from __future__ import annotations
 import bot.main as bm
 
 
+async def _kw_present_params(m: bm.Message, state: bm.FSMContext) -> None:
+    """3F (§7): экран параметров research (ГЕО/язык/сеть/период) с разумными дефолтами.
+    Раньше из 4 параметров ТЗ §7 пользователю не был доступен НИ ОДИН (гео=Украина,
+    язык='ru' хардкодом, сеть/период зашиты)."""
+    from ads.geo import keyword_ideas_lang
+
+    data = await state.get_data()
+    if not data.get("kw_lang"):  # дефолт языка = язык интерфейса (не хардкод 'ru')
+        await state.update_data(kw_lang=keyword_ideas_lang(bm.i18n.current_lang()))
+    await state.set_state(bm.KwWizard.params)
+    cfg = await state.get_data()
+    await m.answer(
+        bm.i18n.t("kw_params_title"),
+        reply_markup=bm.kw_params_kb(cfg),
+        parse_mode=bm.ParseMode.HTML,
+    )
+
+
 @bm.dp.message(bm.Command("keywords"))
 async def keywords_(m: bm.Message, state: bm.FSMContext, command: bm.CommandObject) -> None:
-    """Подбор ключевых слов (read-only, advisory). С аргументами — сразу; иначе спросить."""
+    """Подбор ключевых слов (read-only, advisory). С аргументами — сразу к параметрам
+    (сиды предзаполнены); иначе спросить сиды."""
     await state.clear()
     seeds, url = bm._parse_kw_input(command.args or "")
     if seeds or url:
-        await bm._kw_run(m, m.chat.id, seeds, url, "ru")
+        await state.update_data(kw_seeds=seeds, kw_url=url)
+        await _kw_present_params(m, state)
         return
     await state.set_state(bm.KwWizard.awaiting_seeds)
     await m.answer(bm.i18n.t("kw_ask"), reply_markup=bm.nav_kb(), parse_mode=bm.ParseMode.HTML)
@@ -39,8 +59,97 @@ async def kw_seeds(m: bm.Message, state: bm.FSMContext) -> None:
             bm.i18n.t("kw_bad_input"), reply_markup=bm.nav_kb(), parse_mode=bm.ParseMode.HTML
         )
         return  # остаёмся в состоянии — пользователь пришлёт сиды/URL ещё раз (или «✖ Отмена»)
+    await state.update_data(kw_seeds=seeds, kw_url=url)
+    await _kw_present_params(m, state)  # 3F: параметры §7 перед подбором
+
+
+async def _kw_run_from_state(m: bm.Message, state: bm.FSMContext) -> None:
+    """Запуск подбора с параметрами из state-data (экран 3F)."""
+    from ads.geo import geo_id_for_country
+
+    cfg = await state.get_data()
+    seeds = list(cfg.get("kw_seeds") or [])
+    url = cfg.get("kw_url")
+    lang = str(cfg.get("kw_lang") or "ru")
+    geo_iso = str(cfg.get("kw_geo_iso") or "UA")
+    if geo_iso == "any":
+        geo_ids: tuple[int, ...] | None = ()
+    else:
+        gid = geo_id_for_country(geo_iso)
+        geo_ids = (gid,) if gid else None  # неизвестный ISO → дефолт (_kw_run подставит Украину)
+    months_raw = int(cfg.get("kw_months") or 0)
     await state.clear()
-    await bm._kw_run(m, m.chat.id, seeds, url, "ru")
+    await bm._kw_run(
+        m,
+        m.chat.id,
+        seeds,
+        url,
+        lang,
+        geo_ids=geo_ids,
+        network=str(cfg.get("kw_net") or "GOOGLE_SEARCH"),
+        months=months_raw or None,
+    )
+
+
+@bm.dp.callback_query(bm.KwCfgCB.filter())
+async def kw_params_cb(
+    cq: bm.CallbackQuery, callback_data: bm.KwCfgCB, state: bm.FSMContext
+) -> None:
+    """3F: тапы экрана параметров — цикл значений/саб-пикер ГЕО/запуск. Read-only (state-data)."""
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    field, value = callback_data.field, callback_data.value
+    if field == "run":
+        await cq.answer()
+        await _kw_run_from_state(msg, state)
+        return
+    if field == "geo":
+        await cq.answer()
+        await msg.answer(bm.i18n.t("kw_params_pick_geo"), reply_markup=bm.kw_geo_kb())
+        return
+    if field == "geo_pick":
+        if value == "custom":
+            await state.set_state(bm.KwWizard.awaiting_geo)
+            await cq.answer()
+            await msg.answer(bm.i18n.t("kw_params_ask_geo"), reply_markup=bm.nav_kb())
+            return
+        await state.update_data(kw_geo_iso=value)
+        await state.set_state(bm.KwWizard.params)
+    elif field == "lang":  # цикл ru → uk → en
+        cur = str((await state.get_data()).get("kw_lang") or "ru")
+        order = ("ru", "uk", "en")
+        await state.update_data(kw_lang=order[(order.index(cur) + 1) % 3 if cur in order else 0])
+    elif field == "net":
+        cur = str((await state.get_data()).get("kw_net") or "GOOGLE_SEARCH")
+        await state.update_data(
+            kw_net="GOOGLE_SEARCH_AND_PARTNERS" if cur == "GOOGLE_SEARCH" else "GOOGLE_SEARCH"
+        )
+    elif field == "period":  # цикл авто → 12 → 24
+        cur = int((await state.get_data()).get("kw_months") or 0)
+        await state.update_data(kw_months={0: 12, 12: 24}.get(cur, 0))
+    await cq.answer()
+    cfg = await state.get_data()
+    await bm._safe_edit(
+        cq,
+        bm.i18n.t("kw_params_title"),
+        reply_markup=bm.kw_params_kb(cfg),
+        parse_mode=bm.ParseMode.HTML,
+    )
+
+
+@bm.dp.message(bm.KwWizard.awaiting_geo)
+async def kw_geo_text(m: bm.Message, state: bm.FSMContext) -> None:
+    """3F: ручной ввод страны («Кения»/«KE») → ISO через ads.geo; не распозналось → retry."""
+    from ads.geo import country_iso, geo_id_for_country
+
+    iso = country_iso(m.text or "")
+    if not iso or not geo_id_for_country(iso):
+        await m.answer(bm.i18n.t("kw_params_geo_unknown"), reply_markup=bm.nav_kb())
+        return  # остаёмся в состоянии — пользователь уточнит (или «✖ Отмена»)
+    await state.update_data(kw_geo_iso=iso)
+    await _kw_present_params(m, state)
 
 
 # ── §7: добавить подобранные ключи в кампанию (research → кампания → тип соответствия → «да») ──

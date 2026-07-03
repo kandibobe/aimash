@@ -65,6 +65,11 @@ class CampaignSettings(BaseModel):
             base[k] = v
         return CampaignSettings(**base)
 
+    def is_empty(self) -> bool:
+        """Извлечение ничего не дало (все поля None/пустые списки) — merge был бы no-op.
+        Нужен cc_final_edit (3B): пустой settings-патч → фолбэк на буквальную замену."""
+        return all(v is None or (isinstance(v, list) and not v) for v in self.model_dump().values())
+
 
 _SYSTEM = (
     "Ты — специалист по Google Ads. Извлеки из описания рекламной кампании настройки и верни "

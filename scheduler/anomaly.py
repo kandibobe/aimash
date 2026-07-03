@@ -31,10 +31,15 @@ def _pct_change(now: float, prev: float) -> float | None:
     return (now - prev) / prev * 100.0
 
 
-def detect_anomalies(current, previous, thresholds: dict | None = None) -> list[Alert]:
+def detect_anomalies(
+    current, previous, thresholds: dict | None = None, *, currency: str = ""
+) -> list[Alert]:
     """current/previous — объекты с полями .cost и .conversions (reports.queries.Metrics или
-    любой namespace). Возвращает список аномалий (пустой = всё в норме)."""
+    любой namespace). Возвращает список аномалий (пустой = всё в норме). currency (3H) — код
+    валюты аккаунта в суммах сообщения: без него «1000 → 2000» неоднозначно для
+    мульти-валютного портфеля MCC."""
     t = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
+    cur = f" {currency}" if currency else ""
     alerts: list[Alert] = []
     cost_now, cost_prev = float(current.cost), float(previous.cost)
     conv_now, conv_prev = float(current.conversions), float(previous.conversions)
@@ -49,7 +54,7 @@ def detect_anomalies(current, previous, thresholds: dict | None = None) -> list[
             Alert(
                 "spend_spike",
                 "warning",
-                f"📈 Расход вырос на {ch:+.0f}% ({cost_prev:.2f} → {cost_now:.2f}).",
+                f"📈 Расход вырос на {ch:+.0f}% ({cost_prev:.2f} → {cost_now:.2f}{cur}).",
             )
         )
 
@@ -69,7 +74,7 @@ def detect_anomalies(current, previous, thresholds: dict | None = None) -> list[
             Alert(
                 "spend_no_conv",
                 "warning",
-                f"⚠️ Расход {cost_now:.2f} при нуле конверсий (было {conv_prev:.1f}).",
+                f"⚠️ Расход {cost_now:.2f}{cur} при нуле конверсий (было {conv_prev:.1f}).",
             )
         )
 

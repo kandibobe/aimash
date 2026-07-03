@@ -72,6 +72,7 @@ from agent.tools.schemas import MAX_CAMPAIGN_KEYWORDS, SCHEMAS
 from bot import i18n, texts, ux
 from bot.campaign_wizard.store import CampaignDraftStore
 from bot.callbacks import (
+    AlertCB,
     AudienceCB,
     CampCB,
     CcCB,
@@ -80,9 +81,12 @@ from bot.callbacks import (
     ExtCB,
     GeoCB,
     KwAddCB,
+    KwCfgCB,
     LangCB,
     ModelCB,
+    MoreCB,
     NavCB,
+    PageCB,
     PeriodCB,
     RecentCB,
     ReportAcctCB,
@@ -93,9 +97,11 @@ from bot.callbacks import (
     VideoCB,
 )
 from bot.keyboards import (
+    ALL_MENU_BUTTONS,
     BOT_COMMANDS,
     BOT_COMMANDS_EN,
     BTN_BALANCE_ALL,
+    alerts_kb,
     BTN_CAMPAIGNS_ALL,
     BTN_EXPORT_ALL,
     BTN_HELP_ALL,
@@ -105,6 +111,7 @@ from bot.keyboards import (
     BTN_LANG_ALL,
     BTN_MCC_ALL,
     BTN_MODEL_ALL,
+    BTN_MORE_ALL,
     BTN_NEWCAMPAIGN_ALL,
     BTN_REPORT_ALL,
     BTN_RSA_ALL,
@@ -135,6 +142,7 @@ from bot.keyboards import (
     kw_add_kb,
     lang_kb,
     main_menu,
+    more_menu_kb,
     match_type_kb,
     model_kb,
     nav_kb,
@@ -283,6 +291,8 @@ class RsaList(StatesGroup):
 
 class KwWizard(StatesGroup):
     awaiting_seeds = State()  # ждём сид-слова и/или URL для подбора ключей
+    params = State()  # 3F (§7): экран параметров research (ГЕО/язык/сеть/период)
+    awaiting_geo = State()  # 3F: ручной ввод страны для ГЕО подбора
 
 
 class KwAdd(StatesGroup):
@@ -314,6 +324,10 @@ class VideoWizard(StatesGroup):
 
 class ModelWizard(StatesGroup):
     awaiting_model = State()  # ждём свой slug модели OpenRouter для /model
+
+
+class AlertsWizard(StatesGroup):
+    awaiting_value = State()  # 3H (M10): /alerts «✏️» — ждём число порога (field в state-data)
 
 
 class TplWizard(StatesGroup):
@@ -777,6 +791,40 @@ async def _abandon_active_flow(chat_id: int, state: FSMContext) -> bool:
     return had_state or bool(cc_session)
 
 
+async def _suspend_active_flow_soft(m: Message, state: FSMContext) -> tuple[int | None, bool]:
+    """3A: МЯГКО свернуть активный флоу при нажатии кнопки главного меню — работа НЕ теряется
+    (в отличие от _abandon_active_flow для «✖ Отмена»/cancel):
+      • черновик визарда §19 остаётся active (НЕ abandon, медиа НЕ чистим) — возврат через
+        «➕ Создание кампании» → «▶️ Продолжить»;
+      • непустой буфер текста профиля §20 СБРАСЫВАЕТСЯ в confirm-черновик (ничего не пишется
+        без ✅ — тот же путь, что «💾 Сохранить»);
+      • лёгкие состояния (GDN/ext-медиа, ingest) закрываются как обычно.
+    Возвращает (шаг активного черновика §19 или None, был ли буфер §20 сброшен в черновик)."""
+    chat_id = m.chat.id
+    data = await state.get_data()
+    media_id = data.get("gdn_media_id") or data.get("ext_media_id")
+    if media_id:
+        await asyncio.to_thread(clear_pending_media, media_id)
+    cc_step: int | None = None
+    cc_session = data.get("cc_session")
+    if cc_session:
+        snap = await CDRAFTS.get(cc_session, expected_chat_id=chat_id)
+        if snap is not None and snap.status == "active":
+            cc_step = int(snap.current_step)  # черновик жив — только подсказка о возврате
+    _PENDING_CONTEXT.pop(chat_id, None)
+    _cli_cancel_idle(chat_id)
+    cli_flushed = False
+    buf = _CLI_TEXT_BUF.pop(chat_id, None)
+    if buf:
+        cust = str(data.get("cli_customer_id") or DRAFT_ACCOUNT_ID)
+        try:
+            cli_flushed = await _cli_extract_and_propose(m.bot, chat_id, cust, buf)
+        except Exception:  # noqa: BLE001 — сбой извлечения не должен блокировать кнопку меню
+            log.warning("menu-guard: буфер §20 не сброшен в черновик (chat=%s)", chat_id)
+    await state.clear()
+    return cc_step, cli_flushed
+
+
 # ── Модель ИИ (/model): рантайм-переключатель OpenRouter-модели (глобально на процесс) ─────
 def _valid_model_slug(s: str) -> str | None:
     """OpenRouter-slug вида vendor/model (до 128 — лимит колонки user_settings.model_override),
@@ -838,6 +886,67 @@ async def _save_ui_pref(chat_id: int, key: str, value: str) -> None:
             await s.commit()
     except Exception:  # noqa: BLE001 — UX-настройка не критична
         log.debug("ui_pref не сохранён chat=%s key=%s", chat_id, key)
+
+
+# 3H (M10): пороги аномалий per-chat (UserSettings.alert_thresholds, JSON). Ключи и дефолты —
+# scheduler.anomaly.DEFAULT_THRESHOLDS; здесь только персист/валидация. НАСТРОЙКА БОТА (не Ads).
+_ALERT_FIELD_KEYS = {"spike": "spend_spike_pct", "drop": "conv_drop_pct", "minspend": "min_spend"}
+
+
+def _alert_value_ok(key: str, value: float) -> bool:
+    """Диапазоны считает КОД: проценты 1–1000, min_spend 0–MONEY_MAX_UNITS."""
+    from core.limits import MONEY_MAX_UNITS
+
+    if key in ("spend_spike_pct", "conv_drop_pct"):
+        return 1.0 <= value <= 1000.0
+    return 0.0 <= value <= float(MONEY_MAX_UNITS)
+
+
+async def _load_alert_thresholds(chat_id: int) -> dict:
+    """Эффективные пороги чата: DEFAULT_THRESHOLDS ∪ сохранённые per-chat."""
+    from sqlalchemy import select
+
+    from db.models import UserSettings
+    from db.session import Session
+    from scheduler.anomaly import DEFAULT_THRESHOLDS
+
+    saved: dict = {}
+    try:
+        async with Session() as s:
+            row = (
+                await s.execute(
+                    select(UserSettings.alert_thresholds).where(UserSettings.chat_id == chat_id)
+                )
+            ).scalar_one_or_none()
+            saved = dict(row or {})
+    except Exception:  # noqa: BLE001 — настройка не критична, показываем дефолты
+        saved = {}
+    return {**DEFAULT_THRESHOLDS, **saved}
+
+
+async def _save_alert_threshold(chat_id: int, key: str, value: float | None) -> None:
+    """Upsert одного порога (value=None при key='' — полный сброс на дефолты). JSON-колонку
+    переприсваиваем целиком (SQLAlchemy не отслеживает мутацию вложенного dict)."""
+    from sqlalchemy import select
+
+    from db.models import UserSettings
+    from db.session import Session
+
+    async with Session() as s:
+        row = (
+            await s.execute(select(UserSettings).where(UserSettings.chat_id == chat_id))
+        ).scalar_one_or_none()
+        if key == "" or value is None:  # полный сброс
+            if row is not None:
+                row.alert_thresholds = None
+                await s.commit()
+            return
+        merged = {**(row.alert_thresholds or {} if row else {}), key: float(value)}
+        if row is None:
+            s.add(UserSettings(chat_id=chat_id, alert_thresholds=merged))
+        else:
+            row.alert_thresholds = merged
+        await s.commit()
 
 
 async def _remember_period(chat_id: int, code: str) -> None:
@@ -1583,9 +1692,19 @@ def _parse_geo_proximity(text: str) -> tuple[str, float] | None:
 
 
 async def _kw_run(
-    target: Message, chat_id: int, seeds: list[str], url: str | None, language: str
+    target: Message,
+    chat_id: int,
+    seeds: list[str],
+    url: str | None,
+    language: str,
+    *,
+    geo_ids: tuple[int, ...] | None = None,
+    network: str = "GOOGLE_SEARCH",
+    months: int | None = None,
 ) -> None:
-    """Подобрать идеи → кластеризовать по интенту → сводка + .xlsx. READ-ONLY (advisory)."""
+    """Подобрать идеи → кластеризовать по интенту → сводка + .xlsx. READ-ONLY (advisory).
+    3F (§7): geo_ids/network/months — параметры research (раньше зашиты); None/дефолт =
+    прежнее поведение (Украина / Search / окно API)."""
     import os
     import tempfile
 
@@ -1594,12 +1713,22 @@ async def _kw_run(
     # Draft — нули). Замок чтения держит generate_keyword_ideas (ensure_read_allowed); если активный
     # аккаунт вышел из read-list, _active_read_account сам откатывается на Draft (fail-closed).
     from ads.client import build_client_async
-    from ads.keyword_plan import generate_keyword_ideas
+    from ads.keyword_plan import DEFAULT_GEO_IDS, generate_keyword_ideas
+
+    eff_geo = tuple(geo_ids) if geo_ids else DEFAULT_GEO_IDS
 
     async def _gen(cid: str):
         client = await build_client_async(cid)  # холодная сборка — вне loop
         return await asyncio.to_thread(
-            generate_keyword_ideas, client, cid, seeds=seeds, url=url, language=language
+            generate_keyword_ideas,
+            client,
+            cid,
+            seeds=seeds,
+            url=url,
+            language=language,
+            geo_ids=eff_geo,
+            network=network,
+            months=months,
         )
 
     acct = await _active_read_account(chat_id)
@@ -1747,11 +1876,15 @@ async def _kw_run(
 
 
 async def _kw_start_from_intent(m: Message, brief: dict, state: FSMContext) -> None:
-    """NL-вход: keyword_research-намерение агента. Есть сиды/URL — сразу; иначе спросить."""
+    """NL-вход: keyword_research-намерение агента. Есть сиды/URL — сразу; иначе спросить.
+    3F: дефолт языка — язык интерфейса (keyword_ideas_lang), а не хардкод 'ru' (EN-пользователь
+    получал русские идеи, нерелевантные его рынку)."""
+    from ads.geo import keyword_ideas_lang
+
     await state.clear()
     seeds = [s for s in (brief.get("seeds") or []) if s]
     url = brief.get("url")
-    language = brief.get("language", "ru")
+    language = brief.get("language") or keyword_ideas_lang(i18n.current_lang())
     if seeds or url:
         await _kw_run(m, m.chat.id, seeds, url, language)
         return
@@ -1940,13 +2073,17 @@ async def _cc_render_stage(target: Message, chat_id: int, draft, state: FSMConte
         if s:
             await state.set_state(CreateCampaignWizard.settings_confirm)
             await target.answer(
-                texts.fmt_cc_settings_summary(s),
+                _cc_crumb(1) + texts.fmt_cc_settings_summary(s),
                 reply_markup=cc_settings_kb(),
                 parse_mode=ParseMode.HTML,
             )
         else:
             await state.set_state(CreateCampaignWizard.settings_desc)
-            await target.answer(i18n.t("cc_ask_description"), reply_markup=nav_kb())
+            await target.answer(
+                _cc_crumb(1) + i18n.t("cc_ask_description"),
+                reply_markup=nav_kb(),
+                parse_mode=ParseMode.HTML,
+            )
         return
     if step == 2:
         await _cc_present_stage2(target, chat_id, draft.session_id, state)
@@ -2074,36 +2211,54 @@ def _cli_cancel_idle(chat_id: int) -> None:
         t.cancel()
 
 
-async def _cli_idle_autosave(bot, chat_id: int, customer_id: str, idle: int) -> None:
+# 3G: замок «одно извлечение за раз» per-chat — гонка «idle-таймер стрельнул во время ручного
+# „Сохранить“» давала ДВА proposal из одного буфера. Под замком буфер потребляется ровно один раз.
+_CLI_SAVE_LOCK: dict[int, asyncio.Lock] = {}
+
+
+def _cli_lock(chat_id: int) -> asyncio.Lock:
+    return _CLI_SAVE_LOCK.setdefault(chat_id, asyncio.Lock())
+
+
+async def _cli_idle_autosave(bot, chat_id: int, customer_id: str, idle: int, state=None) -> None:
     """§20.3/B13: по idle секунд тишины извлекаем накопленный буфер и показываем «было→станет» +
-    confirm-гейт (как «💾 Сохранить»). Ничего не сохраняется без ✅ (тот же гейт §5). Фон не роняет loop."""
+    confirm-гейт (как «💾 Сохранить»). Ничего не сохраняется без ✅ (тот же гейт §5). Фон не роняет
+    loop. 3G: после автосейва РЕЖИМ НАКОПЛЕНИЯ ЗАКРЫВАЕТСЯ (state.clear — раньше FSM оставался в
+    awaiting_text и следующий текст молча минтил ВТОРОЙ proposal); гонка с ручным «Сохранить»
+    закрыта общим _cli_lock (буфер потребляется один раз)."""
     try:
         await asyncio.sleep(idle)
     except asyncio.CancelledError:
         return
     _CLI_IDLE_TASK.pop(chat_id, None)
-    buf = _CLI_TEXT_BUF.get(chat_id) or []
-    if not buf:
-        return
-    _CLI_TEXT_BUF.pop(
-        chat_id, None
-    )  # буфер израсходован; следующее сообщение начнёт новое накопление
-    try:
-        if await _cli_extract_and_propose(bot, chat_id, customer_id, buf):
-            await bot.send_message(chat_id, i18n.t("cli_autosaved"))
-    except Exception:  # noqa: BLE001 — фон не должен ронять event loop
-        log.warning("§20.3 авто-сохранение профиля не удалось (chat=%s)", chat_id, exc_info=True)
+    async with _cli_lock(chat_id):
+        buf = _CLI_TEXT_BUF.pop(chat_id, None) or []
+        if not buf:
+            return  # ручное «Сохранить» успело первым (замок) — no-op
+        try:
+            if await _cli_extract_and_propose(bot, chat_id, customer_id, buf):
+                if state is not None:  # закрыть режим накопления (возврат — «✏️ Обновить инфу»)
+                    try:
+                        await state.clear()
+                    except Exception:  # noqa: BLE001 — best-effort (storage мог смениться)
+                        pass
+                await bot.send_message(chat_id, i18n.t("cli_autosaved"))
+        except Exception:  # noqa: BLE001 — фон не должен ронять event loop
+            log.warning(
+                "§20.3 авто-сохранение профиля не удалось (chat=%s)", chat_id, exc_info=True
+            )
 
 
-def _cli_arm_idle(bot, chat_id: int, customer_id: str) -> None:
+def _cli_arm_idle(bot, chat_id: int, customer_id: str, state=None) -> None:
     """§20.3/B13: (пере)взвести таймер авто-сохранения. Каждое новое сообщение сбрасывает отсчёт;
-    client_text_idle_s ≤ 0 → авто-сохранение отключено (только ручное «💾 Сохранить»)."""
+    client_text_idle_s ≤ 0 → авто-сохранение отключено (только ручное «💾 Сохранить»).
+    state (3G) — FSMContext чата: автосейв закроет режим накопления."""
     _cli_cancel_idle(chat_id)
     idle = int(getattr(settings, "client_text_idle_s", 0) or 0)
     if idle <= 0:
         return
     _CLI_IDLE_TASK[chat_id] = asyncio.create_task(
-        _cli_idle_autosave(bot, chat_id, customer_id, idle)
+        _cli_idle_autosave(bot, chat_id, customer_id, idle, state)
     )
 
 
@@ -2736,8 +2891,11 @@ async def _cc_present_stage7(target: Message, chat_id: int, session_id: str, sta
     await state.set_state(CreateCampaignWizard.final)
     await state.update_data(cc_session=session_id)
     draft = await CDRAFTS.get(session_id, expected_chat_id=chat_id)
+    if draft is None:  # гонка с истечением/abandon черновика (mypy-находка аудита) — не падаем
+        await target.answer(i18n.t("cc_draft_stale"))
+        return
     await target.answer(
-        texts.fmt_cc_final_summary(draft.wizard_state),
+        _cc_crumb(7) + texts.fmt_cc_final_summary(draft.wizard_state),
         reply_markup=cc_final_kb(),
         parse_mode=ParseMode.HTML,
     )
@@ -2745,9 +2903,12 @@ async def _cc_present_stage7(target: Message, chat_id: int, session_id: str, sta
 
 async def _cc_resummarize(target: Message, session_id: str, chat_id: int) -> None:
     snap = await CDRAFTS.get(session_id, expected_chat_id=chat_id)
+    if snap is None:  # черновик истёк/брошен между правкой и пере-сводкой — не падаем
+        await target.answer(i18n.t("cc_draft_stale"))
+        return
     await target.answer(i18n.t("cc_edit_applied"))
     await target.answer(
-        texts.fmt_cc_final_summary(snap.wizard_state),
+        _cc_crumb(7) + texts.fmt_cc_final_summary(snap.wizard_state),
         reply_markup=cc_final_kb(),
         parse_mode=ParseMode.HTML,
     )
@@ -3254,14 +3415,17 @@ async def _do_confirm(cq: CallbackQuery, cid: str) -> bool:
             log.exception("record_failure не записан cid=%s (БД недоступна?)", cid)
         await _safe_edit(
             cq,
-            i18n.t("failed", kind=type(e).__name__, err=texts.esc(human)),
+            i18n.t("failed", err=texts.esc(human)),  # 3C: без технического имени класса
             parse_mode=ParseMode.HTML,
         )
         return False
     # Успех: мутация применена и finalize записан. Косметический сбой UI-edit НЕ должен пометить
     # успешную операцию как failed — отдельный try/except, вне ветки record_failure.
     log.info("мутация применена cid=%s chat=%s", cid, chat_id)  # денежный путь — успех в лог
-    await _safe_edit(cq, i18n.t("applied", result=texts.esc(result)), parse_mode=ParseMode.HTML)
+    # 3C: человекочитаемый итог вместо сырого dict; fmt_mutation_result отдаёт ГОТОВЫЙ HTML
+    # (эскейп внутри) — texts.esc здесь дал бы двойное экранирование.
+    human_result = texts.fmt_mutation_result(snap.operation if snap else "", result)
+    await _safe_edit(cq, i18n.t("applied", result=human_result), parse_mode=ParseMode.HTML)
     # partial_failure (батчи ключей/минус-слов): часть позиций отклонена сервером — честно
     # перечисляем причины (не молчим об «усечённом» успехе). Причины уже отредактированы.
     if isinstance(result, dict) and result.get("rejected"):
@@ -3361,9 +3525,11 @@ async def _rsa_edit_overview(cq: CallbackQuery, session) -> None:
 
 
 # ── Регистрация хендлеров по доменам (вынос из этого файла; порядок импорта = порядок
-# диспатча aiogram — catch-all on_text в fallback СТРОГО последним; инвариант закреплён
+# диспатча aiogram — menu_guard СТРОГО первым (3A: кнопки меню раньше state-хендлеров визардов),
+# catch-all on_text в fallback СТРОГО последним; инвариант закреплён
 # tests/test_handler_order.py). Позднее связывание: модули читают имена через bm.<name>. ──
 from bot.handlers import (  # noqa: E402
+    menu_guard,
     commands,
     reports,
     keywords_flow,
@@ -3378,6 +3544,7 @@ from bot.handlers import (  # noqa: E402
 )
 
 # Ре-экспорт публичных имён хендлеров: тесты/скрипты зовут их как bot.main.<handler>.
+from bot.handlers.menu_guard import *  # noqa: E402,F403
 from bot.handlers.commands import *  # noqa: E402,F403
 from bot.handlers.reports import *  # noqa: E402,F403
 from bot.handlers.keywords_flow import *  # noqa: E402,F403

@@ -113,7 +113,8 @@ CATALOG: dict[str, dict[str, str]] = {
             "/report [7|30|90|MTD | YYYY-MM-DD [YYYY-MM-DD]] — period summary (default 30 days)\n"
             "/export [period] — deep report .xlsx · /sheets [period] — in Google Sheets (link)\n"
             "/mcc [period] — summary across all MCC child accounts (per-currency subtotals)\n"
-            "/quota — daily Google Ads API operation quota\n\n"
+            "/quota — daily Google Ads API operation quota\n"
+            "/alerts — anomaly alert thresholds (spend spike / conversions drop)\n\n"
             "<b>ℹ️ Clients</b>\n"
             "/clients — knowledge base: client profile as text + site crawling → relevant generation\n"
             "/client &lt;id&gt; — client card by account id\n\n"
@@ -282,6 +283,79 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": texts.PROPOSAL_PENDING,
         "en": "📝 <b>Change draft</b>\n\n{summary}\n\nConfirm? <i>(draft valid for 24h)</i>",
     },
+    "photo_in_flow_hint": {
+        "ru": (
+            "📎 Сейчас идёт другой шаг — фото/видео здесь не ожидается. Заверши текущий флоу "
+            "(или «✖ Отмена»), а для кампании из медиа просто пришли фото/видео из главного меню."
+        ),
+        "en": (
+            "📎 Another step is in progress — a photo/video isn't expected here. Finish the "
+            "current flow (or “✖ Cancel”), then send the media from the main menu."
+        ),
+    },
+    # — 3F (§7): параметры keyword research —
+    "kw_params_title": {
+        "ru": (
+            "⚙️ <b>Параметры подбора</b> — проверь и жми «🚀 Подобрать».\n"
+            "<i>Тап по строке меняет значение.</i>"
+        ),
+        "en": (
+            "⚙️ <b>Research parameters</b> — review and tap “🚀 Search ideas”.\n"
+            "<i>Tap a row to change its value.</i>"
+        ),
+    },
+    "kw_params_pick_geo": {
+        "ru": "🌍 Какая страна (рынок) для подбора?",
+        "en": "🌍 Which country (market) for the research?",
+    },
+    "kw_params_ask_geo": {
+        "ru": "Напиши страну (например «Кения» или код <code>KE</code>).",
+        "en": "Type a country (e.g. “Kenya” or code <code>KE</code>).",
+    },
+    "kw_params_geo_unknown": {
+        "ru": "Не распознал страну. Попробуй название («Польша») или ISO-код (<code>PL</code>).",
+        "en": "Couldn't recognize the country. Try a name (“Poland”) or ISO code (<code>PL</code>).",
+    },
+    # — 3H (M10): /alerts — пороги аномалий —
+    "alerts_saved": {"ru": "✅ Порог сохранён.", "en": "✅ Threshold saved."},
+    "alerts_reset_done": {"ru": "↩️ Пороги сброшены к дефолтам.", "en": "↩️ Thresholds reset."},
+    "alerts_ask_value": {
+        "ru": "Пришли число: процент (напр. <code>35</code>) или мин. расход.",
+        "en": "Send a number: percent (e.g. <code>35</code>) or min spend.",
+    },
+    "alerts_bad_value": {
+        "ru": "Не похоже на допустимое число (проценты 1–1000). Попробуй ещё раз.",
+        "en": "Doesn't look like a valid number (percent 1–1000). Try again.",
+    },
+    "more_menu_title": {
+        "ru": "➕ <b>Ещё</b> — дополнительные возможности:",
+        "en": "➕ <b>More</b> — additional features:",
+    },
+    "cc_edit_not_understood": {
+        "ru": (
+            "🤷 Не понял правку. Примеры: «поставь бюджет 60», «добавь город Найроби», "
+            "«смени „Быстро и надёжно“ на „Надёжно и быстро“»."
+        ),
+        "en": (
+            "🤷 Couldn't parse the edit. Examples: “set budget 60”, “add city Nairobi”, "
+            "“change “Fast and reliable” to “Reliable and fast””."
+        ),
+    },
+    # — 3A: кнопка меню во время визарда (мягкое сворачивание без потери работы) —
+    "cc_wizard_suspended": {
+        "ru": (
+            "⏸ Черновик кампании сохранён (шаг {step}/7) — вернуться: "
+            "«➕ Создание кампании» → «▶️ Продолжить»."
+        ),
+        "en": (
+            "⏸ Campaign draft saved (step {step}/7) — to resume: "
+            "“➕ Create campaign” → “▶️ Continue”."
+        ),
+    },
+    "cli_buf_flushed": {
+        "ru": "💾 Накопленный текст профиля оформлен черновиком — подтверди его выше (✅/❌).",
+        "en": "💾 The accumulated profile text became a draft — confirm it above (✅/❌).",
+    },
     # — 2C: гранты аккаунтов (/grant /revoke /accounts /whoami) —
     "admin_only": {
         "ru": "⛔ Команда доступна только администратору бота (ADMIN_CHAT_IDS).",
@@ -376,7 +450,7 @@ CATALOG: dict[str, dict[str, str]] = {
     },
     "failed": {
         "ru": texts.FAILED,
-        "en": "⚠️ Failed to execute: {kind}: {err}",
+        "en": "⚠️ Failed to execute: {err}",
     },
     "no_campaigns": {
         "ru": texts.NO_CAMPAIGNS,
@@ -1141,8 +1215,14 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "🕷 Crawl of {domain} is already running — wait for the summary, no need to start again.",
     },
     "cli_autosaved": {
-        "ru": "💾 Авто-сохранение по таймауту: показал черновик профиля — подтвердите «да» ниже.",
-        "en": "💾 Auto-save on idle: here's the profile draft — confirm “yes” below.",
+        "ru": (
+            "💾 Авто-сохранение по таймауту: показал черновик профиля — подтвердите «да» выше. "
+            "Режим накопления закрыт; добавить ещё — «✏️ Обновить инфу»."
+        ),
+        "en": (
+            "💾 Auto-save on idle: here's the profile draft — confirm “yes” above. "
+            "Accumulation closed; to add more — “✏️ Update info”."
+        ),
     },
     "cli_crawl_unchanged": {
         "ru": "✅ Сайт {domain} не изменился ({pages} стр.). Профиль актуален, обновление не требуется.",

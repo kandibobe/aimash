@@ -119,7 +119,8 @@ HELP = (
     "/report [7|30|90|MTD | ГГГГ-ММ-ДД [ГГГГ-ММ-ДД]] — сводка за период (по умолч. 30 дн.)\n"
     "/export [период] — глубокий отчёт .xlsx · /sheets [период] — в Google Sheets (ссылка)\n"
     "/mcc [период] — сводка по всем дочерним аккаунтам MCC (подытоги по валютам)\n"
-    "/quota — дневная квота операций Google Ads API\n\n"
+    "/quota — дневная квота операций Google Ads API\n"
+    "/alerts — пороги алертов аномалий (всплеск расхода / падение конверсий)\n\n"
     "<b>ℹ️ Клиенты</b>\n"
     "/clients — база знаний: профиль клиента текстом + краулинг сайта → релевантная генерация\n"
     "/client &lt;id&gt; — карточка клиента по номеру аккаунта\n\n"
@@ -222,7 +223,8 @@ PROPOSAL_PENDING = (
 )
 EXECUTING = "⏳ Выполняю…"
 APPLIED = "✅ <b>Готово.</b>\n{result}"
-FAILED = "⚠️ Не удалось выполнить: {kind}: {err}"
+# 3C: без технического {kind} (имя класса исключения) — {err} уже человекочитаем (humanize).
+FAILED = "⚠️ Не удалось выполнить: {err}"
 REJECTED = "❌ Отменено"
 STALE = "Черновик не найден или устарел"
 NO_PROPOSAL = "Нет активного черновика для отмены."
@@ -1357,6 +1359,137 @@ _OP_HUMAN_EN = {
     "create_gdn_campaign": "create GDN campaign",
     "create_search_campaign": "create Search campaign",
 }
+
+
+def fmt_alerts(cur: dict, lang: str | None = None) -> str:
+    """3H (M10): текущие пороги аномалий планировщика (эффективные: дефолты ∪ per-chat)."""
+    en = _lang(lang) == "en"
+    if en:
+        return (
+            "🔔 <b>Anomaly alert thresholds</b> (weekly windows, scheduler)\n"
+            f"📈 Spend spike: <b>+{cur.get('spend_spike_pct', 0):.0f}%</b>\n"
+            f"📉 Conversions drop: <b>−{cur.get('conv_drop_pct', 0):.0f}%</b>\n"
+            f"💸 Min spend (noise floor): <b>{cur.get('min_spend', 0):g}</b>\n\n"
+            "<i>Alerts only signal — the bot never changes anything by itself.</i>"
+        )
+    return (
+        "🔔 <b>Пороги алертов аномалий</b> (недельные окна, планировщик)\n"
+        f"📈 Всплеск расхода: <b>+{cur.get('spend_spike_pct', 0):.0f}%</b>\n"
+        f"📉 Падение конверсий: <b>−{cur.get('conv_drop_pct', 0):.0f}%</b>\n"
+        f"💸 Мин. расход (отсечка шума): <b>{cur.get('min_spend', 0):g}</b>\n\n"
+        "<i>Алерты — только сигнал: бот сам ничего не меняет.</i>"
+    )
+
+
+# 3C: подписи частей composite-результата для warnings частичного успеха.
+_RESULT_PART = {
+    "keywords": ("ключи", "keywords"),
+    "geo": ("гео-таргетинг", "geo targeting"),
+    "languages": ("языки", "languages"),
+    "ad_schedule": ("расписание показов", "ad schedule"),
+}
+# Служебные/технические ключи result — в человекочитаемом фолбэке не показываем.
+_RESULT_HIDDEN_KEYS = frozenset(
+    {"applied", "customer_id", "campaign", "budget", "ad_group", "ad", "resource_names", "created"}
+)
+
+
+def fmt_mutation_result(operation: str, result: object, lang: str | None = None) -> str:
+    """3C: человекочитаемый итог применённой операции для _do_confirm — вместо сырого Python-dict
+    (`{'campaign': 'customers/…', 'geo': 0}` менеджеру ни о чём). Возвращает ГОТОВЫЙ HTML
+    (экранирование внутри). Warnings частичного успеха composite-create показываются явно."""
+    en = _lang(lang) == "en"
+    if result is None:
+        return ""
+    if isinstance(result, str):
+        return esc(result)
+    if not isinstance(result, dict):
+        return esc(str(result))
+    L: list[str] = []
+    if operation in (
+        "create_search_campaign",
+        "create_gdn_campaign",
+        "create_demand_gen_campaign",
+        "create_video_campaign",
+    ):
+        name = str(result.get("campaign_name") or "")
+        head = (
+            f"🆕 Campaign “{esc(name)}” created (PAUSED, $0 until launch)."
+            if en
+            else f"🆕 Кампания «{esc(name)}» создана (PAUSED, $0 до запуска)."
+        )
+        L.append(head)
+        stats: list[str] = []
+        for key, (ru_l, en_l) in (
+            ("headlines", ("заголовков", "headlines")),
+            ("descriptions", ("описаний", "descriptions")),
+            ("keywords", ("ключей", "keywords")),
+            ("geo", ("гео", "geo")),
+            ("languages", ("языков", "languages")),
+        ):
+            v = result.get(key)
+            if isinstance(v, int) and v > 0:
+                stats.append(f"{en_l if en else ru_l}: {v}")
+        if stats:
+            L.append("• " + " · ".join(stats))
+    elif operation in (
+        "add_keywords",
+        "remove_keywords",
+        "add_negative_keywords",
+        "remove_negative_keywords",
+    ):
+        n = int(result.get("count") or 0)
+        mt = str(result.get("match_type") or "")
+        verb = {
+            "add_keywords": ("Добавлено ключей", "Keywords added"),
+            "remove_keywords": ("Удалено ключей", "Keywords removed"),
+            "add_negative_keywords": ("Добавлено минус-слов", "Negative keywords added"),
+            "remove_negative_keywords": ("Снято минус-слов", "Negative keywords removed"),
+        }[operation]
+        L.append(f"{verb[1] if en else verb[0]}: <b>{n}</b>" + (f" ({esc(mt)})" if mt else ""))
+        nf = result.get("not_found")
+        if isinstance(nf, list) and nf:
+            label = "not found" if en else "не найдено"
+            L.append(f"• {label}: {esc(', '.join(map(str, nf[:5])))}")
+    elif operation in ("profile_save", "profile_update", "profile_clear"):
+        if result.get("cleared"):
+            L.append("🗑 Profile cleared." if en else "🗑 Профиль очищен.")
+        else:
+            fields = result.get("changed_fields") or []
+            verb = (
+                ("Profile created" if result.get("created") else "Profile updated")
+                if en
+                else ("Профиль создан" if result.get("created") else "Профиль обновлён")
+            )
+            L.append(
+                f"💾 {verb}" + (f": {esc(', '.join(map(str, fields[:8])))}" if fields else ".")
+            )
+    else:
+        # фолбэк: построчно «ключ: значение» без служебных/сырых resource_name (не repr-дамп)
+        for k, v in result.items():
+            if k in _RESULT_HIDDEN_KEYS or k in ("warnings", "bidding_note", "rejected"):
+                continue
+            if isinstance(v, (str, int, float, bool)):
+                L.append(f"• {esc(str(k))}: {esc(str(v))}")
+        if not L:
+            L.append("✅ OK")
+    # warnings частичного успеха (composite-create): «⚠️ гео не применено (0 из 2)»
+    for w in result.get("warnings") or []:
+        part = str(w.get("part") or "")
+        ru_l, en_l = _RESULT_PART.get(part, (part, part))
+        req, app = int(w.get("requested") or 0), int(w.get("applied") or 0)
+        if en:
+            msg = (
+                f"⚠️ {en_l}: applied {app} of {req}" if app else f"⚠️ {en_l} NOT applied (0 of {req})"
+            )
+        else:
+            msg = (
+                f"⚠️ {ru_l}: применено {app} из {req}"
+                if app
+                else f"⚠️ {ru_l} НЕ применено (0 из {req})"
+            )
+        L.append(msg)
+    return "\n".join(L)
 
 
 def _journal_actor(actor_user_id: int | None, actor_username: str | None) -> str:

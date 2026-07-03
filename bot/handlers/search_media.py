@@ -33,7 +33,10 @@ async def search_brief(m: bm.Message, state: bm.FSMContext) -> None:
     name, url, budget_units, topic, keywords = parsed
     await m.answer(bm.i18n.t("search_generating"))
     try:
-        draft = await bm._generate_rsa(bm.CopyBrief(topic=topic, n_headlines=15, n_descriptions=4))
+        async with bm.ux.typing_action(m):  # 3I: живой индикатор на 10–30с генерации
+            draft = await bm._generate_rsa(
+                bm.CopyBrief(topic=topic, n_headlines=15, n_descriptions=4)
+            )
     except Exception as e:  # LLM/сеть
         await state.clear()
         await m.answer(bm.i18n.t("err_text_gen", err=bm.ux.err_text(e)))
@@ -106,11 +109,13 @@ async def on_photo(m: bm.Message, state: bm.FSMContext, bot: bm.Bot) -> None:
     if await state.get_state() == bm.CreateCampaignWizard.asset_logo:
         await bm._cc_asset_logo_from_photo(m, state, bot)
         return
-    # §19/§11: фото в ЛЮБОМ другом состоянии визардов «Создание кампании»/«кампания из видео» НЕ
-    # должно перехватываться GDN-веткой (она делает state.clear(), теряя черновик). Подсказка.
+    # 3I (инверсный гард): фото в ЛЮБОМ активном состоянии, кроме повторного фото GDN-брифа,
+    # НЕ перехватывается GDN-веткой — она делает state.clear() и молча теряла ТЕКУЩИЙ флоу
+    # (напр. фото во время ввода текста профиля §20 убивало сессию клиентов). Раньше белый
+    # список покрывал только CreateCampaignWizard/VideoWizard.
     cur_state = await state.get_state()
-    if isinstance(cur_state, str) and cur_state.startswith(("CreateCampaignWizard", "VideoWizard")):
-        await m.answer(bm.i18n.t("cc_photo_wrong_stage"))
+    if cur_state is not None and cur_state != bm.GdnWizard.awaiting_brief.state:
+        await m.answer(bm.i18n.t("photo_in_flow_hint"))
         return
     prev = await state.get_data()  # новое фото отменяет прежнее → чистим его медиа (без утечки)
     old_id = prev.get("gdn_media_id")
@@ -138,10 +143,11 @@ async def on_photo(m: bm.Message, state: bm.FSMContext, bot: bm.Bot) -> None:
 @bm.dp.message(bm.F.video)
 async def on_video(m: bm.Message, state: bm.FSMContext) -> None:
     """§11: приём видео → визард кампании из видео. Загрузить файл в Google Ads напрямую нельзя —
-    видео живёт на YouTube (примечание §11), поэтому просим ссылку. §19-визард не перехватываем."""
+    видео живёт на YouTube (примечание §11), поэтому просим ссылку. 3I (инверсный гард, как
+    on_photo): видео в ЛЮБОМ активном флоу — подсказка, а не молчаливый state.clear()."""
     cur_state = await state.get_state()
-    if isinstance(cur_state, str) and cur_state.startswith("CreateCampaignWizard"):
-        await m.answer(bm.i18n.t("cc_photo_wrong_stage"))
+    if cur_state is not None and cur_state != bm.VideoWizard.awaiting_link.state:
+        await m.answer(bm.i18n.t("photo_in_flow_hint"))
         return
     await state.clear()
     await state.set_state(bm.VideoWizard.awaiting_link)
@@ -217,7 +223,10 @@ async def video_brief(m: bm.Message, state: bm.FSMContext) -> None:
     name, url, budget_units, geo_locations = parsed
     await m.answer(bm.i18n.t("gdn_generating"))
     try:
-        draft = await bm._generate_rsa(bm.CopyBrief(topic=name, n_headlines=5, n_descriptions=5))
+        async with bm.ux.typing_action(m):  # 3I: живой индикатор на генерации
+            draft = await bm._generate_rsa(
+                bm.CopyBrief(topic=name, n_headlines=5, n_descriptions=5)
+            )
     except Exception as e:  # LLM/сеть
         await state.clear()
         await m.answer(bm.i18n.t("err_text_gen", err=bm.ux.err_text(e)))
@@ -288,7 +297,10 @@ async def gdn_brief(m: bm.Message, state: bm.FSMContext) -> None:
     name, url, budget_units, geo_locations = parsed
     await m.answer(bm.i18n.t("gdn_generating"))
     try:
-        draft = await bm._generate_rsa(bm.CopyBrief(topic=name, n_headlines=5, n_descriptions=4))
+        async with bm.ux.typing_action(m):  # 3I: живой индикатор на генерации
+            draft = await bm._generate_rsa(
+                bm.CopyBrief(topic=name, n_headlines=5, n_descriptions=4)
+            )
     except Exception as e:  # LLM/сеть
         await bm._gdn_cleanup(state, media_id)
         await m.answer(bm.i18n.t("err_text_gen", err=bm.ux.err_text(e)))

@@ -504,3 +504,87 @@ async def test_stage7_create_blocks_without_ad():
         await bm.cc_create(cq, CcCB(action="create"), fsm)
     assert called["present"] is False  # без объявления — нет proposal
     assert cq.answers and cq.answers[-1][1] is True  # show_alert
+
+
+# ── 3D: «‹ Назад» — навигация без потери данных черновика ──────────────────────────
+async def test_cc_back_navigates_without_data_loss():
+    """back с этапа 7 → этап 6; сохранённые ключи/настройки целы; двойной back на 0 не падает."""
+    import bot.main as bm
+    from db.session import init_db
+    from types import SimpleNamespace
+
+    await init_db()
+    chat_id = 93_001
+    sid = await bm.CDRAFTS.create(chat_id=chat_id, customer_id=bm.DRAFT_ACCOUNT_ID)
+    await bm.CDRAFTS.patch(
+        sid,
+        lambda st: st["keywords"].update({"list": ["авто"], "verified": True}),
+        expected_chat_id=chat_id,
+    )
+    await bm.CDRAFTS.set_step(sid, 7, expected_chat_id=chat_id)
+
+    class _Msg:
+        def __init__(self):
+            self.chat = SimpleNamespace(id=chat_id)
+            self.answers: list = []
+
+        async def answer(self, text: str = "", **kw):
+            self.answers.append(text)
+            return self
+
+    class _CQ:
+        def __init__(self, msg):
+            self.message = msg
+            self.from_user = SimpleNamespace(id=chat_id)
+
+        async def answer(self, *a, **k):
+            pass
+
+    class _State:
+        def __init__(self):
+            self._data, self._state = {}, None
+
+        async def get_data(self):
+            return dict(self._data)
+
+        async def update_data(self, **kw):
+            self._data.update(kw)
+
+        async def set_state(self, s):
+            self._state = s
+
+        async def clear(self):
+            self._data, self._state = {}, None
+
+    msg = _Msg()
+    await bm.cc_back(_CQ(msg), bm.CcCB(action="back"), _State())
+    snap = await bm.CDRAFTS.get(sid, expected_chat_id=chat_id)
+    assert snap.current_step == 6
+    assert snap.wizard_state["keywords"]["list"] == ["авто"]  # данные целы
+
+    # прыгаем на 0 и жмём back ещё раз — клампится в 0, не падает
+    await bm.CDRAFTS.set_step(sid, 0, expected_chat_id=chat_id)
+    await bm.cc_back(_CQ(_Msg()), bm.CcCB(action="back"), _State())
+    snap = await bm.CDRAFTS.get(sid, expected_chat_id=chat_id)
+    assert snap.current_step == 0
+
+
+def test_cc_keyboards_have_back_button():
+    """3D: клавиатуры этапов 1–7 несут «‹ Назад» (CcCB back); финал после создания — без back."""
+    from bot import keyboards as kb
+
+    def _texts(markup):
+        return [b.text for row in markup.inline_keyboard for b in row]
+
+    for factory in (
+        kb.cc_settings_kb,
+        kb.cc_kw_kb,
+        kb.cc_kw_confirm_kb,
+        kb.cc_assets_kb,
+        kb.cc_skip_kb,
+    ):
+        assert any("Назад" in t or "Back" in t for t in _texts(factory())), factory.__name__
+    assert any("Назад" in t for t in _texts(kb.cc_final_kb()))  # до создания — есть
+    assert not any(
+        "Назад" in t for t in _texts(kb.cc_final_kb(can_launch=True, launch_cid="a" * 32))
+    )  # после создания кампании back бессмыслен

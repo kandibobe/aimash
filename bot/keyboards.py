@@ -13,6 +13,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 from adcopy.validate import STRUCTURED_SNIPPET_HEADERS
 from bot.callbacks import (
+    AlertCB,
     AudienceCB,
     CampCB,
     CcCB,
@@ -21,9 +22,12 @@ from bot.callbacks import (
     ExtCB,
     GeoCB,
     KwAddCB,
+    KwCfgCB,
     LangCB,
     ModelCB,
+    MoreCB,
     NavCB,
+    PageCB,
     PeriodCB,
     RecentCB,
     ReportAcctCB,
@@ -74,6 +78,7 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="whoami", description="Мой chat_id, активный аккаунт, режим доступа"),
     BotCommand(command="refresh", description="Обновить аккаунты/кэши без рестарта"),
     BotCommand(command="quota", description="Дневная квота Google Ads API"),
+    BotCommand(command="alerts", description="Пороги алертов аномалий (расход/конверсии)"),
     BotCommand(command="rsa", description="Сгенерировать тексты объявления (RSA)"),
     BotCommand(command="newsearch", description="Создать поисковую кампанию (RSA + ключи)"),
     BotCommand(command="newvideo", description="Кампания из видео: Demand Gen / Video (YouTube)"),
@@ -111,6 +116,7 @@ BOT_COMMANDS_EN: list[BotCommand] = [
     BotCommand(command="whoami", description="My chat_id, active account, access mode"),
     BotCommand(command="refresh", description="Refresh accounts/caches without a restart"),
     BotCommand(command="quota", description="Google Ads API daily quota"),
+    BotCommand(command="alerts", description="Anomaly alert thresholds (spend/conversions)"),
     BotCommand(command="rsa", description="Generate ad copy (RSA)"),
     BotCommand(command="newsearch", description="Create a search campaign (RSA + keywords)"),
     BotCommand(command="newvideo", description="Campaign from video: Demand Gen / Video (YouTube)"),
@@ -188,6 +194,7 @@ BTN_BALANCE = {"ru": "💳 Бюджет ИИ", "en": "💳 AI budget"}
 BTN_JOURNAL = {"ru": "📜 Журнал", "en": "📜 Journal"}
 BTN_LANG = {"ru": "🌐 Язык", "en": "🌐 Language"}
 BTN_HELP = {"ru": "❓ Помощь", "en": "❓ Help"}
+BTN_MORE = {"ru": "➕ Ещё", "en": "➕ More"}  # 3E: хаб вторичных флоу (обнаружимость)
 
 # Множества всех языковых вариантов для матчинга в хендлерах (F.text.in_(BTN_*_ALL)).
 BTN_NEWCAMPAIGN_ALL = frozenset(BTN_NEWCAMPAIGN.values())
@@ -205,6 +212,28 @@ BTN_BALANCE_ALL = frozenset(BTN_BALANCE.values())
 BTN_JOURNAL_ALL = frozenset(BTN_JOURNAL.values())
 BTN_LANG_ALL = frozenset(BTN_LANG.values())
 BTN_HELP_ALL = frozenset(BTN_HELP.values())
+BTN_MORE_ALL = frozenset(BTN_MORE.values())
+
+# 3A: ВСЕ подписи кнопок главного меню (оба языка) — для гарда menu_guard: кнопка меню,
+# нажатая во время активного визарда, не должна «съедаться» state-хендлером как ввод.
+ALL_MENU_BUTTONS: frozenset[str] = (
+    BTN_MORE_ALL
+    | BTN_NEWCAMPAIGN_ALL
+    | BTN_CLIENTS_ALL
+    | BTN_STATUS_ALL
+    | BTN_CAMPAIGNS_ALL
+    | BTN_REPORT_ALL
+    | BTN_EXPORT_ALL
+    | BTN_SHEETS_ALL
+    | BTN_MCC_ALL
+    | BTN_KEYWORDS_ALL
+    | BTN_RSA_ALL
+    | BTN_MODEL_ALL
+    | BTN_BALANCE_ALL
+    | BTN_JOURNAL_ALL
+    | BTN_LANG_ALL
+    | BTN_HELP_ALL
+)
 
 
 def main_menu(lang: str | None = None) -> ReplyKeyboardMarkup:
@@ -227,15 +256,138 @@ def main_menu(lang: str | None = None) -> ReplyKeyboardMarkup:
         BTN_JOURNAL,
         BTN_LANG,
         BTN_HELP,
+        BTN_MORE,  # 3E: хаб вторичных флоу (/newsearch /newvideo /templates /recent /quota /alerts)
     ):
         kb.button(text=btn[lng])
-    kb.adjust(1, 1, 2, 3, 3, 2, 3)
+    kb.adjust(1, 1, 2, 3, 3, 2, 4)
     placeholder = "Command or text…" if lng == "en" else "Команда или текст…"
     return kb.as_markup(
         resize_keyboard=True,
         is_persistent=True,
         input_field_placeholder=placeholder,
     )
+
+
+# 3F (§7): частые страны для пикера ГЕО подбора ключей (ISO → подпись). «Все страны» и ручной
+# ввод — отдельными кнопками; полный резолв произвольной страны — ads.geo.country_iso.
+_KW_GEO_PRESETS: tuple[tuple[str, str, str], ...] = (
+    ("UA", "🇺🇦 Украина", "🇺🇦 Ukraine"),
+    ("KE", "🇰🇪 Кения", "🇰🇪 Kenya"),
+    ("PL", "🇵🇱 Польша", "🇵🇱 Poland"),
+    ("DE", "🇩🇪 Германия", "🇩🇪 Germany"),
+    ("US", "🇺🇸 США", "🇺🇸 USA"),
+    ("KZ", "🇰🇿 Казахстан", "🇰🇿 Kazakhstan"),
+)
+
+
+def kw_params_kb(cfg: dict, lang: str | None = None) -> InlineKeyboardMarkup:
+    """3F (§7): экран параметров research. cfg — state-data ({kw_geo_iso, kw_lang, kw_net,
+    kw_months}). Тапы по строкам циклят/открывают выбор; «🚀 Подобрать» — запуск."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    geo = cfg.get("kw_geo_iso") or "UA"
+    geo_label = {"any": "🌐 " + ("all countries" if en else "все страны")}.get(geo, geo)
+    kb.button(
+        text=("🌍 Geo: " if en else "🌍 ГЕО: ") + str(geo_label),
+        callback_data=KwCfgCB(field="geo"),
+    )
+    kb.button(
+        text=("🗣 Language: " if en else "🗣 Язык: ") + str(cfg.get("kw_lang") or "ru"),
+        callback_data=KwCfgCB(field="lang"),
+    )
+    net = cfg.get("kw_net") or "GOOGLE_SEARCH"
+    net_label = (
+        ("Search + partners" if en else "Поиск + партнёры")
+        if net == "GOOGLE_SEARCH_AND_PARTNERS"
+        else "Search"
+    )
+    kb.button(
+        text=("🔎 Network: " if en else "🔎 Сеть: ") + net_label, callback_data=KwCfgCB(field="net")
+    )
+    months = cfg.get("kw_months") or 0
+    period_label = (
+        ("auto" if en else "авто") if not months else f"{months} " + ("mo" if en else "мес")
+    )
+    kb.button(
+        text=("📅 Period: " if en else "📅 Период: ") + period_label,
+        callback_data=KwCfgCB(field="period"),
+    )
+    kb.button(
+        text="🚀 " + ("Search ideas" if en else "Подобрать"), callback_data=KwCfgCB(field="run")
+    )
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    kb.adjust(1, 1, 1, 1, 2)
+    return kb.as_markup()
+
+
+def kw_geo_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """3F: саб-пикер ГЕО — частые страны + «все страны» + ручной ввод."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    for iso, ru_l, en_l in _KW_GEO_PRESETS:
+        kb.button(text=en_l if en else ru_l, callback_data=KwCfgCB(field="geo_pick", value=iso))
+    kb.button(
+        text="🌐 " + ("All countries" if en else "Все страны"),
+        callback_data=KwCfgCB(field="geo_pick", value="any"),
+    )
+    kb.button(
+        text="✏️ " + ("Other…" if en else "Другая…"),
+        callback_data=KwCfgCB(field="geo_pick", value="custom"),
+    )
+    kb.adjust(2, 2, 2, 2)
+    return kb.as_markup()
+
+
+def alerts_kb(cur: dict, lang: str | None = None) -> InlineKeyboardMarkup:
+    """3H (M10): пресеты порогов аномалий. cur — эффективные пороги (дефолты ∪ per-chat);
+    активное значение помечено ✅. «✏️» — ручной ввод (FSM), «↩️» — сброс к дефолтам."""
+    en = _lang(lang) == "en"
+
+    def _mark(field_key: str, preset: float) -> str:
+        return "✅ " if abs(float(cur.get(field_key, -1)) - preset) < 1e-9 else ""
+
+    kb = InlineKeyboardBuilder()
+    for preset in (25, 50, 100):
+        kb.button(
+            text=f"{_mark('spend_spike_pct', preset)}📈 {preset}%",
+            callback_data=AlertCB(field="spike", value=str(preset)),
+        )
+    kb.button(text="✏️", callback_data=AlertCB(field="spike", value="custom"))
+    for preset in (25, 50, 75):
+        kb.button(
+            text=f"{_mark('conv_drop_pct', preset)}📉 {preset}%",
+            callback_data=AlertCB(field="drop", value=str(preset)),
+        )
+    kb.button(text="✏️", callback_data=AlertCB(field="drop", value="custom"))
+    for preset in (1, 10, 100):
+        kb.button(
+            text=f"{_mark('min_spend', preset)}💸 {preset}",
+            callback_data=AlertCB(field="minspend", value=str(preset)),
+        )
+    kb.button(text="✏️", callback_data=AlertCB(field="minspend", value="custom"))
+    kb.button(
+        text="↩️ Reset to defaults" if en else "↩️ Сбросить (дефолты)",
+        callback_data=AlertCB(field="reset"),
+    )
+    kb.adjust(4, 4, 4, 1)
+    return kb.as_markup()
+
+
+def more_menu_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """3E: inline-хаб «➕ Ещё» — вторичные флоу одним тапом (раньше — только слэш-командой)."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    for label_en, label_ru, action in (
+        ("🔎 Search campaign (quick)", "🔎 Поисковая кампания (быстро)", "newsearch"),
+        ("🎬 Campaign from video", "🎬 Кампания из видео", "newvideo"),
+        ("📁 Campaign templates", "📁 Шаблоны кампаний", "templates"),
+        ("↻ Recent actions", "↻ Недавние действия", "recent"),
+        ("📉 API quota", "📉 Квота API", "quota"),
+        ("🔔 Alert thresholds", "🔔 Пороги алертов", "alerts"),
+    ):
+        kb.button(text=label_en if en else label_ru, callback_data=MoreCB(action=action))
+    kb.adjust(1, 1, 2, 2)
+    return kb.as_markup()
 
 
 # ── Inline: универсальная навигация мастеров (Назад + Отмена) ────────────────────
@@ -480,9 +632,15 @@ def cc_accounts_search_kb(
     return kb.as_markup()
 
 
+def _cc_back_btn(kb: InlineKeyboardBuilder, en: bool) -> None:
+    """3D: «‹ Назад» визарда §19 — навигация на предыдущий этап (данные черновика НЕ стираются;
+    раньше единственным выходом была полная «✖ Отмена» с потерей маршрута)."""
+    kb.button(text="‹ Back" if en else "‹ Назад", callback_data=CcCB(action="back"))
+
+
 def cc_settings_kb(lang: str | None = None) -> InlineKeyboardMarkup:
-    """Этап 1 (§19.3): ✅ Подтвердить / ✏️ Изменить / ❌ Отмена — как в ТЗ. «Изменить» лишь
-    подсказывает формат правки (правка — свободным текстом в состоянии, см. bot.main)."""
+    """Этап 1 (§19.3): ✅ Подтвердить / ✏️ Изменить / ‹ Назад / ✖ Отмена — как в ТЗ. «Изменить»
+    лишь подсказывает формат правки (правка — свободным текстом в состоянии, см. bot.main)."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     kb.button(
@@ -493,8 +651,9 @@ def cc_settings_kb(lang: str | None = None) -> InlineKeyboardMarkup:
         text="✏️ Edit" if en else "✏️ Изменить",
         callback_data=CcCB(action="edit", sub="settings"),
     )
+    _cc_back_btn(kb, en)
     kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
-    kb.adjust(1, 2)
+    kb.adjust(1, 1, 2)
     return kb.as_markup()
 
 
@@ -508,8 +667,9 @@ def cc_kw_kb(lang: str | None = None) -> InlineKeyboardMarkup:
         callback_data=CcCB(action="kw_generate"),
     )
     kb.button(text="⏭ Skip" if en else "⏭ Пропустить", callback_data=CcCB(action="skip"))
+    _cc_back_btn(kb, en)
     kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
-    kb.adjust(1, 2)
+    kb.adjust(1, 1, 2)
     return kb.as_markup()
 
 
@@ -529,8 +689,9 @@ def cc_assets_kb(lang: str | None = None) -> InlineKeyboardMarkup:
     kb.button(
         text="✅ Done / Skip" if en else "✅ Готово / Пропустить", callback_data=CcCB(action="skip")
     )
+    _cc_back_btn(kb, en)
     kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
-    kb.adjust(1, 1, 2)
+    kb.adjust(1, 1, 1, 2)
     return kb.as_markup()
 
 
@@ -585,13 +746,16 @@ def cc_final_kb(
             text="🚀 Launch campaign" if en else "🚀 Запустить кампанию",
             callback_data=CcCB(action="launch", sub=launch_cid),
         )
-    else:
-        kb.button(
-            text="✅ Create draft" if en else "✅ Создать черновик",
-            callback_data=CcCB(action="create"),
-        )
+        kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+        kb.adjust(1, 1)
+        return kb.as_markup()
+    kb.button(
+        text="✅ Create draft" if en else "✅ Создать черновик",
+        callback_data=CcCB(action="create"),
+    )
+    _cc_back_btn(kb, en)  # 3D: назад к URL-опциям (кампания ещё НЕ создана)
     kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
-    kb.adjust(1, 1)
+    kb.adjust(1, 2)
     return kb.as_markup()
 
 
@@ -624,8 +788,9 @@ def cc_skip_kb(lang: str | None = None) -> InlineKeyboardMarkup:
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     kb.button(text="⏭ Skip" if en else "⏭ Пропустить", callback_data=CcCB(action="skip"))
+    _cc_back_btn(kb, en)
     kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
-    kb.adjust(2)
+    kb.adjust(1, 2)
     return kb.as_markup()
 
 
@@ -638,8 +803,9 @@ def cc_kw_confirm_kb(lang: str | None = None) -> InlineKeyboardMarkup:
         text="✅ Confirm keywords" if en else "✅ Подтвердить ключевые слова",
         callback_data=CcCB(action="kw_confirm"),
     )
+    _cc_back_btn(kb, en)
     kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
-    kb.adjust(1, 1)
+    kb.adjust(1, 2)
     return kb.as_markup()
 
 
@@ -683,15 +849,27 @@ def cc_resume_kb(lang: str | None = None) -> InlineKeyboardMarkup:
 
 
 # ── Inline: /campaigns — список с быстрыми действиями ────────────────────────────
-def campaigns_kb(camps: list[dict]) -> InlineKeyboardMarkup:
-    """По кнопке на кампанию (раскрывает меню действий). idx = позиция в списке."""
+def campaigns_kb(camps: list[dict], page: int = 0) -> InlineKeyboardMarkup:
+    """По кнопке на кампанию (раскрывает меню действий), ПОСТРАНИЧНО (3E: >100 кампаний давали
+    REPLY_MARKUP_TOO_LONG → «код инцидента» вместо списка). idx = ГЛОБАЛЬНАЯ позиция в списке."""
     kb = InlineKeyboardBuilder()
-    for i, c in enumerate(camps):
+    total = len(camps)
+    pages = max(1, (total + _CAMP_PAGE - 1) // _CAMP_PAGE)
+    page = max(0, min(page, pages - 1))
+    start = page * _CAMP_PAGE
+    shown = 0
+    for i in range(start, min(start + _CAMP_PAGE, total)):
+        c = camps[i]
         mark = {"ENABLED": "▶️", "PAUSED": "⏸"}.get(c.get("status", ""), "•")
         kb.button(
             text=f"{mark} {_ellipsize(c['name'])}", callback_data=CampCB(action="menu", idx=i)
         )
-    kb.adjust(1)
+        shown += 1
+    nav_n = _page_nav_row(kb, "camp", "", page, pages)
+    sizes = [1] * shown
+    if nav_n:
+        sizes.append(nav_n)
+    kb.adjust(*sizes)
     return kb.as_markup()
 
 
@@ -896,18 +1074,38 @@ def report_recall_kb(recall: dict, lang: str | None = None) -> InlineKeyboardMar
     return kb.as_markup()
 
 
+def _page_nav_row(kb: InlineKeyboardBuilder, kind: str, target: str, page: int, pages: int) -> int:
+    """3E: ряд «‹ · N/M · ›» для PageCB-пагинации. Возвращает число добавленных кнопок (0 при
+    одной странице)."""
+    if pages <= 1:
+        return 0
+    n = 0
+    if page > 0:
+        kb.button(text="‹", callback_data=PageCB(kind=kind, target=target, page=page - 1))
+        n += 1
+    kb.button(text=f"{page + 1}/{pages}", callback_data=PageCB(kind=kind, target=target, page=page))
+    n += 1
+    if page < pages - 1:
+        kb.button(text="›", callback_data=PageCB(kind=kind, target=target, page=page + 1))
+        n += 1
+    return n
+
+
 def report_accounts_kb(
-    rows: list, target: str, lang: str | None = None, *, last: str | None = None
+    rows: list, target: str, lang: str | None = None, *, last: str | None = None, page: int = 0
 ) -> InlineKeyboardMarkup:
-    """§8: выбор аккаунта для отчёта/экспорта. rows — ChildAccount-подобные (.name/.id/.currency);
-    idx → позиция в _REPORT_ACCT_CACHE[chat_id] (customer_id в callback_data НЕ кладём). target —
-    какой поток (report|export|sheets), чтобы после выбора продолжить именно его. last (§UX-память) —
-    последний выбранный аккаунт: если он в списке, первой кнопкой «↻ как в прошлый раз» (тот же
-    ReportAcctCB на его idx). Неизвестный/отсутствующий last — игнорируется (обычный список)."""
+    """§8: выбор аккаунта для отчёта/экспорта, ПОСТРАНИЧНО (3E: раньше кнопка на каждую строку —
+    >100 аккаунтов давали REPLY_MARKUP_TOO_LONG). rows — ChildAccount-подобные (.name/.id/.currency);
+    idx → ГЛОБАЛЬНАЯ позиция в _REPORT_ACCT_CACHE[chat_id]. target — поток (report|export|sheets).
+    last (§UX-память) — последний выбранный аккаунт: на СТРАНИЦЕ 0 первой кнопкой
+    «↻ как в прошлый раз» (закреплена независимо от страницы, где живёт сам аккаунт)."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
+    total = len(rows)
+    page, pages, start = _acct_page(total, page)
+    extra = 0
     last_idx = None
-    if last:
+    if last and page == 0:
         last_n = "".join(ch for ch in str(last) if ch.isdigit())
         for i, r in enumerate(rows):
             if "".join(ch for ch in str(getattr(r, "id", "")) if ch.isdigit()) == last_n:
@@ -918,7 +1116,10 @@ def report_accounts_kb(
         nm = _ellipsize(getattr(r, "name", "") or getattr(r, "id", ""))
         repeat = f"↻ {nm} — same as last time" if en else f"↻ {nm} — как в прошлый раз"
         kb.button(text=repeat, callback_data=ReportAcctCB(target=target, idx=last_idx))
-    for i, r in enumerate(rows):
+        extra += 1
+    shown = 0
+    for i in range(start, min(start + _ACCT_PAGE, total)):
+        r = rows[i]
         name = _ellipsize(getattr(r, "name", "") or getattr(r, "id", ""))
         cid = getattr(r, "id", "")
         cur = getattr(r, "currency", "") or ""
@@ -926,30 +1127,51 @@ def report_accounts_kb(
         kb.button(
             text=f"🏢 {name} · {cid}{suffix}", callback_data=ReportAcctCB(target=target, idx=i)
         )
+        shown += 1
+    nav_n = _page_nav_row(kb, "rpta", target, page, pages)
     kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
-    kb.adjust(1)
+    sizes = [1] * (extra + shown)
+    if nav_n:
+        sizes.append(nav_n)
+    sizes.append(1)
+    kb.adjust(*sizes)
     return kb.as_markup()
 
 
+_CAMP_PAGE = 10  # кампаний на страницу пикеров (3E)
+
+
 def report_campaigns_kb(
-    camps: list[dict], target: str, lang: str | None = None
+    camps: list[dict], target: str, lang: str | None = None, *, page: int = 0
 ) -> InlineKeyboardMarkup:
-    """§9: «Весь аккаунт» (idx=-1) + список кампаний (idx → _REPORT_CAMP_CACHE[chat_id]). Маркер
-    статуса нейтрален (данные не переводятся). Следующий шаг — period_kb(target)."""
+    """§9: «Весь аккаунт» (idx=-1, закреплён на каждой странице) + кампании ПОСТРАНИЧНО (3E).
+    idx → ГЛОБАЛЬНАЯ позиция в _REPORT_CAMP_CACHE[chat_id]. Следующий шаг — period_kb(target)."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
+    total = len(camps)
+    pages = max(1, (total + _CAMP_PAGE - 1) // _CAMP_PAGE)
+    page = max(0, min(page, pages - 1))
+    start = page * _CAMP_PAGE
     kb.button(
         text="📊 Whole account" if en else "📊 Весь аккаунт",
         callback_data=ReportCampCB(target=target, idx=-1),
     )
-    for i, c in enumerate(camps):
+    shown = 0
+    for i in range(start, min(start + _CAMP_PAGE, total)):
+        c = camps[i]
         mark = {"ENABLED": "▶️", "PAUSED": "⏸"}.get(c.get("status", ""), "•")
         kb.button(
             text=f"{mark} {_ellipsize(c['name'])}",
             callback_data=ReportCampCB(target=target, idx=i),
         )
+        shown += 1
+    nav_n = _page_nav_row(kb, "rptc", target, page, pages)
     kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
-    kb.adjust(1)
+    sizes = [1] * (1 + shown)
+    if nav_n:
+        sizes.append(nav_n)
+    sizes.append(1)
+    kb.adjust(*sizes)
     return kb.as_markup()
 
 

@@ -467,3 +467,111 @@ async def diag(m: bm.Message) -> None:
         await m.answer(bm.texts.fmt_errors(rows), parse_mode=bm.ParseMode.HTML)
     except Exception as e:  # noqa: BLE001 — диагностика не должна сама падать наружу
         await m.answer(bm.i18n.t("err_journal", err=bm.ux.err_text(e)))
+
+
+# ── 3E: «➕ Ещё» — inline-хаб вторичных флоу (обнаружимость без ручного ввода команд) ─
+@bm.dp.message(bm.F.text.in_(bm.BTN_MORE_ALL))
+async def btn_more(m: bm.Message) -> None:
+    await m.answer(bm.i18n.t("more_menu_title"), reply_markup=bm.more_menu_kb())
+
+
+@bm.dp.callback_query(bm.MoreCB.filter())
+async def on_more(cq: bm.CallbackQuery, callback_data: bm.MoreCB, state: bm.FSMContext) -> None:
+    """Маршрутизация хаба «Ещё» в ТЕ ЖЕ entry, что и слэш-команды (тела не дублируются).
+    Кнопки только двигают UI — мутаций не создают."""
+    await cq.answer()
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        return
+    action = callback_data.action
+    if action == "newsearch":
+        await bm.newsearch_cmd(msg, state)
+    elif action == "newvideo":
+        await bm.newvideo_cmd(msg, state)
+    elif action == "templates":
+        await bm._send_templates(msg, bm._cq_chat_id(cq))
+    elif action == "recent":
+        await bm._send_recent(msg, bm._cq_chat_id(cq))
+    elif action == "quota":
+        await bm.quota_cmd(msg)
+    elif action == "alerts":
+        await bm.alerts_cmd(msg)  # 3H: настройка порогов аномалий
+
+
+# ── 3H (M10): /alerts — настройка порогов аномалий per-chat (раньше только вставкой в БД) ─
+@bm.dp.message(bm.Command("alerts"))
+async def alerts_cmd(m: bm.Message) -> None:
+    """Пороги алертов планировщика (spend_spike/conv_drop/min_spend) — НАСТРОЙКА БОТА
+    (UserSettings.alert_thresholds), не Google Ads: confirm-гейт не нужен (как /lang)."""
+    cur = await bm._load_alert_thresholds(m.chat.id)
+    await m.answer(
+        bm.texts.fmt_alerts(cur), reply_markup=bm.alerts_kb(cur), parse_mode=bm.ParseMode.HTML
+    )
+
+
+@bm.dp.callback_query(bm.AlertCB.filter())
+async def on_alert_preset(
+    cq: bm.CallbackQuery, callback_data: bm.AlertCB, state: bm.FSMContext
+) -> None:
+    chat_id = bm._cq_chat_id(cq)
+    field, value = callback_data.field, callback_data.value
+    if field == "reset":
+        await bm._save_alert_threshold(chat_id, "", None)
+        await cq.answer(bm.i18n.t("alerts_reset_done"))
+        cur = await bm._load_alert_thresholds(chat_id)
+        await bm._safe_edit(
+            cq,
+            bm.texts.fmt_alerts(cur),
+            reply_markup=bm.alerts_kb(cur),
+            parse_mode=bm.ParseMode.HTML,
+        )
+        return
+    key = bm._ALERT_FIELD_KEYS.get(field)
+    if key is None:
+        await cq.answer(bm.i18n.t("stale"), show_alert=True)
+        return
+    if value == "custom":  # ручной ввод числа через FSM
+        await state.set_state(bm.AlertsWizard.awaiting_value)
+        await state.update_data(alert_field=key)
+        await cq.answer()
+        msg = bm._cq_msg(cq)
+        if msg is not None:
+            await msg.answer(bm.i18n.t("alerts_ask_value"), reply_markup=bm.nav_kb())
+        return
+    try:
+        num = float(value)
+    except ValueError:
+        await cq.answer(bm.i18n.t("stale"), show_alert=True)
+        return
+    if not bm._alert_value_ok(key, num):  # диапазон считает КОД
+        await cq.answer(bm.i18n.t("alerts_bad_value"), show_alert=True)
+        return
+    await bm._save_alert_threshold(chat_id, key, num)
+    await cq.answer(bm.i18n.t("alerts_saved"))
+    cur = await bm._load_alert_thresholds(chat_id)
+    await bm._safe_edit(
+        cq, bm.texts.fmt_alerts(cur), reply_markup=bm.alerts_kb(cur), parse_mode=bm.ParseMode.HTML
+    )
+
+
+@bm.dp.message(bm.AlertsWizard.awaiting_value)
+async def alerts_value(m: bm.Message, state: bm.FSMContext) -> None:
+    """Ручной ввод порога («✏️»): float-парс + валидация КОДОМ; невалид → retry (state остаётся)."""
+    data = await state.get_data()
+    key = data.get("alert_field") or ""
+    raw = (m.text or "").strip().replace(",", ".").rstrip("%")
+    try:
+        num = float(raw)
+    except ValueError:
+        await m.answer(bm.i18n.t("alerts_bad_value"), reply_markup=bm.nav_kb())
+        return
+    if not key or not bm._alert_value_ok(key, num):
+        await m.answer(bm.i18n.t("alerts_bad_value"), reply_markup=bm.nav_kb())
+        return
+    await bm._save_alert_threshold(m.chat.id, key, num)
+    await state.clear()
+    cur = await bm._load_alert_thresholds(m.chat.id)
+    await m.answer(bm.i18n.t("alerts_saved"))
+    await m.answer(
+        bm.texts.fmt_alerts(cur), reply_markup=bm.alerts_kb(cur), parse_mode=bm.ParseMode.HTML
+    )

@@ -2141,6 +2141,21 @@ def _create_search_campaign_via_sdk(
         "status": "PAUSED",
         "applied": True,
     }
+    # 3C: частичный успех best-effort-шагов 5–8 — ЯВНЫЕ warnings, а не молчаливый 0 в result
+    # («кампания на Кению» без гео при запуске = глобальный показ; менеджер обязан это увидеть).
+    # НЕ откатываем: кампания PAUSED/$0 — безопасна, недостающее добавляется отдельными командами.
+    warnings: list[dict] = []
+
+    def _warn(part: str, requested: int, applied_n: int) -> None:
+        if requested and applied_n < requested:
+            warnings.append({"part": part, "requested": requested, "applied": applied_n})
+
+    _warn("keywords", len(keywords or []), kw_created)
+    _warn("geo", len(geo_locations or []), geo_count)
+    _warn("languages", len(lang_ids or []), lang_count)
+    _warn("ad_schedule", len(ad_schedule_blocks or []), sched_count)
+    if warnings:
+        result["warnings"] = warnings
     if bidding_note:
         result["bidding_note"] = bidding_note  # §19.3: стратегия понижена (нет конверс-трекинга)
     return result
