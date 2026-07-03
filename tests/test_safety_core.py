@@ -149,14 +149,43 @@ def test_ensure_read_allowed_permits_listed_child():
 
 def test_mutation_lock_unchanged_by_read_allowlist():
     # ⚠️ КЛЮЧЕВОЙ инвариант разделения замков: дочерний в read-list НЕ открывает мутации на нём.
-    # ensure_allowed (деньги) обязан отклонить его — даже когда чтение разрешено.
+    # ensure_allowed (деньги) обязан отклонить его — даже когда чтение разрешено. G1: read-list лишь
+    # добавляет аккаунт в ПОТОЛОК; мутация требует ещё и членства в allowed_customer_ids (opt-in).
     with allowed_ids(DRAFT_ACCOUNT_ID), read_ids(_CHILD):
         ensure_read_allowed(_CHILD)  # читать — можно
         try:
-            ensure_allowed(_CHILD)  # менять — НЕЛЬЗЯ
+            ensure_allowed(_CHILD)  # менять — НЕЛЬЗЯ (не в allowed_customer_ids)
             raise AssertionError("замок мутаций пробит read-list — критическая регрессия!")
         except PermissionError:
             pass
+
+
+# ── G1 (управляемый список): включение мутаций на ВИДИМОМ аккаунте через allow-list ──
+def test_mutation_enabled_for_visible_account_in_allowlist():
+    # G: аккаунт, ВИДИМЫЙ боту (в read-list) И явно добавленный в allowed_customer_ids — мутируем.
+    with allowed_ids(f"{DRAFT_ACCOUNT_ID},{_CHILD}"), read_ids(_CHILD):
+        ensure_allowed(DRAFT_ACCOUNT_ID)  # Draft — по-прежнему
+        ensure_allowed(_CHILD)  # включённый видимый дочерний — теперь тоже (opt-in владельца)
+
+
+def test_mutation_blocked_for_invisible_account_even_in_allowlist():
+    # Защита от опечатки: чужой/невидимый id в allowed_customer_ids, но НЕ в read/discovered →
+    # выходит за эффективный потолок allowed_ceiling() → отказ (env не откроет невидимый аккаунт).
+    with allowed_ids(f"{DRAFT_ACCOUNT_ID},1234567890"), read_ids(_CHILD):
+        try:
+            ensure_allowed("1234567890")
+            raise AssertionError("невидимый аккаунт из allow-list прошёл — регрессия потолка!")
+        except PermissionError:
+            pass
+
+
+def test_allowed_ceiling_reflects_visible_accounts():
+    from ads.client import allowed_ceiling
+
+    with allowed_ids(DRAFT_ACCOUNT_ID), read_ids(_CHILD):
+        ceiling = allowed_ceiling()
+        assert DRAFT_ACCOUNT_ID in ceiling and _CHILD in ceiling  # Draft + видимый read-child
+        assert "1234567890" not in ceiling  # невидимый чужой id — не в потолке
 
 
 # ── Замок обхода MCC (ensure_manager_allowed): прямой юнит (раньше — лишь косвенно) ──

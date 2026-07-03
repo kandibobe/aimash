@@ -154,6 +154,12 @@ def generate_keyword_ideas(
     url = (url or "").strip() or None
     if not seeds and not url:
         raise ValueError("нужен хотя бы один сид-ключ или URL")
+    # K: убрать необслуживаемые страны (RU/BY) — иначе Google отвечает «The input has an invalid
+    # value». Подбор идёт по остальным гео (или без гео, если это была единственная страна). Пометку
+    # для пользователя формирует вызывающий (он знает исходный запрос) — тут только страховка.
+    from ads.geo import drop_non_serviceable_geo
+
+    geo_ids, _dropped_geo = drop_non_serviceable_geo(geo_ids)
 
     svc = client.get_service("KeywordPlanIdeaService")
 

@@ -69,6 +69,12 @@ async def ensure_account_allowed_for_user(chat_id: int, customer_id: str) -> Non
     cid = normalize_customer_id(customer_id)
     if cid == DRAFT_ACCOUNT_ID:
         return
+    # F: админ бота (ADMIN_CHAT_IDS) читает ВСЁ read-allowed без пер-юзер гранта — он и так управляет
+    # грантами (/grant), чтение ≠ деньги. Владелец-одиночка видит все активные дочерние во всех пикерах
+    # (раньше первый же /grant включал enforcement и прятал не-гранованные аккаунты). Не-админ операторы
+    # сохраняют изоляцию. Мутационный замок этим НЕ затрагивается (ensure_allowed — отдельный).
+    if chat_id in settings.admin_ids:
+        return
     if not await per_user_enforcement_active():
         return  # legacy-проход: пер-юзер изоляция не включена (авторитетен глобальный замок)
     async with Session() as s:

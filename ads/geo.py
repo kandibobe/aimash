@@ -114,6 +114,26 @@ _ISO_TO_GEO_ID: dict[str, int] = {
     "UZ": 2860,
 }
 
+# K: страны, которые Google Ads / Keyword Planner НЕ обслуживает (реклама приостановлена для РФ/РБ).
+# geoTargetConstant валиден ПО ФОРМЕ, но запрос идей с таким гео падает «The input has an invalid
+# value». Отфильтровываем их ПЕРЕД SDK-вызовом (подбор идёт без этих стран) и честно сообщаем юзеру.
+NON_SERVICEABLE_GEO_IDS: frozenset[int] = frozenset({2643, 2112})  # RU (Россия), BY (Беларусь)
+
+
+def drop_non_serviceable_geo(geo_ids) -> tuple[tuple[int, ...], list[int]]:
+    """(kept, dropped): убрать необслуживаемые страны (RU/BY) из набора geo-таргетов Keyword Planner."""
+    kept: list[int] = []
+    dropped: list[int] = []
+    for gid in geo_ids or ():
+        (dropped if int(gid) in NON_SERVICEABLE_GEO_IDS else kept).append(int(gid))
+    return tuple(kept), dropped
+
+
+def has_non_serviceable_geo(geo_ids) -> bool:
+    """True, если среди geo-таргетов есть необслуживаемая страна (RU/BY) — повод показать пометку."""
+    return any(int(g) in NON_SERVICEABLE_GEO_IDS for g in (geo_ids or ()))
+
+
 # ISO страны → основной язык поисковой аудитории (ISO 639-1) для подбора/текстов.
 _ISO_TO_LANGUAGE: dict[str, str] = {
     "KE": "en",

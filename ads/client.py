@@ -20,21 +20,23 @@ if TYPE_CHECKING:
 
     from ads.read import ChildAccount
 
-# Aimash (Draft account), 775-364-3025 — ЕДИНСТВЕННЫЙ аккаунт, на котором разрешены МУТАЦИИ.
+# Aimash (Draft account), 775-364-3025 — базовый аккаунт МУТАЦИЙ (всегда в потолке).
 DRAFT_ACCOUNT_ID = "7753643025"
-# Жёсткий потолок МУТАЦИЙ: env (allowed_customer_ids) не может выйти за этот набор.
-# Расширение круга мутаций = ОСОЗНАННАЯ правка этого файла (см. docstring модуля).
+# Базовый КОД-минимум потолка мутаций. Эффективный потолок считает `allowed_ceiling()` = этот минимум
+# ∪ ВИДИМЫЕ боту аккаунты (env read-list + дочерние настроенного MCC). Мутационный набор
+# (settings.allowed_customer_ids) ⊆ эффективного потолка (см. ensure_allowed).
 #
-# ⚠️ БУДУЩЕЕ ВКЛЮЧЕНИЕ МУТАЦИЙ на 2-м аккаунте (напр. Aimash 676-404-0266 = 6764040266) —
-# НЕ включено намеренно (заказчик: пока только ЧТЕНИЕ везде, деньги на боевом не трогаем).
-# Исполнение УЖЕ привязано к proposal.customer_id (предсдаточный спринт 2026-07):
-# ads/service.py:read_before принимает customer_id, execute_confirmed читает аккаунт из черновика
-# и ЗАНОВО ensure_allowed(cid) на исполнении (fail-closed; инварианты —
-# tests/test_execute_account_binding.py). Чтобы включить мутации на новом аккаунте, осталось:
-#   1) сюда: ALLOWED_CEILING = frozenset({DRAFT_ACCOUNT_ID, "6764040266"});
-#   2) bot/main._present_proposal — штамповать активный МУТАЦИОННЫЙ аккаунт (параметр customer_id
-#      уже есть, дефолт Draft) вместо дефолта.
-# Бюджет из scheduler остаётся заблокирован (user_initiated).
+# ✅ ВКЛЮЧЕНИЕ МУТАЦИЙ на конкретном аккаунте (G, «управляемый список», решение владельца 2026-07) —
+# УПРАВЛЯЕМО КОНФИГОМ, без правки кода на каждый аккаунт:
+#   1) добавить его id в `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS` (env) — но он обязан быть ВИДИМ боту
+#      (Draft / GOOGLE_ADS_READ_CUSTOMER_IDS / дочерний настроенного MCC), иначе allowed_ceiling()
+#      его не пропустит (защита от опечатки в чужой боевой id);
+#   2) если аккаунт под ДРУГИМ MCC — зарегистрировать его per-account OAuth-токен
+#      (scripts/register_account.py → oauth_tokens), иначе build_client не аутентифицирует его.
+# Исполнение уже привязано к proposal.customer_id и ЗАНОВО ensure_allowed(cid) на исполнении
+# (tests/test_execute_account_binding.py); _present_proposal штампует АКТИВНЫЙ аккаунт (G2).
+# По умолчанию allowed_customer_ids={Draft} ⇒ поведение НЕ меняется, пока владелец не включит аккаунт.
+# Бюджет из scheduler остаётся заблокирован всегда (user_initiated).
 ALLOWED_CEILING = frozenset({DRAFT_ACCOUNT_ID})
 
 # Кэш SDK-клиентов по нормализованному customer_id. Раньше был @lru_cache(maxsize=1) — один клиент
@@ -274,15 +276,34 @@ def clear_client_cache(customer_id: str | None = None) -> None:
         _CLIENT_CACHE.pop(normalize_customer_id(customer_id), None)
 
 
-def ensure_allowed(customer_id: str) -> None:
-    """Замок единственного аккаунта. Бросает PermissionError на любой запрет.
+def allowed_ceiling() -> frozenset[str]:
+    """G1: ЭФФЕКТИВНЫЙ потолок мутаций = базовый код-минимум `ALLOWED_CEILING` ({DRAFT}) ∪ аккаунты,
+    которые бот ВИДИТ (env `GOOGLE_ADS_READ_CUSTOMER_IDS` ∪ дочерние, обнаруженные обходом настроенного
+    MCC `_READ_DISCOVERED`). Мутационный набор (`settings.allowed_customer_ids`) обязан быть ⊆ этого
+    потолка (см. `ensure_allowed`) — env НЕ может включить мутации на аккаунте, которого бот не видит
+    (не под нашим MCC / не в read-list). Так владелец включает мутации УПРАВЛЯЕМЫМ списком, но только
+    среди видимых аккаунтов (не может опечаткой открыть чужой боевой id).
 
-    Это единственная точка, через которую и чтение per-account, и ВСЕ мутации
-    проверяют customer_id. Нормализуем id (только цифры), поэтому '775-364-3025'
-    и '7753643025' эквивалентны.
+    ⚠️ Чтение дочернего само по себе НЕ делает его мутируемым: он попадает лишь в ПОТОЛОК, а мутация
+    требует ещё и членства в `settings.allowed_customer_ids` (явный opt-in владельца) — инвариант
+    `test_grant_does_not_open_mutations`/`test_mutation_lock_unchanged_by_read_allowlist`."""
+    visible = {normalize_customer_id(x) for x in settings.read_customer_ids} | set(_READ_DISCOVERED)
+    return ALLOWED_CEILING | frozenset(i for i in visible if i)
+
+
+def ensure_allowed(customer_id: str) -> None:
+    """Замок аккаунта МУТАЦИЙ. Бросает PermissionError на любой запрет.
+
+    Это единственная точка, через которую ВСЕ мутации проверяют customer_id. Нормализуем id (только
+    цифры), поэтому '775-364-3025' и '7753643025' эквивалентны.
+
+    G1: мутационный набор = `settings.allowed_customer_ids` (env, opt-in владельца), ограниченный
+    ЭФФЕКТИВНЫМ потолком `allowed_ceiling()` (Draft ∪ видимые аккаунты). По умолчанию allow-list =
+    {Draft} ⇒ поведение как раньше (мутации только на Draft), пока владелец не добавит видимый аккаунт.
     """
     cid = normalize_customer_id(customer_id)
     allowed = {normalize_customer_id(x) for x in settings.allowed_customer_ids}
+    ceiling = allowed_ceiling()
 
     # (2) fail-closed: без явного allow-list ничего не разрешаем.
     if not allowed:
@@ -290,11 +311,13 @@ def ensure_allowed(customer_id: str) -> None:
             "allowed_customer_ids пуст — операции запрещены (fail-closed). "
             f"Задай GOOGLE_ADS_ALLOWED_CUSTOMER_IDS={DRAFT_ACCOUNT_ID} в .env"
         )
-    # (1) потолок в коде: env не может добавить чужой/боевой аккаунт.
-    if not allowed <= ALLOWED_CEILING:
+    # (1) потолок: env может включить мутации только на аккаунте, который бот ВИДИТ (Draft/read/
+    # discovered) — чужой/боевой id вне видимости не пройдёт.
+    if not allowed <= ceiling:
         raise PermissionError(
-            f"allowed_customer_ids {sorted(allowed)} выходит за код-потолок "
-            f"{sorted(ALLOWED_CEILING)} — расширение требует правки ads/client.py"
+            f"allowed_customer_ids {sorted(allowed)} выходит за потолок мутаций "
+            f"{sorted(ceiling)} — аккаунт должен быть виден боту (Draft, GOOGLE_ADS_READ_CUSTOMER_IDS "
+            "или дочерний настроенного MCC)"
         )
     # (3) членство.
     if cid not in allowed:

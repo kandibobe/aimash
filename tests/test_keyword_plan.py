@@ -148,6 +148,38 @@ def test_seed_type_keyword_and_url():
     assert req.geo_target_constants == ["geoTargetConstants/2804"]  # Украина
 
 
+# ── K: RU/BY не обслуживаются Keyword Planner — отфильтровываются перед SDK-запросом ──
+def test_ru_geo_dropped_request_runs_without_geo():
+    """RU (2643) не обслуживается → запрос строится БЕЗ гео (не «invalid value»), не падает."""
+    from ads.keyword_plan import generate_keyword_ideas
+
+    client = _Client([_row("байкал", 100)])
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        ideas = generate_keyword_ideas(client, DRAFT_ACCOUNT_ID, seeds=["туры"], geo_ids=(2643,))
+    assert [i.text for i in ideas] == ["байкал"]  # подбор отработал
+    assert client.svc.last_req.geo_target_constants == []  # RU выкинут → без гео (глобально)
+
+
+def test_ru_dropped_but_ua_kept():
+    from ads.keyword_plan import generate_keyword_ideas
+
+    client = _Client([_row("x", 1)])
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        generate_keyword_ideas(client, DRAFT_ACCOUNT_ID, seeds=["s"], geo_ids=(2643, 2804, 2112))
+    # осталась только Украина (2804); RU (2643) и BY (2112) выкинуты
+    assert client.svc.last_req.geo_target_constants == ["geoTargetConstants/2804"]
+
+
+def test_geo_helpers():
+    from ads.geo import drop_non_serviceable_geo, has_non_serviceable_geo
+
+    kept, dropped = drop_non_serviceable_geo((2643, 2804, 2112, 2840))
+    assert kept == (2804, 2840) and set(dropped) == {2643, 2112}
+    assert has_non_serviceable_geo((2643,)) is True
+    assert has_non_serviceable_geo((2804,)) is False
+    assert has_non_serviceable_geo(()) is False
+
+
 def test_seed_type_keyword_only_and_url_only():
     from ads.keyword_plan import generate_keyword_ideas
 

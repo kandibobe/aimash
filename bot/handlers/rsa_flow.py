@@ -44,6 +44,9 @@ async def rsa_cmd(m: bm.Message, state: bm.FSMContext) -> None:
         await m.answer(bm.i18n.t("no_campaigns"))
         return
     bm._RSA_CAMP_CACHE[m.chat.id] = camps
+    # N5: пикер выбора кампании — кнопочный экран; ставим state, чтобы текст/URL тут не утекал в агента
+    # (гард on_text: активный state без своего текст-хендлера → подсказка «заверши шаг»).
+    await state.set_state(bm.RsaWizard.picking)
     await m.answer(
         bm.i18n.t("rsa_pick_campaign"),
         reply_markup=bm.rsa_pick_campaigns_kb(camps),

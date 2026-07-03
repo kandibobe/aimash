@@ -51,7 +51,7 @@ from ads.assets import (
     prepare_display_images,
     save_pending_media,
 )
-from ads.client import DRAFT_ACCOUNT_ID, ensure_read_allowed
+from ads.client import DRAFT_ACCOUNT_ID, ensure_allowed, ensure_read_allowed
 from ads.mutations import GDN_BUSINESS_NAME_MAX, VIDEO_DESCRIPTION_MAX
 from ads.resolve import currency_mismatch, find_ad_groups
 from ads.service import execute_confirmed, read_before
@@ -443,6 +443,36 @@ class LangMiddleware(BaseMiddleware):
             i18n.reset_current_lang(token)
 
 
+# N4: /команда во время активного визарда сама управляет состоянием (свои хендлеры зарегистрированы
+# раньше визард-стейтов и делают state.clear()/abandon) → НЕ сворачиваем их через middleware, иначе
+# было бы двойное действие (напр. §20-буфер сброшен в черновик, а затем /cancel его отменил).
+_MW_SUSPEND_EXEMPT = frozenset({"/cancel", "/start"})
+
+
+class SlashCommandExitsWizardMiddleware(BaseMiddleware):
+    """N4: любая `/команда`, набранная во время активного визарда, МЯГКО сворачивает визард (работа
+    не теряется: §19-черновик жив, §20-буфер → confirm-черновик, лёгкие state — clear), чтобы
+    сработал НАСТОЯЩИЙ Command-хендлер. Раньше brief-state хендлеры (StateFilter матчит ЛЮБОЙ текст,
+    вкл. `/`) съедали `/templates`/`/savetemplate`/`/recent`/`/newvideo` (они зарегистрированы ПОЗЖЕ
+    визард-стейта) и отвечали ошибкой формата /newsearch. Один гард класса — mirror menu_guard для
+    кнопок меню. Обнуляем data['raw_state'], чтобы StateFilter визарда больше не матчил в этом апдейте."""
+
+    async def __call__(self, handler, event: TelegramObject, data):
+        text = getattr(event, "text", None)
+        if isinstance(text, str) and text.startswith("/") and data.get("raw_state") is not None:
+            cmd = text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+            state = data.get("state")
+            if cmd not in _MW_SUSPEND_EXEMPT and state is not None:
+                try:
+                    await _suspend_active_flow_soft(event, state)  # lossless-сворачивание визарда
+                except Exception:  # noqa: BLE001 — сбой сворачивания не должен ронять саму команду
+                    await state.clear()
+                data["raw_state"] = (
+                    None  # визард-StateFilter больше не совпадёт → команда сработает
+                )
+        return await handler(event, data)
+
+
 def _valid_idx(seq: list | None, idx: int) -> TypeGuard[list]:
     """idx из callback_data указывает на реальный элемент кэша. Проверяем И нижнюю границу: дефолт
     -1 в callback-схемах (AudienceCB и др.) проходил бы `idx >= len` (−1 ≥ len ложно) и через
@@ -653,6 +683,18 @@ def _build_agent_context(chat_id: int) -> dict:
     }
 
 
+def _account_label(cid: str) -> str:
+    """Человекочитаемая метка аккаунта для карточки/сообщений: «Имя · id» или id. Draft — явно."""
+    cid = normalize_customer_id(cid)
+    if cid == DRAFT_ACCOUNT_ID:
+        return f"Aimash (Draft) · {cid}"
+    from ads.client import discovered_read_children_meta
+
+    meta = discovered_read_children_meta().get(cid)
+    name = (getattr(meta, "name", "") or "").strip() if meta else ""
+    return f"{name} · {cid}" if name else cid
+
+
 async def _present_proposal(
     message: Message,
     *,
@@ -662,19 +704,35 @@ async def _present_proposal(
     summary: str,
     cid: str,
     external_context: bool = False,
-    customer_id: str = DRAFT_ACCOUNT_ID,
+    customer_id: str | None = None,
 ) -> None:
     """Сохранить черновик и показать с кнопками ✅/❌. user_initiated=True ставит ДОВЕРЕННЫЙ слой
     (входящее действие whitelisted-человека), НЕ агент про себя (golden rule #3, fail-closed).
 
-    customer_id — аккаунт МУТАЦИИ, штампуемый в черновик (authoritative: execute_confirmed
-    исполняет именно его, с повторным ensure_allowed). Дефолт Draft — единственный разрешённый
-    сегодня; будущий мультиаккаунт передаёт активный мутационный аккаунт (ads/client.py:28).
+    customer_id — аккаунт МУТАЦИИ, штампуемый в черновик (authoritative: execute_confirmed исполняет
+    именно его, с повторным ensure_allowed). G2/G3: не задан → DRAFT (базовый). АКТИВНЫЙ аккаунт
+    передаётся ЯВНО только теми путями, где чтение и запись идут на ОДИН аккаунт (agent-loop NL:
+    кампания резолвится на исполнении на proposal.customer_id). Визард §19/RSA/меню /campaigns читают
+    структуру на Draft (hardcoded) → остаются на Draft, чтобы не было mismatch «читаю Draft — пишу в
+    другой аккаунт» (мультиаккаунт этих флоу — отдельный шаг). НЕ-Draft аккаунт обязан быть ВКЛЮЧЁН на
+    мутации (иначе внятный отказ «только чтение», БЕЗ тихой подмены), карточка несёт баннер аккаунта.
 
     external_context=True — предложение родилось при наличии СПРАВОЧНОГО контента из файла/ссылки
     (prompt-injection поверхность): для ДЕНЕЖНЫХ операций префиксуем сводку предупреждением
     «сумма могла быть предложена внешним контентом» (попадает и в audit-summary). Механику
     user_initiated НЕ меняем — последний гейт всё равно человек с diff и ✅."""
+    # G2/G3: дефолт — Draft (визард/меню читают Draft). Не-Draft приходит ЯВНО из agent-loop (там
+    # чтение+запись на один аккаунт). Не-Draft обязан быть включён на мутации, иначе отказ ДО карточки.
+    if customer_id is None:
+        customer_id = DRAFT_ACCOUNT_ID
+    if customer_id != DRAFT_ACCOUNT_ID:
+        try:
+            ensure_allowed(customer_id)
+        except PermissionError:
+            await message.answer(
+                i18n.t("mutation_account_read_only", acct=_account_label(customer_id))
+            )
+            return
     # §5: читаем ТЕКУЩЕЕ значение (бюджет/ставку/статус) ДО показа → реальный diff «было → станет»
     # и снимок-база для оптимистичной сверки при исполнении (TOCTOU). read_before fail-safe (None).
     async with ux.typing_action(message):
@@ -699,6 +757,12 @@ async def _present_proposal(
     # Человекочитаемая сводка по operation+params (деньги — реальное «40.00 → 48.00 (+20%)»).
     # Для create_rsa/create_gdn у вызывающего свой богатый summary → fmt вернёт "".
     display = texts.fmt_mutation_summary(operation, params) or summary
+    # G2: не-Draft аккаунт мутации — баннер В СВОДКЕ (и в audit): менеджер видит, на ЧЬИ деньги идёт
+    # изменение, до нажатия ✅ (Draft не баннерим — он базовый/тестовый, чтобы не шуметь).
+    if customer_id != DRAFT_ACCOUNT_ID:
+        display = (
+            i18n.t("mutation_account_banner", acct=_account_label(customer_id)) + "\n\n" + display
+        )
     if external_context and operation in _MONEY_OPS_UI:
         # Денежное предложение при внешнем контенте — усиленное предупреждение В СВОДКЕ (и в audit).
         display = i18n.t("external_context_money_warn") + "\n\n" + display
@@ -1561,6 +1625,8 @@ async def _rsa_resolve_after_campaign(
         await _rsa_after_adgroup(target, chat_id, state)
         return
     _RSA_AG_CACHE[chat_id] = [{"id": str(g.id), "name": g.name} for g in groups]
+    # N5: пикер группы — кнопочный экран; ставим state, чтобы текст/URL тут не утекал в агента (гард on_text).
+    await state.set_state(RsaWizard.picking)
     await target.answer(
         i18n.t("rsa_pick_adgroup"), reply_markup=rsa_pick_adgroups_kb(_RSA_AG_CACHE[chat_id])
     )
@@ -1714,6 +1780,12 @@ async def _kw_run(
     import os
     import tempfile
 
+    # K: РФ/РБ не обслуживаются Keyword Planner — честно сообщаем ДО запроса (сам запрос всё равно
+    # выкинет их, generate_keyword_ideas страхует), чтобы менеджер понимал, почему без гео.
+    from ads.geo import has_non_serviceable_geo
+
+    if geo_ids and has_non_serviceable_geo(geo_ids):
+        await target.answer(i18n.t("kw_geo_dropped"))
     await target.answer(i18n.t("kw_searching"))
     # §8: идеи берём на АКТИВНОМ read-аккаунте (на боевом Keyword Planner даёт реальные метрики; на
     # Draft — нули). Замок чтения держит generate_keyword_ideas (ensure_read_allowed); если активный
@@ -3287,6 +3359,10 @@ async def _dispatch_command_result(
     получают предупреждение в сводке (см. _present_proposal)."""
     t = res.get("type")
     if t == "proposal":
+        # G2/G3: NL-команда изменения нацелена на АКТИВНЫЙ аккаунт чата (кампания резолвится на
+        # исполнении на этом же аккаунте — чтение и запись согласованы). Не-Draft активный аккаунт
+        # обязан быть включён на мутации (иначе _present_proposal внятно откажет). Дефолт — Draft.
+        target = await _active_read_account(m.chat.id)
         await _present_proposal(
             m,
             chat_id=m.chat.id,
@@ -3295,6 +3371,7 @@ async def _dispatch_command_result(
             summary=res["summary"],
             cid=res["confirmation_id"],
             external_context=external_context,
+            customer_id=target,
         )
     elif t == "rsa_intent":
         await _rsa_start_from_intent(m, res.get("brief", {}), state)
@@ -3623,6 +3700,9 @@ async def main() -> None:
     dp.message.outer_middleware(LangMiddleware())
     dp.callback_query.outer_middleware(LangMiddleware())
     dp.message.outer_middleware(ThrottleMiddleware())  # анти-спам (ТЗ §12), после whitelist
+    # N4: /команда во время визарда сворачивает визард → срабатывает её Command-хендлер (после Lang,
+    # чтобы возможные сообщения сворачивания были локализованы; после Whitelist — только для своих).
+    dp.message.outer_middleware(SlashCommandExitsWizardMiddleware())
     bot = Bot(token)
     # Меню-команды + профиль бота (about/description в @BotFather). Всё косметика — ставим при
     # каждом старте, чтобы правки текстов подхватывались без ручного BotFather. ПАРАЛЛЕЛЬНО

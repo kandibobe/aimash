@@ -131,6 +131,14 @@ async def on_error(event: bm.ErrorEvent) -> bool:
 @bm.dp.message(bm.F.text)
 async def on_text(m: bm.Message, state: bm.FSMContext) -> None:
     text = m.text or ""
+    # N5 (гард класса): если активен FSM-state визарда, но у его экрана нет своего текст-хендлера
+    # (пикеры выбора кампании/группы, экран параметров без обработчика) — текст сюда доходить НЕ
+    # должен уводиться в ingest/агента (раньше URL на таком экране давал «Прочитал… контекст» и
+    # посторонний ответ). Подсказываем завершить шаг на экране. /команды сюда не доходят (их снимает
+    # SlashCommandExitsWizardMiddleware), кнопки меню — menu_guard.
+    if await state.get_state() is not None:
+        await m.answer(bm.i18n.t("wizard_use_screen"))
+        return
     # ingest: если в сообщении есть ссылка — прочитаем её и передадим агенту как СПРАВОЧНЫЙ КОНТЕНТ
     # (best-effort: сбой чтения не ломает обычную команду). Текст на callback/фото-этапах визарда сюда
     # НЕ доходит — его раньше перехватывает cc_stage_expects_button (B8); прочие визарды — свой стейт.

@@ -300,6 +300,30 @@ GDN / Video / Demand Gen, а UAC не реализуется намеренно.
     При необходимости Video заказчик подаёт заявку на allowlist.
   - UAC исключён из объёма намеренно.
 
+### Дельты раунда 2 (видимость аккаунтов, роутинг визардов, RU-гео, мультиаккаунт-мутации)
+
+- **F §8/§12** — пикеры показывали только Draft+гранты (пер-юзер грант `ensure_account_allowed_for_user`
+  при `ACCOUNT_ACCESS_MODE=auto` после первого `/grant`): **админ (`ADMIN_CHAT_IDS`) видит все
+  read-allowed аккаунты без грантов**. Тест `test_access.py::test_admin_bypasses_per_user_read_grant`.
+- **N4** — `/templates`/`/savetemplate`/`/recent` отвечали ошибкой формата `/newsearch` (brief-state
+  съедал позже-зарегистрированные команды): middleware `SlashCommandExitsWizardMiddleware` мягко
+  сворачивает визард на любой `/команде`. Тесты `test_slash_command_guard.py`.
+- **N5/N3b** — URL/текст на экранах-без-хендлера (пикер /rsa, параметры /keywords) утекал в агента:
+  гард `on_text` (активный state → подсказка), хендлер `KwWizard.params` (текст = сиды), не чистим
+  state на сбое запуска, state на RSA-пикерах. Тест `test_bot_integration.py::test_on_text_with_active_wizard_state_*`.
+- **K §7** — «The input has an invalid value» на гео Россия: **RU/BY не обслуживаются Keyword Planner**
+  → `ads.geo.drop_non_serviceable_geo` выкидывает их перед SDK-запросом (подбор без гео) + пометка
+  `kw_geo_dropped`. Тесты `test_keyword_plan.py::test_ru_geo_dropped_*`.
+- **G §3/§18 (мультиаккаунт-мутации, управляемый список)** — `ads.client.allowed_ceiling()` = Draft ∪
+  видимые аккаунты; включение мутаций = добавить видимый аккаунт в `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS`
+  (+OAuth при чужом MCC, чек-лист `docs/DEPLOYMENT.md §2.1`). NL-команды изменений идут на АКТИВНЫЙ
+  аккаунт (`_present_proposal` штампует его, карточка с баннером; не-включённый → отказ «только
+  чтение»). Confirm-гейт/гард бюджета/per-account OAuth сохранены; чтение дочернего НЕ открывает
+  мутации (`test_mutation_lock_unchanged_by_read_allowlist`). **Дефолт = Draft-only, пока владелец не
+  включит аккаунт.** Визард/RSA/меню пока читают Draft (мультиаккаунт-создание — отдельный шаг).
+  Тесты `test_safety_core.py::test_mutation_enabled_for_visible_account_in_allowlist` и др.,
+  `test_bot_integration.py::test_agentloop_mutation_*`.
+
 ### Дельты пост-тестового прохода 2026-07-03 (баги живого теста + UX/контекст)
 
 Закрыты дефекты и недоработки, найденные владельцем при живом тесте (скриншоты/журнал):

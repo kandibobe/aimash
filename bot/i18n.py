@@ -1495,6 +1495,45 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "На этом шаге я жду нажатие кнопки (или фото, если это этап изображений/логотипа), а не текст.",
         "en": "This step expects a button tap (or a photo on the image/logo step), not text.",
     },
+    # N5: активен визард-экран без своего текст-хендлера (пикер/параметры) — не уводим ввод в агента.
+    "wizard_use_screen": {
+        "ru": "Заверши текущий шаг на экране (нажми кнопку выбора или пришли нужные данные). Выйти — /cancel.",
+        "en": "Finish the current step on screen (tap a choice or send the needed data). Exit — /cancel.",
+    },
+    # N5/N3b: на экране параметров /keywords приняли присланные сид-слова/URL — пере-показываем параметры.
+    "kw_params_seeds_added": {
+        "ru": "Добавил в подбор: {n} сид-слов(а){url}. Проверь параметры и жми «🚀 Подобрать».",
+        "en": "Added to the search: {n} seed(s){url}. Check the parameters and tap “🚀 Search ideas”.",
+    },
+    "kw_params_need_seeds": {
+        "ru": "Сначала пришли сид-слова или ссылку (текстом на этом экране), затем «🚀 Подобрать».",
+        "en": "First send seed keywords or a URL (as text on this screen), then “🚀 Search ideas”.",
+    },
+    # K: RU/BY не обслуживаются Keyword Planner — подобрали без этих стран (иначе «invalid value»).
+    "kw_geo_dropped": {
+        "ru": "⚠️ Google Ads не обслуживает Россию/Беларусь как гео — подобрал ключи без этих стран.",
+        "en": "⚠️ Google Ads doesn't serve Russia/Belarus as a geo — searched keywords without them.",
+    },
+    # G2: баннер аккаунта мутации (не-Draft) в карточке подтверждения — на ЧЬИ деньги идёт изменение.
+    "mutation_account_banner": {
+        "ru": "⚠️ Аккаунт изменения: {acct}",
+        "en": "⚠️ Change account: {acct}",
+    },
+    # G2: активный аккаунт только для чтения — мутации на нём не включены (управляемый список).
+    "mutation_account_read_only": {
+        "ru": (
+            "⛔ Аккаунт {acct} доступен только для ЧТЕНИЯ — изменения на нём не включены.\n"
+            "Включить может администратор: добавить id в GOOGLE_ADS_ALLOWED_CUSTOMER_IDS (аккаунт должен "
+            "быть виден боту) и при другом MCC — зарегистрировать OAuth. Либо переключись на Draft "
+            "(/account reset) для теста."
+        ),
+        "en": (
+            "⛔ Account {acct} is READ-ONLY — changes are not enabled for it.\n"
+            "An admin can enable it: add the id to GOOGLE_ADS_ALLOWED_CUSTOMER_IDS (the account must be "
+            "visible to the bot) and register OAuth if it's under another MCC. Or switch to Draft "
+            "(/account reset) for testing."
+        ),
+    },
     "cc_kw_not_a_link": {
         "ru": "Не вижу корректную ссылку на Google-таблицу (http/https). Пришлите ссылку ещё раз.",
         "en": "That's not a valid Google Sheets link (http/https). Please send the link again.",

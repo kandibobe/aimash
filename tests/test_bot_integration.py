@@ -86,6 +86,7 @@ class FakeCallbackQuery:
 class FakeFSM:
     def __init__(self):
         self._d: dict = {}
+        self._state = None
 
     async def get_data(self):
         return dict(self._d)
@@ -93,11 +94,15 @@ class FakeFSM:
     async def update_data(self, **kw):
         self._d.update(kw)
 
-    async def set_state(self, *a, **k):
-        pass
+    async def set_state(self, s=None, *a, **k):
+        self._state = s
+
+    async def get_state(self):  # N5: on_text спрашивает активный state (гард против утечки визарда)
+        return self._state
 
     async def clear(self):
         self._d = {}
+        self._state = None
 
 
 def _proposal_handler(cid: str):
@@ -203,6 +208,114 @@ async def test_on_text_text_decline_creates_no_proposal():
     # ответ без inline-кнопок (reply_markup не передан)
     assert "reply_markup" not in msg.answers[-1][1]
     assert bm._LAST_PENDING.get(104) is None  # черновик не создан
+
+
+@contextmanager
+def _mutation_account_env(*, allowed: str, read: str, admin_chat: int):
+    """G2: временно настроить видимость/включённость аккаунта + сделать чат админом (обходит
+    пер-юзер грант, чтобы get_active_account вернул выбранный аккаунт), затем вернуть как было."""
+    pa = settings.google_ads_allowed_customer_ids
+    pr = settings.google_ads_read_customer_ids
+    padm = settings.admin_chat_ids
+    settings.google_ads_allowed_customer_ids = allowed
+    settings.google_ads_read_customer_ids = read
+    settings.admin_chat_ids = str(admin_chat)
+    try:
+        yield
+    finally:
+        settings.google_ads_allowed_customer_ids = pa
+        settings.google_ads_read_customer_ids = pr
+        settings.admin_chat_ids = padm
+
+
+_CHILD = "1112223334"
+
+
+async def test_agentloop_mutation_targets_enabled_active_account_with_banner():
+    """G2: активный НЕ-Draft аккаунт, включённый на мутации → NL-черновик штампует его + баннер."""
+    await init_db()
+    from ads.client import set_discovered_read_children, set_discovered_read_children_meta
+    from ads.read import ChildAccount
+    from core.access import set_active_account
+
+    chat = 9301
+    set_discovered_read_children([_CHILD])
+    set_discovered_read_children_meta(
+        [
+            ChildAccount(
+                id=_CHILD, name="DARIAL", currency="JPY", manager=False, level=1, status="ENABLED"
+            )
+        ]
+    )
+    msg = FakeMessage("поставь на паузу Brand", chat_id=chat, bot=FakeBot())
+    try:
+        with _mutation_account_env(
+            allowed=f"{DRAFT_ACCOUNT_ID},{_CHILD}", read=_CHILD, admin_chat=chat
+        ):
+            await set_active_account(chat, _CHILD)
+            with patched(bm, "handle_command", _proposal_handler(uuid.uuid4().hex)):
+                await bm.on_text(msg, FakeFSM())
+    finally:
+        set_discovered_read_children([])
+        set_discovered_read_children_meta([])
+        await set_active_account(chat, None)
+    cid = bm._LAST_PENDING.get(chat)
+    assert cid is not None  # черновик создан
+    snap = await ConfirmStore().get_confirmed(cid)
+    assert snap.customer_id == _CHILD  # штамп аккаунта мутации = активный аккаунт
+    assert "DARIAL" in snap.summary and "1112223334" in snap.summary  # баннер аккаунта в карточке
+
+
+async def test_agentloop_mutation_refused_on_read_only_active_account():
+    """G2: активный НЕ-Draft аккаунт НЕ включён на мутации (только чтение) → отказ, черновик НЕ создан."""
+    await init_db()
+    from ads.client import set_discovered_read_children, set_discovered_read_children_meta
+    from ads.read import ChildAccount
+    from core.access import set_active_account
+
+    chat = 9302
+    set_discovered_read_children([_CHILD])
+    set_discovered_read_children_meta(
+        [
+            ChildAccount(
+                id=_CHILD, name="DARIAL", currency="JPY", manager=False, level=1, status="ENABLED"
+            )
+        ]
+    )
+    bm._LAST_PENDING.pop(chat, None)
+    msg = FakeMessage("поставь на паузу Brand", chat_id=chat, bot=FakeBot())
+    try:
+        # allowed = ТОЛЬКО Draft → _CHILD виден (read), но НЕ мутируем
+        with _mutation_account_env(allowed=DRAFT_ACCOUNT_ID, read=_CHILD, admin_chat=chat):
+            await set_active_account(chat, _CHILD)
+            with patched(bm, "handle_command", _proposal_handler(uuid.uuid4().hex)):
+                await bm.on_text(msg, FakeFSM())
+    finally:
+        set_discovered_read_children([])
+        set_discovered_read_children_meta([])
+        await set_active_account(chat, None)
+    assert bm._LAST_PENDING.get(chat) is None  # черновик НЕ создан (только чтение)
+    assert msg.answers and "только" in msg.answers[-1][0].lower()  # сообщение «только для чтения»
+
+
+async def test_on_text_with_active_wizard_state_does_not_reach_agent():
+    """N5: если активен визард-state без своего текст-хендлера (напр. RSA-пикер), on_text НЕ уводит
+    текст/URL в агента (раньше URL давал «Прочитал… контекст»), а подсказывает завершить шаг."""
+    await init_db()
+    called = {"n": 0}
+
+    async def _spy(text, chat_id, **kwargs):
+        called["n"] += 1
+        return {"type": "text", "text": "не должно вызваться"}
+
+    state = FakeFSM()
+    await state.set_state("RsaWizard:picking")  # активный пикер-экран
+    msg = FakeMessage("https://example.com/foo", chat_id=888, bot=FakeBot())
+    with patched(bm, "handle_command", _spy):
+        await bm.on_text(msg, state)
+    assert called["n"] == 0  # агент НЕ вызван (URL не утёк в ingest/агента)
+    assert msg.answers  # показана подсказка «заверши шаг»
+    assert bm._LAST_PENDING.get(888) is None
 
 
 # ── ошибка исполнения: failed + audit failed ─────────────────────────────────────

@@ -70,6 +70,12 @@ async def _kw_run_from_state(m: bm.Message, state: bm.FSMContext) -> None:
     cfg = await state.get_data()
     seeds = list(cfg.get("kw_seeds") or [])
     url = cfg.get("kw_url")
+    # N3b: без сид-слов/URL НЕ запускаем (иначе сырой ValueError «нужен хотя бы один сид-ключ или URL»
+    # из generate_keyword_ideas). Остаёмся на экране параметров (state НЕ чистим) — пользователь
+    # пришлёт сиды текстом (их поймает kw_params_text) и снова нажмёт «🚀 Подобрать».
+    if not seeds and not url:
+        await m.answer(bm.i18n.t("kw_params_need_seeds"))
+        return
     lang = str(cfg.get("kw_lang") or "ru")
     geo_iso = str(cfg.get("kw_geo_iso") or "UA")
     if geo_iso == "any":
@@ -78,7 +84,9 @@ async def _kw_run_from_state(m: bm.Message, state: bm.FSMContext) -> None:
         gid = geo_id_for_country(geo_iso)
         geo_ids = (gid,) if gid else None  # неизвестный ISO → дефолт (_kw_run подставит Украину)
     months_raw = int(cfg.get("kw_months") or 0)
-    await state.clear()
+    # state НЕ чистим до/после запуска: пользователь остаётся на экране параметров (может подправить
+    # и пере-запустить), а любой текст тут ловит kw_params_text (не утекает в агента). Выход — /cancel
+    # или кнопка меню. Раньше ранний state.clear() оставлял state=None → следующий URL уходил в ingest.
     await bm._kw_run(
         m,
         m.chat.id,
@@ -89,6 +97,28 @@ async def _kw_run_from_state(m: bm.Message, state: bm.FSMContext) -> None:
         network=str(cfg.get("kw_net") or "GOOGLE_SEARCH"),
         months=months_raw or None,
     )
+
+
+@bm.dp.message(bm.KwWizard.params)
+async def kw_params_text(m: bm.Message, state: bm.FSMContext) -> None:
+    """N5/N3b: текст, присланный на экране параметров /keywords, — это доп. сид-слова/URL (а не
+    задача агенту). Раньше хендлера тут не было → текст/URL падал в on_text→ingest («Прочитал…
+    контекст»). Мержим в kw_seeds/kw_url и пере-показываем параметры."""
+    seeds, url = bm._parse_kw_input(m.text or "")
+    if not seeds and not url:
+        await m.answer(bm.i18n.t("kw_params_need_seeds"))
+        return
+    data = await state.get_data()
+    merged = list(data.get("kw_seeds") or [])
+    seen = {s.casefold() for s in merged}
+    for s in seeds:  # дедуп регистронезависимо, порядок сохраняем
+        if s.casefold() not in seen:
+            seen.add(s.casefold())
+            merged.append(s)
+    await state.update_data(kw_seeds=merged[:50], kw_url=url or data.get("kw_url"))
+    url_note = "" if not (url or data.get("kw_url")) else " + URL"
+    await m.answer(bm.i18n.t("kw_params_seeds_added", n=len(merged[:50]), url=url_note))
+    await _kw_present_params(m, state)
 
 
 @bm.dp.callback_query(bm.KwCfgCB.filter())

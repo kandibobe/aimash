@@ -228,6 +228,22 @@ async def test_legacy_mode_disables_per_user_lock(monkeypatch):
     await ensure_account_allowed_for_user(9005, ACCT)  # не бросает
 
 
+async def test_admin_bypasses_per_user_read_grant(monkeypatch):
+    """F: админ (ADMIN_CHAT_IDS) читает любой read-allowed аккаунт БЕЗ гранта (владелец видит все
+    активные дочерние в пикерах); не-админ без гранта — отказ. Мутации админ-байпас НЕ открывает."""
+    from ads.client import ensure_allowed
+
+    await init_db()
+    admin_chat, plain_chat = 8801, 8802
+    monkeypatch.setattr(settings, "admin_chat_ids", str(admin_chat))  # режим enforced (autouse)
+    await ensure_account_allowed_for_user(admin_chat, ACCT)  # админ — без гранта, не бросает
+    await ensure_account_allowed_for_user(admin_chat, DRAFT)  # Draft — тоже ок
+    with pytest.raises(PermissionError):
+        await ensure_account_allowed_for_user(plain_chat, ACCT)  # не-админ без гранта — отказ
+    with pytest.raises(PermissionError):
+        ensure_allowed(ACCT)  # админ-байпас ЧТЕНИЯ не открывает МУТАЦИИ (потолок в коде)
+
+
 async def test_grant_does_not_open_mutations():
     """Зеркало ключевого инварианта (golden rule 9): грант ЧТЕНИЯ на дочерний НЕ открывает
     мутации — ensure_allowed (потолок ALLOWED_CEILING=Draft) всё равно отказывает."""

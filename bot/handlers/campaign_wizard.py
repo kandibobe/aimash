@@ -487,6 +487,10 @@ async def cc_kw_generate(
         topic = s.get("product") or s.get("campaign_name") or ""
         gen_lang = s.get("target_language") or bm.i18n.current_lang()
         geo_ids = adsgeo.geo_ids_for_settings(s)
+        # K: РФ/РБ не обслуживаются Keyword Planner — сообщаем и подбираем без гео (иначе падало
+        # «The input has an invalid value»); generate_keyword_ideas сам выкинет необслуживаемые.
+        if geo_ids and adsgeo.has_non_serviceable_geo(geo_ids):
+            await msg.answer(bm.i18n.t("kw_geo_dropped"))
         prof = await bm._cc_profile_ctx(draft)  # §20: профиль клиента → релевантность подбора
         site = await bm._cc_profile_site(draft)  # §19.4.2: seed + URL — сайт из §20-профиля
         seeds = await generate_seed_keywords(topic=topic, url=site, profile=prof, language=gen_lang)

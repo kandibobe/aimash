@@ -18,6 +18,9 @@ class ClientInfoWizard(StatesGroup):
 
 
 class RsaWizard(StatesGroup):
+    picking = (
+        State()
+    )  # N5: показан пикер кампании/группы (кнопки) — текст тут не ждём (гард on_text)
     awaiting_brief = State()  # ждём «тематика | url» для генерации
 
 
