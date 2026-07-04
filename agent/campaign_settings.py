@@ -14,6 +14,7 @@ CampaignSettings; ДИАПАЗОНЫ/деньги/имя считает КОД (
 from __future__ import annotations
 
 import json
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -81,10 +82,11 @@ _SYSTEM = (
     'null если неясно", '
     '"geo_locations": ["страна/город как в тексте"], '
     '"geo_country_code": "ISO alpha-2 страны таргетинга (Кения→KE, Украина→UA) или null", '
-    '"languages": ["язык(и), на которых ищет аудитория ЦЕЛЕВОЙ страны, напр. для Кении '
-    'English, Swahili"], '
+    '"languages": ["язык объявлений — ТОЛЬКО если пользователь ЯВНО назвал язык (напр. '
+    "'на украинском', 'английские объявления'); иначе оставь ПУСТОЙ список [] — язык код подберёт "
+    'сам по стране (Украина→украинский, Кения→английский). НЕ угадывай язык за пользователя"], '
     '"budget_daily_units": число дневного бюджета или null, '
-    '"currency": "USD|UAH|EUR если ЯВНО назван, иначе null", '
+    '"currency": "3-буквенный ISO-код валюты (USD/EUR/AUD/PLN/CZK…) ТОЛЬКО если ЯВНО назван, иначе null", '
     '"goal": "calls|leads|sales|traffic|awareness или null", '
     '"bidding_strategy": "manual_cpc|maximize_conversions|maximize_conversion_value|target_spend '
     'или null", '
@@ -131,11 +133,22 @@ async def extract_campaign_settings(description: str, *, language: str = "ru") -
     text = (description or "").strip()
     if not text:
         return CampaignSettings()
+    from datetime import date as _date
+
+    today = _date.today()
     try:
         msg = await chat(
             [
                 {"role": "system", "content": _SYSTEM},
-                {"role": "user", "content": f"Язык интерфейса: {language}.\nОписание:\n{text}"},
+                {
+                    "role": "user",
+                    # Сегодняшняя дата — чтобы модель могла резолвить относительные даты, если код-
+                    # парсер не покрыл фразу (P0-4). Формат даты в JSON всё равно ISO.
+                    "content": (
+                        f"Язык интерфейса: {language}. Сегодня: {today.isoformat()}.\n"
+                        f"Описание:\n{text}"
+                    ),
+                },
             ],
             role="parsing",
             temperature=0.2,
@@ -143,7 +156,16 @@ async def extract_campaign_settings(description: str, *, language: str = "ru") -
         data = _extract_json_object(getattr(msg, "content", "") or "")
     except Exception:  # noqa: BLE001 — разбор не критичен, есть fallback на медианы/дефолты
         data = None
-    return _coerce(data) if data is not None else CampaignSettings()
+    settings = _coerce(data) if data is not None else CampaignSettings()
+    # P0-4: детерминированно резолвим относительные/короткие даты из текста, если модель их не дала
+    # («от сегодня до завтра» → ISO). Явные ISO-даты модели приоритетнее — не перетираем.
+    if settings.start_date is None or settings.end_date is None:
+        rel_start, rel_end = parse_relative_dates(text, today)
+        if settings.start_date is None and rel_start:
+            settings.start_date = rel_start
+        if settings.end_date is None and rel_end:
+            settings.end_date = rel_end
+    return settings
 
 
 # ── §19.3: расписание показов — строку в структуру переводит КОД (golden rule #4) ──
@@ -237,6 +259,65 @@ def _valid_iso_date(s: str | None) -> str | None:
         return _date.fromisoformat(str(s).strip()).isoformat()
     except ValueError:
         return None
+
+
+# Относительные/короткие даты в свободном тексте (P0-4). Модель не знает «сегодня» и не считает
+# арифметику дат → «от сегодня до завтра» давало null. Код резолвит детерминированно.
+_REL_WORD_RE = re.compile(
+    r"послезавтра|day\s+after\s+tomorrow|завтра|tomorrow|сегодн\w*|today", re.IGNORECASE
+)
+_REL_IN_N_DAYS_RE = re.compile(
+    r"через\s+(\d{1,3})\s*(?:дн\w*|день)|in\s+(\d{1,3})\s*days?", re.IGNORECASE
+)
+# Явная дата с ТОЧКАМИ (DD.MM или DD.MM.YYYY) — точки, чтобы не путать с расписанием «9-18»/«9:00».
+_DATE_DOTS_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?\b")
+# Предлог «конца» рядом с единственным якорем ⇒ это дата ОКОНЧАНИЯ, а не старта.
+_END_PREP_RE = re.compile(r"\b(до|по|until|till|end|конц\w*)\b", re.IGNORECASE)
+
+
+def parse_relative_dates(text: str | None, today=None) -> tuple[str | None, str | None]:
+    """Свободный текст → (start_iso, end_iso). Понимает «сегодня/завтра/послезавтра», «через N дней»,
+    DD.MM(.YYYY). Два якоря по порядку = старт→конец; один якорь с предлогом «до/until» = конец.
+    Ничего не нашли → (None, None). today=None ⇒ date.today() (runtime; в тестах передаётся явно)."""
+    from datetime import date as _date, timedelta as _td
+
+    if today is None:
+        today = _date.today()
+    t = text or ""
+    anchors: list[tuple[int, _date]] = []
+    for m in _REL_WORD_RE.finditer(t):
+        w = m.group(0).lower()
+        if w.startswith("послезавтра") or "after" in w:
+            d = today + _td(days=2)
+        elif w.startswith("завтра") or w == "tomorrow":
+            d = today + _td(days=1)
+        else:  # сегодня/today
+            d = today
+        anchors.append((m.start(), d))
+    for m in _REL_IN_N_DAYS_RE.finditer(t):
+        n = int(m.group(1) or m.group(2))
+        anchors.append((m.start(), today + _td(days=min(n, 3650))))
+    for m in _DATE_DOTS_RE.finditer(t):
+        dd, mm, yy = int(m.group(1)), int(m.group(2)), m.group(3)
+        try:
+            if yy:
+                year = int(yy) if len(yy) == 4 else 2000 + int(yy)
+                d = _date(year, mm, dd)
+            else:
+                d = _date(today.year, mm, dd)
+                if d < today:  # без года и в прошлом → ближайший будущий год
+                    d = _date(today.year + 1, mm, dd)
+            anchors.append((m.start(), d))
+        except ValueError:  # 32.13 и прочий мусор
+            continue
+    if not anchors:
+        return (None, None)
+    anchors.sort(key=lambda a: a[0])
+    if len(anchors) == 1 and _END_PREP_RE.search(t):
+        return (None, anchors[0][1].isoformat())
+    start = anchors[0][1].isoformat()
+    end = anchors[1][1].isoformat() if len(anchors) > 1 else None
+    return (start, end)
 
 
 # ── Сборка итоговых настроек: extracted + медианы «по аналогии» + дефолты ─────────

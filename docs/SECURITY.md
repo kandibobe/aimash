@@ -9,12 +9,16 @@
 > ссылки не «протухали». Точные строки даны только для стабильных файлов.
 
 ## Текущая фаза (важно для модели угроз)
-**МУТАЦИИ** разрешены на **ровно одном** аккаунте — `Aimash (Draft)` = `7753643025` — и **только TEST
-MCC** при разработке. **ЧТЕНИЕ** — шире: раздельный чокпойнт `ensure_read_allowed` пускает
-мутационный аккаунт ∪ `GOOGLE_ADS_READ_CUSTOMER_IDS` ∪ дочерние, обнаруженные обходом MCC на старте
-(§8 read реализован: `/mcc`, per-currency сводки, per-child таймзоны). Мутация на дочернем всё равно
-упрётся в `ensure_allowed` (инварианты `test_mutation_lock_unchanged_by_read_allowlist`). Открытие
-**мутаций** на полном MCC — **осознанным** расширением кода, не строкой в `.env` (см. правило 9).
+**МУТАЦИИ** по умолчанию разрешены на **одном** аккаунте — `Aimash (Draft)` = `7753643025` — и
+**только TEST MCC** при разработке. Расширяются **управляемым конфигом** (`GOOGLE_ADS_ALLOWED_CUSTOMER_IDS`),
+но только среди аккаунтов, **видимых** боту на чтение — эффективный потолок `allowed_ceiling()` не
+пропустит чужой боевой id (защита от опечатки), а код-минимум `ALLOWED_CEILING = {Draft}` нельзя
+понизить через `.env` (см. правило 9 и [DEPLOYMENT.md §2.1](DEPLOYMENT.md)). **ЧТЕНИЕ** — шире:
+раздельный чокпойнт `ensure_read_allowed` пускает мутационный аккаунт ∪ `GOOGLE_ADS_READ_CUSTOMER_IDS`
+∪ дочерние, обнаруженные обходом MCC на старте (§8 read реализован: `/mcc`, per-currency сводки,
+per-child таймзоны). Чтение дочернего **не** делает его мутируемым: мутация всё равно требует членства
+в `allowed_customer_ids` (инварианты `test_mutation_lock_unchanged_by_read_allowlist`,
+`test_grant_does_not_open_mutations`).
 
 ---
 
@@ -31,7 +35,7 @@ MCC** при разработке. **ЧТЕНИЕ** — шире: раздель
 | 7 | **Только TEST MCC при разработке** | `ENV=dev` по умолчанию; замок аккаунта на `7753643025` (правило 9) | покрыто правилом 9 + `test_config_failfast` |
 | 8 | **Жёсткий allow-list операций** | `ads/service.py` исполняет только поддержанные операции (отклоняет неизвестную ДО кнопок и в `execute_confirmed`) | `test_write_layer` (отклонение неподдержанной операции) |
 | 9 | **Замок аккаунта** `7753643025` (мутации) + раздельное чтение (§8) | `ads/client.py::ensure_allowed` (мутации), `ensure_read_allowed` (per-account чтение = мутационный ∪ read-env ∪ дочерние обхода), `ensure_manager_allowed` (обход MCC); потолок `ALLOWED_CEILING` зашит в коде | `test_safety_core` (потолок/fail-closed/чужой), `test_mutation_lock_unchanged_by_read_allowlist`, `test_discovered_child_readable_but_not_mutable`, `test_ads_resolve`, `test_ads_read` |
-| 10 | **Fail-closed везде** (никогда fail-open) | `bot/main.py::WhitelistMiddleware` (`if uid not in wl` — блок при пустом); `core/config.py` prod fail-fast (нет ключа/whitelist → `ValueError`); `user_initiated` дефолт `False`; пустой allow-list → отказ | `test_whitelist`, `test_config_failfast`, `test_safety_core` |
+| 10 | **Fail-closed везде** (никогда fail-open) | `bot/main.py::WhitelistMiddleware` → `core.access.is_whitelisted` (источник = env `TELEGRAM_WHITELIST_CHAT_IDS` **∪ таблица `whitelist`**; блок при пустом объединении; сбой БД ⇒ пустой БД-набор, не fail-open); `core/config.py` prod fail-fast (нет ключа/пустой env-whitelist → `ValueError`); `user_initiated` дефолт `False`; пустой allow-list → отказ | `test_whitelist`, `test_runtime_whitelist`, `test_config_failfast`, `test_safety_core` |
 
 ---
 
@@ -44,14 +48,19 @@ AND operation=...` с проверкой `rowcount==1` → одно подтве
 раз** (защита от replay) и **только** под ту операцию, для которой оно выдано. Нет валидного
 claim → `PermissionError`, SDK не вызывается.
 
-### Замок аккаунта — три независимых слоя
-[`ads/client.py`](../ads/client.py):
-1. **Код-потолок** `ALLOWED_CEILING = {7753643025}` — `.env` не может его расширить.
-2. **Fail-closed** — пустой allow-list ⇒ отказ (а не «разрешено всё»).
-3. **Членство** — `customer_id` обязан быть в `allow-list ⊆ потолок`.
+### Замок аккаунта МУТАЦИЙ — слои ([`ads/client.py`](../ads/client.py))
+1. **Код-минимум** `ALLOWED_CEILING = {7753643025}` — `.env` не может его **понизить** (Draft всегда в
+   потолке). **Эффективный** потолок `allowed_ceiling()` = этот минимум **∪ видимые боту аккаунты**
+   (env `GOOGLE_ADS_READ_CUSTOMER_IDS` ∪ дочерние обхода MCC).
+2. **Fail-closed** — пустой `allowed_customer_ids` ⇒ отказ (а не «разрешено всё»).
+3. **Членство** — мутационный `customer_id` обязан быть в `allowed_customer_ids` (opt-in владельца через
+   env) **и** `allowed_customer_ids ⊆ allowed_ceiling()` — env включает мутации только на **видимом**
+   аккаунте, чужой боевой id вне видимости не пройдёт (защита от опечатки).
 
-`ensure_allowed` — единственная точка для per-account чтения **и** всех мутаций; `ensure_manager_
-allowed` отдельно гейтит обход MCC. Расширение круга = **осознанная правка `ads/client.py`**.
+`ensure_allowed` — точка проверки **всех мутаций**; per-account **ЧТЕНИЕ** идёт через отдельный,
+более широкий `ensure_read_allowed`; `ensure_manager_allowed` отдельно гейтит обход MCC. По умолчанию
+`allowed_customer_ids = {Draft}` ⇒ мутируется только Draft; расширение — **управляемый список** видимых
+аккаунтов (см. [DEPLOYMENT.md §2.1](DEPLOYMENT.md)), понизить код-минимум можно лишь правкой `ads/client.py`.
 
 ### Редакция секретов — три рубежа
 1. **Логи**: `RedactionFilter` на каждой записи + повторная редакция в форматтере (`core/logging.py`).
@@ -62,8 +71,10 @@ allowed` отдельно гейтит обход MCC. Расширение кр
 
 ### Fail-fast в проде
 `ENV=prod` без валидного `SECRETS_ENCRYPTION_KEY` или с пустым `TELEGRAM_WHITELIST_CHAT_IDS` →
-приложение **не стартует** (`core/config.py`). Пустой whitelist означал бы «отвечаю всем» — это
-запрещено на старте, а не в рантайме.
+приложение **не стартует** (`core/config.py`). env-whitelist — это **бутстрап первого админа**
+(обязателен в prod); дальше операторы добавляются в рантайме в таблицу `whitelist` (`/adduser`), но
+env всё равно должен быть непустым на старте. Пустое объединение (env ∪ БД) означало бы «отвечаю
+всем» — это запрещено (fail-closed).
 
 ### Защита от GAQL-инъекции
 Резолв по имени (`ads/resolve.py::_gaql_escape`) экранирует `'` и `\` перед подстановкой в
@@ -112,9 +123,10 @@ Residual: контакт, встречающийся в самом тексте 
   не может выполнить мутацию без «да» пользователя и не выйдет за разрешённый аккаунт.
 - **Ротация Fernet-ключа — ручная** (перешифровать `oauth_tokens` старым→новым ключом; см.
   [DEPLOYMENT.md](DEPLOYMENT.md#генерация-fernet-ключа)).
-- **Мутации — один аккаунт (тест-фаза).** Чтение дочерних MCC (сводный отчёт `/mcc`, нормализация
-  валют/таймзон) уже реализовано (§8 read); **мутации** на дочерних по-прежнему заблокированы —
-  открытие только осознанным расширением `ALLOWED_CEILING`.
+- **Мутации — по умолчанию один аккаунт (тест-фаза).** Чтение дочерних MCC (сводный отчёт `/mcc`,
+  нормализация валют/таймзон) уже реализовано (§8 read); **мутации** на дочерних по умолчанию
+  заблокированы — включаются осознанно, по одному, управляемым `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS`
+  среди **видимых** аккаунтов (в рамках `allowed_ceiling()`; см. [DEPLOYMENT.md §2.1](DEPLOYMENT.md)).
 - **Read-путь зависит от живого SDK** в проде; офлайн он покрыт юнит-тестами на фейковом клиенте
   (`test_ads_read`, `test_ads_resolve`), но не заменяет smoke-проверку доступа
   (`scripts/check_access.py`, read-only) на реальном TEST-аккаунте.

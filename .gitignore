@@ -44,6 +44,7 @@ htmlcov/
 *.db
 data/
 dumps/
+backups/    # C1: авто-дампы pg_dump (docker-compose backup-сайдкар) — на VPS, не в гит
 
 # A/B test outputs (могут содержать данные)
 ab_results/

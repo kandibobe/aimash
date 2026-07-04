@@ -1,4 +1,7 @@
 {
+  "env": {
+    "ENV": "dev"
+  },
   "permissions": {
     "allow": [
       "Bash(python:*)",
@@ -26,7 +29,9 @@
       "Bash(cat:*)",
       "Read(./**)",
       "Edit(./**)",
-      "Write(./**)"
+      "Write(./**)",
+      "Bash(PYTHONIOENCODING=utf-8 python -m ruff check bot/texts.py tests/test_db_schema.py bot/i18n.py)",
+      "Bash(PYTHONIOENCODING=utf-8 python -m ruff format --check advisor/ tests/test_advisor.py)"
     ],
     "deny": [
       "Read(./.env)",
@@ -36,9 +41,6 @@
       "Read(./secrets/**)",
       "Bash(git push:*)"
     ]
-  },
-  "env": {
-    "ENV": "dev"
   },
   "hooks": {
     "PreToolUse": [

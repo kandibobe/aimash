@@ -90,6 +90,61 @@ async def test_extract_garbage_json_is_safe():
     assert s == CampaignSettings()
 
 
+# ── P0-4: относительные даты резолвит КОД, если модель их не дала ─────────────────
+@pytest.mark.asyncio
+async def test_extract_resolves_relative_dates_when_model_null():
+    content = json.dumps({"geo_locations": ["Украина"], "start_date": None, "end_date": None})
+    with patched(CS, "chat", _fake_chat(content)):
+        s = await extract_campaign_settings("дата от сегодня до завтра, язык украинский")
+    # обе даты проставлены и end > start (конкретные значения зависят от «сегодня»)
+    assert s.start_date and s.end_date and s.end_date > s.start_date
+
+
+@pytest.mark.asyncio
+async def test_extract_keeps_model_iso_dates_over_relative():
+    content = json.dumps({"start_date": "2027-01-10", "end_date": "2027-01-20"})
+    with patched(CS, "chat", _fake_chat(content)):
+        s = await extract_campaign_settings(
+            "старт завтра"
+        )  # текст относительный, но модель дала ISO
+    assert s.start_date == "2027-01-10"  # явную ISO-дату модели НЕ перетираем
+    assert s.end_date == "2027-01-20"
+
+
+def test_parse_relative_dates_offline():
+    from datetime import date
+
+    from agent.campaign_settings import parse_relative_dates
+
+    t = date(2026, 7, 4)
+    assert parse_relative_dates("от сегодня до завтра", t) == ("2026-07-04", "2026-07-05")
+    assert parse_relative_dates("до завтра", t) == (None, "2026-07-05")
+    assert parse_relative_dates("старт завтра", t) == ("2026-07-05", None)
+    assert parse_relative_dates("через 7 дней", t) == ("2026-07-11", None)
+    assert parse_relative_dates("с 01.08 по 15.08", t) == ("2026-08-01", "2026-08-15")
+    # строка расписания «пн-пт 9-18» НЕ должна ложно распознаться как дата
+    assert parse_relative_dates("пн-пт 9-18", t) == (None, None)
+    assert parse_relative_dates("доставка цветов украина", t) == (None, None)
+
+
+# ── P0-5: язык по умолчанию выводится из ГЕО (Украина → uk), а не «русский» ───────
+def test_assemble_language_derived_from_geo_when_not_named():
+    # модель НЕ вернула язык (пустой список) → код берёт язык страны (UA → uk → Ukrainian)
+    extracted = CampaignSettings(geo_locations=["Украина"], geo_country_code="UA")
+    out = assemble_settings(extracted, topic="ресторан")
+    assert out["target_language"] == "uk"
+    assert out["languages"] == ["Ukrainian"]
+
+
+def test_assemble_language_respects_explicit_choice():
+    # пользователь ЯВНО назвал русский для Украины → уважаем выбор
+    extracted = CampaignSettings(
+        geo_locations=["Украина"], geo_country_code="UA", languages=["русский"]
+    )
+    out = assemble_settings(extracted, topic="ресторан")
+    assert out["target_language"] == "ru"
+
+
 # ── assemble_settings: медианы «по аналогии» + дефолты + теги ─────────────────────
 def test_assemble_tags_by_analogy_when_budget_from_median():
     extracted = CampaignSettings(geo_locations=["Кения"], goal="calls")  # бюджет/cpc не заданы

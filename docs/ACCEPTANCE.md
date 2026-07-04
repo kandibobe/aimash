@@ -291,7 +291,7 @@ GDN / Video / Demand Gen, а UAC не реализуется намеренно.
 | Мутации только на Draft `7753643025` | `ads/client.py:212` (`ensure_allowed`); потолок в коде `ALLOWED_CEILING` — `ads/client.py:25`; fail-closed при пустом allow-list — `ads/client.py:223` | `tests/test_safety_core.py`, `tests/test_invariants_core.py` |
 | Confirm-гейт с `confirmation_id` в каждом `apply_*` | `ads/mutations.py:70` (`_require_confirmation`) → атомарный `claim` `confirm/store.py:119` | `tests/test_write_layer.py`, `tests/test_invariants_core.py` |
 | Бюджет/деньги только при `user_initiated` | `ads/mutations.py:108` (бюджет), `ads/mutations.py:222` (ставка), `ads/mutations.py:759` (стратегия); дефолт `False` — `confirm/gate.py:24` | `tests/test_safety_core.py`, `tests/test_invariants_core.py` |
-| Секреты не утекают (логи/audit/чат) | `redact_text` в audit — `confirm/store.py:280`; whitelist fail-closed — `bot.main.WhitelistMiddleware` | `tests/test_logging_redaction.py`, `tests/test_whitelist.py` |
+| Секреты не утекают (логи/audit/чат) | `redact_text` в audit — `confirm/store.py:280`; whitelist fail-closed (env ∪ БД, рантайм `/adduser`) — `bot.main.WhitelistMiddleware` → `core.access.is_whitelisted` | `tests/test_logging_redaction.py`, `tests/test_whitelist.py`, `tests/test_runtime_whitelist.py` |
 
 ---
 
@@ -389,3 +389,35 @@ GDN / Video / Demand Gen, а UAC не реализуется намеренно.
   (`test_result_humanizer.py`), warnings частичного успеха composite-create.
 - **Надёжность SDK**: partial_failure батчей ключей (`test_partial_failure.py`), честный учёт
   квоты по операциям, превью==созданное (micros кратны биллинг-единице), drop офлайн-бэклога.
+
+## Доводка по живому тесту (round-2, 2026-07-04)
+
+Правки по скринам владельца с боевого MCC (Draft ведётся в **AUD**). Все — офлайн-покрыты.
+
+- **Валюта: любой ISO** — `update_budget`/`update_bid`/промо/прайс принимают ЛЮБОЙ 3-буквенный
+  ISO-код (AUD/CZK/PLN…), а не Literal из 4 значений (раньше `literal_error` ронял бюджет на
+  AUD-Draft ДО валютной сверки). Голая цифра без валютного слова → валюта аккаунта (детектор
+  `ads.resolve.detect_currency_token`), петля «переформулируй в AUD» устранена. Тесты
+  `test_currency_reconcile.py` (ISO/алиасы/детектор/мисматч).
+- **Удаление (§3, необратимо, Draft-only, ДВОЙНОЙ confirm)** — `remove_campaign`/`remove_ad_group`
+  (новые) + существующие `remove_keywords`/`remove_asset_link`; кнопка «🗑 Удалить кампанию» в
+  меню + NL. Оба гейта (`ensure_allowed` Draft-only + claim/replay-one-shot) + `_DESTRUCTIVE_OPS`
+  → двухшаговое подтверждение (`confirm_destructive_kb`→`confirm_final_kb`). Тесты
+  `test_write_layer.py` (happy/replay + негатив-матрица чужой-аккаунт/без-confirm для ВСЕХ ops).
+- **§19 визард**: ГЕО→авто-язык (Украина→uk детерминированно, промпт не «угадывает»);
+  относительные даты «от сегодня до завтра» резолвит КОД (`parse_relative_dates`) + patch-ветки
+  дат/сетей/расписания в `_cc_apply_settings_patch`; сгенерированные ключи сохраняются СРАЗУ
+  (раньше терялись без round-trip таблицы) + кнопка «✅ Использовать эти ключи». Тесты
+  `test_campaign_settings_extract.py`.
+- **§7 ключи**: метрики с ЖИВОГО аккаунта (`_keyword_metrics_account`; Draft/тест → пустые);
+  плоский топ best→worst в сводке; больше слов; NL seed-cap 10→25; «свои ключи/описание словами».
+- **§8 экспорт всех аккаунтов**: `/mcc` шлёт xlsx по всем дочерним (`write_mcc_xlsx`); NL
+  «экспорт статистики всех аккаунтов за N дней» → детерминированный роутинг (`is_export_all_accounts`).
+  Тесты `test_export_all_intent.py`. Диагностический лог обхода MCC (всего/ENABLED/скрыто) — объясняет
+  «почему в пикере N аккаунтов».
+- **§11 DG/Video бюджет**: апфронт-предупреждение при бюджете ниже валюто-зависимого минимума
+  (`core.limits.dg_video_min_daily_units`, AUD=8) + humanize per_day_minimum-ошибки.
+- **§20 клиенты**: «🔎 Подтянуть из аккаунта» — facts-only patch из GAQL (валюта/таймзона/гео/языки/
+  домен, БЕЗ LLM/выдумок) через тот же confirm-гейт памяти (`clients/account_facts.py`).
+- **UX/тексты**: пикеры отчёта/экспорта и «‹ Назад» визарда редактируют сообщение (без дублей);
+  стартовый промпт визарда/keywords/clients — копируемые `<code>`-примеры и вольная форма без спецсимволов.

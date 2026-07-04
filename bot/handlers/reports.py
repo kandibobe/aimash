@@ -168,7 +168,8 @@ async def on_report_account(cq: bm.CallbackQuery, callback_data: bm.ReportAcctCB
     if not (0 <= callback_data.idx < len(rows)):
         await msg.answer(bm.i18n.t("stale"))
         return
-    await bm._present_report_campaigns(msg, callback_data.target, rows[callback_data.idx])
+    # P0-3: редактируем сообщение-пикер аккаунта в пикер кампании (без нового сообщения).
+    await bm._present_report_campaigns(msg, callback_data.target, rows[callback_data.idx], cq=cq)
 
 
 @bm.dp.callback_query(bm.ReportCampCB.filter())
@@ -190,7 +191,9 @@ async def on_report_campaign(cq: bm.CallbackQuery, callback_data: bm.ReportCampC
         c = camps[callback_data.idx]
         sel["campaign_id"], sel["campaign_name"] = str(c.get("id")), c.get("name")
     bm._REPORT_SEL[chat_id] = sel
-    await msg.answer(
+    # P0-3: редактируем сообщение-пикер кампании в выбор периода (без нового сообщения).
+    await bm._safe_edit(
+        cq,
         bm.i18n.t(f"period_pick_{callback_data.target}"),
         # §UX-память: последний пресет — первой кнопкой «↻ как в прошлый раз»
         reply_markup=bm.period_kb(callback_data.target, last=await bm._last_period(chat_id)),

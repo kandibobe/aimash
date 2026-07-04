@@ -100,6 +100,12 @@ async def cc_back(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.FSMCon
     snap = await bm.CDRAFTS.set_step(draft.session_id, prev, expected_chat_id=chat_id)
     await cq.answer()
     if snap is not None:
+        # P0-3: убираем текущую карточку этапа перед показом предыдущей — «туда-обратно» не
+        # плодит одинаковые сообщения (этапы могут слать >1 сообщения → удаление надёжнее правки).
+        try:
+            await msg.delete()
+        except Exception:  # noqa: BLE001 — старое/уже удалённое сообщение
+            pass
         await bm._cc_render_stage(msg, chat_id, snap, state)
 
 
@@ -171,7 +177,11 @@ async def cc_settings_desc(m: bm.Message, state: bm.FSMContext) -> None:
         return
     text = (m.text or "").strip()
     if not text:
-        await m.answer(bm.i18n.t("cc_empty_description"), reply_markup=bm.nav_kb())
+        await m.answer(
+            bm.i18n.t("cc_empty_description"),
+            reply_markup=bm.nav_kb(),
+            parse_mode=bm.ParseMode.HTML,  # копируемый <code>-пример
+        )
         return
     await m.answer(bm.i18n.t("cc_extracting"))
     try:
@@ -500,11 +510,17 @@ async def cc_kw_generate(
         prof = await bm._cc_profile_ctx(draft)  # §20: профиль клиента → релевантность подбора
         site = await bm._cc_profile_site(draft)  # §19.4.2: seed + URL — сайт из §20-профиля
         seeds = await generate_seed_keywords(topic=topic, url=site, profile=prof, language=gen_lang)
-        client = await build_client_async(bm.DRAFT_ACCOUNT_ID)  # холодная сборка — вне loop
+        # P1-7: метрики Keyword Planner берём с ЖИВОГО аккаунта (read-only) — на Draft/тесте объёмы
+        # пустые → мало идей и мёртвая сортировка. Идеи ключей рыночные (не данные аккаунта), поэтому
+        # любой живой аккаунт корректен; замок мутаций не трогается (кампания всё равно строится на Draft).
+        metrics_acct, kw_is_live = await bm._keyword_metrics_account(chat_id)
+        if not kw_is_live:
+            await msg.answer(bm.i18n.t("kw_metrics_test_note"))
+        client = await build_client_async(metrics_acct)  # холодная сборка — вне loop
         ideas = await bm.run_ads_read_call(
             generate_keyword_ideas,
             client,
-            bm.DRAFT_ACCOUNT_ID,
+            metrics_acct,
             seeds=seeds,
             url=site,  # §19.4.2: keyword_and_url_seed (seed 10 + URL), None ⇒ только seeds
             language=adsgeo.keyword_ideas_lang(gen_lang),
@@ -550,17 +566,37 @@ async def cc_kw_generate(
             msg, chat_id, session_id, state, relevant, bm._cc_default_match_type(draft), "generated"
         )
         return
+    # P0-2: сохраняем сгенерированный (отфильтрованный по релевантности) список СРАЗУ, а не только
+    # после возврата ссылки на таблицу. Раньше пропуск round-trip'а → кампания создавалась без
+    # ключей («ключи не добавились»). verified=False: ручная правка таблицы остаётся ОПЦИОНАЛЬНЫМ
+    # уточнением (вернёт ссылку → перезапишем выверенным списком в cc_kw_verify).
     # B3-resume: sheet_url тоже в черновик — resume после рестарта переоткроет верификацию с той
     # же ссылкой (см. _cc_present_stage2), а не молча вернёт на пустой Этап 2.
+    relevant = [i.text for i in ideas if relevance.get(i.text, True)]
+    default_mt = bm._cc_default_match_type(draft)
     await bm.CDRAFTS.patch(
         session_id,
-        lambda st: st["keywords"].update({"sheet_id": sid, "sheet_url": url}),
+        lambda st: st["keywords"].update(
+            {
+                "sheet_id": sid,
+                "sheet_url": url,
+                "list": relevant,
+                "match_type": default_mt,
+                "match_types": None,
+                "source": "generated",
+                "verified": False,
+            }
+        ),
         expected_chat_id=chat_id,
     )
     await state.set_state(bm.CreateCampaignWizard.kw_verify)
     await state.update_data(cc_session=session_id)
     await msg.answer(bm.i18n.t("cc_kw_sheet_ready", url=url))
-    await msg.answer(bm.i18n.t("cc_kw_verify_prompt"), reply_markup=bm.nav_kb())
+    await msg.answer(
+        bm.i18n.t("cc_kw_verify_prompt_v2", n=len(relevant)),
+        reply_markup=bm.cc_kw_verify_kb(),
+        parse_mode=bm.ParseMode.HTML,
+    )
 
 
 @bm.dp.message(bm.CreateCampaignWizard.kw_verify)
@@ -604,6 +640,37 @@ async def cc_kw_verify(m: bm.Message, state: bm.FSMContext) -> None:
     # B6: тип соответствия — подтверждённый на Этапе 1, не хардкод phrase
     await bm._cc_save_keywords(
         m, m.chat.id, session_id, state, kws, bm._cc_default_match_type(draft), "sheet"
+    )
+
+
+@bm.dp.callback_query(bm.CcCB.filter(bm.F.action == "kw_use_generated"))
+async def cc_kw_use_generated(
+    cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.FSMContext
+) -> None:
+    """P0-2: «✅ Использовать эти ключи» — взять уже сохранённый сгенерированный список без ручной
+    правки Google-таблицы и перейти к обзору (Этап 2 → подтверждение ключей)."""
+    chat_id = bm._cq_chat_id(cq)
+    data = await state.get_data()
+    session_id = data.get("cc_session")
+    draft = await bm.CDRAFTS.get(session_id, expected_chat_id=chat_id) if session_id else None
+    msg = bm._cq_msg(cq)
+    if draft is None or msg is None:
+        await cq.answer(bm.i18n.t("cc_draft_stale"), show_alert=True)
+        return
+    await cq.answer()
+    kw = draft.wizard_state.get("keywords") or {}
+    kw_list = kw.get("list") or []
+    if not kw_list:
+        await msg.answer(bm.i18n.t("cc_kw_empty"), reply_markup=bm.cc_kw_kb())
+        return
+    await bm._cc_save_keywords(
+        msg,
+        chat_id,
+        session_id,
+        state,
+        kw_list,
+        kw.get("match_type") or bm._cc_default_match_type(draft),
+        "generated",
     )
 
 

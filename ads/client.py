@@ -123,6 +123,8 @@ async def discover_read_children() -> int:
         return 0  # нет настроенных MCC ⇒ обход невозможен (fail-closed, набор остаётся пустым)
     found: set[str] = set()
     found_meta: dict[str, "ChildAccount"] = {}  # id → ChildAccount (для пикера; не авторизация)
+    total_leaves = 0  # P1-10: сколько НЕ-менеджерских дочерних всего (для диагностики «почему N»)
+    inactive: list[str] = []  # id + статус пропущенных не-ENABLED (для лога)
     for mid in sorted(managers):
         if not mid:
             continue  # defense-in-depth: пустой id (мусор из конфига) — не делаем ga.search('')
@@ -139,12 +141,14 @@ async def discover_read_children() -> int:
         for ch in children:
             if ch.manager:
                 continue
+            total_leaves += 1
             # §8/A3: не-ENABLED дочерние (CANCELED/SUSPENDED/CLOSED/…) НЕ кладём в read-набор —
             # их запрос всё равно упрётся в PERMISSION_DENIED / CUSTOMER_NOT_ENABLED (это флудило
             # scheduler-аномалии и /diag каждый цикл) и они не нужны в пикерах отчётов/экспорта.
             # /mcc-сводка их всё равно покажет отдельной секцией «неактивные» (reports.mcc._is_active),
             # т.к. заново обходит MCC. Мутационный замок (ensure_allowed) — отдельный, не затронут.
             if (ch.status or "").upper() != "ENABLED":
+                inactive.append(f"{normalize_customer_id(ch.id)}:{(ch.status or '?')}")
                 continue
             cid = normalize_customer_id(ch.id)
             if cid:
@@ -152,8 +156,15 @@ async def discover_read_children() -> int:
                 found_meta[cid] = ch  # имя/валюта/статус для UI-пикера
     n = set_discovered_read_children(found)
     set_discovered_read_children_meta(found_meta.values())  # meta для пикера (не влияет на доступ)
-    if n:
-        log.info("mcc discover: дочерних аккаунтов доступно на чтение (§8): %d", n)
+    # P1-10: явная диагностика «почему в пикере N аккаунтов» — всего дочерних / ENABLED показано /
+    # неактивных скрыто (со статусами). Отвечает на «почему только 3»: остальные не-ENABLED.
+    log.info(
+        "mcc discover (§8): дочерних всего=%d, ENABLED (в пикере/read)=%d, скрыто неактивных=%d%s",
+        total_leaves,
+        n,
+        len(inactive),
+        (" [" + ", ".join(inactive[:20]) + "]") if inactive else "",
+    )
     return n
 
 

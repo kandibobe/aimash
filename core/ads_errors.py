@@ -146,6 +146,14 @@ def humanize_google_ads_error(exc: BaseException, *, max_errors: int = 3) -> str
     if extra > 0:
         parts.append(f"…и ещё {extra}")
     text = "; ".join(parts) if parts else f"{type(exc).__name__}: {exc}"
+    # P1-9: ошибка «бюджет ниже дневного минимума» (Demand Gen/Video) ссылается на proto-поле —
+    # добавляем понятную подсказку (порог зависит от валюты аккаунта; надо увеличить бюджет).
+    low = text.lower()
+    if "per_day_minimum" in low or "per-day minimum" in low or "per day minimum" in low:
+        text += (
+            " — увеличьте дневной бюджет: у Demand Gen/Video есть минимальный дневной порог, "
+            "зависящий от валюты аккаунта (напр. ~8 у.е./день на AUD-аккаунте)"
+        )
     rid = _request_id(exc)
     if rid:
         text += f" (request_id: {rid})"

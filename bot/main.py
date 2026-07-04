@@ -53,7 +53,7 @@ from ads.assets import (
 )
 from ads.client import DRAFT_ACCOUNT_ID, ensure_allowed, ensure_read_allowed
 from ads.mutations import GDN_BUSINESS_NAME_MAX, VIDEO_DESCRIPTION_MAX
-from ads.resolve import currency_mismatch, find_ad_groups
+from ads.resolve import currency_mismatch, detect_currency_token, find_ad_groups
 from ads.service import execute_confirmed, read_before
 from clients import crawl_jobs, crawler
 from clients.execute import MEMORY_OPERATIONS, execute_confirmed_memory
@@ -61,9 +61,12 @@ from clients.profile_extract import extract_profile, structure_crawl
 from clients.store import ClientProfileStore, preview_merge
 from agent import router
 from agent.campaign_settings import (
+    _valid_iso_date,
     assemble_settings,
     derive_bidding,
     extract_campaign_settings,
+    parse_ad_schedule,
+    schedule_human,
     units_to_micros,
 )
 from agent.loop import handle_command
@@ -72,12 +75,14 @@ from bot import i18n, texts, ux
 from bot.campaign_wizard.store import CampaignDraftStore
 from bot.callbacks import (
     AdminCB,
+    AdviseCB,
     AlertCB,
     AudienceCB,
     CampCB,
     CcCB,
     ClientCB,
     ConfirmCB,
+    DiagCB,
     ExtCB,
     GeoCB,
     KwAddCB,
@@ -103,6 +108,8 @@ from bot.keyboards import (
     BTN_BALANCE_ALL,
     adduser_access_kb,
     adduser_pick_kb,
+    advise_feedback_kb,
+    advise_header_kb,
     alerts_kb,
     BTN_CAMPAIGNS_ALL,
     BTN_EXPORT_ALL,
@@ -133,10 +140,14 @@ from bot.keyboards import (
     cc_final_kb,
     cc_kw_confirm_kb,
     cc_kw_kb,
+    cc_kw_verify_kb,
     cc_resume_kb,
     cc_settings_kb,
     cc_skip_kb,
+    confirm_destructive_kb,
+    confirm_final_kb,
     confirm_kb,
+    diag_kb,
     ext_assets_list_kb,
     ext_menu_kb,
     ext_snippet_header_kb,
@@ -178,7 +189,12 @@ from core.limits import MONEY_MAX_UNITS  # единый источник ден�
 from core.logging import log, redact_text, setup_logging
 from core.observability import init_observability
 from core.resilience import run_ads_read_call
-from db.session import dispose_engine, init_db
+from db.session import (
+    acquire_single_instance_lock,
+    dispose_engine,
+    init_db,
+    release_single_instance_lock,
+)
 
 STORE = ConfirmStore()  # черновики + audit в БД (SQLite dev), вместо очереди в памяти
 SESSIONS = SessionStore()  # сессии курации RSA (фаза 2.C), персист в proposals (rsa_curation)
@@ -194,6 +210,12 @@ _welcome_file_id: str | None = None
 
 # Операции со списком ключей — большой список в черновике уходит .xlsx-вложением (ТЗ §5).
 _KEYWORD_OPS = frozenset({"add_keywords", "remove_keywords", "add_negative_keywords"})
+
+# P1-6: необратимые удаления — карточка подтверждения проходит ДВА шага (confirm_destructive_kb →
+# confirm_final_kb). Замок аккаунта (Draft-only) и confirm-гейт неизменны; это доп. защита в UI.
+_DESTRUCTIVE_OPS = frozenset(
+    {"remove_campaign", "remove_ad_group", "remove_keywords", "remove_asset_link"}
+)
 
 # Лёгкое in-memory состояние UI (теряется при рестарте — это ок, не источник истины):
 _CAMP_CACHE: dict[int, list[dict]] = {}  # chat_id → последний список кампаний (резолв idx→имя)
@@ -523,6 +545,127 @@ async def _safe_edit_markup(cq: CallbackQuery, markup) -> None:
 
 
 # ── Общие действия (чтобы команда и кнопка делали одно и то же) ─────────────────
+async def _capture_cmd_error(e: Exception, where: str) -> None:
+    """A2 (§15): залогировать+СОХРАНИТЬ ошибку интерактивного хендлера в error_events (→ /diag +
+    проактивный алерт админам A1). Раньше сюда писали только глобальный on_error и scheduler —
+    точечные `except` команд показывали юзеру err_text, но в /diag не попадали (картина инцидентов
+    была неполной). Ожидаемые account-access ошибки (нет прав/деактивирован аккаунт) НЕ пишем —
+    это конфиг оператора, а не дефект (как в scheduler.jobs, чтоб /diag не заваливало). Best-effort:
+    capture_exception сам не бросает (наблюдаемость не роняет рантайм)."""
+    if is_account_access_error(e):
+        return
+    await capture_exception(e, where=where)
+
+
+async def _load_error_events(today: bool = False, limit: int = 15) -> list:
+    """A3 (§15): последние error_events для /diag (reverse-chron). today ⇒ только за сегодня (UTC).
+    Фильтр «сегодня» — в Python (наивный created_at → UTC): избегаем строкового сравнения tz-aware/
+    naive в SQL на SQLite. Read-only; message/traceback уже редактированы на записи (секретов нет)."""
+    from sqlalchemy import desc, select
+
+    from db.models import ErrorEvent as _EE
+    from db.session import Session
+
+    async with Session() as s:
+        rows = (await s.execute(select(_EE).order_by(desc(_EE.id)).limit(50))).scalars().all()
+    if today:
+        from datetime import datetime, timezone
+
+        start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
+        def _ok(dt) -> bool:
+            if dt is None:
+                return False
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt >= start
+
+        rows = [r for r in rows if _ok(r.created_at)]
+    return list(rows[:limit])
+
+
+async def _load_error_detail(rid: str):
+    """A3 (§15): один error_event по request_id (свежайший) — для detail-кнопки /diag (полный
+    редактированный traceback). Read-only. None — если инцидент устарел/не найден."""
+    from sqlalchemy import desc, select
+
+    from db.models import ErrorEvent as _EE
+    from db.session import Session
+
+    async with Session() as s:
+        return (
+            await s.execute(
+                select(_EE).where(_EE.request_id == rid).order_by(desc(_EE.id)).limit(1)
+            )
+        ).scalar_one_or_none()
+
+
+async def _llm_budget_or_reply(message) -> bool:
+    """C3: пер-юзер дневной потолок LLM ПЕРЕД дорогим агент-вызовом. Над лимитом → отвечаем понятно и
+    возвращаем True (вызывающий прекращает обработку, LLM не зовём — fail-closed, трат нет). В пределах —
+    фиксируем вызов и возвращаем False. Гард выключен (LLM_DAILY_CALLS_PER_USER=0) → всегда False.
+    Ставится в NL-точках входа (on_text / _run_task_with_context), а НЕ в call_llm — иначе отказ летел
+    бы в глобальный on_error и засорял /diag «ошибкой» (блок бюджета — не дефект)."""
+    from core import llm_budget
+
+    try:
+        llm_budget.consume(message.chat.id)
+        return False
+    except llm_budget.LLMBudgetExceededError as e:
+        await message.answer(i18n.t("llm_budget_exceeded", used=e.used, limit=e.limit))
+        return True
+
+
+async def _notify_admins_started(bot) -> None:
+    """B1 (§15): однократный readiness-пинг админам (ADMIN_CHAT_IDS) на УСПЕШНОМ старте — миграция
+    HEAD, число аккаунтов на чтение, активная parse-модель. Живой сигнал деплоя: не пришёл после
+    redeploy ⇒ бот не поднялся (крэш-луп) — видно сразу, не дожидаясь первого сообщения. Best-effort:
+    нет админов → тихо пропускаем (не спамим операторов); сбой доставки не роняет старт."""
+    admins = settings.admin_ids
+    if not admins:
+        return
+    head = "—"
+    try:  # alembic HEAD из БД (best-effort; на SQLite/dev таблицы alembic_version может не быть)
+        from sqlalchemy import text as _sql_text
+
+        from db.session import Session
+
+        async with Session() as s:
+            head = (
+                await s.execute(_sql_text("SELECT version_num FROM alembic_version LIMIT 1"))
+            ).scalar() or "—"
+    except Exception:  # noqa: BLE001 — версия миграции необязательна для пинга
+        head = "—"
+    try:
+        from ads.client import discovered_read_children
+
+        n_children = len(discovered_read_children())
+    except Exception:  # noqa: BLE001
+        n_children = 0
+    model = router.effective_model("parsing")
+    for chat_id in admins:
+        en = i18n.get_lang(chat_id) == "en"
+        body = (
+            (
+                "✅ <b>Aimash started</b>\n"
+                f"• migration: <code>{texts.esc(str(head))}</code>\n"
+                f"• readable accounts: {n_children}\n"
+                f"• model (parsing): <code>{texts.esc(model)}</code>"
+            )
+            if en
+            else (
+                "✅ <b>Aimash запущен</b>\n"
+                f"• миграция: <code>{texts.esc(str(head))}</code>\n"
+                f"• аккаунтов на чтение: {n_children}\n"
+                f"• модель (parsing): <code>{texts.esc(model)}</code>"
+            )
+        )
+        try:
+            await bot.send_message(chat_id, body, parse_mode=ParseMode.HTML)
+        except Exception as e:  # noqa: BLE001 — недоступный админ не роняет старт
+            log.warning("startup-пинг не доставлен админу %s: %s", chat_id, type(e).__name__)
+
+
 async def _send_help(message: Message) -> None:
     await message.answer(i18n.t("help"), parse_mode=ParseMode.HTML)
 
@@ -540,6 +683,7 @@ async def _send_status(message: Message) -> None:
             st = await run_ads_read_call(account_stats, client, acct, 30, label="account_stats")
             cur = await _read_currency(client, acct)  # §9: валюта в денежных строках
     except Exception as e:  # сеть/доступ/SDK
+        await _capture_cmd_error(e, "cmd:status")  # A2: в /diag + алерт админам
         await message.answer(i18n.t("err_stats", err=ux.err_text(e)))
         await _heal_if_stuck_global(message, acct)  # само-восстановление залипшего аккаунта
         return
@@ -571,6 +715,7 @@ async def _send_balance(message: Message) -> None:
         async with ux.typing_action(message):  # «печатает…» пока идёт запрос к OpenRouter
             acct = await fetch_account()
     except Exception as e:  # нет ключа / сеть
+        await _capture_cmd_error(e, "cmd:balance")  # A2: в /diag + алерт админам
         await message.answer(i18n.t("err_balance", err=ux.err_text(e)))
         return
     await message.answer(texts.fmt_balance(acct, snapshot()), parse_mode=ParseMode.HTML)
@@ -584,6 +729,7 @@ async def _send_journal(message: Message) -> None:
     try:
         events = await list_recent_audit(15)
     except Exception as e:  # БД недоступна
+        await _capture_cmd_error(e, "cmd:journal")  # A2: в /diag + алерт админам
         await message.answer(i18n.t("err_journal", err=ux.err_text(e)))
         return
     await message.answer(texts.fmt_journal(events), parse_mode=ParseMode.HTML)
@@ -601,6 +747,7 @@ async def _send_campaigns(message: Message, chat_id: int) -> None:
                 list_campaigns, client, DRAFT_ACCOUNT_ID, label="list_campaigns"
             )
     except Exception as e:  # сеть/доступ/SDK
+        await _capture_cmd_error(e, "cmd:campaigns")  # A2: в /diag + алерт админам
         await message.answer(i18n.t("err_campaigns", err=ux.err_text(e)))
         return
     if not camps:
@@ -744,6 +891,18 @@ async def _present_proposal(
         # показа кнопок (FX не делаем; иначе «было→станет» соврал бы про сумму). Валюта — best-effort:
         # неизвестна (нет клиента/сбой read) ⇒ не блокируем (и чужую валюту на показе не печатаем).
         if operation in ("update_budget", "update_bid"):
+            # P0-1: голая цифра без валютного слова. Модель порой всё равно ставит currency (обычно
+            # 'USD') — детерминированно снимаем её, если пользователь валюту НЕ писал, чтобы сумма
+            # трактовалась в валюте аккаунта, а не рождала ложный mismatch (петля «переформулируй в
+            # AUD»). Источник текста — сообщение пользователя (NL-путь). Символ/код валюты в тексте →
+            # уважаем выбор модели (честный mismatch, если валюта ≠ аккаунтной; FX не делаем).
+            claimed_cur = params.get("currency")
+            if claimed_cur and claimed_cur != "percent":
+                user_text = (
+                    getattr(message, "text", None) or getattr(message, "caption", None) or ""
+                )
+                if not detect_currency_token(user_text):
+                    params = {**params, "currency": None}
             acct_cur = ""
             try:
                 from ads.client import build_client_async
@@ -793,6 +952,10 @@ async def _present_proposal(
         _LAST_SEARCH_PARAMS[chat_id] = {k: v for k, v in params.items() if k != "_before"}
     # Большой список ключей/минус-слов (ТЗ §5) → полный список .xlsx-вложением, кнопки на коротком
     # сообщении; в самой сводке список усечён до KW_INLINE_MAX с пометкой «…ещё N во вложении».
+    # P1-6: необратимые удаления → двойное подтверждение (первый шаг), остальное — обычная ✅/❌.
+    confirm_markup = (
+        confirm_destructive_kb(cid) if operation in _DESTRUCTIVE_OPS else confirm_kb(cid)
+    )
     kws = params.get("keywords") if isinstance(params, dict) else None
     if operation in _KEYWORD_OPS and isinstance(kws, list) and len(kws) > texts.KW_INLINE_MAX:
         await ux.send_proposal_keywords_xlsx(
@@ -801,13 +964,13 @@ async def _present_proposal(
             match_type=params.get("match_type", ""),
             action=texts.keyword_action_label(operation),
             header_html=i18n.t("proposal_pending", summary=texts.esc(display)),
-            reply_markup=confirm_kb(cid),
+            reply_markup=confirm_markup,
             parse_mode=ParseMode.HTML,
         )
         return
     rendered = i18n.t("proposal_pending", summary=texts.esc(display))
     if ux.proposal_fits(rendered):
-        await message.answer(rendered, reply_markup=confirm_kb(cid), parse_mode=ParseMode.HTML)
+        await message.answer(rendered, reply_markup=confirm_markup, parse_mode=ParseMode.HTML)
     else:
         # Длинный черновик (напр. RSA с 15 заголовками) не влезает в одно сообщение Telegram →
         # полный текст .txt-вложением, а кнопки ✅/❌ на коротком сообщении (его правит _do_confirm).
@@ -815,7 +978,7 @@ async def _present_proposal(
             message,
             full_text=display,
             header_html=i18n.t("proposal_long_header"),
-            reply_markup=confirm_kb(cid),
+            reply_markup=confirm_markup,
             parse_mode=ParseMode.HTML,
         )
 
@@ -1095,6 +1258,24 @@ async def _active_read_account(chat_id: int) -> str:
         return DRAFT_ACCOUNT_ID
 
 
+async def _keyword_metrics_account(chat_id: int) -> tuple[str, bool]:
+    """P1-7: аккаунт для Keyword Planner-метрик (READ-ONLY). Идеи ключей — рыночные (агрегат Google,
+    не данные аккаунта), поэтому годится ЛЮБОЙ живой аккаунт; тест/Draft отдаёт ПУСТЫЕ метрики →
+    мало слов и мёртвая сортировка. Берём: (1) активный живой read-аккаунт оператора; иначе (2)
+    первый живой дочерний из обхода MCC (read-allowed); иначе (3) Draft (деградация). Возвращает
+    (customer_id, is_live). Замок мутаций НЕ трогается — это чтение; generate_keyword_ideas сам
+    зовёт ensure_read_allowed на выбранном аккаунте."""
+    from ads.client import discovered_read_children
+
+    acct = await _active_read_account(chat_id)
+    if acct and str(acct) != str(DRAFT_ACCOUNT_ID):
+        return acct, True
+    for cid in sorted(discovered_read_children()):
+        if str(cid) != str(DRAFT_ACCOUNT_ID):
+            return cid, True
+    return (acct or DRAFT_ACCOUNT_ID), False
+
+
 async def _heal_if_stuck_global(m: Message, acct: str) -> None:
     """Само-восстановление «залипшего» аккаунта чтения. Если read упал на НЕ-Draft аккаунте, который
     сейчас выбран ГЛОБАЛЬНО (/account), — сбрасываем выбор на Draft и сообщаем. Так один недоступный
@@ -1198,11 +1379,14 @@ async def _start_report_picker(m: Message, target: str) -> None:
     )
 
 
-async def _present_report_campaigns(m: Message, target: str, acct_row) -> None:
+async def _present_report_campaigns(m: Message, target: str, acct_row, *, cq=None) -> None:
     """После выбора аккаунта: запомнить его ТОЛЬКО для ЭТОГО отчёта (_REPORT_SEL, в памяти) и показать
     «Весь аккаунт» + список кампаний. ВАЖНО: НЕ трогаем глобальный активный аккаунт (_save_selected_
     account) — иначе выбор аккаунта для разового отчёта «залипал» бы на /keywords и /status и один
-    недоступный аккаунт ломал бы всё. Глобальный аккаунт чтения переключает только команда /account."""
+    недоступный аккаунт ломал бы всё. Глобальный аккаунт чтения переключает только команда /account.
+
+    cq!=None (тап в пикере) ⇒ РЕДАКТИРУЕМ сообщение под кнопкой вместо нового (P0-3: без дублей при
+    ходьбе аккаунт→кампания→период). cq=None (вход по команде/reply-кнопке) ⇒ обычный .answer."""
     cid = normalize_customer_id(getattr(acct_row, "id", "") or DRAFT_ACCOUNT_ID)
     try:
         ensure_read_allowed(cid)  # TOCTOU: обход мог измениться между рендером и тапом
@@ -1225,7 +1409,14 @@ async def _present_report_campaigns(m: Message, target: str, acct_row) -> None:
     except Exception:  # noqa: BLE001 — нет кампаний/сбой чтения/аккаунт недоступен → только «Весь аккаунт»
         camps = []
     _REPORT_CAMP_CACHE[m.chat.id] = camps
-    await m.answer(i18n.t("report_pick_campaign"), reply_markup=report_campaigns_kb(camps, target))
+    if cq is not None:
+        await _safe_edit(
+            cq, i18n.t("report_pick_campaign"), reply_markup=report_campaigns_kb(camps, target)
+        )
+    else:
+        await m.answer(
+            i18n.t("report_pick_campaign"), reply_markup=report_campaigns_kb(camps, target)
+        )
 
 
 async def _load_model_override() -> str | None:
@@ -1377,6 +1568,9 @@ async def _run_export(
         await m.answer_document(FSInputFile(path, filename=fname))
     except Exception as e:  # сеть/доступ/SDK/openpyxl
         # A4: аккаунт деактивирован/нет прав → честная причина (не общее «не удалось сформировать»)
+        await _capture_cmd_error(
+            e, "cmd:report_xlsx"
+        )  # A2: в /diag + алерт (access-ошибки пропустит)
         key = "err_account_inactive" if is_account_access_error(e) else "err_report_make"
         await m.answer(i18n.t(key, err=ux.err_text(e)))
     finally:
@@ -1405,6 +1599,7 @@ async def _run_sheets(
     except Exception as e:  # сеть/доступ/SDK/нет OAuth-scope Sheets
         # A4: если корень — деактивированный/недоступный аккаунт (ошибка Ads, НЕ Sheets-scope),
         # не показываем сбивающую подсказку про drive.file — даём честную причину.
+        await _capture_cmd_error(e, "cmd:sheets")  # A2: в /diag + алерт (access-ошибки пропустит)
         key = "err_account_inactive" if is_account_access_error(e) else "err_sheets"
         await m.answer(i18n.t(key, err=ux.err_text(e)))
         return
@@ -1435,6 +1630,31 @@ def _mcc_period_factory(arg: str | None):
     return factory
 
 
+# P1-8: NL «экспорт статистики всех аккаунтов [за N дней]» → детерминированно роутим в /mcc (полный
+# xlsx по всем дочерним). get_stats одно-аккаунтный, поэтому агент раньше отдавал только один аккаунт.
+_EXPORT_ALL_RE = re.compile(
+    r"(?=.*(?:всех?\s+аккаунт|по\s+всем\s+аккаунт|all\s+accounts|каждому\s+аккаунт|"
+    r"всем\s+акк|все\s+акк|все[хй]\s+кампани|all\s+campaigns))"
+    r"(?=.*(?:экспорт|эскпорт|выгруз|статистик|отч[её]т|report|export|сводк|данны|stats))",
+    re.IGNORECASE | re.DOTALL,
+)
+_PERIOD_DAYS_RE = re.compile(
+    r"(?:за|for|last|последн\w*)\s+(\d{1,3})\s*(?:дн\w*|day|день)|(\d{1,3})\s*(?:дн\w*|day)",
+    re.IGNORECASE,
+)
+
+
+def is_export_all_accounts(text: str) -> tuple[bool, str | None]:
+    """NL «экспорт статистики всех аккаунтов [за N дней]» → (True, период-arg для _send_mcc).
+    Детерминированный роутинг в сводный MCC-экспорт (одно-аккаунтный get_stats это не покрывал)."""
+    t = text or ""
+    if not _EXPORT_ALL_RE.search(t):
+        return (False, None)
+    md = _PERIOD_DAYS_RE.search(t)
+    days = (md.group(1) or md.group(2)) if md else None
+    return (True, days)
+
+
 async def _send_mcc(m: Message, arg: str | None) -> None:
     """§8: сводный отчёт по ВСЕМ дочерним аккаунтам ВСЕХ настроенных MCC (2F: раньше — только
     основной login_customer_id; вторичные из GOOGLE_ADS_LOGIN_CUSTOMER_IDS не попадали в /mcc,
@@ -1457,6 +1677,7 @@ async def _send_mcc(m: Message, arg: str | None) -> None:
     from reports.service import summary_text_mcc
 
     parts: list[str] = []
+    summaries: list = []  # P1-8: копим сводки для xlsx-выгрузки по всем аккаунтам
     async with ux.typing_action(m):
         for manager_id in managers:
             try:
@@ -1469,6 +1690,7 @@ async def _send_mcc(m: Message, arg: str | None) -> None:
                     period_for=_mcc_period_factory(arg),
                 )
                 parts.append(summary_text_mcc(summary))
+                summaries.append((manager_id, summary))
             except Exception as e:  # сеть/доступ/SDK — один MCC не валит остальные
                 await capture_exception(e, where=f"mcc:{manager_id}")
                 parts.append(i18n.t("mcc_manager_failed", mid=texts.esc(manager_id)))
@@ -1477,6 +1699,38 @@ async def _send_mcc(m: Message, arg: str | None) -> None:
         return
     # HTML + деление по строкам: у большого MCC сводка длиннее лимита Telegram (полная — в /export).
     await ux.send_html_chunks(m, "\n\n———\n\n".join(parts))
+    # P1-8: полная таблица по ВСЕМ дочерним аккаунтам — .xlsx-вложением (раньше был только текст;
+    # build_mcc_workbook/write_mcc_xlsx существовали, но не вызывались ни из одной команды).
+    await _send_mcc_xlsx(m, summaries, period)
+
+
+async def _send_mcc_xlsx(m: Message, summaries: list, period) -> None:
+    """P1-8: приложить .xlsx по каждой MCC-сводке (лист «Аккаунты» — по строке на дочерний). Сбой
+    выгрузки не роняет уже отправленный текстовый дайджест (best-effort)."""
+    import os
+    import tempfile
+
+    if not summaries:
+        return
+    from reports.xlsx import write_mcc_xlsx
+
+    async with ux.upload_action(m):
+        for manager_id, summary in summaries:
+            path: str | None = None
+            try:
+                fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_mcc_")
+                os.close(fd)
+                await asyncio.to_thread(write_mcc_xlsx, summary, path)
+                fname = f"aimash_mcc_{manager_id}_{period.date_from}_{period.date_to}.xlsx"
+                await m.answer_document(FSInputFile(path, filename=fname))
+            except Exception as e:  # noqa: BLE001 — xlsx best-effort, текст уже ушёл
+                log.warning("mcc xlsx не сформирован mid=%s: %s", manager_id, type(e).__name__)
+            finally:
+                if path and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
 
 
 # ── RSA-генерация (фаза 2.C): /rsa визард → курация → confirm-гейт create_rsa ─────
@@ -1815,7 +2069,10 @@ async def _kw_run(
             months=months,
         )
 
-    acct = await _active_read_account(chat_id)
+    # P1-7: метрики берём с ЖИВОГО аккаунта (тест/Draft отдаёт нули → мало слов и мёртвая сортировка).
+    acct, is_live = await _keyword_metrics_account(chat_id)
+    if not is_live:
+        await target.answer(i18n.t("kw_metrics_test_note"))
     try:
         ideas = await _gen(acct)
     except Exception as e:  # сеть/доступ/SDK/валидация ввода
@@ -2101,6 +2358,24 @@ def _cc_apply_settings_patch(cur: dict, patch) -> dict:
         s["campaign_name"] = patch.campaign_name
     if patch.currency:
         s["currency"] = patch.currency
+    # P0-4: даты/сети/расписание правкой РАНЬШЕ терялись (веток не было — только язык/бюджет/гео).
+    start = _valid_iso_date(patch.start_date)
+    if start:
+        s["start_date"] = start
+    end = _valid_iso_date(patch.end_date)
+    if end:
+        s["end_date"] = end
+    if s.get("start_date") and s.get("end_date") and s["end_date"] < s["start_date"]:
+        s["end_date"] = None  # конец раньше старта — мусор, не несём в SDK
+    if patch.networks:
+        s["networks"] = patch.networks
+        bd.discard("networks")
+    if patch.ad_schedule:
+        blocks = parse_ad_schedule(patch.ad_schedule)
+        if blocks is not None:  # нераспознанное расписание не трогает текущее
+            s["ad_schedule_blocks"] = blocks
+            s["ad_schedule"] = schedule_human(blocks, patch.ad_schedule)
+            bd.discard("ad_schedule")
     if patch.bidding_strategy or patch.goal:
         strat, tcpa, payment = derive_bidding(patch)
         s["bidding_strategy"] = strat
@@ -2110,6 +2385,10 @@ def _cc_apply_settings_patch(cur: dict, patch) -> dict:
             s["payment_model"] = payment
         by.discard("bidding_strategy")
         bd.discard("bidding_strategy")
+    elif patch.target_cpa_units is not None:
+        s["target_cpa_micros"] = units_to_micros(patch.target_cpa_units)
+    if patch.payment_model:
+        s["payment_model"] = patch.payment_model
     s["by_analogy"] = sorted(by)
     s["by_default"] = sorted(bd)
     return s
@@ -2750,7 +3029,16 @@ async def _cc_present_stage2(target: Message, chat_id: int, session_id: str, sta
         url = kw.get("sheet_url") or f"https://docs.google.com/spreadsheets/d/{kw['sheet_id']}/edit"
         await state.set_state(CreateCampaignWizard.kw_verify)
         await target.answer(i18n.t("cc_kw_sheet_ready", url=url))
-        await target.answer(i18n.t("cc_kw_verify_prompt"), reply_markup=nav_kb())
+        # P0-2: если сгенерированный список уже сохранён — предлагаем «Использовать эти ключи»
+        # (без обязательной правки таблицы); старые черновики без list — прежний промпт со ссылкой.
+        if kw.get("list"):
+            await target.answer(
+                i18n.t("cc_kw_verify_prompt_v2", n=len(kw.get("list") or [])),
+                reply_markup=cc_kw_verify_kb(),
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await target.answer(i18n.t("cc_kw_verify_prompt"), reply_markup=nav_kb())
         return
     if kw.get("list") and kw.get("verified"):
         # (б) список уже верифицирован: обзор + гейт подтверждения (как в _cc_save_keywords).
@@ -3067,6 +3355,28 @@ async def _video_mint_proposal(
             await asyncio.to_thread(clear_pending_media, logo_media_id)
         await target.answer(i18n.t("err_validate", err=ux.err_text(e)))
         return
+    # P1-9: апфронт-предупреждение, если дневной бюджет ниже типичного минимума DG/Video для валюты
+    # аккаунта мутации (Draft) — иначе Google отклонит с per_day_minimum уже ПОСЛЕ подтверждения.
+    try:
+        from ads.client import build_client_async
+        from core.limits import dg_video_min_daily_units
+
+        acct_cur = await _read_currency(
+            await build_client_async(DRAFT_ACCOUNT_ID), DRAFT_ACCOUNT_ID
+        )
+        min_units = dg_video_min_daily_units(acct_cur)
+        have_units = validated["budget_daily_micros"] / 1_000_000
+        if have_units < min_units:
+            await target.answer(
+                i18n.t(
+                    "dg_budget_below_min",
+                    cur=acct_cur or "",
+                    minv=f"{min_units:g}",
+                    have=f"{have_units:g}",
+                )
+            )
+    except Exception:  # noqa: BLE001 — предупреждение best-effort, не роняем показ черновика
+        pass
     summary = texts.fmt_video_proposal_summary(
         kind,
         params["campaign_name"],
@@ -3345,6 +3655,65 @@ async def _clone_from_intent(m: Message, brief: dict) -> None:
     )
 
 
+# ── advisor: рекомендации (advisory, read-only) ───────────────────────────────────
+async def _advise_run(
+    target: Message,
+    chat_id: int,
+    *,
+    topic: str | None = None,
+    account: str | None = None,
+    period_days: int | None = None,
+    source: str = "advise",
+) -> None:
+    """Показать РЕКОМЕНДАЦИИ по аккаунту. READ-ONLY: собирает отчёт + правила (advisor.service),
+    НИЧЕГО не меняет и proposal НЕ создаёт — исполнение любого совета идёт ОТДЕЛЬНОЙ командой через
+    confirm-гейт (golden rule #1/#3). Каждая рекомендация — своим сообщением с 👍/👎 (per-rec фидбек,
+    Слой B). account/period_days — из NL-запроса («улучшить аккаунт X за 7 дней»); account резолвится
+    через композитный read-замок (запрещённый → внятный отказ). Сбой чтения → ошибка, не мутация."""
+    from advisor import service as advisor_service
+    from core.access import resolve_read_account
+
+    try:  # тот же резолв, что /report и _do_read: read-замок × пер-юзер грант (fail-closed)
+        acct = await resolve_read_account(chat_id, account)
+    except PermissionError:
+        await target.answer(i18n.t("loop_account_denied", account=str(account or "")))
+        return
+    except LookupError as e:
+        await target.answer(i18n.t("loop_account_not_found", detail=str(e)))
+        return
+    except Exception:  # noqa: BLE001 — сбой резолва настройки не должен ломать /advise
+        acct = await _active_read_account(chat_id)
+    lang = i18n.get_lang(chat_id)
+    topics = None if not topic or topic == "all" else [topic]
+    days = period_days if isinstance(period_days, int) and period_days > 0 else 30
+    async with ux.typing_action(target):
+        try:
+            rec_set = await advisor_service.build_recommendations(
+                chat_id, acct, topics=topics, source=source, lang=lang, period_days=days
+            )
+        except Exception as e:  # сеть/доступ/SDK — не роняем денежный путь, показываем ошибку
+            await target.answer(i18n.t("advise_error", err=ux.err_text(e)))
+            return
+    proactive = str(await _load_ui_pref(chat_id, "advise_proactive")).lower() in (
+        "1",
+        "true",
+        "on",
+        "yes",
+    )
+    if not rec_set.recs:
+        await target.answer(
+            i18n.t("advise_empty", lang), reply_markup=advise_header_kb(proactive, lang)
+        )
+        return
+    await target.answer(
+        i18n.t("advise_header", lang, account=rec_set.account, period=rec_set.period_label),
+        reply_markup=advise_header_kb(proactive, lang),
+    )
+    for r in rec_set.recs:
+        await target.answer(r.body or "", reply_markup=advise_feedback_kb(r.rec_uid, lang))
+    await target.answer(i18n.t("advise_disclaimer", lang))
+
+
 # ── Свободный текст → агент ───────────────────────────────────────────────────────
 # ── ingest: приём файла → чтение → задача (бриф/ключи/данные для агента) ─────────────
 async def _cc_keywords_from_document(m: Message, state: FSMContext, text: str, name: str) -> None:
@@ -3400,6 +3769,17 @@ async def _dispatch_command_result(
         await _kw_start_from_intent(m, res.get("brief", {}), state)
     elif t == "clone_intent":
         await _clone_from_intent(m, res.get("brief", {}))
+    elif t == "advise_intent":
+        # «Что улучшить (аккаунт X за N дней)?» → рекомендации (advisory, read-only). Ничего не
+        # создаёт и не меняет — исполнение любого совета идёт отдельной командой через confirm-гейт.
+        brief = res.get("brief", {})
+        await _advise_run(
+            m,
+            m.chat.id,
+            topic=brief.get("topic"),
+            account=brief.get("account"),
+            period_days=brief.get("period_days"),
+        )
     elif t == "clarify":
         await m.answer("❓ " + res["question"])
     elif t == "read":
@@ -3425,6 +3805,8 @@ async def _run_task_with_context(
 ) -> None:
     """Задача + СПРАВОЧНЫЙ КОНТЕНТ (из файла/ссылки) → агент → роутинг исхода (как on_text).
     Мутации всё равно за confirm-гейтом — контент это данные, не команды."""
+    if await _llm_budget_or_reply(m):  # C3: пер-юзер дневной потолок LLM (fail-closed)
+        return
     ctx = _build_agent_context(m.chat.id)  # C1/C3: последняя кампания/аккаунт + история реплик
     async with ux.typing_action(m):
         res = await handle_command(
@@ -3474,6 +3856,14 @@ async def _camp_mutate(cq: CallbackQuery, idx: int, operation: str) -> None:
 
 
 # ── Inline: подтверждение/отмена черновика (confirm-гейт) ─────────────────────────
+async def _do_confirm_stage1(cq: CallbackQuery, cid: str) -> None:
+    """P1-6: первый шаг ДВОЙНОГО подтверждения необратимого удаления. НЕ исполняем — только меняем
+    клавиатуру на финальную (⚠️ Да, удалить безвозвратно / Отмена) и предупреждаем. Черновик
+    остаётся pending; реальное исполнение — второй тап (action=ok → _do_confirm)."""
+    await cq.answer(i18n.t("delete_confirm_alert"), show_alert=True)
+    await _safe_edit_markup(cq, confirm_final_kb(cid))
+
+
 async def _do_confirm(cq: CallbackQuery, cid: str) -> bool:
     """Подтвердить и исполнить черновик. Возвращает True только если мутация реально применена
     (finalize записан); False на stale/сбое execute. Вызыватели, у которых от исхода зависит
@@ -3531,6 +3921,17 @@ async def _do_confirm(cq: CallbackQuery, cid: str) -> bool:
     # Успех: мутация применена и finalize записан. Косметический сбой UI-edit НЕ должен пометить
     # успешную операцию как failed — отдельный try/except, вне ветки record_failure.
     log.info("мутация применена cid=%s chat=%s", cid, chat_id)  # денежный путь — успех в лог
+    # Слой B (advisor): связать applied-мутацию с открытой рекомендацией → замер результата позже.
+    # Best-effort, только ЛОКАЛЬНАЯ БД (не мутация Ads): успех операции от этого не зависит.
+    if snap is not None:
+        try:
+            from advisor.outcome import link_applied_mutation
+
+            await link_applied_mutation(
+                chat_id, snap.operation, snap.params or {}, snap.customer_id, cid
+            )
+        except Exception:  # noqa: BLE001 — Слой B необязателен, денежный путь не роняем
+            log.debug("advise outcome link не выполнен cid=%s", cid)
     # 3C: человекочитаемый итог вместо сырого dict; fmt_mutation_result отдаёт ГОТОВЫЙ HTML
     # (эскейп внутри) — texts.esc здесь дал бы двойное экранирование.
     human_result = texts.fmt_mutation_result(snap.operation if snap else "", result)
@@ -3677,6 +4078,18 @@ async def main() -> None:
     except Exception as e:  # БД недоступна: НЕ даём дефолтному excepthook напечатать DSN с паролем
         log.error("init_db не удалось — бот не стартует: %s", type(e).__name__, exc_info=e)
         return
+    # B2: гард одного polling-инстанса (Postgres advisory lock; на SQLite no-op). Занят другим
+    # инстансом → чисто выходим, НЕ лезем polling'ом (иначе Telegram 409 Conflict у обоих). Сбой
+    # самого захвата (БД мигнула) не должен ронять старт — тогда работаем как раньше (без гарда).
+    try:
+        if not await acquire_single_instance_lock():
+            log.warning(
+                "другой инстанс Aimash уже держит polling-lock — этот процесс выходит "
+                "(защита от 409 Conflict). Убей дубль или дождись его остановки."
+            )
+            return
+    except Exception as e:  # noqa: BLE001 — сбой захвата lock не критичен (деградируем без гарда)
+        log.warning("single-instance lock не захвачен (%s) — стартую без гарда", type(e).__name__)
     try:  # §8/мультиаккаунт: расшифровать per-account OAuth-токены (oauth_tokens) в рантайм-кэш,
         # чтобы build_client(child) для дочерних под другими MCC брал их refresh-токен/login_customer_id.
         # Сбой не критичен — Draft/тест-MCC покрыт единым .env-токеном (см. ads.client._cfg_for).
@@ -3775,6 +4188,7 @@ async def main() -> None:
             "циклического double-import при `python -m bot.main`. См. алиас sys.modules у dp."
         )
     log.info("Aimash bot запущен (polling).")
+    await _notify_admins_started(bot)  # B1: readiness-пинг админам (живой сигнал успешного деплоя)
     # start_polling сам ставит обработчики SIGINT/SIGTERM и завершается штатно по сигналу;
     # finally гарантирует graceful-освобождение ресурсов (P2 lifecycle), что бы ни остановило polling.
     try:
@@ -3797,6 +4211,7 @@ async def main() -> None:
                 sched.shutdown(wait=True)
             except Exception as e:  # noqa: BLE001 — выключение не должно ронять teardown
                 log.warning("scheduler.shutdown(wait=True) сбой: %s", type(e).__name__)
+        await release_single_instance_lock()  # B2: отпустить polling-lock (до закрытия пула)
         await (
             dispose_engine()
         )  # закрыть пул соединений БД (иначе на остановке висят коннекты asyncpg)

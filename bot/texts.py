@@ -120,6 +120,7 @@ HELP = (
     "/export [период] — глубокий отчёт .xlsx · /sheets [период] — в Google Sheets (ссылка)\n"
     "/mcc [период] — сводка по всем дочерним аккаунтам MCC (подытоги по валютам)\n"
     "/quota — дневная квота операций Google Ads API\n"
+    "/advise — 💡 рекомендации по улучшению аккаунта (подсказки, ничего не меняю сам)\n"
     "/alerts — пороги алертов аномалий (всплеск расхода / падение конверсий)\n\n"
     "<b>ℹ️ Клиенты</b>\n"
     "/clients — база знаний: профиль клиента текстом + краулинг сайта → релевантная генерация\n"
@@ -214,9 +215,11 @@ MODEL_BAD = (
 # ── Keyword research (Фаза 3, БЛОК E) ────────────────────────────────────────────
 KW_ASK = (
     "🔍 <b>Подбор ключевых слов</b>\n"
-    "Пришли сид-слова через запятую и/или ссылку одним сообщением.\n"
-    "Например: <code>доставка цветов, букеты, 101 роза</code>\n"
-    "или ссылку <code>https://example.com</code>"
+    "Пришлите сид-слова через запятую и/или ссылку одним сообщением — можно вставить <b>свои "
+    "ключи</b> или просто <b>описать нишу словами</b>, я подберу похожие и оценю объёмы.\n"
+    "Например (нажмите, чтобы скопировать): <code>доставка цветов, букеты, 101 роза</code>\n"
+    "или ссылку <code>https://example.com</code>\n"
+    "<i>Спецсимволы не нужны. Для точных метрик выберите живой аккаунт: /account</i>"
 )
 KW_SEARCHING = "⏳ Подбираю ключевые слова и группирую по интенту…"
 KW_EMPTY = "Ничего не нашлось по этим сидам. Попробуй другие слова или ссылку: /keywords"
@@ -734,7 +737,16 @@ def fmt_video_proposal_summary(
 
 # ── Человекочитаемая сводка черновика мутации (ТЗ §5) ────────────────────────────
 KW_INLINE_MAX = 20  # ключей показываем в сводке черновика; больше — во вложении .xlsx
-_CURRENCY_HUMAN = {"USD": "USD", "UAH": "грн", "EUR": "EUR", "percent": "%"}
+_CURRENCY_HUMAN = {
+    "USD": "USD",
+    "UAH": "грн",
+    "EUR": "EUR",
+    "AUD": "AUD",
+    "CZK": "Kč",
+    "PLN": "zł",
+    "GBP": "GBP",
+    "percent": "%",
+}
 
 
 def match_type_human(mt: str, lang: str | None = None) -> str:
@@ -890,6 +902,11 @@ def fmt_mutation_summary(operation: str, params: dict, lang: str | None = None) 
         b = _before(params)
         old = b.get("before_name") if (b and b.get("kind") == "name") else c
         return f"Кампания «{old}» → переименовать в «{new}»."
+    if operation == "remove_campaign":
+        return f"🗑 УДАЛИТЬ кампанию «{c}» целиком.\n⚠️ Действие необратимо (статус станет REMOVED)."
+    if operation == "remove_ad_group":
+        ag = params.get("ad_group", "")
+        return f"🗑 УДАЛИТЬ группу «{ag}» (кампания «{c}»).\n⚠️ Действие необратимо."
     if operation in ("pause_ad_group", "resume_ad_group"):
         ag = params.get("ad_group", "")
         b = _before(params)
@@ -1020,6 +1037,11 @@ def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
         b = _before(params)
         old = b.get("before_name") if (b and b.get("kind") == "name") else c
         return f"Campaign “{old}” → rename to “{new}”."
+    if operation == "remove_campaign":
+        return f"🗑 DELETE the whole campaign “{c}”.\n⚠️ Irreversible (status becomes REMOVED)."
+    if operation == "remove_ad_group":
+        ag = params.get("ad_group", "")
+        return f"🗑 DELETE ad group “{ag}” (campaign “{c}”).\n⚠️ Irreversible."
     if operation in ("pause_ad_group", "resume_ad_group"):
         ag = params.get("ad_group", "")
         b = _before(params)
@@ -1167,13 +1189,25 @@ def fmt_keywords_summary(
     by_idea (§7) — {ключ: KeywordIdea}; если задан, к строке ключа добавляем конкуренцию/ставку/
     сезон (то, что раньше жило ТОЛЬКО в .xlsx). irrelevant — сколько идей помечено нерелевантными
     (§19.4.2 AI-релевантность), показываем счётчиком. Усечение помечаем явно, без «тихого» обрезания."""
-    max_clusters, max_kw = 8, 6
+    # Плоский топ (15) — главная витрина «best→worst»; кластеры компактнее, полное — в .xlsx.
+    # Границы держим так, чтобы сводка влезала в лимит одного сообщения Telegram (~4096 символов).
+    max_clusters, max_kw, flat_top_n = 5, 4, 15
     by_idea = by_idea or {}
+    # P1-7: плоский топ best→worst по объёму — единый отсортированный список поверх кластеров
+    # (пользователю нужно «сразу видно, что лучше»). Полный список — во вложении .xlsx.
+    all_kw = {k for cl in clusters for k in cl.keywords}
+    flat_top = sorted(all_kw, key=lambda k: by_text.get(k, 0), reverse=True)[:flat_top_n]
     if _lang(lang) == "en":
         lines = [
             f"🔍 <b>Keywords</b> — {esc(src)}",
             f"Ideas: <b>{total}</b>, clusters: {len(clusters)}\n",
         ]
+        if flat_top:
+            lines.append("🏆 <b>Top by volume</b> (best → worst):")
+            for kw in flat_top:
+                suffix = _kw_metrics_suffix(by_idea.get(kw), currency, True)
+                lines.append(f"  • {esc(kw)} — {_thou(by_text.get(kw, 0))}/mo{suffix}")
+            lines.append("")
         for cl in clusters[:max_clusters]:
             intent = f" · <i>{esc(cl.intent)}</i>" if cl.intent else ""
             lines.append(f"<b>{esc(cl.name)}</b>{intent} ({len(cl.keywords)})")
@@ -1197,6 +1231,12 @@ def fmt_keywords_summary(
         f"🔍 <b>Ключевые слова</b> — {esc(src)}",
         f"Идей: <b>{total}</b>, кластеров: {len(clusters)}\n",
     ]
+    if flat_top:
+        lines.append("🏆 <b>Топ по объёму</b> (лучшие → слабее):")
+        for kw in flat_top:
+            suffix = _kw_metrics_suffix(by_idea.get(kw), currency, False)
+            lines.append(f"  • {esc(kw)} — {_thou(by_text.get(kw, 0))}/мес{suffix}")
+        lines.append("")
     for cl in clusters[:max_clusters]:
         intent = f" · <i>{esc(cl.intent)}</i>" if cl.intent else ""
         lines.append(f"<b>{esc(cl.name)}</b>{intent} ({len(cl.keywords)})")
@@ -1521,6 +1561,10 @@ def fmt_mutation_result(operation: str, result: object, lang: str | None = None)
             L.append(
                 f"💾 {verb}" + (f": {esc(', '.join(map(str, fields[:8])))}" if fields else ".")
             )
+    elif operation == "remove_campaign":
+        L.append("🗑 Campaign deleted." if en else "🗑 Кампания удалена.")
+    elif operation == "remove_ad_group":
+        L.append("🗑 Ad group deleted." if en else "🗑 Группа объявлений удалена.")
     else:
         # фолбэк: построчно «ключ: значение» без служебных/сырых resource_name (не repr-дамп)
         for k, v in result.items():
@@ -1579,6 +1623,62 @@ def fmt_errors(rows, lang: str | None = None) -> str:
         if msg:
             L.append(f"    ↳ {esc(msg)}")
     return "\n".join(L)
+
+
+def fmt_error_alert(rows, lang: str | None = None) -> str:
+    """A1 (§15): проактивный дайджест НОВЫХ инцидентов админу (scheduler.jobs.run_error_alerts).
+    rows — новые ErrorEvent (duck-typed, как fmt_errors), уже редактированы (секретов нет). Дедупим
+    по (exc_type, where) с подсчётом ×N — один компактный месседж вместо спама по строке на ошибку.
+    Полный traceback в чат НЕ шлём (он в /diag detail). Подробности — командой /diag."""
+    en = _lang(lang) == "en"
+    n = len(rows)
+    head = (
+        f"🚨 <b>New incidents: {n}</b> — details in /diag"
+        if en
+        else f"🚨 <b>Новых инцидентов: {n}</b> — подробнее в /diag"
+    )
+    L = [head, ""]
+    # Дедуп по (exc_type, where): сохраняем первое вхождение для показа, считаем повторы.
+    seen: dict[tuple[str, str], object] = {}
+    order: list[tuple[str, str]] = []
+    counts: dict[tuple[str, str], int] = {}
+    for e in rows:
+        key = (getattr(e, "exc_type", "") or "", getattr(e, "where", "") or "")
+        counts[key] = counts.get(key, 0) + 1
+        if key not in seen:
+            seen[key] = e
+            order.append(key)
+    for key in order[:15]:
+        e = seen[key]
+        when = e.created_at.strftime("%d.%m %H:%M") if getattr(e, "created_at", None) else "—"
+        c = counts[key]
+        cnt = f" ×{c}" if c > 1 else ""
+        L.append(
+            f"• <code>{esc(e.request_id)}</code> · {esc(e.where)} · "
+            f"<b>{esc(e.exc_type)}</b>{cnt} · {when} UTC"
+        )
+    if len(order) > 15:
+        L.append("…")
+    return "\n".join(L)
+
+
+def fmt_error_detail(row, lang: str | None = None) -> str:
+    """A3 (§15): полная карточка одного инцидента для detail-кнопки /diag (админ). traceback/message
+    УЖЕ редактированы (golden rule #5) — секретов нет. Усекаем под лимит Telegram (4096) с запасом."""
+    en = _lang(lang) == "en"
+    when = row.created_at.strftime("%d.%m %H:%M") if getattr(row, "created_at", None) else "—"
+    head = (
+        "🔍 <b>Incident</b> " if en else "🔍 <b>Инцидент</b> "
+    ) + f"<code>{esc(row.request_id)}</code>"
+    meta = f"{esc(row.where)} · <b>{esc(row.exc_type)}</b> · {when} UTC"
+    tb = (getattr(row, "traceback", "") or getattr(row, "message", "") or "").strip()
+    if len(tb) > 3500:  # Telegram лимит 4096 — оставляем запас на разметку/эскейп
+        tb = tb[:3500] + ("\n…(truncated)" if en else "\n…(усечено)")
+    if tb:
+        body = f"<pre>{esc(tb)}</pre>"
+    else:
+        body = "<i>no traceback</i>" if en else "<i>трейсбека нет</i>"
+    return f"{head}\n{meta}\n\n{body}"
 
 
 def fmt_journal(events, lang: str | None = None) -> str:

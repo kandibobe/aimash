@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from google.ads.googleads.client import GoogleAdsClient
@@ -131,7 +132,34 @@ def find_ad_group_by_name(
     return None
 
 
-_CURRENCY_HUMAN = {"USD": "USD", "UAH": "грн", "EUR": "EUR"}
+_CURRENCY_HUMAN = {
+    "USD": "USD",
+    "UAH": "грн",
+    "EUR": "EUR",
+    "AUD": "AUD",
+    "CZK": "Kč",
+    "PLN": "zł",
+    "GBP": "GBP",
+}
+
+
+# Валютные маркеры в СВОБОДНОМ тексте пользователя (коды/символы/слова RU+EN). Если пользователь
+# валюту НЕ писал, а модель всё равно проставила currency (обычно 'USD') — код снимает её, чтобы
+# голая цифра трактовалась в валюте аккаунта, а не рождала ложный currency_mismatch (петля
+# «переформулируй в AUD»). Границы слова, чтобы 'usd' в 'thousand' не сматчилось случайно.
+_CURRENCY_TOKEN_RE = re.compile(
+    r"(?:(?<![a-zа-я])(?:usd|uah|eur|aud|czk|pln|gbp|cad|nzd|chf|jpy|"
+    r"грн|гривн\w*|гривень|евро|долл\w*|долар\w*|бакс\w*|злот\w*|крон\w*|"
+    r"dollars?|euros?|hryvnia|zloty|koruna)(?![a-zа-я]))"
+    r"|[$€£¥₴]|zł|kč",
+    re.IGNORECASE,
+)
+
+
+def detect_currency_token(text: str) -> bool:
+    """True, если в тексте пользователя есть явный валютный маркер (код/символ/слово). Голую цифру
+    без маркера трактуем в валюте аккаунта (golden rule #4: FX нет, «было→станет» правдив)."""
+    return bool(_CURRENCY_TOKEN_RE.search(text or ""))
 
 
 def currency_mismatch(operation: str, params: dict, account_currency: str) -> str | None:
@@ -156,8 +184,9 @@ def currency_mismatch(operation: str, params: dict, account_currency: str) -> st
     if str(claimed).strip().upper() != acct:
         human = _CURRENCY_HUMAN.get(acct, acct)
         return (
-            f"Сумма указана в {claimed}, а аккаунт ведётся в {human}. "
-            f"Конвертацию валют не делаю — переформулируй сумму в {human}."
+            f"Вы указали сумму в {claimed}, а аккаунт ведётся в {human}. "
+            f"Конвертацию валют я не делаю. Повторите сумму в {human} "
+            f"(например «бюджет 100 {human}») — или пришлите просто число, и я приму его в {human}."
         )
     return None
 

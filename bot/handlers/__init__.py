@@ -26,6 +26,7 @@ HANDLER_MODULES: tuple[str, ...] = (
     "campaign_wizard",
     "clients_kb",
     "templates_recent",
+    "advise_flow",  # advisor: 👍/👎 фидбек (AdviseCB) — только запись, без мутаций
     "confirm_flow",
     "fallback",  # catch-all on_text — ПОСЛЕДНИМ (иначе LLM-фолбэк глотает команды/визарды)
 )

@@ -10,17 +10,25 @@
 ## Задачи и кадэнс (`scheduler/service.py`)
 | Задача | Триггер по умолчанию | env | Что делает |
 |---|---|---|---|
-| `run_scheduled_report` | cron **09:00** ежедневно | `REPORT_SCHEDULE` | плановый отчёт за последние 7 дн. → рассылка whitelisted-операторам |
+| `run_scheduled_report` (глобальная) | cron **09:00** ежедневно | `REPORT_SCHEDULE` | плановый отчёт за последние 7 дн. → рассылка операторам БЕЗ персонального расписания |
+| `run_scheduled_report` (персональная, `only_chat`) | cron из `UserSettings.report_schedule` | — (per-user) | §14: свой отчёт оператору с собственным расписанием (`register_user_report_schedules` на старте) |
 | `run_anomaly_check` | каждые **6 ч** | `ANOMALY_INTERVAL_HOURS` | week-over-week сравнение, алерт при спайке расхода / падении конверсий |
 | `cleanup_stale_proposals` | каждые **60 мин** | `CLEANUP_INTERVAL_MINUTES` | просроченные `pending`-черновики → `rejected` (с аудитом) |
 | `cleanup_stale_campaign_drafts` | каждые **60 мин** | `CAMPAIGN_DRAFT_TTL_HOURS` (72) | §19: активные черновики визарда старше TTL → `abandoned` (переживают рестарт, но не вечно) |
 | `reconcile_stale_crawls` | каждые **60 мин** | `CRAWL_STALE_MINUTES` (30) | §20.4: зависшие `running` crawl_jobs (процесс умер на рестарте) → `failed` |
 | `reconcile_stale_executing` | каждые **60 мин** + прогон сразу на старте | `EXECUTING_STALE_MINUTES` (30) | §12: `executing`-черновики (крэш ПОСЛЕ claim — исход мутации в Ads НЕИЗВЕСТЕН) → терминальный `needs_review` + audit + уведомление владельца; НЕ авто-ретрай |
 
-Кадэнс задаётся из env (не зашит): cron отчётов — `REPORT_SCHEDULE`; интервалы — `ANOMALY_INTERVAL_HOURS`
-и `CLEANUP_INTERVAL_MINUTES` (последний — общий кадэнс всех очисток/реконсиляций). Получатели —
-`settings.whitelist`; пустой whitelist → задача пропускается. Дайджест/алерты локализуются
-per-recipient (язык из `/lang`), денежные суммы несут код валюты аккаунта.
+Кадэнс задаётся из env (не зашит): cron глобального отчёта — `REPORT_SCHEDULE`; интервалы —
+`ANOMALY_INTERVAL_HOURS` и `CLEANUP_INTERVAL_MINUTES` (последний — общий кадэнс всех очисток/
+реконсиляций). **Персональное расписание:** оператор с непустым `UserSettings.report_schedule` получает
+отдельную per-chat cron-джобу (`register_user_report_schedules`), а глобальная рассылка его ПРОПУСКАЕТ
+(без дубля).
+
+**Получатели** — `settings.whitelist` (env-whitelist, бутстрап), пустой ⇒ задача пропускается.
+⚠️ Планировщик — **не** hot-path и намеренно использует **только env-whitelist**, а не объединение
+env ∪ БД: операторы, добавленные в рантайме (`/adduser`, таблица `whitelist`), начинают получать
+плановые отчёты/алерты **после рестарта** процесса (плановая рассылка не критична к секунде). Дайджест/
+алерты локализуются per-recipient (язык из `/lang`), денежные суммы несут код валюты аккаунта.
 
 ## Детектор аномалий (`scheduler/anomaly.py`)
 `detect_anomalies(current, previous, thresholds)` — **чистая логика** (без SDK/сети, полностью

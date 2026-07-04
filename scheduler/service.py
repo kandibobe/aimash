@@ -148,6 +148,49 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
         misfire_grace_time=600,
         next_run_time=datetime.now(timezone.utc),
     )
+    # §advisor Слой B: замер результата применённых рекомендаций (read-only, delta+verdict в КОДЕ).
+    sched.add_job(
+        jobs.run_recommendation_followups,
+        IntervalTrigger(hours=24),
+        args=[bot],
+        id="advise_followups",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    # §advisor: проактивные рекомендации операторам с opt-in (ui_prefs.advise_proactive). READ-ONLY,
+    # не создаёт proposal. Ежедневно; по умолчанию НИКОМУ (fail-closed к анти-спаму).
+    sched.add_job(
+        jobs.run_recommendations_digest,
+        CronTrigger(hour=9, minute=30),
+        args=[bot],
+        id="advise_digest",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    # A1 (§15): проактивный алерт админам о НОВЫХ error_events. Регистрируем ТОЛЬКО если фича включена
+    # (ERROR_ALERT_INTERVAL_MINUTES > 0) — иначе no-op-джоба зря крутилась бы. next_run_time=now:
+    # первый прогон на старте ставит базлайн (max id), чтобы не спамить историей и ловить всё СВЕЖЕЕ.
+    if settings.error_alert_interval_minutes > 0:
+        sched.add_job(
+            jobs.run_error_alerts,
+            IntervalTrigger(minutes=settings.error_alert_interval_minutes),
+            args=[bot],
+            id="error_alerts",
+            replace_existing=True,
+            misfire_grace_time=300,
+            next_run_time=datetime.now(timezone.utc),
+        )
+    # C2 (§15): ретеншн-очистка растущих таблиц (error_events/crawl_jobs) — удаление старых строк
+    # (cleanup-джобы выше лишь меняют статус). audit_log НЕ трогаем (денежный реестр). Кадэнс — раз в
+    # сутки достаточно (объём растёт медленно). Регистрируем всегда: пороги=0 внутри → no-op.
+    sched.add_job(
+        jobs.purge_stale_rows,
+        IntervalTrigger(hours=24),
+        id="purge_stale_rows",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
 
     # §15 (P2-c): исключение ВЕРХНЕГО уровня джобы (вне per-account try) — в capture_exception/Sentry
     # + /diag, а не только в лог APScheduler. Листенер синхронный → планируем async-фиксацию в loop.

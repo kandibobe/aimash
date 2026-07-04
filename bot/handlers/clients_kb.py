@@ -125,7 +125,11 @@ async def cli_add_update_cb(
     await state.update_data(cli_customer_id=customer_id, cli_mode=callback_data.action)
     await state.set_state(bm.ClientInfoWizard.awaiting_text)
     await cq.answer()
-    await cq.message.answer(bm.i18n.t("cli_ask_text"), reply_markup=bm.client_input_kb())
+    await cq.message.answer(
+        bm.i18n.t("cli_ask_text"),
+        reply_markup=bm.client_input_kb(),
+        parse_mode=bm.ParseMode.HTML,  # копируемый <code>-пример
+    )
 
 
 @bm.dp.message(bm.ClientInfoWizard.awaiting_text)
@@ -236,6 +240,57 @@ async def cli_clear_cb(cq: bm.CallbackQuery, state: bm.FSMContext) -> None:
         operation="profile_clear",
         customer_id=customer_id,
         params={"customer_id": customer_id},
+        summary=summary,
+    )
+
+
+@bm.dp.callback_query(bm.ClientCB.filter(bm.F.action == "autofill"))
+async def cli_autofill_cb(
+    cq: bm.CallbackQuery, callback_data: bm.ClientCB, state: bm.FSMContext
+) -> None:
+    """§20 (P1-11): «🔎 Подтянуть из аккаунта» — собрать ФАКТЫ из Google Ads (валюта/таймзона/гео/
+    языки/домен, БЕЗ LLM, никаких выдумок) → показать «было→станет» через ТОТ ЖЕ confirm-гейт памяти
+    (profile_save/update). Ничего не сохраняется без ✅. Замок мутаций Google Ads не затрагивается."""
+    chat_id = bm._cq_chat_id(cq)
+    customer_id = bm.normalize_customer_id(callback_data.sub) or await bm._cli_selected_account(
+        state
+    )
+    if not customer_id:
+        await cq.answer(bm.i18n.t("cli_card_stale"), show_alert=True)
+        return
+    if not await bm._cli_check_access(chat_id, customer_id):
+        await cq.answer(bm.i18n.t("cli_access_denied"), show_alert=True)
+        return
+    await cq.answer()
+    await cq.message.answer(bm.i18n.t("cli_autofill_reading"))
+    # brand-подсказка (имя аккаунта) из кэша пикера — на случай, если meta обхода MCC пуста.
+    brand_hint = ""
+    for r in bm._CLI_ACCT_CACHE.get(chat_id) or []:
+        if bm.normalize_customer_id(getattr(r, "id", "")) == customer_id:
+            brand_hint = getattr(r, "name", "") or ""
+            break
+    from clients.account_facts import fetch_account_facts
+
+    try:
+        async with bm.ux.typing_action(cq.message):
+            patch = await fetch_account_facts(customer_id, brand_hint=brand_hint)
+    except Exception as e:  # noqa: BLE001 — сеть/доступ/SDK
+        await cq.message.answer(bm.i18n.t("cli_autofill_failed", err=bm.ux.err_text(e)))
+        return
+    if not patch:
+        await cq.message.answer(bm.i18n.t("cli_autofill_empty"))
+        return
+    before = await bm.CLIENTS.get_by_account(customer_id)
+    operation = "profile_update" if before is not None else "profile_save"
+    # preview_merge = ТА ЖЕ merge-семантика, что исполнит apply_upsert (§20.5) — превью правдиво.
+    after = bm.preview_merge(before, patch)
+    summary = bm.texts.fmt_client_diff(before, after, customer_id, operation=operation)
+    await bm._present_memory_proposal(
+        cq.message.bot,
+        chat_id=chat_id,
+        operation=operation,
+        customer_id=customer_id,
+        params={"customer_id": customer_id, "patch": patch, "source": "account"},
         summary=summary,
     )
 

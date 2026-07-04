@@ -43,12 +43,12 @@ def _revisions() -> dict[str, str | None]:
     return out
 
 
-def test_single_alembic_head_is_0017():
+def test_single_alembic_head_is_0018():
     revs = _revisions()
     assert revs, "не найдено ни одной миграции — сломан парс migrations/versions"
     downs = {d for d in revs.values() if d}
     heads = [r for r in revs if r not in downs]
-    assert heads == ["0017_whitelist_runtime"], (
-        f"ожидался ровно один head=0017_whitelist_runtime, получено {heads} — "
+    assert heads == ["0018_recommendations"], (
+        f"ожидался ровно один head=0018_recommendations, получено {heads} — "
         "ветвление/забытый down_revision в migrations/versions"
     )

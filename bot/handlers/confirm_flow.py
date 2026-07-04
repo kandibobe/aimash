@@ -16,6 +16,12 @@ async def on_confirm(cq: bm.CallbackQuery, callback_data: bm.ConfirmCB) -> None:
     await bm._do_confirm(cq, callback_data.cid)
 
 
+@bm.dp.callback_query(bm.ConfirmCB.filter(bm.F.action == "del1"))
+async def on_confirm_stage1(cq: bm.CallbackQuery, callback_data: bm.ConfirmCB) -> None:
+    """P1-6: первый шаг двойного подтверждения удаления (необратимо) — показать финальную кнопку."""
+    await bm._do_confirm_stage1(cq, callback_data.cid)
+
+
 @bm.dp.callback_query(bm.ConfirmCB.filter(bm.F.action == "no"))
 async def on_cancel(cq: bm.CallbackQuery, callback_data: bm.ConfirmCB) -> None:
     await bm._do_cancel(cq, callback_data.cid)

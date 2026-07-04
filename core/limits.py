@@ -26,6 +26,30 @@ MAX_RADIUS_KM: int = 2000
 # Значения, не кратные единице, API отклоняет — округляем ДО отправки, чтобы превью == созданному.
 BILLING_UNIT_MICROS: int = 10_000
 
+# P1-9: типичный ДНЕВНОЙ минимум бюджета для Demand Gen / Video (валюто-зависимый). Google требует
+# бюджет ≥ порога, иначе BUDGET…per_day_minimum. Точные пороги Google меняет — это КОНСЕРВАТИВНАЯ
+# оценка для АПФРОНТ-предупреждения (не хардблок: финальную правду говорит API, а мы гуманизируем
+# per_day_minimum-ошибку). AUD=8 подтверждён живым смоуком (scripts/live_smoke_video_dg.py).
+DG_VIDEO_MIN_DAILY_UNITS: dict[str, float] = {
+    "USD": 10.0,
+    "EUR": 10.0,
+    "GBP": 8.0,
+    "AUD": 8.0,
+    "CAD": 10.0,
+    "PLN": 40.0,
+    "CZK": 200.0,
+    "UAH": 300.0,
+}
+DG_VIDEO_MIN_DAILY_DEFAULT_UNITS: float = 10.0
+
+
+def dg_video_min_daily_units(currency: str | None) -> float:
+    """Консервативный дневной минимум бюджета DG/Video в единицах валюты аккаунта (для апфронт-
+    предупреждения). Неизвестная валюта → дефолт. Не хардблок — Google валидирует окончательно."""
+    return DG_VIDEO_MIN_DAILY_UNITS.get(
+        (currency or "").strip().upper(), DG_VIDEO_MIN_DAILY_DEFAULT_UNITS
+    )
+
 
 def round_micros(value: int) -> int:
     """Округлить денежную величину (micros) до кратной BILLING_UNIT_MICROS.

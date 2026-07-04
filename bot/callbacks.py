@@ -21,7 +21,7 @@ class ConfirmCB(CallbackData, prefix="cfm"):
 class CampCB(CallbackData, prefix="camp"):
     """Действия в меню /campaigns. idx — позиция в последнем списке кампаний (по chat_id)."""
 
-    action: str  # "menu" | "pause" | "resume" | "audience" | "back"
+    action: str  # "menu" | "pause" | "resume" | "delete" | "audience" | "geo" | "ext" | "back"
     idx: int
 
 
@@ -80,7 +80,7 @@ class MoreCB(CallbackData, prefix="more"):
     (обнаружимость: раньше только слэш-командой). Кнопка лишь МАРШРУТИЗИРУЕТ в тот же entry,
     что и команда; мутаций не создаёт."""
 
-    action: str  # "newsearch" | "newvideo" | "templates" | "recent" | "quota" | "alerts"
+    action: str  # "newsearch" | "newvideo" | "templates" | "recent" | "quota" | "alerts" | "advise"
 
 
 class PageCB(CallbackData, prefix="pg"):
@@ -217,6 +217,25 @@ class AdminCB(CallbackData, prefix="adm"):
     action: str  # "all" | "pick" | "grant" | "done"
     chat: int = 0  # целевой chat_id оператора
     cid: str = ""  # customer_id (для action='grant')
+
+
+class AdviseCB(CallbackData, prefix="adv"):
+    """advisor: обратная связь на рекомендацию (/advise). rec — rec_uid (hex 32 симв., влезает в
+    64-байт callback_data). Кнопки 👍/👎 пишут ТОЛЬКО в recommendation_feedback (Слой B) — Google Ads
+    НЕ трогают и proposal НЕ создают (инвариант test_advisor). action: up|down (голос-тогл)."""
+
+    action: str  # "up" | "down"
+    rec: str  # rec_uid (hex uuid)
+
+
+class DiagCB(CallbackData, prefix="diag"):
+    """A3 (§15): кнопки под /diag (последние error_events). Read-only навигация — БД/Ads не мутирует.
+    action: refresh (перечитать) | today (только за сегодня UTC) | all (снять фильтр) |
+    detail (полный редактированный traceback по request_id — ТОЛЬКО админ). rid — request_id
+    (≤16 симв., влезает в 64-байт callback_data)."""
+
+    action: str  # "refresh" | "today" | "all" | "detail"
+    rid: str = ""  # request_id (для detail)
 
 
 class ExtCB(CallbackData, prefix="ext"):

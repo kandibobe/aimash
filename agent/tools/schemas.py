@@ -7,9 +7,9 @@ Read-инструменты выполняются сразу; mutation-инст
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
 
 from adcopy.validate import (
     RSA_MAX_DESCRIPTIONS,
@@ -23,7 +23,58 @@ from adcopy.validate import validate as _rsa_validate
 from ads.validation import normalize_keywords
 from core.limits import MONEY_MAX_MICROS, MONEY_MAX_UNITS
 
-Currency = Literal["USD", "UAH", "EUR", "percent"]
+# Валюта: ЛЮБОЙ 3-буквенный ISO-код (не Literal из 4 значений — иначе реальные аккаунты в
+# AUD/CZK/PLN/… роняли update_budget/update_bid ValidationError'ом ДО валютной сверки, golden rule
+# #4/§9). Плюс сентинел "percent" для процентных режимов. Конвертации валют НЕТ (ads.resolve): код
+# нормализует к верхнему регистру и сверяет с валютой аккаунта на предпросмотре, FX не делает.
+_CURRENCY_ALIASES = {
+    "$": "USD",
+    "US$": "USD",
+    "USD": "USD",
+    "€": "EUR",
+    "EUR": "EUR",
+    "ГРН": "UAH",
+    "UAH": "UAH",
+    "A$": "AUD",
+    "AU$": "AUD",
+    "AUD": "AUD",
+    "ZŁ": "PLN",
+    "PLN": "PLN",
+    "KČ": "CZK",
+    "CZK": "CZK",
+}
+_CURRENCY_ISO_RE = re.compile(r"^[A-Z]{3}$")
+
+
+def _norm_currency(v: str) -> str:
+    """Нормализует валюту: 'percent' сентинел; символ/слово-алиас → ISO; иначе любой 3-буквенный
+    ISO-код в верхнем регистре. Пусто/мусор → ValidationError (модель обязана дать код или опустить)."""
+    s = str(v).strip()
+    if not s:
+        raise ValueError("пустая валюта — укажи 3-буквенный ISO-код (USD/EUR/AUD/…) или опусти")
+    if s.lower() == "percent":
+        return "percent"
+    su = s.upper()
+    if su in _CURRENCY_ALIASES:
+        return _CURRENCY_ALIASES[su]
+    if _CURRENCY_ISO_RE.match(su):
+        return su
+    raise ValueError(
+        f"неизвестная валюта '{v}' — укажи 3-буквенный ISO-код (USD/EUR/AUD/…) или опусти "
+        "(тогда сумма трактуется в валюте аккаунта)"
+    )
+
+
+def _norm_money_currency(v: str) -> str:
+    """Как _norm_currency, но 'percent' запрещён — для денежных ассетов (промо/прайс) нужен ISO-код."""
+    c = _norm_currency(v)
+    if c == "percent":
+        raise ValueError("для денежной суммы нужен ISO-код валюты (USD/EUR/AUD/…), не 'percent'")
+    return c
+
+
+Currency = Annotated[str, AfterValidator(_norm_currency)]
+MoneyCurrency = Annotated[str, AfterValidator(_norm_money_currency)]
 MatchType = Literal["broad", "phrase", "exact"]
 
 # §19: потолок числа ключевых слов на кампанию (одна ad group). Верифицированный менеджером список
@@ -48,6 +99,8 @@ MUTATION_TOOLS = {
     "pause_campaign",
     "resume_campaign",
     "update_campaign",
+    "remove_campaign",
+    "remove_ad_group",
     "pause_ad_group",
     "resume_ad_group",
     "set_geo_proximity",
@@ -68,7 +121,7 @@ MUTATION_TOOLS = {
     "add_price_asset",
     "remove_asset_link",
 }
-READ_TOOLS = {"get_stats", "generate_rsa", "keyword_research", "clone_campaign"}
+READ_TOOLS = {"get_stats", "generate_rsa", "keyword_research", "clone_campaign", "analyze_account"}
 
 
 # ── Pydantic-схемы (валидация в коде, не на доверии к модели) ───────────────────
@@ -204,6 +257,18 @@ class ResumeAdGroup(BaseModel):
     ad_group: str
 
 
+class RemoveCampaign(BaseModel):
+    # §3 удаление кампании (необратимо, status→REMOVED). Двойное подтверждение — в UI (bot).
+    # Замок аккаунта (Draft-only) — на исполнении (ensure_allowed). campaign — имя кампании.
+    campaign: str
+
+
+class RemoveAdGroup(BaseModel):
+    # Удаление группы объявлений внутри кампании (необратимо). Группу ищем по имени в кампании.
+    campaign: str
+    ad_group: str
+
+
 class SetGeoProximity(BaseModel):
     """Радиус-таргетинг кампании (proximity). Адрес — СТРУКТУРНЫЙ (city_name + country_code),
     Google сам геокодит точку — клиентский геокодинг не нужен. country_code по умолчанию UA
@@ -328,6 +393,16 @@ class GetStats(BaseModel):
     period_days: int = Field(default=30, gt=0, le=400)
 
 
+class AnalyzeAccount(BaseModel):
+    """Read-намерение: проанализировать аккаунт и дать РЕКОМЕНДАЦИИ (advisory). Модель лишь роутит
+    намерение — контент рекомендаций генерит advisor/ (КОД + advisory-LLM), а любое действие по
+    совету идёт ОТДЕЛЬНОЙ командой через confirm-гейт. Ничего не меняет в аккаунте (в READ_TOOLS)."""
+
+    account: str | None = None
+    period_days: int = Field(default=30, gt=0, le=400)
+    topic: Literal["optimize", "keywords", "rsa", "structure", "all"] = "all"
+
+
 class KeywordResearch(BaseModel):
     """Read-tool: подбор ключевых слов (advisory). Модель заполняет сиды и/или URL; объём/
     конкуренцию и кластеризацию считает КОД (ничего в аккаунте не меняется).
@@ -336,7 +411,8 @@ class KeywordResearch(BaseModel):
     network (Search / Search+Partners), months (историческое окно метрик 1..48) — раньше были
     доступны только в визарде /keywords, теперь и через NL («ключи для X по Кении, Search+партнёры»)."""
 
-    seeds: list[str] = Field(default_factory=list, max_length=10)
+    # P1-7: до 25 сид-фраз (было 10) — пользователь может перечислить/вставить свои ключи прозой.
+    seeds: list[str] = Field(default_factory=list, max_length=25)
     url: str | None = None
     language: Literal["ru", "uk", "en"] = "ru"
     geo: str | None = None  # страна (ISO-2 или название); None → дефолт (_kw_run подставит Украину)
@@ -847,7 +923,7 @@ class AddPromotion(BaseModel):
     final_url: str
     percent_off: float | None = Field(default=None, gt=0, le=100)
     money_off_units: float | None = Field(default=None, gt=0, le=MONEY_MAX_UNITS)
-    currency: Literal["USD", "UAH", "EUR"] | None = None
+    currency: MoneyCurrency | None = None
     promo_code: str | None = Field(default=None, max_length=40)
 
     @field_validator("promotion_target")
@@ -916,7 +992,7 @@ class AddPriceAsset(BaseModel):
         "service_categories",
         "service_tiers",
     ] = "services"
-    currency: Literal["USD", "UAH", "EUR"]
+    currency: MoneyCurrency
     language_code: str = "uk"
     offerings: list[PriceOfferingItem] = Field(min_length=3, max_length=8)
 
@@ -933,6 +1009,8 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "update_campaign": UpdateCampaign,
     "pause_ad_group": PauseAdGroup,
     "resume_ad_group": ResumeAdGroup,
+    "remove_campaign": RemoveCampaign,
+    "remove_ad_group": RemoveAdGroup,
     "set_geo_proximity": SetGeoProximity,
     "set_geo_location": SetGeoLocation,
     "set_bidding_strategy": SetBiddingStrategy,
@@ -944,6 +1022,7 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "create_demand_gen_campaign": CreateDemandGenCampaign,
     "create_video_campaign": CreateVideoCampaign,
     "get_stats": GetStats,
+    "analyze_account": AnalyzeAccount,
     "generate_rsa": GenerateRsa,
     "keyword_research": KeywordResearch,
     "clone_campaign": CloneCampaign,
@@ -1019,6 +1098,19 @@ TOOLS: list[dict] = [
         ResumeAdGroup,
     ),
     _tool(
+        "remove_campaign",
+        "УДАЛИТЬ кампанию целиком (необратимо, статус REMOVED). Для команд «удали кампанию X», "
+        "«delete campaign X». Только предлагает — исполнение после ДВОЙНОГО подтверждения "
+        "пользователя. Укажи campaign (имя).",
+        RemoveCampaign,
+    ),
+    _tool(
+        "remove_ad_group",
+        "УДАЛИТЬ группу объявлений внутри кампании (необратимо). Укажи campaign и ad_group. "
+        "Только предлагает — исполнение после двойного подтверждения.",
+        RemoveAdGroup,
+    ),
+    _tool(
         "set_geo_proximity",
         "Радиус-таргетинг (км) вокруг города для кампании. Укажи campaign, city_name, "
         "country_code (ISO alpha-2, по умолчанию UA) и radius_km.",
@@ -1047,6 +1139,15 @@ TOOLS: list[dict] = [
         GenerateRsa,
     ),
     _tool("get_stats", "Прочитать статистику (read-only).", GetStats),
+    _tool(
+        "analyze_account",
+        "Проанализировать аккаунт и дать РЕКОМЕНДАЦИИ по улучшению (read-only, advisory): где "
+        "расход без конверсий, дорогие по CPA кампании, дисбаланс бюджета. Для команд вида «что "
+        "улучшить?», «как оптимизировать аккаунт?», «what to improve?». НИЧЕГО не меняет — "
+        "исполнение любого совета идёт отдельной командой с подтверждением. topic сужает тему "
+        "(optimize/keywords/rsa/structure/all).",
+        AnalyzeAccount,
+    ),
     _tool(
         "keyword_research",
         "Подобрать ключевые слова по сид-словам и/или URL (read-only, advisory): объёмы, "

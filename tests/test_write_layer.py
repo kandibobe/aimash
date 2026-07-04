@@ -1663,6 +1663,77 @@ async def test_apply_pause_campaign_happy_path():
     assert store.finalized is True
 
 
+# ── P1-6: удаление кампании/группы (необратимо; оба гейта + replay-one-shot) ──────
+async def test_apply_remove_campaign_happy_path():
+    called = {}
+
+    def fake(client, customer_id, campaign_id):
+        called.update(customer_id=customer_id, campaign_id=campaign_id)
+        return {"customer_id": customer_id, "campaign_id": campaign_id, "removed": True}
+
+    store = FakeStore(FakeProposal("remove_campaign", "confirmed", user_initiated=True))
+    with patched(mut, "_remove_campaign_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_remove_campaign(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_id="23",
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=_FakeClient(),
+        )
+    assert res["removed"] is True and called["campaign_id"] == "23"
+    assert store.finalized is True
+
+
+async def test_apply_remove_campaign_replay_one_shot():
+    calls = {"n": 0}
+
+    def fake(client, customer_id, campaign_id):
+        calls["n"] += 1
+        return {"removed": True}
+
+    store = FakeStore(FakeProposal("remove_campaign", "confirmed", user_initiated=True))
+    with patched(mut, "_remove_campaign_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        await mut.apply_remove_campaign(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_id="23",
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=_FakeClient(),
+        )
+        try:
+            await mut.apply_remove_campaign(
+                customer_id=DRAFT_ACCOUNT_ID,
+                campaign_id="23",
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=_FakeClient(),
+            )
+            raise AssertionError("replay удаления должен падать PermissionError")
+        except PermissionError:
+            pass
+    assert calls["n"] == 1  # SDK-исполнитель вызван РОВНО один раз
+
+
+async def test_apply_remove_ad_group_happy_path():
+    called = {}
+
+    def fake(client, customer_id, ad_group_id):
+        called.update(customer_id=customer_id, ad_group_id=ad_group_id)
+        return {"removed": True}
+
+    store = FakeStore(FakeProposal("remove_ad_group", "confirmed", user_initiated=True))
+    with patched(mut, "_remove_ad_group_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_remove_ad_group(
+            customer_id=DRAFT_ACCOUNT_ID,
+            ad_group_id="77",
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=_FakeClient(),
+        )
+    assert res["removed"] is True and called["ad_group_id"] == "77"
+    assert store.finalized is True
+
+
 # ── Негатив-матрица: чужой аккаунт / без подтверждения для ВСЕХ apply_* ───────────
 def _apply_case(op):
     """(apply_fn, kwargs без customer_id/confirm_store) для каждой поддержанной операции."""
@@ -1712,6 +1783,10 @@ def _apply_case(op):
         return mut.apply_pause_ad_group, {"ad_group_id": "77", **base}
     if op == "resume_ad_group":
         return mut.apply_resume_ad_group, {"ad_group_id": "77", **base}
+    if op == "remove_campaign":
+        return mut.apply_remove_campaign, {"campaign_id": "7", **base}
+    if op == "remove_ad_group":
+        return mut.apply_remove_ad_group, {"ad_group_id": "77", **base}
     if op == "set_geo_location":
         return mut.apply_set_geo_location, {
             "campaign_id": "7",

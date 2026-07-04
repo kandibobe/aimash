@@ -118,6 +118,7 @@ CATALOG: dict[str, dict[str, str]] = {
             "/export [period] — deep report .xlsx · /sheets [period] — in Google Sheets (link)\n"
             "/mcc [period] — summary across all MCC child accounts (per-currency subtotals)\n"
             "/quota — daily Google Ads API operation quota\n"
+            "/advise — 💡 recommendations to improve the account (suggestions, I change nothing myself)\n"
             "/alerts — anomaly alert thresholds (spend spike / conversions drop)\n\n"
             "<b>ℹ️ Clients</b>\n"
             "/clients — knowledge base: client profile as text + site crawling → relevant generation\n"
@@ -189,6 +190,18 @@ CATALOG: dict[str, dict[str, str]] = {
     "kw_empty": {
         "ru": texts.KW_EMPTY,
         "en": "Nothing found for these seeds. Try other words or a link: /keywords",
+    },
+    "kw_metrics_test_note": {
+        "ru": (
+            "ℹ️ Живой аккаунт для метрик не выбран — считаю на тест-аккаунте, где Keyword Planner "
+            "возвращает пустые объёмы/CPC (мало идей, сортировка не работает). Выберите живой "
+            "аккаунт командой /account — и подбор станет полным и отсортированным."
+        ),
+        "en": (
+            "ℹ️ No live account selected for metrics — using the test account, where Keyword "
+            "Planner returns empty volumes/CPC (few ideas, sorting won't work). Pick a live "
+            "account with /account for full, sorted results."
+        ),
     },
     "kw_bad_input": {
         "ru": texts.KW_BAD_INPUT,
@@ -323,6 +336,68 @@ CATALOG: dict[str, dict[str, str]] = {
     "kw_params_geo_unknown": {
         "ru": "Не распознал страну. Попробуй название («Польша») или ISO-код (<code>PL</code>).",
         "en": "Couldn't recognize the country. Try a name (“Poland”) or ISO code (<code>PL</code>).",
+    },
+    # — advisor: /advise — рекомендации (advisory, read-only) —
+    "advise_header": {
+        "ru": "💡 Рекомендации · аккаунт {account} · {period}",
+        "en": "💡 Recommendations · account {account} · {period}",
+    },
+    "advise_disclaimer": {
+        "ru": "Это подсказки — сам я ничего не меняю. Реши и дай команду.",
+        "en": "These are suggestions — I don't change anything myself. Decide and give a command.",
+    },
+    "advise_empty": {
+        "ru": "✅ Рекомендаций нет — по ключевым метрикам всё в норме за выбранный период.",
+        "en": "✅ No recommendations — key metrics look fine for the selected period.",
+    },
+    "advise_error": {
+        "ru": "⚠️ Не удалось собрать рекомендации: {err}",
+        "en": "⚠️ Couldn't build recommendations: {err}",
+    },
+    "advise_feedback_thanks": {"ru": "Спасибо, учту 🙏", "en": "Thanks, noted 🙏"},
+    "advise_auto_on": {
+        "ru": "🔔 Авто-советы включены — буду присылать рекомендации по расписанию.",
+        "en": "🔔 Auto-advice on — I'll send recommendations on schedule.",
+    },
+    "advise_auto_off": {
+        "ru": "🔕 Авто-советы выключены — только по команде /advise.",
+        "en": "🔕 Auto-advice off — only on /advise.",
+    },
+    "advise_rec_spend_no_conv": {
+        "ru": "• «{campaign}»: расход {cost} при {clicks} кликах и 0 конверсиях — стоит проверить "
+        "ключи/посадочную или поставить на паузу.",
+        "en": "• “{campaign}”: spent {cost} over {clicks} clicks with 0 conversions — review "
+        "keywords/landing page or consider pausing.",
+    },
+    "advise_rec_high_cpa": {
+        "ru": "• «{campaign}»: CPA {cpa} — в {factor}× выше среднего по аккаунту ({acct_cpa}). "
+        "Проверь ставки и ключи.",
+        "en": "• “{campaign}”: CPA {cpa} — {factor}× the account average ({acct_cpa}). "
+        "Review bids and keywords.",
+    },
+    "advise_rec_budget_imbalance": {
+        "ru": "• «{campaign}» съедает {share}% расхода при CPA {cpa} хуже среднего — стоит "
+        "пересмотреть распределение бюджета (бюджет меняю только по твоей прямой команде).",
+        "en": "• “{campaign}” takes {share}% of spend at a worse-than-average CPA {cpa} — "
+        "consider reviewing budget allocation (I change budgets only on your direct command).",
+    },
+    "advise_rec_wasteful_keyword": {
+        "ru": "• Ключ «{keyword}» ({match_type}) в «{campaign}»: расход {cost} при {clicks} кликах "
+        "и 0 конверсиях — кандидат в минус-слова.",
+        "en": "• Keyword “{keyword}” ({match_type}) in “{campaign}”: spent {cost} over {clicks} "
+        "clicks with 0 conversions — a negative-keyword candidate.",
+    },
+    "advise_rec_low_ctr_ad": {
+        "ru": "• Объявление в «{campaign}» / {ad_group}: CTR {ctr}% ниже среднего по аккаунту "
+        "({acct_ctr}%) — стоит освежить заголовки/описания (RSA).",
+        "en": "• An ad in “{campaign}” / {ad_group}: CTR {ctr}% below the account average "
+        "({acct_ctr}%) — consider refreshing headlines/descriptions (RSA).",
+    },
+    "advise_rec_single_campaign": {
+        "ru": "• Весь трафик в одной кампании «{campaign}» ({cost}) — рассмотри разделение по "
+        "темам/гео для контроля ставок и бюджета.",
+        "en": "• All traffic in a single campaign “{campaign}” ({cost}) — consider splitting by "
+        "themes/geo for finer bid and budget control.",
     },
     # — 3H (M10): /alerts — пороги аномалий —
     "alerts_saved": {"ru": "✅ Порог сохранён.", "en": "✅ Threshold saved."},
@@ -1020,6 +1095,20 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "⚠️ Не удалось прочитать журнал: {err}",
         "en": "⚠️ Couldn't read the journal: {err}",
     },
+    "diag_detail_not_found": {
+        "ru": "🔍 Инцидент не найден (мог быть очищен ретеншном).",
+        "en": "🔍 Incident not found (may have been purged by retention).",
+    },
+    "llm_budget_exceeded": {
+        "ru": (
+            "🚦 Достигнут дневной лимит запросов к ИИ ({used}/{limit}). "
+            "Попробуй завтра или попроси админа поднять лимит."
+        ),
+        "en": (
+            "🚦 Daily AI request limit reached ({used}/{limit}). "
+            "Try again tomorrow or ask an admin to raise the limit."
+        ),
+    },
     "err_campaigns": {
         "ru": "⚠️ Не удалось получить кампании: {err}",
         "en": "⚠️ Couldn't fetch campaigns: {err}",
@@ -1297,12 +1386,23 @@ CATALOG: dict[str, dict[str, str]] = {
     },
     "cli_ask_text": {
         "ru": (
-            "Пришлите информацию о клиенте обычным текстом (можно несколькими сообщениями): "
-            "бизнес, сайт, соцсети, услуги, цены, телефоны. Когда закончите — «💾 Сохранить»."
+            "Пришлите информацию о клиенте обычным текстом, своими словами (можно несколькими "
+            "сообщениями): бизнес, сайт, соцсети, услуги, цены, телефоны. Когда закончите — "
+            "«💾 Сохранить».\n\n"
+            "Пример (можно скопировать и поправить):\n"
+            "<code>Студия «Флора», доставка цветов и букетов по Киеву. Сайт floraprima.ua, "
+            "инстаграм @floraprima. Услуги: букеты от 500 грн, оформление свадеб. Тел "
+            "+380 44 123 45 67.</code>\n"
+            "<i>Или нажмите «🔎 Подтянуть из аккаунта» — заполню фактами из Google Ads.</i>"
         ),
         "en": (
-            "Send the client info as free text (several messages are fine): business, site, "
-            "socials, services, prices, phones. When done — “💾 Save”."
+            "Send the client info as free text, in your own words (several messages are fine): "
+            "business, site, socials, services, prices, phones. When done — “💾 Save”.\n\n"
+            "Example (tap to copy, then tweak):\n"
+            "<code>Studio “Flora”, flower & bouquet delivery in Kyiv. Site floraprima.ua, "
+            "instagram @floraprima. Services: bouquets from 500 UAH, wedding decor. Tel "
+            "+380 44 123 45 67.</code>\n"
+            "<i>Or tap “🔎 Fill from account” to prefill facts from Google Ads.</i>"
         ),
     },
     "cli_accumulating": {
@@ -1336,6 +1436,24 @@ CATALOG: dict[str, dict[str, str]] = {
     "cli_no_website": {
         "ru": "У клиента не указан сайт — добавьте его через «➕ Добавить информацию».",
         "en": "No website in the profile — add it via “➕ Add info”.",
+    },
+    "cli_autofill_reading": {
+        "ru": "🔎 Читаю аккаунт (валюта, таймзона, гео/языки, домен)… только реальные данные.",
+        "en": "🔎 Reading the account (currency, timezone, geo/languages, domain)… facts only.",
+    },
+    "cli_autofill_empty": {
+        "ru": (
+            "В аккаунте не нашлось фактов для профиля (нет активных кампаний/таргетинга). "
+            "Добавьте информацию текстом через «➕ Добавить информацию»."
+        ),
+        "en": (
+            "No account facts found for the profile (no active campaigns/targeting). "
+            "Add info as text via “➕ Add info”."
+        ),
+    },
+    "cli_autofill_failed": {
+        "ru": "⚠️ Не удалось прочитать аккаунт: {err}",
+        "en": "⚠️ Couldn't read the account: {err}",
     },
     "cli_crawl_started": {
         "ru": "🕷 Краулю сайт {domain}… Пришлю сводку по готовности.",
@@ -1439,12 +1557,22 @@ CATALOG: dict[str, dict[str, str]] = {
     },
     "cc_ask_description": {
         "ru": (
-            "Опишите рекламную кампанию одним сообщением — что продвигаем, страна/город, бюджет, "
-            "цель. Я разложу это на настройки."
+            "📝 Опишите кампанию <b>одним сообщением, своими словами</b> — спецсимволы не нужны, "
+            "я сам разложу на настройки.\n\n"
+            "Полезно указать: <i>что рекламируем · страна/город · дневной бюджет · цель "
+            "(звонки/заявки/продажи/трафик) · язык · даты · расписание</i>.\n\n"
+            "Пример (нажмите, чтобы скопировать, и поправьте под себя):\n"
+            "<code>Доставка цветов по Киеву и Одессе, бюджет 300 грн в день, цель — заявки, "
+            "украинский язык, с сегодня до конца месяца, показ пн-пт 9-21</code>"
         ),
         "en": (
-            "Describe the campaign in one message — what you promote, country/city, budget, goal. "
-            "I'll turn it into settings."
+            "📝 Describe the campaign <b>in one message, in your own words</b> — no special "
+            "characters needed, I'll turn it into settings.\n\n"
+            "Helpful to mention: <i>what you promote · country/city · daily budget · goal "
+            "(calls/leads/sales/traffic) · language · dates · schedule</i>.\n\n"
+            "Example (tap to copy, then tweak):\n"
+            "<code>Flower delivery in Kyiv and Odesa, budget 300 UAH per day, goal — leads, "
+            "Ukrainian language, from today till end of month, show Mon-Fri 9-21</code>"
         ),
     },
     "cc_extracting": {
@@ -1452,8 +1580,16 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "⏳ Parsing the description into settings…",
     },
     "cc_empty_description": {
-        "ru": "Опишите кампанию текстом — что продвигаем, ГЕО, бюджет, цель.",
-        "en": "Describe the campaign in text — what you promote, geo, budget, goal.",
+        "ru": (
+            "Нужно текстовое описание. Пример (можно скопировать и поправить):\n"
+            "<code>Ремонт квартир под ключ в Варшаве, бюджет 200 zł в день, цель — заявки, "
+            "польский язык</code>"
+        ),
+        "en": (
+            "I need a text description. Example (tap to copy, then tweak):\n"
+            "<code>Turnkey apartment renovation in Warsaw, budget 200 PLN per day, goal — leads, "
+            "Polish language</code>"
+        ),
     },
     "cc_draft_stale": {
         "ru": "Черновик кампании не найден или устарел — начните заново: «➕ Создание кампании».",
@@ -1568,6 +1704,34 @@ CATALOG: dict[str, dict[str, str]] = {
     "cc_kw_verify_prompt": {
         "ru": "Когда отредактируете таблицу — пришлите ссылку на неё одним сообщением.",
         "en": "When you've edited the sheet — send its link in a single message.",
+    },
+    "delete_confirm_alert": {
+        "ru": "⚠️ Это НЕОБРАТИМО. Нажмите «Да, удалить безвозвратно» для подтверждения.",
+        "en": "⚠️ This is IRREVERSIBLE. Tap «Yes, delete permanently» to confirm.",
+    },
+    "dg_budget_below_min": {
+        "ru": (
+            "⚠️ Дневной бюджет {have} {cur} может быть НИЖЕ минимума для Demand Gen/Video "
+            "(обычно ≥ {minv} {cur}). Google может отклонить создание — если так, увеличьте бюджет "
+            "и повторите."
+        ),
+        "en": (
+            "⚠️ Daily budget {have} {cur} may be BELOW the Demand Gen/Video minimum "
+            "(usually ≥ {minv} {cur}). Google may reject creation — if so, raise the budget and retry."
+        ),
+    },
+    "cc_kw_verify_prompt_v2": {
+        "ru": (
+            "✅ Я уже сохранил <b>{n}</b> ключей в черновик.\n"
+            "• Хотите оставить как есть — нажмите «✅ Использовать эти ключи».\n"
+            "• Хотите отредактировать — поправьте таблицу и пришлите ссылку на неё сообщением "
+            "(тогда возьму ваш выверенный список)."
+        ),
+        "en": (
+            "✅ I've already saved <b>{n}</b> keywords to the draft.\n"
+            "• Keep them — tap «✅ Use these keywords».\n"
+            "• Refine — edit the sheet and send its link back (I'll take your curated list)."
+        ),
     },
     "cc_kw_read_failed": {
         "ru": (

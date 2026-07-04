@@ -307,6 +307,177 @@ async def run_anomaly_check(bot) -> None:
                 )
 
 
+# A1 (§15): чек-поинт проактивных алертов — id последней уже разосланной error_events. Модульный
+# (переживает рестарт через max(id) на ПЕРВОМ прогоне: историю не спамим ретроспективно). id
+# (autoincrement PK) вместо created_at — монотонный и tz-нейтральный (SQLite наивный/Postgres aware).
+_error_alert_last_id: int | None = None
+
+
+async def run_error_alerts(bot) -> int:
+    """A1 (§15): разослать админам (ADMIN_CHAT_IDS) дайджест НОВЫХ error_events с прошлого прогона.
+    error_events наполняется всегда (on_error / scheduler / handlers-A2), но был ПАССИВНЫМ — узнать
+    об ошибке можно было только вызвав /diag. READ-ONLY (golden rule #3): только чтение таблицы +
+    уведомление. Нет админов ⇒ no-op (fail-closed, фича opt-in). ПЕРВЫЙ прогон лишь ставит базлайн
+    (max(id)) и НЕ шлёт — не спамим историей на старте. Возвращает число новых инцидентов."""
+    global _error_alert_last_id
+    with request_scope("scheduler:error-alerts"):  # §15: корреляция логов джобы по request_id
+        admins = set(settings.admin_ids)
+        if not admins:
+            return 0
+        from db.models import ErrorEvent
+
+        async with Session() as s:
+            if (
+                _error_alert_last_id is None
+            ):  # базлайн: алертим только НОВЫЕ после старта (не историю)
+                mx = (await s.execute(select(func.max(ErrorEvent.id)))).scalar_one_or_none()
+                _error_alert_last_id = int(mx or 0)
+                return 0
+            rows = (
+                (
+                    await s.execute(
+                        select(ErrorEvent)
+                        .where(ErrorEvent.id > _error_alert_last_id)
+                        .order_by(ErrorEvent.id)
+                        .limit(
+                            200
+                        )  # анти-флуд: за цикл не более 200, остальное подождёт следующего
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        if not rows:
+            return 0
+        # Чек-поинт двигаем ДО рассылки (даже если доставка всем упадёт): иначе те же ошибки
+        # переотправлялись бы каждый цикл. Они не теряются — доступны в /diag.
+        _error_alert_last_id = int(rows[-1].id)
+        from bot import i18n, texts
+
+        for chat_id in admins:
+            try:
+                await bot.send_message(
+                    chat_id,
+                    texts.fmt_error_alert(rows, lang=i18n.get_lang(chat_id)),
+                    parse_mode="HTML",
+                )
+            except (
+                Exception
+            ) as e:  # один недоступный админ не роняет остальных; НЕ capture (петля!)
+                log.warning(
+                    "scheduler: алерт ошибок не доставлен в %s: %s", chat_id, type(e).__name__
+                )
+        log.info(
+            "scheduler: разослано алертов о %d новых инцидентах (админов %d)",
+            len(rows),
+            len(admins),
+        )
+        return len(rows)
+
+
+async def _advise_proactive_chats(recipients: set[int]) -> set[int]:
+    """Операторы с включённой проактивной подачей рекомендаций (UserSettings.ui_prefs.advise_proactive).
+    По умолчанию ВЫКЛ (fail-closed к анти-спаму: не шлём непрошеные советы). READ-ONLY."""
+    if not recipients:
+        return set()
+    async with Session() as s:
+        rows = (
+            await s.execute(
+                select(UserSettings.chat_id, UserSettings.ui_prefs).where(
+                    UserSettings.chat_id.in_(recipients)
+                )
+            )
+        ).all()
+    on: set[int] = set()
+    for cid, prefs in rows:
+        val = (prefs or {}).get("advise_proactive") if isinstance(prefs, dict) else None
+        if str(val).lower() in ("1", "true", "on", "yes"):
+            on.add(int(cid))
+    return on
+
+
+async def run_recommendations_digest(bot) -> None:
+    """§advisor: ПРОАКТИВНЫЕ рекомендации операторам с advise_proactive (opt-in). READ-ONLY: собирает
+    отчёт + правила (advisor.service), НИЧЕГО не меняет и proposal НЕ создаёт (golden rule #1/#3).
+    Детерминированный render (use_llm=False) — фон не жжёт LLM-бюджет. Один блок на аккаунт."""
+    with request_scope("scheduler:advise"):
+        recipients = _recipients()
+        chats = await _advise_proactive_chats(recipients)
+        if not chats:
+            return
+        accounts = _scheduled_accounts()
+        if not accounts:
+            return
+        from advisor import service as advisor_service
+        from advisor.render import render_digest
+        from bot import i18n
+
+        for chat_id in chats:
+            lang = i18n.get_lang(chat_id)
+            blocks: list[str] = []
+            for acct in accounts:
+                tok = set_context(customer_id=acct)  # §8: per-account атрибуция ошибок/логов
+                try:
+                    rec_set = await advisor_service.build_recommendations(
+                        chat_id, acct, source="scheduler", lang=lang, use_llm=False
+                    )
+                    if rec_set.recs:
+                        lines = [r.body for r in rec_set.recs if r.body]
+                        blocks.append(
+                            render_digest(rec_set.account, rec_set.period_label, lines, lang)
+                        )
+                except Exception as e:  # сеть/доступ/SDK — фиксируем, остальные аккаунты живут
+                    if is_account_access_error(e):
+                        log.info("advise digest: аккаунт %s недоступен (ожидаемо, пропуск)", acct)
+                    else:
+                        await capture_exception(e, where=f"scheduler:advise:{acct}")
+                finally:
+                    reset_context(tok)
+            if not blocks:
+                continue
+            text = "\n\n———\n\n".join(blocks)
+            if len(text) > _DIGEST_MAX:
+                text = text[:_DIGEST_MAX] + "\n…"
+            try:
+                await bot.send_message(chat_id, text)
+            except Exception as e:  # один недоступный чат не роняет остальных
+                log.warning("advise digest не доставлен в %s: %s", chat_id, type(e).__name__)
+
+
+async def run_recommendation_followups(bot=None) -> int:
+    """§advisor Слой B: ЗАМЕР результата применённых рекомендаций, у которых наступил measure_after.
+    READ-ONLY: advisor.outcome.measure_outcome читает метрики кампании ДО/ПОСЛЕ, delta+verdict в КОДЕ,
+    ничего не мутирует (golden rule #3). Возвращает число замеренных. bot — задел под уведомления."""
+    with request_scope("scheduler:advise-followup"):
+        from advisor.outcome import due_outcomes, measure_outcome
+
+        due = await due_outcomes()
+        if not due:
+            return 0
+        n = 0
+        for outcome in due:
+            tok = set_context(customer_id=outcome.customer_id)
+            try:
+                client = await build_client_async(outcome.customer_id)
+                await measure_outcome(outcome, client)
+                n += 1
+            except Exception as e:  # сеть/доступ/SDK — фиксируем, остальные строки живут
+                if is_account_access_error(e):
+                    log.info(
+                        "advise followup: аккаунт %s недоступен (ожидаемо, пропуск)",
+                        outcome.customer_id,
+                    )
+                else:
+                    await capture_exception(
+                        e, where=f"scheduler:advise-followup:{outcome.customer_id}"
+                    )
+            finally:
+                reset_context(tok)
+        if n:
+            log.info("scheduler: рекомендаций замерено (Слой B): %d", n)
+        return n
+
+
 async def cleanup_stale_proposals(
     *, now: datetime | None = None, ttl_hours: int = PROPOSAL_TTL_HOURS
 ) -> int:
@@ -504,3 +675,63 @@ async def reconcile_stale_crawls(
         if n:
             log.info("scheduler: зависших краул-задач помечено failed: %d", n)
         return n
+
+
+def _older_than(ts: datetime | None, cutoff: datetime) -> bool:
+    """Строка старше порога? Наивный created_at трактуем как UTC (SQLite) — корректно и на Postgres
+    (tz-aware). None → False (без даты не удаляем). Сравнение в Python — единый tz-нейтральный путь
+    (как во всех cleanup-джобах), без риска строкового сравнения tz-aware/naive в SQL на SQLite."""
+    if ts is None:
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts < cutoff
+
+
+async def purge_stale_rows(*, now: datetime | None = None) -> dict[str, int]:
+    """C2 (§15): УДАЛИТЬ старые строки монотонно растущих таблиц (error_events / crawl_jobs).
+    Остальные cleanup-джобы лишь меняют статус — эти таблицы копятся вечно. Пороги —
+    settings.error_events_retain_days / crawl_jobs_retain_days (0 ⇒ ВЫКЛ для этой таблицы,
+    fail-safe: не удаляем ничего). crawl_jobs чистим ТОЛЬКО в терминальном статусе (done|failed) —
+    running/незавершённые закрывает reconcile_stale_crawls. ⛔ audit_log НЕ трогаем НИКОГДА (денежный
+    реестр, ручной колд-архив — docs/BACKUP.md). Возраст — в Python (tz-нейтрально). Возвращает
+    {table: удалено}. Удаляем батчами по 500 id (лимит переменных SQLite)."""
+    from sqlalchemy import delete as sa_delete
+
+    from db.models import CrawlJob, ErrorEvent
+
+    now = now or datetime.now(timezone.utc)
+    result = {"error_events": 0, "crawl_jobs": 0}
+    with request_scope("scheduler:purge"):  # §15: корреляция логов джобы по request_id
+        async with Session() as s:
+            if settings.error_events_retain_days > 0:
+                cutoff = now - timedelta(days=settings.error_events_retain_days)
+                rows = (await s.execute(select(ErrorEvent.id, ErrorEvent.created_at))).all()
+                stale = [rid for rid, ca in rows if _older_than(ca, cutoff)]
+                for i in range(0, len(stale), 500):  # батч: не упереться в лимит переменных SQLite
+                    await s.execute(
+                        sa_delete(ErrorEvent).where(ErrorEvent.id.in_(stale[i : i + 500]))
+                    )
+                result["error_events"] = len(stale)
+            if settings.crawl_jobs_retain_days > 0:
+                cutoff = now - timedelta(days=settings.crawl_jobs_retain_days)
+                rows = (
+                    await s.execute(
+                        select(CrawlJob.id, CrawlJob.created_at).where(
+                            CrawlJob.status.in_(("done", "failed"))
+                        )
+                    )
+                ).all()
+                stale = [rid for rid, ca in rows if _older_than(ca, cutoff)]
+                for i in range(0, len(stale), 500):
+                    await s.execute(sa_delete(CrawlJob).where(CrawlJob.id.in_(stale[i : i + 500])))
+                result["crawl_jobs"] = len(stale)
+            if result["error_events"] or result["crawl_jobs"]:
+                await s.commit()
+        if result["error_events"] or result["crawl_jobs"]:
+            log.info(
+                "scheduler: purge — error_events удалено %d, crawl_jobs %d",
+                result["error_events"],
+                result["crawl_jobs"],
+            )
+        return result

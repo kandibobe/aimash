@@ -8,7 +8,8 @@
 ## 1. Предусловия
 - Python 3.12, Docker + Docker Compose, Postgres 16 (в составе compose).
 - Google Ads **developer token** (Basic), OAuth client (client_id/secret) и refresh token.
-- Telegram bot token (@BotFather) и список chat_id для whitelist.
+- Telegram bot token (@BotFather) и хотя бы один chat_id для env-бутстрапа whitelist (дальше
+  операторы добавляются на лету — `/adduser`).
 
 ## 2. Окружение (.env)
 `.env` хранит секреты и **никогда не коммитится** (он в `.gitignore`, и `.dockerignore`
@@ -24,7 +25,7 @@ cp .env.example .env
 |---|---|---|
 | `ENV` | нет | `dev` (только TEST MCC) или `prod` (включает fail-fast по ключу шифрования) |
 | `TELEGRAM_BOT_TOKEN` | **да** | токен бота |
-| `TELEGRAM_WHITELIST_CHAT_IDS` | нет | `123,456` — кому разрешён бот. **Пусто = fail-closed: бот не отвечает НИКОМУ** (в `prod` пустой список роняет старт — `core/config.py`). НЕ «отвечает всем». |
+| `TELEGRAM_WHITELIST_CHAT_IDS` | нет | `123,456` — **бутстрап** доступа к боту. Итоговый whitelist = этот env **∪ таблица `whitelist`** (рантайм-пополнение `/adduser`, `core.access.is_whitelisted`, кэш TTL). **Пусто = fail-closed: бот не отвечает НИКОМУ** (в `prod` пустой env роняет старт — `core/config.py`; env обязателен для бутстрапа первого админа). НЕ «отвечает всем». |
 | `OPENROUTER_API_KEY` | **да** | ключ OpenRouter (LLM) |
 | `OPENROUTER_BASE_URL` | нет | `https://openrouter.ai/api/v1` |
 | `LLM_PARSING` / `LLM_COPY` / `LLM_FALLBACK` | нет | модели (сменяемы) |
@@ -189,9 +190,11 @@ docker image prune -f
 ## 6. Prod-чеклист
 - [ ] `ENV=prod` (включает fail-fast по `SECRETS_ENCRYPTION_KEY`).
 - [ ] `SECRETS_ENCRYPTION_KEY` — валидный Fernet-ключ, из секрет-менеджера (не из репо).
-- [ ] `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=7753643025` (пусто = fail-closed; потолок `ALLOWED_CEILING`
-      зашит в `ads/client.py` и `.env` его не расширит).
-- [ ] `TELEGRAM_WHITELIST_CHAT_IDS` задан (пусто = fail-closed: бот молчит всем; в `prod` пустой список роняет старт).
+- [ ] `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=7753643025` (пусто = fail-closed; код-минимум `ALLOWED_CEILING`
+      зашит в `ads/client.py` и `.env` его не понизит; включение мутаций на ещё одном аккаунте —
+      только среди **видимых** боту, осознанно, см. §2.1).
+- [ ] `TELEGRAM_WHITELIST_CHAT_IDS` задан для бутстрапа (пусто = fail-closed: бот молчит всем; в `prod`
+      пустой env роняет старт; рантайм-операторы — таблица `whitelist` через `/adduser`).
 - [ ] `LOG_FORMAT=json`, проверена редакция секретов в логах (`core/logging.py`).
 - [ ] Все секреты — через секрет-менеджер, не в `.env` на диске.
 - [ ] gitleaks чист; в контексте сборки нет кред-файлов (см. `.dockerignore`).
@@ -203,3 +206,30 @@ docker image prune -f
 Confirm-гейт на каждую мутацию · обязательный `confirmation_id` · замок аккаунта `7753643025`
 (`ensure_allowed`) · длину RSA считает КОД (кириллица = 1) · секреты никогда в логи/гит/промпт ·
 scheduler только читает и уведомляет (никогда не меняет аккаунт). Подробно — [CLAUDE.md](../CLAUDE.md).
+
+## 8. Предпродакшн-харденинг (2026-07): наблюдаемость / устойчивость / сохранность
+Поверх уже имевшихся `error_events` + `/diag` + Sentry + fail-fast-валидаторов добавлено:
+
+- **Проактивные алерты об ошибках (A1).** `ERROR_ALERT_INTERVAL_MINUTES>0` + непустой
+  `ADMIN_CHAT_IDS` ⇒ scheduler шлёт админам дедуплённый дайджест НОВЫХ инцидентов (без traceback в
+  чат; подробности — `/diag`). 0 или нет админов ⇒ выкл. Плюс `except`-блоки команд теперь пишут в
+  `error_events` (раньше — только глобальный on_error/scheduler): `/diag` видит все инциденты.
+- **Кнопки `/diag` (A3):** 🔄 обновить · ⚠️ за сегодня/🗂 все · 🔍 полный (редактированный)
+  traceback инцидента — только админу.
+- **Readiness-пинг на старте (B1):** при успешном запуске бот шлёт админам «✅ запущен · миграция
+  HEAD · N аккаунтов · модель». Не пришёл после редеплоя ⇒ бот не поднялся. CI-деплой теперь ещё и
+  **проверяет здоровье контейнера** после `compose up` (3 сэмпла статуса) — крэш-луп красит job.
+- **Гард одного инстанса (B2):** Postgres advisory-lock на старте — второй polling-инстанс чисто
+  выходит (убирает 409 Conflict при перекрытии контейнеров на редеплое). На SQLite — no-op.
+- **Автобэкап БД (C1):** сайдкар `backup` в `docker-compose.yml` делает `pg_dump -Fc` в `./backups`
+  (ротация `BACKUP_RETAIN=14`) сразу на старте и раз в сутки. ⚠️ Локальный том — не офсайт: выгружай
+  `./backups` наружу. ⚠️ `SECRETS_ENCRYPTION_KEY` бэкапь ОТДЕЛЬНО (иначе `oauth_tokens` в дампе
+  мертвы — см. [BACKUP.md](BACKUP.md)). Постгрес получил `restart: unless-stopped` (B3).
+- **Ретеншн-очистка (C2):** `ERROR_EVENTS_RETAIN_DAYS` / `CRAWL_JOBS_RETAIN_DAYS` — daily-purge
+  растущих таблиц. `audit_log` НЕ трогается никогда (денежный реестр, ручной колд-архив).
+- **Пер-юзер потолок LLM (C3):** `LLM_DAILY_CALLS_PER_USER>0` ⇒ дневной лимит запросов к ИИ на chat_id
+  (fail-closed на 100%, warn на 80%). 0 ⇒ выкл (дефолт — не удивить владельца-оператора).
+
+Prod-чеклист (доп.): по желанию `ERROR_ALERT_INTERVAL_MINUTES=15` (+ `ADMIN_CHAT_IDS`); убедиться,
+что сайдкар `backup` поднят и `./backups` выгружается офсайт; `SECRETS_ENCRYPTION_KEY` в бэкапе
+отдельно от дампа.

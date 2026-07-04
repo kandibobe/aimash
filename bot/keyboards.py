@@ -14,12 +14,14 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from adcopy.validate import STRUCTURED_SNIPPET_HEADERS
 from bot.callbacks import (
     AdminCB,
+    AdviseCB,
     AlertCB,
     AudienceCB,
     CampCB,
     CcCB,
     ClientCB,
     ConfirmCB,
+    DiagCB,
     ExtCB,
     GeoCB,
     KwAddCB,
@@ -79,6 +81,7 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="whoami", description="Мой chat_id, активный аккаунт, режим доступа"),
     BotCommand(command="refresh", description="Обновить аккаунты/кэши без рестарта"),
     BotCommand(command="quota", description="Дневная квота Google Ads API"),
+    BotCommand(command="advise", description="💡 Рекомендации по улучшению аккаунта"),
     BotCommand(command="alerts", description="Пороги алертов аномалий (расход/конверсии)"),
     BotCommand(command="rsa", description="Сгенерировать тексты объявления (RSA)"),
     BotCommand(command="newsearch", description="Создать поисковую кампанию (RSA + ключи)"),
@@ -117,6 +120,7 @@ BOT_COMMANDS_EN: list[BotCommand] = [
     BotCommand(command="whoami", description="My chat_id, active account, access mode"),
     BotCommand(command="refresh", description="Refresh accounts/caches without a restart"),
     BotCommand(command="quota", description="Google Ads API daily quota"),
+    BotCommand(command="advise", description="💡 Recommendations to improve the account"),
     BotCommand(command="alerts", description="Anomaly alert thresholds (spend/conversions)"),
     BotCommand(command="rsa", description="Generate ad copy (RSA)"),
     BotCommand(command="newsearch", description="Create a search campaign (RSA + keywords)"),
@@ -459,11 +463,46 @@ def alerts_kb(cur: dict, lang: str | None = None) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def diag_kb(rows, *, today: bool, is_admin: bool, lang: str | None = None) -> InlineKeyboardMarkup:
+    """A3 (§15): кнопки под /diag. «🔄 Обновить» (перечитать), тумблер «⚠️ За сегодня»/«🗂 Все».
+    Для админа — до 5 кнопок «🔍 <request_id>» (полный редактированный traceback инцидента). rows —
+    показанные ErrorEvent (для detail-кнопок). Кнопки только читают/двигают UI (мутаций нет)."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="🔄 Refresh" if en else "🔄 Обновить",
+        callback_data=DiagCB(action="today" if today else "refresh"),
+    )
+    if today:
+        kb.button(text="🗂 All" if en else "🗂 Все", callback_data=DiagCB(action="all"))
+    else:
+        kb.button(text="⚠️ Today" if en else "⚠️ За сегодня", callback_data=DiagCB(action="today"))
+    counts = [2]
+    if is_admin:
+        # detail только админу (traceback — операционная деталь; /diag открыт всем whitelisted).
+        seen: set[str] = set()
+        n = 0
+        for e in rows or []:
+            rid = getattr(e, "request_id", "") or ""
+            if not rid or rid in seen:
+                continue
+            seen.add(rid)
+            kb.button(text=f"🔍 {rid}", callback_data=DiagCB(action="detail", rid=rid))
+            n += 1
+            if n >= 5:
+                break
+        if n:
+            counts.append(1 if n == 1 else 2)
+    kb.adjust(*counts)
+    return kb.as_markup()
+
+
 def more_menu_kb(lang: str | None = None) -> InlineKeyboardMarkup:
     """3E: inline-хаб «➕ Ещё» — вторичные флоу одним тапом (раньше — только слэш-командой)."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     for label_en, label_ru, action in (
+        ("💡 Recommendations", "💡 Рекомендации", "advise"),
         ("🔎 Search campaign (quick)", "🔎 Поисковая кампания (быстро)", "newsearch"),
         ("🎬 Campaign from video", "🎬 Кампания из видео", "newvideo"),
         ("📁 Campaign templates", "📁 Шаблоны кампаний", "templates"),
@@ -472,7 +511,40 @@ def more_menu_kb(lang: str | None = None) -> InlineKeyboardMarkup:
         ("🔔 Alert thresholds", "🔔 Пороги алертов", "alerts"),
     ):
         kb.button(text=label_en if en else label_ru, callback_data=MoreCB(action=action))
-    kb.adjust(1, 1, 2, 2)
+    kb.adjust(1, 1, 1, 2, 2)
+    return kb.as_markup()
+
+
+def advise_header_kb(proactive_on: bool, lang: str | None = None) -> InlineKeyboardMarkup:
+    """advisor: под заголовком /advise — тумблер проактивной подачи (ui_prefs.advise_proactive).
+    Кнопка лишь меняет НАСТРОЙКУ БОТА (как /alerts), Google Ads/proposal не трогает. rec несёт
+    ЖЕЛАЕМОЕ состояние ('on'|'off'); текст показывает текущее."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    if proactive_on:
+        label = "🔔 Auto-advice: ON (turn off)" if en else "🔔 Авто-советы: ВКЛ (выключить)"
+        kb.button(text=label, callback_data=AdviseCB(action="auto", rec="off"))
+    else:
+        label = "🔕 Auto-advice: OFF (turn on)" if en else "🔕 Авто-советы: ВЫКЛ (включить)"
+        kb.button(text=label, callback_data=AdviseCB(action="auto", rec="on"))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def advise_feedback_kb(rec_uid: str, lang: str | None = None) -> InlineKeyboardMarkup:
+    """advisor: 👍/👎 под одной рекомендацией (/advise). Кнопки пишут ТОЛЬКО в recommendation_feedback
+    (Слой B) — Google Ads НЕ трогают и proposal НЕ создают. Чистая функция (без БД/Ads)."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="👍 Useful" if en else "👍 Полезно",
+        callback_data=AdviseCB(action="up", rec=rec_uid),
+    )
+    kb.button(
+        text="👎 Not useful" if en else "👎 Мимо",
+        callback_data=AdviseCB(action="down", rec=rec_uid),
+    )
+    kb.adjust(2)
     return kb.as_markup()
 
 
@@ -537,6 +609,38 @@ def confirm_kb(cid: str, lang: str | None = None) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def confirm_destructive_kb(cid: str, lang: str | None = None) -> InlineKeyboardMarkup:
+    """Первый шаг ДВОЙНОГО подтверждения необратимого удаления (P1-6): «🗑 Удалить» ведёт НЕ на
+    исполнение, а на экран-предупреждение (ConfirmCB action=del1); реальное исполнение — только
+    после второго тапа (confirm_final_kb → action=ok). Отмена — сразу."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="🗑 Delete" if en else "🗑 Удалить", callback_data=ConfirmCB(action="del1", cid=cid)
+    )
+    kb.button(
+        text="❌ Cancel" if en else "❌ Отмена", callback_data=ConfirmCB(action="no", cid=cid)
+    )
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def confirm_final_kb(cid: str, lang: str | None = None) -> InlineKeyboardMarkup:
+    """Второй (финальный) шаг подтверждения удаления: «⚠️ Да, удалить безвозвратно» = реальный
+    confirm (action=ok, тот же confirmation_id) / «❌ Отмена»."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="⚠️ Yes, delete permanently" if en else "⚠️ Да, удалить безвозвратно",
+        callback_data=ConfirmCB(action="ok", cid=cid),
+    )
+    kb.button(
+        text="❌ Cancel" if en else "❌ Отмена", callback_data=ConfirmCB(action="no", cid=cid)
+    )
+    kb.adjust(1, 1)
+    return kb.as_markup()
+
+
 # ── §20: «Информация про клиентов» ───────────────────────────────────────────────
 def clients_accounts_kb(
     rows: list, with_profile: set[str], lang: str | None = None, page: int = 0
@@ -586,6 +690,12 @@ def client_card_kb(
     en = _lang(lang) == "en"
     sub = str(customer_id or "")
     kb = InlineKeyboardBuilder()
+    # P1-11: подтянуть ФАКТЫ из Google Ads аккаунта (валюта/таймзона/гео/языки/домен) — без выдумок,
+    # через тот же confirm-гейт. Доступно и для нового, и для существующего профиля.
+    kb.button(
+        text="🔎 Fill from account" if en else "🔎 Подтянуть из аккаунта",
+        callback_data=ClientCB(action="autofill", sub=sub),
+    )
     if has_profile:
         kb.button(
             text="✏️ Update info" if en else "✏️ Обновить инфу",
@@ -765,6 +875,22 @@ def cc_kw_kb(lang: str | None = None) -> InlineKeyboardMarkup:
     _cc_back_btn(kb, en)
     kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
     kb.adjust(1, 1, 2)
+    return kb.as_markup()
+
+
+def cc_kw_verify_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """Этап 2 (после генерации в Google Sheets): «✅ Использовать эти ключи» (взять сгенерированный
+    список без ручной правки таблицы — P0-2: ключи уже сохранены в черновик) ИЛИ прислать ссылку на
+    отредактированную таблицу для верификации; «‹ Назад» / «✖ Отмена»."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="✅ Use these keywords" if en else "✅ Использовать эти ключи",
+        callback_data=CcCB(action="kw_use_generated"),
+    )
+    _cc_back_btn(kb, en)
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    kb.adjust(1, 2)
     return kb.as_markup()
 
 
@@ -994,6 +1120,10 @@ def campaign_actions_kb(idx: int, status: str, lang: str | None = None) -> Inlin
     kb.button(
         text="🧩 Extensions" if en else "🧩 Расширения",
         callback_data=CampCB(action="ext", idx=idx),
+    )
+    kb.button(
+        text="🗑 Delete campaign" if en else "🗑 Удалить кампанию",
+        callback_data=CampCB(action="delete", idx=idx),
     )
     kb.button(
         text="‹ Back to list" if en else "‹ Назад к списку",

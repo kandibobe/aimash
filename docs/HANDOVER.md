@@ -49,19 +49,24 @@ docker compose logs -f bot      # убедиться: "alembic upgrade head" п�
 Миграции БД накатываются автоматически (`docker-entrypoint.sh` → `alembic upgrade head` до старта
 бота; падение миграции = контейнер не поднимается, fail-fast). Бот — long-poll (HTTP-порта нет).
 
-### Whitelist — это `.env`, а не таблица БД
-Доступ к боту гейтится по `TELEGRAM_WHITELIST_CHAT_IDS` (env), а **не** по БД
-(`WhitelistMiddleware` и `scheduler` читают `settings.whitelist`). Чтобы пустить пользователей —
-впиши их `chat_id` в `.env` и перезапусти бота. В prod пустой whitelist роняет старт (fail-closed).
+### Whitelist — env-бутстрап + рантайм-таблица БД
+Доступ к боту гейтится **объединением** env `TELEGRAM_WHITELIST_CHAT_IDS` **∪ таблица `whitelist`**
+(`WhitelistMiddleware` → `core.access.is_whitelisted`, кэш с TTL; fail-closed на сбое БД). env — это
+**бутстрап первого админа**: впиши свой `chat_id` в `.env`, перезапусти бот, дальше добавляй
+операторов **на лету** без рестарта — `/adduser <chat_id> [note]` (админ; inline-пикер read-scope),
+`/removeuser <chat_id>`, `/users`. В prod пустой env-whitelist роняет старт (fail-closed); пустое
+объединение (env ∪ БД) блокирует всех.
 
-> Мёртвая таблица `whitelist` **удалена** (миграция `0016_drop_whitelist`) — она никогда не
-> читалась рантаймом и создавала иллюзию БД-allow-list. Мультиюзер-доступ к АККАУНТАМ — таблица
-> `account_access` + команды `/grant`, `/revoke` (админы — env `ADMIN_CHAT_IDS`; режим изоляции —
-> env `ACCOUNT_ACCESS_MODE=auto|enforced|legacy`, дефолт auto: первый грант включает enforcement).
-> Таблица `oauth_tokens` **теперь загружается на старте** (`load_oauth_cache` в `bot.main`): если в
-> ней есть записи, `build_client(child)` берёт per-account refresh-токен/`login_customer_id` для
-> дочерних под другими MCC. Пусто ⇒ Draft/тест-MCC работает на едином `.env`-токене (обратная
-> совместимость). Заполнение — `scripts/register_account.py` (шифрование at-rest).
+> Таблица `whitelist` была удалена как мёртвая в `0016_drop_whitelist`, затем **возвращена
+> рантайм-активной** в `0017_whitelist_runtime` (колонки `added_by`/`note`) — теперь это реальный
+> БД-allow-list, а не иллюзия. Грант чтения whitelist **не** открывает мутаций (отдельный замок).
+> Мультиюзер-доступ к АККАУНТАМ (не к боту) — таблица `account_access` + команды `/grant`, `/revoke`
+> (админы — env `ADMIN_CHAT_IDS`; режим изоляции — env `ACCOUNT_ACCESS_MODE=auto|enforced|legacy`,
+> дефолт auto: первый грант включает enforcement).
+> Таблица `oauth_tokens` **загружается на старте** (`load_oauth_cache` в `bot.main`): если в ней есть
+> записи, `build_client(child)` берёт per-account refresh-токен/`login_customer_id` для дочерних под
+> другими MCC. Пусто ⇒ Draft/тест-MCC работает на едином `.env`-токене (обратная совместимость).
+> Заполнение — `scripts/register_account.py` (шифрование at-rest).
 
 ---
 
@@ -90,7 +95,7 @@ docker compose logs -f bot      # убедиться: "alembic upgrade head" п�
 - [ ] **Prod fail-fast:** `ENV=prod` с пустым `SECRETS_ENCRYPTION_KEY` → старт падает; пустой
       whitelist → падает.
 - [ ] `alembic heads` == **ровно один** head (текущий — см. `migrations/versions/`, сейчас
-      `0016_drop_whitelist`); `upgrade head` чистый; `downgrade -1` → `upgrade` обратимы.
+      `0017_whitelist_runtime`); `upgrade head` чистый; `downgrade -1` → `upgrade` обратимы.
 - [ ] **Autogenerate-дрейф = 0** на чистой Postgres (`alembic revision --autogenerate` ничего не
       предлагает — ни DROP, ни ADD).
 - [ ] Бэкап настроен и **restore протестирован**.
@@ -103,10 +108,15 @@ docker compose logs -f bot      # убедиться: "alembic upgrade head" п�
 
 ## 5. Перед боевыми деньгами на полном MCC (открытый объём)
 
-**Замки чтения и мутаций РАЗДЕЛЕНЫ** (golden rule #9): мутации — `ensure_allowed` + код-потолок
-`ALLOWED_CEILING = {"7753643025"}` ([../ads/client.py](../ads/client.py), `.env` не расширит);
-чтение — `ensure_read_allowed` + env `GOOGLE_ADS_READ_CUSTOMER_IDS` (fail-closed, по умолчанию пуст).
-Это значит: дочерние можно дать **на чтение** под §8, не открывая мутаций на них.
+**Замки чтения и мутаций РАЗДЕЛЕНЫ** (golden rule #9): мутации — `ensure_allowed`, чтение — отдельный
+`ensure_read_allowed`. **Контракт потолка мутаций** (`ads.client.allowed_ceiling`): код-МИНИМУМ
+`ALLOWED_CEILING = {"7753643025"}` ([../ads/client.py](../ads/client.py)) `.env` не может понизить, но
+ЭФФЕКТИВНЫЙ потолок = этот минимум **∪ видимые боту аккаунты** (env `GOOGLE_ADS_READ_CUSTOMER_IDS` ∪
+дочерние обхода MCC). Мутации на не-Draft включаются **управляемым конфигом** `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS`
+(⊆ потолка) — опечатку в чужой боевой id отсекает потолок видимости (см. [DEPLOYMENT.md §2.1](DEPLOYMENT.md#21-включение-мутаций-на-аккаунте-мультиаккаунт-g--управляемый-список)).
+По умолчанию allow-list = {Draft} ⇒ мутируется только Draft. Чтение (`ensure_read_allowed` + env
+`GOOGLE_ADS_READ_CUSTOMER_IDS`, fail-closed) — шире: дочерние можно дать **на чтение** под §8, не
+открывая мутаций на них.
 
 Сделано (read-only §8 — реализовано):
 - ✅ раздельные замки чтения/мутаций (`ensure_read_allowed`), инвариант покрыт тестом;
@@ -127,8 +137,9 @@ docker compose logs -f bot      # убедиться: "alembic upgrade head" п�
    `scripts/register_account.py` (если у них отдельные refresh-токены/MCC; один тест-MCC покрыт
    единым `.env`-токеном автоматически);
 2. (опц.) сводный total по единому курсу FX — **сознательно НЕ делаем** (per-currency честнее);
-3. (отдельно, осознанно) если нужны МУТАЦИИ на дочерних — расширить `ALLOWED_CEILING` в коде +
-   живой прогон под confirm-гейтом.
+3. (отдельно, осознанно) если нужны МУТАЦИИ на дочернем **видимом** аккаунте — добавить его id в
+   `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS` ([DEPLOYMENT.md §2.1](DEPLOYMENT.md#21-включение-мутаций-на-аккаунте-мультиаккаунт-g--управляемый-список))
+   + живой прогон под confirm-гейтом (правка кода нужна лишь чтобы понизить код-минимум `ALLOWED_CEILING`).
 
 До этого бот: **читает** дочерние MCC (обход + read-list), **меняет** только `7753643025`.
 
@@ -170,7 +181,8 @@ docker compose logs -f bot      # убедиться: "alembic upgrade head" п�
   «‹ Назад»/крошки в визарде; пагинация пикеров; хаб «➕ Ещё»; параметры keyword research §7
   (ГЕО/язык/сеть/период); `/alerts` (пороги аномалий per-chat); валюта и язык в рассылках.
 - **Архитектура:** порядок диспатча — `bot/handlers/__init__.py::HANDLER_MODULES` (star-импорты
-  выпилены); FSM-состояния — `bot/states.py`; мёртвая таблица `whitelist` удалена (head `0016`).
+  выпилены); FSM-состояния — `bot/states.py`; мёртвая таблица `whitelist` удалена в `0016` (позже
+  возвращена рантайм-активной в `0017` — см. §1).
 
 ## 7. Второй предсдаточный проход (аудит 2026-07-03)
 

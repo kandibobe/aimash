@@ -610,27 +610,52 @@ async def model_custom_text(m: bm.Message, state: bm.FSMContext) -> None:
 
 @bm.dp.message(bm.Command("diag"))
 async def diag(m: bm.Message) -> None:
-    """§15: последние перехваченные ошибки (error_events) для триажа. Только whitelisted
-    (WhitelistMiddleware). Read-only; message/traceback уже редактированы (секретов нет)."""
-    from sqlalchemy import desc, select
-
-    from db.models import ErrorEvent as DBErrorEvent
-    from db.session import Session
-
+    """§15: последние перехваченные ошибки (error_events) для триажа + кнопки (🔄 обновить /
+    ⚠️ за сегодня / 🔍 подробнее). Только whitelisted (WhitelistMiddleware). Read-only;
+    message/traceback уже редактированы (секретов нет). detail-кнопки — только админу."""
     try:
-        async with Session() as s:
-            rows = (
-                (
-                    await s.execute(
-                        select(DBErrorEvent).order_by(desc(DBErrorEvent.created_at)).limit(10)
-                    )
-                )
-                .scalars()
-                .all()
-            )
-        await m.answer(bm.texts.fmt_errors(rows), parse_mode=bm.ParseMode.HTML)
+        rows = await bm._load_error_events(today=False)
     except Exception as e:  # noqa: BLE001 — диагностика не должна сама падать наружу
+        await bm._capture_cmd_error(e, "cmd:diag")  # A2
         await m.answer(bm.i18n.t("err_journal", err=bm.ux.err_text(e)))
+        return
+    await m.answer(
+        bm.texts.fmt_errors(rows),
+        reply_markup=bm.diag_kb(rows, today=False, is_admin=_is_admin(m.chat.id)),
+        parse_mode=bm.ParseMode.HTML,
+    )
+
+
+@bm.dp.callback_query(bm.DiagCB.filter())
+async def on_diag_cb(cq: bm.CallbackQuery, callback_data: bm.DiagCB) -> None:
+    """A3 (§15): кнопки под /diag. refresh/today/all — перечитать список и отредактировать сообщение
+    (без дублей); detail — полный редактированный traceback инцидента (ТОЛЬКО админ). Read-only:
+    БД/Ads не трогаем — только чтение error_events."""
+    action = callback_data.action
+    if action == "detail":
+        if not _is_admin(cq.from_user.id):  # traceback — операционная деталь (диаг открыт всем WL)
+            await cq.answer(bm.i18n.t("admin_only"), show_alert=True)
+            return
+        row = await bm._load_error_detail(callback_data.rid)
+        await cq.answer()
+        if row is None:
+            await bm._safe_edit(cq, bm.i18n.t("diag_detail_not_found"))
+            return
+        await bm._safe_edit(cq, bm.texts.fmt_error_detail(row), parse_mode=bm.ParseMode.HTML)
+        return
+    today = action == "today"
+    try:
+        rows = await bm._load_error_events(today=today)
+    except Exception:  # noqa: BLE001 — диагностика не должна падать наружу
+        await cq.answer(bm.i18n.t("stale"), show_alert=True)
+        return
+    await cq.answer()
+    await bm._safe_edit(
+        cq,
+        bm.texts.fmt_errors(rows),
+        reply_markup=bm.diag_kb(rows, today=today, is_admin=_is_admin(cq.from_user.id)),
+        parse_mode=bm.ParseMode.HTML,
+    )
 
 
 # ── 3E: «➕ Ещё» — inline-хаб вторичных флоу (обнаружимость без ручного ввода команд) ─
@@ -660,6 +685,22 @@ async def on_more(cq: bm.CallbackQuery, callback_data: bm.MoreCB, state: bm.FSMC
         await bm.quota_cmd(msg)
     elif action == "alerts":
         await bm.alerts_cmd(msg)  # 3H: настройка порогов аномалий
+    elif action == "advise":
+        await bm._advise_run(msg, bm._cq_chat_id(cq))  # 💡 рекомендации (advisory, read-only)
+
+
+# ── advisor: /advise — рекомендации по улучшению активного аккаунта (advisory, read-only) ─
+_ADVISE_TOPICS = {"optimize", "keywords", "rsa", "structure", "all"}
+
+
+@bm.dp.message(bm.Command("advise"))
+async def advise_cmd(m: bm.Message) -> None:
+    """/advise [optimize|keywords|rsa|structure] — рекомендации по аккаунту (advisory). Без темы —
+    все. НИЧЕГО не меняет — исполнение любого совета идёт отдельной командой через confirm-гейт."""
+    parts = (m.text or "").split(maxsplit=1)
+    arg = parts[1].strip().lower() if len(parts) > 1 else ""
+    topic = arg if arg in _ADVISE_TOPICS else None
+    await bm._advise_run(m, m.chat.id, topic=topic)
 
 
 # ── 3H (M10): /alerts — настройка порогов аномалий per-chat (раньше только вставкой в БД) ─

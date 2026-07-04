@@ -140,6 +140,22 @@ class Settings(BaseSettings):
     # может слать инфу несколькими сообщениями подряд — накапливаем в буфер, потом извлекаем).
     client_text_idle_s: int = 60
 
+    # §15 (A1): проактивный алерт админам (ADMIN_CHAT_IDS) о НОВЫХ error_events. error_events
+    # наполняется всегда, но был пассивным (узнать об ошибке — только вызвав /diag). Джоба
+    # scheduler.jobs.run_error_alerts шлёт админам дайджест новых инцидентов раз в N минут. 0 ⇒
+    # ВЫКЛ (алерты не шлём — фича opt-in, не спамим по умолчанию). Нет админов ⇒ тоже no-op.
+    error_alert_interval_minutes: int = 0
+    # §15 (C2): ретеншн растущих таблиц. error_events/crawl_jobs копятся монотонно (cleanup-джобы
+    # лишь меняют статус, не удаляют). Джоба scheduler.jobs.purge_stale_rows удаляет строки старше
+    # порога. audit_log НЕ трогаем (денежный реестр — ручной колд-архив, docs/BACKUP.md). 0 ⇒ ВЫКЛ.
+    error_events_retain_days: int = 90
+    crawl_jobs_retain_days: int = 30
+    # §12 (C3): пер-юзер дневной потолок LLM-вызовов (анти-абуз/защита OpenRouter-бюджета). Единственный
+    # тормоз до этого — message-throttle 0.7/с + баланс OpenRouter (не enforced). core.llm_budget
+    # считает вызовы per chat_id за сутки; warn на 80%, отказ (fail-closed) на 100%. 0 ⇒ ВЫКЛ (без
+    # гарда). Дефолт 0 — opt-in: не удивить владельца (главный оператор) лимитом в разгар работы.
+    llm_daily_calls_per_user: int = 0
+
     @property
     def whitelist(self) -> set[int]:
         return {int(x) for x in self.telegram_whitelist_chat_ids.split(",") if x.strip()}

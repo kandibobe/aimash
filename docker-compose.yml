@@ -21,6 +21,9 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    # B3: как и у бота — БД должна сама подниматься после падения/перезагрузки VPS. Без этого
+    # упавший postgres остаётся мёртвым, а бот (depends_on healthy) уходит в бесконечный крэш-луп.
+    restart: unless-stopped
     # Потолок ресурсов БД (co-located с ботом на 2 vCPU / 4 ГБ — БД не должна задушить бота).
     deploy:
       resources:
@@ -66,6 +69,49 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+
+  # C1: АВТОБЭКАП БД. Раньше scripts/backup_db.sh надо было ставить в host-cron ВРУЧНУЮ — по факту он
+  # часто НЕ был запущен, а в БД oauth_tokens (шифр. refresh-токены) + audit_log (денежный реестр).
+  # Сайдкар делает pg_dump -Fc сразу на старте и далее раз в сутки в ./backups (хост-том, переживает
+  # пересоздание контейнера и `git reset --hard` — папка untracked), ротация BACKUP_RETAIN дампов.
+  # ⚠️ Локальный том — НЕ офсайт: для катастрофоустойчивости выгружай ./backups наружу (rsync/S3/rclone).
+  # ⚠️ SECRETS_ENCRYPTION_KEY бэкапь ОТДЕЛЬНО от дампа (docs/BACKUP.md): без него oauth_tokens в дампе
+  #    не расшифруются — потребуется повторная регистрация аккаунтов (scripts/register_account.py).
+  backup:
+    image: postgres:16
+    container_name: aimash-backup
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: aimash
+      BACKUP_RETAIN: "14"
+      TZ: UTC
+    volumes:
+      - ./backups:/backups
+    restart: unless-stopped
+    # Дамп сразу на старте, затем sleep 24ч. Сбой pg_dump не роняет цикл (|| echo). $$ = литеральный
+    # $ для shell (compose съедает одиночный $). Ротация: оставить последние BACKUP_RETAIN дампов.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          ts=$$(date +%Y%m%d-%H%M%S);
+          out="/backups/aimash-$$ts.dump";
+          echo "[backup] pg_dump -> $$out";
+          if pg_dump -Fc -h postgres -U aimash -d aimash > "$$out"; then
+            echo "[backup] ok";
+          else
+            echo "[backup] FAILED"; rm -f "$$out";
+          fi;
+          ls -1t /backups/aimash-*.dump 2>/dev/null | tail -n +$$(( $${BACKUP_RETAIN:-14} + 1 )) | xargs -r rm -f;
+          sleep 86400;
+        done
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
 
 volumes:
   aimash_pgdata:

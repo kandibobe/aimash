@@ -46,6 +46,52 @@ async def dispose_engine() -> None:
     await engine.dispose()
 
 
+# B2: гард одного polling-инстанса. Ключ — произвольное стабильное 64-битное число ("AIMASH" в hex):
+# одинаков между рестартами, уникален для этого приложения (маловероятно совпасть с чужим advisory-
+# lock в общей БД). Соединение, удерживающее lock, держим живым весь рантайм.
+_SINGLE_INSTANCE_LOCK_KEY = 0x41494D415348  # "AIMASH"
+_lock_conn = None  # type: ignore[var-annotated]
+
+
+async def acquire_single_instance_lock() -> bool:
+    """B2: не дать двум polling-инстансам работать одновременно (Telegram отдаёт 409 Conflict дублю —
+    повторяющаяся боль, особенно перекрытие старого/нового контейнера при `compose up --build`).
+    Берём session-level Postgres advisory lock НЕблокирующе (pg_try_advisory_lock): занят → False,
+    вызывающий чисто выходит (не лезем polling'ом → 409 не возникает). Соединение держим открытым
+    весь рантайм — lock снимается автоматически при его закрытии/падении процесса (session-level, не
+    транзакционный, откат/commit его не трогают). На SQLite (dev/test) advisory-lock нет → no-op=True."""
+    global _lock_conn
+    if _db_url.startswith("sqlite"):
+        return True
+    conn = await engine.connect()
+    try:
+        got = (
+            await conn.execute(
+                text("SELECT pg_try_advisory_lock(:k)"), {"k": _SINGLE_INSTANCE_LOCK_KEY}
+            )
+        ).scalar()
+    except Exception:
+        await conn.close()
+        raise
+    if not got:
+        await conn.close()
+        return False
+    _lock_conn = conn  # держим соединение открытым → держим lock весь рантайм
+    return True
+
+
+async def release_single_instance_lock() -> None:
+    """B2: отпустить advisory lock (закрыть удерживающее соединение). Вызывать в finally teardown.
+    Идемпотентно; no-op если lock не брался (SQLite/второй инстанс)."""
+    global _lock_conn
+    if _lock_conn is not None:
+        try:
+            await _lock_conn.close()  # session-level lock снимется вместе с закрытием соединения
+        except Exception:  # noqa: BLE001 — освобождение lock не должно ронять teardown
+            pass
+        _lock_conn = None
+
+
 def heal_sqlite_schema(sync_conn) -> list[str]:
     """Dev (SQLite) self-heal схемы: `create_all` НЕ добавляет колонки в уже существующие таблицы,
     поэтому аддитивная миграция (напр. 0004 → audit_log.actor_user_id/actor_username) оставляла

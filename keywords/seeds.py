@@ -12,7 +12,7 @@ import re
 
 from agent.router import chat
 
-SEED_COUNT = 10  # §19.4.2: «10 самых релевантных ключевых слов»
+SEED_COUNT = 15  # §19.4.2 (P1-7): больше сид-ключей → богаче набор идей от Keyword Planner
 
 _SYSTEM = (
     "Ты — специалист по контекстной рекламе Google Ads. По теме кампании (ЧТО рекламируется — "

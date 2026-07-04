@@ -227,6 +227,40 @@ async def apply_resume_ad_group(
     return result
 
 
+# ── Удаление кампании / группы (необратимо, status→REMOVED) ───────────────────────
+# НЕ денежная операция (user_initiated не требуется, как pause/resume), НО необратимая — в UI
+# закрыта ДВОЙНЫМ подтверждением (bot.keyboards.confirm_destructive_kb). Оба гейта обязательны:
+# ensure_allowed (Draft-only) + _require_confirmation (atomic claim, one-shot, replay-защита).
+async def apply_remove_campaign(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    ensure_allowed(customer_id)
+    await _require_confirmation(confirm_store, confirmation_id, "remove_campaign")
+    result = await run_ads_call(_remove_campaign_via_sdk, ads_client, customer_id, campaign_id)
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+async def apply_remove_ad_group(
+    *,
+    customer_id: str,
+    ad_group_id: str,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    ensure_allowed(customer_id)
+    await _require_confirmation(confirm_store, confirmation_id, "remove_ad_group")
+    result = await run_ads_call(_remove_ad_group_via_sdk, ads_client, customer_id, ad_group_id)
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
 # ── Ставка CPC на уровне групп объявлений ───────────────────────────────────────
 async def apply_update_bid(
     *,
@@ -1087,6 +1121,35 @@ def _set_ad_group_status_via_sdk(client, customer_id: str, ad_group_id: str, sta
         "customer_id": customer_id,
         "ad_group_id": str(ad_group_id),
         "status": getattr(status, "name", str(status)),
+        "applied": True,
+    }
+
+
+def _remove_campaign_via_sdk(client, customer_id: str, campaign_id: str) -> dict:
+    """Удаление кампании через CampaignService (op.remove = resource_name). Необратимо: статус
+    кампании становится REMOVED. Замок/гейт — в apply_remove_campaign выше."""
+    svc = client.get_service("CampaignService")
+    op = client.get_type("CampaignOperation")
+    op.remove = svc.campaign_path(str(customer_id), str(campaign_id))
+    svc.mutate_campaigns(customer_id=str(customer_id), operations=[op])
+    return {
+        "customer_id": customer_id,
+        "campaign_id": str(campaign_id),
+        "removed": True,
+        "applied": True,
+    }
+
+
+def _remove_ad_group_via_sdk(client, customer_id: str, ad_group_id: str) -> dict:
+    """Удаление группы объявлений через AdGroupService (op.remove). Необратимо (status→REMOVED)."""
+    svc = client.get_service("AdGroupService")
+    op = client.get_type("AdGroupOperation")
+    op.remove = svc.ad_group_path(str(customer_id), str(ad_group_id))
+    svc.mutate_ad_groups(customer_id=str(customer_id), operations=[op])
+    return {
+        "customer_id": customer_id,
+        "ad_group_id": str(ad_group_id),
+        "removed": True,
         "applied": True,
     }
 

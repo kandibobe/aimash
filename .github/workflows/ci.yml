@@ -36,8 +36,10 @@ jobs:
         continue-on-error: true
         run: mypy core ads agent confirm bot db
 
+      # D1: порог покрытия как АНТИ-РЕГРЕСС. Сейчас ~68% — ставим floor 65 (буфер, чтобы не падать на
+      # шумных дельтах), но не даём покрытию просесть глубже. Поднимать порог по мере роста тестов.
       - name: Pytest + coverage (офлайн safety-тесты)
-        run: pytest -q --cov=. --cov-report=term-missing --cov-report=xml
+        run: pytest -q --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=65
 
   secret-scan:
     runs-on: ubuntu-latest
@@ -82,3 +84,21 @@ jobs:
             docker compose up -d --build
             docker image prune -f
             docker compose ps
+            # B1: пост-деплой проверка здоровья. `compose up` возвращается сразу — деплой считался бы
+            # «зелёным», даже если бот крэш-лупит (битая миграция / плохой рантайм-конфиг / 409).
+            # Семплируем состояние контейнера 3× за ~35с: крэш-луп не удержит status=running на всех
+            # проверках. Не running → script_stop=true валит job (красный деплой видно сразу).
+            echo "⏳ Пост-деплой проверка здоровья aimash-bot..."
+            sleep 20
+            for i in 1 2 3; do
+              STATE=$(docker inspect -f '{{.State.Status}}' aimash-bot 2>/dev/null || echo missing)
+              RESTARTS=$(docker inspect -f '{{.RestartCount}}' aimash-bot 2>/dev/null || echo "?")
+              echo "check $i: state=$STATE restarts=$RESTARTS"
+              if [ "$STATE" != "running" ]; then
+                echo "::error::aimash-bot не running после деплоя (state=$STATE) — вероятно крэш-луп"
+                docker compose logs --tail=80 bot || true
+                exit 1
+              fi
+              sleep 5
+            done
+            echo "✅ aimash-bot running (деплой здоров)"

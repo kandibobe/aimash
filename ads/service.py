@@ -30,6 +30,8 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
         "pause_campaign",
         "resume_campaign",
         "update_campaign",
+        "remove_campaign",
+        "remove_ad_group",
         "pause_ad_group",
         "resume_ad_group",
         "set_geo_proximity",
@@ -265,6 +267,40 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             else mutations.apply_resume_ad_group
         )
         return await apply(
+            customer_id=customer_id,
+            ad_group_id=ag.id,
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
+    if op == "remove_campaign":
+        ref = await asyncio.to_thread(
+            resolve.find_campaign_by_name, client, customer_id, params["campaign"]
+        )
+        if ref is None:
+            raise ValueError(f"кампания '{params['campaign']}' не найдена")
+        return await mutations.apply_remove_campaign(
+            customer_id=customer_id,
+            campaign_id=ref.id,
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
+    if op == "remove_ad_group":
+        ag = await asyncio.to_thread(
+            resolve.find_ad_group_by_name,
+            client,
+            customer_id,
+            params["campaign"],
+            params["ad_group"],
+        )
+        if ag is None:
+            raise ValueError(
+                f"группа «{params['ad_group']}» в кампании «{params['campaign']}» не найдена"
+            )
+        return await mutations.apply_remove_ad_group(
             customer_id=customer_id,
             ad_group_id=ag.id,
             confirmation_id=confirmation_id,

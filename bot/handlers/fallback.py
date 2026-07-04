@@ -167,6 +167,13 @@ async def on_text(m: bm.Message, state: bm.FSMContext) -> None:
     if await state.get_state() is not None:
         await m.answer(bm.i18n.t("wizard_use_screen"))
         return
+    # P1-8: «экспорт статистики всех аккаунтов [за N дней]» → сводный MCC-экспорт (xlsx по всем
+    # дочерним) детерминированно, минуя одно-аккаунтный get_stats (раньше отдавал только один).
+    is_all, period_arg = bm.is_export_all_accounts(text)
+    if is_all:
+        bm._chat_ctx_note(m.chat.id, user_text=text)
+        await bm._send_mcc(m, period_arg)
+        return
     # ingest: если в сообщении есть ссылка — прочитаем её и передадим агенту как СПРАВОЧНЫЙ КОНТЕНТ
     # (best-effort: сбой чтения не ломает обычную команду). Текст на callback/фото-этапах визарда сюда
     # НЕ доходит — его раньше перехватывает cc_stage_expects_button (B8); прочие визарды — свой стейт.
@@ -186,6 +193,8 @@ async def on_text(m: bm.Message, state: bm.FSMContext) -> None:
                 m, instruction=text, context_text=content, source=urls[0], state=state
             )
             return
+    if await bm._llm_budget_or_reply(m):  # C3: пер-юзер дневной потолок LLM (fail-closed)
+        return
     ctx = bm._build_agent_context(m.chat.id)  # C1/C3: контекст диалога (последняя кампания/история)
     async with bm.ux.typing_action(m):  # «печатает…» пока модель парсит команду
         res = await bm.handle_command(text, chat_id=m.chat.id, context=ctx)

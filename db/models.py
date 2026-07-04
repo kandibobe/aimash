@@ -2,7 +2,7 @@
 
 Таблицы:
 - whitelist        — рантайм-allow-list Telegram chat_id (env ∪ БД; admin /adduser /removeuser)
-- user_settings    — пороги алертов, язык, активный аккаунт, ui_prefs (+report_schedule — RESERVED)
+- user_settings    — пороги алертов, язык, активный аккаунт, ui_prefs, per-user report_schedule (§14)
 - proposals        — очередь черновиков изменений (diff «было→станет», статус, customer_id)
 - audit_log        — все операции: кто/когда/что/результат, по confirmation_id (БЕЗ секретов)
 - oauth_tokens     — refresh-токены, ШИФРОВАННЫЕ at-rest (core.secrets.encrypt)
@@ -14,6 +14,9 @@
 - client_contacts / client_services / client_site_pages — детали профиля (§20.7)
 - crawl_jobs       — журнал задач краулинга сайта клиента (§20.4): статус/страницы/ошибка
 - client_profile_history — версии профиля «до» для отката/аудита (§20.5), переживают clear
+- recommendation   — advisor: показанная рекомендация (advisory, НЕ proposal); source/kind/priority
+- recommendation_feedback — 👍/👎 оператора на рекомендацию (Слой B: сигнал для experience)
+- recommendation_outcome — сшивка рекомендация→applied-мутация→delta метрик (Слой B: замер результата)
 
 ⚠️ Секреты (refresh-токены) хранятся ТОЛЬКО зашифрованными (oauth_tokens.refresh_token_enc).
 В audit_log/proposals секретов нет. PII клиента (§20) — не секрет проекта, но в логи сырьём не
@@ -24,7 +27,18 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Index, Integer, String, Text, func
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    DateTime,
+    Float,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -358,4 +372,89 @@ class ClientProfileHistory(Base):
     snapshot: Mapped[dict | None] = mapped_column(JSON)  # профиль «до» (для «было→станет»/отката)
     operation: Mapped[str] = mapped_column(String(32), nullable=False)  # save|update|clear
     confirmation_id: Mapped[str | None] = mapped_column(String(64), index=True)  # сшивка с audit
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Recommendation(Base):
+    """advisor: одна ПОКАЗАННАЯ рекомендация (advisory, golden rule #1/#3). Это НЕ proposal — строка
+    здесь ничего не исполняет и не создаёт мутацию; исполнение любого совета идёт ОТДЕЛЬНОЙ командой
+    через confirm-гейт. suggested_operation — advisory-МЕТКА (для связывания исхода в Слое B), НЕ путь
+    исполнения. evidence — метрики-триггер (база для замера delta); body — показанный текст (аудит).
+    Секретов нет (только метрики/имена кампаний). rec_uid уникален (влезает в 64-байт callback_data).
+
+    На SQLite (dev) таблицу создаёт create_all; на Postgres (prod) — Alembic (0018). Индексы
+    объявлены и здесь — против дрейфа create_all/autogenerate (как Proposal/CampaignDraft)."""
+
+    __tablename__ = "recommendation"
+    __table_args__ = (
+        Index("ix_recommendation_chat_customer_created", "chat_id", "customer_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    rec_uid: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    customer_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    topic: Mapped[str] = mapped_column(
+        String(16), nullable=False
+    )  # optimize|keywords|rsa|structure
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)  # warning|info
+    target_campaign: Mapped[str | None] = mapped_column(String(255))
+    # advisory-метка (для outcome-связывания), НЕ путь исполнения — мутация только через confirm-гейт.
+    suggested_operation: Mapped[str | None] = mapped_column(String(64))
+    priority: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)  # считает КОД
+    evidence: Mapped[dict | None] = mapped_column(JSON)  # метрики-триггер (база для delta)
+    body: Mapped[str | None] = mapped_column(Text)  # показанный текст (аудит), без секретов
+    source: Mapped[str] = mapped_column(
+        String(16), default="advise", nullable=False
+    )  # advise|scheduler
+    status: Mapped[str] = mapped_column(
+        String(16), default="shown", nullable=False
+    )  # shown|dismissed
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RecommendationFeedback(Base):
+    """Слой B: обратная связь оператора (👍/👎) на рекомендацию. Один голос-тогл на оператора —
+    уникальность (rec_uid, chat_id); связь с recommendation по значению rec_uid (без FK — конвенция
+    проекта, как audit_log/AccountAccess). actor_* — кто нажал (§12-стиль). Кнопки НЕ мутируют
+    Google Ads и НЕ создают proposal — только запись сюда (инвариант test_advisor)."""
+
+    __tablename__ = "recommendation_feedback"
+    __table_args__ = (Index("ux_recommendation_feedback", "rec_uid", "chat_id", unique=True),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    rec_uid: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    actor_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    actor_username: Mapped[str | None] = mapped_column(String(64))
+    rating: Mapped[str] = mapped_column(String(8), nullable=False)  # up|down
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RecommendationOutcome(Base):
+    """Слой B: сшивка рекомендация → ПРИМЕНЁННАЯ мутация → delta метрик (замер результата). Создаётся
+    хуком link_applied_mutation ПОСЛЕ успешного execute_confirmed, когда applied-мутация совпала с
+    открытой рекомендацией (тот же customer_id+suggested_operation+target_campaign). measure_after —
+    когда джоба замера (read-only) посчитает followup и delta (verdict КОДОМ). measured_at=NULL —
+    ждёт замера. Только ЛОКАЛЬНАЯ БД: ни хук, ни джоба ничего не мутируют в Google Ads (rule #3).
+    Связи по значению (rec_uid/confirmation_id, без FK — как audit_log)."""
+
+    __tablename__ = "recommendation_outcome"
+    __table_args__ = (Index("ix_recommendation_outcome_pending", "measured_at", "measure_after"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    rec_uid: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    confirmation_id: Mapped[str | None] = mapped_column(String(64), index=True)  # applied-мутация
+    customer_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    target_campaign: Mapped[str | None] = mapped_column(String(255))
+    apply_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    baseline: Mapped[dict | None] = mapped_column(JSON)  # метрики на момент рекомендации/применения
+    followup: Mapped[dict | None] = mapped_column(JSON)  # метрики после окна (замер джобой)
+    delta: Mapped[dict | None] = mapped_column(JSON)  # разница (считает КОД)
+    measure_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    measured_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )  # NULL=ждёт замера
+    verdict: Mapped[str | None] = mapped_column(String(16))  # improved|worse|neutral (КОД)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
