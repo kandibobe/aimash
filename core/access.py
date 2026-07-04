@@ -26,7 +26,7 @@ from sqlalchemy import delete, select
 from ads.client import DRAFT_ACCOUNT_ID, ensure_read_allowed
 from core.config import normalize_customer_id, settings
 from core.logging import log
-from db.models import AccountAccess, UserSettings
+from db.models import AccountAccess, UserSettings, Whitelist
 from db.session import Session
 
 # Кэш «есть ли хоть один грант» (режим auto): (deadline_monotonic, value). TTL короткий — граница
@@ -58,6 +58,91 @@ async def per_user_enforcement_active() -> bool:
     active = row is not None
     _enf_cache = (now + _ENF_TTL_S, active)
     return active
+
+
+# ── Рантайм-whitelist (§6/§12): env ∪ БД, fail-closed ─────────────────────────────────────
+# Кэш DB-набора chat_id (короткий TTL — граница меняется редко; add/remove инвалидируют сразу).
+# Как _enf_cache: избегаем удара в БД на КАЖДЫЙ апдейт Telegram (WhitelistMiddleware — самый горячий).
+_WL_TTL_S = 30.0
+_wl_cache: tuple[float, frozenset[int]] | None = None
+_wl_db_warned = False  # один WARNING на процесс, если таблица недоступна (миграция не применена)
+
+
+def _invalidate_whitelist_cache() -> None:
+    global _wl_cache
+    _wl_cache = None
+
+
+async def _db_whitelist_ids() -> frozenset[int]:
+    """chat_id из таблицы whitelist (кэш _WL_TTL_S). Пусто ⇒ frozenset() (fail-closed сохраняется:
+    объединение с env; пустое объединение блокирует всех в middleware).
+
+    Устойчивость: любой сбой БД (таблица не создана — миграция 0017 не применена; обрыв соединения)
+    трактуем как ПУСТОЙ набор, НЕ роняя обработку апдейта. Это fail-closed в безопасную сторону:
+    env-whitelist проверяется РАНЬШЕ (бутстрап-админ всегда проходит), а неизвестные chat_id при
+    недоступной БД получают отказ, а не доступ. Один WARNING на процесс (не шумим на каждый апдейт)."""
+    global _wl_cache, _wl_db_warned
+    now = time.monotonic()
+    if _wl_cache is not None and _wl_cache[0] > now:
+        return _wl_cache[1]
+    try:
+        async with Session() as s:
+            rows = (await s.execute(select(Whitelist.chat_id))).scalars().all()
+    except Exception as e:  # noqa: BLE001 — БД недоступна/таблицы нет → fail-closed (пустой набор)
+        if not _wl_db_warned:
+            _wl_db_warned = True
+            log.warning(
+                "whitelist: таблица недоступна (%s) — рантайм-whitelist пуст, действует только env. "
+                "Применить миграцию 0017 (alembic upgrade head).",
+                type(e).__name__,
+            )
+        return frozenset()
+    ids = frozenset(int(x) for x in rows)
+    _wl_cache = (now + _WL_TTL_S, ids)
+    return ids
+
+
+async def is_whitelisted(chat_id: int | None) -> bool:
+    """Пущен ли chat_id в бота: env TELEGRAM_WHITELIST_CHAT_IDS ∪ таблица whitelist (fail-closed —
+    None/отсутствие в обоих ⇒ False). Env — бутстрап первого админа; БД — рантайм /adduser."""
+    if chat_id is None:
+        return False
+    if chat_id in settings.whitelist:
+        return True
+    return chat_id in await _db_whitelist_ids()
+
+
+async def add_whitelisted_user(
+    chat_id: int, *, added_by: int | None = None, note: str | None = None
+) -> bool:
+    """Добавить оператора в рантайм-whitelist (идемпотентно). True — добавлен, False — уже был.
+    Инвалидирует кэш немедленно (новый оператор пишет боту сразу, без рестарта и без ожидания TTL)."""
+    async with Session() as s:
+        exists = (await s.execute(select(Whitelist.id).where(Whitelist.chat_id == chat_id))).first()
+        if exists is not None:
+            return False
+        s.add(Whitelist(chat_id=chat_id, added_by=added_by, note=note))
+        await s.commit()
+    _invalidate_whitelist_cache()
+    return True
+
+
+async def remove_whitelisted_user(chat_id: int) -> None:
+    """Убрать оператора из рантайм-whitelist (no-op, если его не было). Env-whitelist этим НЕ
+    затрагивается (env — бутстрап; убрать env-оператора можно только правкой .env)."""
+    async with Session() as s:
+        await s.execute(delete(Whitelist).where(Whitelist.chat_id == chat_id))
+        await s.commit()
+    _invalidate_whitelist_cache()
+
+
+async def list_whitelisted_users() -> list[Whitelist]:
+    """Операторы рантайм-whitelist (БД), отсортированы по дате добавления. Env-операторы здесь НЕ
+    показываются (они не в таблице) — /users помечает их отдельно из settings.whitelist."""
+    async with Session() as s:
+        return list(
+            (await s.execute(select(Whitelist).order_by(Whitelist.created_at))).scalars().all()
+        )
 
 
 async def ensure_account_allowed_for_user(chat_id: int, customer_id: str) -> None:

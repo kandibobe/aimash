@@ -1,8 +1,8 @@
-"""Схема БД: гарды на dead schema и целостность цепочки миграций (2G).
+"""Схема БД: гарды на целостность цепочки миграций и подключённость таблиц (2G).
 
-- Таблицы whitelist больше нет ни в моделях (иллюзия БД-allow-list снята: доступ — env
-  TELEGRAM_WHITELIST_CHAT_IDS), ни в актуальной схеме;
-- Alembic-цепочка линейна, ровно один head — 0016_drop_whitelist.
+- Таблица whitelist ВОЗВРАЩЕНА (0017) и теперь ПОДКЛЮЧЕНА к рантайму (env ∪ БД,
+  bot.main.WhitelistMiddleware / core.access.is_whitelisted) — не dead schema;
+- Alembic-цепочка линейна, ровно один head — 0017_whitelist_runtime.
 """
 
 from __future__ import annotations
@@ -19,11 +19,14 @@ _REPO = Path(__file__).resolve().parents[1]
 _VERSIONS = _REPO / "migrations" / "versions"
 
 
-def test_whitelist_table_removed_from_models():
-    assert "whitelist" not in Base.metadata.tables, (
-        "таблица whitelist вернулась в модели — она dead schema (allow-list живёт в env, "
-        "см. миграцию 0016_drop_whitelist)"
+def test_whitelist_table_present_and_wired():
+    """whitelist ВОЗВРАЩЕНА (0017) и подключена к рантайму: is_whitelisted читает env ∪ БД.
+    Гард против случайного повторного дропа — теперь это НЕ dead schema (P0-A)."""
+    assert "whitelist" in Base.metadata.tables, (
+        "таблица whitelist должна быть в моделях — она подключена к рантайму "
+        "(bot.main.WhitelistMiddleware / core.access.is_whitelisted), см. 0017_whitelist_runtime"
     )
+    from core.access import is_whitelisted  # noqa: F401 — рантайм-потребитель существует
 
 
 def _revisions() -> dict[str, str | None]:
@@ -40,12 +43,12 @@ def _revisions() -> dict[str, str | None]:
     return out
 
 
-def test_single_alembic_head_is_0016():
+def test_single_alembic_head_is_0017():
     revs = _revisions()
     assert revs, "не найдено ни одной миграции — сломан парс migrations/versions"
     downs = {d for d in revs.values() if d}
     heads = [r for r in revs if r not in downs]
-    assert heads == ["0016_drop_whitelist"], (
-        f"ожидался ровно один head=0016_drop_whitelist, получено {heads} — "
+    assert heads == ["0017_whitelist_runtime"], (
+        f"ожидался ровно один head=0017_whitelist_runtime, получено {heads} — "
         "ветвление/забытый down_revision в migrations/versions"
     )

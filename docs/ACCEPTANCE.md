@@ -183,6 +183,12 @@ GDN / Video / Demand Gen, а UAC не реализуется намеренно.
 - **Тесты:** `tests/test_rsa_session.py`, `tests/test_rsa_create.py`, `tests/test_rsa_refine.py`,
   `tests/test_rsa_length_properties.py`, `tests/test_adcopy_generate.py`,
   `tests/test_cc_rsa_handoff.py`.
+- **Отклонение UX (принято заказчиком 2026-07):** в **визарде §19** курация поэлементная —
+  карточки ✅ Применить / ✏️ Доработать / ❌ Отклонить на каждый заголовок/описание (полное
+  соответствие §10). В **отдельной команде `/rsa`** по умолчанию — быстрый **список-UX** (кнопка
+  «✅ Применить набор») с поэлементной доработкой; заказчик подтвердил это как приемлемую замену
+  поэлементных карточек для быстрого сценария. Мутация в обоих случаях создаёт объявление ТОЛЬКО из
+  одобренных элементов за confirm-гейтом.
 
 ---
 
@@ -267,6 +273,11 @@ GDN / Video / Demand Gen, а UAC не реализуется намеренно.
 - **20.6 Профиль в генерации:** `profile_context_text` → RSA/ассеты/seed-ключи (PII не кладём).
 - **20.7 Хранение:** таблицы `client_profiles`/`client_contacts`/`client_services`/`client_site_pages`/
   `client_profile_history`/`crawl_jobs` (миграции `0013`/`0014`); изменения — в audit log.
+- **Отклонение (принято, 2026-07):** краул СВЕЖЕГО/пустого профиля (когда `before is None`) сохраняет
+  результат без отдельного «было→станет»-подтверждения — перезаписывать нечего, а краул уже запущен
+  явной командой менеджера; пишется audit-строка `applied`. Краул/обновление СУЩЕСТВУЮЩЕГО профиля
+  по-прежнему проходит confirm-гейт (`_present_memory_proposal`). Google Ads это не затрагивает
+  (профиль — локальная память, золотые правила 1–3 про `ads.mutations`).
 - **Тесты:** `tests/test_client_store.py`, `tests/test_client_extract.py`, `tests/test_client_crawler.py`,
   `tests/test_client_crawl_orchestration.py`, `tests/test_client_confirm.py`, `tests/test_client_wizard.py`,
   `tests/test_client_profile_wiring.py`.

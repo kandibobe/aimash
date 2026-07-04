@@ -132,6 +132,10 @@ HELP = (
     "/lang — язык интерфейса (RU/EN)\n"
     "/journal — журнал изменений · /diag — журнал ошибок\n"
     "/cancel — отменить текущий черновик\n\n"
+    "<b>👤 Для админа (ADMIN_CHAT_IDS)</b>\n"
+    "/adduser &lt;chat_id&gt; — открыть оператору доступ к боту (без рестарта) + выбрать аккаунты\n"
+    "/removeuser &lt;chat_id&gt; — закрыть доступ · /users — список операторов\n"
+    "/grant &lt;chat_id&gt; &lt;id&gt; · /revoke &lt;chat_id&gt; &lt;id&gt; — точечный доступ к аккаунту (чтение)\n\n"
     "<b>Как в другой кампании / по брифу</b>\n"
     "• «сделай кампанию N с настройками как в кампании X» — клонирую настройки.\n"
     "• 🧩 в /campaigns → «Расширения»: быстрые ссылки, уточнения, структурные описания, картинка.\n"
@@ -472,6 +476,39 @@ SEARCH_BAD_BRIEF = (
 )
 
 
+def _targeting_block(
+    lng: str,
+    *,
+    geo_locations: list[str] | None,
+    languages: list[str] | None,
+    networks: str | None,
+    ad_schedule: str | None,
+    start_date: str | None,
+    end_date: str | None,
+) -> str:
+    """P1-A: блок таргетинга (гео/язык/сети/расписание/даты) для карточки подтверждения §5/§19.8 —
+    менеджер видит, на КОГО/КОГДА пойдёт кампания, ДО нажатия ✅ (пустое гео = глобальный показ
+    отлавливается глазами). Пустой блок, если ничего не передано (обратная совместимость /clone)."""
+    if not any([geo_locations, languages, networks, ad_schedule, start_date, end_date]):
+        return ""
+    en = lng == "en"
+    geo = ", ".join(geo_locations or []) or ("all (global!)" if en else "все (глобально!)")
+    langs = ", ".join(languages or []) or "—"
+    if en:
+        nets = "Search + partners" if networks == "search_partners" else "Search"
+        sched = ad_schedule or "24/7"
+        dates = f"{start_date or 'today'} — {end_date or 'no end date'}"
+        return (
+            f"\n\nGeo: {geo} · Language: {langs}\n"
+            f"Networks: {nets} · Ad schedule: {sched}\n"
+            f"Dates: {dates}"
+        )
+    nets = "Search + партнёры" if networks == "search_partners" else "Search"
+    sched = ad_schedule or "24/7"
+    dates = f"{start_date or 'сегодня'} — {end_date or 'без даты конца'}"
+    return f"\n\nГЕО: {geo} · Язык: {langs}\nСети: {nets} · Расписание: {sched}\nДаты: {dates}"
+
+
 def fmt_search_proposal_summary(
     name: str,
     url: str,
@@ -481,11 +518,29 @@ def fmt_search_proposal_summary(
     keywords: list[str],
     match_type: str,
     lang: str | None = None,
+    *,
+    geo_locations: list[str] | None = None,
+    languages: list[str] | None = None,
+    networks: str | None = None,
+    ad_schedule: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> str:
-    """Плейн-текст сводка create_search_campaign для confirm-гейта (esc применяется при показе)."""
+    """Плейн-текст сводка create_search_campaign для confirm-гейта (esc применяется при показе).
+    P1-A: опц. таргетинг-поля (гео/язык/сети/расписание/даты) выводятся блоком, если переданы —
+    полное «было→станет» в точке ✅ (§5/§19.8). /clone их НЕ передаёт (там гео не переносится)."""
     lng = _lang(lang)
     h_lines = "\n".join(f"  • {h}" for h in headlines)
     d_lines = "\n".join(f"  • {d}" for d in descriptions)
+    tgt_block = _targeting_block(
+        lng,
+        geo_locations=geo_locations,
+        languages=languages,
+        networks=networks,
+        ad_schedule=ad_schedule,
+        start_date=start_date,
+        end_date=end_date,
+    )
     if lng == "en":
         kw_block = ""
         if keywords:
@@ -503,7 +558,8 @@ def fmt_search_proposal_summary(
         return (
             f"Create a search campaign “{name}” — paused.\n"
             f"Link: {url}\n"
-            f"Daily budget: {budget_units:g}\n\n"
+            f"Daily budget: {budget_units:g}"
+            f"{tgt_block}\n\n"
             f"Headlines ({len(headlines)}):\n{h_lines}\n\n"
             f"Descriptions ({len(descriptions)}):\n{d_lines}"
             f"{kw_block}"
@@ -520,7 +576,8 @@ def fmt_search_proposal_summary(
     return (
         f"Создать поисковую кампанию «{name}» — на паузе.\n"
         f"Ссылка: {url}\n"
-        f"Дневной бюджет: {budget_units:g}\n\n"
+        f"Дневной бюджет: {budget_units:g}"
+        f"{tgt_block}\n\n"
         f"Заголовки ({len(headlines)}):\n{h_lines}\n\n"
         f"Описания ({len(descriptions)}):\n{d_lines}"
         f"{kw_block}"
@@ -1916,6 +1973,14 @@ def fmt_client_card(profile: dict | None, customer_id: str, lang: str | None = N
     pages = int(profile.get("site_pages_count") or 0)
     if pages:
         lines.append(("Crawled pages: " if lng == "en" else "Страниц с сайта: ") + str(pages))
+    # §20.2: дата последнего краула (требование карточки; persist был, в UI не выводился — P1-D).
+    lc = profile.get("last_crawled_at")
+    if lc is not None:
+        try:
+            lc_s = lc.strftime("%Y-%m-%d %H:%M") if hasattr(lc, "strftime") else str(lc)
+        except Exception:  # noqa: BLE001 — дата необязательна, не роняем карточку
+            lc_s = str(lc)
+        lines.append(("Last crawl: " if lng == "en" else "Последний краул: ") + esc(lc_s))
     return "\n".join(lines)
 
 

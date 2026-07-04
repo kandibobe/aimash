@@ -13,6 +13,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 from adcopy.validate import STRUCTURED_SNIPPET_HEADERS
 from bot.callbacks import (
+    AdminCB,
     AlertCB,
     AudienceCB,
     CampCB,
@@ -141,6 +142,78 @@ def lang_kb() -> InlineKeyboardMarkup:
     kb.button(text="🇷🇺 Русский", callback_data=LangCB(code="ru"))
     kb.button(text="🇬🇧 English", callback_data=LangCB(code="en"))
     kb.adjust(2)
+    return kb.as_markup()
+
+
+def adduser_access_kb(target_chat: int, lang: str | None = None) -> InlineKeyboardMarkup:
+    """P0-A: после /adduser — выбор объёма доступа ЧТЕНИЯ для нового оператора (решение заказчика:
+    «Все аккаунты / Выбрать аккаунты»). Кнопки лишь маршрутизируют (AdminCB) — гранты выдаёт
+    хендлер; мутации этим НЕ открываются. Чистая презентация: список аккаунтов тянет хендлер."""
+    from bot import i18n
+
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text=i18n.t("adduser_btn_all", lang), callback_data=AdminCB(action="all", chat=target_chat)
+    )
+    kb.button(
+        text=i18n.t("adduser_btn_pick", lang),
+        callback_data=AdminCB(action="pick", chat=target_chat),
+    )
+    kb.button(
+        text=i18n.t("adduser_btn_none", lang),
+        callback_data=AdminCB(action="done", chat=target_chat),
+    )
+    kb.adjust(2, 1)
+    return kb.as_markup()
+
+
+def adduser_pick_kb(
+    target_chat: int,
+    accounts: list[tuple[str, str]],
+    granted: set[str],
+    lang: str | None = None,
+    *,
+    page: int = 0,
+) -> InlineKeyboardMarkup:
+    """P0-A «Выбрать аккаунты»: тап-тогл гранта чтения аккаунта оператору (✅ = выдан). accounts —
+    [(customer_id, name)] обнаруженных дочерних; granted — уже выданные оператору id. Постранично
+    (защита от REPLY_MARKUP_TOO_LONG на больших MCC, как report_accounts_kb). Резолв — stateless:
+    customer_id в самом callback_data (AdminCB.cid). «Готово» завершает."""
+    from bot import i18n
+
+    kb = InlineKeyboardBuilder()
+    total = len(accounts)
+    page, pages, start = _acct_page(total, page)
+    for cid, name in accounts[start : start + _ACCT_PAGE]:
+        mark = "✅ " if cid in granted else "▫️ "
+        label = _ellipsize(f"{name} · {cid}" if name and name != cid else cid)
+        kb.button(
+            text=f"{mark}{label}", callback_data=AdminCB(action="grant", chat=target_chat, cid=cid)
+        )
+    kb.adjust(1)
+    if pages > 1:
+        nav = InlineKeyboardBuilder()
+        if page > 0:
+            nav.button(
+                text="‹", callback_data=AdminCB(action="pick", chat=target_chat, cid=f"p{page - 1}")
+            )
+        nav.button(
+            text=f"{page + 1}/{pages}",
+            callback_data=AdminCB(action="pick", chat=target_chat, cid=f"p{page}"),
+        )
+        if page < pages - 1:
+            nav.button(
+                text="›", callback_data=AdminCB(action="pick", chat=target_chat, cid=f"p{page + 1}")
+            )
+        nav.adjust(3)
+        kb.attach(nav)
+    done = InlineKeyboardBuilder()
+    done.button(
+        text=i18n.t("adduser_btn_done", lang),
+        callback_data=AdminCB(action="done", chat=target_chat),
+    )
+    done.adjust(1)
+    kb.attach(done)
     return kb.as_markup()
 
 
@@ -1210,7 +1283,7 @@ def _rsa_batch_row(kb: InlineKeyboardBuilder, cid: str, en: bool) -> None:
         callback_data=RsaCB(action="regen", cid=cid),
     )
     kb.button(
-        text="✅ Approve the set" if en else "✅ Утвердить набор",
+        text="✅ Apply the set" if en else "✅ Применить набор",  # §10 wording «Применить»
         callback_data=RsaCB(action="aslist", cid=cid),
     )
 
@@ -1223,7 +1296,7 @@ def rsa_item_kb(
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     kb.button(
-        text="✅ Approve" if en else "✅ Одобрить",
+        text="✅ Apply" if en else "✅ Применить",  # §10 wording «✅ Применить»
         callback_data=RsaCB(action="approve", cid=cid, kind=kind, idx=idx),
     )
     kb.button(

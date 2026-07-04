@@ -330,11 +330,18 @@ class GetStats(BaseModel):
 
 class KeywordResearch(BaseModel):
     """Read-tool: подбор ключевых слов (advisory). Модель заполняет сиды и/или URL; объём/
-    конкуренцию и кластеризацию считает КОД (ничего в аккаунте не меняется)."""
+    конкуренцию и кластеризацию считает КОД (ничего в аккаунте не меняется).
+
+    §7-параметры (P1-F): geo (страна ISO-2 или название — КОД резолвит в geoTargetConstant),
+    network (Search / Search+Partners), months (историческое окно метрик 1..48) — раньше были
+    доступны только в визарде /keywords, теперь и через NL («ключи для X по Кении, Search+партнёры»)."""
 
     seeds: list[str] = Field(default_factory=list, max_length=10)
     url: str | None = None
     language: Literal["ru", "uk", "en"] = "ru"
+    geo: str | None = None  # страна (ISO-2 или название); None → дефолт (_kw_run подставит Украину)
+    network: Literal["search", "search_partners"] = "search"
+    months: int | None = Field(default=None, ge=1, le=48)
 
     @field_validator("url")
     @classmethod

@@ -275,6 +275,170 @@ async def revoke_cmd(m: bm.Message, command: bm.CommandObject) -> None:
     await m.answer(bm.i18n.t("revoke_ok", chat=target_chat, cid=cid), parse_mode=bm.ParseMode.HTML)
 
 
+# ── P0-A: рантайм-управление операторами (whitelist env ∪ БД) — только админ ──
+def _all_readable_ids() -> list[str]:
+    """Все читаемые ботом аккаунты (кроме Draft — он доступен всем без гранта): мутационный набор ∪
+    env read-list ∪ обнаруженные дочерние MCC. Для bulk-гранта «Все аккаунты» новому оператору."""
+    from ads.client import discovered_read_children
+
+    ids = (
+        bm.settings.allowed_customer_ids
+        | bm.settings.read_customer_ids
+        | discovered_read_children()
+    )
+    return sorted(c for c in ids if c and c != bm.DRAFT_ACCOUNT_ID)
+
+
+@bm.dp.message(bm.Command("adduser"))
+async def adduser_cmd(m: bm.Message, command: bm.CommandObject) -> None:
+    """/adduser <chat_id> [заметка] — открыть новому оператору доступ к боту БЕЗ рестарта (рантайм-
+    whitelist, env ∪ БД). Затем inline-выбор объёма ЧТЕНИЯ (Все / Выбрать / только бот). Мутации НЕ
+    открывает (замок ensure_allowed отдельный). Только админ (ADMIN_CHAT_IDS)."""
+    if not _is_admin(m.chat.id):
+        await m.answer(bm.i18n.t("admin_only"))
+        return
+    parts = (command.args or "").split(maxsplit=1)
+    if not parts or not parts[0].lstrip("-").isdigit():
+        await m.answer(bm.i18n.t("adduser_bad_args"), parse_mode=bm.ParseMode.HTML)
+        return
+    target = int(parts[0])
+    note = parts[1].strip() if len(parts) > 1 else None
+    from core.access import add_whitelisted_user
+
+    added = await add_whitelisted_user(target, added_by=m.chat.id, note=note)
+    key = "adduser_added" if added else "adduser_exists"
+    await m.answer(
+        bm.i18n.t(key, chat=target),
+        reply_markup=bm.adduser_access_kb(target),
+        parse_mode=bm.ParseMode.HTML,
+    )
+
+
+@bm.dp.message(bm.Command("removeuser"))
+async def removeuser_cmd(m: bm.Message, command: bm.CommandObject) -> None:
+    """/removeuser <chat_id> — закрыть оператору доступ к боту (убрать из рантайм-whitelist + снять
+    гранты аккаунтов). Env-операторов (.env) убрать нельзя — только правкой .env. Только админ."""
+    if not _is_admin(m.chat.id):
+        await m.answer(bm.i18n.t("admin_only"))
+        return
+    arg = (command.args or "").strip()
+    if not arg.lstrip("-").isdigit():
+        await m.answer(bm.i18n.t("removeuser_bad_args"), parse_mode=bm.ParseMode.HTML)
+        return
+    target = int(arg)
+    if target in bm.settings.whitelist:  # env-оператор — из БД убирать нечего
+        await m.answer(bm.i18n.t("removeuser_env", chat=target), parse_mode=bm.ParseMode.HTML)
+        return
+    from core.access import remove_whitelisted_user
+    from db.models import AccountAccess
+    from db.session import Session
+    from sqlalchemy import delete as _sa_delete
+
+    await remove_whitelisted_user(target)
+    async with Session() as s:  # заодно снимаем все гранты аккаунтов этого оператора
+        await s.execute(_sa_delete(AccountAccess).where(AccountAccess.chat_id == target))
+        await s.commit()
+    from core.access import _invalidate_enforcement_cache
+
+    _invalidate_enforcement_cache()
+    await m.answer(bm.i18n.t("removeuser_ok", chat=target), parse_mode=bm.ParseMode.HTML)
+
+
+@bm.dp.message(bm.Command("users"))
+async def users_cmd(m: bm.Message) -> None:
+    """/users — операторы бота: env (.env, бутстрап) + БД (/adduser). Только админ."""
+    if not _is_admin(m.chat.id):
+        await m.answer(bm.i18n.t("admin_only"))
+        return
+    from core.access import list_whitelisted_users
+
+    env_ids = sorted(bm.settings.whitelist)
+    env_txt = ", ".join(f"<code>{i}</code>" for i in env_ids) or bm.i18n.t("users_empty_db")
+    rows = await list_whitelisted_users()
+    if rows:
+        db_txt = "\n" + "\n".join(
+            f"• <code>{r.chat_id}</code>"
+            + (f" — {bm.texts.esc(r.note)}" if r.note else "")
+            + (f" (by <code>{r.added_by}</code>)" if r.added_by else "")
+            for r in rows
+        )
+    else:
+        db_txt = bm.i18n.t("users_empty_db")
+    await m.answer(bm.i18n.t("users_title", env=env_txt, db=db_txt), parse_mode=bm.ParseMode.HTML)
+
+
+async def _render_adduser_pick(cq: bm.CallbackQuery, target: int, page: int) -> None:
+    """Отрисовать пикер выбора аккаунтов для оператора (тап-тогл гранта чтения). Список — обнаруженные
+    дочерние (meta), отметки ✅ — уже выданные гранты. Пусто ⇒ подсказка /refresh."""
+    from ads.client import discovered_read_children_meta
+    from core.access import list_user_account_ids
+
+    meta = discovered_read_children_meta()
+    accounts = sorted(
+        ((cid, (ch.name or cid)) for cid, ch in meta.items() if cid != bm.DRAFT_ACCOUNT_ID),
+        key=lambda t: t[1].casefold(),
+    )
+    if not accounts:
+        await bm._safe_edit(cq, bm.i18n.t("adduser_pick_empty"))
+        return
+    granted = set(await list_user_account_ids(target))
+    await bm._safe_edit(
+        cq,
+        bm.i18n.t("adduser_pick_title", chat=target),
+        reply_markup=bm.adduser_pick_kb(target, accounts, granted, page=page),
+        parse_mode=bm.ParseMode.HTML,
+    )
+
+
+@bm.dp.callback_query(bm.AdminCB.filter())
+async def admin_access_cb(cq: bm.CallbackQuery, callback_data: bm.AdminCB) -> None:
+    """P0-A: выбор объёма чтения после /adduser. Только админ. Выдаёт ТОЛЬКО гранты чтения
+    (account_access) — мутации не открывает. all=грант всех дочерних; pick=пикер; grant=тогл одного;
+    done=завершить."""
+    if not _is_admin(cq.from_user.id):
+        await cq.answer(bm.i18n.t("admin_only"), show_alert=True)
+        return
+    target = callback_data.chat
+    action = callback_data.action
+    from core.access import (
+        grant_account_access,
+        list_user_account_ids,
+        revoke_account_access,
+    )
+
+    if action == "all":
+        ids = _all_readable_ids()
+        for cid in ids:
+            await grant_account_access(target, cid)
+        await bm._safe_edit(
+            cq, bm.i18n.t("adduser_all_done", chat=target, n=len(ids)), parse_mode=bm.ParseMode.HTML
+        )
+        await cq.answer()
+        return
+    if action == "pick":
+        page = 0
+        if callback_data.cid.startswith("p") and callback_data.cid[1:].isdigit():
+            page = int(callback_data.cid[1:])
+        await _render_adduser_pick(cq, target, page)
+        await cq.answer()
+        return
+    if action == "grant":
+        cid = bm.normalize_customer_id(callback_data.cid)
+        current = set(await list_user_account_ids(target))
+        if cid in current:  # тогл: уже выдан → снять
+            await revoke_account_access(target, cid)
+        else:
+            await grant_account_access(target, cid)
+        await _render_adduser_pick(cq, target, 0)
+        await cq.answer()
+        return
+    # done
+    n = len([c for c in await list_user_account_ids(target) if c != bm.DRAFT_ACCOUNT_ID])
+    key = "adduser_none_done" if n == 0 else "adduser_pick_done"
+    await bm._safe_edit(cq, bm.i18n.t(key, chat=target, n=n), parse_mode=bm.ParseMode.HTML)
+    await cq.answer()
+
+
 @bm.dp.message(bm.Command("accounts"))
 async def accounts_cmd(m: bm.Message) -> None:
     """/accounts — аккаунты, доступные ЭТОМУ оператору на чтение (граница = read-замок × грант),

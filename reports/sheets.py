@@ -2,7 +2,8 @@
 
 Создаёт НОВУЮ таблицу (spreadsheets.create) с листом «Сводка» + листом на каждую разбивку,
 заполняет значения (values.batchUpdate) и возвращает ссылку. Раскладка зеркалит reports.xlsx
-(та же шапка METRIC_HEADERS, те же строки), без форматирования ячеек.
+(та же шапка METRIC_HEADERS, те же строки). Шапка форматируется best-effort через
+spreadsheets.batchUpdate (жирная строка 1 + freeze; §16 P2-b) — сбой формата не роняет экспорт.
 
 ⚠️ Требует OAuth-scope drive.file (или spreadsheets), которого НЕТ у Google Ads токена (adwords).
 Включается отдельным re-auth (см. docs/DEPLOYMENT.md, раздел «Google Sheets»). Без scope вызов
@@ -117,6 +118,37 @@ def _build_service() -> Any:
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
+def _format_headers(svc: Any, spreadsheet_id: str, n_tabs: int) -> None:
+    """§9/§16 (P2-b): косметика — жирная строка 1 + фиксация (freeze) на каждой вкладке через
+    spreadsheets().batchUpdate (метод §16, ранее не использовался). BEST-EFFORT: сбой форматирования
+    НЕ роняет экспорт (значения уже записаны) — логируем и продолжаем. Зеркалит xlsx-шапку."""
+    requests: list[dict] = []
+    for i in range(n_tabs):
+        requests.append(
+            {
+                "repeatCell": {
+                    "range": {"sheetId": i, "startRowIndex": 0, "endRowIndex": 1},
+                    "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                    "fields": "userEnteredFormat.textFormat.bold",
+                }
+            }
+        )
+        requests.append(
+            {
+                "updateSheetProperties": {
+                    "properties": {"sheetId": i, "gridProperties": {"frozenRowCount": 1}},
+                    "fields": "gridProperties.frozenRowCount",
+                }
+            }
+        )
+    try:
+        svc.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id, body={"requests": requests}
+        ).execute()
+    except Exception as e:  # noqa: BLE001 — форматирование необязательно, экспорт уже успешен
+        log.warning("sheets-format: %s (пропуск форматирования шапки)", type(e).__name__)
+
+
 def publish_report_to_sheets(
     report: ReportData, *, title: str | None = None, service: Any = None
 ) -> str:
@@ -132,7 +164,11 @@ def publish_report_to_sheets(
             .create(
                 body={
                     "properties": {"title": title or _default_title(report)},
-                    "sheets": [{"properties": {"title": t.title}} for t in tabs],
+                    # sheetId=i явно (P2-b): чтобы адресовать вкладку в форматирующем batchUpdate
+                    # без доп. запроса на чтение sheetId.
+                    "sheets": [
+                        {"properties": {"title": t.title, "sheetId": i}} for i, t in enumerate(tabs)
+                    ],
                 },
                 fields="spreadsheetId,spreadsheetUrl",
             )
@@ -147,6 +183,7 @@ def publish_report_to_sheets(
                 "data": [{"range": f"'{t.title}'!A1", "values": t.rows} for t in tabs],
             },
         ).execute()
+        _format_headers(svc, sid, len(tabs))  # §9/§16 (P2-b): жирная шапка + фиксация строки 1
     except Exception as e:
         log.warning(
             "sheets-publish: %s за %dмс (вкладок=%d)",

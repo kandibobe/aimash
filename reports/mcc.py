@@ -22,13 +22,16 @@ from ads.read import ChildAccount, list_child_accounts
 from core.logging import redact_text
 from core.resilience import run_ads_read_call
 from reports.period import Period
-from reports.queries import Metrics, fetch_totals
+from reports.queries import Metrics, count_active_campaigns, fetch_totals
 
 
 @dataclass
 class ChildReport:
     account: ChildAccount
     totals: Metrics
+    active_campaigns: int | None = (
+        None  # §8 (P1-G): активных (ENABLED) кампаний; None = не прочитано
+    )
 
 
 @dataclass
@@ -164,7 +167,17 @@ async def build_mcc_summary_async(
                     per = period_for(tz) or period
             except Exception:  # noqa: BLE001 — TZ не прочитан → общий period (не роняем строку)
                 per = period
-        return await run_ads_read_call(fetch, client, ch.id, per, label=f"mcc_{ch.id}")
+        totals = await run_ads_read_call(fetch, client, ch.id, per, label=f"mcc_{ch.id}")
+        # §8 (P1-G): число активных кампаний — best-effort доп. лёгкий запрос (сбой → None, не роняем
+        # строку и не топит сводку). Параллелится фан-аутом по аккаунтам (не сериализует весь /mcc).
+        n_active: int | None = None
+        try:
+            n_active = await run_ads_read_call(
+                count_active_campaigns, client, ch.id, label=f"mcc_camps_{ch.id}"
+            )
+        except Exception:  # noqa: BLE001 — счётчик кампаний необязателен
+            n_active = None
+        return totals, n_active
 
     # Параллельный фан-аут по разрешённым листам под общим семафором Google Ads (как
     # build_account_report_async). return_exceptions: один упавший аккаунт → строка в errors, а не
@@ -177,6 +190,7 @@ async def build_mcc_summary_async(
         if isinstance(res, Exception):
             summary.errors.append((ch.id, f"{type(res).__name__}: {redact_text(str(res))}"))
             continue
-        summary.children.append(ChildReport(account=ch, totals=res))
+        totals, n_active = res  # (Metrics, int|None) — см. _fetch_child (P1-G)
+        summary.children.append(ChildReport(account=ch, totals=totals, active_campaigns=n_active))
     summary.subtotals = aggregate_by_currency(summary.children)
     return summary

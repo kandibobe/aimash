@@ -307,7 +307,13 @@ async def _do_read(name: str, args: dict[str, Any], chat_id: int = 0) -> dict[st
         }
     except LookupError as e:
         return {"type": "text", "text": i18n.t("loop_account_not_found", detail=str(e))}
-    days = int(args.get("period_days") or 30)
+    # Модель может прислать нечисловой period_days ('last month'/''/None) — коэрсим оборонительно
+    # (иначе ValueError летел бы мимо try ниже в глобальный dp.errors, без loop_read_error юзеру).
+    # Клампим 1..365 (зеркалит ads.read.account_stats: max(1, int(days))).
+    try:
+        days = max(1, min(int(args.get("period_days") or 30), 365))
+    except (TypeError, ValueError):
+        days = 30
     try:
         from ads.client import build_client_async
         from ads.read import account_currency, account_stats

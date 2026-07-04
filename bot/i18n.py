@@ -31,6 +31,10 @@ _LANG: contextvars.ContextVar[str] = contextvars.ContextVar("aimash_lang", defau
 CATALOG: dict[str, dict[str, str]] = {
     # — мелкие статусные (исторически тут литералами; оставляем как есть, RU байт-в-байт) —
     "executing": {"ru": "⏳ Выполняю…", "en": "⏳ Working…"},
+    "throttle_warn": {
+        "ru": "⏳ Слишком часто — подожди пару секунд.",
+        "en": "⏳ Too frequent — wait a couple of seconds.",
+    },
     "rejected": {"ru": "❌ Отменено", "en": "❌ Cancelled"},
     "stale": {"ru": "Черновик не найден или устарел", "en": "Draft not found or expired."},
     "no_proposal": {
@@ -126,6 +130,10 @@ CATALOG: dict[str, dict[str, str]] = {
             "/lang — interface language (RU/EN)\n"
             "/journal — change journal · /diag — error journal\n"
             "/cancel — cancel the current draft\n\n"
+            "<b>👤 For the admin (ADMIN_CHAT_IDS)</b>\n"
+            "/adduser &lt;chat_id&gt; — let an operator use the bot (no restart) + pick accounts\n"
+            "/removeuser &lt;chat_id&gt; — revoke access · /users — list operators\n"
+            "/grant &lt;chat_id&gt; &lt;id&gt; · /revoke &lt;chat_id&gt; &lt;id&gt; — per-account read access\n\n"
             "<b>Like another campaign / from a brief</b>\n"
             "• “create campaign N with settings like campaign X” — I clone the settings.\n"
             "• 🧩 in /campaigns → “Extensions”: sitelinks, callouts, structured snippets, image.\n"
@@ -393,6 +401,92 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "✅ Грант снят: chat <code>{chat}</code> ✕ аккаунт <code>{cid}</code>.",
         "en": "✅ Revoked: chat <code>{chat}</code> ✕ account <code>{cid}</code>.",
     },
+    # — P0-A: рантайм-управление операторами (/adduser /removeuser /users) —
+    "adduser_bad_args": {
+        "ru": (
+            "Формат: <code>/adduser &lt;chat_id&gt; [заметка]</code> — открыть оператору доступ к боту.\n"
+            "chat_id оператор узнаёт командой /whoami."
+        ),
+        "en": (
+            "Usage: <code>/adduser &lt;chat_id&gt; [note]</code> — let an operator use the bot.\n"
+            "The operator learns their chat_id via /whoami."
+        ),
+    },
+    "adduser_added": {
+        "ru": (
+            "✅ Оператор <code>{chat}</code> добавлен в whitelist — может пользоваться ботом (без "
+            "рестарта).\nКакие аккаунты открыть ему на <b>чтение</b>? Мутации остаются только на Draft."
+        ),
+        "en": (
+            "✅ Operator <code>{chat}</code> added to the whitelist — can use the bot now (no "
+            "restart).\nWhich accounts to open for <b>reading</b>? Mutations stay Draft-only."
+        ),
+    },
+    "adduser_exists": {
+        "ru": (
+            "Оператор <code>{chat}</code> уже в whitelist. Можно донастроить доступ к аккаунтам:"
+        ),
+        "en": "Operator <code>{chat}</code> is already whitelisted. You can adjust account access:",
+    },
+    "adduser_btn_all": {"ru": "✅ Все аккаунты", "en": "✅ All accounts"},
+    "adduser_btn_pick": {"ru": "🎯 Выбрать аккаунты", "en": "🎯 Pick accounts"},
+    "adduser_btn_none": {"ru": "🚫 Только доступ к боту", "en": "🚫 Bot access only"},
+    "adduser_all_done": {
+        "ru": "✅ Оператору <code>{chat}</code> открыто чтение всех аккаунтов ({n}). Мутации — только Draft.",
+        "en": "✅ Operator <code>{chat}</code> can now read all accounts ({n}). Mutations — Draft only.",
+    },
+    "adduser_none_done": {
+        "ru": (
+            "Оператор <code>{chat}</code> может пользоваться ботом; аккаунты пока не открыты "
+            "(доступен только Draft). Выдать позже: /grant."
+        ),
+        "en": (
+            "Operator <code>{chat}</code> can use the bot; no accounts opened yet (Draft only). "
+            "Grant later with /grant."
+        ),
+    },
+    "adduser_pick_title": {
+        "ru": (
+            "🎯 Выбор аккаунтов для оператора <code>{chat}</code> (тап — открыть/закрыть чтение). "
+            "✅ = доступен. По готовности — «Готово»."
+        ),
+        "en": (
+            "🎯 Pick accounts for operator <code>{chat}</code> (tap to toggle read). "
+            "✅ = allowed. Press “Done” when finished."
+        ),
+    },
+    "adduser_pick_empty": {
+        "ru": "Нет обнаруженных дочерних аккаунтов. Выполни /refresh (пере-обход MCC) и повтори.",
+        "en": "No discovered child accounts. Run /refresh (re-discover MCC) and retry.",
+    },
+    "adduser_btn_done": {"ru": "✔️ Готово", "en": "✔️ Done"},
+    "adduser_pick_done": {
+        "ru": "✅ Готово. Оператору <code>{chat}</code> открыто аккаунтов: {n}.",
+        "en": "✅ Done. Operator <code>{chat}</code> now has access to {n} account(s).",
+    },
+    "removeuser_bad_args": {
+        "ru": "Формат: <code>/removeuser &lt;chat_id&gt;</code> — закрыть оператору доступ к боту.",
+        "en": "Usage: <code>/removeuser &lt;chat_id&gt;</code> — revoke an operator's bot access.",
+    },
+    "removeuser_env": {
+        "ru": (
+            "⚠️ chat <code>{chat}</code> прописан в .env (TELEGRAM_WHITELIST_CHAT_IDS) — из БД убрать "
+            "нечего. Убрать env-оператора можно только правкой .env + рестартом."
+        ),
+        "en": (
+            "⚠️ chat <code>{chat}</code> is in .env (TELEGRAM_WHITELIST_CHAT_IDS) — nothing to remove "
+            "from the DB. Env operators can only be removed by editing .env + restart."
+        ),
+    },
+    "removeuser_ok": {
+        "ru": "✅ Оператор <code>{chat}</code> удалён из whitelist (и снят с грантов аккаунтов).",
+        "en": "✅ Operator <code>{chat}</code> removed from the whitelist (account grants revoked).",
+    },
+    "users_title": {
+        "ru": "👥 <b>Операторы бота</b>\nEnv (.env): {env}\nБД (/adduser): {db}",
+        "en": "👥 <b>Bot operators</b>\nEnv (.env): {env}\nDB (/adduser): {db}",
+    },
+    "users_empty_db": {"ru": "— нет —", "en": "— none —"},
     "accounts_title": {
         "ru": "🏢 <b>Твои аккаунты (чтение)</b> · {n}:",
         "en": "🏢 <b>Your accounts (read)</b> · {n}:",
@@ -605,13 +699,25 @@ CATALOG: dict[str, dict[str, str]] = {
             "▶️ Видео: <code>{vid}</code>\n"
             "Какой тип кампании собрать?\n"
             "• <b>Demand Gen</b> — YouTube/Discover/Gmail, лучший дефолт для лидов и продаж.\n"
-            "• <b>Video</b> — охватная видеокампания (CPM)."
+            "• <b>Video</b> — охватная видеокампания (CPM). ⚠️ создание Video по API требует "
+            "allowlist Google на аккаунте — без него шаг создания упрётся в ограничение."
         ),
         "en": (
             "▶️ Video: <code>{vid}</code>\n"
             "Which campaign type should I build?\n"
             "• <b>Demand Gen</b> — YouTube/Discover/Gmail, best default for leads and sales.\n"
-            "• <b>Video</b> — reach video campaign (CPM)."
+            "• <b>Video</b> — reach video campaign (CPM). ⚠️ creating Video via API needs Google "
+            "allowlist on the account — without it the create step hits a restriction."
+        ),
+    },
+    "video_allowlist_warn": {
+        "ru": (
+            "⚠️ Video-кампании создаются по API только с allowlist Google. Соберу черновик, но "
+            "создание может упереться в ограничение — тогда выбери Demand Gen."
+        ),
+        "en": (
+            "⚠️ Video campaigns are API-creatable only with Google allowlist. I'll build the draft, "
+            "but creation may hit a restriction — pick Demand Gen if so."
         ),
     },
     "video_ask_brief": {

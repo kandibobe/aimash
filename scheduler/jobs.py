@@ -35,8 +35,32 @@ _DIGEST_MAX = 3800  # потолок длины дайджеста для Telegr
 
 
 def _recipients() -> set[int]:
-    """Кому слать: доверенные whitelisted-пользователи (операторы бота)."""
+    """Кому слать: доверенные whitelisted-пользователи (операторы бота).
+
+    ⚠️ env-whitelist (бутстрап). Рантайм-добавленные операторы (БД, /adduser) получают алерты/отчёты
+    после рестарта планировщика — плановая рассылка не критична к секунде (для мгновенного покрытия
+    можно перезапустить процесс). Кэш is_whitelisted тут не задействуем (scheduler — не hot-path)."""
     return set(settings.whitelist)
+
+
+async def _custom_report_chats() -> set[int]:
+    """§14 (P1-I): chat_id операторов с СОБСТВЕННЫМ расписанием отчёта (UserSettings.report_schedule
+    непусто) — им шлёт отдельная per-chat cron-джоба (register_user_report_schedules), а глобальная
+    рассылка их ПРОПУСКАЕТ (иначе дубль). Только whitelisted (чужие настройки игнорируем)."""
+    wl = set(settings.whitelist)
+    if not wl:
+        return set()
+    async with Session() as s:
+        rows = (
+            (
+                await s.execute(
+                    select(UserSettings.chat_id).where(UserSettings.report_schedule.isnot(None))
+                )
+            )
+            .scalars()
+            .all()
+        )
+    return {int(c) for c in rows if int(c) in wl}
 
 
 def _scheduled_accounts() -> list[str]:
@@ -50,6 +74,26 @@ def _scheduled_accounts() -> list[str]:
     return sorted(accts) if accts else [DRAFT_ACCOUNT_ID]
 
 
+async def _account_period(client, acct: str, n_days: int):
+    """§8 (P1-H): период последних N дней в ТАЙМЗОНЕ аккаунта (а не host-local) — как интерактивный
+    /mcc (_mcc_period_factory). Раньше плановый дайджест/аномалии считали окно по времени хоста, что
+    для аккаунтов далеко от TZ хоста смещало границы дней. TZ best-effort: сбой/неизвестна → host-дата.
+    READ-ONLY. datetime.now — рантайм-код планировщика (не workflow), допустим."""
+    try:
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+
+        from ads.read import account_timezone
+
+        tz = await run_ads_read_call(account_timezone, client, acct, label=f"sched_tz_{acct}")
+        if tz:
+            today = _dt.now(ZoneInfo(tz)).date()
+            return last_n_days(n_days, today=today)
+    except Exception:  # noqa: BLE001 — TZ не прочитан/неизвестна → окно по host-дате (как раньше)
+        pass
+    return last_n_days(n_days)
+
+
 async def _broadcast(bot, text: str, **kw) -> None:
     for chat_id in _recipients():
         try:
@@ -58,30 +102,40 @@ async def _broadcast(bot, text: str, **kw) -> None:
             log.warning("scheduler: не доставлено в %s: %s: %s", chat_id, type(e).__name__, e)
 
 
-async def run_scheduled_report(bot) -> None:
+async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
     """Плановый отчёт (последние N дн.) по ВСЕМ разрешённым на чтение аккаунтам (§8) — ОДИН дайджест
     на оператора (анти-спам, не N сообщений). READ-ONLY. Сбой одного аккаунта не валит остальные
-    (capture_exception per-account) и не топит рассылку."""
+    (capture_exception per-account) и не топит рассылку.
+
+    §14 (P1-I): only_chat — персональная джоба оператора с СОБСТВЕННЫМ расписанием
+    (register_user_report_schedules): шлём только ему. only_chat=None — ГЛОБАЛЬНАЯ джоба: шлём всем
+    операторам БЕЗ персонального расписания (те получают отчёт своей per-chat джобой — без дубля)."""
     with request_scope("scheduler:report"):  # §15: корреляция логов джобы по request_id
-        if not _recipients():
-            log.info("scheduler: получателей нет (whitelist пуст) — пропуск планового отчёта")
+        if only_chat is not None:
+            recipients = {only_chat} if only_chat in _recipients() else set()
+        else:
+            recipients = _recipients() - await _custom_report_chats()
+        if not recipients:
+            log.info(
+                "scheduler: получателей нет — пропуск планового отчёта (only_chat=%s)", only_chat
+            )
             return
         accounts = _scheduled_accounts()
         if not accounts:
             log.info("scheduler: нет аккаунтов для отчёта (allow/read-list пусты) — пропуск")
             return
-        period = last_n_days(REPORT_WINDOW_DAYS)
         # 3H: блоки собираем per-lang (у операторов может быть RU и EN): summary_text локализуется,
         # а валюта аккаунта дочитывается per-account (раньше суммы шли голыми числами без кода).
         from bot import i18n
 
-        langs = {i18n.get_lang(chat_id) for chat_id in _recipients()} or {"ru"}
+        langs = {i18n.get_lang(chat_id) for chat_id in recipients} or {"ru"}
         blocks: dict[str, list[str]] = {lang: [] for lang in langs}
         for acct in accounts:
             tok = set_context(customer_id=acct)  # §8: ошибки/логи этого аккаунта атрибутируются
             try:
                 # per-account (Фаза 3: свой токен/MCC из oauth_tokens); холодная сборка вне loop
                 client = await build_client_async(acct)
+                period = await _account_period(client, acct, REPORT_WINDOW_DAYS)  # §8 (P1-H): TZ
                 currency = ""
                 try:  # валюта best-effort: без неё показываем числа без кода (как раньше)
                     from ads.read import account_currency
@@ -118,7 +172,7 @@ async def run_scheduled_report(bot) -> None:
             if len(digest) > _DIGEST_MAX:  # анти-спам: не дробим на N сообщений, усечём с пометкой
                 digest = digest[:_DIGEST_MAX] + "\n\n…(усечено — полный отчёт по аккаунту: /report)"
             digests[lang] = digest
-        for chat_id in _recipients():
+        for chat_id in recipients:
             try:
                 await bot.send_message(chat_id, digests[i18n.get_lang(chat_id)])
             except Exception as e:  # один недоступный чат не должен ронять рассылку
@@ -140,6 +194,21 @@ async def _thresholds_by_chat(chat_ids: set[int]) -> dict[int, dict | None]:
             )
         ).all()
     return {cid: thr for cid, thr in rows}
+
+
+def _effective_thresholds(thr: dict | None, acct: str) -> dict | None:
+    """§14 (P1-J): пороги аномалий для КОНКРЕТНОГО аккаунта — chat-дефолты, поверх которых наложен
+    опциональный per-account оверлей `alert_thresholds["per_account"][customer_id]`. Позволяет
+    тюнинговать шумный high-spend аккаунт иначе, чем тихий (особенно min_spend в мульти-валютном
+    портфеле). Нет оверлея → плоские chat-пороги (обратная совместимость). Ключ `per_account` в
+    detect_anomalies не течёт (он не порог)."""
+    if not thr:
+        return thr
+    base = {k: v for k, v in thr.items() if k != "per_account"}
+    overlay = (thr.get("per_account") or {}).get(acct)
+    if isinstance(overlay, dict) and overlay:
+        return {**base, **overlay}
+    return base or None
 
 
 def _format_alerts_multi(account_alerts: list[tuple[str, list]], lang: str = "ru") -> str:
@@ -172,13 +241,13 @@ async def run_anomaly_check(bot) -> None:
         accounts = _scheduled_accounts()
         if not accounts:
             return
-        period = last_n_days(ANOMALY_WINDOW_DAYS)
         # cur/prev (+валюта, 3H) на каждый аккаунт; сбой одного фиксируем и пропускаем.
         metrics: dict[str, tuple] = {}
         for acct in accounts:
             tok = set_context(customer_id=acct)  # §8: per-account атрибуция ошибок/логов
             try:
                 client = await build_client_async(acct)
+                period = await _account_period(client, acct, ANOMALY_WINDOW_DAYS)  # §8 (P1-H): TZ
                 cur = await run_ads_read_call(
                     fetch_totals, client, acct, period, label=f"anom_{acct}"
                 )
@@ -218,7 +287,10 @@ async def run_anomaly_check(bot) -> None:
             thr = thresholds.get(chat_id)
             acct_alerts: list[tuple[str, list]] = []
             for acct, (cur, prev, currency) in metrics.items():
-                alerts = detect_anomalies(cur, prev, thr, currency=currency)
+                # §14 (P1-J): пороги с per-account оверлеем поверх chat-дефолтов.
+                alerts = detect_anomalies(
+                    cur, prev, _effective_thresholds(thr, acct), currency=currency
+                )
                 if alerts:
                     acct_alerts.append((acct, alerts))
             if not acct_alerts:

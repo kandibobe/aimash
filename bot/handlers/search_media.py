@@ -197,7 +197,12 @@ async def video_pick_type(
         return
     await state.update_data(video_kind=callback_data.action)
     await state.set_state(bm.VideoWizard.awaiting_brief)
-    await cq.answer()
+    # P1-K: Video-кампании создаются по API только с allowlist Google — предупреждаем ДО брифа
+    # (раньше менеджер узнавал об ограничении только после подтверждения). Demand Gen — без ограничения.
+    if callback_data.action == "video":
+        await cq.answer(bm.i18n.t("video_allowlist_warn"), show_alert=True)
+    else:
+        await cq.answer()
     msg = bm._cq_msg(cq)
     if msg is not None:
         await msg.answer(

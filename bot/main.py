@@ -71,6 +71,7 @@ from agent.tools.schemas import MAX_CAMPAIGN_KEYWORDS, SCHEMAS
 from bot import i18n, texts, ux
 from bot.campaign_wizard.store import CampaignDraftStore
 from bot.callbacks import (
+    AdminCB,
     AlertCB,
     AudienceCB,
     CampCB,
@@ -100,6 +101,8 @@ from bot.keyboards import (
     BOT_COMMANDS,
     BOT_COMMANDS_EN,
     BTN_BALANCE_ALL,
+    adduser_access_kb,
+    adduser_pick_kb,
     alerts_kb,
     BTN_CAMPAIGNS_ALL,
     BTN_EXPORT_ALL,
@@ -166,7 +169,7 @@ from bot.throttle import ThrottleMiddleware
 from confirm.gate import Proposal, build_summary
 from confirm.store import ConfirmStore
 from core import ingest
-from core.access import ensure_account_allowed_for_user
+from core.access import ensure_account_allowed_for_user, is_whitelisted
 from core.ads_errors import humanize_google_ads_error, is_account_access_error
 from core.config import normalize_customer_id, settings
 from core.context import new_request_id, request_scope, reset_context, set_context
@@ -406,11 +409,11 @@ async def _maybe_refuse_unlisted(event: object, uid: int | None) -> None:
 
 class WhitelistMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: TelegramObject, data):
-        # Fail-closed (как ads.client.ensure_allowed): пустой whitelist => блок ВСЕХ, а не fail-open.
-        # uid=None (callback без message / вход без чата) тоже не в наборе => блок. Круг — через .env.
+        # Fail-closed (как ads.client.ensure_allowed): пустое объединение => блок ВСЕХ, а не fail-open.
+        # uid=None (callback без message / вход без чата) тоже не пройдёт => блок. Круг — env ∪ БД:
+        # env TELEGRAM_WHITELIST_CHAT_IDS (бутстрап) ∪ таблица whitelist (рантайм /adduser, кэш TTL).
         uid = _event_chat_id(event)
-        wl = settings.whitelist
-        if uid not in wl:
+        if not await is_whitelisted(uid):
             # Дедуп: один WARNING на chat_id (упорный флуд чужого — debug, не шум в журнале).
             if uid not in _WL_LOGGED and len(_WL_LOGGED) < _WL_REFUSED_CAP:
                 _WL_LOGGED.add(uid)
@@ -745,7 +748,10 @@ async def _present_proposal(
             try:
                 from ads.client import build_client_async
 
-                acct_cur = await _read_currency(await build_client_async())
+                # Валюта именно аккаунта МУТАЦИИ (customer_id), а не всегда Draft: при включённом
+                # не-Draft аккаунте (управляемый список) команда «бюджет 100 UAH» на UAH-child не
+                # должна ложно отклоняться по валюте USD-Draft, а «было→станет» — врать про сумму.
+                acct_cur = await _read_currency(await build_client_async(customer_id), customer_id)
             except Exception:  # noqa: BLE001 — валюту не определить → без FX-сверки, не роняем показ
                 acct_cur = ""
             mismatch = currency_mismatch(operation, params, acct_cur)
@@ -1957,14 +1963,29 @@ async def _kw_start_from_intent(m: Message, brief: dict, state: FSMContext) -> N
     """NL-вход: keyword_research-намерение агента. Есть сиды/URL — сразу; иначе спросить.
     3F: дефолт языка — язык интерфейса (keyword_ideas_lang), а не хардкод 'ru' (EN-пользователь
     получал русские идеи, нерелевантные его рынку)."""
-    from ads.geo import keyword_ideas_lang
+    from ads.geo import country_iso, geo_id_for_country, keyword_ideas_lang
 
     await state.clear()
     seeds = [s for s in (brief.get("seeds") or []) if s]
     url = brief.get("url")
     language = brief.get("language") or keyword_ideas_lang(i18n.current_lang())
+    # P1-F (§7): гео/сеть/период из NL-брифа → те же параметры research, что и экран /keywords.
+    geo_ids: tuple[int, ...] | None = None
+    geo_raw = (brief.get("geo") or "").strip()
+    if geo_raw:
+        iso = country_iso(geo_raw) or geo_raw.upper()
+        gid = geo_id_for_country(iso)
+        geo_ids = (gid,) if gid else None  # неизвестная страна → дефолт (_kw_run подставит Украину)
+    network = (
+        "GOOGLE_SEARCH_AND_PARTNERS"
+        if brief.get("network") == "search_partners"
+        else "GOOGLE_SEARCH"
+    )
+    months = brief.get("months")
     if seeds or url:
-        await _kw_run(m, m.chat.id, seeds, url, language)
+        await _kw_run(
+            m, m.chat.id, seeds, url, language, geo_ids=geo_ids, network=network, months=months
+        )
         return
     await state.set_state(KwWizard.awaiting_seeds)
     await m.answer(i18n.t("kw_ask"), reply_markup=nav_kb(), parse_mode=ParseMode.HTML)
@@ -3723,11 +3744,17 @@ async def main() -> None:
             log.warning("set_my_* (команды/описание) не удалось: %s: %s", type(r).__name__, r)
     sched = None
     try:
-        from scheduler.service import setup_scheduler
+        from scheduler.service import register_user_report_schedules, setup_scheduler
 
         # Плановые отчёты/аномалии/очистка просроченных черновиков. READ-ONLY: планировщик
         # НИКОГДА не меняет аккаунт (golden rule #3) — только чтение и уведомления.
         sched = setup_scheduler(bot)
+        # §14 (P1-I): персональные расписания отчёта операторов (UserSettings.report_schedule) —
+        # per-chat cron поверх глобального (оживляет ранее «мёртвую» колонку). Опционально, не роняем.
+        try:
+            await register_user_report_schedules(sched, bot)
+        except Exception as e:  # noqa: BLE001 — персональные расписания опциональны
+            log.warning("per-user report schedules не зарегистрированы: %s", type(e).__name__)
     except Exception as e:  # планировщик опционален — бот работает и без него
         log.warning("scheduler не запущен: %s: %s", type(e).__name__, e)
     # Fail-fast против double-import gotcha (см. алиас sys.modules у dp и блок __main__): поллить

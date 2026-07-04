@@ -250,10 +250,14 @@ def summary_text_mcc(summary, lang: str | None = None) -> str:
                     break
                 name = _esc(getattr(cr.account, "name", "") or cr.account.id)
                 m = cr.totals
+                # §8 (P1-G): активных кампаний per-account (если прочитано) — оператор видит их в
+                # сводке, не открывая /report по каждому аккаунту.
+                camps = getattr(cr, "active_campaigns", None)
+                camps_s = f" · {camps} {L['camps']}" if camps is not None else ""
                 lines.append(
                     f"• <b>{name}</b> ({cur}): {L['cost']} <b>{_money(m.cost, cur)}</b> · "
                     f"{L['clicks']} {_thou(m.clicks)} · {L['conv']} {m.conversions:.1f} · "
-                    f"CTR {m.ctr * 100:.1f}%"
+                    f"CTR {m.ctr * 100:.1f}%{camps_s}"
                 )
                 shown += 1
         rest = len(summary.children) - shown
@@ -295,6 +299,7 @@ _MCC_LABELS_RU = {
     "cost": "расход",
     "clicks": "клики",
     "conv": "конв.",
+    "camps": "активн. кампаний",
     "accounts": "Аккаунты по расходу",
     "more": "…ещё {n} — полная таблица в /export",
     "inactive": "Неактивные (не ENABLED)",
@@ -309,6 +314,7 @@ _MCC_LABELS_EN = {
     "cost": "cost",
     "clicks": "clicks",
     "conv": "conv.",
+    "camps": "active campaigns",
     "accounts": "Accounts by cost",
     "more": "…{n} more — full table in /export",
     "inactive": "Inactive (not ENABLED)",

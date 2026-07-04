@@ -1,6 +1,7 @@
 """Модели БД (SQLAlchemy 2.0). Миграции — Alembic (migrations/).
 
 Таблицы:
+- whitelist        — рантайм-allow-list Telegram chat_id (env ∪ БД; admin /adduser /removeuser)
 - user_settings    — пороги алертов, язык, активный аккаунт, ui_prefs (+report_schedule — RESERVED)
 - proposals        — очередь черновиков изменений (diff «было→станет», статус, customer_id)
 - audit_log        — все операции: кто/когда/что/результат, по confirmation_id (БЕЗ секретов)
@@ -31,9 +32,25 @@ class Base(DeclarativeBase):
     pass
 
 
-# Таблица whitelist УДАЛЕНА (миграция 0016): она никогда не читалась рантаймом — реальный
-# allow-list всегда был env TELEGRAM_WHITELIST_CHAT_IDS (bot.main.WhitelistMiddleware). Мёртвая
-# схема создавала иллюзию БД-allow-list. Мультиюзер-доступ к АККАУНТАМ — таблица account_access.
+class Whitelist(Base):
+    """Рантайм-allow-list Telegram chat_id (§6/§12). ВОЗВРАЩЕНА (0017) — теперь реально читается
+    рантаймом: WhitelistMiddleware пускает chat_id из env TELEGRAM_WHITELIST_CHAT_IDS ∪ этой таблицы
+    (fail-closed: пустое объединение блокирует всех). Env остаётся бутстрапом первого админа; админ
+    добавляет операторов без рестарта командой /adduser (core.access.add_whitelisted_user).
+
+    В 0016 таблицу дропнули как мёртвую (тогда allow-list был только env). Отличие сейчас — она
+    подключена к гейту. Граница безопасности → отдельная таблица (не JSON), запросная и аудируемая;
+    added_by фиксирует, какой админ добавил (кто/когда, §12)."""
+
+    __tablename__ = "whitelist"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True, nullable=False)
+    added_by: Mapped[int | None] = mapped_column(
+        BigInteger
+    )  # chat_id админа, добавившего оператора
+    note: Mapped[str | None] = mapped_column(String(255))  # опц. заметка (имя оператора и т.п.)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class UserSettings(Base):
@@ -41,8 +58,10 @@ class UserSettings(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     chat_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True, nullable=False)
-    # RESERVED (задел под per-user cron): код НЕ читает; глобальное расписание — env REPORT_SCHEDULE
-    # (scheduler.service.report_trigger). Не дропаем: batch-миграция на SQLite разрушительна.
+    # §14 (P1-I): персональный crontab планового отчёта оператора. Читается
+    # scheduler.service.register_user_report_schedules на старте → per-chat cron-джоба
+    # run_scheduled_report(only_chat=...); глобальная джоба таких операторов пропускает (без дубля).
+    # Пусто/NULL ⇒ оператор в глобальном расписании (env REPORT_SCHEDULE).
     report_schedule: Mapped[str | None] = mapped_column(String(128))
     alert_thresholds: Mapped[dict | None] = mapped_column(JSON)  # пороги аномалий
     model_override: Mapped[str | None] = mapped_column(String(128))  # переопределение LLM (опц.)

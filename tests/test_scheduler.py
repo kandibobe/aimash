@@ -24,6 +24,34 @@ async def _fake_client_async(*a, **k):
     return None
 
 
+# ── P1-J: per-account оверлей порогов ─────────────────────────────────────────────
+def test_effective_thresholds_overlay():
+    from scheduler.jobs import _effective_thresholds
+
+    thr = {"spend_spike_pct": 50.0, "per_account": {"111": {"min_spend": 100.0}}}
+    # для аккаунта 111 — оверлей поверх chat-дефолтов; ключ per_account не течёт в пороги
+    eff = _effective_thresholds(thr, "111")
+    assert eff == {"spend_spike_pct": 50.0, "min_spend": 100.0}
+    # для другого аккаунта — только базовые (без per_account)
+    assert _effective_thresholds(thr, "999") == {"spend_spike_pct": 50.0}
+    # None/пусто — как есть
+    assert _effective_thresholds(None, "111") is None
+
+
+def test_per_account_min_spend_overlay_changes_detection():
+    from scheduler.jobs import _effective_thresholds
+
+    thr = {"min_spend": 1.0, "per_account": {"777": {"min_spend": 1000.0}}}
+    # аккаунт 777: расход 500 при высоком min_spend=1000 → шум подавлен (нет алертов)
+    eff777 = _effective_thresholds(thr, "777")
+    assert detect_anomalies(_m(500, 0), _m(0, 0), eff777) == []
+    # другой аккаунт: базовый min_spend=1.0 → spend_no_conv срабатывает
+    eff_other = _effective_thresholds(thr, "555")
+    assert any(
+        a.kind == "spend_no_conv" for a in detect_anomalies(_m(500, 0), _m(10, 5), eff_other)
+    )
+
+
 # ── Аномалии (чистая логика, без SDK) ────────────────────────────────────────────
 def test_anomaly_spend_spike():
     alerts = detect_anomalies(_m(200, 5), _m(100, 5))  # +100% расход

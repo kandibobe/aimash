@@ -208,6 +208,17 @@ class ClientCB(CallbackData, prefix="cli"):
     sub: str = ""
 
 
+class AdminCB(CallbackData, prefix="adm"):
+    """P0-A (§6/§12): выбор доступа после /adduser. Stateless — цель и аккаунт в самом callback_data
+    (chat = целевой chat_id оператора; cid = customer_id для точечного гранта). Кнопки лишь выдают
+    ГРАНТЫ ЧТЕНИЯ (account_access) — мутации НЕ открывают (замок ensure_allowed отдельный). action:
+    all (грант всех дочерних) | pick (показать пикер) | grant (грант одного cid) | done (готово)."""
+
+    action: str  # "all" | "pick" | "grant" | "done"
+    chat: int = 0  # целевой chat_id оператора
+    cid: str = ""  # customer_id (для action='grant')
+
+
 class ExtCB(CallbackData, prefix="ext"):
     """§3-assets: ассеты-расширения кампании из меню /campaigns. idx — кампания в _CAMP_CACHE
     (для remove — строка в _EXT_CACHE). action: type-меню/выбор типа/показать/удалить. sub —

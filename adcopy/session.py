@@ -162,7 +162,13 @@ class SessionStore:
         self, session_id: str, fn, *, expected_chat_id: int | None = None
     ) -> CurationSession | None:
         """Загрузить сессию, применить fn(params) и переприсвоить JSON (для детекта изменения).
-        expected_chat_id — гард владения (как get): чужой чат не мутирует чужую сессию."""
+        expected_chat_id — гард владения (как get): чужой чат не мутирует чужую сессию.
+
+        FOR UPDATE (row-lock): курация RSA — read-modify-write JSON params; aiogram диспатчит
+        callback-и параллельными тасками, поэтому два почти одновременных тапа (✅ approve + 🔁
+        refine на одну сессию) без блокировки на Postgres дали бы lost-update — второй коммит затирал
+        бы первый (потеря подтверждения/правки). with_for_update сериализует патчи (SQLite молча
+        игнорирует — single-writer). Зеркалит проверенный фикс bot/campaign_wizard/store.py."""
         async with Session() as s:
             conds = [
                 Proposal.confirmation_id == session_id,
@@ -170,7 +176,9 @@ class SessionStore:
             ]
             if expected_chat_id is not None:
                 conds.append(Proposal.chat_id == expected_chat_id)
-            p = (await s.execute(select(Proposal).where(*conds))).scalar_one_or_none()
+            p = (
+                await s.execute(select(Proposal).where(*conds).with_for_update())
+            ).scalar_one_or_none()
             if p is None:
                 return None
             # deepcopy + flag_modified: JSON-колонка не отслеживает мутации вложенных структур;

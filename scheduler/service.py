@@ -6,13 +6,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
+from apscheduler.events import EVENT_JOB_ERROR
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from core.config import settings
+from core.errors import capture_exception
 from core.logging import log
 from scheduler import jobs
 
@@ -34,6 +37,61 @@ def report_trigger() -> CronTrigger:
             type(e).__name__,
         )
         return CronTrigger(**_DEFAULT_REPORT_CRON)
+
+
+async def register_user_report_schedules(sched: AsyncIOScheduler, bot) -> int:
+    """§14 (P1-I): персональные расписания планового отчёта. Читает UserSettings.report_schedule
+    (crontab-строки) и регистрирует per-chat cron-джобу run_scheduled_report(bot, only_chat=chat)
+    для каждого оператора со своим расписанием. Глобальная джоба таких операторов ПРОПУСКАЕТ
+    (_custom_report_chats) — без дубля. Оживляет ранее «мёртвую» колонку report_schedule.
+
+    Вызывать ПОСЛЕ setup_scheduler в async-контексте старта (нужна БД). Невалидный crontab у
+    оператора — НЕ роняем (лог + пропуск, как report_trigger). Возвращает число зарегистрированных.
+    Runtime-изменения расписания подхватываются на рестарте (или повторным вызовом из /refresh)."""
+    from sqlalchemy import select
+
+    from core.config import settings as _settings
+    from db.models import UserSettings
+    from db.session import Session
+
+    wl = set(_settings.whitelist)
+    if not wl:
+        return 0
+    async with Session() as s:
+        rows = (
+            await s.execute(
+                select(UserSettings.chat_id, UserSettings.report_schedule).where(
+                    UserSettings.report_schedule.isnot(None)
+                )
+            )
+        ).all()
+    n = 0
+    for chat_id, cron in rows:
+        if int(chat_id) not in wl or not (cron or "").strip():
+            continue
+        try:
+            trig = CronTrigger.from_crontab(cron.strip())
+        except (ValueError, TypeError) as e:
+            log.warning(
+                "per-user report cron chat=%s=%r невалиден (%s) — пропуск",
+                chat_id,
+                cron,
+                type(e).__name__,
+            )
+            continue
+        sched.add_job(
+            jobs.run_scheduled_report,
+            trig,
+            args=[bot],
+            kwargs={"only_chat": int(chat_id)},
+            id=f"scheduled_report_{int(chat_id)}",
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
+        n += 1
+    if n:
+        log.info("scheduler: персональных расписаний отчёта зарегистрировано: %d", n)
+    return n
 
 
 def setup_scheduler(bot) -> AsyncIOScheduler:
@@ -90,6 +148,21 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
         misfire_grace_time=600,
         next_run_time=datetime.now(timezone.utc),
     )
+
+    # §15 (P2-c): исключение ВЕРХНЕГО уровня джобы (вне per-account try) — в capture_exception/Sentry
+    # + /diag, а не только в лог APScheduler. Листенер синхронный → планируем async-фиксацию в loop.
+    def _on_job_error(event) -> None:
+        exc = getattr(event, "exception", None)
+        if exc is None:
+            return
+        try:
+            asyncio.get_running_loop().create_task(
+                capture_exception(exc, where=f"scheduler:{event.job_id}")
+            )
+        except RuntimeError:  # нет running loop (не должно случаться для AsyncIOScheduler)
+            log.warning("scheduler job %s упала, но loop недоступен для capture", event.job_id)
+
+    sched.add_listener(_on_job_error, EVENT_JOB_ERROR)
     sched.start()
     log.info(
         "scheduler запущен: отчёт cron=%r, аномалии каждые %dч, очистка каждые %dмин (read-only)",

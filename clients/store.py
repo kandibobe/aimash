@@ -523,4 +523,6 @@ class ClientProfileStore:
                 for n, d, pr, c in services
             ],
             "site_pages_count": int(pages_count or 0),
+            # §20.2: дата последнего краула для карточки клиента (persist есть, отдавали в UI — нет).
+            "last_crawled_at": p.last_crawled_at,
         }

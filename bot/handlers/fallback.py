@@ -22,6 +22,34 @@ async def on_document(m: bm.Message, state: bm.FSMContext, bot: bm.Bot) -> None:
     if (doc.file_size or 0) > bm.ingest.MAX_FILE_BYTES:
         await m.answer(bm.i18n.t("ingest_too_big", mb=bm.ingest.MAX_FILE_BYTES // 1_000_000))
         return
+    # P1-C (§11): изображение, присланное ДОКУМЕНТОМ (несжатый креатив) — частый способ отправки
+    # HD-картинок. Раньше падало в text-ingest → «ingest_file_failed». Теперь на «чистом» апдейте
+    # (нет активного визарда) запускаем GDN-визард ровно как F.photo (download → prepare_display_images
+    # → save_pending_media → GdnWizard.awaiting_brief). В активном флоу изображение-документ не трогаем
+    # (текст-ветка ниже вернёт понятную ошибку) — фото-этапы визардов читают m.photo, не документ.
+    mime = (getattr(doc, "mime_type", None) or "").lower()
+    name_l = (getattr(doc, "file_name", None) or "").lower()
+    is_image = mime.startswith("image/") or name_l.endswith(
+        (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
+    )
+    if is_image and await state.get_state() is None:
+        try:
+            buf = bm.io.BytesIO()
+            await bot.download(doc, destination=buf)
+            landscape, square = await bm.asyncio.to_thread(
+                bm.prepare_display_images, buf.getvalue()
+            )
+        except Exception as e:  # сеть/битый файл/не картинка
+            await m.answer(bm.i18n.t("err_photo", err=bm.ux.err_text(e)))
+            return
+        media_id = bm.uuid.uuid4().hex
+        await bm.asyncio.to_thread(bm.save_pending_media, media_id, landscape, square)
+        await state.update_data(gdn_media_id=media_id)
+        await state.set_state(bm.GdnWizard.awaiting_brief)
+        await m.answer(
+            bm.i18n.t("gdn_ask_brief"), reply_markup=bm.nav_kb(), parse_mode=bm.ParseMode.HTML
+        )
+        return
     try:
         buf = bm.io.BytesIO()
         await bot.download(doc, destination=buf)

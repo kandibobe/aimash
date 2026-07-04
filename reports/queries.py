@@ -150,6 +150,14 @@ def fetch_totals(client, customer_id: str, period, campaign_id: str | None = Non
     return total
 
 
+def count_active_campaigns(client, customer_id: str) -> int:
+    """§8 (P1-G): число АКТИВНЫХ (ENABLED) кампаний аккаунта — лёгкий запрос без метрик/периода
+    (не тянет segments.date), для колонки «активных кампаний» в сводке /mcc. READ-ONLY."""
+    ensure_read_allowed(customer_id)
+    q = "SELECT campaign.id FROM campaign WHERE campaign.status = 'ENABLED'"
+    return sum(1 for _ in _search(client, customer_id, q))
+
+
 # ── Разбивки ────────────────────────────────────────────────────────────────────
 def fetch_by_campaign(
     client, customer_id: str, period, campaign_id: str | None = None

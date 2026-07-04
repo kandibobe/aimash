@@ -194,6 +194,22 @@ async def test_get_stats_defaults_to_chat_active_account(monkeypatch):
     assert out["type"] == "read" and out["account"] == "7753643025"
 
 
+async def test_get_stats_nonnumeric_period_days_coerces_gracefully(monkeypatch):
+    """P0-B3: модель прислала нечисловой period_days → не крэш (мимо try в глобальный обработчик),
+    а graceful read с дефолтом 30 дней (клампится)."""
+    from core.config import settings
+    from db.session import init_db
+
+    await init_db()
+    monkeypatch.setattr(settings, "google_ads_allowed_customer_ids", "7753643025")
+    seen: dict = {}
+    _fake_stats_env(monkeypatch, seen)
+    fake, _ = _chat_returning(_msg([_tc("get_stats", {"period_days": "last month"})]))
+    with patched(L, "chat", fake):
+        out = await L.handle_command("покажи статистику за прошлый месяц", chat_id=44)
+    assert out["type"] == "read" and out["days"] == 30  # дефолт, без ValueError
+
+
 async def test_get_stats_ambiguous_name_asks(monkeypatch):
     """Имя, матчащее несколько дочерних → уточнение (LookupError → text), не угадывание."""
     from ads.client import set_discovered_read_children, set_discovered_read_children_meta

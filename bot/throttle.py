@@ -68,7 +68,15 @@ class ThrottleMiddleware(BaseMiddleware):
             if callable(answer) and (warned is None or now - warned >= self.warn_cooldown):
                 self._warned[chat_id] = now
                 try:
-                    await answer("⏳ Слишком часто — подожди пару секунд.")
+                    # i18n лениво (LangMiddleware — outer ДО throttle → contextvar языка уже стоит);
+                    # импорт внутри метода во избежание цикла (bot.i18n → bot.texts). Фолбэк — RU.
+                    try:
+                        from bot import i18n
+
+                        warn_text = i18n.t("throttle_warn")
+                    except Exception:  # noqa: BLE001 — i18n недоступен (тесты/цикл) → RU-литерал
+                        warn_text = "⏳ Слишком часто — подожди пару секунд."
+                    await answer(warn_text)
                 except Exception:  # предупреждение необязательно
                     pass
             return  # дроп: апдейт не доходит до хендлера

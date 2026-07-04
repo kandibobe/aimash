@@ -147,21 +147,24 @@ def build_mcc_workbook(summary) -> Workbook:
 
     # 2) Аккаунты: по строке на лист-аккаунт (id/имя/валюта/статус + метрики).
     acc = wb.create_sheet(title="Аккаунты")
-    acc_headers = ["ID", "Аккаунт", "Валюта", "Статус", *metric_headers("")]
+    # §8 (P1-G): колонка «Активных кампаний» (ENABLED) — перед метриками.
+    acc_headers = ["ID", "Аккаунт", "Валюта", "Статус", "Активных кампаний", *metric_headers("")]
     acc.append(acc_headers)
     for cr in summary.children:
         a = cr.account
+        n_active = getattr(cr, "active_campaigns", None)
         acc.append(
             [
                 a.id,
                 getattr(a, "name", "") or "",
                 a.currency or "",
                 getattr(a, "status", "") or "",
+                n_active if n_active is not None else "",
                 *cr.totals.as_row(),
             ]
         )
     _style_header_row(acc, len(acc_headers))
-    _apply_metric_formats_at(acc, 4, 2, len(summary.children))
+    _apply_metric_formats_at(acc, 5, 2, len(summary.children))
     _autosize(acc, len(acc_headers))
 
     # 3) Пропущено/ошибки: read-list пропуски, менеджерские, частичные сбои чтения.

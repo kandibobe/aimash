@@ -77,7 +77,9 @@ async def cc_account_cb(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.
     await bm._safe_edit(
         cq,
         bm.texts.cc_account_header(getattr(chosen, "name", ""), preview_id),
-        reply_markup=bm.nav_kb(),
+        # P1-L: «‹ Назад» → Этап 0 (выбор аккаунта). cc_back декрементит шаг и перерисовывает
+        # пикер — раньше сменить аккаунт можно было только полной отменой визарда (dead-spot).
+        reply_markup=bm.nav_kb(bm.CcCB(action="back")),
         parse_mode=bm.ParseMode.HTML,
     )
 
@@ -298,6 +300,7 @@ async def cc_ad_url(m: bm.Message, state: bm.FSMContext) -> None:
         profile=(prof or None),  # §20: профиль клиента — отдельным первоклассным контекстом
         geo=((s.get("geo_locations") or [""])[0] or None),
         language=(s.get("target_language") or bm.i18n.current_lang()),
+        tone=(s.get("tone") or None),  # P1-E: §19.5 тон-контекст (если задан в настройках)
         n_headlines=bm.RSA_MAX_HEADLINES,
         n_descriptions=bm.RSA_MAX_DESCRIPTIONS,
     )
@@ -307,6 +310,9 @@ async def cc_ad_url(m: bm.Message, state: bm.FSMContext) -> None:
     except Exception as e:  # LLM/сеть
         await m.answer(bm.i18n.t("err_text_gen", err=bm.ux.err_text(e)), reply_markup=bm.nav_kb())
         return
+    # P1-E: та же диагностика, что в /rsa (сколько набрано/отброшено КОДОМ за длину + модерация
+    # CAPS/спам) — раньше в визарде §19 не показывалась, менеджер не видел предупреждений.
+    await m.answer(bm.ux.fmt_rsa_diagnostics(gen, bm.RSA_MAX_HEADLINES, bm.RSA_MAX_DESCRIPTIONS))
     if len(gen.headlines) < bm.RSA_MIN_HEADLINES or len(gen.descriptions) < bm.RSA_MIN_DESCRIPTIONS:
         await m.answer(bm.i18n.t("search_gen_empty"), reply_markup=bm.nav_kb())
         return
@@ -905,6 +911,10 @@ async def cc_create(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.FSMC
     except Exception as e:  # noqa: BLE001 — валидация схемы (длины/URL/бюджет)
         await cq.answer(bm.i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
         return
+    # P1-A: на карточке ✅-гейта показываем и таргетинг (гео/язык/сети/расписание/даты) — менеджер
+    # видит полное «было→станет» перед созданием (§5/§19.8). ad_schedule — человекочит. строка из
+    # настроек черновика (в validated хранится структурой ad_schedule_blocks).
+    _cc_settings = draft.wizard_state.get("settings") or {}
     summary = bm.texts.fmt_search_proposal_summary(
         validated["campaign_name"],
         validated["final_url"],
@@ -913,6 +923,12 @@ async def cc_create(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.FSMC
         validated["descriptions"],
         validated["keywords"],
         validated["match_type"],
+        geo_locations=validated.get("geo_locations"),
+        languages=validated.get("languages"),
+        networks=validated.get("networks"),
+        ad_schedule=_cc_settings.get("ad_schedule"),
+        start_date=validated.get("start_date"),
+        end_date=validated.get("end_date"),
     )
     await cq.answer()
     # B10: список ключей мог быть обрезан до потолка схемы — не молчим, сообщаем менеджеру в чат
