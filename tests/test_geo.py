@@ -37,13 +37,26 @@ def test_language_for_country_is_audience_language():
     assert geo.language_for_country("RU") == "ru"
 
 
-def test_keyword_ideas_lang_falls_back_to_en_not_ru():
+def test_keyword_ideas_lang_any_language():
+    # §7: ЛЮБОЙ язык из таблицы Google (не зажим ru/uk/en)
     assert geo.keyword_ideas_lang("en") == "en"
     assert geo.keyword_ideas_lang("uk") == "uk"
-    # неподдержанный Discover'ом язык → en (а НЕ молчаливый ru, как было багом)
-    assert geo.keyword_ideas_lang("sw") == "en"
-    assert geo.keyword_ideas_lang("de") == "en"
-    assert geo.keyword_ideas_lang(None) == "en"
+    assert geo.keyword_ideas_lang("de") == "de"  # теперь поддержан (был → en)
+    assert geo.keyword_ideas_lang("немецкий") == "de"  # имя → ISO
+    assert geo.keyword_ideas_lang("ja") == "ja"
+    # неизвестный Google язык / пусто / 'any' → '' (язык в запросе НЕ задаём, шире выборка)
+    assert geo.keyword_ideas_lang("sw") == ""  # swahili нет в LANGUAGE_IDS
+    assert geo.keyword_ideas_lang(None) == ""
+    assert geo.keyword_ideas_lang("any") == ""
+
+
+def test_geo_id_for_any_country():
+    # §7: любая страна через формулу 2000 + ISO-3166 numeric (не только ~27 из таблицы)
+    assert geo.geo_id_for_country("UA") == 2804
+    assert geo.geo_id_for_country("DE") == 2276
+    assert geo.geo_id_for_country("JP") == 2392  # не было в ручной таблице
+    assert geo.geo_id_for_country("BR") == 2076
+    assert geo.geo_id_for_country("ZZ") is None
 
 
 def test_lang_iso_from_name():

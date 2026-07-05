@@ -391,6 +391,30 @@ async def test_big_keyword_proposal_attaches_xlsx():
     assert snap is not None and "фразовое" in snap.summary and "{" not in snap.summary
 
 
+async def test_big_remove_negative_keywords_proposal_attaches_xlsx():
+    """Регресс §5/golden rule #1: удаление >20 минус-слов ОБЯЗАНО приложить .xlsx (сводка усекает
+    список и обещает вложение). Раньше remove_negative_keywords не было в _KEYWORD_OPS → вложение
+    не слалось, и менеджер жал ✅ на объёме, который не видел."""
+    await init_db()
+    cid = uuid.uuid4().hex
+    msg = FakeMessage(bot=FakeBot())
+    params = {
+        "campaign": "Search",
+        "keywords": [f"neg{i}" for i in range(30)],  # > KW_INLINE_MAX
+        "match_type": "broad",
+    }
+    await bm._present_proposal(
+        msg,
+        chat_id=202,
+        operation="remove_negative_keywords",
+        params=params,
+        summary="raw dict",
+        cid=cid,
+    )
+    assert any(a[0] == "<doc>" for a in msg.answers)  # .xlsx вложение (было пропущено до фикса)
+    assert any(a[1].get("reply_markup") for a in msg.answers)  # сообщение с кнопками ✅/❌
+
+
 @contextmanager
 def _allowed_draft():
     orig = settings.google_ads_allowed_customer_ids

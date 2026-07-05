@@ -262,6 +262,36 @@ async def test_apply_create_video_blocked_when_not_user_initiated():
     assert store.finalized is False
 
 
+# ── B4: Video-кнопка скрыта по умолчанию (аккаунт не в allowlist Google) ──────────
+@contextmanager
+def _video_enabled(value: bool):
+    prev = settings.google_ads_video_enabled
+    settings.google_ads_video_enabled = value
+    try:
+        yield
+    finally:
+        settings.google_ads_video_enabled = prev
+
+
+def _kb_button_texts(markup) -> list[str]:
+    return [b.text for row in markup.inline_keyboard for b in row]
+
+
+def test_video_type_kb_hides_video_button_by_default():
+    """B4: по умолчанию (GOOGLE_ADS_VIDEO_ENABLED=false) кнопки «Video» НЕТ — создание Video через
+    API упирается в MUTATE_NOT_ALLOWED (allowlist Google), не ведём менеджера в тупик. Остаётся
+    Demand Gen (рабочий путь). Флаг True (аккаунт в allowlist) — кнопка возвращается."""
+    from bot.keyboards import video_type_kb
+
+    with _video_enabled(False):
+        off = _kb_button_texts(video_type_kb("ru"))
+    with _video_enabled(True):
+        on = _kb_button_texts(video_type_kb("ru"))
+    assert not any("Video" in t for t in off), off
+    assert any("Demand Gen" in t for t in off), off  # рабочий путь остаётся всегда
+    assert any("Video" in t for t in on), on  # включённый флаг возвращает кнопку
+
+
 # ── capability-guard зеркало + схемы ─────────────────────────────────────────────
 def test_video_ops_in_supported_operations():
     from ads.service import SUPPORTED_OPERATIONS

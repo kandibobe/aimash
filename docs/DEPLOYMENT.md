@@ -36,6 +36,9 @@ cp .env.example .env
 | `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | нет | MCC (контекст авторизации) |
 | `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS` | нет | белый список МУТАЦИЙ, CSV (пусто = fail-closed). Дефолт `7753643025` (Draft). Добавление видимого аккаунта включает мутации на нём — см. §2.1 |
 | `SECRETS_ENCRYPTION_KEY` | **да** | Fernet-ключ шифрования токенов at-rest (обязателен в prod) |
+| `TWO_FACTOR_ENABLED` | нет | §12 2FA-гейт опасных операций. `false` (дефолт) = выкл. `true` = перед исполнением опасной мутации бот просит PIN. **Fail-closed**: `true` без `TWO_FACTOR_PIN` ⇒ опасные операции блокируются (не пропускаются). См. §2.2 |
+| `TWO_FACTOR_PIN` | **да** | PIN для 2FA (маскируется в логах/repr). Сверяется в коде constant-time (`core/twofa.py`) |
+| `TWO_FACTOR_OPS_CSV` | нет | какие операции требуют кода (CSV). Дефолт `remove_campaign,remove_ad_group,update_budget,update_bid,set_bidding_strategy`. Пусто ⇒ при включённом 2FA ничего не гейтится |
 | `DATABASE_URL` | нет | строка подключения (в compose задаётся на `postgres:5432`) |
 | `LOG_LEVEL` / `LOG_FORMAT` | нет | `INFO` / `text` (в prod рекомендуется `json`) |
 | `GOOGLE_ADS_READ_CUSTOMER_IDS` | нет | доп. аккаунты для ЧТЕНИЯ (§8), CSV. Чтение НЕ открывает мутации (нужен ещё ALLOWED_CUSTOMER_IDS, §2.1) |
@@ -75,6 +78,22 @@ cp .env.example .env
 > ⚠️ Визард `/newcampaign`, `/rsa`, меню `/campaigns` пока читают структуру на Draft — создание/меню-
 > действия на ДРУГОМ аккаунте через них не поддержаны (отдельный шаг). Для не-Draft используй прямые
 > NL-команды изменений (бюджет/пауза/ставка/ключи/минус-слова/гео).
+
+### 2.2 Двухфакторное подтверждение опасных операций (§12 2FA) — опционально
+
+По умолчанию **выключено** (поведение не меняется). Включение добавляет второй фактор «кто-то нажал
+✅» против случайного/поспешного подтверждения денежной или необратимой операции:
+
+1. Задай `TWO_FACTOR_ENABLED=true` и `TWO_FACTOR_PIN=<секрет>` (через секрет-менеджер).
+2. По желанию сузь/расширь список гейтящихся операций через `TWO_FACTOR_OPS_CSV` (имена как в
+   `agent/tools/schemas.py`).
+
+Поток: оператор жмёт ✅ на опасной операции → бот просит PIN одним сообщением. Верный код → операция
+исполняется; неверный (до 3 попыток) или «отмена» → **черновик остаётся `pending`** (не сожжён),
+можно нажать ✅ заново. PIN сверяется в КОДЕ (`hmac.compare_digest`, constant-time), сырьё не
+логируется. **Fail-closed:** `TWO_FACTOR_ENABLED=true` без `TWO_FACTOR_PIN` ⇒ опасные операции
+блокируются (не пропускаются без проверки). Confirm-гейт и замок аккаунта при этом сохраняются —
+2FA стоит поверх них, а не вместо. Инварианты — `tests/test_twofa.py`.
 
 ### Одно-операторный доступ на чтение (все аккаунты в пикерах)
 Пикеры применяют пер-пользовательский грант: в режиме `ACCOUNT_ACCESS_MODE=auto` первый `/grant`
@@ -135,6 +154,17 @@ dev/SQLite и тестов. В dev (SQLite) `init_db()` дополнительн
 ```bash
 docker compose run --rm bot alembic upgrade head
 ```
+
+### Верификация прод-БД (Postgres) — `scripts/verify_postgres.py`
+Перед боевым запуском подтверди, что на **чистом Postgres** миграции доходят до head и рантайм-схема
+читается (в отличие от dev-SQLite, где схему аддитивно чинит `heal_sqlite_schema`; на Postgres истина
+— только Alembic):
+```bash
+DATABASE_URL=postgresql+asyncpg://aimash:***@localhost:5432/aimash python scripts/verify_postgres.py
+```
+Скрипт: проверяет, что DSN — Postgres (иначе отказ) → `alembic upgrade head` → сверяет `current` == head
+(`0019_bug_reports`) → `init_db()` (детектор дрейфа модель⟂миграции; на Postgres это no-op `create_all`)
+→ смоук-чтение ключевых таблиц. `exit 0` — чисто, `exit 1` — сбой. Пароль БД в выводе маскируется.
 
 ## 5. Запуск
 ```bash
@@ -198,8 +228,13 @@ docker image prune -f
 - [ ] `LOG_FORMAT=json`, проверена редакция секретов в логах (`core/logging.py`).
 - [ ] Все секреты — через секрет-менеджер, не в `.env` на диске.
 - [ ] gitleaks чист; в контексте сборки нет кред-файлов (см. `.dockerignore`).
-- [ ] `alembic upgrade head` применён; бэкапы БД настроены.
+- [ ] `alembic upgrade head` применён; бэкапы БД настроены. **Верификация Postgres** пройдена
+      (`scripts/verify_postgres.py` → `exit 0`: миграции→head + смоук-чтение).
 - [ ] Таймауты/ретраи проверены (`core/resilience.py`: `ADS_*`, `LLM_*`).
+- [ ] По желанию §12 2FA: `TWO_FACTOR_ENABLED=true` + `TWO_FACTOR_PIN` (иначе опасные операции
+      блокируются — fail-closed). См. §2.2.
+- [ ] Live-смоук создающих кампаний на Draft (PAUSED, $0): `scripts/live_smoke_gdn.py` (GDN §11),
+      `scripts/live_smoke_video_dg.py` (Video/Demand Gen). Оставленные PAUSED-кампании удалить.
 - [ ] Прогон на TEST MCC завершён; на боевой аккаунт переключаемся осознанно.
 
 ## 7. Напоминание о золотых правилах

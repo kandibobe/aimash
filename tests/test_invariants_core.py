@@ -211,7 +211,12 @@ def test_no_source_references_ads_adcopy():
 # Гард на КЛАСС: новый demo/фикстура-скрипт с mutate_* без require_dev_env() провалит тест.
 # Allow-list — скрипты, идущие ЧЕРЕЗ полный confirm-гейт (save_proposal→confirm→execute):
 # им dev-гард не нужен (сам гейт и замок аккаунта уже защищают денежный путь).
-_GATED_SCRIPT_ALLOWLIST = {"live_smoke_test.py", "live_smoke_video_dg.py"}
+_GATED_SCRIPT_ALLOWLIST = {
+    "live_smoke_test.py",
+    "live_smoke_video_dg.py",
+    "live_smoke_lead_form.py",
+    "live_smoke_gdn.py",  # §11 GDN-смоук: создаёт через confirm-гейт, cleanup только при ENV=dev
+}
 
 
 def test_direct_write_scripts_call_require_dev_env():
@@ -297,6 +302,39 @@ async def test_google_ads_exception_with_token_redacted_in_chat_and_audit():
     err_text_db = str(row.result.get("error", ""))
     assert secret not in err_text_db, "секрет утёк в audit_log (golden rule #5)"
     assert "REDACTED" in err_text_db
+
+
+# ── Phase 4: дрейф SUPPORTED_OPERATIONS ↔ MUTATION_TOOLS (агент-невидимая мутация) ──
+# Исполнимые операции (ads.service.SUPPORTED_OPERATIONS) = агент-инструменты (schemas.MUTATION_TOOLS)
+# ∪ UI-only-операции (минтятся кнопками, агент их НЕ вызывает — защита от prompt-injection). Явный
+# allowlist UI-only: новая SUPPORTED-операция, забытая в MUTATION_TOOLS, провалит тест (агент не
+# сможет её вызвать по NL), ЕСЛИ она не внесена сюда осознанно как UI-only.
+_UI_ONLY_OPS = {
+    "attach_image_asset",  # §3-assets: изображение приходит как media_id из UI, не по NL агента
+    "launch_campaign",  # §19.8: кнопка «🚀 Запустить» визарда (включает кампанию+группы+объявления)
+}
+
+
+def test_supported_ops_are_agent_tools_or_ui_only():
+    from ads.service import SUPPORTED_OPERATIONS
+    from agent.tools.schemas import MUTATION_TOOLS
+
+    ui_only = set(SUPPORTED_OPERATIONS) - set(MUTATION_TOOLS)
+    assert ui_only == _UI_ONLY_OPS, (
+        f"SUPPORTED_OPERATIONS вне MUTATION_TOOLS = {sorted(ui_only)}, ожидалось {sorted(_UI_ONLY_OPS)}. "
+        "Новая исполнимая операция должна быть либо агент-инструментом (schemas.MUTATION_TOOLS), либо "
+        "осознанно UI-only (внеси в _UI_ONLY_OPS). Иначе агент не вызовет её по NL — тихий пробел."
+    )
+
+
+def test_every_supported_op_has_a_schema():
+    """Каждая исполнимая операция имеет Pydantic-схему (SCHEMAS) — _build_proposal (UI-кнопки) и
+    валидация агента опираются на неё; op без схемы упал бы KeyError при попытке минтить черновик."""
+    from ads.service import SUPPORTED_OPERATIONS
+    from agent.tools.schemas import SCHEMAS
+
+    missing = sorted(op for op in SUPPORTED_OPERATIONS if op not in SCHEMAS)
+    assert not missing, f"SUPPORTED_OPERATIONS без Pydantic-схемы (SCHEMAS): {missing}"
 
 
 # ── #3 (UI-зеркало): _MONEY_OPS_UI в bot.main синхронен реестру денежных операций ──

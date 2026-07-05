@@ -328,7 +328,7 @@ async def cc_ad_url(m: bm.Message, state: bm.FSMContext) -> None:
         return
     rsa_session_id = await bm.SESSIONS.create(
         chat_id=m.chat.id,
-        customer_id=bm.DRAFT_ACCOUNT_ID,
+        customer_id=draft.customer_id or bm.DRAFT_ACCOUNT_ID,  # §8: аккаунт мутации визарда
         campaign=(s.get("campaign_name") or ""),
         ad_group_id="",
         ad_group_name=(s.get("campaign_name") or ""),
@@ -686,10 +686,10 @@ async def cc_use_assets(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.
         await cq.answer(bm.i18n.t("cc_draft_stale"), show_alert=True)
         return
     await cq.answer()
-    # Переиспользуем ТОЛЬКО ассеты Draft: кампания создаётся на Draft, а CampaignAsset не может
+    # Переиспользуем ассеты АККАУНТА МУТАЦИИ: кампания создаётся на нём, а CampaignAsset не может
     # ссылаться на ассет другого аккаунта (превью-аккаунт дал бы чужие resource_name → молчаливый
-    # no-op). Поэтому читаем строго с DRAFT_ACCOUNT_ID, а не с preview_customer_id.
-    read_cid = bm.DRAFT_ACCOUNT_ID
+    # no-op). Поэтому читаем строго с аккаунта мутации черновика, а не с preview_customer_id.
+    read_cid = draft.customer_id or bm.DRAFT_ACCOUNT_ID
     rows: list = []
     try:
         from ads.client import build_client_async
@@ -758,6 +758,34 @@ async def cc_asset_type(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.
         return
     family = callback_data.sub
     await cq.answer()
+    # §19.7.1: типы, требующие ВНЕШНЕЙ настройки аккаунта / отсутствующие в API v24 — не
+    # автогенерируются. Честно объясняем требование и возвращаем в пикер (раньше эти типы просто
+    # отсутствовали в списке — менеджер не знал ни о них, ни почему их нет). lead_form РЕАЛИЗОВАН
+    # отдельной веткой ниже (собирает privacy-URL и строит реальный ассет).
+    _GATED_MSG = {
+        "location": "cc_asset_needs_location",
+        "affiliate_location": "cc_asset_needs_affiliate",
+        "app": "cc_asset_app_out_of_scope",
+    }
+    if family in _GATED_MSG:
+        await msg.answer(bm.i18n.t(_GATED_MSG[family]), parse_mode=bm.ParseMode.HTML)
+        await msg.answer(
+            bm.i18n.t("cc_assets_pick_type"),
+            reply_markup=bm.cc_asset_types_kb(),
+            parse_mode=bm.ParseMode.HTML,
+        )
+        return
+    if (
+        family == "lead_form"
+    ):  # §19.7.1: лид-форма — нужен URL политики конфиденциальности (обязателен)
+        await state.set_state(bm.CreateCampaignWizard.asset_lead_form)
+        await state.update_data(cc_session=session_id)
+        await msg.answer(
+            bm.i18n.t("cc_asset_lead_form_prompt"),
+            reply_markup=bm.nav_kb(),
+            parse_mode=bm.ParseMode.HTML,
+        )
+        return
     if family == "business_logo":  # §19.7.1: логотип — это ФОТО, не текстовая автогенерация
         await state.set_state(bm.CreateCampaignWizard.asset_logo)
         await state.update_data(cc_session=session_id)
@@ -824,6 +852,70 @@ async def cc_asset_type(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.
         # §20.6: честно сообщаем, что ссылки — из реальной карты сайта (краул), не выдуманы
         await msg.answer(bm.i18n.t("cc_asset_sitelinks_from_crawl", n=len(site_pages)))
     await msg.answer(
+        bm.i18n.t("cc_assets_prompt"), reply_markup=bm.cc_assets_kb(), parse_mode=bm.ParseMode.HTML
+    )
+
+
+def _build_lead_form_spec(profile: dict, settings: dict, privacy_url: str, lang: str) -> dict:
+    """§19.7.1: собрать spec лид-формы из профиля клиента (§20) + настроек кампании + privacy-URL.
+    Тексты обрезаны по лимитам Google Ads (business_name≤255, headline≤30, description≤200, CTA≤30);
+    поля формы — стандартный набор (имя/e-mail/телефон). Никаких выдуманных данных — только факты
+    профиля + дефолтные подписи на языке аудитории. privacy_url обязателен (собран у менеджера)."""
+    en = lang == "en"
+    prof = profile if isinstance(profile, dict) else {}
+    brand = (prof.get("brand") or "").strip()
+    product = (settings.get("product") or "").strip()
+    campaign_name = (settings.get("campaign_name") or "").strip()
+    desc = (prof.get("business_desc") or "").strip()
+    business_name = (brand or campaign_name or ("Business" if en else "Компания"))[:255]
+    headline = (product or campaign_name or ("Get in touch" if en else "Оставьте заявку"))[:30]
+    description = (
+        desc
+        or ("Leave a request and we'll contact you." if en else "Оставьте заявку — мы свяжемся.")
+    )[:200]
+    cta_desc = ("Get a quote" if en else "Оставить заявку")[:30]
+    return {
+        "family": "lead_form",
+        "params": {
+            "business_name": business_name,
+            "headline": headline,
+            "description": description,
+            "call_to_action_description": cta_desc,
+            "privacy_policy_url": privacy_url,
+            "cta_type": "GET_QUOTE",
+            "field_types": ["FULL_NAME", "EMAIL", "PHONE_NUMBER"],
+        },
+    }
+
+
+@bm.dp.message(bm.CreateCampaignWizard.asset_lead_form)
+async def cc_asset_lead_form_url(m: bm.Message, state: bm.FSMContext) -> None:
+    """§19.7.1: получен URL политики конфиденциальности → строим spec лид-формы из профиля + URL,
+    накапливаем в черновик (реальная привязка — на composite-создании за confirm-гейтом). Возврат
+    в меню ассетов. Невалидный URL → повтор (остаёмся в состоянии)."""
+    data = await state.get_data()
+    session_id = data.get("cc_session")
+    draft = await bm.CDRAFTS.get(session_id, expected_chat_id=m.chat.id) if session_id else None
+    if draft is None:
+        await state.clear()
+        await m.answer(bm.i18n.t("cc_draft_stale"))
+        return
+    url = (m.text or "").strip()
+    if not url.startswith(("http://", "https://")):
+        await m.answer(bm.i18n.t("cc_asset_lead_form_bad_url"), reply_markup=bm.nav_kb())
+        return  # остаёмся в состоянии — пользователь пришлёт корректный URL (или «✖ Отмена»)
+    cid = draft.preview_customer_id or bm.DRAFT_ACCOUNT_ID
+    profile = await bm.CLIENTS.get_by_account(cid) or {}
+    settings = draft.wizard_state.get("settings") or {}
+    spec = _build_lead_form_spec(profile, settings, url, bm.i18n.current_lang())
+    await state.set_state(bm.CreateCampaignWizard.assets)
+    await state.update_data(cc_session=session_id)
+    snap = await bm.CDRAFTS.patch(
+        session_id, lambda st: st["assets"]["new"].append(spec), expected_chat_id=m.chat.id
+    )
+    n = len(((snap.wizard_state if snap else {}).get("assets") or {}).get("new") or [])
+    await m.answer(bm.i18n.t("cc_asset_added", label=bm.texts.fmt_asset_spec_label(spec), n=n))
+    await m.answer(
         bm.i18n.t("cc_assets_prompt"), reply_markup=bm.cc_assets_kb(), parse_mode=bm.ParseMode.HTML
     )
 
@@ -1019,14 +1111,17 @@ async def cc_create(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.FSMC
         params=validated,
         summary=summary,
         cid=cid,
+        customer_id=draft.customer_id
+        or bm.DRAFT_ACCOUNT_ID,  # §8: создаём на аккаунте мутации визарда
     )
 
 
 @bm.dp.callback_query(bm.CcCB.filter(bm.F.action == "launch"))
 async def cc_launch(cq: bm.CallbackQuery, callback_data: bm.CcCB) -> None:
-    """§19.8: «🚀 Запустить» после создания черновика → resume_campaign proposal (confirm-гейт).
+    """§19.8: «🚀 Запустить» после создания черновика → launch_campaign proposal (confirm-гейт).
     Запуск = отдельная прямая команда: кнопка лишь СОЗДАЁТ черновик «PAUSED→ENABLED», исполняется
-    только после ✅ (та же ветка, что /campaigns → «Возобновить»). Замок аккаунта не трогаем.
+    только после ✅. Операция launch_campaign (НЕ resume_campaign) включает кампанию ПОЛНОСТЬЮ —
+    кампанию + группы + объявления, иначе PAUSED группа/RSA дали бы 0 показов. Замок аккаунта не трогаем.
 
     Имя кампании резолвим по sub=confirmation_id ПРИМЕНЁННОГО create-proposal из БД (переживает
     рестарт процесса); legacy-кнопки без sub — из _CC_LAUNCH_CACHE (один релиз). Гарды по sub:
@@ -1050,13 +1145,17 @@ async def cc_launch(cq: bm.CallbackQuery, callback_data: bm.CcCB) -> None:
             await cq.answer(bm.i18n.t("cc_launch_stale"), show_alert=True)
             return
         name = (snap.params or {}).get("campaign_name") or None
+        launch_acct = (
+            snap.customer_id
+        )  # §8: запуск на аккаунте, где кампания СОЗДАНА (не хардкод Draft)
     else:  # legacy-кнопка (до деплоя restart-durability) — процессный кэш
         name = bm._CC_LAUNCH_CACHE.get(chat_id)
+        launch_acct = await bm._active_read_account(chat_id)
     if not name:
         await cq.answer(bm.i18n.t("cc_launch_stale"), show_alert=True)
         return
     try:
-        cid, op, params, summary = bm._build_proposal("resume_campaign", campaign=name)
+        cid, op, params, summary = bm._build_proposal("launch_campaign", campaign=name)
     except Exception as e:  # noqa: BLE001 — валидация схемы
         await cq.answer(bm.i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
         return
@@ -1068,7 +1167,13 @@ async def cc_launch(cq: bm.CallbackQuery, callback_data: bm.CcCB) -> None:
     if msg is None:
         return
     await bm._present_proposal(
-        msg, chat_id=chat_id, operation=op, params=params, summary=summary, cid=cid
+        msg,
+        chat_id=chat_id,
+        operation=op,
+        params=params,
+        summary=summary,
+        cid=cid,
+        customer_id=launch_acct,  # §8: запуск на аккаунте создания кампании
     )
 
 

@@ -16,6 +16,11 @@ async def on_advise_feedback(cq: bm.CallbackQuery, callback_data: bm.AdviseCB) -
     только локальная БД: ни мутаций Google Ads, ни proposal (инвариант test_advisor)."""
     chat_id = bm._cq_chat_id(cq)
 
+    # §advisor #1: «применить» — СТАРТ confirm-гейта (только не-денежные ops; гард в bm._advise_apply).
+    if callback_data.action == "apply":
+        await bm._advise_apply(cq, callback_data.rec)
+        return
+
     # Тумблер проактивной подачи (ui_prefs.advise_proactive) — как /alerts, confirm-гейт не нужен.
     if callback_data.action == "auto":
         want_on = callback_data.rec == "on"

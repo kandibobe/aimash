@@ -39,6 +39,22 @@ def report_trigger() -> CronTrigger:
         return CronTrigger(**_DEFAULT_REPORT_CRON)
 
 
+_DEFAULT_WEEKLY_DIGEST_CRON = {"day_of_week": "mon", "hour": 9, "minute": 0}  # пн 09:00 (fallback)
+
+
+def weekly_digest_trigger() -> CronTrigger:
+    """CronTrigger еженедельного дайджеста из settings.weekly_digest_schedule (crontab-строка).
+    Зеркалит report_trigger: невалидную строку НЕ роняем стартом — откат на пн 09:00 + громкий лог."""
+    raw = (settings.weekly_digest_schedule or "").strip()
+    try:
+        return CronTrigger.from_crontab(raw)
+    except (ValueError, TypeError) as e:
+        log.warning(
+            "WEEKLY_DIGEST_SCHEDULE=%r невалиден (%s) — откат на пн 09:00", raw, type(e).__name__
+        )
+        return CronTrigger(**_DEFAULT_WEEKLY_DIGEST_CRON)
+
+
 async def register_user_report_schedules(sched: AsyncIOScheduler, bot) -> int:
     """§14 (P1-I): персональные расписания планового отчёта. Читает UserSettings.report_schedule
     (crontab-строки) и регистрирует per-chat cron-джобу run_scheduled_report(bot, only_chat=chat)
@@ -180,6 +196,17 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
             replace_existing=True,
             misfire_grace_time=300,
             next_run_time=datetime.now(timezone.utc),
+        )
+    # §6/§15 (1.3): еженедельный дайджест админам (ошибки + баг-репорты + активность), текст + файл.
+    # Регистрируем ТОЛЬКО если включён (WEEKLY_DIGEST_ENABLED) — opt-in, как error_alerts. READ-ONLY.
+    if settings.weekly_digest_enabled:
+        sched.add_job(
+            jobs.run_weekly_digest,
+            weekly_digest_trigger(),
+            args=[bot],
+            id="weekly_digest",
+            replace_existing=True,
+            misfire_grace_time=3600,
         )
     # C2 (§15): ретеншн-очистка растущих таблиц (error_events/crawl_jobs) — удаление старых строк
     # (cleanup-джобы выше лишь меняют статус). audit_log НЕ трогаем (денежный реестр). Кадэнс — раз в

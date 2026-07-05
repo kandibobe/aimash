@@ -108,3 +108,29 @@ def test_diagnostics_follows_contextvar_with_advisory():
         assert "ad review" in ux.fmt_rsa_diagnostics(d, 15, 4)
     finally:
         i18n.reset_current_lang(tok)
+
+
+# ── §10 CTA-эвристика (advisory: хотя бы один призыв к действию в наборе) ─────────────
+def test_has_cta_detects_multilingual():
+    from adcopy.validate import any_cta, has_cta
+
+    assert has_cta("Купите цветы сегодня")  # RU стем «куп»
+    assert has_cta("Order now and save")  # EN order
+    assert has_cta("Замовляйте зараз")  # UK замов
+    assert not has_cta("Красивые свежие цветы")  # без призыва
+    assert any_cta(["описание", "Звоните нам"])  # хотя бы один
+    assert not any_cta(["просто текст", "ещё букет"])
+
+
+def test_diagnostics_hints_when_no_cta_ru():
+    d = _draft(
+        ["Свежие цветы", "Большой выбор", "Доставка по городу"], ["Красивые букеты", "Много сортов"]
+    )
+    s = ux.fmt_rsa_diagnostics(d, 15, 4, lang="ru")
+    assert "💡" in s and "действию" in s  # подсказка добавить CTA
+
+
+def test_diagnostics_no_cta_hint_when_present():
+    d = _draft(["Купите цветы", "Большой выбор", "Доставка"], ["Заказать букет", "Много сортов"])
+    s = ux.fmt_rsa_diagnostics(d, 15, 4, lang="ru")
+    assert "💡" not in s  # CTA есть → без подсказки

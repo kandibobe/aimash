@@ -70,6 +70,20 @@ def test_catalog_en_differs_and_nonempty():
         assert entry["en"] != entry["ru"], key
 
 
+def test_catalog_every_key_has_both_languages():
+    """Мета-гард (Phase 4): КАЖДЫЙ ключ CATALOG имеет непустые ru И en — иначе t() на одном языке
+    вернёт пусто/мост/сам ключ. Раньше проверялась лишь горстка ключей; новый ключ в одном языке
+    (частый класс бага) проходил незамеченным до рантайма. Проверяем ВЕСЬ каталог явно."""
+    missing = sorted(
+        k
+        for k, v in i18n.CATALOG.items()
+        if not isinstance(v, dict)
+        or not (v.get("ru") or "").strip()
+        or not (v.get("en") or "").strip()
+    )
+    assert not missing, f"ключи CATALOG без ru или en: {missing}"
+
+
 def test_ru_default_unchanged_start_help():
     # RU дефолт байт-в-байт совпадает с исходными константами texts.* (EN — чисто аддитивно)
     assert i18n.t("start", "ru") == texts.START

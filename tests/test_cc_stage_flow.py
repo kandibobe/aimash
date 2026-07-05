@@ -239,14 +239,16 @@ async def test_stage7_create_builds_composite_proposal():
     fsm = FakeFSM({"cc_session": sid})
     captured = {}
 
-    async def fake_present(message, *, chat_id, operation, params, summary, cid):
-        captured.update(operation=operation, params=params, cid=cid)
+    async def fake_present(message, *, chat_id, operation, params, summary, cid, customer_id=None):
+        captured.update(operation=operation, params=params, cid=cid, customer_id=customer_id)
 
     cq = FakeCallbackQuery(FakeMessage(chat_id=chat))
     with patched(bm, "_present_proposal", fake_present):
         await bm.cc_create(cq, CcCB(action="create"), fsm)
 
     assert captured["operation"] == "create_search_campaign"
+    # §8: при активном аккаунте=Draft (тесты: пустой allow-list) визард минтит на Draft (fail-closed)
+    assert captured["customer_id"] == bm.DRAFT_ACCOUNT_ID
     p = captured["params"]
     assert p["campaign_name"].startswith("Кения")
     assert p["geo_locations"] == ["Кения"]
@@ -263,21 +265,23 @@ async def test_stage7_create_builds_composite_proposal():
 
 
 @pytest.mark.asyncio
-async def test_launch_button_mints_resume_proposal():
-    """§19.8 (legacy-кнопка без sub): «🚀 Запустить» → resume_campaign proposal (confirm-гейт),
-    не прямой запуск. Кэш имени одноразовый (не запустить дважды по старой кнопке)."""
+async def test_launch_button_mints_launch_proposal():
+    """§19.8 (legacy-кнопка без sub): «🚀 Запустить» → launch_campaign proposal (confirm-гейт),
+    не прямой запуск. launch_campaign включает кампанию ПОЛНОСТЬЮ (кампания+группы+объявления),
+    в отличие от resume_campaign (только кампания) — иначе PAUSED группа/RSA ⇒ 0 показов.
+    Кэш имени одноразовый (не запустить дважды по старой кнопке)."""
     await init_db()
     chat = 7700206
     bm._CC_LAUNCH_CACHE[chat] = "Кения · Авто · Search"
     captured = {}
 
-    async def fake_present(message, *, chat_id, operation, params, summary, cid):
+    async def fake_present(message, *, chat_id, operation, params, summary, cid, customer_id=None):
         captured.update(operation=operation, params=params)
 
     cq = FakeCallbackQuery(FakeMessage(chat_id=chat))
     with patched(bm, "_present_proposal", fake_present):
         await bm.cc_launch(cq, CcCB(action="launch"))
-    assert captured["operation"] == "resume_campaign"
+    assert captured["operation"] == "launch_campaign"
     assert captured["params"]["campaign"] == "Кения · Авто · Search"
     assert chat not in bm._CC_LAUNCH_CACHE  # одноразово
 
@@ -323,13 +327,13 @@ async def test_launch_button_survives_restart_via_sub():
     bm._CC_LAUNCH_DONE.clear()
     captured = {}
 
-    async def fake_present(message, *, chat_id, operation, params, summary, cid):
+    async def fake_present(message, *, chat_id, operation, params, summary, cid, customer_id=None):
         captured.update(operation=operation, params=params)
 
     cq = FakeCallbackQuery(FakeMessage(chat_id=chat))
     with patched(bm, "_present_proposal", fake_present):
         await bm.cc_launch(cq, CcCB(action="launch", sub=cid))
-    assert captured["operation"] == "resume_campaign"
+    assert captured["operation"] == "launch_campaign"
     assert captured["params"]["campaign"] == "Кения · Рестарт · Search"
 
     # одноразовость в процессе: повторный клик той же кнопкой → stale

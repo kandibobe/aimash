@@ -25,7 +25,10 @@ async def rsa_cmd(m: bm.Message, state: bm.FSMContext) -> None:
         from ads.client import build_client_async
         from ads.read import list_campaigns
 
-        client = await build_client_async()
+        acct = await bm._active_read_account(
+            m.chat.id
+        )  # §8: RSA на активном аккаунте, не хардкод Draft
+        client = await build_client_async(acct)
         # как остальной read-слой: таймаут+ретрай транзиентных под семафором Google Ads
         # (а не «голый» to_thread — иначе зависший SearchStream не капается и копит in-flight).
         # B2: RSA живёт только в Search-кампаниях → показываем ТОЛЬКО их (иначе объявление уходило
@@ -33,7 +36,7 @@ async def rsa_cmd(m: bm.Message, state: bm.FSMContext) -> None:
         camps = await bm.run_ads_read_call(
             list_campaigns,
             client,
-            bm.DRAFT_ACCOUNT_ID,
+            acct,
             label="list_campaigns",
             channel_type="SEARCH",
         )

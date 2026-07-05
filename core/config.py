@@ -89,11 +89,30 @@ class Settings(BaseSettings):
     # fail-closed; мутации этим НЕ затрагиваются (свой узкий замок). Пусто => чтение, как и мутации,
     # только на разрешённый аккаунт (поведение не меняется). См. ads.client.ensure_read_allowed.
     google_ads_read_customer_ids: str = ""
+    # §11 Video: создание VIDEO-кампаний через API разрешено Google ТОЛЬКО по allowlist аккаунта
+    # (иначе mutate → MUTATE_NOT_ALLOWED, trigger «VIDEO»). Дефолт False ⇒ визард не ведёт менеджера
+    # в гарантированный тупик (предлагает Demand Gen — рабочий путь из видео). Владелец включает
+    # True, ТОЛЬКО когда его аккаунт добавлен в allowlist Google. Код Video-цепочки готов и покрыт.
+    google_ads_video_enabled: bool = False
     google_ads_api_version: str = "v24"  # API-версия (мажор). SDK-пин google-ads — в pyproject.toml
     # Дневной лимит операций Google Ads API (§3): Basic dev-token = 15 000 операций/сутки; Standard —
     # фактически без лимита (ставь высоким). core.quota предупреждает на 80% и БЛОКИРУЕТ новые
     # МУТАЦИИ на 95% (чтение не блокируем). 0 ⇒ трекинг выключен (без гарда).
     google_ads_daily_op_limit: int = 15000
+
+    # §12 2FA (опц. в ТЗ): PIN-подтверждение ОПАСНЫХ операций ПЕРЕД исполнением. Opt-in, дефолт
+    # OFF, fail-closed: включён без PIN ⇒ опасные операции БЛОКИРУЮТСЯ (не fail-open). PIN сверяет
+    # КОД (core.twofa, hmac.compare_digest — constant-time), сырьё не логируется (SecretStr).
+    two_factor_enabled: bool = False
+    two_factor_pin: SecretStr = SecretStr(
+        ""
+    )  # маскируется в логах/repr/трейсбеках (golden rule #5)
+    # Какие операции требуют 2FA-кода (CSV). Дефолт — необратимые/денежные: удаление кампании/группы
+    # (уже за двойным confirm) + бюджет/ставка/стратегия. Пусто ⇒ при включённом 2FA НИЧЕГО не
+    # гейтится (осознанный выбор владельца); операции нормализуются в two_factor_ops (property).
+    two_factor_ops_csv: str = (
+        "remove_campaign,remove_ad_group,update_budget,update_bid,set_bidding_strategy"
+    )
 
     # Безопасность / БД
     secrets_encryption_key: SecretStr = SecretStr("")
@@ -145,6 +164,12 @@ class Settings(BaseSettings):
     # scheduler.jobs.run_error_alerts шлёт админам дайджест новых инцидентов раз в N минут. 0 ⇒
     # ВЫКЛ (алерты не шлём — фича opt-in, не спамим по умолчанию). Нет админов ⇒ тоже no-op.
     error_alert_interval_minutes: int = 0
+    # §6/§15 (1.3): еженедельный дайджест админам (ADMIN_CHAT_IDS) — ошибки за 7 дней + баг-репорты +
+    # сводка активности (операции/кампании/квота). Текст + прикреплённый файл. Джоба
+    # scheduler.jobs.run_weekly_digest по крону weekly_digest_schedule. False ⇒ ВЫКЛ (opt-in, как
+    # error_alert; нет админов ⇒ тоже no-op). Крон-строка невалидна ⇒ откат на пн 09:00 (fail-safe).
+    weekly_digest_enabled: bool = False
+    weekly_digest_schedule: str = "0 9 * * 1"  # crontab: понедельник 09:00 (локальное время)
     # §15 (C2): ретеншн растущих таблиц. error_events/crawl_jobs копятся монотонно (cleanup-джобы
     # лишь меняют статус, не удаляют). Джоба scheduler.jobs.purge_stale_rows удаляет строки старше
     # порога. audit_log НЕ трогаем (денежный реестр — ручной колд-архив, docs/BACKUP.md). 0 ⇒ ВЫКЛ.
@@ -198,6 +223,12 @@ class Settings(BaseSettings):
             for x in self.google_ads_read_customer_ids.split(",")
             if (n := normalize_customer_id(x))
         }
+
+    @property
+    def two_factor_ops(self) -> set[str]:
+        """§12: множество операций, требующих 2FA-кода (нормализованные имена мутаций). Гейт —
+        core.twofa.required_for × bot.main._do_confirm. Пусто ⇒ ничего не гейтится."""
+        return {op for x in self.two_factor_ops_csv.split(",") if (op := x.strip())}
 
     @property
     def login_customer_id_set(self) -> set[str]:

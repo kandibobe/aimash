@@ -161,6 +161,30 @@ async def apply_resume_campaign(
     return result
 
 
+# ── Запуск кампании (§19.8/§11): включить ВСЮ структуру, не только кампанию ────────
+# ОТДЕЛЬНАЯ операция от resume_campaign НАМЕРЕННО. `resume_campaign` включает ТОЛЬКО статус
+# кампании — это правильно для /campaigns → «Возобновить», где менеджер мог осознанно держать
+# часть групп/объявлений на паузе. Но визард §19 создаёт кампанию, группу И RSA-объявление
+# ВСЕ в PAUSED (0 расхода до запуска); включение одной кампании оставило бы группу и объявление
+# на паузе ⇒ показов НОЛЬ, а менеджер думал бы, что кампания идёт (тихий дефект). «Запустить» =
+# включить кампанию + ВСЕ её (не-REMOVED) группы + ВСЕ (не-REMOVED) объявления. Идемпотентно
+# (повторный ENABLED — no-op). НЕ денежная (бюджет задан при создании) → user_initiated НЕ требуется,
+# как resume/pause. Оба обязательных гейта на месте: ensure_allowed (Draft-only) + _require_confirmation.
+async def apply_launch_campaign(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    ensure_allowed(customer_id)
+    await _require_confirmation(confirm_store, confirmation_id, "launch_campaign")
+    result = await run_ads_call(_launch_campaign_via_sdk, ads_client, customer_id, campaign_id)
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
 # ── Переименование кампании (§3 «изменение» кампании) ────────────────────────────
 # Единственная правка уровня campaign, не связанная с деньгами/статусом/стратегией: имя.
 # НЕ денежная операция → user_initiated не требуется (как pause/resume). Оба гейта обязательны.
@@ -1125,6 +1149,68 @@ def _set_ad_group_status_via_sdk(client, customer_id: str, ad_group_id: str, sta
     }
 
 
+def _launch_campaign_via_sdk(client, customer_id: str, campaign_id: str) -> dict:
+    """§19.8/§11: включить ВСЮ структуру кампании (кампания + ВСЕ не-REMOVED группы + ВСЕ не-REMOVED
+    объявления) в ENABLED. Объявление показывается только когда ENABLED на ВСЕХ трёх уровнях —
+    поэтому запуск созданного визардом PAUSED-черновика обязан включить и группу, и RSA, иначе 0
+    показов. REMOVED-сущности НЕ воскрешаем (их фильтруем в GAQL). Идемпотентно (ENABLED→ENABLED)."""
+    cid = str(customer_id)
+    ga = client.get_service("GoogleAdsService")
+    # Собираем resource_name групп и объявлений кампании (кроме REMOVED — их не оживляем).
+    ag_rns = [
+        row.ad_group.resource_name
+        for row in ga.search(
+            customer_id=cid,
+            query=(
+                "SELECT ad_group.resource_name FROM ad_group "
+                f"WHERE campaign.id = {int(campaign_id)} AND ad_group.status != 'REMOVED'"
+            ),
+        )
+    ]
+    ad_rns = [
+        row.ad_group_ad.resource_name
+        for row in ga.search(
+            customer_id=cid,
+            query=(
+                "SELECT ad_group_ad.resource_name FROM ad_group_ad "
+                f"WHERE campaign.id = {int(campaign_id)} AND ad_group_ad.status != 'REMOVED'"
+            ),
+        )
+    ]
+    # 1) кампания → ENABLED (переиспользуем существующий сеттер: единый update_mask-идиом).
+    _set_campaign_status_via_sdk(client, cid, campaign_id, client.enums.CampaignStatusEnum.ENABLED)
+    # 2) группы → ENABLED (батч одним mutate).
+    if ag_rns:
+        ag_svc = client.get_service("AdGroupService")
+        ops = []
+        for rn in ag_rns:
+            op = client.get_type("AdGroupOperation")
+            op.update.resource_name = rn
+            op.update.status = client.enums.AdGroupStatusEnum.ENABLED
+            client.copy_from(op.update_mask, protobuf_helpers.field_mask(None, op.update._pb))
+            ops.append(op)
+        ag_svc.mutate_ad_groups(customer_id=cid, operations=ops)
+    # 3) объявления → ENABLED (батч одним mutate).
+    if ad_rns:
+        aga_svc = client.get_service("AdGroupAdService")
+        ops = []
+        for rn in ad_rns:
+            op = client.get_type("AdGroupAdOperation")
+            op.update.resource_name = rn
+            op.update.status = client.enums.AdGroupAdStatusEnum.ENABLED
+            client.copy_from(op.update_mask, protobuf_helpers.field_mask(None, op.update._pb))
+            ops.append(op)
+        aga_svc.mutate_ad_group_ads(customer_id=cid, operations=ops)
+    return {
+        "customer_id": customer_id,
+        "campaign_id": str(campaign_id),
+        "status": "ENABLED",
+        "ad_groups_enabled": len(ag_rns),
+        "ads_enabled": len(ad_rns),
+        "applied": True,
+    }
+
+
 def _remove_campaign_via_sdk(client, customer_id: str, campaign_id: str) -> dict:
     """Удаление кампании через CampaignService (op.remove = resource_name). Необратимо: статус
     кампании становится REMOVED. Замок/гейт — в apply_remove_campaign выше."""
@@ -1889,6 +1975,9 @@ async def apply_create_search_campaign(
                 imgs += 1
             except Exception:  # noqa: BLE001 — image-ассет может быть неприменим к аккаунту
                 pass
+        # §19.6: и запрошено, и добавлено — чтобы вызывающий увидел ТИХУЮ потерю (added < requested
+        # на неподходящем аккаунте) и сообщил менеджеру, а не молча проглотил (раньше был только added).
+        result["images_requested"] = len(image_specs)
         result["images_added"] = imgs
     await confirm_store.finalize(confirmation_id, result=result)
     return result

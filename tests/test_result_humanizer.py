@@ -36,6 +36,39 @@ def test_create_campaign_result_humanized_with_warnings():
     assert "customers/775" not in out  # сырые resource_name не показываем
 
 
+def test_create_result_surfaces_image_and_asset_drops():
+    """§19.6/§19.7: тихие потери (картинки/ассеты) больше не молчат — added/requested, пропущенные
+    с причиной, добавленные и переиспользованные видны менеджеру в итоге создания."""
+    result = {
+        "campaign_name": "Flowers",
+        "campaign": "customers/775/campaigns/1",
+        "status": "PAUSED",
+        "applied": True,
+        "images_requested": 3,
+        "images_added": 1,  # 2 потеряны (неподходящий аккаунт)
+        "assets_added": ["callouts", "sitelinks"],
+        "assets_reused": 4,
+        "assets_skipped": [{"family": "lead_form"}, {"family": "location"}],
+    }
+    out = texts.fmt_mutation_result("create_search_campaign", result, lang="ru")
+    assert "1/3" in out and "Изображения" in out  # тихая потеря картинок видна
+    assert "callouts" in out and "Ассеты добавлены" in out
+    assert "Переиспользовано ассетов: 4" in out
+    assert "lead_form" in out and "пропущены" in out  # пропущенные — с причиной
+
+
+def test_create_result_all_images_ok_no_warning():
+    result = {
+        "campaign_name": "Ok",
+        "status": "PAUSED",
+        "applied": True,
+        "images_requested": 2,
+        "images_added": 2,
+    }
+    out = texts.fmt_mutation_result("create_search_campaign", result, lang="ru")
+    assert "🖼" in out and "⚠️ Изображения" not in out  # всё прикреплено → без предупреждения
+
+
 def test_keywords_result_humanized():
     out = texts.fmt_mutation_result(
         "add_keywords",

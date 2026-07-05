@@ -78,6 +78,7 @@ from bot.callbacks import (
     AdviseCB,
     AlertCB,
     AudienceCB,
+    BugCB,
     CampCB,
     CcCB,
     ClientCB,
@@ -142,6 +143,7 @@ from bot.keyboards import (
     cc_kw_kb,
     cc_kw_verify_kb,
     cc_resume_kb,
+    bugs_kb,
     cc_settings_kb,
     cc_skip_kb,
     confirm_destructive_kb,
@@ -154,6 +156,7 @@ from bot.keyboards import (
     geo_mode_kb,
     kw_add_kb,
     kw_geo_kb,
+    kw_lang_kb,
     kw_params_kb,
     lang_kb,
     main_menu,
@@ -162,6 +165,7 @@ from bot.keyboards import (
     model_kb,
     nav_kb,
     recent_kb,
+    service_menu_kb,
     templates_kb,
     video_logo_kb,
     video_type_kb,
@@ -180,6 +184,7 @@ from bot.throttle import ThrottleMiddleware
 from confirm.gate import Proposal, build_summary
 from confirm.store import ConfirmStore
 from core import ingest
+from core import twofa  # §12 2FA-гейт опасных операций (opt-in, дефолт OFF, fail-closed)
 from core.access import ensure_account_allowed_for_user, is_whitelisted
 from core.ads_errors import humanize_google_ads_error, is_account_access_error
 from core.config import normalize_customer_id, settings
@@ -209,7 +214,12 @@ WELCOME_IMG = Path(__file__).resolve().parent / "assets" / "welcome.png"
 _welcome_file_id: str | None = None
 
 # Операции со списком ключей — большой список в черновике уходит .xlsx-вложением (ТЗ §5).
-_KEYWORD_OPS = frozenset({"add_keywords", "remove_keywords", "add_negative_keywords"})
+# remove_negative_keywords ОБЯЗАН быть здесь: fmt_mutation_summary усекает его список до
+# KW_INLINE_MAX и обещает «…полный список во вложении .xlsx» — без этой операции в наборе вложение
+# не слалось, и менеджер жал ✅ на объёме, который не видел (нарушение §5/golden rule #1).
+_KEYWORD_OPS = frozenset(
+    {"add_keywords", "remove_keywords", "add_negative_keywords", "remove_negative_keywords"}
+)
 
 # P1-6: необратимые удаления — карточка подтверждения проходит ДВА шага (confirm_destructive_kb →
 # confirm_final_kb). Замок аккаунта (Draft-only) и confirm-гейт неизменны; это доп. защита в UI.
@@ -219,6 +229,10 @@ _DESTRUCTIVE_OPS = frozenset(
 
 # Лёгкое in-memory состояние UI (теряется при рестарте — это ок, не источник истины):
 _CAMP_CACHE: dict[int, list[dict]] = {}  # chat_id → последний список кампаний (резолв idx→имя)
+# §8/мультиаккаунт: аккаунт, с которого прочитан текущий _CAMP_CACHE — ЯКОРЬ для чтений/мутаций
+# меню /campaigns (читаю и мутирую ОДИН аккаунт, без mismatch). Дефолт (нет записи) = Draft.
+# Замок мутаций (ensure_allowed) держится в _present_proposal: не-Draft вне allow-list → отказ.
+_CAMP_ACCT: dict[int, str] = {}
 _LAST_PENDING: dict[int, str] = {}  # chat_id → confirmation_id последнего черновика (для /cancel)
 # §2B: params последнего черновика create_search_campaign на чат — материал для /savetemplate
 # «сохранить как шаблон». В памяти (как _LAST_PENDING); секретов нет.
@@ -299,6 +313,13 @@ _AUD_CACHE: dict[
 _REPORT_ACCT_CACHE: dict[int, list] = {}  # chat_id → read-allowed аккаунты (idx→ChildAccount)
 _REPORT_CAMP_CACHE: dict[int, list[dict]] = {}  # chat_id → кампании выбранного аккаунта (idx→dict)
 _REPORT_SEL: dict[int, dict] = {}  # chat_id → {"account", "campaign_id", "campaign_name"}
+_ADVISE_TOPIC_CACHE: dict[int, str | None] = {}  # chat_id → тема /advise, переживает выбор в пикере
+
+
+# §12: chat_id → ожидающий 2FA-код черновик {"cid", "cq" (исходный ✅-CallbackQuery), "attempts"}.
+# Черновик при ожидании остаётся `pending` (не сжигается) — неверный код/отмена → повторить ✅ можно.
+_TWOFA_PENDING: dict[int, dict] = {}
+_TWOFA_MAX_ATTEMPTS = 3  # неверных вводов до отмены (черновик НЕ сжигается — повторить ✅ можно)
 
 
 # 4A: FSM-состояния всех визардов вынесены в bot/states.py (декомпозиция god-module).
@@ -306,6 +327,7 @@ _REPORT_SEL: dict[int, dict] = {}  # chat_id → {"account", "campaign_id", "cam
 # тестов работают без изменений (позднее связывание).
 from bot.states import (  # noqa: E402
     AlertsWizard,
+    BugReportWizard,
     ClientInfoWizard,
     CreateCampaignWizard,
     ExtWizard,
@@ -320,6 +342,7 @@ from bot.states import (  # noqa: E402
     RsaWizard,
     SearchWizard,
     TplWizard,
+    TwoFactor,
     VideoWizard,
 )
 
@@ -560,14 +583,16 @@ async def _capture_cmd_error(e: Exception, where: str) -> None:
 async def _load_error_events(today: bool = False, limit: int = 15) -> list:
     """A3 (§15): последние error_events для /diag (reverse-chron). today ⇒ только за сегодня (UTC).
     Фильтр «сегодня» — в Python (наивный created_at → UTC): избегаем строкового сравнения tz-aware/
-    naive в SQL на SQLite. Read-only; message/traceback уже редактированы на записи (секретов нет)."""
+    naive в SQL на SQLite. Read-only; message/traceback уже редактированы на записи (секретов нет).
+    Экспорт (1.2) зовёт с большим limit → фетчим с запасом (для today-фильтра берём шире)."""
     from sqlalchemy import desc, select
 
     from db.models import ErrorEvent as _EE
     from db.session import Session
 
+    fetch = max(50, int(limit) * 2 if today else int(limit))
     async with Session() as s:
-        rows = (await s.execute(select(_EE).order_by(desc(_EE.id)).limit(50))).scalars().all()
+        rows = (await s.execute(select(_EE).order_by(desc(_EE.id)).limit(fetch))).scalars().all()
     if today:
         from datetime import datetime, timezone
 
@@ -670,10 +695,9 @@ async def _send_help(message: Message) -> None:
     await message.answer(i18n.t("help"), parse_mode=ParseMode.HTML)
 
 
-async def _send_status(message: Message) -> None:
-    """Быстрая сводка по аккаунту за 30 дн. (read-only, без подтверждения). Аккаунт — активный
-    аккаунт ЧТЕНИЯ чата (§6 /account), по умолчанию Draft."""
-    acct = await _active_read_account(message.chat.id)
+async def _render_status(message: Message, acct: str) -> None:
+    """Показать статистику КОНКРЕТНОГО аккаунта за 30 дн. (read-only). acct уже прошёл замок чтения
+    (пикер/резолв). Draft без живых данных → подсказка выбрать живой аккаунт (§8 F)."""
     try:
         from ads.client import build_client_async
         from ads.read import account_stats
@@ -700,6 +724,64 @@ async def _send_status(message: Message) -> None:
             },
             cur,
         ),
+        parse_mode=ParseMode.HTML,
+    )
+    hint = _live_account_hint(acct)  # §8 F: работаем на Draft, а есть живые → зовём выбрать
+    if hint:
+        await message.answer(hint, parse_mode=ParseMode.HTML)
+
+
+async def _send_status(message: Message) -> None:
+    """§6/§8: пикер аккаунта → статистика (30 дн.). Один доступный аккаунт → сразу его статистика
+    (без клика). Переиспользует пикер /report (report_accounts_kb, target='status')."""
+    chat_id = message.chat.id
+    rows = await _read_account_rows(chat_id)
+    _REPORT_ACCT_CACHE[chat_id] = rows
+    if len(rows) <= 1:  # только Draft/один аккаунт — сразу статистика (пикер не нужен)
+        await _render_status(message, await _active_read_account(chat_id))
+        return
+    await message.answer(
+        i18n.t("status_pick_account"),
+        reply_markup=report_accounts_kb(rows, "status", last=await _last_account(chat_id)),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def _start_advise_picker(message: Message, *, topic: str | None = None) -> None:
+    """§6/§8: пикер аккаунта → рекомендации advisor. Один доступный аккаунт → сразу прогон (без
+    клика). Тема живёт в _ADVISE_TOPIC_CACHE, переживает выбор аккаунта в пикере (topic-specific
+    /advise через пикер). Переиспользует пикер /report (report_accounts_kb, target='advise')."""
+    chat_id = message.chat.id
+    rows = await _read_account_rows(chat_id)
+    _REPORT_ACCT_CACHE[chat_id] = rows
+    _ADVISE_TOPIC_CACHE[chat_id] = topic
+    if len(rows) <= 1:  # только Draft/один аккаунт — сразу рекомендации (пикер не нужен)
+        await _advise_run(message, chat_id, topic=topic)
+        return
+    await message.answer(
+        i18n.t("advise_pick_account"),
+        reply_markup=report_accounts_kb(rows, "advise", last=await _last_account(chat_id)),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def _start_setacct_picker(message: Message) -> None:
+    """E/§8 F: пикер выбора АКТИВНОГО аккаунта ЧТЕНИЯ (персист per-chat, переживает рестарт) —
+    ключ к «данные со всего аккаунта, а не только Draft». Переиспользует пикер /report
+    (report_accounts_kb, target='setacct'); один доступный аккаунт → просто показываем текущий."""
+    chat_id = message.chat.id
+    rows = await _read_account_rows(chat_id)
+    _REPORT_ACCT_CACHE[chat_id] = rows
+    if len(rows) <= 1:  # выбирать не из чего — сообщаем текущий (как /account без аргумента)
+        cur = await _active_read_account(chat_id)
+        draft_mark = " (Draft)" if cur == DRAFT_ACCOUNT_ID else ""
+        await message.answer(
+            i18n.t("account_current", cid=cur, draft=draft_mark), parse_mode=ParseMode.HTML
+        )
+        return
+    await message.answer(
+        i18n.t("setacct_pick_account"),
+        reply_markup=report_accounts_kb(rows, "setacct", last=await _last_account(chat_id)),
         parse_mode=ParseMode.HTML,
     )
 
@@ -735,17 +817,25 @@ async def _send_journal(message: Message) -> None:
     await message.answer(texts.fmt_journal(events), parse_mode=ParseMode.HTML)
 
 
+def _camp_account(chat_id: int) -> str:
+    """Аккаунт-якорь меню /campaigns (с которого прочитан _CAMP_CACHE). Нет записи → Draft.
+    Все чтения/мутации меню идут на него — чтение и запись согласованы (мультиаккаунт-готовность).
+    Замок ensure_allowed в _present_proposal отсекает не-Draft вне allow-list (fail-closed)."""
+    return _CAMP_ACCT.get(chat_id, DRAFT_ACCOUNT_ID)
+
+
 async def _send_campaigns(message: Message, chat_id: int) -> None:
-    """Список кампаний + inline-кнопки выбора. Кэшируем список по chat_id для резолва idx→имя."""
+    """Список кампаний АКТИВНОГО аккаунта чтения + inline-кнопки. Кэшируем список и аккаунт-якорь
+    по chat_id (мультиаккаунт: меню читает и мутирует ОДИН аккаунт). Активный резолвится через
+    read-замок × грант (дефолт Draft); мутации по кнопкам всё равно упрутся в ensure_allowed."""
+    acct = await _active_read_account(chat_id)
     try:
         from ads.client import build_client_async
         from ads.read import list_campaigns
 
-        client = await build_client_async()
+        client = await build_client_async(acct)
         async with ux.typing_action(message):
-            camps = await run_ads_read_call(
-                list_campaigns, client, DRAFT_ACCOUNT_ID, label="list_campaigns"
-            )
+            camps = await run_ads_read_call(list_campaigns, client, acct, label="list_campaigns")
     except Exception as e:  # сеть/доступ/SDK
         await _capture_cmd_error(e, "cmd:campaigns")  # A2: в /diag + алерт админам
         await message.answer(i18n.t("err_campaigns", err=ux.err_text(e)))
@@ -754,8 +844,9 @@ async def _send_campaigns(message: Message, chat_id: int) -> None:
         await message.answer(i18n.t("no_campaigns"))
         return
     _CAMP_CACHE[chat_id] = camps
+    _CAMP_ACCT[chat_id] = acct
     await message.answer(
-        texts.campaigns_title(DRAFT_ACCOUNT_ID),
+        texts.campaigns_title(acct),
         reply_markup=campaigns_kb(camps),
         parse_mode=ParseMode.HTML,
     )
@@ -861,11 +952,12 @@ async def _present_proposal(
 
     customer_id — аккаунт МУТАЦИИ, штампуемый в черновик (authoritative: execute_confirmed исполняет
     именно его, с повторным ensure_allowed). G2/G3: не задан → DRAFT (базовый). АКТИВНЫЙ аккаунт
-    передаётся ЯВНО только теми путями, где чтение и запись идут на ОДИН аккаунт (agent-loop NL:
-    кампания резолвится на исполнении на proposal.customer_id). Визард §19/RSA/меню /campaigns читают
-    структуру на Draft (hardcoded) → остаются на Draft, чтобы не было mismatch «читаю Draft — пишу в
-    другой аккаунт» (мультиаккаунт этих флоу — отдельный шаг). НЕ-Draft аккаунт обязан быть ВКЛЮЧЁН на
-    мутации (иначе внятный отказ «только чтение», БЕЗ тихой подмены), карточка несёт баннер аккаунта.
+    передаётся ЯВНО путями, где чтение и запись идут на ОДИН аккаунт: agent-loop NL (кампания
+    резолвится на исполнении на proposal.customer_id) и меню /campaigns (аккаунт-якорь _CAMP_ACCT,
+    §8 — читает и мутирует один аккаунт). Визард §19/RSA/шаблоны/media пока читают структуру на Draft
+    (hardcoded) → остаются на Draft (мультиаккаунт этих флоу — следующий шаг по тому же паттерну:
+    аккаунт-якорь сессии + customer_id сюда). НЕ-Draft аккаунт обязан быть ВКЛЮЧЁН на мутации (иначе
+    внятный отказ «только чтение», БЕЗ тихой подмены), карточка несёт баннер аккаунта.
 
     external_context=True — предложение родилось при наличии СПРАВОЧНОГО контента из файла/ссылки
     (prompt-injection поверхность): для ДЕНЕЖНЫХ операций префиксуем сводку предупреждением
@@ -1256,6 +1348,18 @@ async def _active_read_account(chat_id: int) -> str:
         return await get_active_account(chat_id)
     except Exception:  # noqa: BLE001 — сбой чтения настройки не должен ломать отчёты
         return DRAFT_ACCOUNT_ID
+
+
+def _live_account_hint(acct: str) -> str:
+    """§8 F: подсказка, если работаем на пустом Draft, а у бота есть ЖИВЫЕ read-аккаунты (обход MCC
+    или env read-list). Иначе '' — не шумим. Чинит «вижу только черновик»: зовём выбрать живой."""
+    if str(acct) != str(DRAFT_ACCOUNT_ID):
+        return ""
+    from ads.client import discovered_read_children
+
+    live = {c for c in discovered_read_children() if str(c) != str(DRAFT_ACCOUNT_ID)}
+    live |= {c for c in settings.read_customer_ids if str(c) != str(DRAFT_ACCOUNT_ID)}
+    return i18n.t("live_account_hint") if live else ""
 
 
 async def _keyword_metrics_account(chat_id: int) -> tuple[str, bool]:
@@ -1804,7 +1908,15 @@ async def _rsa_present_final(target: Message, chat_id: int, session, state: FSMC
         await target.answer(i18n.t("cb_error", kind=type(e).__name__))
         return
     await _present_proposal(
-        target, chat_id=chat_id, operation=op, params=params, summary=summary, cid=cid
+        target,
+        chat_id=chat_id,
+        operation=op,
+        params=params,
+        summary=summary,
+        cid=cid,
+        customer_id=getattr(
+            session, "customer_id", None
+        ),  # §8: create_rsa на аккаунте-якоре сессии
     )
 
 
@@ -1860,9 +1972,12 @@ async def _rsa_resolve_after_campaign(
 
     await state.update_data(campaign=campaign)
     try:
-        client = await build_client_async()
+        acct = await _active_read_account(
+            chat_id
+        )  # §8: группы активного аккаунта (не хардкод Draft)
+        client = await build_client_async(acct)
         groups = await run_ads_read_call(
-            find_ad_groups, client, DRAFT_ACCOUNT_ID, campaign, label="find_ad_groups"
+            find_ad_groups, client, acct, campaign, label="find_ad_groups"
         )
     except Exception as e:  # сеть/доступ/SDK
         await target.answer(i18n.t("err_adgroups", err=ux.err_text(e)))
@@ -1895,8 +2010,11 @@ async def _rsa_resolve_after_campaign(
 async def _rsa_generate_and_start(target: Message, chat_id: int, state: FSMContext) -> None:
     """Сгенерировать тексты по брифу из state, создать сессию курации, показать итог."""
     data = await state.get_data()
-    # §20→§10: профиль клиента (одно-аккаунтный дефолт — Draft) как контекст генерации.
-    _prof = await _cc_profile_ctx_account(DRAFT_ACCOUNT_ID)
+    acct = await _active_read_account(
+        chat_id
+    )  # §8: RSA на активном аккаунте (сессия читает+мутирует его)
+    # §20→§10: профиль клиента активного аккаунта как контекст генерации (не хардкод Draft).
+    _prof = await _cc_profile_ctx_account(acct)
     brief = CopyBrief(
         topic=data.get("topic", ""),
         keywords=list(data.get("keywords") or []),
@@ -1924,7 +2042,7 @@ async def _rsa_generate_and_start(target: Message, chat_id: int, state: FSMConte
         return
     session_id = await SESSIONS.create(
         chat_id=chat_id,
-        customer_id=DRAFT_ACCOUNT_ID,
+        customer_id=acct,  # §8: аккаунт-якорь RSA-сессии (create_rsa минтится на него)
         campaign=data.get("campaign", ""),
         ad_group_id=data.get("ad_group_id", ""),
         ad_group_name=data.get("ad_group_name", ""),
@@ -1962,12 +2080,13 @@ async def _rsa_start_from_intent(m: Message, brief: dict, state: FSMContext) -> 
         from ads.client import build_client_async
         from ads.read import list_campaigns
 
-        client = await build_client_async()
+        acct = await _active_read_account(
+            m.chat.id
+        )  # §8: кампании АКТИВНОГО аккаунта, не хардкод Draft
+        client = await build_client_async(acct)
         # как остальной read-слой: таймаут+ретрай транзиентных под семафором Google Ads
         # (а не «голый» to_thread — иначе зависший SearchStream не капается и копит in-flight).
-        camps = await run_ads_read_call(
-            list_campaigns, client, DRAFT_ACCOUNT_ID, label="list_campaigns"
-        )
+        camps = await run_ads_read_call(list_campaigns, client, acct, label="list_campaigns")
     except Exception as e:  # сеть/доступ/SDK
         await m.answer(i18n.t("err_campaigns", err=ux.err_text(e)))
         return
@@ -2220,19 +2339,31 @@ async def _kw_start_from_intent(m: Message, brief: dict, state: FSMContext) -> N
     """NL-вход: keyword_research-намерение агента. Есть сиды/URL — сразу; иначе спросить.
     3F: дефолт языка — язык интерфейса (keyword_ideas_lang), а не хардкод 'ru' (EN-пользователь
     получал русские идеи, нерелевантные его рынку)."""
-    from ads.geo import country_iso, geo_id_for_country, keyword_ideas_lang
+    from ads.geo import (
+        country_iso,
+        geo_id_for_country,
+        keyword_ideas_lang,
+        language_for_country,
+    )
 
     await state.clear()
     seeds = [s for s in (brief.get("seeds") or []) if s]
     url = brief.get("url")
-    language = brief.get("language") or keyword_ideas_lang(i18n.current_lang())
     # P1-F (§7): гео/сеть/период из NL-брифа → те же параметры research, что и экран /keywords.
     geo_ids: tuple[int, ...] | None = None
+    geo_iso: str | None = None
     geo_raw = (brief.get("geo") or "").strip()
     if geo_raw:
-        iso = country_iso(geo_raw) or geo_raw.upper()
-        gid = geo_id_for_country(iso)
+        geo_iso = country_iso(geo_raw) or geo_raw.upper()
+        gid = geo_id_for_country(geo_iso)
         geo_ids = (gid,) if gid else None  # неизвестная страна → дефолт (_kw_run подставит Украину)
+    # §7: язык — из брифа; иначе ВЫВОДИМ ИЗ СТРАНЫ (Германия→de, а не язык интерфейса — иначе идеи на
+    # чужом рынку языке → «мало слов»); иначе язык интерфейса. keyword_ideas_lang нормализует/опускает.
+    language = keyword_ideas_lang(
+        brief.get("language")
+        or (language_for_country(geo_iso) if geo_iso else None)
+        or i18n.current_lang()
+    )
     network = (
         "GOOGLE_SEARCH_AND_PARTNERS"
         if brief.get("network") == "search_partners"
@@ -2424,7 +2555,11 @@ async def _cc_begin(target: Message, chat_id: int, state: FSMContext) -> None:
         await asyncio.to_thread(
             clear_pending_media_ids, (prev.wizard_state.get("images") or {}).get("media_ids") or []
         )
-    session_id = await CDRAFTS.create(chat_id=chat_id, customer_id=DRAFT_ACCOUNT_ID)
+    # §8: аккаунт МУТАЦИИ визарда = активный аккаунт чтения (дефолт Draft); preview_customer_id
+    # (медианы «по аналогии») выбирается отдельно на Этапе 0. Замок — в _present_proposal на создании.
+    session_id = await CDRAFTS.create(
+        chat_id=chat_id, customer_id=await _active_read_account(chat_id)
+    )
     await state.set_state(CreateCampaignWizard.account_select)
     await state.update_data(cc_session=session_id)
     await _cc_present_stage0(target, chat_id)
@@ -3345,6 +3480,9 @@ async def _video_mint_proposal(
         await target.answer(i18n.t("video_session_stale"))
         return
     op = "create_demand_gen_campaign" if kind == "dg" else "create_video_campaign"
+    acct = await _active_read_account(
+        chat_id
+    )  # §8: DG/Video на активном аккаунте (не хардкод Draft)
     if kind == "dg" and logo_media_id:
         params["logo_media_id"] = logo_media_id
     try:  # defense-in-depth: схема ещё раз проверит длины/составы/URL/бюджет/YouTube id
@@ -3361,9 +3499,7 @@ async def _video_mint_proposal(
         from ads.client import build_client_async
         from core.limits import dg_video_min_daily_units
 
-        acct_cur = await _read_currency(
-            await build_client_async(DRAFT_ACCOUNT_ID), DRAFT_ACCOUNT_ID
-        )
+        acct_cur = await _read_currency(await build_client_async(acct), acct)
         min_units = dg_video_min_daily_units(acct_cur)
         have_units = validated["budget_daily_micros"] / 1_000_000
         if have_units < min_units:
@@ -3399,6 +3535,7 @@ async def _video_mint_proposal(
         params=validated,
         summary=summary,
         cid=p.confirmation_id,
+        customer_id=acct,  # §8: DG/Video создаётся на активном аккаунте (замок — в _present_proposal)
     )
 
 
@@ -3606,10 +3743,13 @@ async def _clone_from_intent(m: Message, brief: dict) -> None:
     from ads.read import read_campaign_config
     from ads.resolve import find_campaign_by_name
 
+    acct = await _active_read_account(
+        m.chat.id
+    )  # §8: источник читаем И кампанию создаём на активном
     try:
-        client = await build_client_async()
+        client = await build_client_async(acct)
         cfg = await run_ads_read_call(
-            read_campaign_config, client, DRAFT_ACCOUNT_ID, source, label="read_campaign_config"
+            read_campaign_config, client, acct, source, label="read_campaign_config"
         )
     except Exception as e:  # сеть/доступ/SDK
         await m.answer(i18n.t("clone_read_error", err=ux.err_text(e)))
@@ -3620,7 +3760,7 @@ async def _clone_from_intent(m: Message, brief: dict) -> None:
     # Имя-дубль ломает резолв по имени (find_campaign_by_name LIMIT 1) → стоп ДО показа черновика.
     try:
         existing = await run_ads_read_call(
-            find_campaign_by_name, client, DRAFT_ACCOUNT_ID, new_name, label="find_campaign_by_name"
+            find_campaign_by_name, client, acct, new_name, label="find_campaign_by_name"
         )
     except Exception:  # noqa: BLE001 — дубль-проверка best-effort, не роняем клон из-за сбоя read
         existing = None
@@ -3652,10 +3792,17 @@ async def _clone_from_intent(m: Message, brief: dict) -> None:
         params=params,
         summary=summary,
         cid=p.confirmation_id,
+        customer_id=acct,  # §8: клон создаётся на том же аккаунте, с которого читали источник
     )
 
 
 # ── advisor: рекомендации (advisory, read-only) ───────────────────────────────────
+# §advisor #1: what a recommendation can apply in ONE TAP — ТОЛЬКО НЕ-денежные операции.
+# update_budget/update_bid НАМЕРЕННО исключены: деньги/ставки только прямой командой (golden rule #3),
+# никогда one-tap. Гард дублируется в _advise_apply (defense-in-depth) + тест test_advise_apply_*.
+_ADVISE_APPLY_OPS = frozenset({"pause_campaign", "add_negative_keywords"})
+
+
 async def _advise_run(
     target: Message,
     chat_id: int,
@@ -3701,6 +3848,16 @@ async def _advise_run(
         "yes",
     )
     if not rec_set.recs:
+        # Внятный empty-state: нет активности (пустой Draft/тест) ≠ «всё в норме». В первом случае
+        # подсказываем выбрать живой аккаунт (частая причина — активен пустой Draft, F).
+        if not rec_set.has_activity:
+            hint = _live_account_hint(acct)
+            body = i18n.t("advise_empty_no_data", lang)
+            await target.answer(
+                body + (("\n\n" + hint) if hint else ""),
+                reply_markup=advise_header_kb(proactive, lang),
+            )
+            return
         await target.answer(
             i18n.t("advise_empty", lang), reply_markup=advise_header_kb(proactive, lang)
         )
@@ -3710,8 +3867,71 @@ async def _advise_run(
         reply_markup=advise_header_kb(proactive, lang),
     )
     for r in rec_set.recs:
-        await target.answer(r.body or "", reply_markup=advise_feedback_kb(r.rec_uid, lang))
+        # §advisor #1: «применить» показываем ТОЛЬКО для не-денежных советов (pause/минус-слова);
+        # деньги/ставки — вне one-tap (golden rule #3), advise_feedback_kb сам отфильтрует.
+        apply_op = r.suggested_operation if r.suggested_operation in _ADVISE_APPLY_OPS else None
+        await target.answer(
+            r.body or "", reply_markup=advise_feedback_kb(r.rec_uid, lang, apply_op=apply_op)
+        )
+    for extra in getattr(rec_set, "extras", []):  # #3: advisory-довески (LLM-минус-слова)
+        await target.answer(extra)
     await target.answer(i18n.t("advise_disclaimer", lang))
+
+
+def _advise_apply_params(rec) -> dict | None:
+    """Собрать params мутации из рекомендации для one-tap «применить». None — нельзя собрать.
+    pause_campaign → {campaign}; add_negative_keywords → {campaign, keywords:[ключ], match_type}."""
+    campaign = rec.target_campaign
+    if not campaign:
+        return None
+    if rec.suggested_operation == "pause_campaign":
+        return {"campaign": campaign}
+    if rec.suggested_operation == "add_negative_keywords":
+        kw = (rec.evidence or {}).get("keyword")
+        if not kw:
+            return None
+        return {"campaign": campaign, "keywords": [kw], "match_type": "broad"}
+    return None
+
+
+async def _advise_apply(cq: CallbackQuery, rec_uid: str) -> None:
+    """§advisor #1: применить совет в один тап → СТАРТ confirm-гейта (proposal), НЕ исполнение.
+    ЖЁСТКИЙ гард (golden rule #3): только не-денежные операции (_ADVISE_APPLY_OPS); деньги/ставки
+    НИКОГДА не one-tap. Аккаунт мутации = rec.customer_id (тот, о котором был совет) → _present_proposal
+    заново проходит ensure_allowed (не-Draft вне allow-list → внятный отказ, не тихая подмена)."""
+    from advisor import store as advisor_store
+    from agent.tools.schemas import SCHEMAS
+
+    chat_id = _cq_chat_id(cq)
+    msg = _cq_msg(cq)
+    rec = await advisor_store.get_recommendation(rec_uid)
+    if rec is None or msg is None:
+        await cq.answer(i18n.t("advise_apply_stale"), show_alert=True)
+        return
+    op = rec.suggested_operation
+    if op not in _ADVISE_APPLY_OPS:  # деньги/ставки/структура — только вручную командой
+        await cq.answer(i18n.t("advise_apply_not_actionable"), show_alert=True)
+        return
+    params = _advise_apply_params(rec)
+    if params is None:
+        await cq.answer(i18n.t("advise_apply_stale"), show_alert=True)
+        return
+    try:  # defense-in-depth: схема мутации ещё раз валидирует состав/длины/нормализует ключи
+        validated: dict = SCHEMAS[op](**params).model_dump()
+    except Exception:  # noqa: BLE001 — кривой ключ/имя → не минтим, просим /advise заново
+        await cq.answer(i18n.t("advise_apply_stale"), show_alert=True)
+        return
+    await cq.answer()
+    p = Proposal(operation=op, summary="", params=validated, chat_id=chat_id)
+    await _present_proposal(
+        msg,
+        chat_id=chat_id,
+        operation=op,
+        params=validated,
+        summary=rec.body or "",
+        cid=p.confirmation_id,
+        customer_id=rec.customer_id,  # аккаунт совета; ensure_allowed на минтинге (fail-closed)
+    )
 
 
 # ── Свободный текст → агент ───────────────────────────────────────────────────────
@@ -3851,7 +4071,13 @@ async def _camp_mutate(cq: CallbackQuery, idx: int, operation: str) -> None:
     if msg is None:
         return
     await _present_proposal(
-        msg, chat_id=chat_id, operation=op, params=params, summary=summary, cid=cid
+        msg,
+        chat_id=chat_id,
+        operation=op,
+        params=params,
+        summary=summary,
+        cid=cid,
+        customer_id=_camp_account(chat_id),  # §8: мутируем аккаунт, с которого читали /campaigns
     )
 
 
@@ -3864,11 +4090,46 @@ async def _do_confirm_stage1(cq: CallbackQuery, cid: str) -> None:
     await _safe_edit_markup(cq, confirm_final_kb(cid))
 
 
-async def _do_confirm(cq: CallbackQuery, cid: str) -> bool:
+async def _twofa_begin(
+    cq: CallbackQuery, cid: str, chat_id: int, state: FSMContext | None, operation: str
+) -> bool:
+    """§12: опасная операция при включённом 2FA — ОТЛОЖИТЬ исполнение и запросить PIN. Черновик
+    остаётся `pending` (не confirmed): неверный код/отмена → повторить ✅ можно, ничего не сожжено.
+    Fail-closed: 2FA включён без PIN → блок (не открываем op); без FSMContext (нет канала приёма
+    кода) → тоже блок. Возвращает False (мутация НЕ применена в этом заходе)."""
+    if not twofa.is_ready():  # включён, но PIN не задан → fail-closed: НЕ открываем опасную op
+        await _safe_edit(cq, i18n.t("twofa_not_configured"))
+        return False
+    if state is None:  # нет FSM-канала для приёма кода (редкий вызов) → fail-closed блок
+        await cq.answer(i18n.t("twofa_need_button"), show_alert=True)
+        return False
+    _TWOFA_PENDING[chat_id] = {"cid": cid, "cq": cq, "attempts": 0}
+    await state.set_state(TwoFactor.awaiting_code)
+    await cq.answer()
+    await _safe_edit(
+        cq, i18n.t("twofa_prompt", op=texts.esc(str(operation))), parse_mode=ParseMode.HTML
+    )
+    return False
+
+
+async def _do_confirm(
+    cq: CallbackQuery, cid: str, *, state: FSMContext | None = None, twofa_ok: bool = False
+) -> bool:
     """Подтвердить и исполнить черновик. Возвращает True только если мутация реально применена
     (finalize записан); False на stale/сбое execute. Вызыватели, у которых от исхода зависит
-    следующий шаг (§20 «Сохранить и краулить»), должны проверять возврат."""
+    следующий шаг (§20 «Сохранить и краулить»), должны проверять возврат.
+
+    §12 2FA: ДО перевода в confirmed — если операция опасна и 2FA включён, отложить исполнение и
+    запросить код (черновик остаётся `pending`). `twofa_ok=True` — повторный вход после верного
+    кода (гейт пройден). `state` нужен для FSM-ожидания кода; без него опасную op не открываем
+    (fail-closed)."""
     chat_id = _cq_chat_id(cq)
+    # §12: 2FA-гейт стоит ПЕРЕД confirm — неверный код/отмена оставляют черновик pending (повторить
+    # ✅ можно), ничего не сжигая. get_confirmed читает черновик в любом статусе (нужна operation).
+    if not twofa_ok:
+        peek = await STORE.get_confirmed(cid)
+        if peek is not None and twofa.required_for(peek.operation):
+            return await _twofa_begin(cq, cid, chat_id, state, peek.operation)
     actor_id, actor_name = _actor(cq)
     if not await STORE.confirm(
         cid, chat_id=chat_id, actor_user_id=actor_id, actor_username=actor_name

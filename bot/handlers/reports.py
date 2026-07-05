@@ -168,6 +168,31 @@ async def on_report_account(cq: bm.CallbackQuery, callback_data: bm.ReportAcctCB
     if not (0 <= callback_data.idx < len(rows)):
         await msg.answer(bm.i18n.t("stale"))
         return
+    acct = bm.normalize_customer_id(getattr(rows[callback_data.idx], "id", ""))
+    if (
+        callback_data.target == "status"
+    ):  # §6/§8: пикер → статистика (замок чтения — в _render_status)
+        await bm._render_status(msg, acct)
+        return
+    if callback_data.target == "advise":  # advisor на ВЫБРАННОМ аккаунте (замок — в _advise_run)
+        topic = bm._ADVISE_TOPIC_CACHE.pop(bm._cq_chat_id(cq), None)  # тема из пикера (или все)
+        await bm._advise_run(msg, bm._cq_chat_id(cq), topic=topic, account=acct)
+        return
+    if callback_data.target == "setacct":  # E/§8 F: выбрать АКТИВНЫЙ аккаунт чтения (персист)
+        chat_id = bm._cq_chat_id(cq)
+        try:  # TOCTOU: rows уже read-allowed, но перепроверяем замок × пер-юзер грант (fail-closed)
+            bm.ensure_read_allowed(acct)
+            from core.access import ensure_account_allowed_for_user
+
+            await ensure_account_allowed_for_user(chat_id, acct)
+        except PermissionError:
+            await msg.answer(
+                bm.i18n.t("account_denied", cid=bm.texts.esc(acct)), parse_mode=bm.ParseMode.HTML
+            )
+            return
+        await bm._save_selected_account(chat_id, acct)  # персист выбора (переживает рестарт)
+        await msg.answer(bm.i18n.t("account_set", cid=acct), parse_mode=bm.ParseMode.HTML)
+        return
     # P0-3: редактируем сообщение-пикер аккаунта в пикер кампании (без нового сообщения).
     await bm._present_report_campaigns(msg, callback_data.target, rows[callback_data.idx], cq=cq)
 

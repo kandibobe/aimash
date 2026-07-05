@@ -278,6 +278,34 @@ def test_seasonality_empty_when_no_volumes():
 
     idea = _idea(SimpleNamespace(text="x", keyword_idea_metrics=_metrics_with_months([])))
     assert idea.peak_month == ""  # ряда нет (типично на тест-аккаунте)
+    assert idea.monthly == []  # §7: полная кривая тоже пуста
+
+
+def test_seasonality_full_curve_captured_and_ordered():
+    """§7: полная 12-мес кривая сохраняется на KeywordIdea (раньше отбрасывалась) — в календарном
+    порядке, month_num по ИМЕНИ enum (не по числовому значению proto)."""
+    from ads.keyword_plan import _idea
+
+    months = [
+        SimpleNamespace(year=2025, month=SimpleNamespace(name="DECEMBER"), monthly_searches=900),
+        SimpleNamespace(year=2025, month=SimpleNamespace(name="JANUARY"), monthly_searches=100),
+        SimpleNamespace(year=2025, month=SimpleNamespace(name="JULY"), monthly_searches=300),
+    ]
+    idea = _idea(SimpleNamespace(text="ёлка", keyword_idea_metrics=_metrics_with_months(months)))
+    # отсортировано по (year, month_num): январь(1) → июль(7) → декабрь(12)
+    assert idea.monthly == [(2025, 1, 100), (2025, 7, 300), (2025, 12, 900)]
+    assert idea.peak_month == "дек 2025"  # производное согласовано с кривой
+
+
+def test_seasonality_sparkline_shape():
+    from ads.keyword_plan import seasonality_sparkline
+
+    assert seasonality_sparkline([]) == ""  # пусто
+    assert seasonality_sparkline([(2025, 1, 0), (2025, 2, 0)]) == ""  # нулевой ряд
+    spark = seasonality_sparkline([(2025, 1, 10), (2025, 2, 100), (2025, 3, 55)])
+    assert len(spark) == 3
+    assert spark[1] == "█"  # пик — самый высокий блок
+    assert spark[0] < spark[1]  # рост к пику (по unicode-порядку блоков)
 
 
 # ── Кластеризация ─────────────────────────────────────────────────────────────────

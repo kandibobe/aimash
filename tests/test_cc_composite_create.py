@@ -120,7 +120,9 @@ def test_asset_dispatch_and_gated():
             object(), "1", "2", {"family": "callouts", "params": {"callouts": ["Гарантия"]}}
         )
     assert calls["callouts"] == ["Гарантия"]
-    for gated in ("location", "affiliate_location", "lead_form"):
+    # location/affiliate_location — недоступны в v24 (config-gated → NotImplementedError). lead_form
+    # РЕАЛИЗОВАН (см. test_lead_form_asset_*), в этот набор больше не входит.
+    for gated in ("location", "affiliate_location"):
         with pytest.raises(NotImplementedError):
             ext.apply_asset_spec_via_sdk(object(), "1", "2", {"family": gated, "params": {}})
     with pytest.raises(ValueError):
@@ -133,8 +135,8 @@ def test_attach_asset_specs_collects_added_and_skipped():
         fam = spec["family"]
         if fam == "callouts":
             return {"applied": True}
-        if fam == "lead_form":
-            raise NotImplementedError("требует privacy policy")
+        if fam == "location":
+            raise NotImplementedError("недоступно в v24")
         raise RuntimeError("boom")
 
     with patched(ext, "apply_asset_spec_via_sdk", fake_dispatch):
@@ -144,12 +146,92 @@ def test_attach_asset_specs_collects_added_and_skipped():
             "123",
             [
                 {"family": "callouts", "params": {}},
-                {"family": "lead_form", "params": {}},
+                {"family": "location", "params": {}},
                 {"family": "price", "params": {}},
             ],
         )
     assert added == ["callouts"]
-    assert {s["family"] for s in skipped} == {"lead_form", "price"}
+    assert {s["family"] for s in skipped} == {"location", "price"}
+
+
+# ── §19.7.1: реальная сборка lead_form_asset (v24) — поля/CTA/link по именам enum ──
+def test_lead_form_asset_builds_correct_op():
+    """Стандартная пара create-asset → CampaignAsset-link: проверяем, что lead_form_asset заполнен
+    (business_name/headline/description/privacy_url/CTA + поля формы) и линкуется field_type=LEAD_FORM."""
+    captured: dict = {}
+
+    class _LF:
+        def __init__(self):
+            self.fields = []
+
+    class _AssetOp:
+        def __init__(self):
+            self.create = SimpleNamespace(lead_form_asset=_LF())
+
+    class _AssetSvc:
+        def mutate_assets(self, customer_id, operations):
+            captured["op"] = operations[0]
+            return SimpleNamespace(results=[SimpleNamespace(resource_name="customers/x/assets/9")])
+
+    class _CampSvc:
+        def campaign_path(self, cid, camp):
+            return f"customers/{cid}/campaigns/{camp}"
+
+    class _CampAssetSvc:
+        def mutate_campaign_assets(self, customer_id, operations):
+            captured["link_field"] = operations[0].create.field_type
+            return SimpleNamespace(
+                results=[SimpleNamespace(resource_name="customers/x/campaignAssets/1")]
+            )
+
+    class _Enums:
+        class LeadFormCallToActionTypeEnum:
+            GET_QUOTE = "GET_QUOTE"
+
+        class LeadFormFieldUserInputTypeEnum:
+            FULL_NAME = "FULL_NAME"
+            EMAIL = "EMAIL"
+            PHONE_NUMBER = "PHONE_NUMBER"
+
+        class AssetFieldTypeEnum:
+            LEAD_FORM = "LEAD_FORM"
+
+    services = {
+        "AssetService": _AssetSvc(),
+        "CampaignService": _CampSvc(),
+        "CampaignAssetService": _CampAssetSvc(),
+    }
+
+    class _Client:
+        enums = _Enums()
+
+        def get_service(self, name):
+            return services[name]
+
+        def get_type(self, name):
+            if name == "AssetOperation":
+                return _AssetOp()
+            if name == "LeadFormField":
+                return SimpleNamespace()
+            return SimpleNamespace(create=SimpleNamespace())  # CampaignAssetOperation
+
+    res = ext._add_lead_form_via_sdk(
+        _Client(),
+        "775",
+        "55",
+        business_name="Kasi Motors",
+        headline="Оставьте заявку",
+        description="Свяжемся с вами",
+        call_to_action_description="Заявка",
+        privacy_policy_url="https://kasi.example/privacy",
+    )
+    lf = captured["op"].create.lead_form_asset
+    assert lf.business_name == "Kasi Motors"
+    assert lf.privacy_policy_url == "https://kasi.example/privacy"
+    assert lf.call_to_action_type == "GET_QUOTE"
+    assert [f.input_type for f in lf.fields] == ["FULL_NAME", "EMAIL", "PHONE_NUMBER"]
+    assert captured["link_field"] == "LEAD_FORM"  # линк с правильным field_type
+    assert res["applied"] and res["kind"] == "lead_form" and res["count"] == 1
 
 
 # ── §19.3: конверс-стратегия без отслеживания конверсий → понижение до Maximize Clicks ──

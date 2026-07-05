@@ -158,6 +158,19 @@ def count_active_campaigns(client, customer_id: str) -> int:
     return sum(1 for _ in _search(client, customer_id, q))
 
 
+def campaign_status_counts(client, customer_id: str) -> dict[str, int]:
+    """§8: РАЗБИВКА кампаний аккаунта ПО СТАТУСУ ({ENABLED: n, PAUSED: m, …}) — лёгкий запрос без
+    метрик/периода, для сводки /mcc (спец-требование §8 «статус кампаний», не только счётчик
+    активных). REMOVED исключаем (мусор для оператора). READ-ONLY."""
+    ensure_read_allowed(customer_id)
+    q = "SELECT campaign.status FROM campaign WHERE campaign.status != 'REMOVED'"
+    out: dict[str, int] = {}
+    for row in _search(client, customer_id, q):
+        st = _enum_name(row.campaign.status)
+        out[st] = out.get(st, 0) + 1
+    return out
+
+
 # ── Разбивки ────────────────────────────────────────────────────────────────────
 def fetch_by_campaign(
     client, customer_id: str, period, campaign_id: str | None = None

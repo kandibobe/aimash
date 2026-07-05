@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from aiogram.enums import ChatAction
 from aiogram.types import FSInputFile
 
-from adcopy.validate import count_flagged
+from adcopy.validate import any_cta, count_flagged
 from bot import i18n
 from core.logging import redact_text
 
@@ -192,9 +192,14 @@ def fmt_rsa_diagnostics(
     drop_d = int(getattr(draft, "dropped_descriptions", 0) or 0)
     # §10: редакторская политика (КАПС/пунктуация/повторы) — считает КОД, не промпт. Advisory:
     # подсвечиваем рискованные тексты ДО запуска, не блокируя (редактура Google нечёткая).
-    flagged = count_flagged(
-        [*(getattr(draft, "headlines", []) or []), *(getattr(draft, "descriptions", []) or [])]
-    )
+    all_texts = [
+        *(getattr(draft, "headlines", []) or []),
+        *(getattr(draft, "descriptions", []) or []),
+    ]
+    flagged = count_flagged(all_texts)
+    # §10 best practice: хотя бы ОДИН призыв к действию (CTA) в наборе. Advisory (эвристика по
+    # лексикону), не блокирует — просто подсказка «добавьте CTA», если его нигде не нашли.
+    no_cta = bool(all_texts) and not any_cta(all_texts)
     if lang == "en":
         h = f"{got_h}/{n_headlines} headlines" + (f" ({drop_h} too long)" if drop_h else "")
         d = f"{got_d}/{n_descriptions} descriptions" + (f" ({drop_d} too long)" if drop_d else "")
@@ -204,6 +209,8 @@ def fmt_rsa_diagnostics(
                 f"\n⚠️ {flagged} text(s) may fail ad review (caps / punctuation / repeats)"
                 " — check before launch."
             )
+        if no_cta:
+            out += "\n💡 No clear call-to-action found — consider adding one (Buy, Order, Call…)."
         return out
     h_word = _plural_ru(got_h, "заголовок", "заголовков")
     d_word = _plural_ru(got_d, "описание", "описаний")
@@ -215,6 +222,8 @@ def fmt_rsa_diagnostics(
             f"\n⚠️ {flagged} текст(ов) под риском модерации (КАПС / пунктуация / повторы)"
             " — проверьте перед запуском."
         )
+    if no_cta:
+        out += "\n💡 Призыв к действию не найден — добавьте (Купить, Заказать, Звоните…)."
     return out
 
 
@@ -274,6 +283,39 @@ async def send_proposal_text(
             except OSError:
                 pass
     await message.answer(header_html, reply_markup=reply_markup, parse_mode=parse_mode)  # type: ignore[attr-defined]
+
+
+async def send_text_document(message: object, *, text: str, filename: str) -> None:
+    """Отправить произвольный ТЕКСТ .txt-вложением в ИНТЕРАКТИВНОМ хендлере (есть message).
+    Используется экспортом журнала ошибок (/diag «📎 Экспорт») и т.п. Временный файл — в finally."""
+    fd, path = tempfile.mkstemp(suffix=".txt", prefix="aimash_export_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        await message.answer_document(FSInputFile(path, filename=filename))  # type: ignore[attr-defined]
+    finally:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+async def send_bot_document(bot: object, chat_id: int, *, text: str, filename: str) -> None:
+    """Отправить ТЕКСТ .txt-вложением из SCHEDULER-контекста (нет message, только bot). Аналог
+    send_text_document для плановых джоб (еженедельный дайджест). Временный файл — в finally.
+    Вызывающий сам ловит исключения per-recipient (как _broadcast)."""
+    fd, path = tempfile.mkstemp(suffix=".txt", prefix="aimash_digest_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        await bot.send_document(chat_id, FSInputFile(path, filename=filename))  # type: ignore[attr-defined]
+    finally:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 async def send_proposal_keywords_xlsx(

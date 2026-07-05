@@ -1775,6 +1775,8 @@ def _apply_case(op):
         }
     if op == "resume_campaign":
         return mut.apply_resume_campaign, {"campaign_id": "7", **base}
+    if op == "launch_campaign":
+        return mut.apply_launch_campaign, {"campaign_id": "7", **base}
     if op == "pause_campaign":
         return mut.apply_pause_campaign, {"campaign_id": "7", **base}
     if op == "update_campaign":

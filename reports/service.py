@@ -201,6 +201,24 @@ def _esc(s: str) -> str:
     return html.escape(str(s), quote=False)
 
 
+_CAMP_STATUS_EMOJI = {"ENABLED": "▶️", "PAUSED": "⏸"}
+
+
+def _fmt_campaign_status(status_counts) -> str:
+    """§8: компактная разбивка кампаний ПО СТАТУСУ для строки аккаунта в /mcc: «▶️3 ⏸5».
+    None/пусто ⇒ ''. ENABLED/PAUSED — эмодзи (частые), прочие статусы — «Имя:N»."""
+    if not isinstance(status_counts, dict) or not status_counts:
+        return ""
+    parts: list[str] = []
+    for st in ("ENABLED", "PAUSED"):
+        if status_counts.get(st):
+            parts.append(f"{_CAMP_STATUS_EMOJI[st]}{status_counts[st]}")
+    for st, n in status_counts.items():
+        if st not in ("ENABLED", "PAUSED") and n:
+            parts.append(f"{str(st).title()}:{n}")
+    return (" · " + " ".join(parts)) if parts else ""
+
+
 def summary_text_mcc(summary, lang: str | None = None) -> str:
     """Читаемая сводка по дочерним MCC (§8) для Telegram (/mcc), <b>parse_mode=HTML</b>: подытоги ПО
     ВАЛЮТАМ (без FX — деньги не выдумываем), СПИСОК аккаунтов (имя · расход · клики · конв. · CTR),
@@ -250,10 +268,13 @@ def summary_text_mcc(summary, lang: str | None = None) -> str:
                     break
                 name = _esc(getattr(cr.account, "name", "") or cr.account.id)
                 m = cr.totals
-                # §8 (P1-G): активных кампаний per-account (если прочитано) — оператор видит их в
-                # сводке, не открывая /report по каждому аккаунту.
-                camps = getattr(cr, "active_campaigns", None)
-                camps_s = f" · {camps} {L['camps']}" if camps is not None else ""
+                # §8: разбивка кампаний ПО СТАТУСУ per-account (▶️N ⏸M) — оператор видит статус
+                # кампаний в сводке, не открывая /report по каждому. Fallback на старый счётчик
+                # активных, если разбивка не прочиталась, но ENABLED-счётчик известен.
+                camps_s = _fmt_campaign_status(getattr(cr, "campaign_status", None))
+                if not camps_s:
+                    camps = getattr(cr, "active_campaigns", None)
+                    camps_s = f" · {camps} {L['camps']}" if camps is not None else ""
                 lines.append(
                     f"• <b>{name}</b> ({cur}): {L['cost']} <b>{_money(m.cost, cur)}</b> · "
                     f"{L['clicks']} {_thou(m.clicks)} · {L['conv']} {m.conversions:.1f} · "

@@ -24,6 +24,7 @@ from core.access import (  # noqa: E402
     is_whitelisted,
     list_whitelisted_users,
     remove_whitelisted_user,
+    whitelisted_ids,
     _invalidate_whitelist_cache,
 )
 from core.config import settings  # noqa: E402
@@ -88,6 +89,27 @@ async def test_removeuser_revokes_access():
         assert await is_whitelisted(NEW_OP) is True
         await remove_whitelisted_user(NEW_OP)
         assert await is_whitelisted(NEW_OP) is False
+
+
+async def test_whitelisted_ids_union_env_and_db():
+    """D9: whitelisted_ids() = env ∪ БД (весь набор операторов). Планировщик берёт этот набор для
+    плановых отчётов/аномалий/advise, поэтому рантайм-добавленный /adduser оператор получает рассылки
+    БЕЗ рестарта (раньше scheduler._recipients был env-only)."""
+    with _env_whitelist("111"):  # env-бутстрап оператор
+        await add_whitelisted_user(NEW_OP, added_by=111)  # рантайм-оператор в БД
+        ids = await whitelisted_ids()
+        assert 111 in ids and NEW_OP in ids  # env ∪ БД
+
+
+async def test_scheduler_recipients_include_runtime_operator():
+    """D9 (интеграция): scheduler._recipients() (теперь корутина) отдаёт env ∪ БД — рантайм-оператор
+    в списке получателей плановой рассылки."""
+    from scheduler import jobs
+
+    with _env_whitelist("111"):
+        await add_whitelisted_user(NEW_OP, added_by=111)
+        recips = await jobs._recipients()
+        assert 111 in recips and NEW_OP in recips
 
 
 async def test_grant_read_does_not_open_mutations(monkeypatch):

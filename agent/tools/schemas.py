@@ -239,6 +239,13 @@ class ResumeCampaign(BaseModel):
     campaign: str
 
 
+class LaunchCampaign(BaseModel):
+    # §19.8/§11 «Запустить»: включить кампанию ПОЛНОСТЬЮ (кампания + группы + объявления). Только
+    # UI-кнопка визарда (как attach_image_asset — не в MUTATION_TOOLS/TOOLS, агент её не вызывает
+    # сам). Отдельная от resume_campaign, которая включает лишь кампанию (см. ads.mutations).
+    campaign: str
+
+
 class UpdateCampaign(BaseModel):
     # §3 «изменение» кампании: переименование. campaign — текущее имя, new_name — новое.
     # Диапазон длины дублирует валидатор мутации (defense-in-depth: не доверяем модели).
@@ -414,7 +421,10 @@ class KeywordResearch(BaseModel):
     # P1-7: до 25 сид-фраз (было 10) — пользователь может перечислить/вставить свои ключи прозой.
     seeds: list[str] = Field(default_factory=list, max_length=25)
     url: str | None = None
-    language: Literal["ru", "uk", "en"] = "ru"
+    # §7: ЛЮБОЙ язык (ISO 639-1 или название: 'de'/'немецкий'/'japanese'). КОД резолвит downstream
+    # (ads.geo.keyword_ideas_lang → keyword_plan.LANGUAGE_IDS); неизвестный/пусто → язык не задаётся.
+    # Пусто → выведем из гео (_kw_run). Раньше было Literal ru/uk/en (зажим).
+    language: str | None = None
     geo: str | None = None  # страна (ISO-2 или название); None → дефолт (_kw_run подставит Украину)
     network: Literal["search", "search_partners"] = "search"
     months: int | None = Field(default=None, ge=1, le=48)
@@ -425,6 +435,11 @@ class KeywordResearch(BaseModel):
         if v and not str(v).startswith(("http://", "https://")):
             raise ValueError("url должен быть http/https")
         return v
+
+    @field_validator("language")
+    @classmethod
+    def _lang(cls, v):
+        return (str(v).strip() or None) if v else None
 
     @field_validator("seeds")
     @classmethod
@@ -1006,6 +1021,7 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "remove_negative_keywords": RemoveNegativeKeywords,
     "pause_campaign": PauseCampaign,
     "resume_campaign": ResumeCampaign,
+    "launch_campaign": LaunchCampaign,
     "update_campaign": UpdateCampaign,
     "pause_ad_group": PauseAdGroup,
     "resume_ad_group": ResumeAdGroup,
@@ -1152,7 +1168,8 @@ TOOLS: list[dict] = [
         "keyword_research",
         "Подобрать ключевые слова по сид-словам и/или URL (read-only, advisory): объёмы, "
         "конкуренция, кластеризация по интенту. Ничего не меняет в аккаунте. Укажи seeds "
-        "и/или url; язык ru/uk/en.",
+        "и/или url. geo — страна (ISO-2 или название, любая). language — ЛЮБОЙ язык (ISO 639-1 "
+        "'de'/'ja'/… или название 'немецкий'); опусти — выведется из страны/интерфейса.",
         KeywordResearch,
     ),
     _tool(

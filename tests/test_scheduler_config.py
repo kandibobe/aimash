@@ -15,7 +15,12 @@ from apscheduler.triggers.cron import CronTrigger
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.config import settings  # noqa: E402
-from scheduler.service import _DEFAULT_REPORT_CRON, report_trigger  # noqa: E402
+from scheduler.service import (  # noqa: E402
+    _DEFAULT_REPORT_CRON,
+    _DEFAULT_WEEKLY_DIGEST_CRON,
+    report_trigger,
+    weekly_digest_trigger,
+)
 
 
 def _set_schedule(monkeypatch, value: str) -> None:
@@ -51,3 +56,23 @@ def test_invalid_crontab_falls_back_to_default_not_raises(monkeypatch):
 def test_empty_crontab_falls_back_to_default(monkeypatch):
     _set_schedule(monkeypatch, "")
     assert str(report_trigger()) == str(CronTrigger(**_DEFAULT_REPORT_CRON))
+
+
+# ── 1.3: еженедельный дайджест — свой crontab, тот же fail-safe ────────────────────
+def _set_digest(monkeypatch, value: str) -> None:
+    monkeypatch.setattr(settings, "weekly_digest_schedule", value, raising=False)
+
+
+def test_weekly_digest_default_is_monday_9():
+    assert settings.weekly_digest_schedule == "0 9 * * 1"
+    assert settings.weekly_digest_enabled is False  # opt-in по умолчанию
+
+
+def test_weekly_digest_crontab_parses(monkeypatch):
+    _set_digest(monkeypatch, "30 8 * * 5")  # пятница 08:30
+    assert str(weekly_digest_trigger()) == str(CronTrigger.from_crontab("30 8 * * 5"))
+
+
+def test_weekly_digest_invalid_falls_back(monkeypatch):
+    _set_digest(monkeypatch, "мусор")
+    assert str(weekly_digest_trigger()) == str(CronTrigger(**_DEFAULT_WEEKLY_DIGEST_CRON))

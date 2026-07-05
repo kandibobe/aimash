@@ -632,6 +632,22 @@ async def on_diag_cb(cq: bm.CallbackQuery, callback_data: bm.DiagCB) -> None:
     (без дублей); detail — полный редактированный traceback инцидента (ТОЛЬКО админ). Read-only:
     БД/Ads не трогаем — только чтение error_events."""
     action = callback_data.action
+    if action == "export":
+        # 1.2: журнал ошибок файлом (.txt) — читать удобнее длинной ленты в чате. Read-only.
+        try:
+            rows = await bm._load_error_events(today=False, limit=200)
+        except Exception:  # noqa: BLE001 — диагностика не должна падать наружу
+            await cq.answer(bm.i18n.t("stale"), show_alert=True)
+            return
+        await cq.answer()
+        msg = bm._cq_msg(cq)
+        if msg is not None:
+            from reports.diag_export import build_error_events_text
+
+            await bm.ux.send_text_document(
+                msg, text=build_error_events_text(rows), filename="error_log.txt"
+            )
+        return
     if action == "detail":
         if not _is_admin(cq.from_user.id):  # traceback — операционная деталь (диаг открыт всем WL)
             await cq.answer(bm.i18n.t("admin_only"), show_alert=True)
@@ -686,7 +702,23 @@ async def on_more(cq: bm.CallbackQuery, callback_data: bm.MoreCB, state: bm.FSMC
     elif action == "alerts":
         await bm.alerts_cmd(msg)  # 3H: настройка порогов аномалий
     elif action == "advise":
-        await bm._advise_run(msg, bm._cq_chat_id(cq))  # 💡 рекомендации (advisory, read-only)
+        await bm._start_advise_picker(msg)  # 💡 рекомендации (advisory, read-only) — пикер аккаунта
+    elif action == "reportbug":
+        await bm.reportbug_start(msg, state)  # 🐞 сообщить об ошибке (§6)
+    elif action == "service":  # E: открыть суб-хаб «⚙️ Сервис/Аккаунты»
+        await msg.answer(bm.i18n.t("service_menu_title"), reply_markup=bm.service_menu_kb())
+    elif action == "svc_accounts":
+        await bm.accounts_cmd(msg)  # 🏢 мои доступные аккаунты (read-замок × грант)
+    elif action == "svc_account":
+        await bm._start_setacct_picker(msg)  # 🔄 сменить активный аккаунт чтения (пикер, персист)
+    elif action == "svc_whoami":
+        await bm.whoami_cmd(msg)  # 👤 chat_id / активный аккаунт / режим доступа
+    elif action == "svc_refresh":
+        await bm.refresh_(msg)  # 🔃 обновить список аккаунтов и кэши без рестарта
+    elif action == "svc_savetemplate":
+        await msg.answer(bm.i18n.t("tpl_save_hint"))  # 💾 подсказка по /savetemplate (нужно имя)
+    elif action == "svc_diag":
+        await bm.diag(msg)  # 🩺 диагностика: последние перехваченные ошибки (§15)
 
 
 # ── advisor: /advise — рекомендации по улучшению активного аккаунта (advisory, read-only) ─
@@ -700,7 +732,8 @@ async def advise_cmd(m: bm.Message) -> None:
     parts = (m.text or "").split(maxsplit=1)
     arg = parts[1].strip().lower() if len(parts) > 1 else ""
     topic = arg if arg in _ADVISE_TOPICS else None
-    await bm._advise_run(m, m.chat.id, topic=topic)
+    # >1 аккаунта чтения → пикер (advisor работает на выбранном); 1 аккаунт → сразу прогон.
+    await bm._start_advise_picker(m, topic=topic)
 
 
 # ── 3H (M10): /alerts — настройка порогов аномалий per-chat (раньше только вставкой в БД) ─

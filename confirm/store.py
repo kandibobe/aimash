@@ -383,3 +383,34 @@ async def list_recent_audit(limit: int = 15) -> list[AuditEvent]:
         if len(out) >= limit:
             break
     return out
+
+
+async def audit_activity_since(days: int) -> dict:
+    """Сводка активности за последние `days` дней (для еженедельного дайджеста, §6/§15): счётчики
+    строк audit_log по статусам + число созданных кампаний (applied create_*_campaign). Read-only,
+    секретов нет. Фильтр по created_at — в Python (наивный/tz-aware на SQLite), как _load_error_events."""
+    from datetime import timedelta, timezone
+
+    start = datetime.now(timezone.utc) - timedelta(days=int(days))
+    async with Session() as s:
+        rows = list(
+            (
+                await s.execute(select(AuditLog.status, AuditLog.operation, AuditLog.created_at))
+            ).all()
+        )
+    statuses: dict[str, int] = {}
+    created_campaigns = 0
+    for status, operation, created_at in rows:
+        dt = created_at
+        if dt is not None and dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if dt is None or dt < start:
+            continue
+        statuses[status] = statuses.get(status, 0) + 1
+        if (
+            status == "applied"
+            and str(operation or "").startswith("create_")
+            and str(operation).endswith("_campaign")
+        ):
+            created_campaigns += 1
+    return {"statuses": statuses, "created_campaigns": created_campaigns}

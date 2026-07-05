@@ -34,20 +34,21 @@ PROPOSAL_TTL_HOURS = 24  # сколько живёт неподтверждён�
 _DIGEST_MAX = 3800  # потолок длины дайджеста для Telegram (лимит 4096, оставляем запас)
 
 
-def _recipients() -> set[int]:
-    """Кому слать: доверенные whitelisted-пользователи (операторы бота).
+async def _recipients() -> set[int]:
+    """Кому слать: доверенные операторы бота = env-whitelist (бутстрап) ∪ рантайм-таблица whitelist
+    (/adduser). D9: раньше был env-only — рантайм-добавленные операторы не получали плановые
+    отчёты/аномалии/advise до рестарта планировщика. Fail-closed: сбой БД ⇒ только env
+    (core.access.whitelisted_ids). Scheduler — не hot-path, свежий набор на каждый запуск джобы ок."""
+    from core.access import whitelisted_ids
 
-    ⚠️ env-whitelist (бутстрап). Рантайм-добавленные операторы (БД, /adduser) получают алерты/отчёты
-    после рестарта планировщика — плановая рассылка не критична к секунде (для мгновенного покрытия
-    можно перезапустить процесс). Кэш is_whitelisted тут не задействуем (scheduler — не hot-path)."""
-    return set(settings.whitelist)
+    return await whitelisted_ids()
 
 
 async def _custom_report_chats() -> set[int]:
     """§14 (P1-I): chat_id операторов с СОБСТВЕННЫМ расписанием отчёта (UserSettings.report_schedule
     непусто) — им шлёт отдельная per-chat cron-джоба (register_user_report_schedules), а глобальная
-    рассылка их ПРОПУСКАЕТ (иначе дубль). Только whitelisted (чужие настройки игнорируем)."""
-    wl = set(settings.whitelist)
+    рассылка их ПРОПУСКАЕТ (иначе дубль). Только whitelisted (env ∪ БД — D9; чужие игнорируем)."""
+    wl = await _recipients()
     if not wl:
         return set()
     async with Session() as s:
@@ -95,7 +96,7 @@ async def _account_period(client, acct: str, n_days: int):
 
 
 async def _broadcast(bot, text: str, **kw) -> None:
-    for chat_id in _recipients():
+    for chat_id in await _recipients():
         try:
             await bot.send_message(chat_id, text, **kw)
         except Exception as e:  # один недоступный чат не должен ронять рассылку
@@ -112,9 +113,9 @@ async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
     операторам БЕЗ персонального расписания (те получают отчёт своей per-chat джобой — без дубля)."""
     with request_scope("scheduler:report"):  # §15: корреляция логов джобы по request_id
         if only_chat is not None:
-            recipients = {only_chat} if only_chat in _recipients() else set()
+            recipients = {only_chat} if only_chat in await _recipients() else set()
         else:
-            recipients = _recipients() - await _custom_report_chats()
+            recipients = await _recipients() - await _custom_report_chats()
         if not recipients:
             log.info(
                 "scheduler: получателей нет — пропуск планового отчёта (only_chat=%s)", only_chat
@@ -235,7 +236,7 @@ async def run_anomaly_check(bot) -> None:
     Анти-спам: ОДИН месседж на оператора со всеми его аккаунтами. READ-ONLY (golden rule #3):
     fetch_totals через run_ads_read_call (ретрай TimeoutError/транзиентных), без мутаций."""
     with request_scope("scheduler:anomaly"):  # §15: корреляция логов джобы по request_id
-        recipients = _recipients()
+        recipients = await _recipients()
         if not recipients:
             return
         accounts = _scheduled_accounts()
@@ -375,6 +376,70 @@ async def run_error_alerts(bot) -> int:
         return len(rows)
 
 
+WEEKLY_DIGEST_DAYS = 7  # окно еженедельного дайджеста (ошибки/баг-репорты/активность)
+
+
+async def _error_events_since(days: int) -> list:
+    """error_events за последние `days` дней (reverse-chron) для еженедельного дайджеста. Read-only;
+    message/traceback уже редактированы на записи. Фильтр created_at — в Python (naive/aware SQLite)."""
+    from db.models import ErrorEvent
+
+    start = datetime.now(timezone.utc) - timedelta(days=int(days))
+    async with Session() as s:
+        rows = (
+            (await s.execute(select(ErrorEvent).order_by(ErrorEvent.id.desc()).limit(1000)))
+            .scalars()
+            .all()
+        )
+    out = []
+    for r in rows:
+        dt = r.created_at
+        if dt is not None and dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if dt is not None and dt >= start:
+            out.append(r)
+    return out
+
+
+async def run_weekly_digest(bot) -> int:
+    """§6/§15 (1.3): еженедельный дайджест админам (ADMIN_CHAT_IDS) — ошибки за 7 дней + баг-репорты +
+    сводка активности. Короткий ТЕКСТ + прикреплённый ФАЙЛ с деталями. READ-ONLY (golden rule #3):
+    только чтение error_events/bug_reports/audit_log + рассылка. Нет админов ⇒ no-op (opt-in).
+    Один недоступный админ не роняет остальных (НЕ capture — иначе петля наблюдаемости).
+    Возвращает число обслуженных админов."""
+    from bot import i18n, texts, ux
+    from confirm.store import audit_activity_since
+    from core import bugs
+    from reports.diag_export import build_weekly_digest_file
+
+    with request_scope("scheduler:weekly-digest"):  # §15: корреляция логов джобы по request_id
+        admins = set(settings.admin_ids)
+        if not admins:
+            return 0
+        errors = await _error_events_since(WEEKLY_DIGEST_DAYS)
+        bug_rows = await bugs.bug_reports_since(WEEKLY_DIGEST_DAYS)
+        activity = await audit_activity_since(WEEKLY_DIGEST_DAYS)
+        file_text = build_weekly_digest_file(errors, bug_rows, activity, days=WEEKLY_DIGEST_DAYS)
+        served = 0
+        for chat_id in admins:
+            lang = i18n.get_lang(chat_id)
+            text = texts.fmt_weekly_digest(
+                errors, bug_rows, activity, days=WEEKLY_DIGEST_DAYS, lang=lang
+            )[:_DIGEST_MAX]
+            try:
+                await bot.send_message(chat_id, text, parse_mode="HTML")
+                await ux.send_bot_document(
+                    bot, chat_id, text=file_text, filename="weekly_digest.txt"
+                )
+                served += 1
+            except Exception as e:  # noqa: BLE001 — недоступный админ не роняет; НЕ capture (петля!)
+                log.warning(
+                    "scheduler: недельный дайджест не доставлен в %s: %s", chat_id, type(e).__name__
+                )
+        log.info("scheduler: недельный дайджест разослан (админов %d)", served)
+        return served
+
+
 async def _advise_proactive_chats(recipients: set[int]) -> set[int]:
     """Операторы с включённой проактивной подачей рекомендаций (UserSettings.ui_prefs.advise_proactive).
     По умолчанию ВЫКЛ (fail-closed к анти-спаму: не шлём непрошеные советы). READ-ONLY."""
@@ -401,7 +466,7 @@ async def run_recommendations_digest(bot) -> None:
     отчёт + правила (advisor.service), НИЧЕГО не меняет и proposal НЕ создаёт (golden rule #1/#3).
     Детерминированный render (use_llm=False) — фон не жжёт LLM-бюджет. Один блок на аккаунт."""
     with request_scope("scheduler:advise"):
-        recipients = _recipients()
+        recipients = await _recipients()
         chats = await _advise_proactive_chats(recipients)
         if not chats:
             return
@@ -444,10 +509,31 @@ async def run_recommendations_digest(bot) -> None:
                 log.warning("advise digest не доставлен в %s: %s", chat_id, type(e).__name__)
 
 
+async def _notify_outcome(bot, outcome, verdict: str) -> None:
+    """§advisor #2: сообщить оператору исход применённого совета (improved/worse) — обучение видимо.
+    READ-ONLY (только уведомление). chat_id берём из связанной рекомендации по rec_uid."""
+    from advisor import store as advisor_store
+    from bot import i18n
+
+    rec = await advisor_store.get_recommendation(outcome.rec_uid)
+    if rec is None:
+        return
+    lang = i18n.get_lang(rec.chat_id)
+    key = "advise_outcome_improved" if verdict == "improved" else "advise_outcome_worse"
+    campaign = outcome.target_campaign or (rec.target_campaign or "")
+    try:
+        await bot.send_message(rec.chat_id, i18n.t(key, lang, campaign=campaign))
+    except Exception as e:  # один недоступный чат не роняет замер
+        log.warning(
+            "advise outcome-уведомление не доставлено в %s: %s", rec.chat_id, type(e).__name__
+        )
+
+
 async def run_recommendation_followups(bot=None) -> int:
     """§advisor Слой B: ЗАМЕР результата применённых рекомендаций, у которых наступил measure_after.
     READ-ONLY: advisor.outcome.measure_outcome читает метрики кампании ДО/ПОСЛЕ, delta+verdict в КОДЕ,
-    ничего не мутирует (golden rule #3). Возвращает число замеренных. bot — задел под уведомления."""
+    ничего не мутирует (golden rule #3). Возвращает число замеренных. bot задан → уведомляем оператора
+    об исходе improved/worse (#2: обучение видимо)."""
     with request_scope("scheduler:advise-followup"):
         from advisor.outcome import due_outcomes, measure_outcome
 
@@ -459,8 +545,10 @@ async def run_recommendation_followups(bot=None) -> int:
             tok = set_context(customer_id=outcome.customer_id)
             try:
                 client = await build_client_async(outcome.customer_id)
-                await measure_outcome(outcome, client)
+                verdict = await measure_outcome(outcome, client)
                 n += 1
+                if bot is not None and verdict in ("improved", "worse"):
+                    await _notify_outcome(bot, outcome, verdict)
             except Exception as e:  # сеть/доступ/SDK — фиксируем, остальные строки живут
                 if is_account_access_error(e):
                     log.info(

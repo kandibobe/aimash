@@ -36,6 +36,7 @@ class KwWizard(StatesGroup):
     awaiting_seeds = State()  # ждём сид-слова и/или URL для подбора ключей
     params = State()  # 3F (§7): экран параметров research (ГЕО/язык/сеть/период)
     awaiting_geo = State()  # 3F: ручной ввод страны для ГЕО подбора
+    awaiting_lang = State()  # §7: ручной ввод ЯЗЫКА подбора (любой из таблицы Google)
 
 
 class KwAdd(StatesGroup):
@@ -67,6 +68,21 @@ class VideoWizard(StatesGroup):
 
 class ModelWizard(StatesGroup):
     awaiting_model = State()  # ждём свой slug модели OpenRouter для /model
+
+
+class TwoFactor(StatesGroup):
+    """§12 2FA: ждём PIN-код перед исполнением опасной операции. Ожидающий черновик (cid) + исходный
+    CallbackQuery живут в bot.main._TWOFA_PENDING[chat_id] (переживают только процесс, не рестарт —
+    как любой pending-гейт; черновик при этом остаётся `pending`, повторить ✅ можно)."""
+
+    awaiting_code = State()  # ждём код; верный → исполняем, неверный/отмена → черновик остаётся
+
+
+class BugReportWizard(StatesGroup):
+    """§6 «сообщить об ошибке» (/reportbug): оператор описывает проблему одним сообщением.
+    Текст РЕДАКТИРУЕТСЯ (redact_text) перед сохранением/форвардом (golden rule #5)."""
+
+    awaiting_text = State()  # ждём текст описания бага
 
 
 class AlertsWizard(StatesGroup):
@@ -105,5 +121,6 @@ class CreateCampaignWizard(StatesGroup):
     images = State()  # Этап 4: ждём фото или «Пропустить»
     assets = State()  # Этап 5: выбор «текущие/добавить/пропустить» (callback-driven)
     asset_logo = State()  # Этап 5: выбран Business logo — ждём фото логотипа (1:1)
+    asset_lead_form = State()  # Этап 5: выбрана лид-форма — ждём URL политики конфиденциальности
     url_options = State()  # Этап 6: ждём «tracking | suffix» или «Пропустить»
     final = State()  # Этап 7: сводка; ждём правку-текст или ✅ Создать / 🚀 Запустить

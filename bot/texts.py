@@ -120,7 +120,9 @@ HELP = (
     "/export [период] — глубокий отчёт .xlsx · /sheets [период] — в Google Sheets (ссылка)\n"
     "/mcc [период] — сводка по всем дочерним аккаунтам MCC (подытоги по валютам)\n"
     "/quota — дневная квота операций Google Ads API\n"
-    "/advise — 💡 рекомендации по улучшению аккаунта (подсказки, ничего не меняю сам)\n"
+    "/advise [optimize|keywords|rsa|structure] — 💡 рекомендации по ЖИВЫМ метрикам "
+    "(расход/клики/конверсии). При нескольких аккаунтах — пикер выбора. На пустом/тест-"
+    "аккаунте советов нет (нужен рабочий: /account). Только подсказки — ничего не меняю сам\n"
     "/alerts — пороги алертов аномалий (всплеск расхода / падение конверсий)\n\n"
     "<b>ℹ️ Клиенты</b>\n"
     "/clients — база знаний: профиль клиента текстом + краулинг сайта → релевантная генерация\n"
@@ -132,6 +134,7 @@ HELP = (
     "/model — выбрать модель ИИ (OpenRouter) · /balance — бюджет ИИ: баланс и траты\n"
     "/lang — язык интерфейса (RU/EN)\n"
     "/journal — журнал изменений · /diag — журнал ошибок\n"
+    "/reportbug — 🐞 сообщить об ошибке (передам админу)\n"
     "/cancel — отменить текущий черновик\n\n"
     "<b>👤 Для админа (ADMIN_CHAT_IDS)</b>\n"
     "/adduser &lt;chat_id&gt; — открыть оператору доступ к боту (без рестарта) + выбрать аккаунты\n"
@@ -896,6 +899,16 @@ def fmt_mutation_summary(operation: str, params: dict, lang: str | None = None) 
             return f"Кампания «{c}»: {status_human(b['before_status'], lng)} → {new}"
         verb = "поставить на паузу" if operation == "pause_campaign" else "возобновить"
         return f"Кампания «{c}» — {verb}."
+    if operation == "launch_campaign":
+        # §19.8/§11: запуск включает кампанию ПОЛНОСТЬЮ (кампания + группы + объявления) — говорим
+        # об этом явно, чтобы менеджер понимал: показы пойдут (не только статус кампании сменится).
+        b = _before(params)
+        base = (
+            f"Кампания «{c}» — 🚀 ЗАПУСТИТЬ (включить полностью: кампания + группы + объявления)."
+        )
+        if b and b.get("kind") == "status" and b.get("before_status"):
+            return f"Кампания «{c}»: {status_human(b['before_status'], lng)} → включена полностью ▶️.\n{base}"
+        return base
     if operation == "update_campaign":
         # §3 «изменение» кампании: переименование. Показываем старое → новое имя.
         new = params.get("new_name", "")
@@ -1032,6 +1045,12 @@ def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
             return f"Campaign “{c}”: {status_human(b['before_status'], 'en')} → {new}"
         verb = "pause" if operation == "pause_campaign" else "resume"
         return f"Campaign “{c}” — {verb}."
+    if operation == "launch_campaign":
+        b = _before(params)
+        base = f"Campaign “{c}” — 🚀 LAUNCH (enable fully: campaign + ad groups + ads)."
+        if b and b.get("kind") == "status" and b.get("before_status"):
+            return f"Campaign “{c}”: {status_human(b['before_status'], 'en')} → fully enabled ▶️.\n{base}"
+        return base
     if operation == "update_campaign":
         new = params.get("new_name", "")
         b = _before(params)
@@ -1426,6 +1445,7 @@ _OP_HUMAN = {
     "add_negative_keywords": "минус-слова",
     "pause_campaign": "пауза кампании",
     "resume_campaign": "возобновить кампанию",
+    "launch_campaign": "запустить кампанию",
     "set_geo_proximity": "гео-радиус",
     "set_geo_location": "гео-локации",
     "set_bidding_strategy": "стратегия ставок",
@@ -1448,6 +1468,7 @@ _OP_HUMAN_EN = {
     "add_negative_keywords": "negative keywords",
     "pause_campaign": "pause campaign",
     "resume_campaign": "resume campaign",
+    "launch_campaign": "launch campaign",
     "set_geo_proximity": "geo-radius",
     "set_geo_location": "geo-locations",
     "set_bidding_strategy": "bidding strategy",
@@ -1529,6 +1550,45 @@ def fmt_mutation_result(operation: str, result: object, lang: str | None = None)
                 stats.append(f"{en_l if en else ru_l}: {v}")
         if stats:
             L.append("• " + " · ".join(stats))
+        # §19.6/§19.7: изображения и ассеты — раньше считались, но НИГДЕ не показывались (тихая
+        # потеря на неподходящем аккаунте). Теперь видно: прикреплено/из запрошенных, добавлено,
+        # переиспользовано, ПРОПУЩЕНО (с причиной «нужна доп. настройка»).
+        img_req = result.get("images_requested")
+        img_add = result.get("images_added")
+        if isinstance(img_req, int) and img_req > 0 and isinstance(img_add, int):
+            if img_add < img_req:
+                L.append(
+                    f"⚠️ Images: {img_add}/{img_req} attached — the account may not support image assets."
+                    if en
+                    else f"⚠️ Изображения: {img_add}/{img_req} прикреплено — аккаунт может не поддерживать image-ассеты."
+                )
+            else:
+                L.append(
+                    f"🖼 Images attached: {img_add}"
+                    if en
+                    else f"🖼 Изображений прикреплено: {img_add}"
+                )
+        added = result.get("assets_added")
+        if isinstance(added, list) and added:
+            fams = esc(", ".join(map(str, added)))
+            L.append(f"➕ Assets added: {fams}" if en else f"➕ Ассеты добавлены: {fams}")
+        reused = result.get("assets_reused")
+        if isinstance(reused, int) and reused > 0:
+            L.append(
+                f"♻️ Existing assets linked: {reused}"
+                if en
+                else f"♻️ Переиспользовано ассетов: {reused}"
+            )
+        skipped = result.get("assets_skipped")
+        if isinstance(skipped, list) and skipped:
+            fams = esc(
+                ", ".join(str(s.get("family") if isinstance(s, dict) else s) for s in skipped)
+            )
+            L.append(
+                f"⚠️ Assets skipped: {fams} (require extra setup)."
+                if en
+                else f"⚠️ Ассеты пропущены: {fams} (нужна доп. настройка)."
+            )
     elif operation in (
         "add_keywords",
         "remove_keywords",
@@ -1679,6 +1739,115 @@ def fmt_error_detail(row, lang: str | None = None) -> str:
     else:
         body = "<i>no traceback</i>" if en else "<i>трейсбека нет</i>"
     return f"{head}\n{meta}\n\n{body}"
+
+
+_BUG_STATUS_EMOJI = {"new": "🆕", "triaged": "🛠", "closed": "🗄"}
+
+
+def fmt_bug_list(rows, lang: str | None = None) -> str:
+    """§6: список баг-репортов для админ-триажа (/bugs). rows — BugReport (duck-typed), reverse-chron.
+    text уже РЕДАКТИРОВАН на записи (секретов нет). Показываем id/статус/автора/время + начало текста."""
+    en = _lang(lang) == "en"
+    if not rows:
+        return "🐞 No bug reports." if en else "🐞 Баг-репортов нет."
+    head = "🐞 <b>Bug reports</b>" if en else "🐞 <b>Баг-репорты</b>"
+    L = [head, ""]
+    for r in rows:
+        when = r.created_at.strftime("%d.%m %H:%M") if getattr(r, "created_at", None) else "—"
+        st = _BUG_STATUS_EMOJI.get(getattr(r, "status", "") or "", "•")
+        who = f"@{esc(r.username)}" if getattr(r, "username", None) else f"chat {r.chat_id}"
+        msg = (getattr(r, "text", "") or "").strip().replace("\n", " ")
+        if len(msg) > 140:
+            msg = msg[:140] + "…"
+        L.append(f"{st} <b>#{r.id}</b> · {who} · {when} UTC")
+        if msg:
+            L.append(f"    ↳ {esc(msg)}")
+    return "\n".join(L)
+
+
+def fmt_bug_forward(
+    *, bug_id: int, chat_id: int, username, ticket: str, text: str, lang: str | None = None
+) -> str:
+    """§6: карточка баг-репорта для немедленного форварда админам. text уже РЕДАКТИРОВАН вызывающим."""
+    en = _lang(lang) == "en"
+    who = f"@{esc(username)}" if username else f"chat {chat_id}"
+    head = f"🐞 <b>New bug report</b> #{bug_id}" if en else f"🐞 <b>Новый баг-репорт</b> #{bug_id}"
+    meta = (f"from {who}" if en else f"от {who}") + f" · <code>{esc(ticket)}</code>"
+    tip = "Triage: /bugs" if en else "Триаж: /bugs"
+    return f"{head}\n{meta}\n\n{esc(text)}\n\n<i>{tip}</i>"
+
+
+def fmt_weekly_digest(
+    errors, bug_rows, activity: dict, *, days: int = 7, lang: str | None = None
+) -> str:
+    """§6/§15 (1.3): еженедельный дайджест админам. errors — ErrorEvent за неделю (дедуп по
+    (exc_type, where) со счётчиками); bug_rows — BugReport за неделю; activity —
+    confirm.store.audit_activity_since (статусы + created_campaigns). Всё уже редактировано/без
+    секретов. Короткий текст (детали — во вложении файла)."""
+    en = _lang(lang) == "en"
+    head = (
+        f"🗓 <b>Weekly digest</b> · last {days} days"
+        if en
+        else f"🗓 <b>Еженедельный дайджест</b> · за {days} дн."
+    )
+    L = [head, ""]
+
+    # Активность
+    st = (activity or {}).get("statuses", {}) or {}
+    created = int((activity or {}).get("created_campaigns", 0) or 0)
+    applied = int(st.get("applied", 0))
+    failed = int(st.get("failed", 0))
+    rejected = int(st.get("rejected", 0))
+    if en:
+        L.append(f"⚙️ <b>Activity</b>: {applied} applied · {failed} failed · {rejected} rejected")
+        L.append(f"    campaigns created: {created}")
+    else:
+        L.append(
+            f"⚙️ <b>Активность</b>: {applied} применено · {failed} сбоев · {rejected} отклонено"
+        )
+        L.append(f"    создано кампаний: {created}")
+
+    # Ошибки (дедуп по (exc_type, where))
+    errs = list(errors or [])
+    L.append("")
+    if not errs:
+        L.append("🩺 <b>Errors</b>: none 🎉" if en else "🩺 <b>Ошибки</b>: нет 🎉")
+    else:
+        counts: dict[tuple[str, str], int] = {}
+        order: list[tuple[str, str]] = []
+        for e in errs:
+            key = (getattr(e, "exc_type", "") or "", getattr(e, "where", "") or "")
+            counts[key] = counts.get(key, 0) + 1
+            if key not in order:
+                order.append(key)
+        L.append(
+            (f"🩺 <b>Errors</b>: {len(errs)} total, {len(order)} kinds")
+            if en
+            else (f"🩺 <b>Ошибки</b>: всего {len(errs)}, видов {len(order)}")
+        )
+        for key in sorted(order, key=lambda k: counts[k], reverse=True)[:8]:
+            exc_type, where = key
+            L.append(f"    • <b>{esc(exc_type)}</b> · {esc(where)} ×{counts[key]}")
+
+    # Баг-репорты
+    bugs = list(bug_rows or [])
+    L.append("")
+    if not bugs:
+        L.append("🐞 <b>Bug reports</b>: none" if en else "🐞 <b>Баг-репорты</b>: нет")
+    else:
+        new_n = sum(1 for b in bugs if getattr(b, "status", "") == "new")
+        L.append(
+            (f"🐞 <b>Bug reports</b>: {len(bugs)} ({new_n} new) — see /bugs")
+            if en
+            else (f"🐞 <b>Баг-репорты</b>: {len(bugs)} ({new_n} новых) — см. /bugs")
+        )
+    L.append("")
+    L.append(
+        "<i>Full details in the attached file.</i>"
+        if en
+        else "<i>Полные детали — в прикреплённом файле.</i>"
+    )
+    return "\n".join(L)
 
 
 def fmt_journal(events, lang: str | None = None) -> str:
@@ -1894,6 +2063,7 @@ def fmt_asset_spec_label(spec: dict, lang: str | None = None) -> str:
             "call": "Phone",
             "price": "Prices",
             "promotion": "Promotion",
+            "lead_form": "Lead form",
         }
         if en
         else {
@@ -1905,6 +2075,7 @@ def fmt_asset_spec_label(spec: dict, lang: str | None = None) -> str:
             "call": "Телефон",
             "price": "Цены",
             "promotion": "Акция",
+            "lead_form": "Лид-форма",
         }
     ).get(family, family)
     if family == "sitelinks":
@@ -1918,6 +2089,8 @@ def fmt_asset_spec_label(spec: dict, lang: str | None = None) -> str:
         return f"{fam_h}: {p.get('business_name', '')}"
     if family == "call":
         return f"{fam_h}: {p.get('phone_number', '')}"
+    if family == "lead_form":
+        return f"{fam_h}: {p.get('headline', '')}"
     if family == "price":
         off = "offers" if en else "оф."
         return f"{fam_h}: {len(p.get('offerings') or [])} {off} ({p.get('currency', '')})"

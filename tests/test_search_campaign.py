@@ -332,11 +332,106 @@ def test_create_search_via_sdk_rolls_back_budget_on_campaign_failure():
     assert removed == ["customers/x/campaignBudgets/9"]  # осиротевший бюджет удалён
 
 
+# ── §19.8/§11: «Запустить» включает ВСЮ структуру, а не только кампанию (crux фикса) ──
+def test_launch_campaign_via_sdk_enables_whole_tree():
+    """Регресс-гард на тихий дефект: визард создаёт кампанию/группу/RSA все PAUSED; включение
+    ОДНОЙ кампании оставляло бы группу и объявление на паузе ⇒ 0 показов. `_launch_campaign_via_sdk`
+    обязан выставить ENABLED на ВСЕХ трёх уровнях, фильтруя REMOVED в GAQL."""
+
+    calls: dict[str, list] = {"campaigns": [], "ad_groups": [], "ad_group_ads": []}
+
+    class _GA:
+        def search(self, customer_id, query):
+            assert "!= 'REMOVED'" in query  # REMOVED-сущности не воскрешаем
+            if "FROM ad_group_ad" in query:
+                return [
+                    SimpleNamespace(
+                        ad_group_ad=SimpleNamespace(resource_name="customers/x/adGroupAds/11~101")
+                    ),
+                    SimpleNamespace(
+                        ad_group_ad=SimpleNamespace(resource_name="customers/x/adGroupAds/11~102")
+                    ),
+                ]
+            assert "FROM ad_group " in query
+            return [
+                SimpleNamespace(ad_group=SimpleNamespace(resource_name="customers/x/adGroups/11"))
+            ]
+
+    class _CampSvc:
+        def campaign_path(self, cid, camp):
+            return f"customers/{cid}/campaigns/{camp}"
+
+        def mutate_campaigns(self, customer_id, operations):
+            calls["campaigns"].append(
+                [(o.update.resource_name, o.update.status) for o in operations]
+            )
+
+    class _AgSvc:
+        def mutate_ad_groups(self, customer_id, operations):
+            calls["ad_groups"].append(
+                [(o.update.resource_name, o.update.status) for o in operations]
+            )
+
+    class _AgAdSvc:
+        def mutate_ad_group_ads(self, customer_id, operations):
+            calls["ad_group_ads"].append(
+                [(o.update.resource_name, o.update.status) for o in operations]
+            )
+
+    services = {
+        "GoogleAdsService": _GA(),
+        "CampaignService": _CampSvc(),
+        "AdGroupService": _AgSvc(),
+        "AdGroupAdService": _AgAdSvc(),
+    }
+
+    class _Enums:
+        class CampaignStatusEnum:
+            ENABLED = "C_ENABLED"
+
+        class AdGroupStatusEnum:
+            ENABLED = "AG_ENABLED"
+
+        class AdGroupAdStatusEnum:
+            ENABLED = "AGA_ENABLED"
+
+    class _Client:
+        enums = _Enums()
+
+        def get_service(self, name):
+            return services[name]
+
+        def get_type(self, name):
+            return _Auto()
+
+        def copy_from(self, dst, src):
+            pass
+
+    class _FakeFieldMask:
+        @staticmethod
+        def field_mask(a, b):
+            return object()
+
+    with patched(mut, "protobuf_helpers", _FakeFieldMask):
+        res = mut._launch_campaign_via_sdk(_Client(), DRAFT_ACCOUNT_ID, "55")
+
+    # 1) кампания включена
+    assert calls["campaigns"] and calls["campaigns"][0][0][1] == "C_ENABLED"
+    # 2) ВСЕ группы включены
+    assert calls["ad_groups"] and all(st == "AG_ENABLED" for _, st in calls["ad_groups"][0])
+    # 3) ВСЕ объявления включены — без этого показов НОЛЬ (суть исправляемого дефекта)
+    assert calls["ad_group_ads"] and len(calls["ad_group_ads"][0]) == 2
+    assert all(st == "AGA_ENABLED" for _, st in calls["ad_group_ads"][0])
+    assert res["ad_groups_enabled"] == 1 and res["ads_enabled"] == 2 and res["status"] == "ENABLED"
+
+
 # ── capability-guard зеркало ─────────────────────────────────────────────────────
 def test_create_search_in_supported_operations():
     from ads.service import SUPPORTED_OPERATIONS
 
     assert "create_search_campaign" in SUPPORTED_OPERATIONS
+    # §19.8/§11: launch_campaign исполнима за confirm-гейтом (не тихо игнорируется execute_confirmed)
+    assert "launch_campaign" in SUPPORTED_OPERATIONS
 
 
 # ── Схема CreateSearchCampaign ───────────────────────────────────────────────────

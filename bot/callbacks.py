@@ -80,7 +80,7 @@ class MoreCB(CallbackData, prefix="more"):
     (обнаружимость: раньше только слэш-командой). Кнопка лишь МАРШРУТИЗИРУЕТ в тот же entry,
     что и команда; мутаций не создаёт."""
 
-    action: str  # "newsearch" | "newvideo" | "templates" | "recent" | "quota" | "alerts" | "advise"
+    action: str  # newsearch|newvideo|templates|recent|quota|alerts|advise|reportbug|service|svc_*
 
 
 class PageCB(CallbackData, prefix="pg"):
@@ -231,11 +231,19 @@ class AdviseCB(CallbackData, prefix="adv"):
 class DiagCB(CallbackData, prefix="diag"):
     """A3 (§15): кнопки под /diag (последние error_events). Read-only навигация — БД/Ads не мутирует.
     action: refresh (перечитать) | today (только за сегодня UTC) | all (снять фильтр) |
-    detail (полный редактированный traceback по request_id — ТОЛЬКО админ). rid — request_id
-    (≤16 симв., влезает в 64-байт callback_data)."""
+    detail (полный редактированный traceback по request_id — ТОЛЬКО админ) | export (журнал файлом).
+    rid — request_id (≤16 симв., влезает в 64-байт callback_data)."""
 
-    action: str  # "refresh" | "today" | "all" | "detail"
+    action: str  # "refresh" | "today" | "all" | "detail" | "export"
     rid: str = ""  # request_id (для detail)
+
+
+class BugCB(CallbackData, prefix="bug"):
+    """§6: триаж баг-репорта (/bugs, ТОЛЬКО админ). Кнопки меняют статус строки bug_reports —
+    Google Ads НЕ трогают, proposal НЕ создают. action: triaged|closed|refresh; bid — id репорта."""
+
+    action: str  # "triaged" | "closed" | "refresh"
+    bid: int = 0  # BugReport.id
 
 
 class ExtCB(CallbackData, prefix="ext"):

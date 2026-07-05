@@ -12,8 +12,12 @@ import bot.main as bm
 
 
 @bm.dp.callback_query(bm.ConfirmCB.filter(bm.F.action == "ok"))
-async def on_confirm(cq: bm.CallbackQuery, callback_data: bm.ConfirmCB) -> None:
-    await bm._do_confirm(cq, callback_data.cid)
+async def on_confirm(
+    cq: bm.CallbackQuery, callback_data: bm.ConfirmCB, state: bm.FSMContext | None = None
+) -> None:
+    # state прокидываем для §12 2FA: опасная op → _do_confirm отложит исполнение и запросит PIN.
+    # Дефолт None — прямой вызов в тестах (aiogram сам инжектит FSMContext по имени параметра).
+    await bm._do_confirm(cq, callback_data.cid, state=state)
 
 
 @bm.dp.callback_query(bm.ConfirmCB.filter(bm.F.action == "del1"))
@@ -29,10 +33,49 @@ async def on_cancel(cq: bm.CallbackQuery, callback_data: bm.ConfirmCB) -> None:
 
 # Legacy-fallback: старые сообщения с "ok:/no:" (до рестарта). После переходного периода удалить.
 @bm.dp.callback_query(bm.F.data.startswith("ok:"))
-async def on_confirm_legacy(cq: bm.CallbackQuery) -> None:
-    await bm._do_confirm(cq, (cq.data or "")[3:])
+async def on_confirm_legacy(cq: bm.CallbackQuery, state: bm.FSMContext | None = None) -> None:
+    await bm._do_confirm(cq, (cq.data or "")[3:], state=state)  # state → §12 2FA-гейт
 
 
 @bm.dp.callback_query(bm.F.data.startswith("no:"))
 async def on_cancel_legacy(cq: bm.CallbackQuery) -> None:
     await bm._do_cancel(cq, (cq.data or "")[3:])
+
+
+# ── §12 2FA: приём PIN-кода перед исполнением опасной операции ─────────────────────
+@bm.dp.message(bm.TwoFactor.awaiting_code)
+async def on_twofa_code(m: bm.Message, state: bm.FSMContext) -> None:
+    """Верный код → исполняем (re-enter _do_confirm, twofa_ok=True, на ИСХОДНОМ ✅-сообщении);
+    неверный (до N) → повтор; N-й/отмена → черновик остаётся `pending` (повторить ✅ можно).
+    Сообщение с кодом пытаемся удалить (гигиена: PIN не остаётся в истории; в привате бот не
+    может удалить чужое сообщение → best-effort). Ключ = chat_id, как весь pending-стейт бота."""
+    chat_id = m.chat.id
+    waiting = bm._TWOFA_PENDING.get(chat_id)
+    code = (m.text or "").strip()
+    try:
+        await m.delete()  # best-effort: не храним PIN в чате (в привате может не сработать)
+    except Exception:  # noqa: BLE001 — удаление не критично, не роняем приём кода
+        pass
+    if waiting is None:  # состояние осиротело (рестарт/гонка) — выходим чисто
+        await state.clear()
+        await m.answer(bm.i18n.t("twofa_stale"))
+        return
+    if code.lower() in ("/cancel", "cancel", "отмена"):  # отмена — черновик остаётся pending
+        bm._TWOFA_PENDING.pop(chat_id, None)
+        await state.clear()
+        await m.answer(bm.i18n.t("twofa_aborted"))
+        return
+    if not bm.twofa.verify(code):
+        waiting["attempts"] = int(waiting.get("attempts", 0)) + 1
+        left = bm._TWOFA_MAX_ATTEMPTS - waiting["attempts"]
+        if left <= 0:  # исчерпаны попытки — сбрасываем ожидание (черновик НЕ сжигаем)
+            bm._TWOFA_PENDING.pop(chat_id, None)
+            await state.clear()
+            await m.answer(bm.i18n.t("twofa_too_many"))
+            return
+        await m.answer(bm.i18n.t("twofa_wrong", left=left))
+        return
+    # Верный код: очищаем ожидание/состояние и исполняем на ИСХОДНОМ CallbackQuery (минуя гейт).
+    bm._TWOFA_PENDING.pop(chat_id, None)
+    await state.clear()
+    await bm._do_confirm(waiting["cq"], waiting["cid"], state=state, twofa_ok=True)

@@ -123,20 +123,25 @@ GDN / Video / Demand Gen, а UAC не реализуется намеренно.
   (`apply_create_search_campaign`), статус зашит в КОДЕ (`ads/mutations.py:1634`,
   `ads/mutations.py:1677`, `ads/mutations.py:1689`); требует `user_initiated`
   (`ads/mutations.py:1453`).
-- **GDN-кампания из фото** (DISPLAY, PAUSED): `ads/mutations.py:1938`
-  (`apply_create_gdn_campaign`), PAUSED — `ads/mutations.py:2051`; `user_initiated` —
-  `ads/mutations.py:1974`. Цепочка помечена «сверено live» в коде (`ads/mutations.py:2016`).
-- **Demand Gen из YouTube-видео** (DEMAND_GEN, PAUSED): `ads/mutations.py:2209`
-  (`apply_create_demand_gen_campaign`), PAUSED — `ads/mutations.py:2335`; `user_initiated` —
-  `ads/mutations.py:2256`.
-- **Video-кампания (YouTube)** (PAUSED): `ads/mutations.py:2437`
-  (`apply_create_video_campaign`), `user_initiated` — `ads/mutations.py:2474`.
-  ⚠️ Docstring прямо предупреждает: «SDK-цепочка требует live-сверки на тест-аккаунте перед
-  сдачей» (`ads/mutations.py:2458`); аналогично для Demand Gen (`ads/mutations.py:2299`).
+Ссылки ниже — по **именам функций** (устойчиво к сдвигу строк; ранее были номера строк, дрейфовавшие
+при правках):
+
+- **GDN-кампания из фото** (DISPLAY, PAUSED): `apply_create_gdn_campaign` (`ads/mutations.py`),
+  статус PAUSED и `user_initiated` зашиты в КОДЕ. ⚠️ **GDN live-сверялась вручную РАНЕЕ, но
+  ВОСПРОИЗВОДИМОГО harness нет** (`scripts/live_smoke_video_dg.py` покрывает только Demand Gen/Video).
+  Добавить GDN-smoke до сдачи — nice-to-have (см. план-файл).
+- **Demand Gen из YouTube-видео** (DEMAND_GEN, PAUSED): `apply_create_demand_gen_campaign`
+  (`ads/mutations.py`), PAUSED и `user_initiated` — в КОДЕ. **Сверен LIVE ✅** (см. §18#5).
+- **Video-кампания (YouTube)** (PAUSED): `apply_create_video_campaign` (`ads/mutations.py`),
+  `user_initiated` — в КОДЕ. ⚠️ Создание Video Google разрешает только по allowlist аккаунта
+  (иначе `MUTATE_NOT_ALLOWED`) → в визарде кнопка Video **СКРЫТА по умолчанию**
+  (`GOOGLE_ADS_VIDEO_ENABLED`, B4); рабочий путь из видео — Demand Gen. Docstring
+  `apply_create_video_campaign` предупреждает о необходимости live-сверки при получении allowlist.
 - Запуск по команде (PAUSED → ENABLED отдельным confirm-гейтом): кнопка «🚀 Запустить» минтит
-  `resume_campaign`-черновик — `bot/main.py:3827` (`cc_launch`), а сама операция —
-  `ads/mutations.py:140` (`apply_resume_campaign`). Запуск НЕ происходит автоматически при
-  создании (`bot/main.py:5272`).
+  **`launch_campaign`**-черновик (`cc_launch` в `bot/handlers/campaign_wizard.py`); операция
+  `apply_launch_campaign` включает кампанию ПОЛНОСТЬЮ — **кампания + ВСЕ группы + ВСЕ объявления**
+  (A1-фикс: `resume_campaign` включал только кампанию ⇒ PAUSED группа/RSA давали 0 показов). Запуск
+  НЕ происходит автоматически при создании.
 - Медиа (фото/логотип) хранятся вне `proposal.params`/логов, во временном хранилище по `media_id`:
   `ads/service.py:386` (`load_pending_media`/`clear_pending_media`).
 - **Тесты:** `tests/test_search_campaign.py`, `tests/test_gdn_campaign.py`,
@@ -248,7 +253,8 @@ GDN / Video / Demand Gen, а UAC не реализуется намеренно.
 - **19.8 Этап 6–7 (URL-опции, финал):** `cc_url_text` (tracking/suffix) → финальная сводка →
   правки командой (`agent/campaign_edit.py`) → **один composite proposal** `create_search_campaign`
   (всё PAUSED; при сбое шага — полный откат бюджет+кампания+группа, B1); запуск — отдельной
-  командой `cc_launch` → `resume_campaign` (тот же confirm-гейт). Черновик гасится только при
+  командой `cc_launch` → `launch_campaign` (включает кампанию+группы+объявления, тот же confirm-гейт).
+  Черновик гасится только при
   успешном подтверждении (B9).
 - **Тесты:** `tests/test_cc_stage_flow.py`, `tests/test_campaign_wizard_state.py`,
   `tests/test_cc_composite_create.py`, `tests/test_search_campaign.py`, `tests/test_cc_display_path.py`,
@@ -308,7 +314,9 @@ GDN / Video / Demand Gen, а UAC не реализуется намеренно.
     стандартном доступе (`MUTATE_NOT_ALLOWED`, trigger «VIDEO»): видеокампании через API —
     только по allowlist Google. **Это ограничение платформы, не дефект** — фиксируется как
     известное; рабочий путь «кампания из видео» — Demand Gen (рекомендован в /newvideo).
-    При необходимости Video заказчик подаёт заявку на allowlist.
+    **B4 (2026-07): кнопка Video в визарде СКРЫТА по умолчанию** (`GOOGLE_ADS_VIDEO_ENABLED=false`) —
+    не ведём менеджера в гарантированный тупик; при выборе Video без флага бот продолжает на
+    Demand Gen. Владелец включает флаг, когда его аккаунт добавлен в allowlist Google.
   - UAC исключён из объёма намеренно.
 
 ### Дельты раунда 2 (видимость аккаунтов, роутинг визардов, RU-гео, мультиаккаунт-мутации)
@@ -421,3 +429,29 @@ GDN / Video / Demand Gen, а UAC не реализуется намеренно.
   домен, БЕЗ LLM/выдумок) через тот же confirm-гейт памяти (`clients/account_facts.py`).
 - **UX/тексты**: пикеры отчёта/экспорта и «‹ Назад» визарда редактируют сообщение (без дублей);
   стартовый промпт визарда/keywords/clients — копируемые `<code>`-примеры и вольная форма без спецсимволов.
+
+## Доводка по независимому предсдаточному аудиту (2026-07-04)
+
+Аудит 3 ТЗ независимой сверкой кода (17 агентов) нашёл реальные дефекты сверх самоотчёта. Закрыто:
+
+- **A1 §11 (P0, был тихий дефект):** «🚀 Запустить» включала ТОЛЬКО кампанию — группа и RSA
+  оставались PAUSED ⇒ 0 показов, менеджер думал, что кампания идёт. Введена операция
+  `launch_campaign` (`apply_launch_campaign` + `_launch_campaign_via_sdk`), включающая кампанию +
+  ВСЕ группы + ВСЕ объявления в ENABLED (фильтр REMOVED, идемпотентно). `cc_launch` минтит её вместо
+  `resume_campaign`. Тесты `test_search_campaign.py::test_launch_campaign_via_sdk_enables_whole_tree`,
+  `test_cc_stage_flow.py::test_launch_button_mints_launch_proposal`, негатив-матрица `test_write_layer`.
+- **A2 §5 (целостность confirm-гейта):** `remove_negative_keywords` не было в `_KEYWORD_OPS` →
+  удаление >20 минус-слов не прикладывало обязательный .xlsx, хотя сводка обещала вложение. Добавлено.
+  Тест `test_bot_integration.py::test_big_remove_negative_keywords_proposal_attaches_xlsx`.
+- **B4 §11 Video:** создание Video Google разрешает только по allowlist (`MUTATE_NOT_ALLOWED`). Кнопка
+  Video в визарде СКРЫТА по умолчанию (`GOOGLE_ADS_VIDEO_ENABLED`); выбор Video без флага → продолжаем
+  на Demand Gen. Тест `test_video_campaigns.py::test_video_type_kb_hides_video_button_by_default`.
+- **B3 доки-замка:** шапка `ads/client.py` и CLAUDE.md «Что НЕ делать» приведены к реальному контракту
+  `allowed_ceiling()` (код-минимум {Draft} нельзя понизить через env; эффективный потолок = минимум ∪
+  видимые; включение мутаций — управляемым конфигом среди видимых). Раньше доки утверждали абсолютный
+  Draft-only «env не расширит» — расходилось с кодом.
+- **D9 §14:** плановая рассылка/аномалии/advise теперь идут env ∪ БД-операторам
+  (`core.access.whitelisted_ids`, `scheduler.jobs._recipients` стал async) — рантайм-добавленный
+  `/adduser` оператор получает отчёты без рестарта. Тесты `test_runtime_whitelist.py`.
+- **B5 доки-оверклеймы:** §11-ссылки ACCEPTANCE переведены на имена функций (номера строк дрейфовали);
+  честно отмечено, что воспроизводимого GDN live-smoke пока нет (покрыт DG/Video).

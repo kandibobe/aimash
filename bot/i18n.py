@@ -36,6 +36,41 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "⏳ Too frequent — wait a couple of seconds.",
     },
     "rejected": {"ru": "❌ Отменено", "en": "❌ Cancelled"},
+    # §12 2FA — PIN перед исполнением опасной операции (opt-in, дефолт OFF)
+    "twofa_prompt": {
+        "ru": "🔐 Операция <b>{op}</b> требует подтверждения кодом. Введи PIN одним сообщением "
+        "(или «отмена», чтобы прервать — черновик сохранится).",
+        "en": "🔐 Operation <b>{op}</b> needs a PIN. Send the code in one message "
+        "(or “cancel” to abort — the draft is kept).",
+    },
+    "twofa_wrong": {
+        "ru": "❌ Неверный код. Осталось попыток: {left}. Введи PIN ещё раз или «отмена».",
+        "en": "❌ Wrong code. Attempts left: {left}. Send the PIN again or “cancel”.",
+    },
+    "twofa_too_many": {
+        "ru": "🚫 Слишком много неверных попыток — подтверждение прервано. Черновик сохранён: "
+        "нажми ✅ ещё раз, чтобы повторить.",
+        "en": "🚫 Too many wrong attempts — confirmation aborted. The draft is kept: "
+        "tap ✅ again to retry.",
+    },
+    "twofa_aborted": {
+        "ru": "↩️ Подтверждение прервано. Черновик сохранён — нажми ✅ ещё раз, чтобы повторить.",
+        "en": "↩️ Confirmation aborted. The draft is kept — tap ✅ again to retry.",
+    },
+    "twofa_stale": {
+        "ru": "Ожидание кода истекло. Нажми ✅ на нужном черновике заново.",
+        "en": "Code wait expired. Tap ✅ on the draft again.",
+    },
+    "twofa_not_configured": {
+        "ru": "🔒 2FA включён, но PIN не задан — опасная операция заблокирована (fail-closed). "
+        "Задай TWO_FACTOR_PIN в конфиге или выключи TWO_FACTOR_ENABLED.",
+        "en": "🔒 2FA is on but no PIN is set — the dangerous operation is blocked (fail-closed). "
+        "Set TWO_FACTOR_PIN in config or turn TWO_FACTOR_ENABLED off.",
+    },
+    "twofa_need_button": {
+        "ru": "🔐 Подтверди операцию кнопкой ✅ (нужен запрос PIN).",
+        "en": "🔐 Confirm via the ✅ button (a PIN prompt is required).",
+    },
     "stale": {"ru": "Черновик не найден или устарел", "en": "Draft not found or expired."},
     "no_proposal": {
         "ru": "Нет активного черновика для отмены.",
@@ -60,6 +95,28 @@ CATALOG: dict[str, dict[str, str]] = {
     "report_pick_account": {
         "ru": "🏢 По какому аккаунту отчёт?",
         "en": "🏢 Which account should I report on?",
+    },
+    "status_pick_account": {
+        "ru": "🏢 По какому аккаунту статистика?",
+        "en": "🏢 Which account's stats?",
+    },
+    "advise_pick_account": {
+        "ru": "🏢 По какому аккаунту рекомендации?",
+        "en": "🏢 Which account should I advise on?",
+    },
+    "setacct_pick_account": {
+        "ru": "🔄 Выбери активный аккаунт для отчётов/ключей (сохранится для этого чата):",
+        "en": "🔄 Pick the active account for reports/keywords (saved for this chat):",
+    },
+    "service_menu_title": {
+        "ru": "⚙️ <b>Сервис / Аккаунты</b> — команды без отдельной кнопки:",
+        "en": "⚙️ <b>Service / Accounts</b> — commands without a dedicated button:",
+    },
+    "live_account_hint": {
+        "ru": "💡 Сейчас активен тестовый аккаунт (черновик) — данных мало. Выбери живой: "
+        "/account &lt;id&gt; · /accounts (или ⚙️ Сервис в «➕ Ещё»).",
+        "en": "💡 The test (draft) account is active — little data. Pick a live one: "
+        "/account &lt;id&gt; · /accounts (or ⚙️ Service in “➕ More”).",
     },
     "report_pick_campaign": {
         "ru": "📋 Весь аккаунт или конкретная кампания?",
@@ -118,7 +175,9 @@ CATALOG: dict[str, dict[str, str]] = {
             "/export [period] — deep report .xlsx · /sheets [period] — in Google Sheets (link)\n"
             "/mcc [period] — summary across all MCC child accounts (per-currency subtotals)\n"
             "/quota — daily Google Ads API operation quota\n"
-            "/advise — 💡 recommendations to improve the account (suggestions, I change nothing myself)\n"
+            "/advise [optimize|keywords|rsa|structure] — 💡 recommendations from LIVE metrics "
+            "(spend/clicks/conversions). Multiple accounts — a picker. Empty/test account has no "
+            "advice (pick a working one: /account). Suggestions only — I change nothing myself\n"
             "/alerts — anomaly alert thresholds (spend spike / conversions drop)\n\n"
             "<b>ℹ️ Clients</b>\n"
             "/clients — knowledge base: client profile as text + site crawling → relevant generation\n"
@@ -130,6 +189,7 @@ CATALOG: dict[str, dict[str, str]] = {
             "/model — choose the AI model (OpenRouter) · /balance — AI budget: balance and spend\n"
             "/lang — interface language (RU/EN)\n"
             "/journal — change journal · /diag — error journal\n"
+            "/reportbug — 🐞 report a bug (I'll pass it to the admin)\n"
             "/cancel — cancel the current draft\n\n"
             "<b>👤 For the admin (ADMIN_CHAT_IDS)</b>\n"
             "/adduser &lt;chat_id&gt; — let an operator use the bot (no restart) + pick accounts\n"
@@ -337,6 +397,20 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "Не распознал страну. Попробуй название («Польша») или ISO-код (<code>PL</code>).",
         "en": "Couldn't recognize the country. Try a name (“Poland”) or ISO code (<code>PL</code>).",
     },
+    "kw_params_pick_lang": {
+        "ru": "🗣 На каком языке подбирать ключи?",
+        "en": "🗣 Which language for the keywords?",
+    },
+    "kw_params_ask_lang": {
+        "ru": "Напиши язык (например «немецкий» или код <code>de</code>).",
+        "en": "Type a language (e.g. “German” or code <code>de</code>).",
+    },
+    "kw_params_lang_unknown": {
+        "ru": "Не распознал язык. Попробуй название («немецкий») или ISO-код (<code>de</code>, "
+        "<code>ja</code>, <code>pt</code>…).",
+        "en": "Couldn't recognize the language. Try a name (“German”) or ISO code (<code>de</code>, "
+        "<code>ja</code>, <code>pt</code>…).",
+    },
     # — advisor: /advise — рекомендации (advisory, read-only) —
     "advise_header": {
         "ru": "💡 Рекомендации · аккаунт {account} · {period}",
@@ -350,6 +424,18 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "✅ Рекомендаций нет — по ключевым метрикам всё в норме за выбранный период.",
         "en": "✅ No recommendations — key metrics look fine for the selected period.",
     },
+    "advise_empty_no_data": {
+        "ru": (
+            "🟡 Нет данных для советов: за период не было расхода/показов на этом аккаунте "
+            "(похоже на пустой тест/черновик). Advisor анализирует ЖИВЫЕ метрики — выбери "
+            "рабочий аккаунт: /account · /accounts."
+        ),
+        "en": (
+            "🟡 No data to advise on: no spend/impressions on this account for the period "
+            "(looks like an empty test/draft). Advisor analyses LIVE metrics — pick a working "
+            "account: /account · /accounts."
+        ),
+    },
     "advise_error": {
         "ru": "⚠️ Не удалось собрать рекомендации: {err}",
         "en": "⚠️ Couldn't build recommendations: {err}",
@@ -362,6 +448,30 @@ CATALOG: dict[str, dict[str, str]] = {
     "advise_auto_off": {
         "ru": "🔕 Авто-советы выключены — только по команде /advise.",
         "en": "🔕 Auto-advice off — only on /advise.",
+    },
+    "advise_outcome_improved": {
+        "ru": "✅ Твоё изменение по кампании «{campaign}» сработало — метрики улучшились после совета.",
+        "en": "✅ Your change on campaign “{campaign}” paid off — metrics improved after the advice.",
+    },
+    "advise_outcome_worse": {
+        "ru": "⚠️ После изменения по кампании «{campaign}» метрики просели — возможно, стоит "
+        "пересмотреть или откатить.",
+        "en": "⚠️ After the change on campaign “{campaign}” metrics dropped — consider reviewing "
+        "or reverting.",
+    },
+    "advise_apply_btn_pause": {"ru": "⏸ Поставить на паузу", "en": "⏸ Pause it"},
+    "advise_apply_btn_negatives": {"ru": "➖ В минус-слова", "en": "➖ Add as negatives"},
+    "advise_apply_stale": {
+        "ru": "Рекомендация устарела — запусти /advise заново.",
+        "en": "Recommendation expired — run /advise again.",
+    },
+    "advise_apply_not_actionable": {
+        "ru": "Этот совет применяется только вручную командой (деньги/ставки — не в один тап).",
+        "en": "This advice is applied only via a manual command (money/bids are never one-tap).",
+    },
+    "advise_negatives_hint": {
+        "ru": "💡 Возможные минус-слова (советую, сам НЕ добавляю): {words}",
+        "en": "💡 Possible negative keywords (advice, I do NOT add them myself): {words}",
     },
     "advise_rec_spend_no_conv": {
         "ru": "• «{campaign}»: расход {cost} при {clicks} кликах и 0 конверсиях — стоит проверить "
@@ -795,6 +905,21 @@ CATALOG: dict[str, dict[str, str]] = {
             "but creation may hit a restriction — pick Demand Gen if so."
         ),
     },
+    # B4: Video выключен конфигом (аккаунт не в allowlist Google) — не ведём в гарантированный тупик,
+    # а честно объясняем и оставляем на Demand Gen (рабочий путь из видео). Включается
+    # GOOGLE_ADS_VIDEO_ENABLED=true, когда аккаунт добавлен в allowlist Google.
+    "video_disabled_use_dg": {
+        "ru": (
+            "▶️ Video через API недоступно: создание VIDEO-кампаний Google разрешает только по "
+            "allowlist аккаунта (иначе запрос отклоняется). Использую 🎯 Demand Gen — рабочий путь "
+            "из того же видео. Продолжаем с Demand Gen."
+        ),
+        "en": (
+            "▶️ Video via API is unavailable: Google allows creating VIDEO campaigns only for "
+            "allowlisted accounts (otherwise the request is rejected). Using 🎯 Demand Gen — the "
+            "working path from the same video. Continuing with Demand Gen."
+        ),
+    },
     "video_ask_brief": {
         "ru": (
             "Пришли одним сообщением: <b>название | ссылка на сайт | дневной бюджет [| гео]</b>.\n"
@@ -1098,6 +1223,29 @@ CATALOG: dict[str, dict[str, str]] = {
     "diag_detail_not_found": {
         "ru": "🔍 Инцидент не найден (мог быть очищен ретеншном).",
         "en": "🔍 Incident not found (may have been purged by retention).",
+    },
+    # §6 «Сообщить об ошибке» (/reportbug)
+    "bug_ask": {
+        "ru": (
+            "🐞 Опишите проблему одним сообщением: что делали, что пошло не так, что ожидали.\n"
+            "Я передам это администратору. Секреты можно не вычищать — я их редактирую автоматически."
+        ),
+        "en": (
+            "🐞 Describe the problem in one message: what you did, what went wrong, what you expected.\n"
+            "I'll pass it to the admin. No need to strip secrets — I redact them automatically."
+        ),
+    },
+    "bug_empty": {
+        "ru": "Пустое сообщение — опишите проблему текстом (или «✖ Отмена»).",
+        "en": "Empty message — describe the problem in text (or “✖ Cancel”).",
+    },
+    "bug_thanks": {
+        "ru": "✅ Спасибо! Баг-репорт принят. Тикет: <code>{ticket}</code> — админ уведомлён.",
+        "en": "✅ Thanks! Bug report received. Ticket: <code>{ticket}</code> — the admin was notified.",
+    },
+    "bug_save_failed": {
+        "ru": "⚠️ Не удалось сохранить баг-репорт (проблема с БД). Попробуйте позже.",
+        "en": "⚠️ Couldn't save the bug report (DB issue). Please try again later.",
     },
     "llm_budget_exceeded": {
         "ru": (
@@ -1901,6 +2049,60 @@ CATALOG: dict[str, dict[str, str]] = {
     "cc_assets_pick_type": {
         "ru": "Какой ассет добавить? Сгенерирую наполнение по теме и сайту, вы сможете подтвердить.",
         "en": "Which asset to add? I'll generate the content from the topic and site for you to confirm.",
+    },
+    # §19.7.1: типы ассетов, требующие внешней настройки аккаунта (не автогенерируются) — честное
+    # объяснение вместо тихого отсутствия в перечне.
+    "cc_asset_needs_location": {
+        "ru": (
+            "📍 <b>Адрес (Location)</b> требует привязки <b>Google Business Profile</b> к аккаунту "
+            "(адрес из текста нельзя превратить в объявление без верифицированной точки на картах). "
+            "Свяжите Business Profile в Google Ads и попробуйте снова."
+        ),
+        "en": (
+            "📍 <b>Location</b> asset requires a linked <b>Google Business Profile</b> on the account "
+            "(a text address can't become an ad without a verified Maps location). "
+            "Link the Business Profile in Google Ads and try again."
+        ),
+    },
+    "cc_asset_needs_affiliate": {
+        "ru": (
+            "🏬 <b>Адрес аффилиата</b> удалён из Google Ads API v24 (Google депрекировал этот тип "
+            "ассета) — создать его нельзя. Используйте адрес (Location) через Business Profile."
+        ),
+        "en": (
+            "🏬 <b>Affiliate location</b> was removed from Google Ads API v24 (Google deprecated this "
+            "asset type) — it can't be created. Use a Location asset via Business Profile instead."
+        ),
+    },
+    # §19.7.1: лид-форма РЕАЛИЗОВАНА — просим URL политики конфиденциальности (единственный внешний
+    # обязательный ввод; остальное собираем из профиля §20). Ассет строится за confirm-гейтом.
+    "cc_asset_lead_form_prompt": {
+        "ru": (
+            "📝 <b>Лид-форма.</b> Пришлите ссылку на <b>политику конфиденциальности</b> (обязательна "
+            "для лид-форм Google). Остальное (бренд, заголовок, поля имя/e-mail/телефон) соберу из "
+            "профиля клиента.\n<i>Аккаунт должен принять условия Lead Form в Google Ads — иначе ассет "
+            "будет пропущен при создании (кампания не пострадает).</i>"
+        ),
+        "en": (
+            "📝 <b>Lead form.</b> Send the <b>privacy policy</b> URL (required by Google for lead "
+            "forms). I'll fill the rest (business name, headline, name/email/phone fields) from the "
+            "client profile.\n<i>The account must accept Lead Form terms in Google Ads — otherwise the "
+            "asset is skipped on creation (the campaign is unaffected).</i>"
+        ),
+    },
+    "cc_asset_lead_form_bad_url": {
+        "ru": "Нужна ссылка на политику конфиденциальности (http:// или https://). Пришлите URL.",
+        "en": "A privacy policy link is required (http:// or https://). Please send the URL.",
+    },
+    "cc_asset_app_out_of_scope": {
+        "ru": (
+            "📱 <b>Приложение (App)</b> — вне объёма проекта: App/UAC-кампании исключены (у клиента "
+            "нет приложения). Используйте другие типы ассетов."
+        ),
+        "en": (
+            "📱 <b>App</b> asset is out of scope: App/UAC campaigns are excluded (the client has no "
+            "app). Use the other asset types."
+        ),
     },
     "cc_asset_generating": {
         "ru": "⏳ Генерирую наполнение ассета…",

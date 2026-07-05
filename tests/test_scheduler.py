@@ -24,6 +24,15 @@ async def _fake_client_async(*a, **k):
     return None
 
 
+def _arecipients(value):
+    """D9: _recipients теперь корутина (env ∪ БД whitelist). Фейк, возвращающий готовый set."""
+
+    async def _f():
+        return set(value)
+
+    return _f
+
+
 # ── P1-J: per-account оверлей порогов ─────────────────────────────────────────────
 def test_effective_thresholds_overlay():
     from scheduler.jobs import _effective_thresholds
@@ -166,7 +175,7 @@ async def test_anomaly_thresholds_read_from_user_settings(monkeypatch):
     # build_client_async теперь per-account (принимает customer_id) → async-фейк глотает аргументы.
     monkeypatch.setattr(jobs, "build_client_async", _fake_client_async)
     monkeypatch.setattr(jobs, "fetch_totals", lambda *a, **k: next(seq))
-    monkeypatch.setattr(jobs, "_recipients", lambda: {1, 2})
+    monkeypatch.setattr(jobs, "_recipients", _arecipients({1, 2}))
     # Один аккаунт (метрики аккаунта общие, пороги — per-chat): seq из 2 значений = cur+prev.
     monkeypatch.setattr(jobs, "_scheduled_accounts", lambda: [DRAFT_ACCOUNT_ID])
 
@@ -199,7 +208,7 @@ async def test_scheduled_report_multi_account_one_digest(monkeypatch):
 
     monkeypatch.setattr(jobs, "build_account_report_async", fake_report)
     monkeypatch.setattr(jobs, "summary_text", lambda r, lang=None: r)  # r=="R:<acct>" (3H: +lang)
-    monkeypatch.setattr(jobs, "_recipients", lambda: {1})
+    monkeypatch.setattr(jobs, "_recipients", _arecipients({1}))
 
     sent: list[tuple[int, str]] = []
 
@@ -222,7 +231,7 @@ async def test_anomaly_multi_account_one_message(monkeypatch):
     # Оба аккаунта со всплеском расхода (+100%): curA,prevA, curB,prevB.
     seq = iter([_m(200, 5), _m(100, 5), _m(300, 5), _m(150, 5)])
     monkeypatch.setattr(jobs, "fetch_totals", lambda *a, **k: next(seq))
-    monkeypatch.setattr(jobs, "_recipients", lambda: {2})  # дефолтный порог → алерт
+    monkeypatch.setattr(jobs, "_recipients", _arecipients({2}))  # дефолтный порог → алерт
 
     sent: list[tuple[int, str]] = []
 
@@ -266,3 +275,82 @@ def test_scheduler_never_imports_mutations():
                 name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
                 assert name != "execute_confirmed", f"{py.name}: вызов execute_confirmed"
                 assert not name.startswith(("apply_", "mutate_")), f"{py.name}: вызов {name}"
+
+
+# ── 1.3: еженедельный дайджест — текст + файл админам, no-op без админов ───────────
+class _DigestBot:
+    def __init__(self):
+        self.messages: list = []
+        self.documents: list = []
+
+    async def send_message(self, chat_id, text="", **kw):
+        self.messages.append((chat_id, text))
+
+    async def send_document(self, chat_id, document, **kw):
+        self.documents.append((chat_id, getattr(document, "filename", "")))
+
+
+async def _seed_digest_rows():
+    from datetime import timezone
+
+    from db.models import AuditLog, ErrorEvent
+    from db.session import Session
+
+    from core import bugs
+
+    now = datetime.now(timezone.utc)
+    async with Session() as s:
+        s.add(
+            ErrorEvent(
+                request_id="rid1",
+                chat_id=1,
+                where="handler",
+                exc_type="ValueError",
+                message="boom",
+                traceback="tb",
+                created_at=now,
+            )
+        )
+        s.add(
+            AuditLog(
+                confirmation_id="c1",
+                operation="create_search_campaign",
+                customer_id=DRAFT_ACCOUNT_ID,
+                chat_id=1,
+                status="applied",
+                created_at=now,
+            )
+        )
+        await s.commit()
+    await bugs.add_bug_report(1, "кнопка не работает", username="op")
+
+
+async def test_weekly_digest_sends_text_and_file_to_admins(monkeypatch):
+    """1.3: дайджест шлёт админу текст + прикреплённый файл; активность/ошибки/баг-репорты собраны."""
+    from core.config import settings
+    from db.session import init_db
+    from scheduler import jobs
+
+    await init_db()
+    await _seed_digest_rows()
+    monkeypatch.setattr(settings, "admin_chat_ids", "5", raising=False)
+    bot = _DigestBot()
+    served = await jobs.run_weekly_digest(bot)
+    assert served == 1
+    assert bot.messages and bot.messages[0][0] == 5  # текст админу
+    assert bot.documents and bot.documents[0][0] == 5  # файл админу
+    assert bot.documents[0][1] == "weekly_digest.txt"
+    body = bot.messages[0][1]
+    assert "🗓" in body  # заголовок дайджеста
+
+
+async def test_weekly_digest_no_admins_is_noop(monkeypatch):
+    from core.config import settings
+    from db.session import init_db
+    from scheduler import jobs
+
+    await init_db()
+    monkeypatch.setattr(settings, "admin_chat_ids", "", raising=False)
+    bot = _DigestBot()
+    assert await jobs.run_weekly_digest(bot) == 0
+    assert not bot.messages and not bot.documents

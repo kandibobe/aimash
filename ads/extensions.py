@@ -325,13 +325,71 @@ def _add_business_logo_via_sdk(client, customer_id, image_bytes: bytes, name: st
     }
 
 
-# Семейства, требующие внешней конфигурации (Google Business Profile / privacy-policy URL) — в MVP
-# §19 НЕ создаём автоматически: scaffold-заглушка с понятным сообщением (Phase later). Чтобы не
-# уронить composite-создание, дисп. ловит NotImplementedError и пропускает такой ассет с пометкой.
+def _add_lead_form_via_sdk(
+    client,
+    customer_id,
+    campaign_id,
+    *,
+    business_name: str,
+    headline: str,
+    description: str,
+    call_to_action_description: str,
+    privacy_policy_url: str,
+    cta_type: str = "GET_QUOTE",
+    field_types=("FULL_NAME", "EMAIL", "PHONE_NUMBER"),
+    post_submit_headline: str | None = None,
+    post_submit_description: str | None = None,
+) -> dict:
+    """§19.7.1: lead_form_asset (v24) → link LEAD_FORM к кампании. CTA-тип и поля формы — по ИМЕНАМ
+    enum (LeadFormCallToActionType / LeadFormFieldUserInputType), версионно-безопасно. Требует принятого
+    на аккаунте Lead Form ToS и валидного privacy_policy_url — если аккаунт не готов, API отклоняет
+    mutate_assets; вызывающий (`_attach_asset_specs_via_sdk`) ловит и кладёт ассет в `assets_skipped`
+    (кампания-черновик $0/PAUSED не роняется). Стандартная пара create-asset → CampaignAsset-link."""
+    cid = str(customer_id)
+    asset_svc = client.get_service("AssetService")
+    op = client.get_type("AssetOperation")
+    lf = op.create.lead_form_asset
+    lf.business_name = business_name
+    lf.call_to_action_type = getattr(client.enums.LeadFormCallToActionTypeEnum, cta_type)
+    lf.call_to_action_description = call_to_action_description
+    lf.headline = headline
+    lf.description = description
+    lf.privacy_policy_url = privacy_policy_url
+    if post_submit_headline:
+        lf.post_submit_headline = post_submit_headline
+    if post_submit_description:
+        lf.post_submit_description = post_submit_description
+    for ft in field_types:
+        fld = client.get_type("LeadFormField")
+        fld.input_type = getattr(client.enums.LeadFormFieldUserInputTypeEnum, ft)
+        lf.fields.append(fld)
+    asset_rn = asset_svc.mutate_assets(customer_id=cid, operations=[op]).results[0].resource_name
+    field_type = client.enums.AssetFieldTypeEnum.LEAD_FORM
+    link_rns = _link_campaign_assets(
+        client, cid, _campaign_rn(client, cid, campaign_id), [asset_rn], field_type
+    )
+    return {
+        "customer_id": cid,
+        "campaign_id": str(campaign_id),
+        "kind": "lead_form",
+        "assets": [asset_rn],
+        "links": link_rns,
+        "count": len(link_rns),
+        "applied": True,
+    }
+
+
+# Семейства, требующие внешней конфигурации аккаунта / отсутствующие в API v24 — НЕ создаём из
+# профиля/текста (нет данных для валидной сборки). Чтобы не уронить composite-создание, дисп. бросает
+# NotImplementedError, а вызывающий ловит и пропускает такой ассет с пометкой (assets_skipped). Точный
+# статус в v24 (сверено интроспекцией установленного google-ads):
+#   • location — AssetFieldType.LOCATION в v24 НЕТ: location-ассеты идут через AssetSet + place_id/
+#     привязанный Google Business Profile (иной механизм, аккаунт-зависимо) — вне авто-генерации;
+#   • affiliate_location — AffiliateLocationAsset в v24 ОТСУТСТВУЕТ (Google депрекировал) — недоступно.
+# lead_form РЕАЛИЗОВАН выше (стандартная пара asset→link), из _CONFIG_GATED убран.
 _CONFIG_GATED = {
-    "location": "Location asset требует привязки Google Business Profile (place_id/owner)",
-    "affiliate_location": "Affiliate location требует сети магазинов (chain registry)",
-    "lead_form": "Lead form требует privacy_policy_url + поля формы + CTA",
+    "location": "Location в v24 — через AssetSet + place_id/Google Business Profile (аккаунт-зависимо)",
+    "affiliate_location": "Affiliate location удалён из Google Ads API v24 (депрекирован)",
 }
 
 
@@ -350,6 +408,8 @@ def apply_asset_spec_via_sdk(client, customer_id, campaign_id, spec: dict) -> di
         return _add_structured_snippets_via_sdk(
             client, customer_id, campaign_id, p["header"], p["values"]
         )
+    if family == "lead_form":
+        return _add_lead_form_via_sdk(client, customer_id, campaign_id, **p)
     if family == "call":
         return _add_call_asset_via_sdk(
             client, customer_id, campaign_id, p["phone_number"], p["country_code"]

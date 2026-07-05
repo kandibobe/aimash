@@ -11,7 +11,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from ads.keyword_plan import KeywordIdea
+from ads.keyword_plan import KeywordIdea, seasonality_sparkline
 from keywords.cluster import Cluster
 
 _HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
@@ -28,8 +28,9 @@ HEADERS = [
     "Ставка (низ)",
     "Ставка (верх)",
     "Пик сезона",
+    "Сезонность (12 мес)",  # §7: полная кривая как unicode-спарклайн
 ]
-# Форматы числовых колонок (с позиции «Объём/мес»); «Пик сезона» (10) — текст.
+# Форматы числовых колонок (с позиции «Объём/мес»); «Пик сезона» (10)/«Сезонность» (11) — текст.
 _NUM_FORMATS = {4: "#,##0", 6: "0", 7: "#,##0.00", 8: "#,##0.00", 9: "#,##0.00"}
 
 
@@ -91,6 +92,7 @@ def build_workbook(
                     round(idea.low_bid, 2),
                     round(idea.high_bid, 2),
                     idea.peak_month,
+                    seasonality_sparkline(getattr(idea, "monthly", None)),
                 ]
             )
 
@@ -175,6 +177,7 @@ def write_keywords_csv(
                         round(idea.low_bid, 2),
                         round(idea.high_bid, 2),
                         idea.peak_month,
+                        seasonality_sparkline(getattr(idea, "monthly", None)),
                     ]
                 )
     return path

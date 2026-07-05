@@ -22,7 +22,7 @@ from ads.read import ChildAccount, list_child_accounts
 from core.logging import redact_text
 from core.resilience import run_ads_read_call
 from reports.period import Period
-from reports.queries import Metrics, count_active_campaigns, fetch_totals
+from reports.queries import Metrics, campaign_status_counts, fetch_totals
 
 
 @dataclass
@@ -32,6 +32,9 @@ class ChildReport:
     active_campaigns: int | None = (
         None  # §8 (P1-G): активных (ENABLED) кампаний; None = не прочитано
     )
+    # §8: РАЗБИВКА кампаний по статусу ({ENABLED: n, PAUSED: m, …}); None = не прочитано. active_campaigns
+    # — производное (ENABLED-счётчик) для обратной совместимости рендера/xlsx.
+    campaign_status: dict[str, int] | None = None
 
 
 @dataclass
@@ -168,16 +171,17 @@ async def build_mcc_summary_async(
             except Exception:  # noqa: BLE001 — TZ не прочитан → общий period (не роняем строку)
                 per = period
         totals = await run_ads_read_call(fetch, client, ch.id, per, label=f"mcc_{ch.id}")
-        # §8 (P1-G): число активных кампаний — best-effort доп. лёгкий запрос (сбой → None, не роняем
+        # §8: разбивка кампаний по СТАТУСУ — best-effort доп. лёгкий запрос (сбой → None, не роняем
         # строку и не топит сводку). Параллелится фан-аутом по аккаунтам (не сериализует весь /mcc).
-        n_active: int | None = None
+        # active_campaigns (ENABLED-счётчик) — производное для обратной совместимости рендера/xlsx.
+        status_counts: dict[str, int] | None = None
         try:
-            n_active = await run_ads_read_call(
-                count_active_campaigns, client, ch.id, label=f"mcc_camps_{ch.id}"
+            status_counts = await run_ads_read_call(
+                campaign_status_counts, client, ch.id, label=f"mcc_camps_{ch.id}"
             )
-        except Exception:  # noqa: BLE001 — счётчик кампаний необязателен
-            n_active = None
-        return totals, n_active
+        except Exception:  # noqa: BLE001 — разбивка по статусу необязательна
+            status_counts = None
+        return totals, status_counts
 
     # Параллельный фан-аут по разрешённым листам под общим семафором Google Ads (как
     # build_account_report_async). return_exceptions: один упавший аккаунт → строка в errors, а не
@@ -190,7 +194,15 @@ async def build_mcc_summary_async(
         if isinstance(res, Exception):
             summary.errors.append((ch.id, f"{type(res).__name__}: {redact_text(str(res))}"))
             continue
-        totals, n_active = res  # (Metrics, int|None) — см. _fetch_child (P1-G)
-        summary.children.append(ChildReport(account=ch, totals=totals, active_campaigns=n_active))
+        totals, status_counts = res  # (Metrics, dict|None) — см. _fetch_child (§8)
+        active = status_counts.get("ENABLED") if isinstance(status_counts, dict) else None
+        summary.children.append(
+            ChildReport(
+                account=ch,
+                totals=totals,
+                active_campaigns=active,
+                campaign_status=status_counts,
+            )
+        )
     summary.subtotals = aggregate_by_currency(summary.children)
     return summary

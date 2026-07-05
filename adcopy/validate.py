@@ -140,3 +140,91 @@ def count_flagged(texts: list[str]) -> int:
     """Сколько строк из списка имеют ≥1 редакторское замечание. Нестроки игнорируем (дакт-фейки
     в тестах передают счётчики, а не тексты) — фильтр по isinstance, чтобы не падать на них."""
     return sum(1 for t in texts if isinstance(t, str) and moderation_issues(t))
+
+
+# ── §10: наличие призыва к действию (CTA) — advisory-эвристика (КОД, не только промпт) ──
+# Мультиязычный лексикон СТЕМОВ императивов/призывов (RU/EN/UK). Стемы (не полные слова), т.к. RU/UK
+# спрягаются: «куп» ловит купи/купить/купите/купуй. Сопоставление — по началу токена (startswith),
+# регистронезависимо. Best practice §10: хотя бы ОДИН CTA в наборе объявления (не в каждом тексте).
+_CTA_STEMS = frozenset(
+    {
+        # EN
+        "buy",
+        "order",
+        "shop",
+        "get",
+        "call",
+        "book",
+        "try",
+        "learn",
+        "discover",
+        "save",
+        "download",
+        "start",
+        "find",
+        "compare",
+        "request",
+        "contact",
+        "explore",
+        "join",
+        "grab",
+        "claim",
+        "visit",
+        "subscribe",
+        "sign",
+        "register",
+        "apply",
+        "choose",
+        "hurry",
+        # RU (стемы)
+        "куп",
+        "закаж",
+        "заказ",
+        "звони",
+        "узна",
+        "получ",
+        "попроб",
+        "оформ",
+        "выбер",
+        "выбир",
+        "жми",
+        "успе",
+        "скач",
+        "подпи",
+        "начн",
+        "перейд",
+        "закаж",
+        "приход",
+        "брон",
+        "сравн",
+        "звоните",
+        "оставь",
+        "регистр",
+        "получи",
+        # UK (стемы)
+        "замов",
+        "купуй",
+        "дізна",
+        "отрим",
+        "спробу",
+        "телефону",
+        "обер",
+        "почн",
+        "приєдн",
+        "завантаж",
+        "зателефону",
+    }
+)
+
+
+def has_cta(text: str) -> bool:
+    """Есть ли в тексте призыв к действию (по лексикону стемов). Advisory-эвристика (§10)."""
+    for w in _WORD_RE.findall((text or "").lower()):
+        if w in _CTA_STEMS or any(w.startswith(stem) for stem in _CTA_STEMS if len(stem) >= 3):
+            return True
+    return False
+
+
+def any_cta(texts: list[str]) -> bool:
+    """Есть ли CTA хотя бы в одном тексте набора (best practice §10 — минимум один призыв)."""
+    return any(has_cta(t) for t in texts if isinstance(t, str))

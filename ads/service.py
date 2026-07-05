@@ -29,6 +29,7 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
         "remove_negative_keywords",
         "pause_campaign",
         "resume_campaign",
+        "launch_campaign",
         "update_campaign",
         "remove_campaign",
         "remove_ad_group",
@@ -63,6 +64,7 @@ _DIFFABLE_OPS = frozenset(
         "update_bid",
         "pause_campaign",
         "resume_campaign",
+        "launch_campaign",
         "update_campaign",
         "pause_ad_group",
         "resume_ad_group",
@@ -96,7 +98,7 @@ async def read_before(operation: str, params: dict, customer_id: str | None = No
                 "before_micros": int(ref.budget_micros),
                 "after_micros": int(after),
             }
-        if operation in ("pause_campaign", "resume_campaign"):
+        if operation in ("pause_campaign", "resume_campaign", "launch_campaign"):
             ref = await asyncio.to_thread(resolve.find_campaign_by_name, client, cid, name)
             if ref is None:
                 return None
@@ -226,6 +228,22 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
         if ref is None:
             raise ValueError(f"кампания '{params['campaign']}' не найдена")
         return await mutations.apply_resume_campaign(
+            customer_id=customer_id,
+            campaign_id=ref.id,
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
+    if op == "launch_campaign":
+        # §19.8/§11: «Запустить» = включить кампанию ПОЛНОСТЬЮ (кампания + группы + объявления),
+        # иначе PAUSED группа/объявление ⇒ 0 показов. Резолв кампании по имени → apply_launch_campaign.
+        ref = await asyncio.to_thread(
+            resolve.find_campaign_by_name, client, customer_id, params["campaign"]
+        )
+        if ref is None:
+            raise ValueError(f"кампания '{params['campaign']}' не найдена")
+        return await mutations.apply_launch_campaign(
             customer_id=customer_id,
             campaign_id=ref.id,
             confirmation_id=confirmation_id,

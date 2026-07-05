@@ -27,15 +27,16 @@ async def camp_geo(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
     current = ""
     if camp_id:
         try:
-            from ads.client import DRAFT_ACCOUNT_ID, build_client_async
+            from ads.client import build_client_async
             from ads.read import read_campaign_targeting
             from core.resilience import run_ads_read_call
 
-            # /campaigns сегодня Draft-only (меню действий = мутации) — читаем его же.
+            # §8: читаем аккаунт-якорь меню (тот же, что и мутируем) — не хардкод Draft.
+            acct = bm._camp_account(bm._cq_chat_id(cq))
             t = await run_ads_read_call(
                 read_campaign_targeting,
-                await build_client_async(),
-                DRAFT_ACCOUNT_ID,
+                await build_client_async(acct),
+                acct,
                 camp_id,
                 label="campaign_targeting",
             )
@@ -76,7 +77,9 @@ async def on_geo_mode(cq: bm.CallbackQuery, callback_data: bm.GeoCB, state: bm.F
         prompt = "geo_pick_proximity"
     # geo_idx нужен retry-хендлерам, чтобы собрать Back-цель (меню кампании) даже после
     # невалидного ввода; имя кампании уже резолвлено в geo_campaign.
-    await state.update_data(geo_campaign=name, geo_idx=callback_data.idx)
+    await state.update_data(
+        geo_campaign=name, geo_idx=callback_data.idx, geo_account=bm._camp_account(chat_id)
+    )
     await cq.answer()
     # Back → меню кампании (та же цель, что у «‹ Назад» в geo_mode_kb): переиспользуем camp_menu.
     await msg.answer(
@@ -104,6 +107,7 @@ async def geo_locations(m: bm.Message, state: bm.FSMContext) -> None:
         await state.clear()
         await m.answer(bm.i18n.t("geo_stale"))
         return
+    acct = (data.get("geo_account") or bm.DRAFT_ACCOUNT_ID).strip()
     await state.clear()
     try:
         cid, operation, params, summary = bm._build_proposal(
@@ -113,7 +117,13 @@ async def geo_locations(m: bm.Message, state: bm.FSMContext) -> None:
         await m.answer(bm.i18n.t("cb_error", kind=type(e).__name__))
         return
     await bm._present_proposal(
-        m, chat_id=m.chat.id, operation=operation, params=params, summary=summary, cid=cid
+        m,
+        chat_id=m.chat.id,
+        operation=operation,
+        params=params,
+        summary=summary,
+        cid=cid,
+        customer_id=acct,
     )
 
 
@@ -136,6 +146,7 @@ async def geo_proximity(m: bm.Message, state: bm.FSMContext) -> None:
         await state.clear()
         await m.answer(bm.i18n.t("geo_stale"))
         return
+    acct = (data.get("geo_account") or bm.DRAFT_ACCOUNT_ID).strip()
     await state.clear()
     try:
         cid, operation, params, summary = bm._build_proposal(
@@ -145,7 +156,13 @@ async def geo_proximity(m: bm.Message, state: bm.FSMContext) -> None:
         await m.answer(bm.i18n.t("cb_error", kind=type(e).__name__))
         return
     await bm._present_proposal(
-        m, chat_id=m.chat.id, operation=operation, params=params, summary=summary, cid=cid
+        m,
+        chat_id=m.chat.id,
+        operation=operation,
+        params=params,
+        summary=summary,
+        cid=cid,
+        customer_id=acct,
     )
 
 
@@ -191,7 +208,9 @@ async def on_ext_type(cq: bm.CallbackQuery, callback_data: bm.ExtCB, state: bm.F
         )
         return
     await state.clear()
-    await state.update_data(ext_campaign=name, ext_idx=callback_data.idx)
+    await state.update_data(
+        ext_campaign=name, ext_idx=callback_data.idx, ext_account=bm._camp_account(chat_id)
+    )
     if callback_data.action == "sitelink":
         await state.set_state(bm.ExtWizard.awaiting_sitelinks)
         prompt = "ext_ask_sitelinks"
@@ -226,7 +245,10 @@ async def on_ext_snippet_header(
     await state.clear()
     await state.set_state(bm.ExtWizard.awaiting_snippet_values)
     await state.update_data(
-        ext_campaign=name, ext_idx=callback_data.idx, ext_header=callback_data.sub
+        ext_campaign=name,
+        ext_idx=callback_data.idx,
+        ext_header=callback_data.sub,
+        ext_account=bm._camp_account(chat_id),
     )
     await cq.answer()
     await msg.answer(
@@ -252,6 +274,7 @@ async def ext_sitelinks(m: bm.Message, state: bm.FSMContext) -> None:
         await state.clear()
         await m.answer(bm.i18n.t("ext_stale"))
         return
+    acct = (data.get("ext_account") or bm.DRAFT_ACCOUNT_ID).strip()
     await state.clear()
     try:
         cid, operation, params, summary = bm._build_proposal(
@@ -261,7 +284,13 @@ async def ext_sitelinks(m: bm.Message, state: bm.FSMContext) -> None:
         await m.answer(bm.i18n.t("cb_error", kind=type(e).__name__))
         return
     await bm._present_proposal(
-        m, chat_id=m.chat.id, operation=operation, params=params, summary=summary, cid=cid
+        m,
+        chat_id=m.chat.id,
+        operation=operation,
+        params=params,
+        summary=summary,
+        cid=cid,
+        customer_id=acct,
     )
 
 
@@ -281,6 +310,7 @@ async def ext_callouts(m: bm.Message, state: bm.FSMContext) -> None:
         await state.clear()
         await m.answer(bm.i18n.t("ext_stale"))
         return
+    acct = (data.get("ext_account") or bm.DRAFT_ACCOUNT_ID).strip()
     await state.clear()
     try:
         cid, operation, params, summary = bm._build_proposal(
@@ -290,7 +320,13 @@ async def ext_callouts(m: bm.Message, state: bm.FSMContext) -> None:
         await m.answer(bm.i18n.t("cb_error", kind=type(e).__name__))
         return
     await bm._present_proposal(
-        m, chat_id=m.chat.id, operation=operation, params=params, summary=summary, cid=cid
+        m,
+        chat_id=m.chat.id,
+        operation=operation,
+        params=params,
+        summary=summary,
+        cid=cid,
+        customer_id=acct,
     )
 
 
@@ -311,6 +347,7 @@ async def ext_snippet_values(m: bm.Message, state: bm.FSMContext) -> None:
         await state.clear()
         await m.answer(bm.i18n.t("ext_stale"))
         return
+    acct = (data.get("ext_account") or bm.DRAFT_ACCOUNT_ID).strip()
     await state.clear()
     try:
         cid, operation, params, summary = bm._build_proposal(
@@ -320,7 +357,13 @@ async def ext_snippet_values(m: bm.Message, state: bm.FSMContext) -> None:
         await m.answer(bm.i18n.t("cb_error", kind=type(e).__name__))
         return
     await bm._present_proposal(
-        m, chat_id=m.chat.id, operation=operation, params=params, summary=summary, cid=cid
+        m,
+        chat_id=m.chat.id,
+        operation=operation,
+        params=params,
+        summary=summary,
+        cid=cid,
+        customer_id=acct,
     )
 
 
@@ -337,11 +380,12 @@ async def on_ext_show(cq: bm.CallbackQuery, callback_data: bm.ExtCB) -> None:
     from ads.client import build_client_async
     from ads.read import list_campaign_assets
 
+    acct = bm._camp_account(chat_id)  # §8: аккаунт-якорь меню, не хардкод Draft
     try:
         rows = await bm.run_ads_read_call(
             list_campaign_assets,
-            await build_client_async(),
-            bm.DRAFT_ACCOUNT_ID,
+            await build_client_async(acct),
+            acct,
             campaign_id,
             label="list_campaign_assets",
         )
@@ -384,7 +428,13 @@ async def on_ext_remove(cq: bm.CallbackQuery, callback_data: bm.ExtCB) -> None:
         return
     await cq.answer()
     await bm._present_proposal(
-        msg, chat_id=chat_id, operation=operation, params=params, summary=summary, cid=cid
+        msg,
+        chat_id=chat_id,
+        operation=operation,
+        params=params,
+        summary=summary,
+        cid=cid,
+        customer_id=bm._camp_account(chat_id),
     )
 
 
@@ -413,7 +463,7 @@ async def camp_back(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
     await cq.answer()
     await bm._safe_edit(
         cq,
-        bm.texts.campaigns_title(bm.DRAFT_ACCOUNT_ID),
+        bm.texts.campaigns_title(bm._camp_account(bm._cq_chat_id(cq))),
         reply_markup=bm.campaigns_kb(camps),
         parse_mode=bm.ParseMode.HTML,
     )
@@ -450,11 +500,10 @@ async def camp_audience(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
         from ads.client import build_client_async
         from ads.read import list_audiences
 
-        client = await build_client_async()
+        acct = bm._camp_account(chat_id)  # §8: аудитории аккаунта-якоря меню, не хардкод Draft
+        client = await build_client_async(acct)
         async with bm.ux.typing_action(cq.message):
-            auds = await bm.run_ads_read_call(
-                list_audiences, client, bm.DRAFT_ACCOUNT_ID, label="list_audiences"
-            )
+            auds = await bm.run_ads_read_call(list_audiences, client, acct, label="list_audiences")
     except Exception as e:  # сеть/доступ/SDK
         await cq.answer(bm.i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
         return
@@ -498,5 +547,11 @@ async def on_audience_pick(cq: bm.CallbackQuery, callback_data: bm.AudienceCB) -
     if msg is None:
         return
     await bm._present_proposal(
-        msg, chat_id=chat_id, operation=op, params=params, summary=summary, cid=cid
+        msg,
+        chat_id=chat_id,
+        operation=op,
+        params=params,
+        summary=summary,
+        cid=cid,
+        customer_id=bm._camp_account(chat_id),
     )

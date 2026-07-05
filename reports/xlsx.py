@@ -119,6 +119,16 @@ def write_report_xlsx(report: ReportData, path: str) -> str:
 
 
 # ── MCC-сводка (§8): подытоги по валюте + лист аккаунтов + лист пропусков/ошибок ────
+def _mcc_campaign_status_cell(cr) -> str:
+    """§8: строка разбивки кампаний по статусу для xlsx («ENABLED:3, PAUSED:5»). Fallback на
+    ENABLED-счётчик (active_campaigns), если полной разбивки нет; '' если не прочитано."""
+    sc = getattr(cr, "campaign_status", None)
+    if isinstance(sc, dict) and sc:
+        return ", ".join(f"{k}:{v}" for k, v in sorted(sc.items()))
+    n = getattr(cr, "active_campaigns", None)
+    return f"ENABLED:{n}" if n is not None else ""
+
+
 def build_mcc_workbook(summary) -> Workbook:
     """Книга по сводке дочерних MCC (reports.mcc.MccSummary, duck-typed). Листы: «Сводка MCC»
     (подытоги ПО ВАЛЮТАМ — без FX), «Аккаунты» (по строке на лист-аккаунт), «Пропущено/ошибки»
@@ -147,19 +157,18 @@ def build_mcc_workbook(summary) -> Workbook:
 
     # 2) Аккаунты: по строке на лист-аккаунт (id/имя/валюта/статус + метрики).
     acc = wb.create_sheet(title="Аккаунты")
-    # §8 (P1-G): колонка «Активных кампаний» (ENABLED) — перед метриками.
-    acc_headers = ["ID", "Аккаунт", "Валюта", "Статус", "Активных кампаний", *metric_headers("")]
+    # §8: колонка «Кампании (статус)» — разбивка по статусу (ENABLED:n, PAUSED:m) перед метриками.
+    acc_headers = ["ID", "Аккаунт", "Валюта", "Статус", "Кампании (статус)", *metric_headers("")]
     acc.append(acc_headers)
     for cr in summary.children:
         a = cr.account
-        n_active = getattr(cr, "active_campaigns", None)
         acc.append(
             [
                 a.id,
                 getattr(a, "name", "") or "",
                 a.currency or "",
                 getattr(a, "status", "") or "",
-                n_active if n_active is not None else "",
+                _mcc_campaign_status_cell(cr),
                 *cr.totals.as_row(),
             ]
         )

@@ -24,6 +24,56 @@ class RecommendationSet:
     period_label: str
     currency: str
     recs: list[Recommendation] = field(default_factory=list)
+    extras: list[str] = field(default_factory=list)  # advisory-довески (напр. LLM-минус-слова, #3)
+    has_activity: bool = (
+        False  # была ли активность в периоде (расход/показы) — для внятного empty-state
+    )
+
+
+def _keyword_texts(report, limit: int = 40) -> list[str]:
+    """Тексты ключей из разбивки keyword_view (топ по расходу) — для advisory LLM-минус-слов (#3)."""
+    kb = next((b for b in getattr(report, "breakdowns", []) if b.key == "keyword"), None)
+    if not kb or not kb.rows:
+        return []
+    rows = sorted(kb.rows, key=lambda r: -getattr(r[1], "cost_micros", 0))
+    out: list[str] = []
+    for dims, _m in rows[:limit]:
+        if len(dims) >= 3 and dims[2]:
+            out.append(str(dims[2]))
+    return out
+
+
+async def _negative_keywords_extra(report, topics, lang: str) -> list[str]:
+    """#3: LLM-предложение минус-слов по ключам аккаунта (advisory, ничего не добавляет — как §7).
+    Только для темы keywords и при наличии ключей. Сбой/пусто → [] (не роняем /advise)."""
+    if topics and "keywords" not in topics:
+        return []
+    kws = _keyword_texts(report)
+    if not kws:
+        return []
+    try:
+        from bot import i18n
+        from keywords.cluster import suggest_negative_keywords
+
+        negs = await suggest_negative_keywords(
+            "", kws, language=(lang if lang in ("ru", "uk", "en") else "ru"), limit=12
+        )
+        if not negs:
+            return []
+        return [i18n.t("advise_negatives_hint", lang, words=", ".join(negs))]
+    except Exception:  # noqa: BLE001 — advisory-довесок, не критичен
+        return []
+
+
+def _has_activity(report) -> bool:
+    """Была ли реальная активность в периоде (расход/показы/клики). Пустой Draft/тест-аккаунт →
+    False → внятный empty-state («нет данных, выбери живой аккаунт»), а не «советов нет»."""
+    t = getattr(report, "totals", None)
+    if t is None:
+        return False
+    return bool(
+        getattr(t, "cost_micros", 0) or getattr(t, "impressions", 0) or getattr(t, "clicks", 0)
+    )
 
 
 def _period_label(report) -> str:
@@ -118,9 +168,14 @@ async def build_recommendations(
     if persist and cands:
         await store.record_recommendations(chat_id, customer_id, cands, source)
 
+    # #3: advisory LLM-минус-слова (тема keywords) — только на интерактивном пути (use_llm).
+    extras = await _negative_keywords_extra(report, topics, lang) if use_llm else []
+
     return RecommendationSet(
         account=str(customer_id),
         period_label=_period_label(report),
         currency=getattr(report, "currency", "") or "",
         recs=cands,
+        extras=extras,
+        has_activity=_has_activity(report),
     )

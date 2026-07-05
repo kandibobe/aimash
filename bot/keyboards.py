@@ -17,6 +17,7 @@ from bot.callbacks import (
     AdviseCB,
     AlertCB,
     AudienceCB,
+    BugCB,
     CampCB,
     CcCB,
     ClientCB,
@@ -97,6 +98,7 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="balance", description="Бюджет ИИ: баланс OpenRouter и траты"),
     BotCommand(command="journal", description="Журнал изменений (что/когда/кто)"),
     BotCommand(command="diag", description="Журнал ошибок (диагностика)"),
+    BotCommand(command="reportbug", description="🐞 Сообщить об ошибке"),
     BotCommand(command="lang", description="Язык интерфейса / interface language"),
 ]
 
@@ -136,6 +138,7 @@ BOT_COMMANDS_EN: list[BotCommand] = [
     BotCommand(command="balance", description="AI budget: OpenRouter balance and spend"),
     BotCommand(command="journal", description="Change journal (what/when/who)"),
     BotCommand(command="diag", description="Error log (diagnostics)"),
+    BotCommand(command="reportbug", description="🐞 Report a bug"),
     BotCommand(command="lang", description="Interface language / язык интерфейса"),
 ]
 
@@ -381,8 +384,10 @@ def kw_params_kb(cfg: dict, lang: str | None = None) -> InlineKeyboardMarkup:
         text=("🌍 Geo: " if en else "🌍 ГЕО: ") + str(geo_label),
         callback_data=KwCfgCB(field="geo"),
     )
+    lang_v = str(cfg.get("kw_lang") or "ru")
+    lang_label = ("🌐 " + ("any" if en else "любой")) if lang_v == "any" else lang_v
     kb.button(
-        text=("🗣 Language: " if en else "🗣 Язык: ") + str(cfg.get("kw_lang") or "ru"),
+        text=("🗣 Language: " if en else "🗣 Язык: ") + lang_label,
         callback_data=KwCfgCB(field="lang"),
     )
     net = cfg.get("kw_net") or "GOOGLE_SEARCH"
@@ -425,6 +430,40 @@ def kw_geo_kb(lang: str | None = None) -> InlineKeyboardMarkup:
         callback_data=KwCfgCB(field="geo_pick", value="custom"),
     )
     kb.adjust(2, 2, 2, 2)
+    return kb.as_markup()
+
+
+# §7: частые языки подбора (ISO 639-1, ru_label, en_label). Любой другой — через «✏️ Другой…».
+_KW_LANG_PRESETS: tuple[tuple[str, str, str], ...] = (
+    ("ru", "🇷🇺 Русский", "🇷🇺 Russian"),
+    ("uk", "🇺🇦 Українська", "🇺🇦 Ukrainian"),
+    ("en", "🇬🇧 English", "🇬🇧 English"),
+    ("de", "🇩🇪 Немецкий", "🇩🇪 German"),
+    ("pl", "🇵🇱 Польский", "🇵🇱 Polish"),
+    ("es", "🇪🇸 Испанский", "🇪🇸 Spanish"),
+    ("fr", "🇫🇷 Французский", "🇫🇷 French"),
+    ("tr", "🇹🇷 Турецкий", "🇹🇷 Turkish"),
+    ("it", "🇮🇹 Итальянский", "🇮🇹 Italian"),
+    ("ar", "🇸🇦 Арабский", "🇸🇦 Arabic"),
+)
+
+
+def kw_lang_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """3F (§7): саб-пикер ЯЗЫКА подбора — частые языки + «🌐 Любой» (не фильтровать) + ручной ввод.
+    Зеркало kw_geo_kb; ЛЮБОЙ язык из таблицы Google достижим через «✏️ Другой…»."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    for iso, ru_l, en_l in _KW_LANG_PRESETS:
+        kb.button(text=en_l if en else ru_l, callback_data=KwCfgCB(field="lang_pick", value=iso))
+    kb.button(
+        text="🌐 " + ("Any language" if en else "Любой язык"),
+        callback_data=KwCfgCB(field="lang_pick", value="any"),
+    )
+    kb.button(
+        text="✏️ " + ("Other…" if en else "Другой…"),
+        callback_data=KwCfgCB(field="lang_pick", value="custom"),
+    )
+    kb.adjust(2, 2, 2, 2, 2, 2)
     return kb.as_markup()
 
 
@@ -477,7 +516,9 @@ def diag_kb(rows, *, today: bool, is_admin: bool, lang: str | None = None) -> In
         kb.button(text="🗂 All" if en else "🗂 Все", callback_data=DiagCB(action="all"))
     else:
         kb.button(text="⚠️ Today" if en else "⚠️ За сегодня", callback_data=DiagCB(action="today"))
-    counts = [2]
+    # 1.2: экспорт журнала ошибок файлом (.txt) — вложением, читать удобнее длинной ленты в чате.
+    kb.button(text="📎 Export" if en else "📎 Экспорт", callback_data=DiagCB(action="export"))
+    counts = [3]
     if is_admin:
         # detail только админу (traceback — операционная деталь; /diag открыт всем whitelisted).
         seen: set[str] = set()
@@ -497,6 +538,37 @@ def diag_kb(rows, *, today: bool, is_admin: bool, lang: str | None = None) -> In
     return kb.as_markup()
 
 
+def bugs_kb(rows, lang: str | None = None) -> InlineKeyboardMarkup:
+    """§6: кнопки под /bugs (админ-триаж). Для каждого НЕ закрытого репорта — «✅ В работу» (triaged)
+    и «🗄 Закрыть» (closed); плюс «🔄 Обновить». Кнопки меняют только статус bug_reports (локальная
+    БД), Google Ads/proposal не трогают. rows — показанные BugReport."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔄 Refresh" if en else "🔄 Обновить", callback_data=BugCB(action="refresh"))
+    counts = [1]
+    shown = 0
+    for r in rows or []:
+        if getattr(r, "status", "") == "closed":
+            continue
+        bid = int(getattr(r, "id", 0) or 0)
+        if not bid:
+            continue
+        kb.button(
+            text=f"✅ #{bid} " + ("In work" if en else "В работу"),
+            callback_data=BugCB(action="triaged", bid=bid),
+        )
+        kb.button(
+            text=f"🗄 #{bid} " + ("Close" if en else "Закрыть"),
+            callback_data=BugCB(action="closed", bid=bid),
+        )
+        counts.append(2)
+        shown += 1
+        if shown >= 8:  # не раздуваем клавиатуру (лимиты Telegram/читаемость)
+            break
+    kb.adjust(*counts)
+    return kb.as_markup()
+
+
 def more_menu_kb(lang: str | None = None) -> InlineKeyboardMarkup:
     """3E: inline-хаб «➕ Ещё» — вторичные флоу одним тапом (раньше — только слэш-командой)."""
     en = _lang(lang) == "en"
@@ -509,9 +581,30 @@ def more_menu_kb(lang: str | None = None) -> InlineKeyboardMarkup:
         ("↻ Recent actions", "↻ Недавние действия", "recent"),
         ("📉 API quota", "📉 Квота API", "quota"),
         ("🔔 Alert thresholds", "🔔 Пороги алертов", "alerts"),
+        ("🐞 Report a bug", "🐞 Сообщить об ошибке", "reportbug"),
+        ("⚙️ Service / Accounts", "⚙️ Сервис / Аккаунты", "service"),
     ):
         kb.button(text=label_en if en else label_ru, callback_data=MoreCB(action=action))
-    kb.adjust(1, 1, 1, 2, 2)
+    kb.adjust(1, 1, 1, 2, 2, 1, 1)
+    return kb.as_markup()
+
+
+def service_menu_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """E: inline суб-хаб «⚙️ Сервис/Аккаунты» — сервис/аккаунт-команды, у которых не было кнопки
+    (обнаружимость: раньше только слэшем). Как more_menu_kb: кнопка лишь МАРШРУТИЗИРУЕТ в тот же
+    entry, что и команда (account/accounts/whoami/refresh/savetemplate/diag); мутаций не создаёт."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    for label_en, label_ru, action in (
+        ("🏢 My accounts", "🏢 Мои аккаунты", "svc_accounts"),
+        ("🔄 Switch account", "🔄 Сменить аккаунт", "svc_account"),
+        ("👤 Who am I", "👤 Кто я", "svc_whoami"),
+        ("🔃 Refresh accounts/caches", "🔃 Обновить аккаунты/кэши", "svc_refresh"),
+        ("💾 Save template", "💾 Сохранить шаблон", "svc_savetemplate"),
+        ("🩺 Diagnostics", "🩺 Диагностика", "svc_diag"),
+    ):
+        kb.button(text=label_en if en else label_ru, callback_data=MoreCB(action=action))
+    kb.adjust(2, 1, 2, 1)
     return kb.as_markup()
 
 
@@ -531,11 +624,27 @@ def advise_header_kb(proactive_on: bool, lang: str | None = None) -> InlineKeybo
     return kb.as_markup()
 
 
-def advise_feedback_kb(rec_uid: str, lang: str | None = None) -> InlineKeyboardMarkup:
-    """advisor: 👍/👎 под одной рекомендацией (/advise). Кнопки пишут ТОЛЬКО в recommendation_feedback
-    (Слой B) — Google Ads НЕ трогают и proposal НЕ создают. Чистая функция (без БД/Ads)."""
+# §advisor #1: какие советы можно применить в ОДИН ТАП (только НЕ-денежные — pause/минус-слова).
+# Деньги/ставки (update_budget/update_bid) НАМЕРЕННО не one-tap (golden rule #3) → нет метки → нет кнопки.
+_ADVISE_APPLY_LABELS = {
+    "pause_campaign": "advise_apply_btn_pause",
+    "add_negative_keywords": "advise_apply_btn_negatives",
+}
+
+
+def advise_feedback_kb(
+    rec_uid: str, lang: str | None = None, apply_op: str | None = None
+) -> InlineKeyboardMarkup:
+    """advisor: 👍/👎 под одной рекомендацией (/advise) + (опц.) «применить» для НЕ-денежных советов.
+    Фидбек-кнопки пишут только в recommendation_feedback; «применить» СТАРТУЕТ confirm-гейт (proposal),
+    ничего не исполняя само. apply_op ∈ _ADVISE_APPLY_LABELS → кнопка; иначе (деньги/None) — нет."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
+    apply_key = _ADVISE_APPLY_LABELS.get(apply_op or "")
+    if apply_key:
+        from bot import i18n
+
+        kb.button(text=i18n.t(apply_key, lang), callback_data=AdviseCB(action="apply", rec=rec_uid))
     kb.button(
         text="👍 Useful" if en else "👍 Полезно",
         callback_data=AdviseCB(action="up", rec=rec_uid),
@@ -544,7 +653,10 @@ def advise_feedback_kb(rec_uid: str, lang: str | None = None) -> InlineKeyboardM
         text="👎 Not useful" if en else "👎 Мимо",
         callback_data=AdviseCB(action="down", rec=rec_uid),
     )
-    kb.adjust(2)
+    if apply_key:
+        kb.adjust(1, 2)
+    else:
+        kb.adjust(2)
     return kb.as_markup()
 
 
@@ -928,6 +1040,12 @@ _CC_ASSET_TYPE_LABELS = {
         "call": "📞 Телефон (Call)",
         "price": "💲 Цены (Price)",
         "promotion": "🎁 Акция (Promotion)",
+        # §19.7.1: типы, требующие ВНЕШНЕЙ настройки аккаунта (не автогенерируются). Показываем в
+        # перечне честно (раньше молча отсутствовали), при выборе — объясняем, что нужно.
+        "lead_form": "📝 Лид-форма (Lead form)",
+        "location": "📍 Адрес (Location) ⚙️",
+        "affiliate_location": "🏬 Адрес аффилиата 🚫",
+        "app": "📱 Приложение (App) 🚫",
     },
     "en": {
         "sitelinks": "🔗 Sitelinks",
@@ -938,8 +1056,19 @@ _CC_ASSET_TYPE_LABELS = {
         "call": "📞 Call (phone)",
         "price": "💲 Price",
         "promotion": "🎁 Promotion",
+        "lead_form": "📝 Lead form",
+        "location": "📍 Location ⚙️",
+        "affiliate_location": "🏬 Affiliate location 🚫",
+        "app": "📱 App 🚫",
     },
 }
+
+# §19.7.1: семейства ассетов, требующие внешней настройки аккаунта (location) или отсутствующие в
+# API v24 / вне объёма (affiliate_location депрекирован Google, app=UAC исключён) — НЕ
+# автогенерируются. Показаны в пикере честно (не молча опущены); при выборе бот объясняет причину
+# (cc_asset_type). lead_form РЕАЛИЗОВАН (собирает privacy-URL) — в этот набор НЕ входит.
+# ⚙️ = нужна доп. настройка аккаунта; 🚫 = недоступно в v24 / вне объёма.
+CC_ASSET_GATED = ("location", "affiliate_location", "app")
 
 
 def cc_asset_types_kb(lang: str | None = None) -> InlineKeyboardMarkup:
@@ -1032,17 +1161,25 @@ def cc_kw_confirm_kb(lang: str | None = None) -> InlineKeyboardMarkup:
 
 def video_type_kb(lang: str | None = None) -> InlineKeyboardMarkup:
     """§11: выбор типа кампании из видео — Demand Gen (рекомендуется) или Video (охват, CPM).
-    Кнопки лишь двигают визард; мутация — только через confirm-гейт."""
+    Кнопки лишь двигают визард; мутация — только через confirm-гейт.
+
+    B4: Video-кнопку показываем ТОЛЬКО если владелец включил её (GOOGLE_ADS_VIDEO_ENABLED) —
+    аккаунт в allowlist Google. Иначе не предлагаем гарантированный тупик (Video → MUTATE_NOT_ALLOWED);
+    остаётся Demand Gen (рабочий путь из того же видео). Импорт локальный — не связываем слой
+    клавиатур с конфигом на уровне модуля."""
+    from core.config import settings
+
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     kb.button(
         text="🎯 Demand Gen (recommended)" if en else "🎯 Demand Gen (рекомендую)",
         callback_data=VideoCB(action="dg"),
     )
-    kb.button(
-        text="▶️ Video (reach, CPM)" if en else "▶️ Video (охват, CPM)",
-        callback_data=VideoCB(action="video"),
-    )
+    if settings.google_ads_video_enabled:
+        kb.button(
+            text="▶️ Video (reach, CPM)" if en else "▶️ Video (охват, CPM)",
+            callback_data=VideoCB(action="video"),
+        )
     kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
     kb.adjust(1, 1, 1)
     return kb.as_markup()

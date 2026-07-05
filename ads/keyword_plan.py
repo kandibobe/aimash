@@ -15,13 +15,68 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ads.client import ensure_read_allowed
 from core.logging import log
 
-# Языковые константы (сверено live): ru=1031, uk=1036, en=1000. Гео Украина (country) = 2804.
-LANGUAGE_IDS: dict[str, int] = {"ru": 1031, "uk": 1036, "en": 1000}
+# Google Ads languageConstants (ISO 639-1 → constant id). Публичная таблица Google; ru=1031/uk=1036/
+# en=1000 сверены live. Полный набор — чтобы подбор ключей работал на ЛЮБОМ языке рынка (§7), а не
+# только ru/uk/en. Неизвестный код → язык в запросе ОПУСКАЕТСЯ (шире выборка), см. _build_request.
+LANGUAGE_IDS: dict[str, int] = {
+    "en": 1000,
+    "de": 1001,
+    "fr": 1002,
+    "es": 1003,
+    "it": 1004,
+    "ja": 1005,
+    "da": 1009,
+    "nl": 1010,
+    "fi": 1011,
+    "ko": 1012,
+    "nb": 1013,
+    "no": 1013,
+    "pt": 1014,
+    "sv": 1015,
+    "zh": 1017,
+    "zh_cn": 1017,
+    "zh_tw": 1018,
+    "ar": 1019,
+    "bg": 1020,
+    "cs": 1021,
+    "el": 1022,
+    "hi": 1023,
+    "hu": 1024,
+    "id": 1025,
+    "is": 1026,
+    "he": 1027,
+    "lv": 1028,
+    "lt": 1029,
+    "pl": 1030,
+    "ru": 1031,
+    "ro": 1032,
+    "sk": 1033,
+    "sl": 1034,
+    "sr": 1035,
+    "uk": 1036,
+    "tr": 1037,
+    "ca": 1038,
+    "hr": 1039,
+    "vi": 1040,
+    "ur": 1041,
+    "tl": 1042,
+    "fil": 1042,
+    "et": 1043,
+    "th": 1044,
+    "bn": 1056,
+    "fa": 1064,
+    "gu": 1072,
+    "kn": 1086,
+    "ml": 1098,
+    "mr": 1102,
+    "ta": 1130,
+    "te": 1131,
+}
 DEFAULT_LANGUAGE = "ru"
 DEFAULT_GEO_IDS: tuple[int, ...] = (2804,)  # Украина; переопределяемо вызывающей стороной
 MAX_IDEAS = 200  # сколько идей ВОЗВРАЩАЕМ (топ по объёму, для Telegram/таблицы)
@@ -56,6 +111,43 @@ class KeywordIdea:
     high_bid: float = 0.0  # top-of-page high bid
     avg_cpc: float = 0.0  # средний CPC (валюта)
     peak_month: str = ""  # сезонность (§7): месяц макс. спроса, напр. «дек 2025»; '' если ряда нет
+    # §7: ПОЛНАЯ кривая сезонности — [(year, month_num 1..12, searches)] в календарном порядке.
+    # peak_month — производное (пик кривой); раньше ряд отбрасывался, теперь доступен для экспорта.
+    monthly: list = field(default_factory=list)
+
+
+def _monthly_series(monthly_volumes) -> list[tuple[int, int, int]]:
+    """§7: полная кривая сезонности → [(year, month_num, searches)] в календарном порядке. month_num
+    берём по ИМЕНИ enum (_MONTH_INDEX), а не по числовому значению proto (там JANUARY=2 — смещено)."""
+    out: list[tuple[int, int, int]] = []
+    for v in monthly_volumes or []:
+        name = getattr(getattr(v, "month", None), "name", "") or ""
+        idx = _MONTH_INDEX.get(name)
+        if idx is None:
+            continue
+        out.append(
+            (
+                int(getattr(v, "year", 0) or 0),
+                idx,
+                int(getattr(v, "monthly_searches", 0) or 0),
+            )
+        )
+    out.sort(key=lambda t: (t[0], t[1]))
+    return out
+
+
+_SPARK = "▁▂▃▄▅▆▇█"
+
+
+def seasonality_sparkline(monthly) -> str:
+    """§7: компактная кривая сезонности как unicode-спарклайн по последним ≤12 точкам ряда
+    (monthly = [(year, month_num, searches)]). Пусто/нулевой ряд ⇒ ''. Для экспорта: показывает
+    ФОРМУ спроса за год (пик даёт отдельная колонка peak_month), а не только максимум."""
+    pts = [int(s) for _, _, s in (monthly or [])][-12:]
+    if not pts or max(pts) <= 0:
+        return ""
+    mx = max(pts)
+    return "".join(_SPARK[min(len(_SPARK) - 1, int(s / mx * (len(_SPARK) - 1)))] for s in pts)
 
 
 def _peak_month(monthly_volumes) -> str:
@@ -86,6 +178,7 @@ def _idea(r) -> KeywordIdea:
         high_bid=(m.high_top_of_page_bid_micros or 0) / 1_000_000,
         avg_cpc=(m.average_cpc_micros or 0) / 1_000_000,
         peak_month=_peak_month(getattr(m, "monthly_search_volumes", None)),
+        monthly=_monthly_series(getattr(m, "monthly_search_volumes", None)),
     )
 
 
@@ -118,6 +211,8 @@ _MONTH_NAMES = (
     "NOVEMBER",
     "DECEMBER",
 )
+# §7: имя месяца → календарный номер 1..12 (для полной кривой сезонности _monthly_series).
+_MONTH_INDEX = {name: i + 1 for i, name in enumerate(_MONTH_NAMES)}
 
 
 def _year_month_range(today, months: int) -> tuple[tuple[int, str], tuple[int, str]]:
@@ -166,8 +261,11 @@ def generate_keyword_ideas(
     def _build_request():
         req = client.get_type("GenerateKeywordIdeasRequest")
         req.customer_id = str(customer_id)
-        lang_id = LANGUAGE_IDS.get(language, LANGUAGE_IDS[DEFAULT_LANGUAGE])
-        req.language = f"languageConstants/{lang_id}"
+        # §7: язык ОПЦИОНАЛЕН. Известный ISO → languageConstant; неизвестный/'any'/'' → НЕ задаём
+        # (Google не фильтрует по языку → шире выборка). Раньше неизвестный молча становился русским.
+        lang_id = LANGUAGE_IDS.get((language or "").strip().lower())
+        if lang_id:
+            req.language = f"languageConstants/{lang_id}"
         for gid in geo_ids:
             req.geo_target_constants.append(f"geoTargetConstants/{int(gid)}")
         net_enum = client.enums.KeywordPlanNetworkEnum

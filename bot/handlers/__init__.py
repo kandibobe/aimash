@@ -27,6 +27,7 @@ HANDLER_MODULES: tuple[str, ...] = (
     "clients_kb",
     "templates_recent",
     "advise_flow",  # advisor: 👍/👎 фидбек (AdviseCB) — только запись, без мутаций
+    "bug_report",  # §6: /reportbug + /bugs (админ-триаж) — только локальная БД, без мутаций
     "confirm_flow",
     "fallback",  # catch-all on_text — ПОСЛЕДНИМ (иначе LLM-фолбэк глотает команды/визарды)
 )

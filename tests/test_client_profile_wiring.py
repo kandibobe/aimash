@@ -222,3 +222,41 @@ async def test_cc_asset_type_sitelinks_gets_crawled_pages():
     assert any(p["url"] == "https://kasi.example/catalog" for p in pages)  # реальные url из краула
     # сообщение-пометка «из реальной карты сайта» отправлено
     assert any("карты сайта" in (t or "") for t, _ in cq.message.answers)
+
+
+@pytest.mark.asyncio
+async def test_cc_asset_type_gated_shows_requirement_not_silent():
+    """§19.7.1: выбор типа, недоступного в v24/вне объёма (location/affiliate/app), НЕ молчит и НЕ
+    падает — бот объясняет причину и возвращает в пикер (раньше эти типы просто отсутствовали)."""
+    await init_db()
+    chat_id = 724
+    session = await bm.CDRAFTS.create(chat_id=chat_id, customer_id=bm.DRAFT_ACCOUNT_ID)
+    for family, needle in (
+        ("location", "Business Profile"),
+        ("affiliate_location", "v24"),
+        ("app", "вне объёма"),
+    ):
+        cq = FakeCB(chat_id)
+        await bm.cc_asset_type(
+            cq, CcCB(action="asset_type", sub=family), FakeState(cc_session=session)
+        )
+        texts_sent = " ".join(t or "" for t, _ in cq.message.answers)
+        assert needle in texts_sent, f"{family}: причина не объяснена"
+    # ни один недоступный тип не накопил ассет в черновике (assets.new пуст)
+    draft = await bm.CDRAFTS.get(session, expected_chat_id=chat_id)
+    assert not (draft.wizard_state.get("assets") or {}).get("new")
+
+
+@pytest.mark.asyncio
+async def test_cc_asset_type_lead_form_prompts_for_privacy_url():
+    """§19.7.1: лид-форма РЕАЛИЗОВАНА — выбор запрашивает URL политики конфиденциальности (ассет
+    строится за confirm-гейтом после ввода), а не отклоняется как «нужна настройка»."""
+    await init_db()
+    chat_id = 725
+    session = await bm.CDRAFTS.create(chat_id=chat_id, customer_id=bm.DRAFT_ACCOUNT_ID)
+    cq = FakeCB(chat_id)
+    await bm.cc_asset_type(
+        cq, CcCB(action="asset_type", sub="lead_form"), FakeState(cc_session=session)
+    )
+    texts_sent = " ".join(t or "" for t, _ in cq.message.answers)
+    assert "конфиденциальн" in texts_sent  # просим privacy-URL, не отказываем

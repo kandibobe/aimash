@@ -84,6 +84,7 @@ async def search_brief(m: bm.Message, state: bm.FSMContext) -> None:
         params=params,
         summary=summary,
         cid=p.confirmation_id,
+        customer_id=await bm._active_read_account(m.chat.id),  # §8: создаём на активном аккаунте
     )
 
 
@@ -195,14 +196,21 @@ async def video_pick_type(
         await cq.answer(bm.i18n.t("video_session_stale"), show_alert=True)
         await state.clear()
         return
-    await state.update_data(video_kind=callback_data.action)
-    await state.set_state(bm.VideoWizard.awaiting_brief)
-    # P1-K: Video-кампании создаются по API только с allowlist Google — предупреждаем ДО брифа
-    # (раньше менеджер узнавал об ограничении только после подтверждения). Demand Gen — без ограничения.
-    if callback_data.action == "video":
+    kind = callback_data.action
+    # B4: Video через API возможен только для allowlist-аккаунтов Google (иначе mutate →
+    # MUTATE_NOT_ALLOWED). Если владелец не включил его явно (GOOGLE_ADS_VIDEO_ENABLED), НЕ ведём
+    # менеджера в гарантированный тупик после полного брифа — честно объясняем и продолжаем на
+    # Demand Gen (тот же ролик, рабочий путь). Video-цепочка в коде готова: включить = один флаг.
+    if kind == "video" and not bm.settings.google_ads_video_enabled:
+        kind = "dg"
+        await cq.answer(bm.i18n.t("video_disabled_use_dg"), show_alert=True)
+    elif kind == "video":
+        # Аккаунт заявлен как allowlisted (флаг включён) — предупреждаем о риске, но продолжаем Video.
         await cq.answer(bm.i18n.t("video_allowlist_warn"), show_alert=True)
     else:
         await cq.answer()
+    await state.update_data(video_kind=kind)
+    await state.set_state(bm.VideoWizard.awaiting_brief)
     msg = bm._cq_msg(cq)
     if msg is not None:
         await msg.answer(
@@ -353,4 +361,5 @@ async def gdn_brief(m: bm.Message, state: bm.FSMContext) -> None:
         params=params,
         summary=summary,
         cid=p.confirmation_id,
+        customer_id=await bm._active_read_account(m.chat.id),  # §8: создаём на активном аккаунте
     )

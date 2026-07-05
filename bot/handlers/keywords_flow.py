@@ -139,6 +139,10 @@ async def kw_params_cb(
         await cq.answer()
         await msg.answer(bm.i18n.t("kw_params_pick_geo"), reply_markup=bm.kw_geo_kb())
         return
+    if field == "lang":  # §7: открыть саб-пикер языка (был 3-тактный цикл ru/uk/en)
+        await cq.answer()
+        await msg.answer(bm.i18n.t("kw_params_pick_lang"), reply_markup=bm.kw_lang_kb())
+        return
     if field == "geo_pick":
         if value == "custom":
             await state.set_state(bm.KwWizard.awaiting_geo)
@@ -147,10 +151,14 @@ async def kw_params_cb(
             return
         await state.update_data(kw_geo_iso=value)
         await state.set_state(bm.KwWizard.params)
-    elif field == "lang":  # цикл ru → uk → en
-        cur = str((await state.get_data()).get("kw_lang") or "ru")
-        order = ("ru", "uk", "en")
-        await state.update_data(kw_lang=order[(order.index(cur) + 1) % 3 if cur in order else 0])
+    elif field == "lang_pick":  # §7: пресет/«любой»/ручной ввод языка
+        if value == "custom":
+            await state.set_state(bm.KwWizard.awaiting_lang)
+            await cq.answer()
+            await msg.answer(bm.i18n.t("kw_params_ask_lang"), reply_markup=bm.nav_kb())
+            return
+        await state.update_data(kw_lang=value)  # ISO из пресета или 'any' (язык не фильтруем)
+        await state.set_state(bm.KwWizard.params)
     elif field == "net":
         cur = str((await state.get_data()).get("kw_net") or "GOOGLE_SEARCH")
         await state.update_data(
@@ -179,6 +187,20 @@ async def kw_geo_text(m: bm.Message, state: bm.FSMContext) -> None:
         await m.answer(bm.i18n.t("kw_params_geo_unknown"), reply_markup=bm.nav_kb())
         return  # остаёмся в состоянии — пользователь уточнит (или «✖ Отмена»)
     await state.update_data(kw_geo_iso=iso)
+    await _kw_present_params(m, state)
+
+
+@bm.dp.message(bm.KwWizard.awaiting_lang)
+async def kw_lang_text(m: bm.Message, state: bm.FSMContext) -> None:
+    """§7: ручной ввод ЯЗЫКА подбора («немецкий»/«de»/«japanese») → ISO через ads.geo.lang_iso.
+    Не распозналось Google — retry. Зеркало kw_geo_text; любой язык из таблицы Google достижим."""
+    from ads.geo import lang_iso
+
+    iso = lang_iso(m.text or "")
+    if not iso:
+        await m.answer(bm.i18n.t("kw_params_lang_unknown"), reply_markup=bm.nav_kb())
+        return  # остаёмся в состоянии — пользователь уточнит (или «✖ Отмена»)
+    await state.update_data(kw_lang=iso)
     await _kw_present_params(m, state)
 
 
@@ -306,4 +328,7 @@ async def on_kw_add_match(cq: bm.CallbackQuery, callback_data: bm.KwAddCB) -> No
         params=params,
         summary=summary,
         cid=cid,
+        customer_id=await bm._active_read_account(
+            bm._cq_chat_id(cq)
+        ),  # §8: ключи на активный аккаунт
     )

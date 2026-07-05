@@ -32,11 +32,12 @@ async def savetemplate_cmd(m: bm.Message, command: bm.CommandObject) -> None:
         from ads.read import read_campaign_config
 
         try:
-            client = await build_client_async()
+            acct = await bm._active_read_account(m.chat.id)  # §8: источник с активного аккаунта
+            client = await build_client_async(acct)
             cfg = await bm.run_ads_read_call(
                 read_campaign_config,
                 client,
-                bm.DRAFT_ACCOUNT_ID,
+                acct,
                 source,
                 label="read_campaign_config",
             )
@@ -134,11 +135,14 @@ async def tpl_name(m: bm.Message, state: bm.FSMContext) -> None:
     from ads.client import build_client_async
     from ads.resolve import find_campaign_by_name
 
+    acct = await bm._active_read_account(
+        m.chat.id
+    )  # §8: создаём на активном аккаунте (и дубль-чек на нём)
     try:
         existing = await bm.run_ads_read_call(
             find_campaign_by_name,
-            await build_client_async(),
-            bm.DRAFT_ACCOUNT_ID,
+            await build_client_async(acct),
+            acct,
             new_name,
             label="find_campaign_by_name",
         )
@@ -174,6 +178,7 @@ async def tpl_name(m: bm.Message, state: bm.FSMContext) -> None:
         params=validated,
         summary=summary,
         cid=p.confirmation_id,
+        customer_id=acct,  # §8: создаём кампанию из шаблона на активном аккаунте (замок — в _present_proposal)
     )
 
 
@@ -217,4 +222,5 @@ async def on_recent_repeat(cq: bm.CallbackQuery, callback_data: bm.RecentCB) -> 
         params=validated,
         summary=fallback,
         cid=p.confirmation_id,
+        customer_id=await bm._active_read_account(chat_id),  # §8: повтор на активном аккаунте
     )

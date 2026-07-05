@@ -112,6 +112,15 @@ async def is_whitelisted(chat_id: int | None) -> bool:
     return chat_id in await _db_whitelist_ids()
 
 
+async def whitelisted_ids() -> set[int]:
+    """ВЕСЬ набор доверенных операторов: env TELEGRAM_WHITELIST_CHAT_IDS (бутстрап) ∪ таблица
+    whitelist (рантайм /adduser). Fail-closed (сбой БД ⇒ только env — см. _db_whitelist_ids).
+    D9: для не-hot-path потребителей, которым нужен весь список операторов (планировщик —
+    плановые отчёты/аномалии/advise), а не проверка одного id (is_whitelisted). Раньше планировщик
+    брал только env и рантайм-добавленные (/adduser) операторы не получали рассылки до рестарта."""
+    return set(settings.whitelist) | set(await _db_whitelist_ids())
+
+
 async def add_whitelisted_user(
     chat_id: int, *, added_by: int | None = None, note: str | None = None
 ) -> bool:

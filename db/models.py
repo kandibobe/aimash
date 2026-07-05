@@ -17,6 +17,7 @@
 - recommendation   — advisor: показанная рекомендация (advisory, НЕ proposal); source/kind/priority
 - recommendation_feedback — 👍/👎 оператора на рекомендацию (Слой B: сигнал для experience)
 - recommendation_outcome — сшивка рекомендация→applied-мутация→delta метрик (Слой B: замер результата)
+- bug_reports       — пользовательские баг-репорты (/reportbug, §6): текст РЕДАКТ., статус триажа
 
 ⚠️ Секреты (refresh-токены) хранятся ТОЛЬКО зашифрованными (oauth_tokens.refresh_token_enc).
 В audit_log/proposals секретов нет. PII клиента (§20) — не секрет проекта, но в логи сырьём не
@@ -457,4 +458,28 @@ class RecommendationOutcome(Base):
         DateTime(timezone=True)
     )  # NULL=ждёт замера
     verdict: Mapped[str | None] = mapped_column(String(16))  # improved|worse|neutral (КОД)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class BugReport(Base):
+    """Пользовательский баг-репорт (команда /reportbug, §6 «сообщить об ошибке»). Оператор описывает
+    проблему текстом → бот сохраняет сюда, форвардит админам и включает в еженедельный дайджест.
+    text РЕДАКТИРОВАН через core.logging.redact_text ПЕРЕД записью (golden rule #5 — оператор мог
+    вставить в описание что-то секрето-подобное). context_request_id сшивает репорт с последним
+    инцидентом /diag (error_events) того же чата — для триажа. Ничего не мутирует в Google Ads."""
+
+    __tablename__ = "bug_reports"
+    __table_args__ = (Index("ix_bug_reports_status_created", "status", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    username: Mapped[str | None] = mapped_column(String(64))  # @username автора (если есть)
+    text: Mapped[str] = mapped_column(Text, nullable=False)  # описание — РЕДАКТИРОВАНО
+    context_request_id: Mapped[str | None] = mapped_column(
+        String(16)
+    )  # сшивка с error_events (/diag)
+    status: Mapped[str] = mapped_column(
+        String(16), default="new", nullable=False
+    )  # new|triaged|closed
+    triaged_by: Mapped[int | None] = mapped_column(BigInteger)  # chat_id админа, сменившего статус
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

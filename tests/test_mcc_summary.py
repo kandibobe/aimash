@@ -121,3 +121,56 @@ def test_build_mcc_summary_empty_read_list_includes_only_mutation_account():
 
     assert {c.account.id for c in summary.children} == {DRAFT}
     assert summary.skipped == [CHILD]
+
+
+# ── §8: разбивка кампаний ПО СТАТУСУ (не только счётчик активных) ──────────────────
+def test_fmt_campaign_status_breakdown():
+    from reports.service import _fmt_campaign_status
+
+    assert _fmt_campaign_status(None) == ""
+    assert _fmt_campaign_status({}) == ""
+    s = _fmt_campaign_status({"ENABLED": 3, "PAUSED": 5})
+    assert "▶️3" in s and "⏸5" in s
+    assert "Pending:2" in _fmt_campaign_status({"PENDING": 2})  # прочие статусы — «Имя:N»
+
+
+def test_summary_text_mcc_shows_status_breakdown():
+    from reports.mcc import MccSummary
+    from reports.period import last_n_days
+    from reports.service import summary_text_mcc
+
+    cr = ChildReport(
+        _child("1112223334", "USD"),
+        _m(cost_micros=5_000_000, clicks=10),
+        active_campaigns=3,
+        campaign_status={"ENABLED": 3, "PAUSED": 2},
+    )
+    summ = MccSummary(manager_id="555", period=last_n_days(7), children=[cr])
+    txt = summary_text_mcc(summ, lang="ru")
+    assert "▶️3" in txt and "⏸2" in txt  # статус кампаний виден в строке аккаунта
+
+
+def test_campaign_status_counts_query_and_count():
+    from types import SimpleNamespace
+
+    from reports.queries import campaign_status_counts
+
+    captured: dict = {}
+
+    class _Svc:
+        def search(self, customer_id, query):
+            captured["q"] = query
+            return [
+                SimpleNamespace(campaign=SimpleNamespace(status=SimpleNamespace(name="ENABLED"))),
+                SimpleNamespace(campaign=SimpleNamespace(status=SimpleNamespace(name="ENABLED"))),
+                SimpleNamespace(campaign=SimpleNamespace(status=SimpleNamespace(name="PAUSED"))),
+            ]
+
+    class _Client:
+        def get_service(self, name):
+            return _Svc()
+
+    with _ids(allowed="1112223334", read=""):
+        counts = campaign_status_counts(_Client(), "1112223334")
+    assert counts == {"ENABLED": 2, "PAUSED": 1}
+    assert "!= 'REMOVED'" in captured["q"] and "FROM campaign" in captured["q"]
