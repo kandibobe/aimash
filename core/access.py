@@ -230,10 +230,40 @@ async def list_user_account_ids(chat_id: int) -> list[str]:
     return sorted({DRAFT_ACCOUNT_ID, *(normalize_customer_id(c) for c in rows)})
 
 
+async def _default_live_account(chat_id: int) -> str:
+    """§8 «читать РЕАЛЬНЫЙ аккаунт целиком»: дефолт аккаунта ЧТЕНИЯ, когда оператор не выбрал явно.
+    Если у бота РОВНО ОДИН живой read-аккаунт (обход MCC ∪ env read-list, КРОМЕ Draft), доступный
+    этому оператору (глобальный read-замок × пер-юзер грант) → он. Иначе '' (⇒ вызывающий берёт
+    Draft): ноль живых → пустая песочница; несколько → НЕ угадываем (решает пикер /account).
+
+    Почему безопасно для мутаций: таргет мутации = тот же активный аккаунт (read/write согласованы,
+    чтобы «пауза X» целилась в ТУ кампанию, что видит оператор), но замок ads.client.ensure_allowed
+    режет не-allow-listed аккаунт (fail-closed) ДО показа кнопок — т.е. смена дефолта чтения делает
+    отказ на не-Draft мутации строже, а не слабее (golden rule 9 сохранён)."""
+    from ads.client import discovered_read_children
+
+    live = {
+        n
+        for c in (set(discovered_read_children()) | set(settings.read_customer_ids))
+        if (n := normalize_customer_id(c)) and n != DRAFT_ACCOUNT_ID
+    }
+    if len(live) != 1:  # 0 → Draft (песочница); >1 → пикер (не угадываем активный)
+        return ""
+    cid = next(iter(live))
+    try:
+        ensure_read_allowed(cid)  # глобальный read-замок (fail-closed)
+        await ensure_account_allowed_for_user(chat_id, cid)  # пер-пользователь
+    except PermissionError:
+        return ""  # оператору этот аккаунт не гранован → Draft (fail-closed)
+    return cid
+
+
 async def get_active_account(chat_id: int) -> str:
-    """Активный аккаунт чата. NULL/нет строки → Draft. Если сохранён не-Draft — ПЕРЕПРОВЕРЯЕМ доступ
-    (глобальный read-замок + пер-пользовательский грант): доступ отозвали ⇒ тихо откатываемся на
-    Draft (fail-closed: НИКОГДА не на чужой аккаунт). Единственная точка резолва «активного» в боте."""
+    """Активный аккаунт ЧТЕНИЯ чата. Явный выбор (/account, пикер) ПЕРЕПРОВЕРЯЕТСЯ (глобальный
+    read-замок + пер-пользовательский грант): доступ отозвали ⇒ тихо откатываемся на Draft
+    (fail-closed: НИКОГДА не на чужой аккаунт). Нет явного выбора (или Draft) → «реальный аккаунт
+    целиком»: единственный живой read-аккаунт (см. _default_live_account), иначе Draft. Единственная
+    точка резолва «активного» в боте — смена дефолта каскадно включает живой аккаунт во ВСЕХ чтениях."""
     async with Session() as s:
         sel = (
             await s.execute(
@@ -241,14 +271,19 @@ async def get_active_account(chat_id: int) -> str:
             )
         ).scalar_one_or_none()
     cid = normalize_customer_id(sel) if sel else ""
-    if not cid or cid == DRAFT_ACCOUNT_ID:
+    if not cid:
+        # НЕТ явного выбора (NULL) → авто «реальный аккаунт целиком»: единственный живой read-аккаунт.
+        return await _default_live_account(chat_id) or DRAFT_ACCOUNT_ID
+    if cid == DRAFT_ACCOUNT_ID:
+        # ЯВНЫЙ пин Draft (setacct-пикер выбрал Draft / _heal_if_stuck_global): НЕ авто-прыжок на
+        # живой аккаунт — оператор осознанно смотрит песочницу. «Авто» доступно через /account reset.
         return DRAFT_ACCOUNT_ID
     try:
         ensure_read_allowed(cid)  # глобальный read-замок (fail-closed)
         await ensure_account_allowed_for_user(chat_id, cid)  # пер-пользователь
     except PermissionError:
         log.info("active-account: доступ к %s для chat %s отозван → откат на Draft", cid, chat_id)
-        return DRAFT_ACCOUNT_ID
+        return DRAFT_ACCOUNT_ID  # явный выбор отозван → fail-closed на Draft (не прыгаем на другой)
     return cid
 
 

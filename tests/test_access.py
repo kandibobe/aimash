@@ -295,6 +295,87 @@ async def test_resolve_read_account_paths(monkeypatch):
         set_discovered_read_children_meta([])
 
 
+# ── §8 «читать РЕАЛЬНЫЙ аккаунт целиком»: авто-дефолт на единственный живой read-аккаунт ──
+async def test_no_selection_defaults_to_single_live_account():
+    """Нет явного выбора + РОВНО ОДИН живой read-аккаунт (доступный оператору) → он, а не Draft."""
+    from ads.client import set_discovered_read_children
+
+    await init_db()
+    chat = 7101
+    set_discovered_read_children([])  # детерминизм: живой набор только из read_ids ниже
+    await revoke_account_access(chat, ACCT)
+    await grant_account_access(chat, ACCT)  # оператор допущен к живому аккаунту (enforced-autouse)
+    try:
+        with _read(read_ids=ACCT):
+            assert await get_active_account(chat) == ACCT  # авто на единственный живой
+    finally:
+        await revoke_account_access(chat, ACCT)
+
+
+async def test_no_selection_multiple_live_stays_draft():
+    """Нет выбора + НЕСКОЛЬКО живых read-аккаунтов → Draft (не угадываем; выбор — пикер /account)."""
+    from ads.client import set_discovered_read_children
+
+    await init_db()
+    chat, acct2 = 7102, "9998887776"
+    set_discovered_read_children([])
+    await grant_account_access(chat, ACCT)
+    await grant_account_access(chat, acct2)
+    try:
+        with _read(read_ids=f"{ACCT},{acct2}"):
+            assert await get_active_account(chat) == DRAFT  # >1 живого → не угадываем
+    finally:
+        await revoke_account_access(chat, ACCT)
+        await revoke_account_access(chat, acct2)
+
+
+async def test_no_selection_single_live_not_granted_stays_draft():
+    """Нет выбора + один живой, но оператору НЕ гранован (enforced) → Draft (fail-closed, не утечка)."""
+    from ads.client import set_discovered_read_children
+
+    await init_db()
+    chat = 7103
+    set_discovered_read_children([])
+    await revoke_account_access(chat, ACCT)  # гранта нет
+    with _read(read_ids=ACCT):
+        assert await get_active_account(chat) == DRAFT  # нет гранта → авто-дефолт не откроет чужой
+
+
+async def test_live_read_default_does_not_open_mutation():
+    """Инвариант §8 × golden rule 9: авто-дефолт ЧТЕНИЯ на живой аккаунт НЕ открывает МУТАЦИИ на
+    нём — ensure_allowed (потолок ALLOWED_CEILING=Draft) отказывает, пока аккаунт не в
+    allowed_customer_ids. Смена read-дефолта делает отказ на не-Draft строже, а не слабее."""
+    from ads.client import ensure_allowed, set_discovered_read_children
+
+    await init_db()
+    chat = 7106
+    set_discovered_read_children([])
+    await grant_account_access(chat, ACCT)  # оператор может ЧИТАТЬ живой аккаунт
+    try:
+        with _read(read_ids=ACCT, allowed=DRAFT):  # виден на чтение, НЕ включён на мутации
+            assert await get_active_account(chat) == ACCT  # чтение авто-дефолтит на живой
+            with pytest.raises(PermissionError):
+                ensure_allowed(ACCT)  # но мутация на него — ОТКАЗ (замок держит, fail-closed)
+    finally:
+        await revoke_account_access(chat, ACCT)
+
+
+async def test_pinned_draft_not_overridden_by_single_live():
+    """ЯВНЫЙ пин Draft (setacct/heal) НЕ перебивается авто-дефолтом на живой аккаунт."""
+    from ads.client import set_discovered_read_children
+
+    await init_db()
+    chat = 7104
+    set_discovered_read_children([])
+    await grant_account_access(chat, ACCT)
+    await set_active_account(chat, DRAFT)  # оператор осознанно пинит Draft (песочница)
+    try:
+        with _read(read_ids=ACCT):  # живой аккаунт есть, но пин Draft держится
+            assert await get_active_account(chat) == DRAFT
+    finally:
+        await revoke_account_access(chat, ACCT)
+
+
 async def test_get_active_account_corner_cases():
     """Углы резолва: нет строки → Draft; явный Draft → Draft; дефис-форма в БД → нормализованный возврат."""
     from sqlalchemy import select
