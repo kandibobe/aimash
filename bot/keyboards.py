@@ -630,6 +630,9 @@ _ADVISE_APPLY_LABELS = {
     "pause_campaign": "advise_apply_btn_pause",
     "add_negative_keywords": "advise_apply_btn_negatives",
 }
+# ЕДИНЫЙ источник множества one-tap операций: bot.main (интерактивный /advise) и scheduler-дайджест
+# импортируют ЭТО множество — дублирование списков разъехалось бы молча (гард денег #3).
+ADVISE_APPLY_OPS = frozenset(_ADVISE_APPLY_LABELS)
 
 
 def advise_feedback_kb(
@@ -653,10 +656,16 @@ def advise_feedback_kb(
         text="👎 Not useful" if en else "👎 Мимо",
         callback_data=AdviseCB(action="down", rec=rec_uid),
     )
+    # 🙈 «Скрыть» — сигнал «показано и проигнорировано»: status='dismissed' + слабый негатив в
+    # experience (пер-кампанийная усталость). Только локальная БД, как 👍/👎.
+    kb.button(
+        text="🙈 Hide" if en else "🙈 Скрыть",
+        callback_data=AdviseCB(action="dismiss", rec=rec_uid),
+    )
     if apply_key:
-        kb.adjust(1, 2)
+        kb.adjust(1, 3)
     else:
-        kb.adjust(2)
+        kb.adjust(3)
     return kb.as_markup()
 
 
@@ -1454,23 +1463,35 @@ def _page_nav_row(kb: InlineKeyboardBuilder, kind: str, target: str, page: int, 
 
 
 def report_accounts_kb(
-    rows: list, target: str, lang: str | None = None, *, last: str | None = None, page: int = 0
+    rows: list,
+    target: str,
+    lang: str | None = None,
+    *,
+    last: str | None = None,
+    page: int = 0,
+    frequent: list[str] | None = None,
 ) -> InlineKeyboardMarkup:
     """§8: выбор аккаунта для отчёта/экспорта, ПОСТРАНИЧНО (3E: раньше кнопка на каждую строку —
     >100 аккаунтов давали REPLY_MARKUP_TOO_LONG). rows — ChildAccount-подобные (.name/.id/.currency);
     idx → ГЛОБАЛЬНАЯ позиция в _REPORT_ACCT_CACHE[chat_id]. target — поток (report|export|sheets).
     last (§UX-память) — последний выбранный аккаунт: на СТРАНИЦЕ 0 первой кнопкой
-    «↻ как в прошлый раз» (закреплена независимо от страницы, где живёт сам аккаунт)."""
+    «↻ как в прошлый раз» (закреплена независимо от страницы, где живёт сам аккаунт).
+    frequent (1.7) — «частые аккаунты» оператора (bm._frequent_accounts): до 3 закреплённых
+    ⭐-кнопок на странице 0 (без дубля с last); при 7 дочерних срезает рутину переключения."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     total = len(rows)
     page, pages, start = _acct_page(total, page)
     extra = 0
+
+    def _digits(v: object) -> str:
+        return "".join(ch for ch in str(v) if ch.isdigit())
+
     last_idx = None
     if last and page == 0:
-        last_n = "".join(ch for ch in str(last) if ch.isdigit())
+        last_n = _digits(last)
         for i, r in enumerate(rows):
-            if "".join(ch for ch in str(getattr(r, "id", "")) if ch.isdigit()) == last_n:
+            if _digits(getattr(r, "id", "")) == last_n:
                 last_idx = i
                 break
     if last_idx is not None:
@@ -1479,6 +1500,18 @@ def report_accounts_kb(
         repeat = f"↻ {nm} — same as last time" if en else f"↻ {nm} — как в прошлый раз"
         kb.button(text=repeat, callback_data=ReportAcctCB(target=target, idx=last_idx))
         extra += 1
+    if frequent and page == 0:  # 1.7: ⭐-закрепы частых (только присутствующие в rows — замок цел)
+        pinned: set[int] = {last_idx} if last_idx is not None else set()
+        by_digits = {_digits(getattr(r, "id", "")): i for i, r in enumerate(rows)}
+        for fcid in frequent[:3]:
+            i = by_digits.get(_digits(fcid))
+            if i is None or i in pinned:
+                continue
+            r = rows[i]
+            nm = _ellipsize(getattr(r, "name", "") or getattr(r, "id", ""))
+            kb.button(text=f"⭐ {nm}", callback_data=ReportAcctCB(target=target, idx=i))
+            pinned.add(i)
+            extra += 1
     shown = 0
     for i in range(start, min(start + _ACCT_PAGE, total)):
         r = rows[i]

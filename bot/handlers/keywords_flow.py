@@ -318,7 +318,7 @@ async def on_kw_add_match(cq: bm.CallbackQuery, callback_data: bm.KwAddCB) -> No
             "add_keywords", campaign=sess["campaign"], keywords=sess["keywords"], match_type=mt
         )
     except Exception as e:  # noqa: BLE001 — валидация схемы (длина/пустой список) → понятный ответ
-        await cq.answer(bm.i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
+        await cq.answer(await bm._friendly_error(e, "kw:add", short=True), show_alert=True)
         return
     await cq.answer()
     await bm._present_proposal(

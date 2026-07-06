@@ -21,6 +21,22 @@ async def on_advise_feedback(cq: bm.CallbackQuery, callback_data: bm.AdviseCB) -
         await bm._advise_apply(cq, callback_data.rec)
         return
 
+    # 🙈 «Скрыть» — dismissed + слабый негатив в experience («показано и проигнорировано» учится).
+    if callback_data.action == "dismiss":
+        from advisor import store as advisor_store
+
+        ok = False
+        try:
+            ok = await advisor_store.dismiss_recommendation(callback_data.rec, chat_id)
+        except Exception:  # noqa: BLE001 — скрытие не критично, UI не роняем
+            bm.log.warning("advise dismiss: не записан для %s", callback_data.rec)
+        await cq.answer(bm.i18n.t("advise_dismissed" if ok else "stale"))
+        try:  # убрать кнопки под скрытой карточкой (сама карточка остаётся в истории чата)
+            await cq.message.edit_reply_markup(reply_markup=None)
+        except Exception:  # noqa: BLE001 — косметика
+            pass
+        return
+
     # Тумблер проактивной подачи (ui_prefs.advise_proactive) — как /alerts, confirm-гейт не нужен.
     if callback_data.action == "auto":
         want_on = callback_data.rec == "on"

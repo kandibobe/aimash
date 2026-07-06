@@ -42,6 +42,19 @@ def report_trigger() -> CronTrigger:
 _DEFAULT_WEEKLY_DIGEST_CRON = {"day_of_week": "mon", "hour": 9, "minute": 0}  # пн 09:00 (fallback)
 
 
+def business_digest_trigger() -> CronTrigger:
+    """CronTrigger недельного БИЗНЕС-дайджеста (1.6) из settings.business_digest_schedule.
+    Зеркалит weekly_digest_trigger: невалидная строка → откат на пн 09:00 + громкий лог."""
+    raw = (settings.business_digest_schedule or "").strip()
+    try:
+        return CronTrigger.from_crontab(raw)
+    except (ValueError, TypeError) as e:
+        log.warning(
+            "BUSINESS_DIGEST_SCHEDULE=%r невалиден (%s) — откат на пн 09:00", raw, type(e).__name__
+        )
+        return CronTrigger(**_DEFAULT_WEEKLY_DIGEST_CRON)
+
+
 def weekly_digest_trigger() -> CronTrigger:
     """CronTrigger еженедельного дайджеста из settings.weekly_digest_schedule (crontab-строка).
     Зеркалит report_trigger: невалидную строку НЕ роняем стартом — откат на пн 09:00 + громкий лог."""
@@ -180,6 +193,17 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
         CronTrigger(hour=9, minute=30),
         args=[bot],
         id="advise_digest",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    # 1.6: недельный БИЗНЕС-дайджест менеджерам (WoW-сводка + топ-3 совета + аномалии). READ-ONLY,
+    # opt-in per-chat (/bizdigest, ui_prefs.business_digest) — регистрируем всегда, внутри no-op
+    # без подписчиков (как advise_digest; fail-closed к анти-спаму).
+    sched.add_job(
+        jobs.run_business_digest,
+        business_digest_trigger(),
+        args=[bot],
+        id="business_digest",
         replace_existing=True,
         misfire_grace_time=3600,
     )

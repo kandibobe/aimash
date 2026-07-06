@@ -134,6 +134,13 @@ class Settings(BaseSettings):
     # пока единый источник глобального расписания — env.
     report_schedule: str = "0 9 * * *"  # crontab: ежедневно 09:00 (локальное время)
     anomaly_interval_hours: int = 6  # проверка аномалий каждые N часов
+    # §advisor «утренний экран действий»: сколько топ-рекомендаций (по доле расхода под риском,
+    # кросс-аккаунтно, БЕЗ FX) слать в проактивном дайджесте и пауза между сообщениями (flood-
+    # limits Telegram: ≤1 msg/s на чат; 0.7c — тот же темп, что message-throttle).
+    advise_digest_top_n: int = 5
+    advise_digest_send_pause: float = 0.7
+    # 1.6: недельный БИЗНЕС-дайджест менеджерам (WoW + топ-3 совета + аномалии), opt-in /bizdigest.
+    business_digest_schedule: str = "0 9 * * 1"  # crontab: пн 09:00
     cleanup_interval_minutes: int = 60  # очистка просроченных черновиков каждые N минут
     # §19: TTL активного черновика визарда «Создание кампании» (campaign_drafts). Щедрый по
     # умолчанию — Этап-2 round-trip с Google Sheets может занять день. Старше → status='abandoned'

@@ -313,8 +313,13 @@ async def _do_read(name: str, args: dict[str, Any], chat_id: int = 0) -> dict[st
     чата (тот же резолв, что /report). Запрещённый/неизвестный аккаунт → внятный отказ, а НЕ
     молчаливая подмена первым разрешённым (раньше NL-запрос статистики чужого аккаунта тихо
     показывал другой — денежные цифры без источника)."""
-    from core.access import resolve_read_account
+    from core.access import account_choice_pending, resolve_read_account
 
+    # §8: аккаунт не назван, оператор его не выбрал, а живых несколько — НЕ угадываем и НЕ
+    # показываем пустой Draft: бот-слой нарисует пикер (agent/loop клавиатур не знает).
+    acct_arg = str(args.get("account") or "").strip()
+    if not acct_arg and await account_choice_pending(chat_id):
+        return {"type": "need_account"}
     try:
         cid = await resolve_read_account(chat_id, args.get("account"))
     except PermissionError:

@@ -108,6 +108,16 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "🔄 Выбери активный аккаунт для отчётов/ключей (сохранится для этого чата):",
         "en": "🔄 Pick the active account for reports/keywords (saved for this chat):",
     },
+    "pick_live_account_first": {
+        "ru": "⚠️ У бота несколько живых аккаунтов, а активный не выбран — не угадываю, "
+        "чтобы не показать не те деньги. Выбери аккаунт:",
+        "en": "⚠️ Several live accounts are visible and none is active — I won't guess "
+        "whose money to show. Pick an account:",
+    },
+    "campaigns_pick_account": {
+        "ru": "🏢 Кампании какого аккаунта показать?",
+        "en": "🏢 Which account's campaigns?",
+    },
     "service_menu_title": {
         "ru": "⚙️ <b>Сервис / Аккаунты</b> — команды без отдельной кнопки:",
         "en": "⚙️ <b>Service / Accounts</b> — commands without a dedicated button:",
@@ -441,6 +451,47 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "⚠️ Couldn't build recommendations: {err}",
     },
     "advise_feedback_thanks": {"ru": "Спасибо, учту 🙏", "en": "Thanks, noted 🙏"},
+    "advise_dismissed": {
+        "ru": "Скрыл. Такие советы по этой кампании буду показывать реже.",
+        "en": "Hidden. I'll show this kind of advice for this campaign less often.",
+    },
+    # «Утренний экран действий» (проактивный дайджест advisor): топ по доле расхода под риском
+    # по всем аккаунтам разом, каждая карточка — с кнопками 👍/👎/🙈/применить.
+    "advise_digest_header": {
+        "ru": "💡 Утренний экран действий — топ-{n} по деньгам-под-риском по всем аккаунтам:",
+        "en": "💡 Morning action screen — top {n} by money-at-risk across all accounts:",
+    },
+    "advise_digest_item": {
+        "ru": "🏢 {account}\n{body}",
+        "en": "🏢 {account}\n{body}",
+    },
+    "advise_digest_share": {
+        "ru": "≈{p}% расхода аккаунта",
+        "en": "≈{p}% of account spend",
+    },
+    # 1.6: недельный бизнес-дайджест (/bizdigest, scheduler.run_business_digest).
+    "bizdigest_header": {
+        "ru": "📈 Недельный бизнес-дайджест ({period})",
+        "en": "📈 Weekly business digest ({period})",
+    },
+    "bizdigest_recs_title": {
+        "ru": "Топ-3 рекомендации:",
+        "en": "Top-3 recommendations:",
+    },
+    "bizdigest_anomalies_title": {
+        "ru": "Аномалии недели:",
+        "en": "This week's anomalies:",
+    },
+    "bizdigest_on": {
+        "ru": "📈 Недельный бизнес-дайджест ВКЛючён — пришлю сводку по всем аккаунтам "
+        "(расход/конверсии/CPA неделя к неделе + топ-3 совета) по расписанию. Выключить: /bizdigest.",
+        "en": "📈 Weekly business digest is ON — you'll get a cross-account summary "
+        "(spend/conversions/CPA week-over-week + top-3 tips) on schedule. Turn off: /bizdigest.",
+    },
+    "bizdigest_off": {
+        "ru": "🔕 Недельный бизнес-дайджест выключен. Включить снова: /bizdigest.",
+        "en": "🔕 Weekly business digest is off. Turn on again: /bizdigest.",
+    },
     "advise_auto_on": {
         "ru": "🔔 Авто-советы включены — буду присылать рекомендации по расписанию.",
         "en": "🔔 Auto-advice on — I'll send recommendations on schedule.",
@@ -1185,7 +1236,8 @@ CATALOG: dict[str, dict[str, str]] = {
     },
     "cb_done": {"ru": "Готово", "en": "Done"},
     "cb_reset": {"ru": "Сброшено", "en": "Reset"},
-    "cb_error": {"ru": "Ошибка: {kind}", "en": "Error: {kind}"},
+    # cb_error («Ошибка: {kind}» с именем класса) удалён — P1-аудит 2026-07-06: менеджеру имена
+    # исключений не показываем; см. bot.main._friendly_error (err_validate / err_unexpected+код).
     "cb_working": {"ru": "Выполняю…", "en": "Working…"},
     "cb_cancelled": {"ru": "Отменено", "en": "Cancelled"},
     # — универсальная навигация мастеров (NavCB cancel) —

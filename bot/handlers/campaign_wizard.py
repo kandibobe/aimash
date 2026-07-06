@@ -1068,7 +1068,7 @@ async def cc_create(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.FSMC
     try:
         validated = bm.SCHEMAS["create_search_campaign"](**params).model_dump()
     except Exception as e:  # noqa: BLE001 — валидация схемы (длины/URL/бюджет)
-        await cq.answer(bm.i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
+        await cq.answer(await bm._friendly_error(e, "cc:create", short=True), show_alert=True)
         return
     # P1-A: на карточке ✅-гейта показываем и таргетинг (гео/язык/сети/расписание/даты) — менеджер
     # видит полное «было→станет» перед созданием (§5/§19.8). ad_schedule — человекочит. строка из
@@ -1157,7 +1157,7 @@ async def cc_launch(cq: bm.CallbackQuery, callback_data: bm.CcCB) -> None:
     try:
         cid, op, params, summary = bm._build_proposal("launch_campaign", campaign=name)
     except Exception as e:  # noqa: BLE001 — валидация схемы
-        await cq.answer(bm.i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
+        await cq.answer(await bm._friendly_error(e, "cc:launch", short=True), show_alert=True)
         return
     await cq.answer()
     if create_cid:

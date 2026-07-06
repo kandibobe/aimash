@@ -230,16 +230,11 @@ async def list_user_account_ids(chat_id: int) -> list[str]:
     return sorted({DRAFT_ACCOUNT_ID, *(normalize_customer_id(c) for c in rows)})
 
 
-async def _default_live_account(chat_id: int) -> str:
-    """§8 «читать РЕАЛЬНЫЙ аккаунт целиком»: дефолт аккаунта ЧТЕНИЯ, когда оператор не выбрал явно.
-    Если у бота РОВНО ОДИН живой read-аккаунт (обход MCC ∪ env read-list, КРОМЕ Draft), доступный
-    этому оператору (глобальный read-замок × пер-юзер грант) → он. Иначе '' (⇒ вызывающий берёт
-    Draft): ноль живых → пустая песочница; несколько → НЕ угадываем (решает пикер /account).
-
-    Почему безопасно для мутаций: таргет мутации = тот же активный аккаунт (read/write согласованы,
-    чтобы «пауза X» целилась в ТУ кампанию, что видит оператор), но замок ads.client.ensure_allowed
-    режет не-allow-listed аккаунт (fail-closed) ДО показа кнопок — т.е. смена дефолта чтения делает
-    отказ на не-Draft мутации строже, а не слабее (golden rule 9 сохранён)."""
+async def live_read_accounts(chat_id: int) -> list[str]:
+    """Живые (не-Draft) read-аккаунты, доступные ЭТОМУ оператору: (обход MCC ∪ env read-list)
+    × глобальный read-замок × пер-пользовательский грант. Единый источник для авто-дефолта
+    активного аккаунта и «выбор обязателен» на быстрых путях (§8). Fail-closed: аккаунт без
+    права — просто не в списке."""
     from ads.client import discovered_read_children
 
     live = {
@@ -247,15 +242,51 @@ async def _default_live_account(chat_id: int) -> str:
         for c in (set(discovered_read_children()) | set(settings.read_customer_ids))
         if (n := normalize_customer_id(c)) and n != DRAFT_ACCOUNT_ID
     }
+    out: list[str] = []
+    for cid in sorted(live):
+        try:
+            ensure_read_allowed(cid)  # глобальный read-замок (fail-closed)
+            await ensure_account_allowed_for_user(chat_id, cid)  # пер-пользователь
+        except PermissionError:
+            continue
+        out.append(cid)
+    return out
+
+
+async def _default_live_account(chat_id: int) -> str:
+    """§8 «читать РЕАЛЬНЫЙ аккаунт целиком»: дефолт аккаунта ЧТЕНИЯ, когда оператор не выбрал явно.
+    Если оператору доступен РОВНО ОДИН живой read-аккаунт (см. live_read_accounts) → он. Иначе ''
+    (⇒ вызывающий берёт Draft): ноль живых → пустая песочница; несколько → НЕ угадываем
+    (решает пикер /account или принудительный пикер быстрого пути, см. account_choice_pending).
+
+    Почему безопасно для мутаций: таргет мутации = тот же активный аккаунт (read/write согласованы,
+    чтобы «пауза X» целилась в ТУ кампанию, что видит оператор), но замок ads.client.ensure_allowed
+    режет не-allow-listed аккаунт (fail-closed) ДО показа кнопок — т.е. смена дефолта чтения делает
+    отказ на не-Draft мутации строже, а не слабее (golden rule 9 сохранён)."""
+    live = await live_read_accounts(chat_id)
     if len(live) != 1:  # 0 → Draft (песочница); >1 → пикер (не угадываем активный)
         return ""
-    cid = next(iter(live))
+    return live[0]
+
+
+async def account_choice_pending(chat_id: int) -> bool:
+    """True ⇔ оператор НЕ сделал явный выбор аккаунта (NULL в user_settings) И доступных ему
+    живых read-аккаунтов БОЛЬШЕ ОДНОГО — авто-дефолт не сработал, быстрый путь молча читал бы
+    пустой Draft. Быстрые пути (/report, /campaigns, NL-статистика) по этому флагу показывают
+    пикер вместо нулевого отчёта. Fail-closed к СТАРОМУ поведению: любой сбой → False (Draft,
+    не блокируем оператора)."""
     try:
-        ensure_read_allowed(cid)  # глобальный read-замок (fail-closed)
-        await ensure_account_allowed_for_user(chat_id, cid)  # пер-пользователь
-    except PermissionError:
-        return ""  # оператору этот аккаунт не гранован → Draft (fail-closed)
-    return cid
+        async with Session() as s:
+            sel = (
+                await s.execute(
+                    select(UserSettings.selected_customer_id).where(UserSettings.chat_id == chat_id)
+                )
+            ).scalar_one_or_none()
+        if sel:  # явный выбор (включая осознанный пин Draft) — ничего не ждём
+            return False
+        return len(await live_read_accounts(chat_id)) > 1
+    except Exception:  # noqa: BLE001 — сбой БД/замков → ведём себя как раньше (Draft)
+        return False
 
 
 async def get_active_account(chat_id: int) -> str:

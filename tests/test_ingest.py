@@ -153,6 +153,11 @@ async def test_handle_command_without_context_unchanged():
     from types import SimpleNamespace
 
     import agent.loop as L
+    from db.session import init_db
+
+    await (
+        init_db()
+    )  # get_stats-путь читает user_settings — тест самодостаточен и в одиночном прогоне
 
     captured = {}
 

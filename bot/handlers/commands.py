@@ -736,6 +736,23 @@ async def advise_cmd(m: bm.Message) -> None:
     await bm._start_advise_picker(m, topic=topic)
 
 
+# ── 1.6 (аудит 2026-07-06): /bizdigest — тогл недельного бизнес-дайджеста ─────────
+@bm.dp.message(bm.Command("bizdigest"))
+async def bizdigest_cmd(m: bm.Message) -> None:
+    """Тогл недельного БИЗНЕС-дайджеста (ui_prefs.business_digest; рассылает
+    scheduler.run_business_digest — READ-ONLY WoW-сводка + топ-3 совета + аномалии).
+    Настройка БОТА (как /alerts) — confirm-гейт не нужен. По умолчанию ВЫКЛ (анти-спам)."""
+    cur = str(await bm._load_ui_pref(m.chat.id, "business_digest")).lower() in (
+        "1",
+        "true",
+        "on",
+        "yes",
+    )
+    want = not cur
+    await bm._save_ui_pref(m.chat.id, "business_digest", "1" if want else "0")
+    await m.answer(bm.i18n.t("bizdigest_on" if want else "bizdigest_off"))
+
+
 # ── 3H (M10): /alerts — настройка порогов аномалий per-chat (раньше только вставкой в БД) ─
 @bm.dp.message(bm.Command("alerts"))
 async def alerts_cmd(m: bm.Message) -> None:

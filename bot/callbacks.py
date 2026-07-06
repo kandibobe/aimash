@@ -220,12 +220,14 @@ class AdminCB(CallbackData, prefix="adm"):
 
 
 class AdviseCB(CallbackData, prefix="adv"):
-    """advisor: обратная связь на рекомендацию (/advise). rec — rec_uid (hex 32 симв., влезает в
-    64-байт callback_data). Кнопки 👍/👎 пишут ТОЛЬКО в recommendation_feedback (Слой B) — Google Ads
-    НЕ трогают и proposal НЕ создают (инвариант test_advisor). action: up|down (голос-тогл)."""
+    """advisor: обратная связь на рекомендацию (/advise, утренний дайджест). rec — rec_uid (hex 32
+    симв., влезает в 64-байт callback_data). Кнопки 👍/👎 пишут ТОЛЬКО в recommendation_feedback,
+    🙈 (dismiss) — status='dismissed' (Слой B, «показано и проигнорировано»); apply СТАРТУЕТ
+    confirm-гейт по тапу человека; auto — тумблер проактива. Google Ads НЕ трогают и proposal
+    сами НЕ создают (инвариант test_advisor)."""
 
-    action: str  # "up" | "down"
-    rec: str  # rec_uid (hex uuid)
+    action: str  # "up" | "down" | "dismiss" | "apply" | "auto"
+    rec: str  # rec_uid (hex uuid); для auto — "on"|"off"
 
 
 class DiagCB(CallbackData, prefix="diag"):

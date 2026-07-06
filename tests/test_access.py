@@ -360,6 +360,39 @@ async def test_live_read_default_does_not_open_mutation():
         await revoke_account_access(chat, ACCT)
 
 
+async def test_account_choice_pending_matrix():
+    """pending ⇔ NULL-выбор И >1 живого ДОСТУПНОГО аккаунта. Пин Draft / один живой / ноль
+    живых → False (прежнее поведение, Draft/авто-дефолт). Грант-фильтр: из двух живых гранован
+    один ⇒ выбор не нужен (авто-дефолт на него)."""
+    from ads.client import set_discovered_read_children
+    from core.access import account_choice_pending
+
+    await init_db()
+    chat, acct2 = 7105, "9998887776"
+    set_discovered_read_children([])
+    await grant_account_access(chat, ACCT)
+    await grant_account_access(chat, acct2)
+    try:
+        with _read(read_ids=f"{ACCT},{acct2}"):
+            assert await account_choice_pending(chat) is True  # NULL + 2 живых → ждём выбор
+            await set_active_account(chat, DRAFT)  # осознанный пин Draft — выбора не ждём
+            assert await account_choice_pending(chat) is False
+            await set_active_account(chat, None)  # сброс на NULL → снова ждём
+            assert await account_choice_pending(chat) is True
+        with _read(read_ids=ACCT):  # один живой → авто-дефолт (WIP), пикер не нужен
+            assert await account_choice_pending(chat) is False
+        with _read(read_ids=""):  # ноль живых → Draft-песочница без шума
+            assert await account_choice_pending(chat) is False
+        await revoke_account_access(chat, acct2)  # грантован лишь один из двух живых
+        with _read(read_ids=f"{ACCT},{acct2}"):
+            assert await account_choice_pending(chat) is False  # доступен один → авто-дефолт
+            assert await get_active_account(chat) == ACCT
+    finally:
+        await revoke_account_access(chat, ACCT)
+        await revoke_account_access(chat, acct2)
+        await set_active_account(chat, None)
+
+
 async def test_pinned_draft_not_overridden_by_single_live():
     """ЯВНЫЙ пин Draft (setacct/heal) НЕ перебивается авто-дефолтом на живой аккаунт."""
     from ads.client import set_discovered_read_children

@@ -114,7 +114,7 @@ async def geo_locations(m: bm.Message, state: bm.FSMContext) -> None:
             "set_geo_location", campaign=campaign, locations=locations
         )
     except Exception as e:  # noqa: BLE001 — валидация схемы (>20 локаций / >80 симв.) → понятный ответ
-        await m.answer(bm.i18n.t("cb_error", kind=type(e).__name__))
+        await m.answer(await bm._friendly_error(e, "camp:geo_location"))
         return
     await bm._present_proposal(
         m,
@@ -153,7 +153,7 @@ async def geo_proximity(m: bm.Message, state: bm.FSMContext) -> None:
             "set_geo_proximity", campaign=campaign, city_name=city, radius_km=radius
         )
     except Exception as e:  # noqa: BLE001 — валидация схемы (радиус вне (0,2000] / длина) → понятный ответ
-        await m.answer(bm.i18n.t("cb_error", kind=type(e).__name__))
+        await m.answer(await bm._friendly_error(e, "camp:geo_proximity"))
         return
     await bm._present_proposal(
         m,
@@ -281,7 +281,7 @@ async def ext_sitelinks(m: bm.Message, state: bm.FSMContext) -> None:
             "add_sitelinks", campaign=campaign, sitelinks=sitelinks
         )
     except Exception as e:  # noqa: BLE001 — валидация схемы (длина/URL/desc) → понятный ответ
-        await m.answer(bm.i18n.t("cb_error", kind=type(e).__name__))
+        await m.answer(await bm._friendly_error(e, "camp:sitelinks"))
         return
     await bm._present_proposal(
         m,
@@ -317,7 +317,7 @@ async def ext_callouts(m: bm.Message, state: bm.FSMContext) -> None:
             "add_callouts", campaign=campaign, callouts=callouts
         )
     except Exception as e:  # noqa: BLE001
-        await m.answer(bm.i18n.t("cb_error", kind=type(e).__name__))
+        await m.answer(await bm._friendly_error(e, "camp:callouts"))
         return
     await bm._present_proposal(
         m,
@@ -354,7 +354,7 @@ async def ext_snippet_values(m: bm.Message, state: bm.FSMContext) -> None:
             "add_structured_snippets", campaign=campaign, header=header, values=values
         )
     except Exception as e:  # noqa: BLE001
-        await m.answer(bm.i18n.t("cb_error", kind=type(e).__name__))
+        await m.answer(await bm._friendly_error(e, "camp:snippets"))
         return
     await bm._present_proposal(
         m,
@@ -424,7 +424,9 @@ async def on_ext_remove(cq: bm.CallbackQuery, callback_data: bm.ExtCB) -> None:
             "remove_asset_link", link_resource_names=[rn]
         )
     except Exception as e:  # noqa: BLE001
-        await cq.answer(bm.i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
+        await cq.answer(
+            await bm._friendly_error(e, "camp:remove_asset", short=True), show_alert=True
+        )
         return
     await cq.answer()
     await bm._present_proposal(
@@ -505,7 +507,7 @@ async def camp_audience(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
         async with bm.ux.typing_action(cq.message):
             auds = await bm.run_ads_read_call(list_audiences, client, acct, label="list_audiences")
     except Exception as e:  # сеть/доступ/SDK
-        await cq.answer(bm.i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
+        await cq.answer(await bm._friendly_error(e, "camp:audiences", short=True), show_alert=True)
         return
     if not auds:
         await cq.answer(bm.i18n.t("no_audiences"), show_alert=True)
@@ -539,7 +541,9 @@ async def on_audience_pick(cq: bm.CallbackQuery, callback_data: bm.AudienceCB) -
             "attach_audience", campaign=name, audience_resource_names=[aud.resource_name]
         )
     except Exception as e:  # валидация схемы
-        await cq.answer(bm.i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
+        await cq.answer(
+            await bm._friendly_error(e, "camp:attach_audience", short=True), show_alert=True
+        )
         return
     params["_audience_names"] = [aud.name]  # инертно для исполнения; для дружелюбной сводки
     await cq.answer()

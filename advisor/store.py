@@ -82,6 +82,24 @@ async def record_feedback(
         await s.commit()
 
 
+async def dismiss_recommendation(rec_uid: str, chat_id: int) -> bool:
+    """«🙈 Скрыть»: status='dismissed' у СВОЕЙ рекомендации (chat_id обязан совпасть — чужой чат
+    не гасит чужую карточку). Это сигнал «показано и проигнорировано» для experience (слабее 👎).
+    Только локальная БД — Google Ads/proposal не трогает (инвариант test_advisor). True, если
+    строка найдена и обновлена."""
+    async with Session() as s:
+        row = (
+            await s.execute(
+                select(RecRow).where(RecRow.rec_uid == rec_uid, RecRow.chat_id == int(chat_id))
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return False
+        row.status = "dismissed"
+        await s.commit()
+    return True
+
+
 async def get_recommendation(rec_uid: str) -> RecRow | None:
     """Строка рекомендации по rec_uid (для outcome-связывания в Слое B). None — нет такой."""
     async with Session() as s:

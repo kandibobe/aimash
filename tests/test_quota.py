@@ -97,3 +97,57 @@ async def test_run_ads_call_passes_op_count_to_quota(monkeypatch):
     res = await resilience.run_ads_call(_sdk_call, account="777", op_count=42)
     assert res == {"ok": True}
     assert seen == {"account": "777", "kind": "mutate", "count": 42}
+
+
+async def test_run_ads_create_call_counts_quota_and_blocks_before_sdk(monkeypatch):
+    """1.2 (аудит 2026-07-06): создатели идут через run_ads_create_call — квота учитывается
+    (op_count батча), а на ≥95% блок происходит ДО SDK-вызова (fail-closed, без трат)."""
+    from core import resilience
+
+    seen: dict = {}
+
+    def _fake_record(account=None, *, kind="read", count=1):
+        seen.update(account=account, kind=kind, count=count)
+
+    monkeypatch.setattr(quota, "record", _fake_record)
+    monkeypatch.setattr(quota, "check_mutation_allowed", lambda account=None: None)
+
+    def _sdk_create():
+        return {"campaign": "customers/1/campaigns/2"}
+
+    res = await resilience.run_ads_create_call(_sdk_create, account="777", op_count=17)
+    assert res == {"campaign": "customers/1/campaigns/2"}
+    assert seen == {"account": "777", "kind": "mutate", "count": 17}
+
+    # Блок квоты — ДО SDK: сам вызов не должен исполниться.
+    def _boom(account=None):
+        raise quota.QuotaExceededError("лимит")
+
+    called: list = []
+
+    def _sdk_never():
+        called.append(1)
+
+    monkeypatch.setattr(quota, "check_mutation_allowed", _boom)
+    with pytest.raises(quota.QuotaExceededError):
+        await resilience.run_ads_create_call(_sdk_never, account="777")
+    assert called == []  # SDK не тронут
+
+
+async def test_run_ads_create_call_does_not_retry(monkeypatch):
+    """Создатели НЕ идемпотентны: транзиентная ошибка НЕ ретраится (один вызов — одна попытка)."""
+    from google.api_core import exceptions as gapi
+
+    from core import resilience
+
+    monkeypatch.setattr(quota, "check_mutation_allowed", lambda account=None: None)
+    monkeypatch.setattr(quota, "record", lambda *a, **kw: None)
+    attempts: list = []
+
+    def _flaky():
+        attempts.append(1)
+        raise gapi.InternalServerError("транзиент")  # для run_ads_call это ретраебл
+
+    with pytest.raises(gapi.InternalServerError):
+        await resilience.run_ads_create_call(_flaky)
+    assert len(attempts) == 1  # ровно одна попытка — без backoff-повторов

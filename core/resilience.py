@@ -179,6 +179,38 @@ async def run_ads_call(
     return result
 
 
+async def run_ads_create_call(
+    fn: Callable[..., T],
+    *args: object,
+    label: str | None = None,
+    account: str | None = None,
+    op_count: int = 1,
+    **kwargs: object,
+) -> T:
+    """Как run_ads_call, но БЕЗ РЕТРАЕВ — для НЕидемпотентных создателей (composite-создание
+    кампаний Search/GDN/Video/DG, ассеты/расширения): повтор после серверного INTERNAL/DEADLINE
+    мог бы задвоить сущности (запрос мог примениться). Сохраняет ВЕСЬ остальной денежный контур,
+    который раньше терялся на голом asyncio.to_thread: check_mutation_allowed ДО SDK (fail-closed
+    на ≥95% дневной квоты §3), asyncio.timeout(ADS_TIMEOUT_S), семафор конкурентности,
+    quota.record(op_count=реальное число mutate-операций батча) ПОСЛЕ успеха, лог §15."""
+    from core import quota
+
+    name = label or getattr(fn, "__name__", "ads_create")
+    quota.check_mutation_allowed(account)  # ДО семафора/SDK: не тратим слот на заведомо блок
+
+    start = time.monotonic()
+    try:
+        async with _get_ads_semaphore():  # тот же потолок конкурентности, что и для мутаций
+            async with asyncio.timeout(ADS_TIMEOUT_S):
+                result: T = await asyncio.to_thread(fn, *args, **kwargs)
+    except Exception as e:
+        log.warning("ads-create %s: %s за %dмс", name, type(e).__name__, _ms(start))
+        raise
+    quota.record(account, kind="mutate", count=op_count)  # учёт операций батча в квоте (§3)
+    log.info("ads-create %s: ok за %dмс", name, _ms(start))
+    return result
+
+
 async def run_ads_read_call(
     fn: Callable[..., T],
     *args: object,

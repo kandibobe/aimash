@@ -31,7 +31,10 @@ async def report_(m: bm.Message, command: bm.CommandObject) -> None:
     await bm._remember_period(
         m.chat.id, (command.args or "").strip()
     )  # §UX-память (только пресеты)
-    acct = await bm._active_read_account(m.chat.id)  # быстрый путь: весь активный аккаунт
+    # Быстрый путь: весь активный аккаунт; не выбран при нескольких живых → пикер (§8).
+    acct = await bm._require_read_account(m, "report")
+    if acct is None:
+        return
     await bm._run_report(m, period, acct, None, None)
     await bm._save_report_recall(m.chat.id, acct, None, None, (command.args or "").strip())
 
@@ -50,7 +53,10 @@ async def export_(m: bm.Message, command: bm.CommandObject) -> None:
     await bm._remember_period(
         m.chat.id, (command.args or "").strip()
     )  # §UX-память (только пресеты)
-    await bm._run_export(m, period, await bm._active_read_account(m.chat.id))
+    acct = await bm._require_read_account(m, "export")  # не выбран при неск. живых → пикер (§8)
+    if acct is None:
+        return
+    await bm._run_export(m, period, acct)
 
 
 @bm.dp.message(bm.Command("sheets"))
@@ -67,7 +73,10 @@ async def sheets_(m: bm.Message, command: bm.CommandObject) -> None:
     await bm._remember_period(
         m.chat.id, (command.args or "").strip()
     )  # §UX-память (только пресеты)
-    await bm._run_sheets(m, period, await bm._active_read_account(m.chat.id))
+    acct = await bm._require_read_account(m, "sheets")  # не выбран при неск. живых → пикер (§8)
+    if acct is None:
+        return
+    await bm._run_sheets(m, period, acct)
 
 
 @bm.dp.message(bm.Command("mcc"))
@@ -114,6 +123,7 @@ async def on_page_nav(cq: bm.CallbackQuery, callback_data: bm.PageCB) -> None:
             callback_data.target,
             last=await bm._last_account(chat_id),
             page=page,
+            frequent=await bm._frequent_accounts(chat_id),
         )
     elif kind == "rptc":
         camps = bm._REPORT_CAMP_CACHE.get(chat_id)
@@ -192,6 +202,10 @@ async def on_report_account(cq: bm.CallbackQuery, callback_data: bm.ReportAcctCB
             return
         await bm._save_selected_account(chat_id, acct)  # персист выбора (переживает рестарт)
         await msg.answer(bm.i18n.t("account_set", cid=acct), parse_mode=bm.ParseMode.HTML)
+        return
+    if callback_data.target == "campaigns":  # §8: /campaigns при невыбранном аккаунте → пикер
+        # Разовый выбор (как в отчётах): глобальный активный НЕ трогаем, читаем выбранный.
+        await bm._send_campaigns_for(msg, bm._cq_chat_id(cq), acct)
         return
     # P0-3: редактируем сообщение-пикер аккаунта в пикер кампании (без нового сообщения).
     await bm._present_report_campaigns(msg, callback_data.target, rows[callback_data.idx], cq=cq)

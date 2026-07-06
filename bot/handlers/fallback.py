@@ -61,11 +61,8 @@ async def on_document(m: bm.Message, state: bm.FSMContext, bot: bm.Bot) -> None:
             bm.i18n.t("ingest_file_failed", err=bm.texts.esc(str(e))), parse_mode=bm.ParseMode.HTML
         )
         return
-    except Exception as e:  # сеть/скачивание
-        await m.answer(
-            bm.i18n.t("ingest_file_failed", err=bm.texts.esc(type(e).__name__)),
-            parse_mode=bm.ParseMode.HTML,
-        )
+    except Exception as e:  # сеть/скачивание — без имени класса, с кодом инцидента (/diag)
+        await m.answer(await bm._friendly_error(e, "ingest:file_download"))
         return
     source = doc.file_name or bm.i18n.t("file_fallback")
     # §19.4.1: Этап 2 визарда ждёт ключи — файл кормим в черновик, НЕ в общий ingest (и НЕ чистим

@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import re
 import time
 from typing import Protocol
@@ -42,7 +41,10 @@ from core.limits import (
     MONEY_MAX_UNITS,
     round_micros,
 )  # единый источник порогов (defense-in-depth)
-from core.resilience import run_ads_call  # таймаут+ретрай на самом SDK-вызове (не на гейтах)
+from core.resilience import (  # таймаут+ретрай на самом SDK-вызове (не на гейтах)
+    run_ads_call,
+    run_ads_create_call,  # НЕидемпотентные создатели: квота+таймаут+семафор БЕЗ ретраев
+)
 
 # Длину/форму ключевых слов считает КОД (golden rule #4) — единый источник в ads.validation.
 # Алиас сохранён для обратной совместимости (тесты/вызовы mutations._assert_keyword_ok).
@@ -684,8 +686,15 @@ async def apply_add_sitelinks(
     ensure_allowed(customer_id)  # гейт 1 — замок аккаунта
     _validate_sitelinks(sitelinks)  # ДО claim
     await _require_confirmation(confirm_store, confirmation_id, "add_sitelinks")  # гейт 2
-    result = await asyncio.to_thread(
-        extensions._add_sitelinks_via_sdk, ads_client, customer_id, campaign_id, list(sitelinks)
+    result = await run_ads_create_call(
+        extensions._add_sitelinks_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_id,
+        list(sitelinks),
+        label="add_sitelinks",
+        account=customer_id,
+        op_count=2 * max(1, len(sitelinks)),  # N ассетов + N линков к кампании
     )
     await confirm_store.finalize(confirmation_id, result=result)
     return result
@@ -704,8 +713,15 @@ async def apply_add_callouts(
     ensure_allowed(customer_id)
     _validate_callouts(callouts)
     await _require_confirmation(confirm_store, confirmation_id, "add_callouts")
-    result = await asyncio.to_thread(
-        extensions._add_callouts_via_sdk, ads_client, customer_id, campaign_id, list(callouts)
+    result = await run_ads_create_call(
+        extensions._add_callouts_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_id,
+        list(callouts),
+        label="add_callouts",
+        account=customer_id,
+        op_count=2 * max(1, len(callouts)),  # N ассетов + N линков
     )
     await confirm_store.finalize(confirmation_id, result=result)
     return result
@@ -725,13 +741,16 @@ async def apply_add_structured_snippets(
     ensure_allowed(customer_id)
     _validate_snippets(header, values)
     await _require_confirmation(confirm_store, confirmation_id, "add_structured_snippets")
-    result = await asyncio.to_thread(
+    result = await run_ads_create_call(
         extensions._add_structured_snippets_via_sdk,
         ads_client,
         customer_id,
         campaign_id,
         header,
         list(values),
+        label="add_structured_snippets",
+        account=customer_id,
+        op_count=2,  # ассет + линк
     )
     await confirm_store.finalize(confirmation_id, result=result)
     return result
@@ -756,13 +775,16 @@ async def apply_attach_image_asset(
     if not (name or "").strip():
         raise ValueError("пустое имя ассета")
     await _require_confirmation(confirm_store, confirmation_id, "attach_image_asset")  # гейт 2
-    result = await asyncio.to_thread(
+    result = await run_ads_create_call(
         extensions._attach_image_asset_via_sdk,
         ads_client,
         customer_id,
         campaign_id,
         image_bytes,
         name,
+        label="attach_image_asset",
+        account=customer_id,
+        op_count=2,  # ассет + линк
     )
     await confirm_store.finalize(confirmation_id, result=result)
     return result
@@ -830,13 +852,16 @@ async def apply_add_call_asset(
     ensure_allowed(customer_id)
     _validate_call(phone_number, country_code)
     await _require_confirmation(confirm_store, confirmation_id, "add_call_asset")
-    result = await asyncio.to_thread(
+    result = await run_ads_create_call(
         extensions._add_call_asset_via_sdk,
         ads_client,
         customer_id,
         campaign_id,
         phone_number,
         country_code,
+        label="add_call_asset",
+        account=customer_id,
+        op_count=2,  # ассет + линк
     )
     await confirm_store.finalize(confirmation_id, result=result)
     return result
@@ -860,7 +885,7 @@ async def apply_add_promotion(
     ensure_allowed(customer_id)
     _validate_promotion(promotion_target, final_url, percent_off, money_off_units, currency)
     await _require_confirmation(confirm_store, confirmation_id, "add_promotion")
-    result = await asyncio.to_thread(
+    result = await run_ads_create_call(
         lambda: extensions._add_promotion_via_sdk(
             ads_client,
             customer_id,
@@ -871,7 +896,10 @@ async def apply_add_promotion(
             money_off_units=money_off_units,
             currency=currency,
             promo_code=promo_code,
-        )
+        ),
+        label="add_promotion",
+        account=customer_id,
+        op_count=2,  # ассет + линк
     )
     await confirm_store.finalize(confirmation_id, result=result)
     return result
@@ -893,7 +921,7 @@ async def apply_add_price_asset(
     ensure_allowed(customer_id)
     _validate_price(offerings, currency)
     await _require_confirmation(confirm_store, confirmation_id, "add_price_asset")
-    result = await asyncio.to_thread(
+    result = await run_ads_create_call(
         lambda: extensions._add_price_asset_via_sdk(
             ads_client,
             customer_id,
@@ -902,7 +930,10 @@ async def apply_add_price_asset(
             currency=currency,
             language_code=language_code,
             offerings=list(offerings),
-        )
+        ),
+        label="add_price_asset",
+        account=customer_id,
+        op_count=2,  # ассет + линк
     )
     await confirm_store.finalize(confirmation_id, result=result)
     return result
@@ -920,11 +951,14 @@ async def apply_remove_asset_link(
     ensure_allowed(customer_id)
     _validate_link_rns(link_resource_names)
     await _require_confirmation(confirm_store, confirmation_id, "remove_asset_link")
-    result = await asyncio.to_thread(
+    result = await run_ads_create_call(
         extensions._remove_campaign_assets_via_sdk,
         ads_client,
         customer_id,
         list(link_resource_names),
+        label="remove_asset_link",
+        account=customer_id,
+        op_count=max(1, len(link_resource_names)),  # по операции на связь
     )
     await confirm_store.finalize(confirmation_id, result=result)
     return result
@@ -1870,8 +1904,9 @@ async def apply_create_search_campaign(
     ads_client: object,
 ) -> dict:
     """Создать поисковую кампанию из текстов за двойным гейтом. Все сущности — PAUSED (0 расхода).
-    Создание — ТОЛЬКО прямой командой пользователя (как бюджет/GDN). НЕ через run_ads_call: цепочка
-    из создающих вызовов НЕ идемпотентна (авто-ретрай породил бы дубли) — от повтора защищает claim.
+    Создание — ТОЛЬКО прямой командой пользователя (как бюджет/GDN). Через run_ads_create_call
+    (квота §3 + таймаут + семафор), но БЕЗ ретраев: цепочка из создающих вызовов НЕ идемпотентна
+    (авто-ретрай породил бы дубли) — от повтора защищает claim.
 
     §19 (composite): бюджет→кампания(SEARCH,PAUSED,стратегия+URL-опции)→группа→RSA(+display path)→
     ключи→гео→язык — в синхронной цепочке (откат осиротевшего бюджета при сбое кампании). Ассеты и
@@ -1917,10 +1952,23 @@ async def apply_create_search_campaign(
     proposal = await _require_confirmation(confirm_store, confirmation_id, "create_search_campaign")
     if not proposal.user_initiated:
         raise PermissionError("создание кампании должно быть прямой командой пользователя")
-    result = await asyncio.to_thread(
+    # Честный op_count composite-цепочки (§3): бюджет+кампания+группа+RSA + ключи + гео + языки
+    # + блоки расписания (+страна, если задана кодом). Google тарифицирует КАЖДУЮ операцию.
+    _search_ops = (
+        4
+        + len(clean_kw)
+        + len(geo_locations or [])
+        + (1 if geo_country_code else 0)
+        + len(languages or [])
+        + len(ad_schedule_blocks or [])
+    )
+    result = await run_ads_create_call(
         _create_search_campaign_via_sdk,
         ads_client,
         customer_id,
+        label="create_search_campaign",
+        account=customer_id,
+        op_count=_search_ops,
         campaign_name=campaign_name,
         final_url=final_url,
         headlines=headlines,
@@ -1946,31 +1994,44 @@ async def apply_create_search_campaign(
     # Ассеты + изображения — ПОСЛЕ кампании (PAUSED/$0): сбой одного не роняет кампанию.
     campaign_id = (result.get("campaign") or "").rsplit("/", 1)[-1]
     if asset_specs and campaign_id:
-        added, skipped = await asyncio.to_thread(
-            _attach_asset_specs_via_sdk, ads_client, customer_id, campaign_id, list(asset_specs)
+        added, skipped = await run_ads_create_call(
+            _attach_asset_specs_via_sdk,
+            ads_client,
+            customer_id,
+            campaign_id,
+            list(asset_specs),
+            label="attach_asset_specs",
+            account=customer_id,
+            op_count=2 * max(1, len(asset_specs)),  # ассет + линк на каждый спек
         )
         result["assets_added"] = added
         result["assets_skipped"] = skipped
     # §19.7: переиспользование СУЩЕСТВУЮЩИХ ассетов аккаунта — линк к новой кампании по field_type.
     if existing_asset_links and campaign_id:
-        result["assets_reused"] = await asyncio.to_thread(
+        result["assets_reused"] = await run_ads_create_call(
             _link_existing_assets_via_sdk,
             ads_client,
             customer_id,
             campaign_id,
             list(existing_asset_links),
+            label="link_existing_assets",
+            account=customer_id,
+            op_count=max(1, len(existing_asset_links)),  # по линку на ассет
         )
     if image_specs and campaign_id:
         imgs = 0
         for img_bytes, name in image_specs:
             try:
-                await asyncio.to_thread(
+                await run_ads_create_call(
                     extensions._attach_image_asset_via_sdk,
                     ads_client,
                     customer_id,
                     campaign_id,
                     img_bytes,
                     name,
+                    label="attach_image_asset",
+                    account=customer_id,
+                    op_count=2,  # ассет + линк
                 )
                 imgs += 1
             except Exception:  # noqa: BLE001 — image-ассет может быть неприменим к аккаунту
@@ -2500,10 +2561,14 @@ async def apply_create_gdn_campaign(
     # Создание кампании — ТОЛЬКО прямой командой пользователя (как бюджет): bot ставит флаг, агент нет.
     if not proposal.user_initiated:
         raise PermissionError("создание кампании должно быть прямой командой пользователя")
-    result = await asyncio.to_thread(
+    result = await run_ads_create_call(
         _create_gdn_campaign_via_sdk,
         ads_client,
         customer_id,
+        label="create_gdn_campaign",
+        account=customer_id,
+        # бюджет+кампания+группа+объявление + 2 image-ассета + гео/язык (оценка сверху)
+        op_count=8 + len(geo_locations or []),
         campaign_name=campaign_name,
         landscape_bytes=landscape_bytes,
         square_bytes=square_bytes,
@@ -2785,10 +2850,14 @@ async def apply_create_demand_gen_campaign(
     # Создание кампании — ТОЛЬКО прямой командой пользователя (как бюджет/GDN).
     if not proposal.user_initiated:
         raise PermissionError("создание кампании должно быть прямой командой пользователя")
-    result = await asyncio.to_thread(
+    result = await run_ads_create_call(
         _create_demand_gen_campaign_via_sdk,
         ads_client,
         customer_id,
+        label="create_demand_gen_campaign",
+        account=customer_id,
+        # бюджет+кампания+группа+объявление + video/logo-ассеты + гео/язык (оценка сверху)
+        op_count=8 + len(geo_locations or []),
         campaign_name=campaign_name,
         youtube_video_id=youtube_video_id,
         headlines=headlines,
@@ -3040,10 +3109,14 @@ async def apply_create_video_campaign(
     proposal = await _require_confirmation(confirm_store, confirmation_id, "create_video_campaign")
     if not proposal.user_initiated:
         raise PermissionError("создание кампании должно быть прямой командой пользователя")
-    result = await asyncio.to_thread(
+    result = await run_ads_create_call(
         _create_video_campaign_via_sdk,
         ads_client,
         customer_id,
+        label="create_video_campaign",
+        account=customer_id,
+        # бюджет+кампания+группа+объявление + video-ассет + гео/язык (оценка сверху)
+        op_count=7 + len(geo_locations or []),
         campaign_name=campaign_name,
         youtube_video_id=youtube_video_id,
         headlines=headlines,

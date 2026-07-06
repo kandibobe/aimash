@@ -320,21 +320,58 @@ def _magnitude(rec: Recommendation) -> float:
     return float(rec.evidence.get("cost", 0.0) or 0.0)
 
 
+def rank_cross_account(items: list[tuple], top_n: int = 5) -> list[tuple]:
+    """Кросс-аккаунтный Top-N «где горит сильнее» БЕЗ FX (golden rule #4): суммы РАЗНЫХ валют
+    никогда не сравниваются между собой — ключ ранжирования БЕЗРАЗМЕРНЫЙ: вес severity ×
+    (деньги-под-риском / общий расход аккаунта) = доля расхода аккаунта под риском. Совет на 4 000
+    UAH при расходе 100 000 (4%) уступит совету на 50 USD при расходе 60 (83%) — честно и без
+    выдуманных курсов; суммы показываются в валюте своего аккаунта.
+
+    items: (account, currency, account_total_cost, Recommendation). Советы без денег
+    (magnitude=0) уходят в хвост по severity (затем rec.priority — там уже сидит опыт Слоя B).
+    Чистая детерминированная функция (стабильная сортировка)."""
+
+    def _rel_score(it: tuple) -> float:
+        _acct, _cur, total, rec = it
+        rel = (_magnitude(rec) / float(total)) if float(total or 0.0) > 0 else 0.0
+        return _SEVERITY_WEIGHT.get(rec.severity, 0.5) * rel
+
+    ranked = sorted(
+        items,
+        key=lambda it: (
+            -_rel_score(it),
+            -_SEVERITY_WEIGHT.get(it[3].severity, 0.5),
+            -float(it[3].priority or 0.0),
+            str(it[0]),
+            it[3].kind,
+            it[3].target_campaign or "",
+        ),
+    )
+    return ranked[: max(1, int(top_n))]
+
+
 def rank_recommendations(recs: list[Recommendation], experience=None) -> list[Recommendation]:
     """priority = вес severity × (1 + деньги-под-риском) × множитель опыта; отсев suppress-видов.
-    experience (Слой B, Фаза 2) — {kind: {"weight": float, "suppress": bool}}; None ⇒ веса 1.0.
+    experience (Слой B) — ДВУХУРОВНЕВЫЙ dict: {kind: {...}} (account-wide, как раньше) И
+    {(kind, target_campaign): {...}} (пер-кампанийная усталость); None ⇒ веса 1.0.
     Детерминированно (образец rank_clusters): опыт — посчитанный КОДОМ множитель, не сырьё для LLM.
 
-    suppress приглушает НАДОЕВШИЙ оператору вид (много 👎), но НЕ прячет совет с деньгами-под-риском
-    ≥ SUPPRESS_MONEY_FLOOR — иначе 3 👎 по одной кампании молча скрыли бы крупный слив бюджета по
-    ДРУГОЙ кампании того же вида (agg по kind account-wide). Крупные деньги важнее усталости."""
+    suppress приглушает НАДОЕВШИЙ оператору вид (много 👎 / устойчивый 🙈-игнор) — на любом из
+    двух уровней, но НЕ прячет совет с деньгами-под-риском ≥ SUPPRESS_MONEY_FLOOR: 3 👎 по одной
+    кампании не должны молча скрыть крупный слив бюджета. Money-floor guard действует для ОБОИХ
+    уровней. Пер-кампанийный ключ гасит совет только по СВОЕЙ кампании."""
     exp = experience or {}
     ranked: list[Recommendation] = []
     for r in recs:
-        e = exp.get(r.kind) or {}
-        if e.get("suppress") and _magnitude(r) < SUPPRESS_MONEY_FLOOR:
+        e_kind = exp.get(r.kind) or {}
+        e_camp = exp.get((r.kind, r.target_campaign or "")) or {}
+        suppressed = bool(e_kind.get("suppress")) or bool(e_camp.get("suppress"))
+        if suppressed and _magnitude(r) < SUPPRESS_MONEY_FLOOR:
             continue
-        weight = float(e.get("weight", 1.0))
+        weight = max(
+            0.2,
+            min(2.0, float(e_kind.get("weight", 1.0)) * float(e_camp.get("weight", 1.0))),
+        )
         r.priority = round(
             _SEVERITY_WEIGHT.get(r.severity, 0.5) * (1.0 + _magnitude(r)) * weight, 2
         )

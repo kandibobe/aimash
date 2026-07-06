@@ -103,6 +103,7 @@ from bot.callbacks import (
     VideoCB,
 )
 from bot.keyboards import (
+    ADVISE_APPLY_OPS,
     ALL_MENU_BUTTONS,
     BOT_COMMANDS,
     BOT_COMMANDS_EN,
@@ -580,6 +581,27 @@ async def _capture_cmd_error(e: Exception, where: str) -> None:
     await capture_exception(e, where=where)
 
 
+async def _friendly_error(e: Exception, where: str, *, short: bool = False) -> str:
+    """Текст ошибки для НЕтехнического менеджера БЕЗ имени класса исключения (P1-аудит
+    2026-07-06: раньше cb_error показывал «Ошибка: ValidationError»). Валидация (Pydantic →
+    локализованные правила ux.humanize_validation; ValueError валидаторов — их сообщение уже
+    человекочитаемо) → шаблон err_validate. Прочее — фиксируем в error_events (/diag) и отдаём
+    err_unexpected с КОДОМ ИНЦИДЕНТА (request_id): по коду инцидент находят в /diag; имя класса
+    остаётся только в логах. short=True — для cq.answer(alert): одна строка ≤180 симв."""
+    errs = getattr(e, "errors", None)
+    if callable(errs) or isinstance(e, ValueError):
+        body = ux.humanize_validation(e) if callable(errs) else redact_text(str(e))
+        text = i18n.t("err_validate", err=body)
+    else:
+        code = await capture_exception(e, where=where)
+        text = i18n.t("err_unexpected", code=code)
+    if short:
+        text = " ".join(text.split())  # alert: однострочно, без переносов
+        if len(text) > 180:
+            text = text[:179] + "…"
+    return text
+
+
 async def _load_error_events(today: bool = False, limit: int = 15) -> list:
     """A3 (§15): последние error_events для /diag (reverse-chron). today ⇒ только за сегодня (UTC).
     Фильтр «сегодня» — в Python (наивный created_at → UTC): избегаем строкового сравнения tz-aware/
@@ -742,7 +764,12 @@ async def _send_status(message: Message) -> None:
         return
     await message.answer(
         i18n.t("status_pick_account"),
-        reply_markup=report_accounts_kb(rows, "status", last=await _last_account(chat_id)),
+        reply_markup=report_accounts_kb(
+            rows,
+            "status",
+            last=await _last_account(chat_id),
+            frequent=await _frequent_accounts(chat_id),
+        ),
         parse_mode=ParseMode.HTML,
     )
 
@@ -760,7 +787,12 @@ async def _start_advise_picker(message: Message, *, topic: str | None = None) ->
         return
     await message.answer(
         i18n.t("advise_pick_account"),
-        reply_markup=report_accounts_kb(rows, "advise", last=await _last_account(chat_id)),
+        reply_markup=report_accounts_kb(
+            rows,
+            "advise",
+            last=await _last_account(chat_id),
+            frequent=await _frequent_accounts(chat_id),
+        ),
         parse_mode=ParseMode.HTML,
     )
 
@@ -781,7 +813,12 @@ async def _start_setacct_picker(message: Message) -> None:
         return
     await message.answer(
         i18n.t("setacct_pick_account"),
-        reply_markup=report_accounts_kb(rows, "setacct", last=await _last_account(chat_id)),
+        reply_markup=report_accounts_kb(
+            rows,
+            "setacct",
+            last=await _last_account(chat_id),
+            frequent=await _frequent_accounts(chat_id),
+        ),
         parse_mode=ParseMode.HTML,
     )
 
@@ -825,10 +862,20 @@ def _camp_account(chat_id: int) -> str:
 
 
 async def _send_campaigns(message: Message, chat_id: int) -> None:
-    """Список кампаний АКТИВНОГО аккаунта чтения + inline-кнопки. Кэшируем список и аккаунт-якорь
-    по chat_id (мультиаккаунт: меню читает и мутирует ОДИН аккаунт). Активный резолвится через
-    read-замок × грант (дефолт Draft); мутации по кнопкам всё равно упрутся в ensure_allowed."""
-    acct = await _active_read_account(chat_id)
+    """Список кампаний АКТИВНОГО аккаунта чтения + inline-кнопки. Активный резолвится через
+    read-замок × грант (дефолт Draft); при НЕвыбранном аккаунте и нескольких живых — пикер
+    вместо тихого пустого Draft (§8, _require_read_account). Мутации по кнопкам всё равно
+    упрутся в ensure_allowed."""
+    acct = await _require_read_account(message, "campaigns", chat_id=chat_id)
+    if acct is None:
+        return
+    await _send_campaigns_for(message, chat_id, acct)
+
+
+async def _send_campaigns_for(message: Message, chat_id: int, acct: str) -> None:
+    """Тело /campaigns для ЯВНОГО аккаунта (из активного или из пикера target='campaigns').
+    Кэшируем список и аккаунт-якорь по chat_id (мультиаккаунт: меню читает и мутирует ОДИН
+    аккаунт)."""
     try:
         from ads.client import build_client_async
         from ads.read import list_campaigns
@@ -1294,6 +1341,60 @@ async def _last_account(chat_id: int) -> str | None:
     return _LAST_ACCOUNT.get(chat_id) or await _load_ui_pref(chat_id, "last_account")
 
 
+# 1.7 (аудит 2026-07-06): «частые аккаунты» per-chat — TTL-кэш агрегата активности (10 мин).
+_FREQ_CACHE: dict[int, tuple[float, list[str]]] = {}
+_FREQ_TTL_S = 600.0
+
+
+async def _frequent_accounts(chat_id: int, n: int = 3, days: int = 30) -> list[str]:
+    """Частые аккаунты оператора за N дней — по его же активности (audit_log ∪ proposals ∪
+    recommendation, GROUP BY customer_id, count DESC). Читает только ЛОКАЛЬНУЮ БД (не Ads) и
+    ничего не открывает: результат пересекается с read-allowed rows на месте вызова (пикер и так
+    строится из _read_account_rows — замок × грант не обходятся). Draft не считаем «частым»
+    (звёздочки — про живые). TTL-кэш 10 мин (агрегат горячий: каждый пикер). Сбой БД → []."""
+    import time as _time
+
+    hit = _FREQ_CACHE.get(chat_id)
+    if hit and (_time.monotonic() - hit[0]) < _FREQ_TTL_S:
+        return hit[1][:n]
+    from collections import Counter
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select as _select
+
+    from db.models import AuditLog as _AL
+    from db.models import Proposal as _P
+    from db.models import Recommendation as _R
+    from db.session import Session as _S
+
+    counts: Counter[str] = Counter()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))
+    try:
+        async with _S() as s:
+            for model in (_AL, _P, _R):
+                rows = (
+                    await s.execute(
+                        _select(model.customer_id, model.created_at).where(
+                            model.chat_id == int(chat_id)
+                        )
+                    )
+                ).all()
+                for cid, created in rows:
+                    # tz-нейтральная конвенция проекта: фильтр по дате в Python (naive → UTC)
+                    if created is not None and created.tzinfo is None:
+                        created = created.replace(tzinfo=timezone.utc)
+                    if created is not None and created < cutoff:
+                        continue
+                    ncid = normalize_customer_id(str(cid or ""))
+                    if ncid and ncid != DRAFT_ACCOUNT_ID:
+                        counts[ncid] += 1
+    except Exception:  # noqa: BLE001 — «частые» — косметика, сбой БД не ломает пикеры
+        return []
+    top = [cid for cid, _cnt in counts.most_common(max(1, int(n)) * 3)]
+    _FREQ_CACHE[chat_id] = (_time.monotonic(), top)
+    return top[:n]
+
+
 async def _save_report_recall(
     chat_id: int, account: str, campaign_id: str | None, campaign_name: str | None, period_code: str
 ) -> None:
@@ -1361,6 +1462,49 @@ def _live_account_hint(acct: str) -> str:
     live = {c for c in discovered_read_children() if str(c) != str(DRAFT_ACCOUNT_ID)}
     live |= {c for c in settings.read_customer_ids if str(c) != str(DRAFT_ACCOUNT_ID)}
     return i18n.t("live_account_hint") if live else ""
+
+
+async def _require_read_account(m: Message, flow: str, *, chat_id: int | None = None) -> str | None:
+    """Аккаунт ЧТЕНИЯ для быстрого пути (/report 30, /campaigns, NL-статистика). Если оператор
+    НЕ выбрал аккаунт, а живых read-аккаунтов НЕСКОЛЬКО (core.access.account_choice_pending) —
+    быстрый путь молча читал бы пустой Draft: вместо этого шлём подсказку + flow-пикер и
+    возвращаем None (вызывающий выходит). Пин Draft / единственный живой (авто-дефолт) / ноль
+    живых — прежнее одношаговое поведение. Только ЧТЕНИЕ: мутационный замок ensure_allowed не
+    затрагивается (golden rule 9)."""
+    cid = chat_id if chat_id is not None else m.chat.id
+    acct = await _active_read_account(cid)
+    if acct != DRAFT_ACCOUNT_ID:
+        return acct
+    from core.access import account_choice_pending
+
+    if not await account_choice_pending(cid):  # внутри fail-closed к False (Draft, как раньше)
+        return acct
+    await m.answer(i18n.t("pick_live_account_first"), parse_mode=ParseMode.HTML)
+    if flow == "campaigns":
+        await _start_campaigns_picker(m)
+    elif flow in ("report", "export", "sheets"):
+        await _start_report_picker(m, flow)
+    else:  # generic: выбрать АКТИВНЫЙ аккаунт (персист, /account)
+        await _start_setacct_picker(m)
+    return None
+
+
+async def _start_campaigns_picker(m: Message) -> None:
+    """Пикер аккаунта для /campaigns (target='campaigns'): после тапа — _send_campaigns_for на
+    выбранном, глобальный активный аккаунт НЕ трогаем (паттерн _present_report_campaigns)."""
+    chat_id = m.chat.id
+    rows = await _read_account_rows(chat_id)
+    _REPORT_ACCT_CACHE[chat_id] = rows
+    await m.answer(
+        i18n.t("campaigns_pick_account"),
+        reply_markup=report_accounts_kb(
+            rows,
+            "campaigns",
+            last=await _last_account(chat_id),
+            frequent=await _frequent_accounts(chat_id),
+        ),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def _keyword_metrics_account(chat_id: int) -> tuple[str, bool]:
@@ -1482,7 +1626,12 @@ async def _start_report_picker(m: Message, target: str) -> None:
     await m.answer(
         i18n.t("report_pick_account"),
         # §UX-память: последний выбранный аккаунт — первой кнопкой «↻ как в прошлый раз»
-        reply_markup=report_accounts_kb(rows, target, last=await _last_account(m.chat.id)),
+        reply_markup=report_accounts_kb(
+            rows,
+            target,
+            last=await _last_account(m.chat.id),
+            frequent=await _frequent_accounts(m.chat.id),
+        ),
     )
 
 
@@ -1908,7 +2057,7 @@ async def _rsa_present_final(target: Message, chat_id: int, session, state: FSMC
     try:
         cid, op, params, summary = _build_rsa_proposal(session)
     except Exception as e:  # валидация схемы (мин/макс/длины/URL)
-        await target.answer(i18n.t("cb_error", kind=type(e).__name__))
+        await target.answer(await _friendly_error(e, "rsa:final"))
         return
     await _present_proposal(
         target,
@@ -2547,7 +2696,7 @@ async def _cc_present_stage0(target: Message, chat_id: int) -> None:
         )
     except Exception as e:  # noqa: BLE001
         log.warning("cc: пикер аккаунтов не отрисован (%s)", type(e).__name__)
-        await target.answer(i18n.t("cc_accounts_error", err=type(e).__name__))
+        await target.answer(await _friendly_error(e, "cc:accounts_picker"))
 
 
 async def _cc_begin(target: Message, chat_id: int, state: FSMContext) -> None:
@@ -3042,12 +3191,15 @@ async def _run_client_crawl(
             log.warning("crawl job %s failed: %s", job_id, type(e).__name__, exc_info=e)
             await crawl_jobs.mark_failed(job_id, error=str(e))
             try:
+                # Без имени класса (P1-аудит): причина — редактированный текст ошибки; пустой →
+                # generic (класс остаётся в логе строкой выше).
+                reason = redact_text(str(e)).strip() or "?"
                 await bot.send_message(
                     chat_id,
                     i18n.t(
                         "cli_crawl_failed",
                         domain=texts.esc(domain),
-                        err=texts.esc(redact_text(type(e).__name__)),
+                        err=texts.esc(reason),
                     ),
                 )
             except Exception:  # noqa: BLE001 — чат недоступен; уже залогировали
@@ -3613,7 +3765,7 @@ async def _ext_image_from_photo(m: Message, state: FSMContext, bot: Bot) -> None
         )
     except Exception as e:  # noqa: BLE001 — валидация схемы → понятный ответ + чистим медиа
         await asyncio.to_thread(clear_pending_media, media_id)
-        await m.answer(i18n.t("cb_error", kind=type(e).__name__))
+        await m.answer(await _friendly_error(e, "media:attach_image"))
         return
     await _present_proposal(
         m, chat_id=m.chat.id, operation=operation, params=params, summary=summary, cid=cid
@@ -3803,7 +3955,9 @@ async def _clone_from_intent(m: Message, brief: dict) -> None:
 # §advisor #1: what a recommendation can apply in ONE TAP — ТОЛЬКО НЕ-денежные операции.
 # update_budget/update_bid НАМЕРЕННО исключены: деньги/ставки только прямой командой (golden rule #3),
 # никогда one-tap. Гард дублируется в _advise_apply (defense-in-depth) + тест test_advise_apply_*.
-_ADVISE_APPLY_OPS = frozenset({"pause_campaign", "add_negative_keywords"})
+# Единый источник — bot.keyboards.ADVISE_APPLY_OPS (его же импортирует scheduler-дайджест):
+# два списка one-tap операций разъехались бы молча (гард денег, golden rule #3).
+_ADVISE_APPLY_OPS = ADVISE_APPLY_OPS
 
 
 async def _advise_run(
@@ -4005,6 +4159,21 @@ async def _dispatch_command_result(
         )
     elif t == "clarify":
         await m.answer("❓ " + res["question"])
+    elif t == "need_account":
+        # §8: NL-чтение без аккаунта при нескольких живых — не угадываем и не показываем пустой
+        # Draft. Пикер target='status': после тапа сразу придёт статистика (_render_status).
+        rows = await _read_account_rows(m.chat.id)
+        _REPORT_ACCT_CACHE[m.chat.id] = rows
+        await m.answer(
+            i18n.t("pick_live_account_first"),
+            reply_markup=report_accounts_kb(
+                rows,
+                "status",
+                last=await _last_account(m.chat.id),
+                frequent=await _frequent_accounts(m.chat.id),
+            ),
+            parse_mode=ParseMode.HTML,
+        )
     elif t == "read":
         await m.answer(
             texts.fmt_stats(
@@ -4067,7 +4236,7 @@ async def _camp_mutate(cq: CallbackQuery, idx: int, operation: str) -> None:
     try:
         cid, op, params, summary = _build_proposal(operation, campaign=name)
     except Exception as e:  # валидация схемы
-        await cq.answer(i18n.t("cb_error", kind=type(e).__name__), show_alert=True)
+        await cq.answer(await _friendly_error(e, "camp:menu", short=True), show_alert=True)
         return
     await cq.answer()
     msg = _cq_msg(cq)

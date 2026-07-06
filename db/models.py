@@ -125,6 +125,9 @@ class Proposal(Base):
 
 class AuditLog(Base):
     __tablename__ = "audit_log"
+    # 1.7: агрегат «частые аккаунты» (bot.main._frequent_accounts) сканирует по chat_id на каждый
+    # рендер пикера (с TTL-кэшем). Индекс зеркалится в миграции 0020 (конвенция против дрейфа).
+    __table_args__ = (Index("ix_audit_log_chat_created", "chat_id", "created_at"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     confirmation_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)

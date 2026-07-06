@@ -9,6 +9,7 @@ execute_confirmed / apply_* — планировщик не меняет акк�
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
@@ -461,10 +462,30 @@ async def _advise_proactive_chats(recipients: set[int]) -> set[int]:
     return on
 
 
+def _digest_account_label(acct: str) -> str:
+    """Имя аккаунта для карточки дайджеста («Башня · 5437782039»); нет meta → голый id."""
+    try:
+        from ads.client import discovered_read_children_meta
+
+        ch = discovered_read_children_meta().get(str(acct))
+        if ch is not None and (ch.name or "") and str(ch.name) != str(acct):
+            return f"{ch.name} · {acct}"
+    except Exception:  # noqa: BLE001 — ярлык-косметика
+        pass
+    return str(acct)
+
+
 async def run_recommendations_digest(bot) -> None:
-    """§advisor: ПРОАКТИВНЫЕ рекомендации операторам с advise_proactive (opt-in). READ-ONLY: собирает
-    отчёт + правила (advisor.service), НИЧЕГО не меняет и proposal НЕ создаёт (golden rule #1/#3).
-    Детерминированный render (use_llm=False) — фон не жжёт LLM-бюджет. Один блок на аккаунт."""
+    """§advisor «утренний экран действий»: ПРОАКТИВНЫЕ рекомендации операторам с advise_proactive
+    (opt-in). READ-ONLY: собирает отчёты + правила (advisor.service), НИЧЕГО не меняет и proposal
+    НЕ создаёт (golden rule #1/#3) — кнопка «применить» лишь СТАРТУЕТ confirm-гейт по тапу человека
+    (существующий путь AdviseCB apply → bm._advise_apply, ensure_allowed на минтинге и исполнении).
+
+    Отличия от старого «одного блока текста»: (1) отчёт per-account собирается ОДИН раз на прогон
+    (кэш; раньше — per-chat×per-account); (2) единый кросс-аккаунтный Top-N по ДОЛЕ расхода под
+    риском (rank_cross_account, БЕЗ FX — golden rule #4); (3) каждая рекомендация — отдельным
+    сообщением с кнопками 👍/👎/🙈/apply (как в /advise), персистятся ТОЛЬКО показанные Top-N;
+    (4) пауза между сообщениями (flood-limits). Детерминированный render (use_llm=False)."""
     with request_scope("scheduler:advise"):
         recipients = await _recipients()
         chats = await _advise_proactive_chats(recipients)
@@ -474,39 +495,257 @@ async def run_recommendations_digest(bot) -> None:
         if not accounts:
             return
         from advisor import service as advisor_service
-        from advisor.render import render_digest
+        from advisor import store as advisor_store
+        from advisor.rules import _magnitude, rank_cross_account
         from bot import i18n
+        from bot.keyboards import ADVISE_APPLY_OPS, advise_feedback_kb
+
+        top_n = max(1, int(getattr(settings, "advise_digest_top_n", 5)))
+        pause = max(0.0, float(getattr(settings, "advise_digest_send_pause", 0.7)))
+
+        # 1) Отчёты per-account — ОДИН раз на прогон (кэш переиспользуется каждым чатом).
+        reports: dict[str, tuple[object, str, float]] = {}  # acct → (report, currency, total_cost)
+        for acct in accounts:
+            tok = set_context(customer_id=acct)  # §8: per-account атрибуция ошибок/логов
+            try:
+                report = await advisor_service._gather_report(acct, 30)
+                currency = getattr(report, "currency", "") or ""
+                total = float(getattr(report.totals, "cost_micros", 0) or 0) / 1_000_000
+                reports[str(acct)] = (report, currency, total)
+            except Exception as e:  # сеть/доступ/SDK — фиксируем, остальные аккаунты живут
+                if is_account_access_error(e):
+                    log.info("advise digest: аккаунт %s недоступен (ожидаемо, пропуск)", acct)
+                else:
+                    await capture_exception(e, where=f"scheduler:advise:{acct}")
+            finally:
+                reset_context(tok)
+        if not reports:
+            return
 
         for chat_id in chats:
             lang = i18n.get_lang(chat_id)
-            blocks: list[str] = []
-            for acct in accounts:
-                tok = set_context(customer_id=acct)  # §8: per-account атрибуция ошибок/логов
+            # 2) Кандидаты по каждому аккаунту (persist=False — строки пишем ТОЛЬКО для Top-N).
+            items: list[tuple] = []  # (acct, currency, total_cost, rec)
+            for acct, (report, currency, total) in reports.items():
                 try:
                     rec_set = await advisor_service.build_recommendations(
-                        chat_id, acct, source="scheduler", lang=lang, use_llm=False
+                        chat_id,
+                        acct,
+                        source="scheduler",
+                        lang=lang,
+                        use_llm=False,
+                        persist=False,
+                        report=report,
                     )
-                    if rec_set.recs:
-                        lines = [r.body for r in rec_set.recs if r.body]
-                        blocks.append(
-                            render_digest(rec_set.account, rec_set.period_label, lines, lang)
+                except Exception as e:  # опыт/БД — не роняем дайджест целиком
+                    await capture_exception(e, where=f"scheduler:advise:{acct}")
+                    continue
+                items.extend((acct, currency, total, r) for r in rec_set.recs)
+            top = rank_cross_account(items, top_n=top_n)
+            if not top:
+                continue
+            # 3) Персист ТОЛЬКО показанных (rec_uid для кнопок 👍/👎/🙈/apply).
+            by_acct: dict[str, list] = {}
+            for acct, _cur, _total, r in top:
+                by_acct.setdefault(acct, []).append(r)
+            try:
+                for acct, recs in by_acct.items():
+                    await advisor_store.record_recommendations(
+                        chat_id, acct, recs, source="scheduler"
+                    )
+            except Exception as e:  # noqa: BLE001 — без rec_uid кнопки бессмысленны → пропуск чата
+                await capture_exception(e, where="scheduler:advise:persist")
+                continue
+            # 4) Отправка: заголовок + карточки с кнопками (пауза между сообщениями — flood).
+            try:
+                await bot.send_message(chat_id, i18n.t("advise_digest_header", lang, n=len(top)))
+            except Exception as e:  # один недоступный чат не роняет остальных
+                log.warning("advise digest не доставлен в %s: %s", chat_id, type(e).__name__)
+                continue
+            for acct, _cur, total, r in top:
+                share = ""
+                if total > 0 and _magnitude(r) > 0:
+                    pct = min(100.0, 100.0 * _magnitude(r) / total)
+                    share = " · " + i18n.t("advise_digest_share", lang, p=f"{pct:.0f}")
+                text = i18n.t(
+                    "advise_digest_item",
+                    lang,
+                    account=_digest_account_label(acct) + share,
+                    body=r.body or "",
+                )
+                apply_op = (
+                    r.suggested_operation if r.suggested_operation in ADVISE_APPLY_OPS else None
+                )
+                try:
+                    await asyncio.sleep(pause)
+                    await bot.send_message(
+                        chat_id,
+                        text,
+                        reply_markup=advise_feedback_kb(r.rec_uid, lang, apply_op=apply_op),
+                    )
+                except Exception as e:  # недоставка одной карточки не роняет рассылку
+                    log.warning(
+                        "advise digest: карточка не доставлена в %s: %s",
+                        chat_id,
+                        type(e).__name__,
+                    )
+            try:
+                await asyncio.sleep(pause)
+                await bot.send_message(chat_id, i18n.t("advise_disclaimer", lang))
+            except Exception:  # noqa: BLE001
+                pass
+
+
+async def _business_digest_chats(recipients: set[int]) -> set[int]:
+    """Операторы с включённым недельным БИЗНЕС-дайджестом (ui_prefs.business_digest, тогл
+    /bizdigest). По умолчанию ВЫКЛ (fail-closed к анти-спаму). READ-ONLY."""
+    if not recipients:
+        return set()
+    async with Session() as s:
+        rows = (
+            await s.execute(
+                select(UserSettings.chat_id, UserSettings.ui_prefs).where(
+                    UserSettings.chat_id.in_(recipients)
+                )
+            )
+        ).all()
+    on: set[int] = set()
+    for cid, prefs in rows:
+        val = (prefs or {}).get("business_digest") if isinstance(prefs, dict) else None
+        if str(val).lower() in ("1", "true", "on", "yes"):
+            on.add(int(cid))
+    return on
+
+
+def _biz_cpa_line(report, currency: str, lang: str) -> str:
+    """Строка CPA неделя-к-неделе из totals/prev_totals (КОД считает, без FX). Нет данных → ''."""
+    t, p = getattr(report, "totals", None), getattr(report, "prev_totals", None)
+    if t is None:
+        return ""
+
+    def _cpa(m) -> float | None:
+        conv = float(getattr(m, "conversions", 0.0) or 0.0)
+        cost = float(getattr(m, "cost_micros", 0) or 0) / 1_000_000
+        return (cost / conv) if conv > 0 else None
+
+    cur, prev = _cpa(t), (_cpa(p) if p is not None else None)
+    if cur is None and prev is None:
+        return ""
+    code = f" {currency}" if currency else ""
+    label = "CPA (WoW)" if lang == "en" else "CPA (неделя к неделе)"
+    left = f"{prev:.2f}{code}" if prev is not None else "—"
+    right = f"{cur:.2f}{code}" if cur is not None else "—"
+    return f"{label}: {left} → {right}"
+
+
+async def run_business_digest(bot) -> None:
+    """1.6 (аудит 2026-07-06): недельный БИЗНЕС-дайджест менеджерам (opt-in /bizdigest). READ-ONLY:
+    per-account сводка неделя-к-неделе (summary_text уже содержит ▲/▼-дельты) + CPA WoW + топ-3
+    рекомендации (детерминированный render, persist=False — витрина, не карточки) + аномалии недели
+    по per-chat порогам. ОДНО сообщение на оператора (анти-спам, потолок _DIGEST_MAX). НИКАКИХ
+    мутаций/proposal (golden rule #1/#3)."""
+    with request_scope("scheduler:bizdigest"):
+        recipients = await _recipients()
+        chats = await _business_digest_chats(recipients)
+        if not chats:
+            return
+        accounts = _scheduled_accounts()
+        if not accounts:
+            return
+        from advisor import service as advisor_service
+        from bot import i18n
+
+        thr_by_chat = await _thresholds_by_chat(chats)
+        # 1) Отчёты per-account — один раз на прогон (with_comparison=True: prev-период внутри).
+        acct_data: dict[str, tuple[object, str]] = {}
+        for acct in accounts:
+            tok = set_context(customer_id=acct)
+            try:
+                client = await build_client_async(acct)
+                period = await _account_period(client, acct, 7)
+                currency = ""
+                try:
+                    from ads.read import account_currency
+
+                    currency = await run_ads_read_call(
+                        account_currency, client, acct, label=f"biz_cur_{acct}"
+                    )
+                except Exception:  # noqa: BLE001 — валюта best-effort
+                    currency = ""
+                report = await build_account_report_async(client, acct, period, currency=currency)
+                acct_data[str(acct)] = (report, currency)
+            except Exception as e:  # сбой одного аккаунта не валит дайджест
+                if is_account_access_error(e):
+                    log.info("bizdigest: аккаунт %s недоступен (ожидаемо, пропуск)", acct)
+                else:
+                    await capture_exception(e, where=f"scheduler:bizdigest:{acct}")
+            finally:
+                reset_context(tok)
+        if not acct_data:
+            return
+        # 2) Один локализованный дайджест на оператора.
+        for chat_id in chats:
+            lang = i18n.get_lang(chat_id)
+            blocks: list[str] = []
+            for acct, (report, currency) in acct_data.items():
+                part = [summary_text(report, lang)]
+                cpa = _biz_cpa_line(report, currency, lang)
+                if cpa:
+                    part.append(cpa)
+                # топ-3 рекомендаций — витрина недели (persist=False: без карточек/кнопок)
+                try:
+                    rec_set = await advisor_service.build_recommendations(
+                        chat_id,
+                        acct,
+                        source="scheduler",
+                        lang=lang,
+                        use_llm=False,
+                        persist=False,
+                        report=report,
+                    )
+                    tops = [r.body for r in rec_set.recs[:3] if r.body]
+                    if tops:
+                        part.append(
+                            i18n.t("bizdigest_recs_title", lang)
+                            + "\n"
+                            + "\n".join(f"• {b}" for b in tops)
                         )
-                except Exception as e:  # сеть/доступ/SDK — фиксируем, остальные аккаунты живут
-                    if is_account_access_error(e):
-                        log.info("advise digest: аккаунт %s недоступен (ожидаемо, пропуск)", acct)
-                    else:
-                        await capture_exception(e, where=f"scheduler:advise:{acct}")
-                finally:
-                    reset_context(tok)
+                except Exception:  # noqa: BLE001 — советы-довесок, не критичны
+                    pass
+                try:
+                    alerts = detect_anomalies(
+                        report.totals,
+                        report.prev_totals,
+                        _effective_thresholds(thr_by_chat.get(chat_id), acct),
+                        currency=currency,
+                    )
+                    if alerts:
+                        part.append(
+                            i18n.t("bizdigest_anomalies_title", lang)
+                            + "\n"
+                            + "\n".join(f"• {a.message}" for a in alerts)
+                        )
+                except Exception:  # noqa: BLE001 — аномалии-довесок
+                    pass
+                blocks.append("\n".join(part))
             if not blocks:
                 continue
-            text = "\n\n———\n\n".join(blocks)
+            period_label = ""
+            first = next(iter(acct_data.values()))[0]
+            p = getattr(first, "period", None)
+            if p is not None:
+                period_label = f"{getattr(p, 'date_from', '')} — {getattr(p, 'date_to', '')}"
+            text = (
+                i18n.t("bizdigest_header", lang, period=period_label)
+                + "\n\n"
+                + "\n\n———\n\n".join(blocks)
+            )
             if len(text) > _DIGEST_MAX:
                 text = text[:_DIGEST_MAX] + "\n…"
             try:
                 await bot.send_message(chat_id, text)
-            except Exception as e:  # один недоступный чат не роняет остальных
-                log.warning("advise digest не доставлен в %s: %s", chat_id, type(e).__name__)
+            except Exception as e:  # один недоступный чат не роняет рассылку
+                log.warning("bizdigest не доставлен в %s: %s", chat_id, type(e).__name__)
 
 
 async def _notify_outcome(bot, outcome, verdict: str) -> None:
