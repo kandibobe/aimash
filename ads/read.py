@@ -71,17 +71,31 @@ def list_child_accounts(client: GoogleAdsClient, manager_id: str) -> list[ChildA
     return out
 
 
-def account_stats(client: GoogleAdsClient, customer_id: str, days: int = 30) -> AccountStats:
-    """Сводная статистика по аккаунту за РЕАЛЬНЫЙ период N дней. Только для аккаунтов из белого списка.
+def account_stats(
+    client: GoogleAdsClient,
+    customer_id: str,
+    days: int = 30,
+    *,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> AccountStats:
+    """Сводная статистика по аккаунту за РЕАЛЬНЫЙ период N дней ИЛИ явный диапазон дат (C5:
+    NL-отчёты «за вчера»/«с 1 по 15 июня» — date_from/date_to ISO побеждают days). Только для
+    аккаунтов из белого списка.
 
     Окно строим из фактического N через `segments.date BETWEEN` (а не из пресета `LAST_N_DAYS`):
     раньше любой N кроме 7/14/30 молча схлопывался в 30, и подпись «N дн.» врала про объём данных
     (а это денежные метрики). end = вчера (как LAST_N_DAYS — без неполного «сегодня»); нормализация
     таймзон по дочерним аккаунтам — §8, отложена (один аккаунт → host-дата ок)."""
     ensure_read_allowed(customer_id)
-    n = max(1, int(days))
-    end = date.today() - timedelta(days=1)
-    start = end - timedelta(days=n - 1)
+    if date_from and date_to:
+        start, end = date.fromisoformat(str(date_from)), date.fromisoformat(str(date_to))
+        if end < start:
+            start, end = end, start
+    else:
+        n = max(1, int(days))
+        end = date.today() - timedelta(days=1)
+        start = end - timedelta(days=n - 1)
     ga = client.get_service("GoogleAdsService")
     q = (
         "SELECT metrics.impressions, metrics.clicks, metrics.cost_micros, "
@@ -174,6 +188,33 @@ def list_audiences(client: GoogleAdsClient, customer_id: str) -> list[Audience]:
             )
         )
     return out
+
+
+def list_attached_audiences(
+    client: GoogleAdsClient, customer_id: str, campaign_id: str
+) -> list[Audience]:
+    """C7: аудитории (user_list), УЖЕ прикреплённые к кампании, — для показа с кнопкой
+    открепления (🗑 → черновик detach_audience за confirm-гейтом). READ-ONLY. Имена
+    подтягиваем из list_audiences; нет в карте (напр. закрытый список) — честно показываем id."""
+    ensure_read_allowed(customer_id)
+    ga = client.get_service("GoogleAdsService")
+    q = (
+        "SELECT campaign_criterion.user_list.user_list FROM campaign_criterion "
+        f"WHERE campaign.id = {int(campaign_id)} AND campaign_criterion.type = 'USER_LIST' "
+        "AND campaign_criterion.status != 'REMOVED'"
+    )
+    rns: list[str] = []
+    for row in ga.search(customer_id=str(customer_id), query=q):
+        rn = str(row.campaign_criterion.user_list.user_list or "")
+        if rn:
+            rns.append(rn)
+    if not rns:
+        return []
+    by_rn = {a.resource_name: a for a in list_audiences(client, customer_id)}
+    return [
+        by_rn.get(rn) or Audience(resource_name=rn, name=f"user_list …{rn[-6:]}", size=0)
+        for rn in rns
+    ]
 
 
 def list_campaigns(

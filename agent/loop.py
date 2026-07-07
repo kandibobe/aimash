@@ -336,6 +336,25 @@ async def _do_read(name: str, args: dict[str, Any], chat_id: int = 0) -> dict[st
         days = max(1, min(int(args.get("period_days") or 30), 365))
     except (TypeError, ValueError):
         days = 30
+    # C5: произвольные даты из NL. Приоритет: явные date_from/date_to (пользователь назвал даты,
+    # схема их ISO-валидировала) → period_text («вчера»/«за прошлую неделю»/«июнь» — резолвит КОД,
+    # модель не знает «сегодня») → period_days. Нераспознанный period_text честно откатывается
+    # на period_days (метка периода в ответе не врёт — берётся из фактического диапазона).
+    date_from = str(args.get("date_from") or "").strip() or None
+    date_to = str(args.get("date_to") or "").strip() or None
+    if date_from and not date_to:
+        date_to = date_from  # одна дата = отчёт за день
+    if not (date_from and date_to):
+        ptext = str(args.get("period_text") or "").strip()
+        if ptext:
+            try:
+                from reports.period import parse_period_text
+
+                p = parse_period_text(ptext)
+            except Exception:  # noqa: BLE001 — резолвер не должен ронять read-путь
+                p = None
+            if p is not None:
+                date_from, date_to = p.date_from.isoformat(), p.date_to.isoformat()
     try:
         from ads.client import build_client_async
         from ads.read import account_currency, account_stats
@@ -344,7 +363,15 @@ async def _do_read(name: str, args: dict[str, Any], chat_id: int = 0) -> dict[st
         client = await build_client_async(cid)  # per-account OAuth (раньше строился без cid)
         # run_ads_read_call: таймаут+ретрай транзиентных/TimeoutError под семафором Google Ads —
         # ограничивает хвост (зависший read капается на ADS_TIMEOUT_S, единичный блип → авторетрай).
-        st = await run_ads_read_call(account_stats, client, cid, days, label="account_stats")
+        st = await run_ads_read_call(
+            account_stats,
+            client,
+            cid,
+            days,
+            date_from=date_from,
+            date_to=date_to,
+            label="account_stats",
+        )
         try:  # §9: валюта аккаунта (необязательна — без неё показываем метрики без кода валюты)
             currency = await run_ads_read_call(
                 account_currency, client, cid, label="account_currency"
@@ -361,12 +388,18 @@ async def _do_read(name: str, args: dict[str, Any], chat_id: int = 0) -> dict[st
                 account_name = str(_ch.name)
         except Exception:  # noqa: BLE001 — косметика
             account_name = ""
+        if date_from and date_to:  # честная подпись периода: фактический диапазон, не «N дн.»
+            from datetime import date as _d
+
+            days = (_d.fromisoformat(date_to) - _d.fromisoformat(date_from)).days + 1
         return {
             "type": "read",
             "tool": name,
             "account": cid,
             "account_name": account_name,
             "days": days,
+            "date_from": date_from,  # None ⇒ период «последние N дн.»
+            "date_to": date_to,
             "currency": currency,
             "stats": {
                 "impressions": st.impressions,

@@ -74,6 +74,10 @@ class _FakeEnums:
         ENABLED = "ENABLED"
         PAUSED = "PAUSED"
 
+    class AdGroupAdStatusEnum:  # C6: статус отдельного объявления
+        ENABLED = "ENABLED"
+        PAUSED = "PAUSED"
+
 
 class _FakeClient:
     enums = _FakeEnums()
@@ -605,6 +609,90 @@ def test_set_campaign_network_via_sdk_mask_and_field_real_proto():
         assert not any("partner_search_network" in p or "content_network" in p for p in paths), (
             paths
         )
+
+
+# ── C6: пауза/возобновление/удаление ОТДЕЛЬНОГО объявления (AdGroupAdService) ─────
+async def test_apply_pause_ad_happy_path():
+    called = {}
+
+    def fake(client, customer_id, ad_group_id, ad_id, status):
+        called.update(ad_group_id=ad_group_id, ad_id=ad_id, status=status)
+        return {"applied": True, "status": status}
+
+    store = FakeStore(FakeProposal("pause_ad", "confirmed", user_initiated=False))
+    with patched(mut, "_set_ad_status_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_pause_ad(
+            customer_id=DRAFT_ACCOUNT_ID,
+            ad_group_id="77",
+            ad_id="101",
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=_FakeClient(),
+        )
+    assert res["applied"] is True and called["ad_id"] == "101" and called["status"] == "PAUSED"
+    assert store.finalized is True
+
+
+async def test_apply_remove_ad_happy_path():
+    called = {}
+
+    def fake(client, customer_id, ad_group_id, ad_id):
+        called.update(ad_group_id=ad_group_id, ad_id=ad_id)
+        return {"removed": True, "applied": True}
+
+    store = FakeStore(FakeProposal("remove_ad", "confirmed", user_initiated=False))
+    with patched(mut, "_remove_ad_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_remove_ad(
+            customer_id=DRAFT_ACCOUNT_ID,
+            ad_group_id="77",
+            ad_id="101",
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=_FakeClient(),
+        )
+    assert res["removed"] is True and called["ad_id"] == "101"
+    assert store.finalized is True
+
+
+def test_ad_status_and_remove_via_sdk_resource_and_mask():
+    """SDK-слой C6: resource_name adGroupAds/{ag}~{ad}; у update маска несёт status; remove — путь."""
+    captured: dict[str, object] = {}
+
+    class _Svc:
+        def ad_group_ad_path(self, cid, ag, ad):
+            return f"customers/{cid}/adGroupAds/{ag}~{ad}"
+
+        def mutate_ad_group_ads(self, customer_id, operations):
+            captured["op"] = operations[0]
+
+    class _Client:
+        def get_service(self, name):
+            assert name == "AdGroupAdService"
+            return _Svc()
+
+        def get_type(self, name):
+            from google.ads.googleads.v24.services.types import AdGroupAdOperation
+
+            assert name == "AdGroupAdOperation"
+            return AdGroupAdOperation()
+
+        @staticmethod
+        def copy_from(destination, origin):
+            import proto
+
+            if isinstance(origin, proto.Message):
+                origin = origin._pb
+            destination.CopyFrom(origin)
+
+    res = mut._set_ad_status_via_sdk(_Client(), DRAFT_ACCOUNT_ID, "77", "101", 3)  # 3=PAUSED enum
+    assert res["applied"] is True
+    op = captured["op"]
+    assert op.update.resource_name.endswith("/adGroupAds/77~101")
+    assert "status" in list(op.update_mask.paths)
+
+    res2 = mut._remove_ad_via_sdk(_Client(), DRAFT_ACCOUNT_ID, "77", "101")
+    assert res2["removed"] is True
+    assert captured["op"].remove.endswith("/adGroupAds/77~101")
 
 
 # ── apply_pause_ad_group / apply_resume_ad_group (§16 AdGroupService): оба гейта, без денег ──
@@ -1835,6 +1923,12 @@ def _apply_case(op):
         return mut.apply_pause_ad_group, {"ad_group_id": "77", **base}
     if op == "resume_ad_group":
         return mut.apply_resume_ad_group, {"ad_group_id": "77", **base}
+    if op == "pause_ad":
+        return mut.apply_pause_ad, {"ad_group_id": "77", "ad_id": "101", **base}
+    if op == "resume_ad":
+        return mut.apply_resume_ad, {"ad_group_id": "77", "ad_id": "101", **base}
+    if op == "remove_ad":
+        return mut.apply_remove_ad, {"ad_group_id": "77", "ad_id": "101", **base}
     if op == "remove_campaign":
         return mut.apply_remove_campaign, {"campaign_id": "7", **base}
     if op == "remove_ad_group":
@@ -2045,6 +2139,57 @@ def test_resolvers_reject_foreign_account():
                 raise AssertionError(f"{fn.__name__}: чужой аккаунт должен падать")
             except PermissionError:
                 pass
+        from ads.resolve import find_ads_in_group
+
+        try:  # C6: резолвер объявлений — тот же замок ДО SDK
+            find_ads_in_group(object(), "1234567890", "X", "G", "101")
+            raise AssertionError("find_ads_in_group: чужой аккаунт должен падать")
+        except PermissionError:
+            pass
+
+
+# ── C6: find_ads_in_group — id-точное совпадение / подстрока заголовка / все объявления ──
+def _ads_rows():
+    def _row(ad_id, headline, status="ENABLED"):
+        return SimpleNamespace(
+            ad_group=SimpleNamespace(id=77),
+            ad_group_ad=SimpleNamespace(
+                status=SimpleNamespace(name=status),
+                ad=SimpleNamespace(
+                    id=ad_id,
+                    responsive_search_ad=SimpleNamespace(
+                        headlines=[SimpleNamespace(text=headline)]
+                    ),
+                ),
+            ),
+        )
+
+    return [_row(101, "Доставка цветов"), _row(102, "Букеты недорого", "PAUSED")]
+
+
+class _AdsGA:
+    def search(self, customer_id, query):
+        assert "!= 'REMOVED'" in query  # удалённые не воскрешаем и не показываем
+        return _ads_rows()
+
+
+class _AdsClient:
+    def get_service(self, name):
+        return _AdsGA()
+
+
+def test_find_ads_in_group_by_id_headline_and_all():
+    from ads.resolve import find_ads_in_group
+
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        by_id = find_ads_in_group(_AdsClient(), DRAFT_ACCOUNT_ID, "C", "G", "102")
+        assert [a.ad_id for a in by_id] == ["102"] and by_id[0].status == "PAUSED"
+        by_head = find_ads_in_group(_AdsClient(), DRAFT_ACCOUNT_ID, "C", "G", "цветов")
+        assert [a.ad_id for a in by_head] == ["101"] and by_head[0].headline == "Доставка цветов"
+        all_ads = find_ads_in_group(_AdsClient(), DRAFT_ACCOUNT_ID, "C", "G", "")
+        assert [a.ad_id for a in all_ads] == ["101", "102"]  # пустой needle = весь список
+        none = find_ads_in_group(_AdsClient(), DRAFT_ACCOUNT_ID, "C", "G", "нетакого")
+        assert none == []
 
 
 # ── find_ad_group_by_name: выбор группы по имени внутри кампании (pause/resume группы) ──

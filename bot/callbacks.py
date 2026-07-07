@@ -86,8 +86,9 @@ class MoreCB(CallbackData, prefix="more"):
 class PageCB(CallbackData, prefix="pg"):
     """3E: перелистывание постраничных пикеров отчётов/кампаний (защита от
     REPLY_MARKUP_TOO_LONG на >100 строк — как B7-пагинация в визарде §19/§20).
-    kind: 'rpta' (аккаунты отчёта) | 'rptc' (кампании отчёта) | 'camp' (/campaigns).
-    target — поток report|export|sheets (для rpta/rptc; у camp пуст)."""
+    kind: 'rpta' (аккаунты отчёта) | 'rptc' (кампании отчёта) | 'camp' (/campaigns) |
+    'rsac' (пикер /rsa, C8) | 'aud' (аудитории кампании, C8).
+    target — поток report|export|sheets (rpta/rptc); camp_idx (aud); у camp/rsac пуст."""
 
     kind: str
     target: str = ""

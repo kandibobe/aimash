@@ -137,6 +137,27 @@ async def on_page_nav(cq: bm.CallbackQuery, callback_data: bm.PageCB) -> None:
             await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
             return
         markup = bm.campaigns_kb(camps, page=page)
+    elif kind == "rsac":  # C8: пикер кампаний визарда /rsa
+        camps = bm._RSA_CAMP_CACHE.get(chat_id)
+        if not camps:
+            await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
+            return
+        markup = bm.rsa_pick_campaigns_kb(camps, page=page)
+    elif kind == "aud":  # C8: пикер аудиторий кампании (target несёт camp_idx)
+        auds = bm._AUD_CACHE.get(chat_id)
+        if auds is None:
+            await cq.answer(bm.i18n.t("aud_list_stale"), show_alert=True)
+            return
+        try:
+            camp_idx = int(callback_data.target or -1)
+        except ValueError:
+            camp_idx = -1
+        if not bm._valid_idx(bm._CAMP_CACHE.get(chat_id), camp_idx):
+            await cq.answer(bm.i18n.t("aud_list_stale"), show_alert=True)
+            return
+        markup = bm.audiences_kb(
+            auds, camp_idx, attached=bm._AUD_DET_CACHE.get(chat_id) or [], page=page
+        )
     else:  # неизвестный kind (старые кнопки после апгрейда) — тихий stale
         await cq.answer(bm.i18n.t("stale"), show_alert=True)
         return

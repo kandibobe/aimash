@@ -36,6 +36,9 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
         "remove_ad_group",
         "pause_ad_group",
         "resume_ad_group",
+        "pause_ad",
+        "resume_ad",
+        "remove_ad",
         "set_geo_proximity",
         "set_geo_location",
         "set_bidding_strategy",
@@ -70,6 +73,8 @@ _DIFFABLE_OPS = frozenset(
         "set_campaign_network",
         "pause_ad_group",
         "resume_ad_group",
+        "pause_ad",
+        "resume_ad",
     }
 )
 
@@ -126,6 +131,18 @@ async def read_before(operation: str, params: dict, customer_id: str | None = No
             if ag is None:
                 return None
             return {"kind": "status", "before_status": ag.status}
+        if operation in ("pause_ad", "resume_ad"):
+            ads_found = await asyncio.to_thread(
+                resolve.find_ads_in_group,
+                client,
+                cid,
+                name,
+                params.get("ad_group", ""),
+                params.get("ad", ""),
+            )
+            if len(ads_found) != 1:  # не найдено/неоднозначно — честно без «было»
+                return None
+            return {"kind": "status", "before_status": ads_found[0].status}
         if operation == "update_bid":
             ad_groups = await asyncio.to_thread(resolve.find_ad_groups, client, cid, name)
             if not ad_groups:
@@ -287,6 +304,40 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             customer_id=customer_id,
             campaign_id=ref.id,
             search_partners=bool(params.get("search_partners")),
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
+    if op in ("pause_ad", "resume_ad", "remove_ad"):
+        # C6: объявление резолвим по id/заголовку ВНУТРИ группы; неоднозначность — честный отказ
+        # со списком кандидатов (денежная поверхность — не угадываем).
+        matches = await asyncio.to_thread(
+            resolve.find_ads_in_group,
+            client,
+            customer_id,
+            params["campaign"],
+            params["ad_group"],
+            params.get("ad", ""),
+        )
+        if not matches:
+            raise ValueError(
+                f"объявление «{params.get('ad', '')}» не найдено в группе "
+                f"«{params['ad_group']}» (кампания «{params['campaign']}»)"
+            )
+        if len(matches) > 1:
+            listing = "; ".join(f"id {a.ad_id} — «{a.headline[:40]}»" for a in matches[:5])
+            raise ValueError(f"найдено несколько объявлений, уточни id: {listing}")
+        ad = matches[0]
+        ad_apply = {
+            "pause_ad": mutations.apply_pause_ad,
+            "resume_ad": mutations.apply_resume_ad,
+            "remove_ad": mutations.apply_remove_ad,
+        }[op]
+        return await ad_apply(
+            customer_id=customer_id,
+            ad_group_id=ad.ad_group_id,
+            ad_id=ad.ad_id,
             confirmation_id=confirmation_id,
             confirm_store=store,
             ads_client=client,

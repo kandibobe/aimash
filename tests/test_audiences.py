@@ -97,6 +97,74 @@ def test_list_audiences_rejects_foreign_account():
             read.list_audiences(object(), "1234567890")
 
 
+# ── C7: чтение ПРИКРЕПЛЁННЫХ аудиторий кампании (для 🗑 detach в UI) ──────────────
+def test_list_attached_audiences_maps_names_and_falls_back_to_id():
+    class _GA:
+        def search(self, customer_id, query):
+            if "FROM campaign_criterion" in query:
+                assert "!= 'REMOVED'" in query  # снятые критерии не показываем
+                return [
+                    SimpleNamespace(
+                        campaign_criterion=SimpleNamespace(user_list=SimpleNamespace(user_list=_UL))
+                    ),
+                    SimpleNamespace(
+                        campaign_criterion=SimpleNamespace(
+                            user_list=SimpleNamespace(user_list="customers/1/userLists/999")
+                        )
+                    ),
+                ]
+            return [  # list_audiences: имя есть только у _UL
+                SimpleNamespace(
+                    user_list=SimpleNamespace(
+                        resource_name=_UL, name="Покупатели", size_for_display=1500
+                    )
+                )
+            ]
+
+    class _Client:
+        def get_service(self, name):
+            return _GA()
+
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        res = read.list_attached_audiences(_Client(), DRAFT_ACCOUNT_ID, "42")
+    assert [a.resource_name for a in res] == [_UL, "customers/1/userLists/999"]
+    assert res[0].name == "Покупатели"  # имя из карты list_audiences
+    assert "999" in res[1].name  # закрытый/неизвестный список — честный фолбэк на id
+
+
+async def test_detach_button_mints_pending_proposal_only(monkeypatch):
+    """C7: 🗑 у прикреплённой аудитории минтит ТОЛЬКО pending-черновик detach_audience
+    (исполнение — после ✅ через confirm-гейт; ничего не выполняется на клик)."""
+    import bot.main as bm
+    from bot.handlers.campaigns_menu import on_audience_detach
+
+    chat_id = 909
+    bm._CAMP_CACHE[chat_id] = [{"name": "Кампания X", "id": "42", "status": "ENABLED"}]
+    bm._AUD_DET_CACHE[chat_id] = [SimpleNamespace(resource_name=_UL, name="Покупатели")]
+    presented: dict = {}
+
+    async def fake_present(msg, **kw):
+        presented.update(kw)
+
+    monkeypatch.setattr(bm, "_present_proposal", fake_present)
+
+    class _Msg:
+        chat = SimpleNamespace(id=chat_id)
+
+    class _Cq:
+        message = _Msg()
+        from_user = SimpleNamespace(id=chat_id)
+
+        async def answer(self, *a, **kw):
+            pass
+
+    cb = SimpleNamespace(action="det", camp_idx=0, idx=0)
+    await on_audience_detach(_Cq(), cb)
+    assert presented.get("operation") == "detach_audience"
+    assert presented["params"]["audience_resource_names"] == [_UL]
+    assert presented["params"]["_audience_names"] == ["Покупатели"]
+
+
 # ── apply_attach_audience: оба гейта (не деньги → без user_initiated) ─────────────
 async def test_apply_attach_audience_happy_path():
     called = {}

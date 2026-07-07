@@ -1454,20 +1454,49 @@ def geo_mode_kb(idx: int, lang: str | None = None) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def audiences_kb(auds: list, camp_idx: int, lang: str | None = None) -> InlineKeyboardMarkup:
-    """Выбор аудитории для прикрепления к кампании (§3). idx — позиция в списке аудиторий;
-    camp_idx ведёт прикрепление к конкретной кампании и кнопку «назад» — к её меню."""
+def audiences_kb(
+    auds: list,
+    camp_idx: int,
+    lang: str | None = None,
+    attached: list | None = None,
+    page: int = 0,
+) -> InlineKeyboardMarkup:
+    """Выбор аудитории для прикрепления к кампании (§3). idx — ГЛОБАЛЬНАЯ позиция в _AUD_CACHE;
+    camp_idx ведёт прикрепление к конкретной кампании и кнопку «назад» — к её меню.
+    C7: attached — УЖЕ прикреплённые аудитории (idx в _AUD_DET_CACHE) с кнопкой 🗑, минтящей
+    detach_audience за confirm-гейтом (раньше открепить из бота было нельзя вовсе).
+    C8: доступные к прикреплению — ПОСТРАНИЧНО (много user_list → REPLY_MARKUP_TOO_LONG);
+    прикреплённых обычно единицы — показываем всегда."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
-    for i, a in enumerate(auds):
+    rows = 0
+    for i, a in enumerate(attached or []):
+        kb.button(
+            text=("🗑 Detach: " if en else "🗑 Открепить: ") + _ellipsize(a.name),
+            callback_data=AudienceCB(action="det", camp_idx=camp_idx, idx=i),
+        )
+        rows += 1
+    total = len(auds)
+    pages = max(1, (total + _CAMP_PAGE - 1) // _CAMP_PAGE)
+    page = max(0, min(page, pages - 1))
+    start = page * _CAMP_PAGE
+    for i in range(start, min(start + _CAMP_PAGE, total)):
+        a = auds[i]
         size = getattr(a, "size", 0) or 0
         suffix = f" · {size:,}".replace(",", " ") if size else ""
         kb.button(
             text=f"👥 {_ellipsize(a.name)}{suffix}",
             callback_data=AudienceCB(action="pick", camp_idx=camp_idx, idx=i),
         )
+        rows += 1
+    # target несёт camp_idx — перелистывание пересобирает клавиатуру ТОЙ ЖЕ кампании.
+    nav_n = _page_nav_row(kb, "aud", str(camp_idx), page, pages)
+    sizes = [1] * rows
+    if nav_n:
+        sizes.append(nav_n)
+    sizes.append(1)  # «‹ Назад»
     kb.button(text="‹ Back" if en else "‹ Назад", callback_data=CampCB(action="menu", idx=camp_idx))
-    kb.adjust(1)
+    kb.adjust(*sizes)
     return kb.as_markup()
 
 
@@ -1776,16 +1805,30 @@ def rsa_overview_kb(
     return kb.as_markup()
 
 
-def rsa_pick_campaigns_kb(camps: list[dict], lang: str | None = None) -> InlineKeyboardMarkup:
-    """Визард /rsa: выбор кампании (idx → имя из кэша). lang принимаем для единообразия
-    (подписи кампаний — данные, не переводятся; маркер статуса нейтрален)."""
+def rsa_pick_campaigns_kb(
+    camps: list[dict], lang: str | None = None, page: int = 0
+) -> InlineKeyboardMarkup:
+    """Визард /rsa: выбор кампании (idx → ГЛОБАЛЬНАЯ позиция в кэше), ПОСТРАНИЧНО (C8: раньше
+    кнопка на каждую кампанию — на крупном аккаунте REPLY_MARKUP_TOO_LONG ронял весь флоу /rsa).
+    lang принимаем для единообразия (подписи кампаний — данные, не переводятся)."""
     kb = InlineKeyboardBuilder()
-    for i, c in enumerate(camps):
+    total = len(camps)
+    pages = max(1, (total + _CAMP_PAGE - 1) // _CAMP_PAGE)
+    page = max(0, min(page, pages - 1))
+    start = page * _CAMP_PAGE
+    shown = 0
+    for i in range(start, min(start + _CAMP_PAGE, total)):
+        c = camps[i]
         mark = {"ENABLED": "▶️", "PAUSED": "⏸"}.get(c.get("status", ""), "•")
         kb.button(
             text=f"{mark} {_ellipsize(c['name'])}", callback_data=RsaPickCB(what="camp", idx=i)
         )
-    kb.adjust(1)
+        shown += 1
+    nav_n = _page_nav_row(kb, "rsac", "", page, pages)
+    sizes = [1] * shown
+    if nav_n:
+        sizes.append(nav_n)
+    kb.adjust(*sizes)
     return kb.as_markup()
 
 

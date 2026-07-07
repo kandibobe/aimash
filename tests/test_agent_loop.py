@@ -131,8 +131,9 @@ def _fake_stats_env(monkeypatch, seen: dict):
     from ads.client import DRAFT_ACCOUNT_ID  # noqa: F401
     from types import SimpleNamespace as NS
 
-    def _stats(client, cid, days):
+    def _stats(client, cid, days, **kw):
         seen["cid"] = cid
+        seen["range"] = (kw.get("date_from"), kw.get("date_to"))  # C5: явный диапазон дат
         return NS(impressions=1, clicks=1, cost=1.0, conversions=0.0, conv_value=0.0)
 
     monkeypatch.setattr(ar, "account_stats", _stats)
@@ -208,6 +209,60 @@ async def test_get_stats_nonnumeric_period_days_coerces_gracefully(monkeypatch):
     with patched(L, "chat", fake):
         out = await L.handle_command("покажи статистику за прошлый месяц", chat_id=44)
     assert out["type"] == "read" and out["days"] == 30  # дефолт, без ValueError
+
+
+async def test_get_stats_period_text_resolved_by_code(monkeypatch):
+    """C5: «за вчера» — модель передаёт фразу period_text, ДАТЫ считает КОД (модель не знает
+    «сегодня»); в ответе фактический диапазон, подпись не врёт."""
+    from datetime import date, timedelta
+
+    from core.config import settings
+    from db.session import init_db
+
+    await init_db()
+    monkeypatch.setattr(settings, "google_ads_allowed_customer_ids", "7753643025")
+    seen: dict = {}
+    _fake_stats_env(monkeypatch, seen)
+    fake, _ = _chat_returning(_msg([_tc("get_stats", {"period_text": "вчера"})]))
+    with patched(L, "chat", fake):
+        out = await L.handle_command("статистика за вчера", chat_id=45)
+    y = (date.today() - timedelta(days=1)).isoformat()
+    assert out["type"] == "read" and out["date_from"] == y and out["date_to"] == y
+    assert out["days"] == 1 and seen["range"] == (y, y)
+
+
+async def test_get_stats_explicit_dates_win(monkeypatch):
+    """C5: явные date_from/date_to из NL («с 1 по 15 июня») уходят в GAQL-диапазон как есть."""
+    from core.config import settings
+    from db.session import init_db
+
+    await init_db()
+    monkeypatch.setattr(settings, "google_ads_allowed_customer_ids", "7753643025")
+    seen: dict = {}
+    _fake_stats_env(monkeypatch, seen)
+    fake, _ = _chat_returning(
+        _msg([_tc("get_stats", {"date_from": "2026-06-01", "date_to": "2026-06-15"})])
+    )
+    with patched(L, "chat", fake):
+        out = await L.handle_command("отчёт с 1 по 15 июня", chat_id=46)
+    assert out["type"] == "read" and out["days"] == 15
+    assert seen["range"] == ("2026-06-01", "2026-06-15")
+
+
+async def test_get_stats_unparseable_period_text_falls_back(monkeypatch):
+    """C5: нераспознанная фраза периода → честный откат на period_days (не крэш, не гадание)."""
+    from core.config import settings
+    from db.session import init_db
+
+    await init_db()
+    monkeypatch.setattr(settings, "google_ads_allowed_customer_ids", "7753643025")
+    seen: dict = {}
+    _fake_stats_env(monkeypatch, seen)
+    fake, _ = _chat_returning(_msg([_tc("get_stats", {"period_text": "фывапролдж"})]))
+    with patched(L, "chat", fake):
+        out = await L.handle_command("статистика фывапролдж", chat_id=47)
+    assert out["type"] == "read" and out["days"] == 30
+    assert seen["range"] == (None, None)
 
 
 async def test_get_stats_ambiguous_name_asks(monkeypatch):

@@ -527,24 +527,34 @@ async def camp_audience(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
         return
     try:
         from ads.client import build_client_async
-        from ads.read import list_audiences
+        from ads.read import list_attached_audiences, list_audiences
 
         acct = bm._camp_account(chat_id)  # §8: аудитории аккаунта-якоря меню, не хардкод Draft
         client = await build_client_async(acct)
         async with bm.ux.typing_action(cq.message):
             auds = await bm.run_ads_read_call(list_audiences, client, acct, label="list_audiences")
+            attached: list = []
+            camp_id = camps[callback_data.idx].get("id")
+            if camp_id:
+                try:  # C7: прикреплённые — best-effort (сбой не блокирует прикрепление новых)
+                    attached = await bm.run_ads_read_call(
+                        list_attached_audiences, client, acct, camp_id, label="attached_audiences"
+                    )
+                except Exception:  # noqa: BLE001
+                    attached = []
     except Exception as e:  # сеть/доступ/SDK
         await cq.answer(await bm._friendly_error(e, "camp:audiences", short=True), show_alert=True)
         return
-    if not auds:
+    if not auds and not attached:
         await cq.answer(bm.i18n.t("no_audiences"), show_alert=True)
         return
     bm._AUD_CACHE[chat_id] = auds
+    bm._AUD_DET_CACHE[chat_id] = attached  # C7: резолв idx→resource_name для 🗑
     await cq.answer()
     await bm._safe_edit(
         cq,
         bm.texts.audiences_title(camps[callback_data.idx]["name"]),
-        reply_markup=bm.audiences_kb(auds, callback_data.idx),
+        reply_markup=bm.audiences_kb(auds, callback_data.idx, attached=attached),
         parse_mode=bm.ParseMode.HTML,
     )
 
@@ -570,6 +580,45 @@ async def on_audience_pick(cq: bm.CallbackQuery, callback_data: bm.AudienceCB) -
     except Exception as e:  # валидация схемы
         await cq.answer(
             await bm._friendly_error(e, "camp:attach_audience", short=True), show_alert=True
+        )
+        return
+    params["_audience_names"] = [aud.name]  # инертно для исполнения; для дружелюбной сводки
+    await cq.answer()
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        return
+    await bm._present_proposal(
+        msg,
+        chat_id=chat_id,
+        operation=op,
+        params=params,
+        summary=summary,
+        cid=cid,
+        customer_id=bm._camp_account(chat_id),
+    )
+
+
+@bm.dp.callback_query(bm.AudienceCB.filter(bm.F.action == "det"))
+async def on_audience_detach(cq: bm.CallbackQuery, callback_data: bm.AudienceCB) -> None:
+    """C7: 🗑 у прикреплённой аудитории → черновик detach_audience (зеркало on_audience_pick;
+    исполнение только после ✅ через confirm-гейт). Раньше detach был недостижим из UI вовсе."""
+    chat_id = bm._cq_chat_id(cq)
+    camps = bm._CAMP_CACHE.get(chat_id)
+    attached = bm._AUD_DET_CACHE.get(chat_id)
+    if not bm._valid_idx(camps, callback_data.camp_idx) or not bm._valid_idx(
+        attached, callback_data.idx
+    ):
+        await cq.answer(bm.i18n.t("aud_list_stale"), show_alert=True)
+        return
+    name = camps[callback_data.camp_idx]["name"]
+    aud = attached[callback_data.idx]
+    try:
+        cid, op, params, summary = bm._build_proposal(
+            "detach_audience", campaign=name, audience_resource_names=[aud.resource_name]
+        )
+    except Exception as e:  # валидация схемы
+        await cq.answer(
+            await bm._friendly_error(e, "camp:detach_audience", short=True), show_alert=True
         )
         return
     params["_audience_names"] = [aud.name]  # инертно для исполнения; для дружелюбной сводки

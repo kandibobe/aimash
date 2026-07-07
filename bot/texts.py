@@ -939,6 +939,25 @@ def fmt_mutation_summary(operation: str, params: dict, lang: str | None = None) 
     if operation == "remove_ad_group":
         ag = params.get("ad_group", "")
         return f"🗑 УДАЛИТЬ группу «{ag}» (кампания «{c}»).\n⚠️ Действие необратимо."
+    if operation in ("pause_ad", "resume_ad"):
+        ag = params.get("ad_group", "")
+        ad = params.get("ad", "")
+        new = "на паузе ⏸" if operation == "pause_ad" else "включено ▶️"
+        b = _before(params)
+        if b and b.get("kind") == "status" and b.get("before_status"):
+            return (
+                f"Объявление «{ad}» (группа «{ag}», кампания «{c}»): "
+                f"{status_human(b['before_status'], lng)} → {new}"
+            )
+        verb = "поставить на паузу" if operation == "pause_ad" else "возобновить"
+        return f"Объявление «{ad}» (группа «{ag}», кампания «{c}») — {verb}."
+    if operation == "remove_ad":
+        ag = params.get("ad_group", "")
+        ad = params.get("ad", "")
+        return (
+            f"🗑 УДАЛИТЬ объявление «{ad}» (группа «{ag}», кампания «{c}»).\n"
+            "⚠️ Действие необратимо (статус станет REMOVED)."
+        )
     if operation in ("pause_ad_group", "resume_ad_group"):
         ag = params.get("ad_group", "")
         b = _before(params)
@@ -1087,6 +1106,25 @@ def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
     if operation == "remove_ad_group":
         ag = params.get("ad_group", "")
         return f"🗑 DELETE ad group “{ag}” (campaign “{c}”).\n⚠️ Irreversible."
+    if operation in ("pause_ad", "resume_ad"):
+        ag = params.get("ad_group", "")
+        ad = params.get("ad", "")
+        new = "paused ⏸" if operation == "pause_ad" else "enabled ▶️"
+        b = _before(params)
+        if b and b.get("kind") == "status" and b.get("before_status"):
+            return (
+                f"Ad “{ad}” (ad group “{ag}”, campaign “{c}”): "
+                f"{status_human(b['before_status'], 'en')} → {new}"
+            )
+        verb = "pause" if operation == "pause_ad" else "resume"
+        return f"Ad “{ad}” (ad group “{ag}”, campaign “{c}”) — {verb}."
+    if operation == "remove_ad":
+        ag = params.get("ad_group", "")
+        ad = params.get("ad", "")
+        return (
+            f"🗑 DELETE ad “{ad}” (ad group “{ag}”, campaign “{c}”).\n"
+            "⚠️ Irreversible (status becomes REMOVED)."
+        )
     if operation in ("pause_ad_group", "resume_ad_group"):
         ag = params.get("ad_group", "")
         b = _before(params)
@@ -1308,6 +1346,7 @@ def fmt_stats(
     lang: str | None = None,
     *,
     name: str = "",
+    period_label: str = "",
 ) -> str:
     """Статистика аккаунта с вычисленными в КОДЕ CTR/CPC (контракт read не трогаем).
     currency (§9) — код валюты аккаунта для денежных строк; пустой → без явной валюты.
@@ -1322,9 +1361,11 @@ def fmt_stats(
     cpc = (cost / clk) if clk else 0.0
     cur = f" {esc(currency)}" if currency else ""
     label = f"{esc(name)} · …{esc(str(account)[-4:])}" if name else f"…{esc(str(account)[-4:])}"
+    # C5: явный диапазон дат («за вчера»/«с 1 по 15 июня») — подпись фактическим периодом.
     if _lang(lang) == "en":
+        period = esc(period_label) if period_label else f"{days} d."
         return (
-            f"📊 <b>Account {label}</b> · {days} d.\n\n"
+            f"📊 <b>Account {label}</b> · {period}\n\n"
             f"Impressions: <b>{_thou(imp)}</b>\n"
             f"Clicks:      <b>{_thou(clk)}</b>  (CTR {ctr:.2f}%)\n"
             f"Cost:        <b>{_thou(cost, 2)}{cur}</b>\n"
@@ -1332,8 +1373,9 @@ def fmt_stats(
             f"Conversions: <b>{conv:g}</b>\n"
             f"Value:       <b>{_thou(cval, 2)}{cur}</b>"
         )
+    period = esc(period_label) if period_label else f"{days} дн."
     return (
-        f"📊 <b>Аккаунт {label}</b> · {days} дн.\n\n"
+        f"📊 <b>Аккаунт {label}</b> · {period}\n\n"
         f"Показы:      <b>{_thou(imp)}</b>\n"
         f"Клики:       <b>{_thou(clk)}</b>  (CTR {ctr:.2f}%)\n"
         f"Расход:      <b>{_thou(cost, 2)}{cur}</b>\n"

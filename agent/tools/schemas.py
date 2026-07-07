@@ -109,6 +109,9 @@ MUTATION_TOOLS = {
     "remove_ad_group",
     "pause_ad_group",
     "resume_ad_group",
+    "pause_ad",
+    "resume_ad",
+    "remove_ad",
     "set_geo_proximity",
     "set_geo_location",
     "set_bidding_strategy",
@@ -279,6 +282,28 @@ class ResumeAdGroup(BaseModel):
     ad_group: str
 
 
+class PauseAd(BaseModel):
+    """C6 (§16 AdGroupAdService): пауза ОТДЕЛЬНОГО объявления. ad — числовой id объявления или
+    фрагмент его первого заголовка (несколько совпадений → код попросит уточнить id)."""
+
+    campaign: str
+    ad_group: str
+    ad: str = Field(min_length=1, max_length=200)
+
+
+class ResumeAd(BaseModel):
+    campaign: str
+    ad_group: str
+    ad: str = Field(min_length=1, max_length=200)
+
+
+class RemoveAd(BaseModel):
+    # Необратимое удаление объявления — в UI двойное подтверждение (_DESTRUCTIVE_OPS).
+    campaign: str
+    ad_group: str
+    ad: str = Field(min_length=1, max_length=200)
+
+
 class RemoveCampaign(BaseModel):
     # §3 удаление кампании (необратимо, status→REMOVED). Двойное подтверждение — в UI (bot).
     # Замок аккаунта — на исполнении (ensure_allowed). campaign — имя кампании.
@@ -411,8 +436,28 @@ class DetachAudience(BaseModel):
 
 
 class GetStats(BaseModel):
+    """C5: период — либо последние period_days, либо ЯВНЫЙ диапазон date_from/date_to (ISO,
+    когда пользователь сам назвал даты), либо period_text — фраза периода КАК В ТЕКСТЕ
+    («вчера», «за прошлую неделю», «июнь», «с 1 по 15 июня»): модель не знает «сегодня» и не
+    считает даты — их резолвит КОД (reports.period.parse_period_text)."""
+
     account: str | None = None
     period_days: int = Field(default=30, gt=0, le=400)
+    date_from: str | None = None  # ISO YYYY-MM-DD (только если пользователь назвал дату явно)
+    date_to: str | None = None
+    period_text: str | None = Field(default=None, max_length=100)
+
+    @field_validator("date_from", "date_to")
+    @classmethod
+    def _iso(cls, v):
+        if v is None or str(v).strip() == "":
+            return None
+        from datetime import date as _d
+
+        try:
+            return _d.fromisoformat(str(v).strip()).isoformat()
+        except ValueError as e:
+            raise ValueError("дата должна быть в ISO-формате ГГГГ-ММ-ДД") from e
 
 
 class AnalyzeAccount(BaseModel):
@@ -1041,6 +1086,9 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "set_campaign_network": SetCampaignNetwork,
     "pause_ad_group": PauseAdGroup,
     "resume_ad_group": ResumeAdGroup,
+    "pause_ad": PauseAd,
+    "resume_ad": ResumeAd,
+    "remove_ad": RemoveAd,
     "remove_campaign": RemoveCampaign,
     "remove_ad_group": RemoveAdGroup,
     "set_geo_proximity": SetGeoProximity,
@@ -1137,6 +1185,24 @@ TOOLS: list[dict] = [
         ResumeAdGroup,
     ),
     _tool(
+        "pause_ad",
+        "Поставить на паузу ОДНО объявление. Укажи campaign, ad_group и ad — числовой id "
+        "объявления или фрагмент его заголовка.",
+        PauseAd,
+    ),
+    _tool(
+        "resume_ad",
+        "Возобновить (включить) ОДНО объявление из паузы. Укажи campaign, ad_group и ad "
+        "(id или фрагмент заголовка).",
+        ResumeAd,
+    ),
+    _tool(
+        "remove_ad",
+        "УДАЛИТЬ одно объявление (необратимо, статус REMOVED). Только предлагает — исполнение "
+        "после ДВОЙНОГО подтверждения. Укажи campaign, ad_group и ad (id или фрагмент заголовка).",
+        RemoveAd,
+    ),
+    _tool(
         "remove_campaign",
         "УДАЛИТЬ кампанию целиком (необратимо, статус REMOVED). Для команд «удали кампанию X», "
         "«delete campaign X». Только предлагает — исполнение после ДВОЙНОГО подтверждения "
@@ -1177,7 +1243,14 @@ TOOLS: list[dict] = [
         "подтверждения. Укажи topic; campaign/final_url можно уточнить позже.",
         GenerateRsa,
     ),
-    _tool("get_stats", "Прочитать статистику (read-only).", GetStats),
+    _tool(
+        "get_stats",
+        "Прочитать статистику (read-only). Период: по умолчанию period_days (последние N дней); "
+        "если пользователь назвал ЯВНЫЕ даты — date_from/date_to в ISO; если период словами "
+        "(«вчера», «за прошлую неделю», «июнь», «с 1 по 15 июня») — передай фразу КАК ЕСТЬ в "
+        "period_text, даты НЕ выдумывай (их посчитает код).",
+        GetStats,
+    ),
     _tool(
         "analyze_account",
         "Проанализировать аккаунт и дать РЕКОМЕНДАЦИИ по улучшению (read-only, advisory): где "

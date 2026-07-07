@@ -281,6 +281,66 @@ async def apply_resume_ad_group(
     return result
 
 
+# ── Пауза/возобновление/удаление ОТДЕЛЬНОГО объявления (§16 AdGroupAdService, C6) ──
+# ТЗ §3/§16 обещает управление объявлениями, а не только группами/кампаниями. Статус живёт на
+# ad_group_ad (customers/{cid}/adGroupAds/{ad_group_id}~{ad_id}). Деньги НЕ трогаются →
+# user_initiated не требуется (как pause/resume группы). Оба гейта обязательны.
+async def apply_pause_ad(
+    *,
+    customer_id: str,
+    ad_group_id: str,
+    ad_id: str,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    ensure_allowed(customer_id)
+    await _require_confirmation(confirm_store, confirmation_id, "pause_ad")
+    status = ads_client.enums.AdGroupAdStatusEnum.PAUSED
+    result = await run_ads_call(
+        _set_ad_status_via_sdk, ads_client, customer_id, ad_group_id, ad_id, status
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+async def apply_resume_ad(
+    *,
+    customer_id: str,
+    ad_group_id: str,
+    ad_id: str,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    ensure_allowed(customer_id)
+    await _require_confirmation(confirm_store, confirmation_id, "resume_ad")
+    status = ads_client.enums.AdGroupAdStatusEnum.ENABLED
+    result = await run_ads_call(
+        _set_ad_status_via_sdk, ads_client, customer_id, ad_group_id, ad_id, status
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+async def apply_remove_ad(
+    *,
+    customer_id: str,
+    ad_group_id: str,
+    ad_id: str,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """Необратимое удаление объявления (status→REMOVED) — в UI двойное подтверждение
+    (_DESTRUCTIVE_OPS в bot/main), как remove_campaign/remove_ad_group."""
+    ensure_allowed(customer_id)
+    await _require_confirmation(confirm_store, confirmation_id, "remove_ad")
+    result = await run_ads_call(_remove_ad_via_sdk, ads_client, customer_id, ad_group_id, ad_id)
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
 # ── Удаление кампании / группы (необратимо, status→REMOVED) ───────────────────────
 # НЕ денежная операция (user_initiated не требуется, как pause/resume), НО необратимая — в UI
 # закрыта ДВОЙНЫМ подтверждением (bot.keyboards.confirm_destructive_kb). Оба гейта обязательны:
@@ -1212,6 +1272,39 @@ def _set_campaign_network_via_sdk(
         "customer_id": customer_id,
         "campaign_id": str(campaign_id),
         "search_partners": bool(search_partners),
+        "applied": True,
+    }
+
+
+def _set_ad_status_via_sdk(client, customer_id: str, ad_group_id: str, ad_id: str, status) -> dict:
+    """Статус ОТДЕЛЬНОГО объявления через AdGroupAdService (C6, зеркало
+    _set_ad_group_status_via_sdk). resource_name = adGroupAds/{ad_group_id}~{ad_id}."""
+    svc = client.get_service("AdGroupAdService")
+    op = client.get_type("AdGroupAdOperation")
+    op.update.resource_name = svc.ad_group_ad_path(str(customer_id), str(ad_group_id), str(ad_id))
+    op.update.status = status
+    client.copy_from(op.update_mask, protobuf_helpers.field_mask(None, op.update._pb))
+    svc.mutate_ad_group_ads(customer_id=str(customer_id), operations=[op])
+    return {
+        "customer_id": customer_id,
+        "ad_group_id": str(ad_group_id),
+        "ad_id": str(ad_id),
+        "status": getattr(status, "name", str(status)),
+        "applied": True,
+    }
+
+
+def _remove_ad_via_sdk(client, customer_id: str, ad_group_id: str, ad_id: str) -> dict:
+    """Необратимое удаление объявления (op.remove, status→REMOVED). C6."""
+    svc = client.get_service("AdGroupAdService")
+    op = client.get_type("AdGroupAdOperation")
+    op.remove = svc.ad_group_ad_path(str(customer_id), str(ad_group_id), str(ad_id))
+    svc.mutate_ad_group_ads(customer_id=str(customer_id), operations=[op])
+    return {
+        "customer_id": customer_id,
+        "ad_group_id": str(ad_group_id),
+        "ad_id": str(ad_id),
+        "removed": True,
         "applied": True,
     }
 

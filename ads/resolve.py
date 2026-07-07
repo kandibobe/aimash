@@ -150,6 +150,56 @@ def find_ad_group_by_name(
     return None
 
 
+@dataclass
+class AdRef:
+    """Ссылка на отдельное объявление (C6: pause/resume/remove_ad). headline — первый заголовок
+    RSA (человекочитаемая метка; у не-RSA пусто)."""
+
+    ad_id: str
+    ad_group_id: str
+    status: str
+    headline: str
+
+
+def find_ads_in_group(
+    client: GoogleAdsClient, customer_id: str, campaign_name: str, ad_group_name: str, needle: str
+) -> list[AdRef]:
+    """Объявления группы, матчащие needle: только цифры → точный ad.id; иначе — подстрока
+    первого заголовка RSA (casefold). READ-ONLY. Пустой needle → ВСЕ объявления группы
+    (вызывающий покажет список с id). Несколько совпадений — вернём все (вызывающий просит
+    уточнить id, ничего не угадываем — денежная поверхность)."""
+    ensure_allowed(customer_id)
+    ga = client.get_service("GoogleAdsService")
+    safe_c, safe_g = gaql_escape(campaign_name), gaql_escape(ad_group_name)
+    q = (
+        "SELECT ad_group.id, ad_group_ad.ad.id, ad_group_ad.status, "
+        "ad_group_ad.ad.responsive_search_ad.headlines FROM ad_group_ad "
+        f"WHERE campaign.name = '{safe_c}' AND ad_group.name = '{safe_g}' "
+        "AND ad_group_ad.status != 'REMOVED' ORDER BY ad_group_ad.ad.id"
+    )
+    want = (needle or "").strip()
+    by_id = want.isdigit()
+    out: list[AdRef] = []
+    for row in ga.search(customer_id=str(customer_id), query=q):
+        ad_id = str(row.ad_group_ad.ad.id)
+        heads = getattr(row.ad_group_ad.ad.responsive_search_ad, "headlines", []) or []
+        first = next((getattr(h, "text", "") for h in heads if getattr(h, "text", "")), "")
+        if by_id:
+            if ad_id != want:
+                continue
+        elif want and want.casefold() not in first.casefold():
+            continue
+        out.append(
+            AdRef(
+                ad_id=ad_id,
+                ad_group_id=str(row.ad_group.id),
+                status=row.ad_group_ad.status.name,
+                headline=first,
+            )
+        )
+    return out
+
+
 _CURRENCY_HUMAN = {
     "USD": "USD",
     "UAH": "грн",

@@ -230,7 +230,7 @@ _KEYWORD_OPS = frozenset(
 # P1-6: необратимые удаления — карточка подтверждения проходит ДВА шага (confirm_destructive_kb →
 # confirm_final_kb). Замок аккаунта (ensure_allowed) и confirm-гейт неизменны; это доп. защита в UI.
 _DESTRUCTIVE_OPS = frozenset(
-    {"remove_campaign", "remove_ad_group", "remove_keywords", "remove_asset_link"}
+    {"remove_campaign", "remove_ad_group", "remove_ad", "remove_keywords", "remove_asset_link"}
 )
 
 # Лёгкое in-memory состояние UI (теряется при рестарте — это ок, не источник истины):
@@ -313,6 +313,8 @@ _CRAWL_INFLIGHT: dict[str, asyncio.Task] = {}
 _AUD_CACHE: dict[
     int, list
 ] = {}  # chat_id → последний список аудиторий (§3, резолв idx→resource_name)
+# C7: chat_id → ПРИКРЕПЛЁННЫЕ аудитории выбранной кампании (резолв idx→resource_name для 🗑).
+_AUD_DET_CACHE: dict[int, list] = {}
 # §8/§9: пикер отчётов (аккаунт → кампания → период) для /report /export /sheets. Всё в памяти
 # (не источник истины): idx в callback резолвится по chat_id, выбранный аккаунт персистится отдельно
 # (_save_selected_account, как /account). _REPORT_SEL держит текущий выбор до нажатия периода.
@@ -4678,6 +4680,11 @@ async def _dispatch_command_result(
             parse_mode=ParseMode.HTML,
         )
     elif t == "read":
+        # C5: явный диапазон дат в ответе агента → честная подпись периода вместо «N дн.»
+        pf, pt = res.get("date_from"), res.get("date_to")
+        period_label = ""
+        if pf and pt:
+            period_label = pf if pf == pt else f"{pf} — {pt}"
         await m.answer(
             texts.fmt_stats(
                 res.get("account", ""),
@@ -4685,6 +4692,7 @@ async def _dispatch_command_result(
                 res.get("stats", {}),
                 res.get("currency", ""),
                 name=res.get("account_name", ""),  # 2.1: имя кладёт agent/loop из meta
+                period_label=period_label,
             ),
             parse_mode=ParseMode.HTML,
         )
