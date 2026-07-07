@@ -292,6 +292,56 @@ def test_video_type_kb_hides_video_button_by_default():
     assert any("Video" in t for t in on), on  # включённый флаг возвращает кнопку
 
 
+# ── C1 (live 2026-07): логотип DG ОБЯЗАТЕЛЕН — «Пропустить» вёл к гарантированному отказу ──
+def test_video_logo_kb_has_no_skip_button():
+    """Без logo_images Google отвергает create DG (ASSET_LINK TOO_FEW → откат бюджета+кампании+
+    группы), поэтому кнопки «⏭ Пропустить» в клавиатуре логотипа больше нет — только отмена."""
+    from bot.keyboards import video_logo_kb
+
+    markup = video_logo_kb("ru")
+    cbs = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert not any("logo_skip" in str(cb) for cb in cbs), cbs
+    texts = _kb_button_texts(markup)
+    assert not any("Пропустить" in t or "Skip" in t for t in texts), texts
+
+
+@pytest.mark.asyncio
+async def test_stale_logo_skip_button_explains_not_mints(monkeypatch):
+    """Старая «⏭»-кнопка в истории чата: хендлер объясняет обязательность лого и НЕ минтит
+    proposal без логотипа (раньше вёл к гарантированному отказу create)."""
+    import bot.main as bm
+    from bot.handlers.search_media import video_logo_skip
+
+    minted = {"n": 0}
+
+    async def fake_mint(*a, **kw):
+        minted["n"] += 1
+
+    monkeypatch.setattr(bm, "_video_mint_proposal", fake_mint)
+
+    alerts: list[tuple[str, bool]] = []
+
+    class _Cq:
+        message = None
+
+        class from_user:
+            id = 100
+
+        async def answer(self, text: str = "", show_alert: bool = False, **kw):
+            alerts.append((text, show_alert))
+
+    class _State:
+        async def get_data(self):
+            return {}
+
+        async def clear(self):
+            pass
+
+    await video_logo_skip(_Cq(), None, _State())
+    assert minted["n"] == 0  # proposal без лого НЕ создан
+    assert alerts and alerts[0][1] is True and "логотип" in alerts[0][0].lower()
+
+
 # ── capability-guard зеркало + схемы ─────────────────────────────────────────────
 def test_video_ops_in_supported_operations():
     from ads.service import SUPPORTED_OPERATIONS

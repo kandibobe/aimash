@@ -436,3 +436,61 @@ async def test_get_active_account_corner_cases():
     with _read(read_ids=ACCT):
         assert await get_active_account(chat) == ACCT  # вернулось нормализованным
     await revoke_account_access(chat, ACCT)
+
+
+# ── C2 (аудит 2026-07): фильтр аккаунтов под получателя scheduler-рассылки ────────
+async def test_accessible_accounts_enforced_filters_to_grants():
+    """enforced: получатель видит Draft + свои гранты; чужой аккаунт из рассылки отсечён
+    (метрики чужого клиента не утекают в плановый отчёт/аномалии/дайджест)."""
+    from core.access import accessible_accounts_for_user, grant_account_access
+
+    await init_db()
+    chat = 556001
+    await grant_account_access(chat, ACCT)
+    try:
+        out = await accessible_accounts_for_user(chat, [DRAFT, ACCT, "9998887776"])
+        assert out == [DRAFT, ACCT]  # порядок кандидатов сохранён, не-грантованный отсечён
+    finally:
+        await revoke_account_access(chat, ACCT)
+
+
+async def test_accessible_accounts_admin_sees_all(monkeypatch):
+    """Админ — все кандидаты без грантов (он и управляет грантами; чтение ≠ деньги)."""
+    from core.access import accessible_accounts_for_user
+
+    await init_db()
+    chat = 556002
+    monkeypatch.setattr(settings, "admin_chat_ids", str(chat))
+    out = await accessible_accounts_for_user(chat, [DRAFT, ACCT, "9998887776"])
+    assert out == [DRAFT, ACCT, "9998887776"]
+
+
+async def test_accessible_accounts_legacy_pass_unchanged(monkeypatch):
+    """legacy-режим (enforcement выключен): поведение рассылок НЕ меняется — все кандидаты."""
+    import core.access as acc
+    from core.access import accessible_accounts_for_user
+
+    await init_db()
+    monkeypatch.setattr(settings, "account_access_mode", "legacy")
+    acc._invalidate_enforcement_cache()
+    try:
+        out = await accessible_accounts_for_user(556003, [DRAFT, ACCT])
+        assert out == [DRAFT, ACCT]
+    finally:
+        acc._invalidate_enforcement_cache()
+
+
+async def test_accessible_accounts_fail_closed_on_db_error(monkeypatch):
+    """Сбой чтения грантов ⇒ только Draft (fail-closed), не «всё» и не исключение."""
+    import core.access as acc
+    from core.access import accessible_accounts_for_user
+
+    await init_db()
+
+    class _BoomSession:
+        def __call__(self, *a, **k):
+            raise RuntimeError("db down")
+
+    monkeypatch.setattr(acc, "Session", _BoomSession())
+    out = await accessible_accounts_for_user(556004, [DRAFT, ACCT])
+    assert out == [DRAFT]

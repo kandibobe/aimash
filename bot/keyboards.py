@@ -1265,12 +1265,13 @@ def video_type_kb(lang: str | None = None) -> InlineKeyboardMarkup:
 
 
 def video_logo_kb(lang: str | None = None) -> InlineKeyboardMarkup:
-    """§11 Demand Gen: логотип (опц.) — прислать фото или пропустить."""
+    """§11 Demand Gen: логотип ОБЯЗАТЕЛЕН (live 2026-07: без logo_images Google отвергает create
+    TOO_FEW → откат бюджета+кампании+группы). Кнопки «Пропустить» больше нет — только фото или
+    отмена; старые «⏭»-кнопки в истории ловит video_logo_skip с объяснением."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
-    kb.button(text="⏭ Skip" if en else "⏭ Пропустить", callback_data=VideoCB(action="logo_skip"))
     kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
-    kb.adjust(2)
+    kb.adjust(1)
     return kb.as_markup()
 
 

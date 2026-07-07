@@ -133,7 +133,9 @@ async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
         from bot import i18n
 
         langs = {i18n.get_lang(chat_id) for chat_id in recipients} or {"ru"}
-        blocks: dict[str, list[str]] = {lang: [] for lang in langs}
+        # C2: блоки per-АККАУНТ (не плоским списком) — дайджест собирается ПОД получателя из
+        # аккаунтов, доступных именно ему (enforced-режим: метрики чужого клиента не утекают).
+        blocks: dict[str, dict[str, str]] = {lang: {} for lang in langs}
         for acct in accounts:
             tok = set_context(customer_id=acct)  # §8: ошибки/логи этого аккаунта атрибутируются
             try:
@@ -151,7 +153,7 @@ async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
                     currency = ""
                 report = await build_account_report_async(client, acct, period, currency=currency)
                 for lang in langs:
-                    blocks[lang].append(summary_text(report, lang))
+                    blocks[lang][acct] = summary_text(report, lang)
             except Exception as e:  # сеть/доступ/SDK — фиксируем (§15), остальные аккаунты живут
                 if is_account_access_error(e):
                     # A3: аккаунт деактивирован/нет прав — ОЖИДАЕМО (не дефект). Не пишем в /diag
@@ -164,21 +166,32 @@ async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
                 else:
                     await capture_exception(e, where=f"scheduler:report:{acct}")
                     for lang in langs:
-                        blocks[lang].append(f"⚠️ Аккаунт {acct}: отчёт недоступен (см. /diag)")
+                        blocks[lang][acct] = f"⚠️ Аккаунт {acct}: отчёт недоступен (см. /diag)"
             finally:
                 reset_context(tok)
         if not any(blocks.values()):
             return
-        digests: dict[str, str] = {}
-        for lang, parts in blocks.items():
-            header = "🗓 Scheduled report" if lang == "en" else "🗓 Плановый отчёт"
-            digest = header + "\n\n" + "\n\n———\n\n".join(parts)
-            if len(digest) > _DIGEST_MAX:  # анти-спам: не дробим на N сообщений, усечём с пометкой
-                digest = digest[:_DIGEST_MAX] + "\n\n…(усечено — полный отчёт по аккаунту: /report)"
-            digests[lang] = digest
+        from core.access import accessible_accounts_for_user
+
+        digest_cache: dict[tuple, str] = {}  # (lang, доступные аккаунты) → готовый дайджест
         for chat_id in recipients:
+            lang = i18n.get_lang(chat_id)
+            allowed = await accessible_accounts_for_user(chat_id, accounts)
+            visible = [a for a in allowed if a in blocks.get(lang, {})]
+            if not visible:
+                continue  # получателю нечего показать — не шлём пустой заголовок
+            key = (lang, tuple(visible))
+            digest = digest_cache.get(key)
+            if digest is None:
+                header = "🗓 Scheduled report" if lang == "en" else "🗓 Плановый отчёт"
+                digest = header + "\n\n" + "\n\n———\n\n".join(blocks[lang][a] for a in visible)
+                if len(digest) > _DIGEST_MAX:  # анти-спам: не дробим на N сообщений, усечём
+                    digest = (
+                        digest[:_DIGEST_MAX] + "\n\n…(усечено — полный отчёт по аккаунту: /report)"
+                    )
+                digest_cache[key] = digest
             try:
-                await bot.send_message(chat_id, digests[i18n.get_lang(chat_id)])
+                await bot.send_message(chat_id, digest)
             except Exception as e:  # один недоступный чат не должен ронять рассылку
                 log.warning("scheduler: не доставлено в %s: %s: %s", chat_id, type(e).__name__, e)
 
@@ -215,17 +228,26 @@ def _effective_thresholds(thr: dict | None, acct: str) -> dict | None:
     return base or None
 
 
+def _alert_line(a, lang: str) -> str:
+    """C3: рендер алерта НА ЯЗЫКЕ получателя — anomaly.Alert структурный (kind + params,
+    числа отформатированы кодом), тексты живут в bot/i18n (ключ anomaly_<kind>). Раньше
+    Alert.message был RU-литералом и уходил EN-операторам смешанным RU/EN."""
+    from bot import i18n
+
+    return i18n.t(f"anomaly_{a.kind}", lang, **a.params)
+
+
 def _format_alerts_multi(account_alerts: list[tuple[str, list]], lang: str = "ru") -> str:
     """Единое сообщение об аномалиях по НЕСКОЛЬКИМ аккаунтам (§8, анти-спам: один месседж на
-    оператора, а не по сообщению на аккаунт). Каждый блок помечен аккаунтом. 3H: заголовок/
-    подпись локализованы per-recipient (тексты алертов — RU-детектор, суммы несут код валюты)."""
+    оператора, а не по сообщению на аккаунт). Каждый блок помечен аккаунтом. C3: и рамка,
+    и тексты алертов локализованы per-recipient (суммы несут код валюты)."""
     if lang == "en":
         parts = [f"🔔 <b>Anomalies</b> (last {ANOMALY_WINDOW_DAYS}d vs previous period):"]
     else:
         parts = [f"🔔 <b>Аномалии</b> (за {ANOMALY_WINDOW_DAYS} дн. к предыдущему периоду):"]
     for acct, alerts in account_alerts:
         parts.append(f"\n<b>{'Account' if lang == 'en' else 'Аккаунт'} {acct}</b>:")
-        parts.extend("• " + a.message for a in alerts)
+        parts.extend("• " + _alert_line(a, lang) for a in alerts)
     if lang == "en":
         parts.append("\n<i>This is only a signal — I never change anything myself.</i>")
     else:
@@ -286,11 +308,17 @@ async def run_anomaly_check(bot) -> None:
         from bot import i18n
 
         thresholds = await _thresholds_by_chat(recipients)
-        # Пороги per-chat → для каждого получателя собираем алерты по всем аккаунтам в ОДНО сообщение.
+        from core.access import accessible_accounts_for_user
+
+        # Пороги per-chat → для каждого получателя собираем алерты по ЕГО аккаунтам в ОДНО сообщение.
         for chat_id in recipients:
             thr = thresholds.get(chat_id)
+            # C2: метрики аккаунта не уходят оператору без доступа к нему (enforced-режим).
+            allowed = set(await accessible_accounts_for_user(chat_id, list(metrics)))
             acct_alerts: list[tuple[str, list]] = []
             for acct, (cur, prev, currency) in metrics.items():
+                if acct not in allowed:
+                    continue
                 # §14 (P1-J): пороги с per-account оверлеем поверх chat-дефолтов.
                 alerts = detect_anomalies(
                     cur, prev, _effective_thresholds(thr, acct), currency=currency
@@ -528,11 +556,17 @@ async def run_recommendations_digest(bot) -> None:
         if not reports:
             return
 
+        from core.access import accessible_accounts_for_user
+
         for chat_id in chats:
             lang = i18n.get_lang(chat_id)
+            # C2: рекомендации строим только по аккаунтам, доступным этому оператору.
+            allowed = set(await accessible_accounts_for_user(chat_id, list(reports)))
             # 2) Кандидаты по каждому аккаунту (persist=False — строки пишем ТОЛЬКО для Top-N).
             items: list[tuple] = []  # (acct, currency, total_cost, rec)
             for acct, (report, currency, total) in reports.items():
+                if acct not in allowed:
+                    continue
                 try:
                     rec_set = await advisor_service.build_recommendations(
                         chat_id,
@@ -703,10 +737,16 @@ async def run_business_digest(bot) -> None:
         if not acct_data:
             return
         # 2) Один локализованный дайджест на оператора.
+        from core.access import accessible_accounts_for_user
+
         for chat_id in chats:
             lang = i18n.get_lang(chat_id)
+            # C2: в дайджест оператора попадают только доступные ему аккаунты.
+            allowed = set(await accessible_accounts_for_user(chat_id, list(acct_data)))
             blocks: list[str] = []
             for acct, (report, currency) in acct_data.items():
+                if acct not in allowed:
+                    continue
                 part = [summary_text(report, lang)]
                 cpa = _biz_cpa_line(report, currency, lang)
                 if cpa:
@@ -742,7 +782,7 @@ async def run_business_digest(bot) -> None:
                         part.append(
                             i18n.t("bizdigest_anomalies_title", lang)
                             + "\n"
-                            + "\n".join(f"• {a.message}" for a in alerts)
+                            + "\n".join(f"• {_alert_line(a, lang)}" for a in alerts)
                         )
                 except Exception:  # noqa: BLE001 — аномалии-довесок
                     pass

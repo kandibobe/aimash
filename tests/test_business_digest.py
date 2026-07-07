@@ -13,6 +13,22 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _legacy_access(monkeypatch):
+    """C2: run_business_digest стал enforcement-aware; тесты модуля проверяют СБОРКУ дайджеста,
+    не доступ — фиксируем legacy-проход (гранты других тест-файлов в общей SQLite включали бы
+    auto-enforcement, и фильтр съедал бы аккаунты)."""
+    import core.access as acc
+    from core.config import settings as _cfg
+
+    monkeypatch.setattr(_cfg, "account_access_mode", "legacy")
+    acc._invalidate_enforcement_cache()
+    yield
+    acc._invalidate_enforcement_cache()
+
 
 def _report(cost=100.0, prev_cost=50.0, conv=4.0, prev_conv=2.0):
     return SimpleNamespace(
@@ -83,10 +99,16 @@ async def test_bizdigest_one_message_with_blocks_no_proposal(monkeypatch):
     monkeypatch.setattr(jobs, "run_ads_read_call", _fake_read)
     monkeypatch.setattr(jobs, "build_account_report_async", _fake_report)
     monkeypatch.setattr(jobs, "summary_text", lambda r, lang=None: f"SUMMARY[{lang}]")
+    # C3: Alert структурный (kind+params), текст рендерится i18n-ключом anomaly_<kind> на доставке.
     monkeypatch.setattr(
         jobs,
         "detect_anomalies",
-        lambda cur, prev, thr=None, *, currency="": [SimpleNamespace(message="всплеск расхода")],
+        lambda cur, prev, thr=None, *, currency="": [
+            SimpleNamespace(
+                kind="spend_spike",
+                params={"pct": "+100", "prev": "50.00", "now": "100.00", "cur": " USD"},
+            )
+        ],
     )
 
     async def _fake_build(chat_id, acct, **kw):
@@ -115,7 +137,7 @@ async def test_bizdigest_one_message_with_blocks_no_proposal(monkeypatch):
     text = sent[0][1]
     assert "SUMMARY" in text and "CPA" in text  # сводка + CPA-строка
     assert f"совет-{A}" in text  # топ-советы аккаунта A
-    assert "всплеск расхода" in text  # аномалии недели
+    assert "Расход вырос на +100%" in text  # аномалии недели (C3: рендер i18n по kind+params)
     assert f"совет-{B}" not in text  # упавший B пропущен, но дайджест дошёл
 
     async with Session() as s:

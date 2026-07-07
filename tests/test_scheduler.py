@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import select
 
 from ads.client import DRAFT_ACCOUNT_ID
@@ -31,6 +32,21 @@ def _arecipients(value):
         return set(value)
 
     return _f
+
+
+@pytest.fixture(autouse=True)
+def _legacy_access(monkeypatch):
+    """C2: джобы стали enforcement-aware; тесты этого модуля проверяют АГРЕГАЦИЮ дайджестов, не
+    доступ — фиксируем legacy-проход. Иначе гранты, оставленные другими тест-файлами в общей
+    SQLite (auto-режим ⇒ enforcement включён), заставляли бы C2-фильтр съедать аккаунты.
+    Enforced-семантика покрыта отдельным тестом ниже (он переопределяет режим сам)."""
+    import core.access as acc
+    from core.config import settings as _cfg
+
+    monkeypatch.setattr(_cfg, "account_access_mode", "legacy")
+    acc._invalidate_enforcement_cache()
+    yield
+    acc._invalidate_enforcement_cache()
 
 
 # ── P1-J: per-account оверлей порогов ─────────────────────────────────────────────
@@ -242,6 +258,46 @@ async def test_anomaly_multi_account_one_message(monkeypatch):
     await jobs.run_anomaly_check(FakeBot())
     assert len(sent) == 1  # одно сообщение оператору
     assert f"Аккаунт {A}" in sent[0][1] and f"Аккаунт {B}" in sent[0][1]
+
+
+async def test_scheduled_report_enforced_filters_recipient_accounts(monkeypatch):
+    """C2 (аудит 2026-07): enforced-режим — оператор БЕЗ гранта не получает метрики чужого
+    аккаунта в плановом дайджесте (раньше рассылка игнорировала пер-юзер гранты — утечка)."""
+    import core.access as acc
+    from core.access import grant_account_access, revoke_account_access
+    from core.config import settings as cfg
+    from db.session import init_db
+    from scheduler import jobs
+
+    A, B = "1112223334", "2223334445"
+    monkeypatch.setattr(jobs, "_scheduled_accounts", lambda: [A, B])
+    monkeypatch.setattr(jobs, "build_client_async", _fake_client_async)
+
+    async def fake_report(_client, acct, _period, **k):
+        return f"R:{acct}"
+
+    monkeypatch.setattr(jobs, "build_account_report_async", fake_report)
+    monkeypatch.setattr(jobs, "summary_text", lambda r, lang=None: r)
+    monkeypatch.setattr(jobs, "_recipients", _arecipients({3}))
+    monkeypatch.setattr(cfg, "account_access_mode", "enforced")  # поверх legacy-фикстуры модуля
+    acc._invalidate_enforcement_cache()
+
+    await init_db()
+    await grant_account_access(3, A)  # грант ТОЛЬКО на A
+    sent: list[tuple[int, str]] = []
+
+    class FakeBot:
+        async def send_message(self, chat_id, text, **kw):
+            sent.append((chat_id, text))
+
+    try:
+        await jobs.run_scheduled_report(FakeBot())
+    finally:
+        await revoke_account_access(3, A)
+        acc._invalidate_enforcement_cache()
+    assert len(sent) == 1
+    assert f"R:{A}" in sent[0][1]  # свой аккаунт — в дайджесте
+    assert f"R:{B}" not in sent[0][1]  # чужой (без гранта) — отфильтрован
 
 
 # ── КОД-ГАРД (golden rule #3): планировщик НЕ может менять аккаунт ────────────────

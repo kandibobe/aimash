@@ -19,9 +19,13 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
 
 @dataclass
 class Alert:
-    kind: str  # "spend_spike" | "conv_drop" | "spend_no_conv"
+    """C3 (аудит 2026-07): алерт СТРУКТУРНЫЙ — kind + отформатированные КОДОМ значения; текст
+    рендерится в точке доставки на языке получателя (bot/i18n, ключ anomaly_<kind>,
+    scheduler.jobs._alert_line). Раньше message был RU-литералом и утекал EN-операторам."""
+
+    kind: str  # "spend_spike" | "conv_drop" | "spend_no_conv" — суффикс i18n-ключа
     severity: str  # "warning" | "info"
-    message: str  # человекочитаемо (RU), без секретов
+    params: dict  # значения для подстановки в i18n-шаблон (числа форматирует КОД, без секретов)
 
 
 def _pct_change(now: float, prev: float) -> float | None:
@@ -54,7 +58,12 @@ def detect_anomalies(
             Alert(
                 "spend_spike",
                 "warning",
-                f"📈 Расход вырос на {ch:+.0f}% ({cost_prev:.2f} → {cost_now:.2f}{cur}).",
+                {
+                    "pct": f"{ch:+.0f}",
+                    "prev": f"{cost_prev:.2f}",
+                    "now": f"{cost_now:.2f}",
+                    "cur": cur,
+                },
             )
         )
 
@@ -64,7 +73,7 @@ def detect_anomalies(
             Alert(
                 "conv_drop",
                 "warning",
-                f"📉 Конверсии упали на {dr:+.0f}% ({conv_prev:.1f} → {conv_now:.1f}).",
+                {"pct": f"{dr:+.0f}", "prev": f"{conv_prev:.1f}", "now": f"{conv_now:.1f}"},
             )
         )
 
@@ -74,7 +83,7 @@ def detect_anomalies(
             Alert(
                 "spend_no_conv",
                 "warning",
-                f"⚠️ Расход {cost_now:.2f}{cur} при нуле конверсий (было {conv_prev:.1f}).",
+                {"now": f"{cost_now:.2f}", "cur": cur, "prev_conv": f"{conv_prev:.1f}"},
             )
         )
 

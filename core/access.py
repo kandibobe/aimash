@@ -312,6 +312,34 @@ async def list_user_account_ids(chat_id: int) -> list[str]:
     return sorted({DRAFT_ACCOUNT_ID, *(normalize_customer_id(c) for c in rows)})
 
 
+async def accessible_accounts_for_user(chat_id: int, candidates: list[str]) -> list[str]:
+    """C2 (аудит 2026-07): фильтр аккаунтов-кандидатов под КОНКРЕТНОГО получателя scheduler-рассылки
+    (плановый отчёт/аномалии/дайджест §14): метрики аккаунта не должны уходить оператору без
+    доступа к нему (enforced-режим — иначе утечка данных чужого клиента). Семантика зеркалит
+    ensure_account_allowed_for_user, но ОДНИМ запросом на получателя (не N аккаунтов × M запросов):
+    админ — всё; legacy-проход (enforcement выключен) — всё (поведение рассылок не меняется);
+    enforced — Draft + явные гранты. Порядок кандидатов сохраняется. Fail-closed: сбой чтения
+    грантов ⇒ только Draft."""
+    cands = [c for c in (normalize_customer_id(x) for x in candidates) if c]
+    try:
+        if await is_admin(chat_id) or not await per_user_enforcement_active():
+            return cands
+        async with Session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(AccountAccess.customer_id).where(AccountAccess.chat_id == chat_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        granted = {normalize_customer_id(c) for c in rows} | {DRAFT_ACCOUNT_ID}
+    except Exception:  # noqa: BLE001 — БД недоступна ⇒ не гадаем: только Draft (fail-closed)
+        granted = {DRAFT_ACCOUNT_ID}
+    return [c for c in cands if c in granted]
+
+
 async def live_read_accounts(chat_id: int) -> list[str]:
     """Живые (не-Draft) read-аккаунты, доступные ЭТОМУ оператору: (обход MCC ∪ env read-list)
     × глобальный read-замок × пер-пользовательский грант. Единый источник для авто-дефолта

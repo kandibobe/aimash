@@ -286,11 +286,10 @@ async def video_brief(m: bm.Message, state: bm.FSMContext) -> None:
 async def video_logo_skip(
     cq: bm.CallbackQuery, callback_data: bm.VideoCB, state: bm.FSMContext
 ) -> None:
-    await cq.answer()
-    msg = bm._cq_msg(cq)
-    if msg is None:
-        return
-    await bm._video_mint_proposal(msg, bm._cq_chat_id(cq), state, logo_media_id=None)
+    """C1 (live 2026-07): «Пропустить» логотип для DG убран — без logo_images Google отвергает
+    create (ASSET_LINK TOO_FEW) с откатом всей структуры, т.е. кнопка вела к гарантированному
+    отказу. Хендлер оставлен для СТАРЫХ кнопок в истории чата: объясняем, минтить не пытаемся."""
+    await cq.answer(bm.i18n.t("video_logo_required"), show_alert=True)
 
 
 @bm.dp.message(bm.GdnWizard.awaiting_brief)

@@ -415,6 +415,35 @@ async def test_big_remove_negative_keywords_proposal_attaches_xlsx():
     assert any(a[1].get("reply_markup") for a in msg.answers)  # сообщение с кнопками ✅/❌
 
 
+async def test_big_create_search_campaign_proposal_attaches_xlsx():
+    """C4 (аудит 2026-07, тот же класс §5/golden rule #1): финальный гейт СОЗДАНИЯ кампании с
+    большим списком ключей обязан приложить .xlsx — раньше create_search_campaign не было в
+    условии вложения, сводка усекала список до KW_INLINE_MAX, и менеджер подтверждал объём,
+    который не видел."""
+    await init_db()
+    cid = uuid.uuid4().hex
+    msg = FakeMessage(bot=FakeBot())
+    params = {
+        "campaign_name": "Uganda cars",
+        "final_url": "https://example.com/",
+        "headlines": ["Заголовок раз", "Заголовок два", "Заголовок три"],
+        "descriptions": ["Описание первое.", "Описание второе."],
+        "budget_daily_micros": 10_000_000,
+        "keywords": [f"kw{i}" for i in range(30)],  # > KW_INLINE_MAX
+        "match_type": "phrase",
+    }
+    await bm._present_proposal(
+        msg,
+        chat_id=203,
+        operation="create_search_campaign",
+        params=params,
+        summary="raw dict",
+        cid=cid,
+    )
+    assert any(a[0] == "<doc>" for a in msg.answers)  # .xlsx вложение (было пропущено до фикса)
+    assert any(a[1].get("reply_markup") for a in msg.answers)  # сообщение с кнопками ✅/❌
+
+
 @contextmanager
 def _allowed_draft():
     orig = settings.google_ads_allowed_customer_ids
