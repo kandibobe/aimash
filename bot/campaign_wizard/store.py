@@ -75,6 +75,9 @@ def empty_wizard_state() -> dict:
             "final_url_suffix": None,
             "custom_parameters": {},
         },
+        # W4: high-water mark пройденных этапов — «Вперёд ›» после «Назад» возвращает на
+        # максимально достигнутый шаг (данные этапов при back не стираются — см. cc_back).
+        "nav": {"max_step": 0},
     }
 
 
@@ -211,6 +214,13 @@ class CampaignDraftStore:
             if p is None:
                 return None
             p.current_step = int(step)
+            # W4: high-water mark для «Вперёд ›» (deepcopy+flag_modified — как в patch;
+            # старые черновики без "nav" лечатся setdefault-ом).
+            state = copy.deepcopy(dict(p.wizard_state or {}))
+            nav = state.setdefault("nav", {"max_step": 0})
+            nav["max_step"] = max(int(nav.get("max_step") or 0), int(step))
+            p.wizard_state = state
+            flag_modified(p, "wizard_state")
             await s.commit()
             return _snap(p)
 

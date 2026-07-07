@@ -20,12 +20,18 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from agent.router import chat
-from core.limits import MONEY_MAX_UNITS, round_micros
+from core.limits import (
+    MONEY_MAX_UNITS,
+    WIZARD_DEFAULT_MONEY_FALLBACK_UNITS,
+    round_micros,
+    wizard_default_money_units,
+)
 
 # Дефолты, если ни описание, ни медианы аккаунта не дали значения (нейтральные, безопасные на
-# тест-аккаунте; cpc зеркалит дефолт ads.mutations.apply_create_search_campaign).
-DEFAULT_DAILY_BUDGET_UNITS = 10.0
-DEFAULT_CPC_UNITS = 0.5
+# тест-аккаунте). Денежные дефолты — ВАЛЮТО-ЗАВИСИМЫЕ (core.limits.wizard_default_money_units:
+# «0.50 JPY» — абсурд, у JPY нет копеек); константы ниже — фолбэк неизвестной валюты, имена
+# сохранены для обратной совместимости импортов.
+DEFAULT_DAILY_BUDGET_UNITS, DEFAULT_CPC_UNITS = WIZARD_DEFAULT_MONEY_FALLBACK_UNITS
 DEFAULT_MATCH_TYPE = "phrase"
 
 Goal = Literal["calls", "leads", "sales", "traffic", "awareness"]
@@ -42,6 +48,7 @@ class CampaignSettings(BaseModel):
     geo_country_code: str | None = None  # ISO alpha-2, если модель уверенно вывела
     languages: list[str] = Field(default_factory=list)  # ["English","Swahili"]
     budget_daily_units: float | None = None
+    max_cpc_units: float | None = None  # макс. цена за клик — если ЯВНО названа («75 за клик»)
     currency: str | None = None  # USD/UAH/EUR — если ЯВНО назван
     goal: Goal | None = None
     bidding_strategy: Bidding | None = None
@@ -86,7 +93,10 @@ _SYSTEM = (
     "'на украинском', 'английские объявления'); иначе оставь ПУСТОЙ список [] — язык код подберёт "
     'сам по стране (Украина→украинский, Кения→английский). НЕ угадывай язык за пользователя"], '
     '"budget_daily_units": число дневного бюджета или null, '
-    '"currency": "3-буквенный ISO-код валюты (USD/EUR/AUD/PLN/CZK…) ТОЛЬКО если ЯВНО назван, иначе null", '
+    '"max_cpc_units": число максимальной цены за клик (max CPC, «цена за клик», «ставка за клик») '
+    "ТОЛЬКО если ЯВНО названа, иначе null, "
+    '"currency": "3-буквенный ISO-код валюты (USD/EUR/AUD/PLN/CZK…) ТОЛЬКО если ЯВНО назван '
+    '(в т.ч. словом: «йен»→JPY, «гривен»→UAH), иначе null", '
     '"goal": "calls|leads|sales|traffic|awareness или null", '
     '"bidding_strategy": "manual_cpc|maximize_conversions|maximize_conversion_value|target_spend '
     'или null", '
@@ -371,6 +381,7 @@ def assemble_settings(
     common_match_type: str | None = None,
     topic: str | None = None,
     ui_language: str = "ru",
+    account_currency: str | None = None,
 ) -> dict:
     """Слить извлечённое + медианы «по аналогии» + дефолты в финальный settings-словарь визарда.
 
@@ -389,6 +400,16 @@ def assemble_settings(
     by_analogy: list[str] = []  # из истории аккаунта (GAQL-медианы)
     by_default: list[str] = []  # статический дефолт кода
 
+    # Валюта: явная из описания («75 йен» → JPY) → валюта аккаунта → неизвестна. Денежные ДЕФОЛТЫ
+    # валюто-зависимые (0.5 JPY за клик — абсурд); явные значения пользователя не пересчитываются —
+    # он пишет в валюте аккаунта (golden rule #4: деньги считает КОД).
+    currency = (
+        (extracted.currency or "").strip().upper()
+        or (account_currency or "").strip().upper()
+        or None
+    )
+    default_budget_units, default_cpc_units = wizard_default_money_units(currency)
+
     # бюджет: описание → медиана(by_analogy) → дефолт(by_default)
     if extracted.budget_daily_units is not None:
         budget_micros = _units_to_micros(extracted.budget_daily_units)
@@ -396,15 +417,17 @@ def assemble_settings(
         budget_micros = int(median_budget_micros)
         by_analogy.append("budget_daily_micros")
     else:
-        budget_micros = _units_to_micros(DEFAULT_DAILY_BUDGET_UNITS)
+        budget_micros = _units_to_micros(default_budget_units)
         by_default.append("budget_daily_micros")
 
-    # cpc: медиана(by_analogy) → дефолт(by_default) (из описания CPC обычно не задаётся)
-    if avg_cpc_micros:
+    # cpc: описание («75 за клик») → медиана(by_analogy) → дефолт(by_default)
+    if extracted.max_cpc_units is not None and extracted.max_cpc_units > 0:
+        cpc_micros = _units_to_micros(extracted.max_cpc_units)
+    elif avg_cpc_micros:
         cpc_micros = int(avg_cpc_micros)
         by_analogy.append("cpc_bid_micros")
     else:
-        cpc_micros = _units_to_micros(DEFAULT_CPC_UNITS)
+        cpc_micros = _units_to_micros(default_cpc_units)
         by_default.append("cpc_bid_micros")
 
     # тип соответствия: частый в аккаунте(by_analogy) → дефолт phrase(by_default)
@@ -482,7 +505,7 @@ def assemble_settings(
         "target_cpa_micros": tcpa_micros,
         "payment_model": payment,
         "match_type": match_type,
-        "currency": extracted.currency,
+        "currency": currency,
         "networks": networks,
         "ad_schedule": schedule_human(schedule_blocks, extracted.ad_schedule),
         "ad_schedule_blocks": schedule_blocks,  # [] ⇒ 24/7 (критерии не создаются)

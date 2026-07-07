@@ -693,6 +693,43 @@ CATALOG: dict[str, dict[str, str]] = {
             "“change ‘Fast and reliable’ to ‘Reliable and fast’”."
         ),
     },
+    # W5: диалог выхода из визарда с накопленной работой (вместо безвозвратного abandon).
+    "cc_exit_confirm": {
+        "ru": (
+            "Выйти из создания кампании? Черновик на шаге {step}/7 можно сохранить и продолжить "
+            "позже (хранится {ttl_h} ч) или удалить."
+        ),
+        "en": (
+            "Leave campaign creation? The draft at step {step}/7 can be kept for later "
+            "(stored {ttl_h} h) or deleted."
+        ),
+    },
+    "cc_draft_kept": {
+        "ru": (
+            "💾 Черновик сохранён (шаг {step}/7). Вернуться: «➕ Создание кампании» "
+            "или /newcampaign."
+        ),
+        "en": '💾 Draft kept (step {step}/7). Return via "➕ Create campaign" or /newcampaign.',
+    },
+    # W4: «Вперёд ›» по старому сообщению, когда идти уже некуда (черновик на максимуме маршрута).
+    "cc_no_forward": {
+        "ru": "Дальше пока некуда — этот шаг ещё не пройден.",
+        "en": "Nothing ahead yet — that step hasn't been reached.",
+    },
+    # Этап 1: правка настроек не распознана — честный отказ вместо молчаливого ре-рендера той же
+    # карточки (живой тест 2026-07-06: «максимальная цена за клик 75 йен» выглядела применённой).
+    "cc_settings_edit_not_understood": {
+        "ru": (
+            "🤷 Не понял, что поменять в настройках. Можно изменить: бюджет, макс. цену за клик "
+            "(CPC), гео, язык, название, стратегию/цель, сети, расписание, даты, валюту. "
+            "Например: <i>поставь максимальную цену за клик 75</i>."
+        ),
+        "en": (
+            "🤷 Couldn't parse the settings edit. You can change: budget, max CPC, geo, language, "
+            "name, strategy/goal, networks, schedule, dates, currency. "
+            "E.g. <i>set max CPC to 75</i>."
+        ),
+    },
     # — 3A: кнопка меню во время визарда (мягкое сворачивание без потери работы) —
     "cc_wizard_suspended": {
         "ru": (

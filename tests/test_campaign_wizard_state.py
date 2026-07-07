@@ -246,3 +246,64 @@ def test_draft_select_compiles_for_update_on_postgres():
     )
     assert "FOR UPDATE" in with_lock
     assert "FOR UPDATE" not in without_lock
+
+
+@pytest.mark.asyncio
+async def test_stage1_edit_unrecognized_answers_not_understood_and_keeps_settings():
+    """W2 (живой тест 2026-07-06): нераспознанная правка НЕ ре-рендерит молча ту же карточку —
+    настройки байт-в-байт, явный ответ «не понял», сводка не перерисовывается."""
+    await init_db()
+    chat = 7700016
+    sid = await bm.CDRAFTS.create(chat_id=chat, customer_id=DRAFT_ACCOUNT_ID)
+    settings0 = {
+        "campaign_name": "Уганда · авто · Search",
+        "budget_daily_micros": 1_900_000_000,
+        "cpc_bid_micros": 500_000,
+        "currency": "JPY",
+        "by_analogy": [],
+        "by_default": ["cpc_bid_micros"],
+    }
+    await bm.CDRAFTS.patch(sid, lambda s: s.__setitem__("settings", dict(settings0)))
+    fsm = FakeFSM({"cc_session": sid})
+
+    async def _empty_extract(text, *, language="ru"):
+        return CampaignSettings()  # LLM ничего не извлёк
+
+    msg = FakeMessage("Максимальная цена за клик 75 йен", chat_id=chat)
+    with patched(bm, "extract_campaign_settings", _empty_extract):
+        await bm.cc_settings_edit(msg, fsm)
+
+    snap = await bm.CDRAFTS.get(sid)
+    assert snap.wizard_state["settings"] == settings0  # ничего не перетёрто
+    not_understood = bm.i18n.t("cc_settings_edit_not_understood")
+    assert any(not_understood == t for t, _ in msg.answers)  # честный отказ
+    # сводка-карточка НЕ перерисована (иначе правка «выглядит применённой»)
+    assert not any("Кампания (черновик)" in t for t, _ in msg.answers)
+
+
+@pytest.mark.asyncio
+async def test_stage1_edit_max_cpc_updates_draft():
+    """W1: «максимальная цена за клик 75» через хендлер Этапа 1 реально меняет черновик."""
+    await init_db()
+    chat = 7700017
+    sid = await bm.CDRAFTS.create(chat_id=chat, customer_id=DRAFT_ACCOUNT_ID)
+    await bm.CDRAFTS.patch(
+        sid,
+        lambda s: s.__setitem__(
+            "settings",
+            {"cpc_bid_micros": 500_000, "by_analogy": [], "by_default": ["cpc_bid_micros"]},
+        ),
+    )
+    fsm = FakeFSM({"cc_session": sid})
+
+    async def _cpc_extract(text, *, language="ru"):
+        return CampaignSettings(max_cpc_units=75)
+
+    msg = FakeMessage("максимальная цена за клик 75", chat_id=chat)
+    with patched(bm, "extract_campaign_settings", _cpc_extract):
+        await bm.cc_settings_edit(msg, fsm)
+
+    snap = await bm.CDRAFTS.get(sid)
+    assert snap.wizard_state["settings"]["cpc_bid_micros"] == 75_000_000
+    assert "cpc_bid_micros" not in snap.wizard_state["settings"]["by_default"]
+    assert await _count_proposals(chat) == 0  # правка черновика — НЕ мутация

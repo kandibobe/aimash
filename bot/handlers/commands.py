@@ -66,6 +66,10 @@ async def campaigns_(m: bm.Message) -> None:
 
 @bm.dp.message(bm.Command("cancel"))
 async def cancel_cmd(m: bm.Message, state: bm.FSMContext) -> None:
+    # W5: черновик §19 с накопленной работой — сначала диалог «сохранить/удалить/вернуться»,
+    # а не безвозвратный abandon (живой тест 2026-07-06: «вышел и не смог вернуться»).
+    if await bm._maybe_cc_exit_dialog(m, m.chat.id, state):
+        return
     # B14: /cancel сворачивает АКТИВНЫЙ визард/сбор ввода (Создание кампании / Клиенты / KW / RSA), а
     # не только последний proposal — раньше в визарде отвечал «нет черновика» и оставлял юзера в FSM.
     if await bm._abandon_active_flow(m.chat.id, state):
@@ -641,6 +645,11 @@ async def on_nav_cancel(cq: bm.CallbackQuery, state: bm.FSMContext) -> None:
     мутирует и не трогает _LAST_PENDING (черновика тут нет — это лишь выход из сбора ввода). Старую
     inline-подсказку правим в «отменено», а reply-меню шлём НОВЫМ сообщением: ReplyKeyboardMarkup
     нельзя прицепить через edit_text (только новое сообщение)."""
+    # W5: визард §19 с накопленной работой — диалог «сохранить/удалить/вернуться» вместо abandon.
+    msg_ = bm._cq_msg(cq)
+    if msg_ is not None and await bm._maybe_cc_exit_dialog(msg_, bm._cq_chat_id(cq), state):
+        await cq.answer()
+        return
     # Общий свёрт активного визарда (abandon черновика §19 + чистка временных медиа/буферов/контекста).
     await bm._abandon_active_flow(bm._cq_chat_id(cq), state)
     await cq.answer(bm.i18n.t("cb_cancelled"))

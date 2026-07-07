@@ -299,3 +299,107 @@ def test_merge_overrides_only_nonempty():
     assert merged.budget_daily_units == 60
     assert merged.geo_locations == ["Кения"]  # не затёрто пустым
     assert merged.goal == "calls"
+
+
+# ── W1 (живой тест 2026-07-06): max CPC редактируем end-to-end ─────────────────────
+def test_assemble_explicit_max_cpc_wins_over_median_and_default():
+    out = assemble_settings(CampaignSettings(max_cpc_units=75), avg_cpc_micros=180_000, topic="т")
+    assert out["cpc_bid_micros"] == 75_000_000
+    # задан пользователем → БЕЗ тегов источника (сводка покажет «Макс. CPC» без «≈»)
+    assert "cpc_bid_micros" not in out["by_analogy"]
+    assert "cpc_bid_micros" not in out["by_default"]
+
+
+def test_assemble_nonpositive_max_cpc_ignored():
+    # <=0 — мусор от модели: не даём занулить бид, откатываемся на медиану/дефолт
+    out = assemble_settings(CampaignSettings(max_cpc_units=0), avg_cpc_micros=180_000, topic="т")
+    assert out["cpc_bid_micros"] == 180_000
+    out2 = assemble_settings(CampaignSettings(max_cpc_units=-5), topic="т")
+    assert out2["cpc_bid_micros"] == 500_000  # фолбэк-дефолт (валюта неизвестна)
+
+
+def test_patch_max_cpc_applies_and_clears_source_tags():
+    """«максимальная цена за клик 75» на Этапе 1 реально меняет черновик (раньше ветки не было)."""
+    import bot.main as bm
+
+    cur = {
+        "cpc_bid_micros": 500_000,
+        "by_analogy": [],
+        "by_default": ["cpc_bid_micros"],
+    }
+    merged = bm._cc_apply_settings_patch(cur, CampaignSettings(max_cpc_units=75))
+    assert merged["cpc_bid_micros"] == 75_000_000
+    assert "cpc_bid_micros" not in merged["by_default"]
+    # <=0 не зануляет бид
+    same = bm._cc_apply_settings_patch(dict(merged), CampaignSettings(max_cpc_units=0))
+    assert same["cpc_bid_micros"] == 75_000_000
+
+
+def test_cpc_phrases_are_settings_markers():
+    """3B: «цена за клик»/«стоимость клика» — правка НАСТРОЕК, не literal-replace по тексту RSA."""
+    from agent.campaign_edit import is_settings_edit
+
+    assert is_settings_edit("Максимальная цена за клик 75 йен")
+    assert is_settings_edit("поставь стоимость клика 20")
+    assert is_settings_edit("set cost per click to 0.7")
+    assert not is_settings_edit("смени „Быстро“ на „Надёжно“")
+
+
+# ── W3 (живой тест 2026-07-06): валютно-осознанные дефолты денег ──────────────────
+def test_assemble_currency_aware_defaults_jpy():
+    # валюта аккаунта JPY → дефолты в йенах (1500/75), а не абсурд «0.50 JPY»
+    out = assemble_settings(CampaignSettings(), topic="т", account_currency="JPY")
+    assert out["currency"] == "JPY"
+    assert out["budget_daily_micros"] == 1_500_000_000
+    assert out["cpc_bid_micros"] == 75_000_000
+    for key in ("budget_daily_micros", "cpc_bid_micros"):
+        assert key in out["by_default"]
+
+
+def test_assemble_explicit_currency_beats_account_currency():
+    out = assemble_settings(CampaignSettings(currency="usd"), topic="т", account_currency="JPY")
+    assert out["currency"] == "USD"  # явная валюта из текста побеждает (и нормализуется)
+    assert out["cpc_bid_micros"] == 500_000  # дефолты по USD
+
+
+def test_assemble_unknown_currency_falls_back_to_legacy_defaults():
+    out = assemble_settings(CampaignSettings(), topic="т", account_currency="XXX")
+    assert out["budget_daily_micros"] == 10_000_000
+    assert out["cpc_bid_micros"] == 500_000
+
+
+def test_settings_summary_zero_decimal_currency_and_user_set_cpc_label():
+    from bot.texts import fmt_cc_settings_summary
+
+    s = {
+        "campaign_name": "Тест",
+        "budget_daily_micros": 1_900_000_000,
+        "cpc_bid_micros": 75_000_000,
+        "currency": "JPY",
+        "by_analogy": [],
+        "by_default": [],  # CPC задан пользователем
+    }
+    out = fmt_cc_settings_summary(s, lang="ru")
+    assert "1 900 JPY" in out  # без «.00» у zero-decimal валюты (NBSP-разделитель)
+    assert "Макс. CPC: 75 JPY" in out  # точное значение без «≈»
+    assert "≈" not in out.split("Макс. CPC")[1].split("\n")[0]
+    # дефолтный CPC — прежний рендер «Ср. CPC: ≈ …»
+    s2 = {**s, "by_default": ["cpc_bid_micros"]}
+    out2 = fmt_cc_settings_summary(s2, lang="ru")
+    assert "Ср. CPC: ≈ 75 JPY" in out2
+
+
+def test_wizard_default_money_units_table_consistency():
+    """Класс-гард: таблица дефолтов покрывает все zero-decimal валюты и не содержит нулей."""
+    from core.limits import (
+        WIZARD_DEFAULT_MONEY_UNITS,
+        ZERO_DECIMAL_CURRENCIES,
+        wizard_default_money_units,
+    )
+
+    assert ZERO_DECIMAL_CURRENCIES <= set(WIZARD_DEFAULT_MONEY_UNITS)
+    for cur, (budget, cpc) in WIZARD_DEFAULT_MONEY_UNITS.items():
+        assert budget > 0 and cpc > 0, cur
+        assert budget > cpc, cur  # дневной бюджет всегда больше клика
+    assert wizard_default_money_units(None) == (10.0, 0.5)
+    assert wizard_default_money_units("jpy") == WIZARD_DEFAULT_MONEY_UNITS["JPY"]

@@ -8,6 +8,8 @@ from __future__ import annotations
 import html
 import re
 
+from core.limits import ZERO_DECIMAL_CURRENCIES
+
 
 def esc(s: object) -> str:
     """Экранирование для HTML parse_mode (имена кампаний/ошибки могут содержать < & >)."""
@@ -2078,12 +2080,22 @@ def fmt_cc_settings_summary(s: dict, lang: str | None = None) -> str:
         micros = int(s.get(key, 0) or 0)
         if micros <= 0:
             return no_data
-        return f"{_thou(micros / 1_000_000, 2)}{cur_s}{mk(key)}"
+        # У JPY/KRW/… нет минорных единиц — «1 500 JPY», а не «1 500.00 JPY» (живой тест 2026-07-06).
+        digits = 0 if cur.upper() in ZERO_DECIMAL_CURRENCIES else 2
+        return f"{_thou(micros / 1_000_000, digits)}{cur_s}{mk(key)}"
 
     budget = money("budget_daily_micros")
     cpc_micros = int(s.get("cpc_bid_micros", 0) or 0)
     cpc = money("cpc_bid_micros")
-    cpc_prefix = "≈ " if cpc_micros > 0 else ""
+    # CPC, заданный пользователем (нет тегов источника), — точное «Макс. CPC» без «≈»;
+    # медиана/дефолт — прежнее «Ср. CPC: ≈ …».
+    cpc_user_set = cpc_micros > 0 and "cpc_bid_micros" not in by and "cpc_bid_micros" not in bd
+    cpc_prefix = "≈ " if (cpc_micros > 0 and not cpc_user_set) else ""
+    cpc_label = (
+        ("Max CPC" if cpc_user_set else "Avg. CPC")
+        if lng == "en"
+        else ("Макс. CPC" if cpc_user_set else "Ср. CPC")
+    )
     strat = _BIDDING_HUMAN[lng].get(
         s.get("bidding_strategy") or "manual_cpc", s.get("bidding_strategy") or "—"
     )
@@ -2101,7 +2113,7 @@ def fmt_cc_settings_summary(s: dict, lang: str | None = None) -> str:
             f"Geo: {esc(geo)} · Language: {esc(langs)}\n"
             f"Type: Search · Daily budget: {budget}\n"
             f"Bidding: {esc(strat)}{mk('bidding_strategy')} · Payment: {esc(payment)}\n"
-            f"Avg. CPC: {cpc_prefix}{cpc}\n"
+            f"{cpc_label}: {cpc_prefix}{cpc}\n"
             f"Keyword match type: {esc(mt)}{mk('match_type')}\n"
             f"Networks: {nets}{mk('networks')}\n"
             f"Ad schedule: {sched}{mk('ad_schedule')}\n"
@@ -2119,7 +2131,7 @@ def fmt_cc_settings_summary(s: dict, lang: str | None = None) -> str:
         f"ГЕО: {esc(geo)} · Язык: {esc(langs)}\n"
         f"Тип: Search · Бюджет/день: {budget}\n"
         f"Стратегия: {esc(strat)}{mk('bidding_strategy')} · Оплата: {esc(payment)}\n"
-        f"Ср. CPC: {cpc_prefix}{cpc}\n"
+        f"{cpc_label}: {cpc_prefix}{cpc}\n"
         f"Тип соответствия ключей: {esc(mt)}{mk('match_type')}\n"
         f"Сети: {nets}{mk('networks')}\n"
         f"Расписание: {sched}{mk('ad_schedule')}\n"

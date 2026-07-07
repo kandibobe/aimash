@@ -592,3 +592,183 @@ def test_cc_keyboards_have_back_button():
     assert not any(
         "Назад" in t for t in _texts(kb.cc_final_kb(can_launch=True, launch_cid="a" * 32))
     )  # после создания кампании back бессмыслен
+
+
+# ── W4 (живой тест 2026-07-06): «Вперёд ›» + возврат на шаг 0 без перезаписи ───────
+class _NavMsg:
+    def __init__(self, chat_id):
+        from types import SimpleNamespace
+
+        self.chat = SimpleNamespace(id=chat_id)
+        self.answers: list = []
+        self.edits: list = []
+
+    async def answer(self, text="", **kw):
+        self.answers.append((text, kw))
+        return self
+
+    async def edit_text(self, text="", **kw):
+        self.edits.append((text, kw))
+        return self
+
+    async def delete(self):
+        pass
+
+
+class _NavState:
+    def __init__(self, data=None):
+        self._data, self._state = dict(data or {}), None
+
+    async def get_data(self):
+        return dict(self._data)
+
+    async def update_data(self, **kw):
+        self._data.update(kw)
+
+    async def set_state(self, s):
+        self._state = s
+
+    async def clear(self):
+        self._data, self._state = {}, None
+
+
+@pytest.mark.asyncio
+async def test_cc_forward_restores_stage_after_back():
+    """Назад с этапа ключей → настройки → «Вперёд ›» возвращает на этап 2 с теми же ключами."""
+    await init_db()
+    chat = 93_101
+    sid = await bm.CDRAFTS.create(chat_id=chat, customer_id=DRAFT_ACCOUNT_ID)
+    await bm.CDRAFTS.patch(
+        sid,
+        lambda st: (
+            st.__setitem__("settings", {"campaign_name": "Уганда · авто · Search"}),
+            st["keywords"].update(
+                {
+                    "list": ["kw"] * 187,
+                    "sheet_id": "sid123",
+                    "verified": False,
+                    "source": "generated",
+                }
+            ),
+        ),
+        expected_chat_id=chat,
+    )
+    await bm.CDRAFTS.set_step(sid, 2, expected_chat_id=chat)  # high-water = 2
+
+    # «Назад» на настройки
+    msg = _NavMsg(chat)
+    await bm.cc_back(FakeCallbackQuery(msg, uid=chat), CcCB(action="back"), _NavState())
+    snap = await bm.CDRAFTS.get(sid, expected_chat_id=chat)
+    assert snap.current_step == 1
+    # карточка настроек несёт «Вперёд ›» (этап 2 уже пройден)
+    kb_texts = [
+        b.text
+        for _, kw in msg.answers
+        if kw.get("reply_markup")
+        for row in kw["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert any("Вперёд" in t or "Forward" in t for t in kb_texts)
+
+    # «Вперёд ›» возвращает на этап 2, ключи целы, verify-экран заново показан
+    msg2 = _NavMsg(chat)
+    await bm.cc_forward(FakeCallbackQuery(msg2, uid=chat), CcCB(action="fwd"), _NavState())
+    snap = await bm.CDRAFTS.get(sid, expected_chat_id=chat)
+    assert snap.current_step == 2
+    assert len(snap.wizard_state["keywords"]["list"]) == 187  # данные не потеряны
+    assert any("187" in (t or "") for t, _ in msg2.answers)  # verify-экран с тем же списком
+
+
+@pytest.mark.asyncio
+async def test_cc_forward_never_exceeds_max_step():
+    """Вперёд с максимума маршрута — вежливый alert, шаг не двигается."""
+    await init_db()
+    chat = 93_102
+    sid = await bm.CDRAFTS.create(chat_id=chat, customer_id=DRAFT_ACCOUNT_ID)
+    await bm.CDRAFTS.set_step(sid, 2, expected_chat_id=chat)
+    msg = _NavMsg(chat)
+    cq = FakeCallbackQuery(msg, uid=chat)
+    await bm.cc_forward(cq, CcCB(action="fwd"), _NavState())
+    snap = await bm.CDRAFTS.get(sid, expected_chat_id=chat)
+    assert snap.current_step == 2  # не сдвинулся
+    assert cq.answers and cq.answers[-1][1] is True  # show_alert
+
+
+@pytest.mark.asyncio
+async def test_stage0_reentry_with_settings_keeps_them():
+    """Возврат на шаг 0 и повторный выбор аккаунта НЕ перезаписывает собранные настройки:
+    показывается сохранённая сводка (settings_confirm), а не пустой промпт описания."""
+    from types import SimpleNamespace
+
+    await init_db()
+    chat = 93_103
+    sid = await bm.CDRAFTS.create(chat_id=chat, customer_id=DRAFT_ACCOUNT_ID)
+    settings0 = {
+        "campaign_name": "Уганда · авто · Search",
+        "geo_locations": ["Уганда"],
+        "budget_daily_micros": 1_900_000_000,
+        "cpc_bid_micros": 75_000_000,
+        "by_analogy": [],
+        "by_default": [],
+    }
+    await bm.CDRAFTS.patch(
+        sid, lambda st: st.__setitem__("settings", dict(settings0)), expected_chat_id=chat
+    )
+    await bm.CDRAFTS.set_step(sid, 1, expected_chat_id=chat)
+    bm._CC_ACCT_CACHE[chat] = [
+        SimpleNamespace(id=DRAFT_ACCOUNT_ID, name="Aimash (Draft)", manager=False)
+    ]
+    msg = _NavMsg(chat)
+    state = _NavState({"cc_session": sid})
+    await bm.cc_account_cb(FakeCallbackQuery(msg, uid=chat), CcCB(action="acct", idx=0), state)
+    snap = await bm.CDRAFTS.get(sid, expected_chat_id=chat)
+    assert snap.wizard_state["settings"] == settings0  # настройки целы
+    assert state._state == bm.CreateCampaignWizard.settings_confirm  # НЕ settings_desc
+    assert any("Кампания (черновик)" in (t or "") for t, _ in msg.answers)  # сводка показана
+
+
+@pytest.mark.asyncio
+async def test_settings_desc_with_existing_settings_merges_not_overwrites():
+    """Belt-and-brace: текст в settings_desc при уже собранных настройках — merge-правка,
+    полный assemble (перетирание пользовательских значений дефолтами) не выполняется."""
+    await init_db()
+    chat = 93_104
+    sid = await bm.CDRAFTS.create(chat_id=chat, customer_id=DRAFT_ACCOUNT_ID)
+    settings0 = {
+        "campaign_name": "Уганда · авто · Search",
+        "geo_locations": ["Уганда"],
+        "budget_daily_micros": 1_900_000_000,
+        "cpc_bid_micros": 75_000_000,
+        "by_analogy": [],
+        "by_default": [],
+    }
+    await bm.CDRAFTS.patch(
+        sid, lambda st: st.__setitem__("settings", dict(settings0)), expected_chat_id=chat
+    )
+    await bm.CDRAFTS.set_step(sid, 1, expected_chat_id=chat)
+
+    from agent.campaign_settings import CampaignSettings
+
+    async def _budget_only(text, *, language="ru"):
+        return CampaignSettings(budget_daily_units=60)
+
+    called = {"assemble": False}
+
+    def _no_assemble(*a, **k):
+        called["assemble"] = True
+        raise AssertionError("assemble_settings не должен вызываться при merge-правке")
+
+    msg = FakeMessage("поставь бюджет 60", chat_id=chat)
+    fsm = _NavState({"cc_session": sid})
+    with (
+        patched(bm, "extract_campaign_settings", _budget_only),
+        patched(bm, "assemble_settings", _no_assemble),
+    ):
+        await bm.cc_settings_desc(msg, fsm)
+
+    snap = await bm.CDRAFTS.get(sid, expected_chat_id=chat)
+    s = snap.wizard_state["settings"]
+    assert s["budget_daily_micros"] == 60_000_000  # правка применена
+    assert s["geo_locations"] == ["Уганда"]  # остальное цело
+    assert s["cpc_bid_micros"] == 75_000_000
+    assert called["assemble"] is False

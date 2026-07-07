@@ -966,9 +966,21 @@ def _cc_back_btn(kb: InlineKeyboardBuilder, en: bool) -> None:
     kb.button(text="‹ Back" if en else "‹ Назад", callback_data=CcCB(action="back"))
 
 
-def cc_settings_kb(lang: str | None = None) -> InlineKeyboardMarkup:
-    """Этап 1 (§19.3): ✅ Подтвердить / ✏️ Изменить / ‹ Назад / ✖ Отмена — как в ТЗ. «Изменить»
-    лишь подсказывает формат правки (правка — свободным текстом в состоянии, см. bot.main)."""
+def _cc_nav_row(kb: InlineKeyboardBuilder, en: bool, can_forward: bool) -> int:
+    """W4 (живой тест 2026-07-06): навигационный ряд визарда «‹ Назад [/ Вперёд ›] / ✖ Отмена».
+    «Вперёд ›» показывается ТОЛЬКО когда следующий этап уже был пройден (high-water max_step) —
+    после «Назад» пользователь видел тупик и не знал, что вперёд возвращает re-confirm.
+    Возвращает ширину ряда для kb.adjust()."""
+    _cc_back_btn(kb, en)
+    if can_forward:
+        kb.button(text="Forward ›" if en else "Вперёд ›", callback_data=CcCB(action="fwd"))
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    return 3 if can_forward else 2
+
+
+def cc_settings_kb(lang: str | None = None, *, can_forward: bool = False) -> InlineKeyboardMarkup:
+    """Этап 1 (§19.3): ✅ Подтвердить / ✏️ Изменить / ‹ Назад [/ Вперёд ›] / ✖ Отмена — как в ТЗ.
+    «Изменить» лишь подсказывает формат правки (правка — свободным текстом в состоянии)."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     kb.button(
@@ -979,9 +991,8 @@ def cc_settings_kb(lang: str | None = None) -> InlineKeyboardMarkup:
         text="✏️ Edit" if en else "✏️ Изменить",
         callback_data=CcCB(action="edit", sub="settings"),
     )
-    _cc_back_btn(kb, en)
-    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
-    kb.adjust(1, 1, 2)
+    nav = _cc_nav_row(kb, en, can_forward)
+    kb.adjust(1, 1, nav)
     return kb.as_markup()
 
 
@@ -1024,10 +1035,10 @@ def thr_tune_kb(token: str, lang: str | None = None) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def cc_kw_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+def cc_kw_kb(lang: str | None = None, *, can_forward: bool = False) -> InlineKeyboardMarkup:
     """Этап 2: «🔎 Генерация» (CcCB kw_generate) / «📎 Загрузить свои» (2.10 §19.4: визуальная
     развилка из документа — кнопка показывает инструкцию по форматам, сам ввод — текст/файл/ссылка);
-    «⏭ Пропустить» / «✖ Отмена»."""
+    «⏭ Пропустить» / навигация."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     kb.button(
@@ -1039,30 +1050,28 @@ def cc_kw_kb(lang: str | None = None) -> InlineKeyboardMarkup:
         callback_data=CcCB(action="kw_own"),
     )
     kb.button(text="⏭ Skip" if en else "⏭ Пропустить", callback_data=CcCB(action="skip"))
-    _cc_back_btn(kb, en)
-    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
-    kb.adjust(1, 1, 1, 2)
+    nav = _cc_nav_row(kb, en, can_forward)
+    kb.adjust(1, 1, 1, nav)
     return kb.as_markup()
 
 
-def cc_kw_verify_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+def cc_kw_verify_kb(lang: str | None = None, *, can_forward: bool = False) -> InlineKeyboardMarkup:
     """Этап 2 (после генерации в Google Sheets): «✅ Использовать эти ключи» (взять сгенерированный
     список без ручной правки таблицы — P0-2: ключи уже сохранены в черновик) ИЛИ прислать ссылку на
-    отредактированную таблицу для верификации; «‹ Назад» / «✖ Отмена»."""
+    отредактированную таблицу для верификации; навигация."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     kb.button(
         text="✅ Use these keywords" if en else "✅ Использовать эти ключи",
         callback_data=CcCB(action="kw_use_generated"),
     )
-    _cc_back_btn(kb, en)
-    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
-    kb.adjust(1, 2)
+    nav = _cc_nav_row(kb, en, can_forward)
+    kb.adjust(1, nav)
     return kb.as_markup()
 
 
-def cc_assets_kb(lang: str | None = None) -> InlineKeyboardMarkup:
-    """Этап 5: «✅ Использовать текущие» / «➕ Добавить новый» / «✅ Готово» / «✖ Отмена».
+def cc_assets_kb(lang: str | None = None, *, can_forward: bool = False) -> InlineKeyboardMarkup:
+    """Этап 5: «✅ Использовать текущие» / «➕ Добавить новый» / «✅ Готово» / навигация.
     Готово ведёт к Этапу 6 (URL-опции); добавленные/переиспользованные ассеты — в черновике."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
@@ -1077,9 +1086,8 @@ def cc_assets_kb(lang: str | None = None) -> InlineKeyboardMarkup:
     kb.button(
         text="✅ Done / Skip" if en else "✅ Готово / Пропустить", callback_data=CcCB(action="skip")
     )
-    _cc_back_btn(kb, en)
-    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
-    kb.adjust(1, 1, 1, 2)
+    nav = _cc_nav_row(kb, en, can_forward)
+    kb.adjust(1, 1, 1, nav)
     return kb.as_markup()
 
 
@@ -1187,19 +1195,40 @@ def post_create_kb(launch_cid: str = "", lang: str | None = None) -> InlineKeybo
     return kb.as_markup()
 
 
-def cc_skip_kb(lang: str | None = None) -> InlineKeyboardMarkup:
-    """Этап 4/6: «⏭ Пропустить» (CcCB skip) + «✖ Отмена». Прикрепление (фото) — отдельным
+def cc_exit_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """W5 (живой тест 2026-07-06): диалог выхода из визарда §19 с накопленной работой.
+    «Сохранить» = soft-exit (черновик остаётся active, вернуться через /newcampaign);
+    «Удалить» = прежний abandon; «Вернуться» = остаться на текущем этапе."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="💾 Exit — keep the draft" if en else "💾 Выйти — черновик сохранится",
+        callback_data=CcCB(action="exit_keep"),
+    )
+    kb.button(
+        text="🗑 Delete the draft" if en else "🗑 Удалить черновик",
+        callback_data=CcCB(action="exit_drop"),
+    )
+    kb.button(
+        text="↩️ Return to the wizard" if en else "↩️ Вернуться",
+        callback_data=CcCB(action="exit_stay"),
+    )
+    kb.adjust(1, 1, 1)
+    return kb.as_markup()
+
+
+def cc_skip_kb(lang: str | None = None, *, can_forward: bool = False) -> InlineKeyboardMarkup:
+    """Этап 4/6: «⏭ Пропустить» (CcCB skip) + навигация. Прикрепление (фото) — отдельным
     сообщением, не кнопкой."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     kb.button(text="⏭ Skip" if en else "⏭ Пропустить", callback_data=CcCB(action="skip"))
-    _cc_back_btn(kb, en)
-    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
-    kb.adjust(1, 2)
+    nav = _cc_nav_row(kb, en, can_forward)
+    kb.adjust(1, nav)
     return kb.as_markup()
 
 
-def cc_kw_confirm_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+def cc_kw_confirm_kb(lang: str | None = None, *, can_forward: bool = False) -> InlineKeyboardMarkup:
     """§19.4: явный гейт «✅ Подтвердить ключевые слова» перед Этапом 3. Замена списка — просто
     прислать новый (state остаётся на Этапе 2); «✖ Отмена» — выход из визарда."""
     en = _lang(lang) == "en"
@@ -1208,9 +1237,8 @@ def cc_kw_confirm_kb(lang: str | None = None) -> InlineKeyboardMarkup:
         text="✅ Confirm keywords" if en else "✅ Подтвердить ключевые слова",
         callback_data=CcCB(action="kw_confirm"),
     )
-    _cc_back_btn(kb, en)
-    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
-    kb.adjust(1, 2)
+    nav = _cc_nav_row(kb, en, can_forward)
+    kb.adjust(1, nav)
     return kb.as_markup()
 
 

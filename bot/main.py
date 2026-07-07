@@ -141,6 +141,7 @@ from bot.keyboards import (
     clients_accounts_kb,
     cc_asset_types_kb,
     cc_assets_kb,
+    cc_exit_kb,
     cc_final_kb,
     cc_kw_confirm_kb,
     cc_kw_kb,
@@ -1205,6 +1206,63 @@ async def _abandon_active_flow(chat_id: int, state: FSMContext) -> bool:
     _cli_cancel_idle(chat_id)  # B13: гасим таймер авто-сохранения
     await state.clear()
     return had_state or bool(cc_session)
+
+
+def _cc_draft_has_content(draft) -> bool:
+    """W5: есть ли в черновике §19 накопленная работа, которую жалко терять при отмене
+    (настройки/ключи/объявление/медиа/ассеты/URL-опции). Пустой черновик — нечего спасать."""
+    if draft is None:
+        return False
+    st = draft.wizard_state or {}
+    ad = st.get("ad") or {}
+    assets = st.get("assets") or {}
+    return bool(
+        st.get("settings")
+        or (st.get("keywords") or {}).get("list")
+        or ad.get("final_url")
+        or ad.get("headlines")
+        or (st.get("images") or {}).get("media_ids")
+        or assets.get("new")
+        or assets.get("reuse_links")
+        or any((st.get("url_options") or {}).values())
+    )
+
+
+async def _maybe_cc_exit_dialog(target: Message, chat_id: int, state: FSMContext) -> bool:
+    """W5 (живой тест 2026-07-06): «✖ Отмена»/'/cancel' в визарде §19 БЕЗВОЗВРАТНО бросали
+    черновик (status=abandoned выпадает из всех резюм-путей). Если активный черновик из FSM
+    содержит работу — вместо abandon показываем диалог «сохранить / удалить / вернуться».
+    Пустой черновик (первый экран без ввода) — прежний быстрый путь без диалога.
+    Возвращает True, если диалог показан (вызыватель НЕ должен abandon-ить)."""
+    data = await state.get_data()
+    cc_session = data.get("cc_session")
+    if not cc_session:
+        return False
+    draft = await CDRAFTS.get(cc_session, expected_chat_id=chat_id)
+    if draft is None or draft.status != "active" or not _cc_draft_has_content(draft):
+        return False
+    await target.answer(
+        i18n.t(
+            "cc_exit_confirm",
+            step=max(1, int(draft.current_step)),
+            ttl_h=int(settings.campaign_draft_ttl_hours),
+        ),
+        reply_markup=cc_exit_kb(),
+        parse_mode=ParseMode.HTML,
+    )
+    return True
+
+
+async def _cc_exit_drop_flow(chat_id: int, state: FSMContext) -> None:
+    """W5: «🗑 Удалить черновик» из диалога выхода. _abandon_active_flow закрывает черновик из
+    FSM-данных; если FSM уже очищен (menu-guard между диалогом и кнопкой) — добиваем активный
+    черновик чата напрямую, с той же чисткой временных image-медиа."""
+    await _abandon_active_flow(chat_id, state)
+    draft = await CDRAFTS.get_active(chat_id)
+    if draft is not None:
+        for mid in (draft.wizard_state.get("images") or {}).get("media_ids") or []:
+            await asyncio.to_thread(clear_pending_media, mid)
+        await CDRAFTS.abandon(draft.session_id, expected_chat_id=chat_id)
 
 
 async def _suspend_active_flow_soft(m: Message, state: FSMContext) -> tuple[int | None, bool]:
@@ -2838,6 +2896,29 @@ def _cc_draft_account_row():
     )
 
 
+async def _cc_account_currency(customer_id: str | None) -> str:
+    """Валюта выбранного на Этапе-0 аккаунта для валютных дефолтов §19 (0.50 JPY-класс бага).
+    Сначала мета обхода MCC (ChildAccount.currency — 0 лишних API-вызовов), затем GAQL
+    account_currency (свой кэш). Любой сбой/запрет чтения → '' (дефолты без валюты, не падаем)."""
+    from ads.client import build_client_async, discovered_read_children_meta
+    from ads.read import account_currency
+
+    cid = normalize_customer_id(customer_id or DRAFT_ACCOUNT_ID)
+    try:
+        meta = discovered_read_children_meta().get(cid)
+        cur = ((getattr(meta, "currency", "") or "") if meta else "").strip().upper()
+        if cur:
+            return cur
+    except Exception:  # noqa: BLE001 — мета не критична
+        pass
+    try:
+        client = await build_client_async(cid)
+        cur = await run_ads_read_call(account_currency, client, cid, label="account_currency")
+        return (cur or "").strip().upper()
+    except Exception:  # noqa: BLE001 — валюта не критична (деградация на фолбэк-дефолты)
+        return ""
+
+
 async def _cc_read_medians(customer_id: str):
     """Медианы прошлых Search-кампаний аккаунта (§19.3 «по аналогии»). Любой сбой/запрет чтения →
     пустые медианы (визард деградирует на дефолты, не падает)."""
@@ -2879,6 +2960,15 @@ async def _cc_profile_site(draft) -> str | None:
         return None
 
 
+def _cc_max_step(draft) -> int:
+    """W4: максимально достигнутый этап черновика (high-water nav.max_step из store.set_step;
+    старые черновики без nav → current_step). Управляет показом «Вперёд ›» после «Назад»."""
+    if draft is None:
+        return 0
+    nav = (draft.wizard_state or {}).get("nav") or {}
+    return max(int(nav.get("max_step") or 0), int(draft.current_step or 0))
+
+
 def _cc_apply_settings_patch(cur: dict, patch) -> dict:
     """Наложить пред-confirm правку («поставь бюджет 60») на собранные настройки. Изменённые поля
     выходят из ОБОИХ тегов источника (by_analogy И by_default — теперь заданы пользователем).
@@ -2890,6 +2980,12 @@ def _cc_apply_settings_patch(cur: dict, patch) -> dict:
         s["budget_daily_micros"] = units_to_micros(patch.budget_daily_units)
         by.discard("budget_daily_micros")
         bd.discard("budget_daily_micros")
+    # «максимальная цена за клик 75» — раньше ветки НЕ было: CPC был нередактируем, правка
+    # молча терялась (живой тест 2026-07-06). <=0 игнорируем (не даём занулить бид).
+    if patch.max_cpc_units is not None and patch.max_cpc_units > 0:
+        s["cpc_bid_micros"] = units_to_micros(patch.max_cpc_units)
+        by.discard("cpc_bid_micros")
+        bd.discard("cpc_bid_micros")
     if patch.geo_locations:
         s["geo_locations"] = list(patch.geo_locations)
     if patch.geo_country_code:
@@ -2998,7 +3094,7 @@ async def _cc_render_stage(target: Message, chat_id: int, draft, state: FSMConte
             await state.set_state(CreateCampaignWizard.settings_confirm)
             await target.answer(
                 _cc_crumb(1) + texts.fmt_cc_settings_summary(s),
-                reply_markup=cc_settings_kb(),
+                reply_markup=cc_settings_kb(can_forward=_cc_max_step(draft) > 1),
                 parse_mode=ParseMode.HTML,
             )
         else:
@@ -3516,12 +3612,12 @@ async def _cc_finalize_ad(target: Message, chat_id: int, session, state) -> None
 
 # ── Этап 4: изображения объявления (image assets) — прикрепить или пропустить ──────
 async def _cc_present_stage4(target: Message, chat_id: int, session_id: str, state) -> None:
-    await CDRAFTS.set_step(session_id, 4, expected_chat_id=chat_id)
+    snap = await CDRAFTS.set_step(session_id, 4, expected_chat_id=chat_id)
     await state.set_state(CreateCampaignWizard.images)
     await state.update_data(cc_session=session_id)
     await target.answer(
         _cc_crumb(4) + i18n.t("cc_images_prompt"),
-        reply_markup=cc_skip_kb(),
+        reply_markup=cc_skip_kb(can_forward=_cc_max_step(snap) > 4),
         parse_mode=ParseMode.HTML,
     )
 
@@ -3572,6 +3668,7 @@ async def _cc_present_stage2(target: Message, chat_id: int, session_id: str, sta
     await state.update_data(cc_session=session_id)
     draft = await CDRAFTS.get(session_id, expected_chat_id=chat_id)
     kw = (draft.wizard_state.get("keywords") or {}) if draft else {}
+    fwd = _cc_max_step(draft) > 2  # W4: этап 3+ уже был пройден → показываем «Вперёд ›»
     if kw.get("sheet_id") and not kw.get("verified"):
         # (а) round-trip в полёте: пере-показать ссылку на таблицу и ждать её обратно (kw_verify).
         # Fallback-URL для черновиков, созданных до появления sheet_url.
@@ -3583,7 +3680,7 @@ async def _cc_present_stage2(target: Message, chat_id: int, session_id: str, sta
         if kw.get("list"):
             await target.answer(
                 i18n.t("cc_kw_verify_prompt_v2", n=len(kw.get("list") or [])),
-                reply_markup=cc_kw_verify_kb(),
+                reply_markup=cc_kw_verify_kb(can_forward=fwd),
                 parse_mode=ParseMode.HTML,
             )
         else:
@@ -3603,13 +3700,15 @@ async def _cc_present_stage2(target: Message, chat_id: int, session_id: str, sta
         await state.set_state(CreateCampaignWizard.keywords)
         await target.answer(
             i18n.t("cc_kw_review", n=len(kw_list), mt=texts.esc(mt_label), preview=preview),
-            reply_markup=cc_kw_confirm_kb(),
+            reply_markup=cc_kw_confirm_kb(can_forward=fwd),
             parse_mode=ParseMode.HTML,
         )
         return
     await state.set_state(CreateCampaignWizard.keywords)
     await target.answer(
-        _cc_crumb(2) + i18n.t("cc_kw_prompt"), reply_markup=cc_kw_kb(), parse_mode=ParseMode.HTML
+        _cc_crumb(2) + i18n.t("cc_kw_prompt"),
+        reply_markup=cc_kw_kb(can_forward=fwd),
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -3705,12 +3804,12 @@ async def _cc_save_keywords(
 
 # ── Этап 5: ассеты (переиспользовать текущие аккаунта / пропустить) ───────────────
 async def _cc_present_stage5(target: Message, chat_id: int, session_id: str, state) -> None:
-    await CDRAFTS.set_step(session_id, 5, expected_chat_id=chat_id)
+    snap = await CDRAFTS.set_step(session_id, 5, expected_chat_id=chat_id)
     await state.set_state(CreateCampaignWizard.assets)
     await state.update_data(cc_session=session_id)
     await target.answer(
         _cc_crumb(5) + i18n.t("cc_assets_prompt"),
-        reply_markup=cc_assets_kb(),
+        reply_markup=cc_assets_kb(can_forward=_cc_max_step(snap) > 5),
         parse_mode=ParseMode.HTML,
     )
 
@@ -3751,11 +3850,13 @@ async def _cc_asset_logo_from_photo(m: Message, state: FSMContext, bot: Bot) -> 
 
 # ── Этап 6: Ad URL options (tracking/suffix или пропустить) ───────────────────────
 async def _cc_present_stage6(target: Message, chat_id: int, session_id: str, state) -> None:
-    await CDRAFTS.set_step(session_id, 6, expected_chat_id=chat_id)
+    snap = await CDRAFTS.set_step(session_id, 6, expected_chat_id=chat_id)
     await state.set_state(CreateCampaignWizard.url_options)
     await state.update_data(cc_session=session_id)
     await target.answer(
-        _cc_crumb(6) + i18n.t("cc_url_prompt"), reply_markup=cc_skip_kb(), parse_mode=ParseMode.HTML
+        _cc_crumb(6) + i18n.t("cc_url_prompt"),
+        reply_markup=cc_skip_kb(can_forward=_cc_max_step(snap) > 6),
+        parse_mode=ParseMode.HTML,
     )
 
 

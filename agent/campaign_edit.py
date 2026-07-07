@@ -58,6 +58,10 @@ def parse_replace_edit(text: str) -> tuple[str, str] | None:
 # команду СНАЧАЛА в settings-извлечение; literal replace — только для чистого текста.
 _SETTINGS_MARKERS = re.compile(
     r"\b(бюджет\w*|budget|ставк\w*|бид\w*|\bcpc\b|\bbid\b|"
+    # «(максимальная) цена за клик 75» / «стоимость клика» — живой тест 2026-07-06: фраза без
+    # слова «ставка»/CPC не распознавалась настройкой и молча падала в literal-replace/игнор.
+    r"цен\w*\s+за\s+клик|стоимост\w*\s+клика|за\s+клик\b|"
+    r"cost\s+per\s+click|price\s+per\s+click|per\s+click|"
     r"гео\b|geo\b|стран\w*|город\w*|city|country|язык\w*|language|"
     r"стратег\w*|strategy|расписан\w*|schedule|сет(?:ь|и|ей|ям)\b|network|"
     r"валют\w*|currency|дат[аыу]\b|date|match\s*type|тип\w*\s+соответств\w*)",

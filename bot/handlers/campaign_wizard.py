@@ -71,9 +71,22 @@ async def cc_account_cb(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.
     chosen = rows[callback_data.idx]
     preview_id = getattr(chosen, "id", bm.DRAFT_ACCOUNT_ID)
     await bm.CDRAFTS.set_preview(session_id, preview_id, expected_chat_id=chat_id)
-    await bm.CDRAFTS.set_step(session_id, 1, expected_chat_id=chat_id)
-    await state.set_state(bm.CreateCampaignWizard.settings_desc)
+    snap = await bm.CDRAFTS.set_step(session_id, 1, expected_chat_id=chat_id)
     await cq.answer()
+    # W4: настройки уже собраны (возврат «Назад» на Этап 0 и повторный выбор аккаунта) →
+    # НЕ входить заново в settings_desc: свободный текст там пересобрал бы настройки с нуля
+    # (дефолты перетёрли бы правки — data-loss). Показываем сохранённую сводку (settings_confirm).
+    if snap is not None and (snap.wizard_state.get("settings") or {}):
+        msg = bm._cq_msg(cq)
+        await bm._safe_edit(
+            cq,
+            bm.texts.cc_account_header(getattr(chosen, "name", ""), preview_id),
+            parse_mode=bm.ParseMode.HTML,
+        )
+        if msg is not None:
+            await bm._cc_render_stage(msg, chat_id, snap, state)
+        return
+    await state.set_state(bm.CreateCampaignWizard.settings_desc)
     await bm._safe_edit(
         cq,
         bm.texts.cc_account_header(getattr(chosen, "name", ""), preview_id),
@@ -107,6 +120,82 @@ async def cc_back(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.FSMCon
         except Exception:  # noqa: BLE001 — старое/уже удалённое сообщение
             pass
         await bm._cc_render_stage(msg, chat_id, snap, state)
+
+
+@bm.dp.callback_query(bm.CcCB.filter(bm.F.action == "fwd"))
+async def cc_forward(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.FSMContext) -> None:
+    """W4 (живой тест 2026-07-06): «Вперёд ›» — вернуться на уже пройденный этап после «Назад».
+    Зеркало cc_back: чистая навигация в пределах high-water max_step, данные черновика не
+    трогаются (187 сгенерированных ключей ждут в wizard_state.keywords)."""
+    chat_id = bm._cq_chat_id(cq)
+    msg = bm._cq_msg(cq)
+    draft = await bm.CDRAFTS.get_active(chat_id)
+    if draft is None or msg is None:
+        await cq.answer(bm.i18n.t("cc_draft_stale"), show_alert=True)
+        return
+    cur = int(draft.current_step)
+    nxt = min(cur + 1, bm._cc_max_step(draft))
+    if nxt <= cur:  # старое сообщение с кнопкой, дальше идти некуда
+        await cq.answer(bm.i18n.t("cc_no_forward"), show_alert=True)
+        return
+    snap = await bm.CDRAFTS.set_step(draft.session_id, nxt, expected_chat_id=chat_id)
+    await cq.answer()
+    if snap is not None:
+        try:
+            await msg.delete()  # P0-3: как в cc_back — не плодим одинаковые карточки
+        except Exception:  # noqa: BLE001 — старое/уже удалённое сообщение
+            pass
+        await bm._cc_render_stage(msg, chat_id, snap, state)
+
+
+@bm.dp.callback_query(bm.CcCB.filter(bm.F.action == "exit_keep"))
+async def cc_exit_keep(cq: bm.CallbackQuery, state: bm.FSMContext) -> None:
+    """W5: «💾 Выйти — черновик сохранится» — soft-exit как menu-guard 3A: FSM закрывается,
+    черновик остаётся active (TTL 72ч), медиа НЕ чистим. Возврат — /newcampaign → «Продолжить»."""
+    chat_id = bm._cq_chat_id(cq)
+    draft = await bm.CDRAFTS.get_active(chat_id)
+    await state.clear()
+    await cq.answer()
+    step = max(1, int(draft.current_step)) if draft else 1
+    await bm._safe_edit(
+        cq,
+        bm.i18n.t("cc_draft_kept", step=step),
+        reply_markup=bm.cc_resume_kb(),
+        parse_mode=bm.ParseMode.HTML,
+    )
+    msg = bm._cq_msg(cq)
+    if msg is not None:
+        await msg.answer(bm.i18n.t("main_menu_back"), reply_markup=bm.main_menu())
+
+
+@bm.dp.callback_query(bm.CcCB.filter(bm.F.action == "exit_drop"))
+async def cc_exit_drop(cq: bm.CallbackQuery, state: bm.FSMContext) -> None:
+    """W5: «🗑 Удалить черновик» — прежняя семантика отмены (abandon + чистка медиа), теперь
+    ЯВНЫМ выбором пользователя, а не единственным исходом «✖ Отмена»."""
+    chat_id = bm._cq_chat_id(cq)
+    await bm._cc_exit_drop_flow(chat_id, state)
+    await cq.answer(bm.i18n.t("cb_cancelled"))
+    await bm._safe_edit(cq, bm.i18n.t("wizard_cancelled"))
+    msg = bm._cq_msg(cq)
+    if msg is not None:
+        await msg.answer(bm.i18n.t("main_menu_back"), reply_markup=bm.main_menu())
+
+
+@bm.dp.callback_query(bm.CcCB.filter(bm.F.action == "exit_stay"))
+async def cc_exit_stay(cq: bm.CallbackQuery, state: bm.FSMContext) -> None:
+    """W5: «↩️ Вернуться» — закрыть диалог и перерисовать текущий этап черновика."""
+    chat_id = bm._cq_chat_id(cq)
+    msg = bm._cq_msg(cq)
+    draft = await bm.CDRAFTS.get_active(chat_id)
+    if draft is None or msg is None:
+        await cq.answer(bm.i18n.t("cc_draft_stale"), show_alert=True)
+        return
+    await cq.answer()
+    try:
+        await msg.delete()
+    except Exception:  # noqa: BLE001 — старое/уже удалённое сообщение
+        pass
+    await bm._cc_render_stage(msg, chat_id, draft, state)
 
 
 @bm.dp.callback_query(bm.CcCB.filter(bm.F.action == "page"))
@@ -189,7 +278,32 @@ async def cc_settings_desc(m: bm.Message, state: bm.FSMContext) -> None:
     except Exception as e:  # LLM/сеть — остаёмся в состоянии, пользователь повторит
         await m.answer(bm.i18n.t("err_text_gen", err=bm.ux.err_text(e)), reply_markup=bm.nav_kb())
         return
+    existing = draft.wizard_state.get("settings") or {}
+    if existing:
+        # W4 (belt-and-brace): настройки уже собраны, а мы всё же в settings_desc (любой обходной
+        # путь навигации) — текст трактуем как ПРАВКУ (merge-patch), а не пересборку с нуля:
+        # полный assemble_settings перетёр бы пользовательские значения дефолтами (data-loss).
+        if extracted.is_empty():
+            await state.set_state(bm.CreateCampaignWizard.settings_confirm)
+            await m.answer(
+                bm.i18n.t("cc_settings_edit_not_understood"),
+                reply_markup=bm.cc_settings_kb(can_forward=bm._cc_max_step(draft) > 1),
+                parse_mode=bm.ParseMode.HTML,
+            )
+            return
+        merged = bm._cc_apply_settings_patch(existing, extracted)
+        await bm.CDRAFTS.patch(
+            session_id, lambda s: s.__setitem__("settings", merged), expected_chat_id=m.chat.id
+        )
+        await state.set_state(bm.CreateCampaignWizard.settings_confirm)
+        await m.answer(
+            bm._cc_crumb(1) + bm.texts.fmt_cc_settings_summary(merged),
+            reply_markup=bm.cc_settings_kb(can_forward=bm._cc_max_step(draft) > 1),
+            parse_mode=bm.ParseMode.HTML,
+        )
+        return
     medians = await bm._cc_read_medians(draft.preview_customer_id or bm.DRAFT_ACCOUNT_ID)
+    acct_currency = await bm._cc_account_currency(draft.preview_customer_id)
     settings_dict = bm.assemble_settings(
         extracted,
         median_budget_micros=medians.median_daily_budget_micros,
@@ -197,6 +311,7 @@ async def cc_settings_desc(m: bm.Message, state: bm.FSMContext) -> None:
         common_match_type=medians.common_match_type,
         topic=text,  # полное описание (не text[:60] — прежний срез отрезал сам товар)
         ui_language=bm.i18n.current_lang(),
+        account_currency=acct_currency,  # валютные дефолты денег (0.50 JPY-класс бага)
     )
     await bm.CDRAFTS.patch(
         session_id, lambda s: s.__setitem__("settings", settings_dict), expected_chat_id=m.chat.id
@@ -231,13 +346,22 @@ async def cc_settings_edit(m: bm.Message, state: bm.FSMContext) -> None:
             bm.i18n.t("err_text_gen", err=bm.ux.err_text(e)), reply_markup=bm.cc_settings_kb()
         )
         return
+    if patch.is_empty():
+        # Живой тест 2026-07-06: нераспознанная правка МОЛЧА ре-рендерила ту же карточку —
+        # выглядело как «применилось». Честный отказ + список редактируемых полей.
+        await m.answer(
+            bm.i18n.t("cc_settings_edit_not_understood"),
+            reply_markup=bm.cc_settings_kb(can_forward=bm._cc_max_step(draft) > 1),
+            parse_mode=bm.ParseMode.HTML,
+        )
+        return
     merged = bm._cc_apply_settings_patch(draft.wizard_state.get("settings") or {}, patch)
     await bm.CDRAFTS.patch(
         session_id, lambda s: s.__setitem__("settings", merged), expected_chat_id=m.chat.id
     )
     await m.answer(
         bm._cc_crumb(1) + bm.texts.fmt_cc_settings_summary(merged),
-        reply_markup=bm.cc_settings_kb(),
+        reply_markup=bm.cc_settings_kb(can_forward=bm._cc_max_step(draft) > 1),
         parse_mode=bm.ParseMode.HTML,
     )
 
