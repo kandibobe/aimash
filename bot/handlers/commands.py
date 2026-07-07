@@ -248,7 +248,8 @@ async def _is_admin(chat_id: int) -> bool:
 
 @bm.dp.message(bm.Command("mutready"))
 async def mutready_cmd(m: bm.Message, command: bm.CommandObject) -> None:
-    """2.5: /mutready [id|имя] — чек-лист готовности аккаунта к включению мутаций (только админ).
+    """2.5/AD.5: /mutready [id|имя|all] — чек-лист готовности к включению мутаций (только админ).
+    `all` — компактная сводка по ВСЕМ видимым аккаунтам (перед вкл. GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all).
     ДИАГНОСТИКА: видимость (потолок) / статус / OAuth / живой probe / гранты / 2FA / членство в
     allowed-list. НИКАКОЙ автозаписи конфига: финальный шаг (GOOGLE_ADS_ALLOWED_CUSTOMER_IDS)
     владелец делает руками (docs/DEPLOYMENT.md §2.1); замок ensure_allowed не трогается."""
@@ -256,6 +257,15 @@ async def mutready_cmd(m: bm.Message, command: bm.CommandObject) -> None:
         await m.answer(bm.i18n.t("admin_only"))
         return
     arg = (command.args or "").strip()
+    if arg.lower() in (
+        "all",
+        "все",
+        "*",
+    ):  # AD.5: сводка по ВСЕМ видимым аккаунтам (перед вкл. all)
+        async with bm.ux.typing_action(m):
+            results = await bm._mutready_all()
+        await m.answer(bm.texts.fmt_mutready_all(results), parse_mode=bm.ParseMode.HTML)
+        return
     if arg:
         from core.access import resolve_read_account
 

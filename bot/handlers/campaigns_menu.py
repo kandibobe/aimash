@@ -484,7 +484,7 @@ async def camp_resume(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
 @bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "delete"))
 async def camp_delete(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
     """🗑 Удалить кампанию → черновик remove_campaign за confirm-гейтом. Необратимо, поэтому
-    _present_proposal покажет ДВОЙНОЕ подтверждение (P1-6). Замок Draft-only держит ensure_allowed."""
+    _present_proposal покажет ДВОЙНОЕ подтверждение (P1-6). Замок аккаунта держит ensure_allowed."""
     await bm._camp_mutate(cq, callback_data.idx, "remove_campaign")
 
 

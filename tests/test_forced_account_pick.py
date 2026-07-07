@@ -178,3 +178,125 @@ async def test_do_read_with_explicit_account_skips_pending(monkeypatch):
     monkeypatch.setattr(ca, "resolve_read_account", _resolve)
     res = await al._do_read("get_stats", {"account": "Башня"}, chat_id=1)
     assert res["type"] == "text"
+
+
+# ── AD.3: форс-пикер аккаунта на МУТАЦИОННЫХ мятах (не угадываем чужие деньги) ──────────
+async def test_present_proposal_active_forces_pick_when_pending(monkeypatch):
+    """Активный не закреплён (Draft) + живых >1 → стэш черновика + пикер (target='mutate'),
+    сам _present_proposal НЕ вызывается (мутация не минтится, пока аккаунт не выбран)."""
+    import core.access as ca
+
+    chat = 779001
+    rows = [
+        SimpleNamespace(id=bm.DRAFT_ACCOUNT_ID, name="Draft", currency="", status="ENABLED"),
+        SimpleNamespace(id="5437782039", name="Башня", currency="UAH", status="ENABLED"),
+    ]
+
+    async def _fake_active(_chat):
+        return bm.DRAFT_ACCOUNT_ID
+
+    async def _fake_pending(_chat):
+        return True
+
+    async def _fake_rows(_chat):
+        return rows
+
+    async def _fake_last(_chat):
+        return None
+
+    async def _fake_freq(_chat, *a, **kw):
+        return []
+
+    async def _boom(*a, **kw):
+        raise AssertionError("_present_proposal не должен минтиться при неоднозначном аккаунте")
+
+    monkeypatch.setattr(bm, "_active_read_account", _fake_active)
+    monkeypatch.setattr(ca, "account_choice_pending", _fake_pending)
+    monkeypatch.setattr(bm, "_read_account_rows", _fake_rows)
+    monkeypatch.setattr(bm, "_last_account", _fake_last)
+    monkeypatch.setattr(bm, "_frequent_accounts", _fake_freq)
+    monkeypatch.setattr(bm, "_present_proposal", _boom)
+    bm._PENDING_MUT.pop(chat, None)
+    msg = _FakeMsg(chat)
+    await bm._present_proposal_active(
+        msg,
+        chat_id=chat,
+        operation="pause_campaign",
+        params={"campaign": "X"},
+        summary="s",
+        cid="cid779001",
+    )
+    assert chat in bm._PENDING_MUT and bm._PENDING_MUT[chat]["cid"] == "cid779001"
+    assert len(msg.answers) == 1
+    _text, kw = msg.answers[0]
+    assert "mutate" in str(kw.get("reply_markup"))  # пикер целится в доигрывание мутации
+    assert bm._pop_pending_mut(chat)["cid"] == "cid779001"  # одноразово
+    assert bm._pop_pending_mut(chat) is None
+    bm._PENDING_MUT.pop(chat, None)
+
+
+async def test_present_proposal_active_mints_directly_when_pinned(monkeypatch):
+    """Аккаунт закреплён (не-Draft) → сразу _present_proposal с этим customer_id, без пикера."""
+    chat = 779002
+    seen: dict = {}
+
+    async def _fake_active(_chat):
+        return "5437782039"
+
+    async def _fake_present(message, **kw):
+        seen.update(kw)
+
+    monkeypatch.setattr(bm, "_active_read_account", _fake_active)
+    monkeypatch.setattr(bm, "_present_proposal", _fake_present)
+    bm._PENDING_MUT.pop(chat, None)
+    msg = _FakeMsg(chat)
+    await bm._present_proposal_active(
+        msg,
+        chat_id=chat,
+        operation="pause_campaign",
+        params={"campaign": "X"},
+        summary="s",
+        cid="cid779002",
+    )
+    assert seen.get("customer_id") == "5437782039"
+    assert chat not in bm._PENDING_MUT  # ничего не отложено
+
+
+# ── AD.2: баннер аккаунта на КАЖДОЙ карточке (включая Draft) ────────────────────────────
+async def _capture_present_summary(monkeypatch, customer_id):
+    """Прогнать _present_proposal с заглушками, вернуть summary, ушедший в save_proposal."""
+    captured: dict = {}
+
+    async def _fake_before(*a, **kw):
+        return None
+
+    async def _fake_save(**kw):
+        captured.update(kw)
+
+    monkeypatch.setattr(bm, "read_before", _fake_before)
+    monkeypatch.setattr(bm.STORE, "save_proposal", _fake_save)
+    monkeypatch.setattr(bm, "ensure_allowed", lambda cid: None)  # не-Draft проходит замок
+    monkeypatch.setattr(bm.ux, "proposal_fits", lambda *_a, **_k: True)
+    msg = _FakeMsg(779003)
+    await bm._present_proposal(
+        msg,
+        chat_id=779003,
+        operation="pause_campaign",
+        params={"campaign": "X"},
+        summary="s",
+        cid="cidbanner",
+        customer_id=customer_id,
+    )
+    return captured.get("summary", "")
+
+
+async def test_confirm_card_shows_account_banner_for_draft(monkeypatch):
+    """Draft теперь ТОЖЕ несёт баннер аккаунта (тихий фолбэк на Draft больше не невидим)."""
+    summary = await _capture_present_summary(monkeypatch, bm.DRAFT_ACCOUNT_ID)
+    assert bm.DRAFT_ACCOUNT_ID in summary  # ярлык «… · 7753643025» в сводке
+
+
+async def test_confirm_card_shows_account_banner_for_child(monkeypatch):
+    """Боевой аккаунт несёт баннер с его id (менеджер видит, на чьи деньги правка, до ✅)."""
+    summary = await _capture_present_summary(monkeypatch, "5437782039")
+    assert "5437782039" in summary

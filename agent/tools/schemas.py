@@ -281,7 +281,7 @@ class ResumeAdGroup(BaseModel):
 
 class RemoveCampaign(BaseModel):
     # §3 удаление кампании (необратимо, status→REMOVED). Двойное подтверждение — в UI (bot).
-    # Замок аккаунта (Draft-only) — на исполнении (ensure_allowed). campaign — имя кампании.
+    # Замок аккаунта — на исполнении (ensure_allowed). campaign — имя кампании.
     campaign: str
 
 

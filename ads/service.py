@@ -195,8 +195,8 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
     # Аккаунт исполнения — ИЗ ЧЕРНОВИКА (штампует доверенный вход бота при показе), а не хардкод:
     # хранимый customer_id теперь authoritative. Повторный ensure_allowed ЗДЕСЬ (fail-closed:
     # пустой/чужой штамп → PermissionError ДО build_client и ДО apply_* — черновик падает, не съев
-    # одноразовый claim и не тронув SDK). Сегодня штамп всегда Draft → поведение идентично; при
-    # будущем расширении потолка (ads/client.py:28) достаточно правки ALLOWED_CEILING + штампа.
+    # одноразовый claim и не тронув SDK). Штамп — любой ВИДИМЫЙ аккаунт (прод-дефолт allow_all_visible,
+    # решение владельца 2026-07); повторный ensure_allowed гарантирует, что аккаунт всё ещё в потолке.
     customer_id = normalize_customer_id(p.customer_id)
     ensure_allowed(customer_id)
     client = await build_client_async(customer_id)

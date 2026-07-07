@@ -114,6 +114,14 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "⚠️ Several live accounts are visible and none is active — I won't guess "
         "whose money to show. Pick an account:",
     },
+    # AD.3: перед МУТАЦИЕЙ активный аккаунт не закреплён + живых несколько → заставляем выбрать
+    # (чтобы не изменить не тот аккаунт — это чужие деньги на живых кампаниях).
+    "pick_account_before_mutation": {
+        "ru": "⚠️ Активный аккаунт не выбран, а живых несколько. Изменение не того аккаунта — "
+        "чужие деньги. Выбери аккаунт для этой правки:",
+        "en": "⚠️ No active account is set and several are live. Changing the wrong account means "
+        "someone's real money. Pick the account for this change:",
+    },
     "campaigns_pick_account": {
         "ru": "🏢 Кампании какого аккаунта показать?",
         "en": "🏢 Which account's campaigns?",
@@ -583,8 +591,8 @@ CATALOG: dict[str, dict[str, str]] = {
     },
     # 2.5: /mutready — чек-лист готовности к включению мутаций (админ; бот конфиг НЕ меняет).
     "mutready_usage": {
-        "ru": "Использование: /mutready &lt;id или имя аккаунта&gt; (без аргумента — активный).",
-        "en": "Usage: /mutready &lt;id or account name&gt; (no argument — the active account).",
+        "ru": "Использование: /mutready &lt;id или имя&gt; · /mutready all — сводка по всем видимым (без аргумента — активный).",
+        "en": "Usage: /mutready &lt;id or name&gt; · /mutready all — summary for all visible (no argument — the active account).",
     },
     # 2.4: cooldown /refresh (анти-спам API; admin-gate осознанно не ставим — read-only).
     "refresh_cooldown": {
@@ -859,11 +867,13 @@ CATALOG: dict[str, dict[str, str]] = {
     "adduser_added": {
         "ru": (
             "✅ Оператор <code>{chat}</code> добавлен в whitelist — может пользоваться ботом (без "
-            "рестарта).\nКакие аккаунты открыть ему на <b>чтение</b>? Мутации остаются только на Draft."
+            "рестарта).\nКакие аккаунты открыть ему на <b>чтение</b>? Любая мутация — только через "
+            "подтверждение «да» (грант чтения её не открывает)."
         ),
         "en": (
             "✅ Operator <code>{chat}</code> added to the whitelist — can use the bot now (no "
-            "restart).\nWhich accounts to open for <b>reading</b>? Mutations stay Draft-only."
+            "restart).\nWhich accounts to open for <b>reading</b>? Any mutation only runs after "
+            "explicit confirmation (a read grant doesn't enable mutations)."
         ),
     },
     "adduser_exists": {
@@ -876,8 +886,8 @@ CATALOG: dict[str, dict[str, str]] = {
     "adduser_btn_pick": {"ru": "🎯 Выбрать аккаунты", "en": "🎯 Pick accounts"},
     "adduser_btn_none": {"ru": "🚫 Только доступ к боту", "en": "🚫 Bot access only"},
     "adduser_all_done": {
-        "ru": "✅ Оператору <code>{chat}</code> открыто чтение всех аккаунтов ({n}). Мутации — только Draft.",
-        "en": "✅ Operator <code>{chat}</code> can now read all accounts ({n}). Mutations — Draft only.",
+        "ru": "✅ Оператору <code>{chat}</code> открыто чтение всех аккаунтов ({n}). Мутации — только через подтверждение «да».",
+        "en": "✅ Operator <code>{chat}</code> can now read all accounts ({n}). Mutations run only after explicit confirmation.",
     },
     "adduser_none_done": {
         "ru": (
@@ -939,11 +949,11 @@ CATALOG: dict[str, dict[str, str]] = {
     "addadmin_added": {
         "ru": (
             "✅ <code>{chat}</code> теперь админ (без рестарта): /grant, /adduser, /addadmin, "
-            "чтение всех доступных аккаунтов. Мутации остаются только на Draft."
+            "чтение всех доступных аккаунтов. Любая мутация — только через подтверждение «да»."
         ),
         "en": (
             "✅ <code>{chat}</code> is now an admin (no restart): /grant, /adduser, /addadmin, "
-            "read access to all available accounts. Mutations stay Draft-only."
+            "read access to all available accounts. Any mutation runs only after explicit confirmation."
         ),
     },
     "addadmin_exists": {
@@ -1050,6 +1060,19 @@ CATALOG: dict[str, dict[str, str]] = {
     "no_audiences": {
         "ru": texts.NO_AUDIENCES,
         "en": "👥 No available audiences (remarketing lists) found in the account.",
+    },
+    # C3: тексты алертов аномалий (scheduler.anomaly отдаёт kind+params, рендер per-recipient).
+    "anomaly_spend_spike": {
+        "ru": "📈 Расход вырос на {pct}% ({prev} → {now}{cur}).",
+        "en": "📈 Spend up {pct}% ({prev} → {now}{cur}).",
+    },
+    "anomaly_conv_drop": {
+        "ru": "📉 Конверсии упали на {pct}% ({prev} → {now}).",
+        "en": "📉 Conversions down {pct}% ({prev} → {now}).",
+    },
+    "anomaly_spend_no_conv": {
+        "ru": "⚠️ Расход {now}{cur} при нуле конверсий (было {prev_conv}).",
+        "en": "⚠️ Spend {now}{cur} with zero conversions (was {prev_conv}).",
     },
     "camp_network_title": {
         "ru": (
@@ -1258,11 +1281,22 @@ CATALOG: dict[str, dict[str, str]] = {
     },
     "video_ask_logo": {
         "ru": (
-            "🖼 Логотип для Demand Gen (опционально, квадратный 1:1): пришли <b>фото</b> "
-            "или нажми «⏭ Пропустить»."
+            "🖼 Логотип для Demand Gen — <b>обязателен</b> (требование Google; лучше квадратный "
+            "1:1): пришли <b>фото</b> логотипа."
         ),
         "en": (
-            "🖼 Logo for Demand Gen (optional, square 1:1): send a <b>photo</b> or press “⏭ Skip”."
+            "🖼 Logo for Demand Gen — <b>required</b> (Google requirement; square 1:1 works "
+            "best): send the logo as a <b>photo</b>."
+        ),
+    },
+    "video_logo_required": {
+        "ru": (
+            "Для Demand Gen логотип обязателен — без него Google отклоняет создание кампании. "
+            "Пришли фото логотипа (или «✖ Отмена»)."
+        ),
+        "en": (
+            "A logo is required for Demand Gen — Google rejects campaign creation without it. "
+            "Send the logo photo (or “✖ Cancel”)."
         ),
     },
     "video_session_stale": {
@@ -1599,17 +1633,20 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "⚠️ Не удалось построить отчёт: {err}",
         "en": "⚠️ Couldn't build the report: {err}",
     },
-    # §6 /account: выбор аккаунта ЧТЕНИЯ для отчётов (мутации всегда на Draft)
+    # §6 /account: выбор АКТИВНОГО аккаунта — и для отчётов, и как цель изменений по умолчанию
+    # (AD.3: мут-мяты минтят на активном аккаунте; каждое изменение всё равно за подтверждением «да»).
     "account_current": {
         "ru": (
-            "👤 Активный аккаунт отчётов: <code>{cid}</code>{draft}\n"
+            "👤 Активный аккаунт: <code>{cid}</code>{draft}\n"
             "Сменить: <code>/account 123-456-7890</code> · Сброс: <code>/account reset</code>\n"
-            "⚠️ Только ЧТЕНИЕ (статистика/отчёты). Изменения — всегда на Draft-аккаунте."
+            "📊 Отчёты — по нему. ✏️ Изменения — тоже по нему (по умолчанию), но КАЖДОЕ через "
+            "подтверждение «да»."
         ),
         "en": (
-            "👤 Active reports account: <code>{cid}</code>{draft}\n"
+            "👤 Active account: <code>{cid}</code>{draft}\n"
             "Switch: <code>/account 123-456-7890</code> · Reset: <code>/account reset</code>\n"
-            "⚠️ READ-only (stats/reports). Mutations always target the Draft account."
+            "📊 Reports use it. ✏️ Changes target it too (by default), but EACH one requires "
+            "explicit confirmation."
         ),
     },
     "account_set": {

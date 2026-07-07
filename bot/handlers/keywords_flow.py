@@ -400,14 +400,13 @@ async def on_kw_add_match(cq: bm.CallbackQuery, callback_data: bm.KwAddCB) -> No
         return
     bm._KW_ADD.pop(callback_data.token, None)
     await cq.answer()
-    await bm._present_proposal(
+    # AD.3: ключи на активный аккаунт; при неоднозначности (не закреплён + живых >1) — форс-пикер,
+    # затем черновик с баннером аккаунта (кампания резолвится на исполнении на выбранном аккаунте).
+    await bm._present_proposal_active(
         msg,
         chat_id=bm._cq_chat_id(cq),
         operation=operation,
         params=params,
         summary=summary,
         cid=cid,
-        customer_id=await bm._active_read_account(
-            bm._cq_chat_id(cq)
-        ),  # §8: ключи на активный аккаунт
     )

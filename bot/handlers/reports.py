@@ -230,6 +230,34 @@ async def on_report_account(cq: bm.CallbackQuery, callback_data: bm.ReportAcctCB
         # Разовый выбор (как в отчётах): глобальный активный НЕ трогаем, читаем выбранный.
         await bm._send_campaigns_for(msg, bm._cq_chat_id(cq), acct)
         return
+    if callback_data.target == "mutate":  # AD.3: выбран аккаунт для ОТЛОЖЕННОЙ мутации → доиграть
+        chat_id = bm._cq_chat_id(cq)
+        pend = bm._pop_pending_mut(chat_id)
+        if not pend:  # пикер бросили / протух → просим повторить команду
+            await msg.answer(bm.i18n.t("stale"))
+            return
+        try:  # rows уже read-allowed, но перепроверяем замок × грант и ПИНИМ активным (fail-closed)
+            bm.ensure_read_allowed(acct)
+            from core.access import ensure_account_allowed_for_user
+
+            await ensure_account_allowed_for_user(chat_id, acct)
+        except PermissionError:
+            await msg.answer(
+                bm.i18n.t("account_denied", cid=bm.texts.esc(acct)), parse_mode=bm.ParseMode.HTML
+            )
+            return
+        await bm._save_selected_account(chat_id, acct)  # пин: следующую мутацию не переспрашиваем
+        await bm._present_proposal(
+            msg,
+            chat_id=chat_id,
+            operation=pend["operation"],
+            params=pend["params"],
+            summary=pend["summary"],
+            cid=pend["cid"],
+            external_context=bool(pend.get("external_context", False)),
+            customer_id=acct,  # мутационный замок ensure_allowed — внутри _present_proposal
+        )
+        return
     # P0-3: редактируем сообщение-пикер аккаунта в пикер кампании (без нового сообщения).
     await bm._present_report_campaigns(msg, callback_data.target, rows[callback_data.idx], cq=cq)
 

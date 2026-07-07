@@ -197,7 +197,8 @@ class CampaignDraftStore:
         expected_chat_id: int | None = None,
     ) -> DraftSnapshot | None:
         """Зафиксировать выбранный на Этапе-0 дочерний аккаунт (read-only превью). Аккаунт МУТАЦИИ
-        (customer_id) НЕ трогаем — он всегда Draft."""
+        (customer_id) здесь НЕ трогаем — он зафиксирован при создании визарда (create, активный
+        аккаунт Этапа-0); мутация всё равно проходит ensure_allowed + confirm-гейт."""
         async with Session() as s:
             p = await self._load(s, session_id, expected_chat_id, active_only=True, for_update=True)
             if p is None:

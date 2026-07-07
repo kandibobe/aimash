@@ -228,7 +228,7 @@ _KEYWORD_OPS = frozenset(
 )
 
 # P1-6: необратимые удаления — карточка подтверждения проходит ДВА шага (confirm_destructive_kb →
-# confirm_final_kb). Замок аккаунта (Draft-only) и confirm-гейт неизменны; это доп. защита в UI.
+# confirm_final_kb). Замок аккаунта (ensure_allowed) и confirm-гейт неизменны; это доп. защита в UI.
 _DESTRUCTIVE_OPS = frozenset(
     {"remove_campaign", "remove_ad_group", "remove_keywords", "remove_asset_link"}
 )
@@ -1174,7 +1174,14 @@ async def _present_proposal(
         confirm_destructive_kb(cid) if operation in _DESTRUCTIVE_OPS else confirm_kb(cid)
     )
     kws = params.get("keywords") if isinstance(params, dict) else None
-    if operation in _KEYWORD_OPS and isinstance(kws, list) and len(kws) > texts.KW_INLINE_MAX:
+    # C4 (аудит 2026-07): create_search_campaign тоже несёт список ключей — раньше на финальном
+    # гейте создания он усекался до KW_INLINE_MAX БЕЗ вложения, и менеджер жал ✅ на объёме,
+    # который не видел (тот же класс, что и remove_negative_keywords выше).
+    if (
+        (operation in _KEYWORD_OPS or operation == "create_search_campaign")
+        and isinstance(kws, list)
+        and len(kws) > texts.KW_INLINE_MAX
+    ):
         await ux.send_proposal_keywords_xlsx(
             message,
             keywords=kws,
@@ -1202,6 +1209,81 @@ async def _present_proposal(
             reply_markup=confirm_markup,
             parse_mode=ParseMode.HTML,
         )
+
+
+# AD.3: отложенные мутации, ждущие выбора аккаунта (неоднозначно: активный не закреплён + живых >1).
+# Стэш пер-чат; колбэк пикера аккаунта (target='mutate', bot/handlers/reports.py) резолвит аккаунт и
+# доигрывает _present_proposal на выбранном. TTL — на случай, если пикер бросили (stale → «повтори»).
+_PENDING_MUT: dict[int, dict] = {}
+_PENDING_MUT_TTL_S = 600.0
+
+
+def _pop_pending_mut(chat_id: int) -> dict | None:
+    """Снять отложенную мутацию (одноразово). None, если её нет или протухла по TTL."""
+    import time as _time
+
+    p = _PENDING_MUT.pop(chat_id, None)
+    if not p:
+        return None
+    if (_time.monotonic() - float(p.get("ts", 0.0))) > _PENDING_MUT_TTL_S:
+        return None
+    return p
+
+
+async def _present_proposal_active(
+    message: Message,
+    *,
+    chat_id: int,
+    operation: str,
+    params: dict,
+    summary: str,
+    cid: str,
+    external_context: bool = False,
+) -> None:
+    """AD.3: мята мутации на АКТИВНОМ аккаунте чата (NL/клон/видео/ключи). Если аккаунт НЕ закреплён,
+    а живых несколько (core.access.account_choice_pending) — НЕ угадываем (мутация не того аккаунта —
+    чужие деньги): стэшим черновик и показываем ПИКЕР аккаунта (target='mutate'); после тапа
+    _present_proposal доигрывается на выбранном (и он пинится активным). Закреплён / единственный
+    живой / ноль живых — сразу _present_proposal (прежнее поведение). Мутационный замок ensure_allowed
+    срабатывает уже внутри _present_proposal на итоговом аккаунте."""
+    import time as _time
+
+    acct = await _active_read_account(chat_id)
+    if acct == DRAFT_ACCOUNT_ID:
+        from core.access import account_choice_pending
+
+        if await account_choice_pending(chat_id):  # внутри fail-closed к False (Draft, как раньше)
+            _PENDING_MUT[chat_id] = {
+                "operation": operation,
+                "params": params,
+                "summary": summary,
+                "cid": cid,
+                "external_context": external_context,
+                "ts": _time.monotonic(),
+            }
+            rows = await _read_account_rows(chat_id)
+            _REPORT_ACCT_CACHE[chat_id] = rows
+            await message.answer(
+                i18n.t("pick_account_before_mutation"),
+                reply_markup=report_accounts_kb(
+                    rows,
+                    "mutate",
+                    last=await _last_account(chat_id),
+                    frequent=await _frequent_accounts(chat_id),
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+            return
+    await _present_proposal(
+        message,
+        chat_id=chat_id,
+        operation=operation,
+        params=params,
+        summary=summary,
+        cid=cid,
+        external_context=external_context,
+        customer_id=acct,
+    )
 
 
 async def _abandon_active_flow(chat_id: int, state: FSMContext) -> bool:
@@ -1647,11 +1729,12 @@ async def _load_report_recall(chat_id: int) -> dict | None:
 
 
 async def _active_read_account(chat_id: int) -> str:
-    """Активный аккаунт ЧТЕНИЯ чата для /status /report /export /sheets: выбранный через /account
-    или Draft. Делегат core.access.get_active_account — ЕДИНСТВЕННАЯ точка резолва (2B): она
-    перепроверяет И глобальный read-замок, И пер-пользовательский грант (fail-closed → Draft при
-    сужении списков ИЛИ отзыве гранта). МУТАЦИИ этим НЕ затрагиваются — они всегда на Draft
-    (ensure_allowed, golden rule 9)."""
+    """Активный аккаунт чата для /status /report /export /sheets И для мут-мят (NL/клон/видео/ключи
+    через _present_proposal_active): выбранный через /account или Draft. Делегат
+    core.access.get_active_account — ЕДИНСТВЕННАЯ точка резолва (2B): перепроверяет И глобальный
+    read-замок, И пер-пользовательский грант (fail-closed → Draft при сужении списков ИЛИ отзыве
+    гранта). Мутация на этом аккаунте всё равно проходит ensure_allowed (замок мутаций) + confirm-гейт;
+    при неоднозначности (не закреплён + живых >1) мут-мяты форсят выбор аккаунта (AD.3)."""
     from core.access import get_active_account
 
     try:
@@ -1941,7 +2024,10 @@ async def _slash_mutate(m: Message, command: CommandObject, operation: str) -> N
     except Exception as e:  # валидация схемы
         await m.answer(f"⚠️ {ux.err_text(e)}")
         return
-    await _present_proposal(
+    # AD.4: пауза/возобновление — на АКТИВНОМ аккаунте (не хардкод Draft). При неоднозначности
+    # (не закреплён + живых >1) — форс-пикер; иначе _present_proposal на активном (кампания
+    # резолвится на исполнении на итоговом аккаунте).
+    await _present_proposal_active(
         m, chat_id=m.chat.id, operation=op, params=params, summary=summary, cid=cid
     )
 
@@ -2265,10 +2351,25 @@ async def _mutready_check(cid: str) -> dict:
     except Exception:  # noqa: BLE001
         r["operators"] = []
     r["twofa"] = twofa.is_ready()
-    r["mutations_enabled"] = ncid in {
-        normalize_customer_id(x) for x in settings.allowed_customer_ids
-    }
+    # AD.1: мутации включены для аккаунта ⇔ он ВИДИМ и (сентинел «all» ИЛИ он в явном списке) —
+    # зеркалим логику ensure_allowed БЕЗ её вызова (инвариант test_mutready: команда «на пропуск»
+    # ensure_allowed не зовёт). allow_all_visible — прод-дефолт (решение владельца 2026-07).
+    r["all_visible"] = settings.allow_all_visible
+    r["mutations_enabled"] = r["visible"] and (
+        settings.allow_all_visible
+        or ncid in {normalize_customer_id(x) for x in settings.allowed_customer_ids}
+    )
     return r
+
+
+async def _mutready_all() -> list[dict]:
+    """AD.5: чек-лист готовности по ВСЕМ видимым аккаунтам (потолок мутаций allowed_ceiling()).
+    READ-ONLY (каждый _mutready_check — только membership + лёгкий probe, ничего не меняет). Для
+    /mutready all — сводка перед включением мутаций на всё видимое (Draft — первым)."""
+    from ads.client import allowed_ceiling
+
+    ids = sorted(allowed_ceiling(), key=lambda x: (x != DRAFT_ACCOUNT_ID, x))
+    return [await _mutready_check(c) for c in ids]
 
 
 async def _run_mcc_deep_export(m: Message, period, arg_code: str | None) -> None:
@@ -3070,7 +3171,8 @@ async def _cc_present_stage0(target: Message, chat_id: int) -> None:
     """Этап 0: аккаунты, доступные ЭТОМУ оператору на чтение (2F: из discovered-meta ВСЕХ
     настроенных MCC + пер-юзер фильтр, как пикер /report — раньше живой обход только основного
     MCC: вторичные не попадали + лишний SDK-вызов на каждый вход). Сбой/пусто → деградация на
-    единственный Draft, чтобы визард не падал (мутации всё равно только на Draft)."""
+    единственный Draft, чтобы визард не падал (в этом фолбэке доступен только Draft; создание всё
+    равно за confirm-гейтом)."""
     rows: list = []
     try:
         rows = [r for r in await _read_account_rows(chat_id) if not getattr(r, "manager", False)]
@@ -4081,14 +4183,15 @@ async def _video_mint_proposal(
     )
     p = Proposal(operation=op, summary=summary, params=validated, chat_id=chat_id)
     await state.clear()
-    await _present_proposal(
+    # AD.3: DG/Video на активном аккаунте; при неоднозначности (не закреплён + живых >1) — форс-пикер
+    # (замок ensure_allowed — внутри _present_proposal на итоговом аккаунте).
+    await _present_proposal_active(
         target,
         chat_id=chat_id,
         operation=op,
         params=validated,
         summary=summary,
         cid=p.confirmation_id,
-        customer_id=acct,  # §8: DG/Video создаётся на активном аккаунте (замок — в _present_proposal)
     )
 
 
@@ -4165,7 +4268,8 @@ async def _ext_image_from_photo(m: Message, state: FSMContext, bot: Bot) -> None
         await asyncio.to_thread(clear_pending_media, media_id)
         await m.answer(await _friendly_error(e, "media:attach_image"))
         return
-    await _present_proposal(
+    # AD.4: картинка-расширение — на АКТИВНОМ аккаунте (не хардкод Draft); форс-пикер при неоднозначности.
+    await _present_proposal_active(
         m, chat_id=m.chat.id, operation=operation, params=params, summary=summary, cid=cid
     )
 
@@ -4296,9 +4400,12 @@ async def _clone_from_intent(m: Message, brief: dict) -> None:
     from ads.read import read_campaign_config
     from ads.resolve import find_campaign_by_name
 
-    acct = await _active_read_account(
-        m.chat.id
-    )  # §8: источник читаем И кампанию создаём на активном
+    # AD.3: клон ЧИТАЕТ источник и СОЗДАЁТ клон на ОДНОМ аккаунте — форс-пикер ставим ДО чтения
+    # источника (пикер при неоднозначности пинит активный аккаунт; иначе повтор клона был бы
+    # некогерентен: источник с акка A, клон на B). Не-Draft/единственный живой/Draft — как раньше.
+    acct = await _require_read_account(m, "clone")
+    if acct is None:  # показан пикер — оператор выберет аккаунт и повторит команду клона
+        return
     try:
         client = await build_client_async(acct)
         cfg = await run_ads_read_call(
@@ -4524,11 +4631,10 @@ async def _dispatch_command_result(
     получают предупреждение в сводке (см. _present_proposal)."""
     t = res.get("type")
     if t == "proposal":
-        # G2/G3: NL-команда изменения нацелена на АКТИВНЫЙ аккаунт чата (кампания резолвится на
-        # исполнении на этом же аккаунте — чтение и запись согласованы). Не-Draft активный аккаунт
-        # обязан быть включён на мутации (иначе _present_proposal внятно откажет). Дефолт — Draft.
-        target = await _active_read_account(m.chat.id)
-        await _present_proposal(
+        # G2/G3/AD.3: NL-команда изменения нацелена на АКТИВНЫЙ аккаунт чата. Если он НЕ закреплён,
+        # а живых несколько — _present_proposal_active заставит выбрать аккаунт ДО черновика (не
+        # угадываем, чьи деньги). Не-Draft аккаунт обязан быть включён на мутации (иначе внятный отказ).
+        await _present_proposal_active(
             m,
             chat_id=m.chat.id,
             operation=res["operation"],
@@ -4536,7 +4642,6 @@ async def _dispatch_command_result(
             summary=res["summary"],
             cid=res["confirmation_id"],
             external_context=external_context,
-            customer_id=target,
         )
     elif t == "rsa_intent":
         await _rsa_start_from_intent(m, res.get("brief", {}), state)

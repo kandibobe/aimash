@@ -8,17 +8,33 @@
 > Имена функций/классов (а не номера строк) использованы для часто меняющихся модулей — чтобы
 > ссылки не «протухали». Точные строки даны только для стабильных файлов.
 
-## Текущая фаза (важно для модели угроз)
-**МУТАЦИИ** по умолчанию разрешены на **одном** аккаунте — `Aimash (Draft)` = `7753643025` — и
-**только TEST MCC** при разработке. Расширяются **управляемым конфигом** (`GOOGLE_ADS_ALLOWED_CUSTOMER_IDS`),
-но только среди аккаунтов, **видимых** боту на чтение — эффективный потолок `allowed_ceiling()` не
-пропустит чужой боевой id (защита от опечатки), а код-минимум `ALLOWED_CEILING = {Draft}` нельзя
-понизить через `.env` (см. правило 9 и [DEPLOYMENT.md §2.1](DEPLOYMENT.md)). **ЧТЕНИЕ** — шире:
-раздельный чокпойнт `ensure_read_allowed` пускает мутационный аккаунт ∪ `GOOGLE_ADS_READ_CUSTOMER_IDS`
-∪ дочерние, обнаруженные обходом MCC на старте (§8 read реализован: `/mcc`, per-currency сводки,
-per-child таймзоны). Чтение дочернего **не** делает его мутируемым: мутация всё равно требует членства
-в `allowed_customer_ids` (инварианты `test_mutation_lock_unchanged_by_read_allowlist`,
-`test_grant_does_not_open_mutations`).
+## Модель угроз (решение владельца 2026-07: мутации на всех видимых аккаунтах)
+**Draft-only доктрина снята.** В prod **МУТАЦИИ** по умолчанию разрешены на **всех** аккаунтах,
+ВИДИМЫХ боту под его MCC (`GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all`, прод-дефолт; эффективный потолок
+`allowed_ceiling()` = Draft ∪ read-list ∪ дочерние обхода). При разработке — **только TEST MCC**
+(в dev/test пустой список = fail-closed, мутаций нет). Радиус поражения расширился с одного Draft до
+всех дочерних (у клиента — 7 боевых аккаунтов), поэтому безопасность держится на **компенсирующих
+контролях**, каждый из которых сам по себе несменяем:
+1. **Confirm-гейт** — ни одна мутация не исполняется без «да» + одноразового `confirmation_id`
+   (`ensure_allowed` перепроверяется на исполнении по `proposal.customer_id`). Автоматика (scheduler/
+   advisor) физически не может импортировать `ads.mutations` (AST-гарды).
+2. **Потолок видимости** — мутировать можно ТОЛЬКО аккаунт, который бот РЕАЛЬНО видит под своим MCC;
+   чужой боевой id вне MCC невидим ⇒ немутируем даже при `all` (`allowed_ceiling()`, защита от
+   опечатки). Сбой discovery ⇒ деградация до пола потолка `{Draft}`, не эскалация.
+3. **`user_initiated`** — деньги (бюджет/ставка/стратегия/создание) требуют прямой команды человека.
+4. **Whitelist + 2FA** — доступ к боту закрыт (`TELEGRAM_WHITELIST_CHAT_IDS` ∪ БД, fail-closed); при
+   мутабельных боевых аккаунтах **настоятельно** рекомендуется 2FA операторам (см. ниже, раздел
+   «2FA и захват Telegram»), чтобы захват аккаунта оператора не давал right-away денежных изменений.
+5. **Универсальный баннер аккаунта** — карточка подтверждения ВСЕГДА показывает «⚠️ Аккаунт
+   изменения: Имя · id» (Draft — «🧪 …»): оператор видит, на чьи деньги правка, ДО ✅; при
+   неоднозначном аккаунте бот сначала ЗАСТАВЛЯЕТ выбрать аккаунт (не угадывает).
+
+**ЧТЕНИЕ** — отдельный, более широкий замок `ensure_read_allowed` (мутационный набор ∪
+`GOOGLE_ADS_READ_CUSTOMER_IDS` ∪ дочерние обхода MCC; §8: `/mcc`, per-currency сводки, per-child
+таймзоны). Грант чтения оператору **не** открывает мутации — потолок мутаций отдельный (инварианты
+`test_mutation_lock_unchanged_by_read_allowlist`, `test_grant_does_not_open_mutations`,
+`test_discovered_child_readable_but_not_mutable`); сквозной гейт на боевом аккаунте —
+`test_mutations_all_accounts.py`.
 
 ---
 
@@ -34,7 +50,7 @@ per-child таймзоны). Чтение дочернего **не** делае
 | 6 | **Модель не трогает SDK напрямую** (Pydantic → валидация → diff → «да» → SDK) | `agent/tools/schemas.py` (типизированные схемы) → `ads/mutations.py` (валидация диапазонов) → confirm → SDK; capability-guard `ads/service.py` | `test_write_layer` (capability-guard), `test_bot_integration` |
 | 7 | **Только TEST MCC при разработке** | `ENV=dev` по умолчанию; замок аккаунта на `7753643025` (правило 9) | покрыто правилом 9 + `test_config_failfast` |
 | 8 | **Жёсткий allow-list операций** | `ads/service.py` исполняет только поддержанные операции (отклоняет неизвестную ДО кнопок и в `execute_confirmed`) | `test_write_layer` (отклонение неподдержанной операции) |
-| 9 | **Замок аккаунта** `7753643025` (мутации) + раздельное чтение (§8) | `ads/client.py::ensure_allowed` (мутации), `ensure_read_allowed` (per-account чтение = мутационный ∪ read-env ∪ дочерние обхода), `ensure_manager_allowed` (обход MCC); потолок `ALLOWED_CEILING` зашит в коде | `test_safety_core` (потолок/fail-closed/чужой), `test_mutation_lock_unchanged_by_read_allowlist`, `test_discovered_child_readable_but_not_mutable`, `test_ads_resolve`, `test_ads_read` |
+| 9 | **Замок аккаунта** (мутации — все ВИДИМЫЕ, прод-дефолт `all`) + раздельное чтение (§8) | `ads/client.py::ensure_allowed` (мутации, набор = потолок при `all` / явный список), `ensure_read_allowed` (per-account чтение = мутационный ∪ read-env ∪ дочерние обхода), `ensure_manager_allowed` (обход MCC); потолок видимости `ALLOWED_CEILING`={Draft} зашит в коде | `test_safety_core` (сентинел/потолок/fail-closed/чужой), `test_mutations_all_accounts` (сквозной гейт на боевом), `test_mutation_lock_unchanged_by_read_allowlist`, `test_discovered_child_readable_but_not_mutable`, `test_ads_resolve`, `test_ads_read` |
 | 10 | **Fail-closed везде** (никогда fail-open) | `bot/main.py::WhitelistMiddleware` → `core.access.is_whitelisted` (источник = env `TELEGRAM_WHITELIST_CHAT_IDS` **∪ таблица `whitelist`**; блок при пустом объединении; сбой БД ⇒ пустой БД-набор, не fail-open); `core/config.py` prod fail-fast (нет ключа/пустой env-whitelist → `ValueError`); `user_initiated` дефолт `False`; пустой allow-list → отказ | `test_whitelist`, `test_runtime_whitelist`, `test_config_failfast`, `test_safety_core` |
 
 ---
@@ -50,17 +66,21 @@ claim → `PermissionError`, SDK не вызывается.
 
 ### Замок аккаунта МУТАЦИЙ — слои ([`ads/client.py`](../ads/client.py))
 1. **Код-минимум** `ALLOWED_CEILING = {7753643025}` — `.env` не может его **понизить** (Draft всегда в
-   потолке). **Эффективный** потолок `allowed_ceiling()` = этот минимум **∪ видимые боту аккаунты**
-   (env `GOOGLE_ADS_READ_CUSTOMER_IDS` ∪ дочерние обхода MCC).
-2. **Fail-closed** — пустой `allowed_customer_ids` ⇒ отказ (а не «разрешено всё»).
-3. **Членство** — мутационный `customer_id` обязан быть в `allowed_customer_ids` (opt-in владельца через
-   env) **и** `allowed_customer_ids ⊆ allowed_ceiling()` — env включает мутации только на **видимом**
-   аккаунте, чужой боевой id вне видимости не пройдёт (защита от опечатки).
+   потолке; это МИНИМУМ, а не «только Draft»). **Эффективный** потолок `allowed_ceiling()` = этот
+   минимум **∪ видимые боту аккаунты** (env `GOOGLE_ADS_READ_CUSTOMER_IDS` ∪ дочерние обхода MCC).
+2. **Мутационный набор** — сентинел `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all`/`*` (`allow_all_visible`,
+   **прод-дефолт**) ⇒ набор = ВЕСЬ `allowed_ceiling()`; явный список id ⇒ способ СУЗИТЬ; в dev/test
+   пусто ⇒ **fail-closed** (отказ, а не «разрешено всё»).
+3. **Потолок видимости** — набор ⊆ `allowed_ceiling()`: мутировать можно только **видимый** аккаунт,
+   чужой боевой id вне видимости не пройдёт даже при `all` (защита от опечатки). Сбой discovery ⇒
+   набор `all` схлопывается до `{Draft}` (безопасная деградация, не эскалация).
 
 `ensure_allowed` — точка проверки **всех мутаций**; per-account **ЧТЕНИЕ** идёт через отдельный,
-более широкий `ensure_read_allowed`; `ensure_manager_allowed` отдельно гейтит обход MCC. По умолчанию
-`allowed_customer_ids = {Draft}` ⇒ мутируется только Draft; расширение — **управляемый список** видимых
-аккаунтов (см. [DEPLOYMENT.md §2.1](DEPLOYMENT.md)), понизить код-минимум можно лишь правкой `ads/client.py`.
+более широкий `ensure_read_allowed`; `ensure_manager_allowed` отдельно гейтит обход MCC. В prod по
+умолчанию мутируются **все видимые** аккаунты (решение владельца 2026-07); сузить — явным списком id
+(см. [DEPLOYMENT.md §2.1](DEPLOYMENT.md)), понизить код-минимум можно лишь правкой `ads/client.py`.
+Каждая мутация всё равно проходит confirm-гейт + гард `user_initiated` — «all» расширяет НАБОР
+аккаунтов, но не отменяет подтверждение.
 
 ### Редакция секретов — три рубежа
 1. **Логи**: `RedactionFilter` на каждой записи + повторная редакция в форматтере (`core/logging.py`).
@@ -154,8 +174,12 @@ pytest -q tests/test_safety_core.py tests/test_whitelist.py \
 whitelist; confirm-гейт («да») — подтверждение намерения, НЕ аутентификация: скомпрометированный
 Telegram-аккаунт оператора нажмёт ✅ сам. Что это значит на практике:
 
-- **Мутации** ограничены замком аккаунта (по умолчанию только Draft; боевые — управляемым
-  списком) + опциональным 2FA-PIN — включайте 2FA ДО включения мутаций на боевых аккаунтах.
+- **Мутации** ограничены замком аккаунта (в prod по умолчанию — ВСЕ видимые аккаунты, решение
+  владельца 2026-07) + confirm-гейтом + опциональным 2FA-PIN. Поскольку мутабельны все боевые
+  аккаунты, 2FA из «рекомендуется» становится **практически обязательным**: без него захваченный
+  Telegram оператора может провести денежное изменение на любом боевом аккаунте одним ✅ (потолок
+  видимости не спасает — эти аккаунты видимы и мутабельны). Замок сужается явным списком id, если
+  часть аккаунтов не должна быть мутабельной.
 - **Чтение** финансовых данных всех дочерних MCC при захвате Telegram-аккаунта оператора
   утечёт — это принципиальная граница Telegram-бота, кодом не закрывается.
 

@@ -171,7 +171,7 @@ async def apply_resume_campaign(
 # на паузе ⇒ показов НОЛЬ, а менеджер думал бы, что кампания идёт (тихий дефект). «Запустить» =
 # включить кампанию + ВСЕ её (не-REMOVED) группы + ВСЕ (не-REMOVED) объявления. Идемпотентно
 # (повторный ENABLED — no-op). НЕ денежная (бюджет задан при создании) → user_initiated НЕ требуется,
-# как resume/pause. Оба обязательных гейта на месте: ensure_allowed (Draft-only) + _require_confirmation.
+# как resume/pause. Оба обязательных гейта на месте: ensure_allowed (замок аккаунта) + _require_confirmation.
 async def apply_launch_campaign(
     *,
     customer_id: str,
@@ -284,7 +284,7 @@ async def apply_resume_ad_group(
 # ── Удаление кампании / группы (необратимо, status→REMOVED) ───────────────────────
 # НЕ денежная операция (user_initiated не требуется, как pause/resume), НО необратимая — в UI
 # закрыта ДВОЙНЫМ подтверждением (bot.keyboards.confirm_destructive_kb). Оба гейта обязательны:
-# ensure_allowed (Draft-only) + _require_confirmation (atomic claim, one-shot, replay-защита).
+# ensure_allowed (замок аккаунта) + _require_confirmation (atomic claim, one-shot, replay-защита).
 async def apply_remove_campaign(
     *,
     customer_id: str,

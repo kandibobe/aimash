@@ -776,11 +776,15 @@ def keyword_action_label(operation: str, lang: str | None = None) -> str:
             "add_keywords": "Add keywords",
             "remove_keywords": "Remove keywords",
             "add_negative_keywords": "Add negative keywords",
+            "remove_negative_keywords": "Remove negative keywords",
+            "create_search_campaign": "Keywords of the new campaign",
         }.get(operation, operation)
     return {
         "add_keywords": "Добавить ключевые слова",
         "remove_keywords": "Удалить ключевые слова",
         "add_negative_keywords": "Добавить минус-слова",
+        "remove_negative_keywords": "Удалить минус-слова",
+        "create_search_campaign": "Ключи новой кампании",
     }.get(operation, operation)
 
 
@@ -1372,11 +1376,15 @@ def fmt_mutready(r: dict, lang: str | None = None) -> str:
             + ("ready" if r.get("twofa") else "off/not ready (recommended before enabling)"),
         ]
         if r.get("mutations_enabled"):
-            lines.append("✅ mutations ALREADY enabled (GOOGLE_ADS_ALLOWED_CUSTOMER_IDS)")
+            how = "all visible" if r.get("all_visible") else "explicit list"
+            lines.append(
+                f"✅ mutations enabled ({how}) — still gated by confirmation on every change"
+            )
         else:
             lines.append(
-                "⏭ final step (OWNER, by hand): add the id to GOOGLE_ADS_ALLOWED_CUSTOMER_IDS "
-                "(docs/DEPLOYMENT.md §2.1). The bot never changes this config itself."
+                "⏭ final step (OWNER, by hand): set GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (all "
+                "visible; prod default) or an explicit id list (docs/DEPLOYMENT.md §2.1). "
+                "The bot never changes this config itself."
             )
         return "\n".join(lines)
     lines = [
@@ -1396,12 +1404,55 @@ def fmt_mutready(r: dict, lang: str | None = None) -> str:
         + ("готова" if r.get("twofa") else "выкл/не готова (рекомендуется включить до мутаций)"),
     ]
     if r.get("mutations_enabled"):
-        lines.append("✅ мутации УЖЕ включены (GOOGLE_ADS_ALLOWED_CUSTOMER_IDS)")
+        how = "все видимые" if r.get("all_visible") else "явный список"
+        lines.append(
+            f"✅ мутации включены ({how}) — каждое изменение всё равно за подтверждением «да»"
+        )
     else:
         lines.append(
-            "⏭ финальный шаг (ВЛАДЕЛЕЦ, руками): добавить id в GOOGLE_ADS_ALLOWED_CUSTOMER_IDS "
-            "(docs/DEPLOYMENT.md §2.1). Бот этот конфиг сам НЕ меняет."
+            "⏭ финальный шаг (ВЛАДЕЛЕЦ, руками): GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (все видимые; "
+            "прод-дефолт) или явный список id (docs/DEPLOYMENT.md §2.1). Бот этот конфиг сам НЕ меняет."
         )
+    return "\n".join(lines)
+
+
+def fmt_mutready_all(results: list[dict], lang: str | None = None) -> str:
+    """AD.5: компактная сводка готовности по ВСЕМ видимым аккаунтам (/mutready all). Одна строка на
+    аккаунт: маркер общей готовности + флаги visible/oauth/probe/2FA + вкл/выкл мутаций. Диагностика,
+    ничего не меняет (см. fmt_mutready)."""
+    en = _lang(lang) == "en"
+
+    def _f(ok: bool) -> str:
+        return "✅" if ok else "❌"
+
+    header = (
+        "🧰 <b>Mutation readiness — all visible accounts</b>"
+        if en
+        else ("🧰 <b>Готовность к мутациям — все видимые аккаунты</b>")
+    )
+    lines = [header]
+    for r in results:
+        cid = esc(str(r.get("cid", "")))
+        name = esc(str(r.get("name", "") or ""))
+        title = f"{name} · {cid}" if name else cid
+        ready = bool(r.get("visible") and r.get("oauth") and r.get("probe"))
+        mut = r.get("mutations_enabled")
+        if en:
+            flags = f"vis{_f(bool(r.get('visible')))} oauth{_f(bool(r.get('oauth')))} probe{_f(bool(r.get('probe')))} 2FA{_f(bool(r.get('twofa')))}"
+            mut_s = "mut: ON" if mut else "mut: off"
+        else:
+            flags = f"вид{_f(bool(r.get('visible')))} oauth{_f(bool(r.get('oauth')))} probe{_f(bool(r.get('probe')))} 2FA{_f(bool(r.get('twofa')))}"
+            mut_s = "мут: ВКЛ" if mut else "мут: выкл"
+        lines.append(f"{'✅' if ready else '⚠️'} <b>{title}</b> — {flags} · {mut_s}")
+    tail = (
+        "Enable all: GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (prod default). The bot never changes this "
+        "config. Every mutation still needs confirmation."
+        if en
+        else "Включить все: GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (прод-дефолт). Бот конфиг НЕ меняет. "
+        "Любая мутация — только через подтверждение «да»."
+    )
+    lines.append("")
+    lines.append(tail)
     return "\n".join(lines)
 
 
