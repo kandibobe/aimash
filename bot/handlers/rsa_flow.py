@@ -296,7 +296,7 @@ async def rsa_list_edited(m: bm.Message, state: bm.FSMContext) -> None:
     """§10 list-UX: менеджер прислал отредактированный СПИСОК. Парсим → валидируем количество и длину
     (КОД, кириллица=1); ошибка → точное сообщение с номерами строк, остаёмся в состоянии; успех →
     replace_all (всё approved) → завершение (confirm-гейт для create_rsa или черновик визарда)."""
-    from adcopy.validate import LIMITS
+    from adcopy.validate import LIMITS, find_duplicates
     from adcopy.validate import validate as _validate
 
     data = await state.get_data()
@@ -331,6 +331,16 @@ async def rsa_list_edited(m: bm.Message, state: bm.FSMContext) -> None:
         if not ok:
             label = "Description" if en else "Описание"
             errs.append(f"{label} #{i}: {n}/{LIMITS['description']} — «{t[:40]}»")
+    # D5: дубли заголовков/описаний (casefold) — Google Ads отклонит RSA. Показываем ДРУЖЕЛЮБНО,
+    # чтобы менеджер убрал повтор до создания (а не получил серверный DUPLICATE после ✅).
+    for i, t in find_duplicates(headlines):
+        errs.append(
+            (f"Duplicate headline #{i}" if en else f"Дубль заголовка #{i}") + f": «{t[:40]}»"
+        )
+    for i, t in find_duplicates(descriptions):
+        errs.append(
+            (f"Duplicate description #{i}" if en else f"Дубль описания #{i}") + f": «{t[:40]}»"
+        )
     if errs:  # остаёмся в RsaList.awaiting_edited — менеджер правит и присылает снова
         head = "⚠️ Check the list and resend:" if en else "⚠️ Проверь список и пришли снова:"
         await m.answer(head + "\n" + "\n".join(f"• {e}" for e in errs), reply_markup=bm.nav_kb())

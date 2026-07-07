@@ -11,6 +11,25 @@ from __future__ import annotations
 import bot.main as bm
 
 
+@bm.dp.callback_query(bm.SlashMutCB.filter())
+async def on_slash_mutate_pick(cq: bm.CallbackQuery, callback_data: bm.SlashMutCB) -> None:
+    """D4: выбор кампании в пикере /pause · /resume (без аргумента) → минт proposal паузы/
+    возобновления за confirm-гейтом (тот же хвост, что ввод имени командой)."""
+    chat_id = bm._cq_chat_id(cq)
+    camps = bm._SLASH_MUT_CACHE.get(chat_id)
+    if not camps or not (0 <= callback_data.idx < len(camps)):
+        await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
+        return
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    await cq.answer()
+    await bm._slash_mutate_present(
+        msg, chat_id, callback_data.op, camps[callback_data.idx].get("name", "")
+    )
+
+
 @bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "geo"))
 async def camp_geo(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
     """Меню кампании → «📍 Гео-таргетинг»: ПОКАЗЫВАЕМ текущее гео/языки (§3 «чтение … ГЕО» —

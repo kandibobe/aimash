@@ -17,19 +17,28 @@ from keywords.cluster import Cluster
 _HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
 _HEADER_FONT = Font(bold=True, color="FFFFFF")
 
-HEADERS = [
-    "Кластер",
-    "Интент",
-    "Ключевое слово",
-    "Объём/мес",
-    "Конкуренция",
-    "Индекс (0-100)",
-    "Сред. CPC",
-    "Ставка (низ)",
-    "Ставка (верх)",
-    "Пик сезона",
-    "Сезонность (12 мес)",  # §7: полная кривая как unicode-спарклайн
-]
+
+def _headers(currency: str = "") -> list[str]:
+    """D8: заголовки таблицы. Денежные колонки несут ВАЛЮТУ АККАУНТА (ставки в micros→валюту уже
+    посчитал КОД, ads.keyword_plan) — раньше «Ставка/CPC» без валюты вводили в заблуждение при
+    не-USD аккаунте. Пустая валюта (тест-аккаунт/сбой чтения) → без суффикса, как раньше."""
+    suf = f" ({currency})" if currency else ""
+    return [
+        "Кластер",
+        "Интент",
+        "Ключевое слово",
+        "Объём/мес",
+        "Конкуренция",
+        "Индекс (0-100)",
+        f"Сред. CPC{suf}",
+        f"Ставка низ{suf}",
+        f"Ставка верх{suf}",
+        "Пик сезона",
+        "Сезонность (12 мес)",  # §7: полная кривая как unicode-спарклайн
+    ]
+
+
+HEADERS = _headers()  # обратная совместимость (тесты/старые вызовы без валюты)
 # Форматы числовых колонок (с позиции «Объём/мес»); «Пик сезона» (10)/«Сезонность» (11) — текст.
 _NUM_FORMATS = {4: "#,##0", 6: "0", 7: "#,##0.00", 8: "#,##0.00", 9: "#,##0.00"}
 
@@ -52,8 +61,10 @@ def build_workbook(
     url: str | None = None,
     language: str = "ru",
     negatives: list[str] | None = None,
+    currency: str = "",
 ) -> Workbook:
     by_text = {i.text: i for i in ideas}  # метрики по тексту ключа
+    headers = _headers(currency)  # D8: денежные колонки с валютой аккаунта
     wb = Workbook()
     ws = wb.active
     ws.title = "Ключевые слова"
@@ -65,8 +76,8 @@ def build_workbook(
     ws.append([])
 
     header_row = ws.max_row + 1
-    ws.append(HEADERS)
-    for c in range(1, len(HEADERS) + 1):
+    ws.append(headers)
+    for c in range(1, len(headers) + 1):
         ws.cell(row=header_row, column=c).fill = _HEADER_FILL
         ws.cell(row=header_row, column=c).font = _HEADER_FONT
     ws.freeze_panes = f"A{header_row + 1}"
@@ -99,7 +110,7 @@ def build_workbook(
     for col, fmt in _NUM_FORMATS.items():
         for r in range(header_row + 1, ws.max_row + 1):
             ws.cell(row=r, column=col).number_format = fmt
-    _autosize(ws, len(HEADERS))
+    _autosize(ws, len(headers))
 
     # §7 «предложение минус-слов» — отдельный лист (advisory; добавление идёт командой за confirm-гейтом).
     if negatives:
@@ -130,10 +141,17 @@ def write_keywords_xlsx(
     url: str | None = None,
     language: str = "ru",
     negatives: list[str] | None = None,
+    currency: str = "",
 ) -> str:
-    """Сохранить .xlsx по пути path. Возвращает path."""
+    """Сохранить .xlsx по пути path. Возвращает path. currency (D8) — валюта аккаунта в колонках ставок."""
     build_workbook(
-        clusters, ideas, seeds=seeds, url=url, language=language, negatives=negatives
+        clusters,
+        ideas,
+        seeds=seeds,
+        url=url,
+        language=language,
+        negatives=negatives,
+        currency=currency,
     ).save(path)
     return path
 
@@ -146,6 +164,7 @@ def write_keywords_csv(
     seeds: list[str] | None = None,
     url: str | None = None,
     language: str = "ru",
+    currency: str = "",
 ) -> str:
     """ТЗ §7 «CSV/table export»: те же данные, что .xlsx, но плоским CSV (для импорта в таблицы/BI).
     Кодировка utf-8-sig (BOM) — Excel корректно открывает кириллицу. Группировка по кластеру, внутри —
@@ -155,7 +174,7 @@ def write_keywords_csv(
     by_text = {i.text: i for i in ideas}
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
-        w.writerow(HEADERS)
+        w.writerow(_headers(currency))  # D8: денежные колонки с валютой аккаунта
         for cl in clusters:
             rows = sorted(
                 (by_text.get(k) for k in cl.keywords),

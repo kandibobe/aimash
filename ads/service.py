@@ -13,7 +13,8 @@ import asyncio
 
 from ads import mutations, resolve
 from ads.client import DRAFT_ACCOUNT_ID, build_client_async, ensure_allowed
-from core.config import normalize_customer_id
+from ads.read import read_campaign_targeting  # D6: «было» для гео-мутаций (read-only снимок)
+from core.config import normalize_customer_id, settings  # D7: гео-дефолты из env, не хардкод «UA»
 
 # ── Единый источник истины: какие операции РЕАЛЬНО исполняются за confirm-гейтом. ──
 # Это потолок возможностей: всё, чего тут нет, агент обязан отклонить ДО показа кнопок
@@ -75,6 +76,9 @@ _DIFFABLE_OPS = frozenset(
         "resume_ad_group",
         "pause_ad",
         "resume_ad",
+        "set_geo_location",
+        "set_geo_proximity",
+        "set_bidding_strategy",
     }
 )
 
@@ -158,6 +162,23 @@ async def read_before(operation: str, params: dict, customer_id: str | None = No
                 "after_micros": after_list,
                 "n_groups": len(ad_groups),
             }
+        if operation in ("set_geo_location", "set_geo_proximity"):
+            # D6: текущее ГЕО (локации/радиусы) для «было→станет». Резолвим кампанию по имени → id,
+            # затем read_campaign_targeting. Снимок только для показа (дрейф гео не проверяем).
+            ref = await asyncio.to_thread(resolve.find_campaign_by_name, client, cid, name)
+            if ref is None:
+                return None
+            t = await asyncio.to_thread(read_campaign_targeting, client, cid, ref.id)
+            return {
+                "kind": "geo",
+                "before_locations": list(t.locations),
+                "before_proximity": list(t.proximity),
+            }
+        if operation == "set_bidding_strategy":
+            info = await asyncio.to_thread(resolve.campaign_bidding_strategy, client, cid, name)
+            if info is None:
+                return None
+            return {"kind": "bidding", "before_strategy": info["strategy"]}
     except Exception:  # сеть/доступ/SDK — не блокируем показ черновика, просто без «было»
         return None
     return None
@@ -508,7 +529,7 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
         # клиентский геокодинг не нужен). country_code по умолчанию UA (проект — Украина).
         address = {
             "city_name": params["city_name"],
-            "country_code": params.get("country_code", "UA"),
+            "country_code": params.get("country_code") or settings.geo_default_country,
             "street_address": params.get("street_address"),
             "postal_code": params.get("postal_code"),
         }
@@ -532,8 +553,8 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             customer_id=customer_id,
             campaign_id=ref.id,
             locations=params["locations"],
-            country_code=params.get("country_code", "UA"),
-            locale=params.get("locale", "ru"),
+            country_code=params.get("country_code") or settings.geo_default_country,
+            locale=params.get("locale") or settings.geo_default_locale,
             confirmation_id=confirmation_id,
             confirm_store=store,
             ads_client=client,
@@ -578,8 +599,8 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
                 final_url=params["final_url"],
                 budget_daily_micros=params["budget_daily_micros"],
                 geo_locations=params.get("geo_locations") or [],  # §11: опц. ГЕО
-                geo_country_code=params.get("geo_country_code", "UA"),
-                geo_locale=params.get("geo_locale", "ru"),
+                geo_country_code=params.get("geo_country_code") or settings.geo_default_country,
+                geo_locale=params.get("geo_locale") or settings.geo_default_locale,
                 confirmation_id=confirmation_id,
                 confirm_store=store,
                 ads_client=client,
@@ -611,8 +632,8 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
                 logo_bytes=logo_bytes,
                 goal=params.get("goal", "clicks"),
                 geo_locations=params.get("geo_locations") or [],
-                geo_country_code=params.get("geo_country_code", "UA"),
-                geo_locale=params.get("geo_locale", "ru"),
+                geo_country_code=params.get("geo_country_code") or settings.geo_default_country,
+                geo_locale=params.get("geo_locale") or settings.geo_default_locale,
                 confirmation_id=confirmation_id,
                 confirm_store=store,
                 ads_client=client,
@@ -634,8 +655,8 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             final_url=params["final_url"],
             budget_daily_micros=params["budget_daily_micros"],
             geo_locations=params.get("geo_locations") or [],
-            geo_country_code=params.get("geo_country_code", "UA"),
-            geo_locale=params.get("geo_locale", "ru"),
+            geo_country_code=params.get("geo_country_code") or settings.geo_default_country,
+            geo_locale=params.get("geo_locale") or settings.geo_default_locale,
             confirmation_id=confirmation_id,
             confirm_store=store,
             ads_client=client,
@@ -742,7 +763,7 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
                 customer_id=customer_id,
                 campaign_id=ref.id,
                 phone_number=params["phone_number"],
-                country_code=params.get("country_code", "UA"),
+                country_code=params.get("country_code") or settings.geo_default_country,
                 confirmation_id=confirmation_id,
                 confirm_store=store,
                 ads_client=client,
@@ -812,8 +833,8 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
                 keyword_match_types=params.get("keyword_match_types") or None,  # §19.4.1: mixed
                 cpc_bid_micros=params.get("cpc_bid_micros", 500_000),
                 geo_locations=params.get("geo_locations") or None,
-                geo_country_code=params.get("geo_country_code", "UA"),
-                geo_locale=params.get("geo_locale", "ru"),
+                geo_country_code=params.get("geo_country_code") or settings.geo_default_country,
+                geo_locale=params.get("geo_locale") or settings.geo_default_locale,
                 languages=params.get("languages") or None,
                 bidding=params.get("bidding"),
                 path1=params.get("path1"),

@@ -31,6 +31,40 @@ async def on_cancel(cq: bm.CallbackQuery, callback_data: bm.ConfirmCB) -> None:
     await bm._do_cancel(cq, callback_data.cid)
 
 
+# ── D2: «↩️ Откатить» применённую обратимую операцию → минт ОБРАТНОГО черновика ─────
+@bm.dp.callback_query(bm.RollbackCB.filter())
+async def on_rollback(cq: bm.CallbackQuery, callback_data: bm.RollbackCB) -> None:
+    """Клик «↩️ Откатить» → собрать обратную операцию и показать её как ОБЫЧНЫЙ черновик
+    (confirm-гейт ✅/❌; НЕ исполняем сразу). Одноразово: кэш снят, повторный клик → stale.
+    _present_proposal сам ставит user_initiated=True и заново проходит ensure_allowed — бюджет-
+    откат легитимен (правило 3), мутационный замок сохранён."""
+    chat_id = bm._cq_chat_id(cq)
+    spec = bm._ROLLBACK_CACHE.get(chat_id)
+    if not spec or spec.get("token") != callback_data.token:
+        await cq.answer(bm.i18n.t("rollback_stale"), show_alert=True)
+        return
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    bm._ROLLBACK_CACHE.pop(chat_id, None)  # одноразово (следующий applied положит новый)
+    await cq.answer()
+    try:
+        cid, operation, params, summary = bm._build_proposal(spec["operation"], **spec["params"])
+    except Exception as e:  # noqa: BLE001 — валидация обратных params (маловероятно) → внятно
+        await msg.answer(bm.i18n.t("rollback_failed", err=bm.ux.err_text(e)))
+        return
+    await bm._present_proposal(
+        msg,
+        chat_id=chat_id,
+        operation=operation,
+        params=params,
+        summary=summary,
+        cid=cid,
+        customer_id=spec.get("customer_id"),
+    )
+
+
 # Legacy-fallback: старые сообщения с "ok:/no:" (до рестарта). После переходного периода удалить.
 @bm.dp.callback_query(bm.F.data.startswith("ok:"))
 async def on_confirm_legacy(cq: bm.CallbackQuery, state: bm.FSMContext | None = None) -> None:

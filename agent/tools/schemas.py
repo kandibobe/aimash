@@ -23,6 +23,22 @@ from adcopy.validate import validate as _rsa_validate
 from ads.validation import normalize_keywords
 from core.limits import MONEY_MAX_MICROS, MONEY_MAX_UNITS
 
+
+# D7: гео-дефолты страны/языка — из конфига деплоя (env DEFAULT_GEO_COUNTRY_CODE/LOCALE), НЕ
+# захардкоженная Украина. default_factory (а не литерал) ⇒ env-переопределение доходит и до схем
+# (NL-путь set_geo_*/создание). Ленивый импорт settings — schemas грузится очень рано.
+def _default_geo_country() -> str:
+    from core.config import settings
+
+    return settings.geo_default_country
+
+
+def _default_geo_locale() -> str:
+    from core.config import settings
+
+    return settings.geo_default_locale
+
+
 # Валюта: ЛЮБОЙ 3-буквенный ISO-код (не Literal из 4 значений — иначе реальные аккаунты в
 # AUD/CZK/PLN/… роняли update_budget/update_bid ValidationError'ом ДО валютной сверки, golden rule
 # #4/§9). Плюс сентинел "percent" для процентных режимов. Конвертации валют НЕТ (ads.resolve): код
@@ -324,7 +340,7 @@ class SetGeoProximity(BaseModel):
     campaign: str  # обязателен: радиус-таргетинг привязывается к кампании
     radius_km: float = Field(gt=0, le=2000)  # лимит Google Ads
     city_name: str = Field(min_length=1, max_length=80)
-    country_code: str = "UA"  # ISO-3166 alpha-2 (UA, PL, US…)
+    country_code: str = Field(default_factory=_default_geo_country)  # D7: env-конфиг, не «UA»
     street_address: str | None = None
     postal_code: str | None = None
 
@@ -345,8 +361,8 @@ class SetGeoLocation(BaseModel):
 
     campaign: str  # обязателен: гео-таргетинг привязывается к кампании
     locations: list[str] = Field(min_length=1, max_length=20)
-    country_code: str = "UA"  # ISO-3166 alpha-2 — сужает поиск названий
-    locale: str = "ru"  # язык названий локаций (ru/uk/en)
+    country_code: str = Field(default_factory=_default_geo_country)  # D7: env-конфиг, не «UA»
+    locale: str = Field(default_factory=_default_geo_locale)  # язык названий (env/из страны)
 
     @field_validator("locations")
     @classmethod
@@ -610,8 +626,8 @@ class CreateGdnCampaign(BaseModel):
     # показ по всем локациям). Опционально (пусто ⇒ поведение как раньше). Резолв названий →
     # geoTargetConstant делает КОД (reuse _set_geo_location_via_sdk, живо сверенный на Search/§19).
     geo_locations: list[str] = Field(default_factory=list, max_length=50)
-    geo_country_code: str = "UA"
-    geo_locale: str = "ru"
+    geo_country_code: str = Field(default_factory=_default_geo_country)  # D7: env-конфиг, не «UA»
+    geo_locale: str = Field(default_factory=_default_geo_locale)
 
     @field_validator("headlines")
     @classmethod
@@ -662,8 +678,8 @@ class _MediaVideoCampaignBase(BaseModel):
     final_url: str
     budget_daily_micros: int = Field(gt=0, le=MONEY_MAX_MICROS)  # потолок из core.limits
     geo_locations: list[str] = Field(default_factory=list, max_length=50)
-    geo_country_code: str = "UA"
-    geo_locale: str = "ru"
+    geo_country_code: str = Field(default_factory=_default_geo_country)  # D7: env-конфиг, не «UA»
+    geo_locale: str = Field(default_factory=_default_geo_locale)
 
     @field_validator("youtube_video_id")
     @classmethod
@@ -747,8 +763,8 @@ class CreateSearchCampaign(BaseModel):
     # §19 (composite, опциональные — без них поведение прежнее). Глубокую валидацию дублирует
     # ads.mutations._validate_search_inputs (defense-in-depth); здесь — форма + длины path.
     geo_locations: list[str] = Field(default_factory=list, max_length=50)
-    geo_country_code: str = "UA"
-    geo_locale: str = "ru"
+    geo_country_code: str = Field(default_factory=_default_geo_country)  # D7: env-конфиг, не «UA»
+    geo_locale: str = Field(default_factory=_default_geo_locale)
     languages: list[str] = Field(default_factory=list, max_length=10)
     bidding: dict | None = None
     path1: str | None = None

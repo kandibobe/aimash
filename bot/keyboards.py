@@ -34,11 +34,14 @@ from bot.callbacks import (
     NavCB,
     PageCB,
     PeriodCB,
+    PickSearchCB,
     RecentCB,
     ReportAcctCB,
     ReportCampCB,
+    RollbackCB,
     RsaCB,
     RsaPickCB,
+    SlashMutCB,
     TemplateCB,
     ThrTuneCB,
     VideoCB,
@@ -1191,6 +1194,56 @@ def post_create_kb(launch_cid: str = "", lang: str | None = None) -> InlineKeybo
     return kb.as_markup()
 
 
+def kw_add_campaigns_kb(
+    camps: list[dict], token: str, lang: str | None = None
+) -> InlineKeyboardMarkup:
+    """D3: пикер кампаний для /addkeys — кнопка на кампанию (idx → позиция в _KW_ADD_CAMP_CACHE).
+    Показываем первую страницу (до _CAMP_PAGE): текст-фолбэк (kw_add_campaign) всегда ловит имя,
+    поэтому на крупном аккаунте остальные кампании доступны вводом названия — без REPLY_MARKUP_TOO_LONG."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    for i, c in enumerate(camps[:_CAMP_PAGE]):
+        mark = {"ENABLED": "▶️", "PAUSED": "⏸"}.get(c.get("status", ""), "•")
+        kb.button(
+            text=f"{mark} {_ellipsize(c['name'])}",
+            callback_data=KwAddCB(action="camp", token=token, idx=i),
+        )
+    kb.button(
+        text="✖ Cancel" if en else "✖ Отмена", callback_data=KwAddCB(action="cancel", token=token)
+    )
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def slash_mutate_campaigns_kb(
+    camps: list[dict], op: str, lang: str | None = None
+) -> InlineKeyboardMarkup:
+    """D4: пикер кампаний для /pause и /resume без аргумента. idx → позиция в _SLASH_MUT_CACHE.
+    Список уже отфильтрован по статусу (ENABLED для паузы / PAUSED для возобновления). Первая
+    страница (до _CAMP_PAGE): ввод имени командой остаётся фолбэком на крупном аккаунте."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    for i, c in enumerate(camps[:_CAMP_PAGE]):
+        mark = {"ENABLED": "▶️", "PAUSED": "⏸"}.get(c.get("status", ""), "•")
+        kb.button(text=f"{mark} {_ellipsize(c['name'])}", callback_data=SlashMutCB(op=op, idx=i))
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def rollback_kb(token: str, lang: str | None = None) -> InlineKeyboardMarkup:
+    """D2: одна кнопка «↩️ Откатить» под сообщением об успешной обратимой операции. Клик минтит
+    ОБРАТНЫЙ черновик за confirm-гейтом (не исполняет) — см. on_rollback."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="↩️ Undo" if en else "↩️ Откатить",
+        callback_data=RollbackCB(token=token),
+    )
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def cc_exit_kb(lang: str | None = None) -> InlineKeyboardMarkup:
     """W5 (живой тест 2026-07-06): диалог выхода из визарда §19 с накопленной работой.
     «Сохранить» = soft-exit (черновик остаётся active, вернуться через /newcampaign);
@@ -1304,9 +1357,12 @@ def campaigns_kb(camps: list[dict], page: int = 0) -> InlineKeyboardMarkup:
         )
         shown += 1
     nav_n = _page_nav_row(kb, "camp", "", page, pages)
+    search_n = _search_btn(kb, "campaigns", "", total, _lang(None) == "en")
     sizes = [1] * shown
     if nav_n:
         sizes.append(nav_n)
+    if search_n:
+        sizes.append(search_n)
     kb.adjust(*sizes)
     return kb.as_markup()
 
@@ -1669,6 +1725,48 @@ def report_accounts_kb(
 _CAMP_PAGE = 10  # кампаний на страницу пикеров (3E)
 
 
+def _search_btn(kb: InlineKeyboardBuilder, kind: str, target: str, total: int, en: bool) -> int:
+    """D1: «🔎 Найти» в пикере кампаний — только когда список длиннее одной страницы (иначе
+    искать нечего). Возвращает 1, если кнопка добавлена, иначе 0 (для kb.adjust)."""
+    if total <= _CAMP_PAGE:
+        return 0
+    kb.button(
+        text="🔎 Search by name" if en else "🔎 Найти по названию",
+        callback_data=PickSearchCB(kind=kind, target=target, mode="start"),
+    )
+    return 1
+
+
+def picker_search_kb(
+    kind: str, target: str, camps: list[dict], indices: list[int], lang: str | None = None
+) -> InlineKeyboardMarkup:
+    """D1: результаты поиска кампании по названию. indices — ГЛОБАЛЬНЫЕ позиции совпадений в
+    кэше (_CAMP_CACHE/_REPORT_CAMP_CACHE/_RSA_CAMP_CACHE) → callback выбора работает без изменений.
+    Без пагинации: >_CAMP_PAGE совпадений = «уточните запрос» (запрос в 64-байтный callback не
+    влезает — уточнение и есть пагинация). Кнопка «Показать все» снимает фильтр."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    shown = indices[:_CAMP_PAGE]
+    for i in shown:
+        c = camps[i]
+        mark = {"ENABLED": "▶️", "PAUSED": "⏸"}.get(c.get("status", ""), "•")
+        text = f"{mark} {_ellipsize(c['name'])}"
+        if kind == "report":
+            cb = ReportCampCB(target=target, idx=i)
+        elif kind == "rsa":
+            cb = RsaPickCB(what="camp", idx=i)
+        else:  # campaigns
+            cb = CampCB(action="menu", idx=i)
+        kb.button(text=text, callback_data=cb)
+    kb.button(
+        text="↩︎ Show all" if en else "↩︎ Показать все",
+        callback_data=PickSearchCB(kind=kind, target=target, mode="all"),
+    )
+    kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
+    kb.adjust(*([1] * len(shown)), 2)
+    return kb.as_markup()
+
+
 def report_campaigns_kb(
     camps: list[dict], target: str, lang: str | None = None, *, page: int = 0
 ) -> InlineKeyboardMarkup:
@@ -1694,10 +1792,13 @@ def report_campaigns_kb(
         )
         shown += 1
     nav_n = _page_nav_row(kb, "rptc", target, page, pages)
+    search_n = _search_btn(kb, "report", target, total, en)
     kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
     sizes = [1] * (1 + shown)
     if nav_n:
         sizes.append(nav_n)
+    if search_n:
+        sizes.append(search_n)
     sizes.append(1)
     kb.adjust(*sizes)
     return kb.as_markup()
@@ -1825,9 +1926,12 @@ def rsa_pick_campaigns_kb(
         )
         shown += 1
     nav_n = _page_nav_row(kb, "rsac", "", page, pages)
+    search_n = _search_btn(kb, "rsa", "", total, _lang(lang) == "en")
     sizes = [1] * shown
     if nav_n:
         sizes.append(nav_n)
+    if search_n:
+        sizes.append(search_n)
     kb.adjust(*sizes)
     return kb.as_markup()
 

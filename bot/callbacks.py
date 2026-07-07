@@ -135,9 +135,10 @@ class KwAddCB(CallbackData, prefix="kwadd"):
     после показа списка + типа соответствия и «да» (confirm-гейт). token — ключ серверной сессии
     (список ключей не влезает в callback_data, 64 байта). mt — тип соответствия (для action='match')."""
 
-    action: str  # "start" | "match" | "cancel"
+    action: str  # "start" | "match" | "cancel" | "camp"
     token: str  # hex-токен сессии _KW_ADD (bot.main)
     mt: str = ""  # "broad" | "phrase" | "exact" (только для action='match')
+    idx: int = -1  # D3: индекс кампании в _KW_ADD_CAMP_CACHE (только для action='camp')
 
 
 class GeoCB(CallbackData, prefix="geo"):
@@ -156,6 +157,32 @@ class NavCB(CallbackData, prefix="nav"):
     хендлер: state.clear() + возврат главного меню. Черновик НЕ создаётся (это чистый UI/FSM)."""
 
     action: str  # "cancel"
+
+
+class PickSearchCB(CallbackData, prefix="psr"):
+    """D1: «🔎 Найти» в пикерах кампаний. kind — какой пикер (campaigns|report|rsa);
+    target — поток отчёта (report|export|sheets) для kind=report, иначе пусто. mode:
+    'start' → войти в поиск (ждать текст); 'all' → снять фильтр, показать весь список."""
+
+    kind: str  # "campaigns" | "report" | "rsa"
+    target: str = ""
+    mode: str = "start"  # "start" | "all"
+
+
+class RollbackCB(CallbackData, prefix="rbk"):
+    """D2: «↩️ Откатить» применённую обратимую операцию. token — ключ _ROLLBACK_CACHE[chat_id]
+    (не confirmation_id: обратный черновик родится при клике). Откат НЕ исполняется сам —
+    минтит ОБРАТНЫЙ proposal за тем же confirm-гейтом (бюджет-откат = user_initiated, правило 3)."""
+
+    token: str
+
+
+class SlashMutCB(CallbackData, prefix="smut"):
+    """D4: пикер кампаний для /pause и /resume без аргумента. op — pause_campaign|resume_campaign;
+    idx — позиция кампании в _SLASH_MUT_CACHE[chat_id]. Клик минтит proposal (confirm-гейт)."""
+
+    op: str
+    idx: int
 
 
 class TemplateCB(CallbackData, prefix="tpl"):

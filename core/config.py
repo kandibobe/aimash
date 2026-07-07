@@ -102,6 +102,15 @@ class Settings(BaseSettings):
     # True, ТОЛЬКО когда его аккаунт добавлен в allowlist Google. Код Video-цепочки готов и покрыт.
     google_ads_video_enabled: bool = False
     google_ads_api_version: str = "v24"  # API-версия (мажор). SDK-пин google-ads — в pyproject.toml
+    # D7 (2026-07): гео-дефолты, когда бриф/описание НЕ задали страну/язык явно. Раньше «UA»/«ru»
+    # были ЗАХАРДКОЖЕНЫ в 20+ местах (media/search-создание, set_geo_* NL) — заказчик на Уганде
+    # получал Украину по умолчанию. Теперь ЕДИНЫЙ конфиг: деплой Уганды ставит env
+    # DEFAULT_GEO_COUNTRY_CODE=UG (локаль сама выведется = язык страны, ads.geo). Дефолт кода —
+    # «UA»/«ru» для обратной совместимости (тесты/старый деплой); env переопределяет глобально.
+    default_geo_country_code: str = "UA"  # ISO-3166 alpha-2 последней-инстанции для гео
+    # Язык названий локаций. Дефолт «ru» = прежнее поведение (UA-рынок). Пустая строка в env ⇒
+    # ВЫВОДИМ язык из страны (UG→en) — деплой Уганды ставит DEFAULT_GEO_LOCALE= (пусто) или =en.
+    default_geo_locale: str = "ru"
     # Дневной лимит операций Google Ads API (§3): Basic dev-token = 15 000 операций/сутки; Standard —
     # фактически без лимита (ставь высоким). core.quota предупреждает на 80% и БЛОКИРУЕТ новые
     # МУТАЦИИ на 95% (чтение не блокируем). 0 ⇒ трекинг выключен (без гарда).
@@ -271,6 +280,22 @@ class Settings(BaseSettings):
         """§12: множество операций, требующих 2FA-кода (нормализованные имена мутаций). Гейт —
         core.twofa.required_for × bot.main._do_confirm. Пусто ⇒ ничего не гейтится."""
         return {op for x in self.two_factor_ops_csv.split(",") if (op := x.strip())}
+
+    @property
+    def geo_default_country(self) -> str:
+        """D7: страна-последней-инстанции для гео (ISO alpha-2), когда бриф её не задал. Из env
+        DEFAULT_GEO_COUNTRY_CODE (деплой Уганды → UG), дефолт «UA» (обратная совместимость)."""
+        return (self.default_geo_country_code or "UA").strip().upper()
+
+    @property
+    def geo_default_locale(self) -> str:
+        """D7: язык названий локаций по умолчанию. Явный DEFAULT_GEO_LOCALE побеждает; иначе
+        выводим из страны (ads.geo: UG→en, UA→uk…), финальный фолбэк «ru»."""
+        if self.default_geo_locale.strip():
+            return self.default_geo_locale.strip()
+        from ads.geo import language_for_country
+
+        return language_for_country(self.geo_default_country) or "ru"
 
     @property
     def login_customer_id_set(self) -> set[str]:

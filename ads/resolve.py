@@ -97,6 +97,22 @@ def campaign_network_settings(client: GoogleAdsClient, customer_id: str, name: s
     return None
 
 
+def campaign_bidding_strategy(client: GoogleAdsClient, customer_id: str, name: str) -> dict | None:
+    """D6: текущий тип стратегии ставок кампании — для «было→станет» set_bidding_strategy. READ-ONLY.
+    Возврат {"id", "strategy": <ENUM-имя, напр. MAXIMIZE_CONVERSIONS>}. None = кампания не найдена."""
+    ensure_allowed(customer_id)
+    ga = client.get_service("GoogleAdsService")
+    safe = gaql_escape(name)
+    q = (
+        "SELECT campaign.id, campaign.bidding_strategy_type FROM campaign "
+        f"WHERE campaign.name = '{safe}' LIMIT 1"
+    )
+    for row in ga.search(customer_id=str(customer_id), query=q):
+        bst = getattr(row.campaign, "bidding_strategy_type", None)
+        return {"id": str(row.campaign.id), "strategy": getattr(bst, "name", "") or str(bst or "")}
+    return None
+
+
 def find_ad_groups(
     client: GoogleAdsClient, customer_id: str, campaign_name: str
 ) -> list[AdGroupRef]:

@@ -205,15 +205,61 @@ async def kw_lang_text(m: bm.Message, state: bm.FSMContext) -> None:
 
 
 # ── §7: добавить ключи в кампанию (свой файл/ссылка/текст → тип соответствия → «да») ──
+async def _kw_add_present_campaign(msg: bm.Message, chat_id: int, token: str) -> None:
+    """D3: показать шаг выбора кампании /addkeys — пикером кампаний активного аккаунта, если он
+    доступен (текст-ввод названия остаётся: kw_add_campaign ловит любое имя). Крупный аккаунт/
+    сбой чтения ⇒ только текст-подсказка (пикер опционален)."""
+    camps = await bm._kw_add_load_campaigns(chat_id)
+    if camps:
+        bm._KW_ADD_CAMP_CACHE[chat_id] = camps
+        await msg.answer(
+            bm.i18n.t("kw_add_pick_campaign_list"),
+            reply_markup=bm.kw_add_campaigns_kb(camps, token),
+            parse_mode=bm.ParseMode.HTML,
+        )
+    else:
+        await msg.answer(bm.i18n.t("kw_add_pick_campaign"), reply_markup=bm.nav_kb())
+
+
+async def _kw_add_set_campaign(
+    msg: bm.Message, state: bm.FSMContext, token: str, campaign: str
+) -> None:
+    """Общий хвост «кампания выбрана» (из пикера или из текста): фиксируем кампанию в сессии и
+    переходим к §7 list-UX (правка кандидатов ИЛИ приём своего списка). Гейт не тратим."""
+    sess = bm._KW_ADD.get(token)
+    if not sess:
+        await state.clear()
+        await msg.answer(bm.i18n.t("kw_add_stale"))
+        return
+    sess["campaign"] = campaign
+    await state.set_state(bm.KwAdd.awaiting_keywords)  # §7 list-UX: правка списка ключей
+    if sess.get("keywords"):  # старт из research: кандидаты уже есть — показать для правки
+        await msg.answer(
+            bm.i18n.t("kw_add_edit_prompt", camp=bm.texts.esc(campaign)),
+            reply_markup=bm.nav_kb(),
+            parse_mode=bm.ParseMode.HTML,
+        )
+        await msg.answer(
+            bm.texts.fmt_kw_candidates(sess.get("keywords") or [])
+        )  # плейн — копируется
+        return
+    await msg.answer(  # P3: свой список — файл xlsx/csv/txt, ссылка на Google Sheets или текст
+        bm.i18n.t("kw_add_send_list", camp=bm.texts.esc(campaign)),
+        reply_markup=bm.nav_kb(),
+        parse_mode=bm.ParseMode.HTML,
+    )
+
+
 async def addkeys_start(m: bm.Message, state: bm.FSMContext) -> None:
     """P3 (фидбэк заказчика 2026-07-06): отдельный вход «добавить ключи в кампанию» из меню/
     команды — вместо кнопки под отчётом research. Принимает СВОЙ список: файл xlsx/csv/txt,
-    ссылку на Google Sheets или текст. Ничего не меняет — сбор ввода до confirm-гейта."""
+    ссылку на Google Sheets или текст. Ничего не меняет — сбор ввода до confirm-гейта.
+    D3: шаг кампании — пикером (текст-ввод названия остаётся фолбэком)."""
     await state.clear()
     token = bm._kw_add_put([], "manual")
     await state.set_state(bm.KwAdd.awaiting_campaign)
     await state.update_data(kw_add_token=token)
-    await m.answer(bm.i18n.t("kw_add_pick_campaign"), reply_markup=bm.nav_kb())
+    await _kw_add_present_campaign(m, m.chat.id, token)
 
 
 @bm.dp.message(bm.Command("addkeys"))
@@ -238,15 +284,33 @@ async def on_kw_add_start(
     await state.set_state(bm.KwAdd.awaiting_campaign)
     await state.update_data(kw_add_token=callback_data.token)
     await cq.answer()
-    # nav_kb() без back_cb: предыдущий экран — сводка /keywords (нет дешёвого inline-родителя),
-    # поэтому только «✖ Отмена» (выход в меню). Этого достаточно — пользователь больше не застрянет.
-    await msg.answer(bm.i18n.t("kw_add_pick_campaign"), reply_markup=bm.nav_kb())
+    # D3: пикер кампаний активного аккаунта (текст-ввод названия остаётся). nav-выход — «✖ Отмена».
+    await _kw_add_present_campaign(msg, bm._cq_chat_id(cq), callback_data.token)
+
+
+@bm.dp.callback_query(bm.KwAddCB.filter(bm.F.action == "camp"))
+async def on_kw_add_pick_campaign(
+    cq: bm.CallbackQuery, callback_data: bm.KwAddCB, state: bm.FSMContext
+) -> None:
+    """D3: выбор кампании в пикере /addkeys → тот же хвост, что и текст-ввод (сбор до confirm-гейта)."""
+    camps = bm._KW_ADD_CAMP_CACHE.get(bm._cq_chat_id(cq))
+    if not camps or not (0 <= callback_data.idx < len(camps)):
+        await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
+        return
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    await cq.answer()
+    await _kw_add_set_campaign(
+        msg, state, callback_data.token, camps[callback_data.idx].get("name", "")
+    )
 
 
 @bm.dp.message(bm.KwAdd.awaiting_campaign)
 async def kw_add_campaign(m: bm.Message, state: bm.FSMContext) -> None:
-    """Получили кампанию → §7 list-UX: показываем кандидаты-ключи СПИСКОМ для правки (менеджер
-    копирует, редактирует, присылает обратно), затем выбор типа соответствия."""
+    """Получили кампанию ТЕКСТОМ (фолбэк к пикеру D3) → §7 list-UX: кандидаты списком для правки
+    (менеджер копирует, редактирует, присылает обратно), затем выбор типа соответствия."""
     campaign = (m.text or "").strip()
     if not campaign:
         # retry-подсказка ОБЯЗАНА нести nav_kb — иначе после невалидного ввода кнопок снова нет
@@ -258,31 +322,7 @@ async def kw_add_campaign(m: bm.Message, state: bm.FSMContext) -> None:
         )
         return  # остаёмся в состоянии — пользователь пришлёт название ещё раз
     data = await state.get_data()
-    sess = bm._KW_ADD.get(data.get("kw_add_token", ""))
-    if not sess:
-        await state.clear()
-        await m.answer(bm.i18n.t("kw_add_stale"))
-        return
-    sess["campaign"] = campaign
-    await state.set_state(
-        bm.KwAdd.awaiting_keywords
-    )  # §7 list-UX: правка списка ключей вместо кликов
-    if sess.get("keywords"):  # старт из research: кандидаты уже есть — показать для правки
-        await m.answer(
-            bm.i18n.t("kw_add_edit_prompt", camp=bm.texts.esc(campaign)),
-            reply_markup=bm.nav_kb(),
-            parse_mode=bm.ParseMode.HTML,
-        )
-        await m.answer(
-            bm.texts.fmt_kw_candidates(sess.get("keywords") or [])
-        )  # плейн — копируется как есть
-        return
-    # P3: свой список — файл xlsx/csv/txt, ссылка на Google Sheets или текст
-    await m.answer(
-        bm.i18n.t("kw_add_send_list", camp=bm.texts.esc(campaign)),
-        reply_markup=bm.nav_kb(),
-        parse_mode=bm.ParseMode.HTML,
-    )
+    await _kw_add_set_campaign(m, state, data.get("kw_add_token", ""), campaign)
 
 
 async def kw_add_accept(m: bm.Message, state: bm.FSMContext, kws: list[str]) -> None:

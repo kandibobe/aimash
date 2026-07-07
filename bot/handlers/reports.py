@@ -165,6 +165,76 @@ async def on_page_nav(cq: bm.CallbackQuery, callback_data: bm.PageCB) -> None:
     await bm._safe_edit_markup(cq, markup)
 
 
+# ── D1: «🔎 Найти» — поиск кампании по названию в пикерах (/campaigns, отчёт, /rsa) ──
+@bm.dp.callback_query(bm.PickSearchCB.filter(bm.F.mode == "start"))
+async def on_picker_search_start(
+    cq: bm.CallbackQuery, callback_data: bm.PickSearchCB, state: bm.FSMContext
+) -> None:
+    """Клик «🔎 Найти» → ждём часть названия. kind/target кладём в state-data; экран показывает
+    только «↩︎ Показать все / ✖ Отмена» (пустой список совпадений) — текст перехватит
+    on_picker_search_query (зарегистрирован ДО catch-all)."""
+    chat_id = bm._cq_chat_id(cq)
+    camps = bm._picker_camps(callback_data.kind, chat_id)
+    if not camps:  # кэш потерян (рестарт) — тихий stale, старый пикер бесполезен
+        await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
+        return
+    await state.set_state(bm.PickerSearch.awaiting)
+    await state.update_data(psrch_kind=callback_data.kind, psrch_target=callback_data.target)
+    await cq.answer()
+    await bm._safe_edit(
+        cq,
+        bm.i18n.t("picker_search_prompt"),
+        reply_markup=bm.picker_search_kb(callback_data.kind, callback_data.target, camps, []),
+    )
+
+
+@bm.dp.callback_query(bm.PickSearchCB.filter(bm.F.mode == "all"))
+async def on_picker_search_all(
+    cq: bm.CallbackQuery, callback_data: bm.PickSearchCB, state: bm.FSMContext
+) -> None:
+    """«↩︎ Показать все» → снять фильтр, вернуть полный (постраничный) пикер и состояние-покой."""
+    chat_id = bm._cq_chat_id(cq)
+    camps = bm._picker_camps(callback_data.kind, chat_id)
+    if not camps:
+        await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
+        return
+    await state.set_state(bm._picker_rest_state(callback_data.kind))
+    await cq.answer()
+    await bm._safe_edit(
+        cq,
+        bm.i18n.t("picker_pick_campaign"),
+        reply_markup=bm._picker_full_kb(callback_data.kind, callback_data.target, camps),
+    )
+
+
+@bm.dp.message(bm.PickerSearch.awaiting, bm.F.text)
+async def on_picker_search_query(m: bm.Message, state: bm.FSMContext) -> None:
+    """Текст в режиме поиска = фильтр по подстроке имени/id (ГЛОБАЛЬНЫЕ индексы → выбор без
+    изменений). Одноразовый: показали результат → снимаем PickerSearch (повтор — снова «🔎»)."""
+    data = await state.get_data()
+    kind = data.get("psrch_kind", "campaigns")
+    target = data.get("psrch_target", "")
+    camps = bm._picker_camps(kind, m.chat.id)
+    await state.set_state(bm._picker_rest_state(kind))  # одноразовость поиска
+    if not camps:
+        await m.answer(bm.i18n.t("camp_list_stale"))
+        return
+    q = (m.text or "").strip()
+    indices = bm._picker_match_indices(camps, q)
+    if not indices:
+        await m.answer(
+            bm.i18n.t("picker_search_empty", q=bm.texts.esc(q[:40])),
+            reply_markup=bm._picker_full_kb(kind, target, camps),
+            parse_mode=bm.ParseMode.HTML,
+        )
+        return
+    await m.answer(
+        bm.i18n.t("picker_search_results", n=len(indices), shown=min(len(indices), bm._CAMP_PAGE)),
+        reply_markup=bm.picker_search_kb(kind, target, camps, indices),
+        parse_mode=bm.ParseMode.HTML,
+    )
+
+
 # ── Inline: выбор АККАУНТА → КАМПАНИИ → периода для отчёта (§8/§9) ─────────────────
 @bm.dp.callback_query(bm.ReportAcctCB.filter())
 async def on_report_account(cq: bm.CallbackQuery, callback_data: bm.ReportAcctCB) -> None:

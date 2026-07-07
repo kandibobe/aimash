@@ -149,6 +149,30 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "Укажи кампанию: <code>/resume Название кампании</code> — чтобы возобновить.",
         "en": "Specify a campaign: <code>/resume Campaign name</code> — to resume it.",
     },
+    # D4: пикер кампаний для /pause · /resume без аргумента (отфильтровано по статусу)
+    # D9: нераспознанная слэш-команда → подсказка (не уводим в LLM)
+    "unknown_command": {
+        "ru": (
+            "🤔 Не знаю команду <code>{cmd}</code>.\n"
+            "Полный список — /help. Частое: /report · /campaigns · /keywords · /newcampaign · "
+            "/addkeys · /pause · /resume.\n"
+            "Или просто напишите задачу словами — я пойму без команды."
+        ),
+        "en": (
+            "🤔 I don't know the command <code>{cmd}</code>.\n"
+            "Full list — /help. Common: /report · /campaigns · /keywords · /newcampaign · "
+            "/addkeys · /pause · /resume.\n"
+            "Or just describe the task in plain words — no command needed."
+        ),
+    },
+    "slash_pause_pick": {
+        "ru": "⏸ Какую кампанию приостановить? Выберите активную из списка:",
+        "en": "⏸ Which campaign to pause? Pick an active one from the list:",
+    },
+    "slash_resume_pick": {
+        "ru": "▶️ Какую кампанию возобновить? Выберите приостановленную из списка:",
+        "en": "▶️ Which campaign to resume? Pick a paused one from the list:",
+    },
     # — крупные статичные тексты (RU = texts.<KEY>, EN — перевод) —
     "start": {
         "ru": texts.START,
@@ -293,6 +317,11 @@ CATALOG: dict[str, dict[str, str]] = {
     "kw_add_pick_campaign": {
         "ru": "В какую кампанию добавить ключи? Пришли название кампании одним сообщением.",
         "en": "Which campaign should I add the keywords to? Send the campaign name in one message.",
+    },
+    # D3: пикер кампаний /addkeys (текст-ввод названия остаётся фолбэком)
+    "kw_add_pick_campaign_list": {
+        "ru": "В какую кампанию добавить ключи? Выберите из списка — или пришлите название текстом.",
+        "en": "Which campaign to add keywords to? Pick from the list — or send the name as text.",
     },
     # P3 (фидбэк заказчика 2026-07-06): вместо кнопки под отчётом — отдельный вход /addkeys.
     "kw_addkeys_hint": {
@@ -2038,6 +2067,36 @@ CATALOG: dict[str, dict[str, str]] = {
     "cc_acct_search_results": {
         "ru": "🔍 Найдено: {n}. Выберите аккаунт (показаны первые {shown}):",
         "en": "🔍 Found: {n}. Choose an account (showing first {shown}):",
+    },
+    # D1: поиск кампании по названию в пикерах (/campaigns, отчёт, /rsa)
+    "picker_search_prompt": {
+        "ru": "🔎 Пришлите часть названия кампании (или id) — покажу совпадения.",
+        "en": "🔎 Send part of the campaign name (or id) — I’ll show matches.",
+    },
+    "picker_search_empty": {
+        "ru": "🔎 По «{q}» кампаний не нашёл. Вот весь список:",
+        "en": "🔎 No campaigns match “{q}”. Here’s the full list:",
+    },
+    "picker_search_results": {
+        "ru": "🔎 Найдено: {n}. Выберите кампанию (показаны первые {shown}):",
+        "en": "🔎 Found: {n}. Choose a campaign (showing first {shown}):",
+    },
+    "picker_pick_campaign": {
+        "ru": "Выберите кампанию:",
+        "en": "Choose a campaign:",
+    },
+    # D2: откат применённой обратимой операции (мятие ОБРАТНОГО черновика за confirm-гейтом)
+    "rollback_offer": {
+        "ru": "↩️ Не то? Могу откатить это изменение — верну прежнее значение (тоже через ✅).",
+        "en": "↩️ Not right? I can undo this change — restore the previous value (also via ✅).",
+    },
+    "rollback_stale": {
+        "ru": "↩️ Откат уже недоступен (появилось новое действие или бот перезапускался).",
+        "en": "↩️ Undo is no longer available (a newer action appeared or the bot restarted).",
+    },
+    "rollback_failed": {
+        "ru": "↩️ Не удалось собрать откат: {err}",
+        "en": "↩️ Couldn’t build the undo: {err}",
     },
     # §20.6: sitelinks предложены из РЕАЛЬНОЙ карты страниц краула (не выдуманы LLM)
     "cc_asset_sitelinks_from_crawl": {

@@ -49,6 +49,22 @@ def assert_valid(text: str, kind: str) -> str:
     return text
 
 
+def find_duplicates(items: list[str]) -> list[tuple[int, str]]:
+    """D5: повторяющиеся элементы набора (casefold + strip). Возвращает [(1-based индекс, текст)]
+    ВТОРЫХ и последующих вхождений (первое — не дубль). Google Ads отклоняет RSA с одинаковыми
+    заголовками/описаниями (asset может повторяться, но в одном объявлении дубли не проходят) —
+    ловим ДО создания, чтобы не тратить черновик на серверный отказ."""
+    seen: set[str] = set()
+    dupes: list[tuple[int, str]] = []
+    for i, t in enumerate(items, 1):
+        key = (t or "").strip().casefold()
+        if key in seen:
+            dupes.append((i, t))
+        else:
+            seen.add(key)
+    return dupes
+
+
 # ── §3-assets: лимиты длины ассетов-расширений (КОД, code points, кириллица=1) ────
 # Считаем тем же rsa_len (кириллица=1, CJK=2). Источник лимитов — справка Google Ads (v24).
 ASSET_LIMITS = {

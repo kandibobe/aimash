@@ -95,16 +95,20 @@ from bot.callbacks import (
     NavCB,
     PageCB,
     PeriodCB,
+    PickSearchCB,
     RecentCB,
     ReportAcctCB,
     ReportCampCB,
+    RollbackCB,
     RsaCB,
     RsaPickCB,
+    SlashMutCB,
     TemplateCB,
     ThrTuneCB,
     VideoCB,
 )
 from bot.keyboards import (
+    _CAMP_PAGE,  # D1: размер страницы пикера (для «показано N из M» в поиске)
     ADVISE_APPLY_OPS,
     ALL_MENU_BUTTONS,
     BOT_COMMANDS,
@@ -159,6 +163,7 @@ from bot.keyboards import (
     ext_menu_kb,
     ext_snippet_header_kb,
     geo_mode_kb,
+    kw_add_campaigns_kb,
     kw_geo_kb,
     kw_lang_kb,
     kw_params_kb,
@@ -176,10 +181,13 @@ from bot.keyboards import (
     video_logo_kb,
     video_type_kb,
     period_kb,
+    picker_search_kb,
     post_create_kb,
     report_accounts_kb,
     report_campaigns_kb,
     report_recall_kb,
+    rollback_kb,
+    slash_mutate_campaigns_kb,
     rsa_aslist_kb,
     rsa_item_kb,
     rsa_overview_kb,
@@ -350,6 +358,7 @@ from bot.states import (  # noqa: E402
     KwWizard,
     ModelWizard,
     MyScheduleWizard,
+    PickerSearch,
     RsaList,
     RsaRefine,
     RsaWizard,
@@ -974,6 +983,66 @@ async def _send_campaigns_for(message: Message, chat_id: int, acct: str) -> None
     )
 
 
+# ── D1: поиск кампании по названию в пикерах (/campaigns, отчёт, /rsa) ────────────
+# Выбор совпадения идёт по ГЛОБАЛЬНОМУ индексу в кэше — те же callback-и (CampCB/ReportCampCB/
+# RsaPickCB), что и без поиска; фильтр лишь подмешивает подмножество индексов. Read-only.
+def _picker_camps(kind: str, chat_id: int) -> list[dict] | None:
+    """Кэш кампаний нужного пикера по chat_id (None → кэш потерян, рестарт/устарело)."""
+    cache = {
+        "campaigns": _CAMP_CACHE,
+        "report": _REPORT_CAMP_CACHE,
+        "rsa": _RSA_CAMP_CACHE,
+    }.get(kind)
+    return cache.get(chat_id) if cache is not None else None
+
+
+def _picker_full_kb(kind: str, target: str, camps: list[dict]):
+    """Полный (постраничный) пикер нужного вида — для «↩︎ Показать все» и пустого результата."""
+    if kind == "report":
+        return report_campaigns_kb(camps, target)
+    if kind == "rsa":
+        return rsa_pick_campaigns_kb(camps)
+    return campaigns_kb(camps)
+
+
+def _picker_match_indices(camps: list[dict], query: str) -> list[int]:
+    """Глобальные индексы кампаний, чьё имя (или id) содержит запрос (casefold, регистронезав.)."""
+    q = query.strip().casefold()
+    if not q:
+        return list(range(len(camps)))
+    return [
+        i
+        for i, c in enumerate(camps)
+        if q in (c.get("name") or "").casefold() or q in str(c.get("id") or "")
+    ]
+
+
+def _picker_rest_state(kind: str):
+    """Состояние-«покой» пикера после поиска: /rsa живёт в RsaWizard.picking (гард on_text),
+    /campaigns и отчёт — без состояния (их вход stateless). Возврат в него = одноразовость поиска."""
+    return RsaWizard.picking if kind == "rsa" else None
+
+
+# ── D3: пикер кампаний для /addkeys (best-effort; текст-ввод названия остаётся) ──────
+_KW_ADD_CAMP_CACHE: dict[int, list[dict]] = {}
+
+
+async def _kw_add_load_campaigns(chat_id: int) -> list[dict]:
+    """Список кампаний активного read-аккаунта для пикера /addkeys. Best-effort: сбой/пусто/
+    неоднозначный аккаунт ⇒ [] (флоу спокойно падает на ввод названия текстом, kw_add_campaign).
+    НЕ форсит выбор аккаунта (в отличие от отчётов): пикер — удобство, а не обязательный шаг."""
+    try:
+        acct = await _active_read_account(chat_id)
+        from ads.client import build_client_async
+        from ads.read import list_campaigns
+
+        client = await build_client_async(acct)
+        camps = await run_ads_read_call(list_campaigns, client, acct, label="kw_add_campaigns")
+        return camps or []
+    except Exception:  # noqa: BLE001 — пикер опционален; текст-фолбэк всегда работает
+        return []
+
+
 # Денежные операции (UI-слой): для них при внешнем контенте (файл/ссылка) в сводку добавляется
 # предупреждение (см. _present_proposal). Зеркалит реестр _EXPECTED_MONEY_OPS в
 # tests/test_invariants_core.py (имена op без префикса apply_) — дрейф ловит тест.
@@ -998,6 +1067,85 @@ def _build_proposal(operation: str, **args) -> tuple[str, str, dict, str]:
     summary = build_summary(operation, before="[текущее значение из Google Ads]", after=params)
     p = Proposal(operation=operation, summary=summary, params=params, chat_id=0)
     return p.confirmation_id, operation, params, summary
+
+
+# ── D2: «↩️ Откатить» — обратная операция из снимка _before (за confirm-гейтом) ──────
+# Только детерминированно обратимые операции (снимок _before достаточен для одной обратной
+# мутации). update_bid откатывается лишь при ОДИНАКОВЫХ ставках групп (иначе один set_to не
+# восстановит разнородные ставки — честно НЕ предлагаем). Геостратегия/bidding_strategy —
+# не откатываются одной операцией (в backlog). Обратный черновик минтится как ОБЫЧНЫЙ proposal
+# (confirm-гейт + user_initiated=True в _present_proposal → бюджет-откат легитимен, правило 3).
+_ROLLBACKABLE_OPS = frozenset(
+    {
+        "update_budget",
+        "update_bid",
+        "pause_campaign",
+        "resume_campaign",
+        "launch_campaign",
+        "update_campaign",
+        "set_campaign_network",
+        "pause_ad_group",
+        "resume_ad_group",
+        "pause_ad",
+        "resume_ad",
+    }
+)
+# chat_id → {token, operation, params, customer_id}: последняя откатываемая операция (одноразово).
+_ROLLBACK_CACHE: dict[int, dict] = {}
+
+
+def _reverse_spec(operation: str, params: dict, before) -> tuple[str, dict] | None:
+    """Собрать (обратная_операция, params) из снимка _before. None — необратимо/нет снимка/
+    неоднозначно. Восстанавливаем прежнее значение/статус ПРОТИВОПОЛОЖНОЙ операцией."""
+    if not isinstance(before, dict) or not isinstance(params, dict):
+        return None
+    camp = params.get("campaign")
+    if not camp:
+        return None
+    kind = before.get("kind")
+    if operation == "update_budget" and kind == "budget":
+        micros = before.get("before_micros")
+        if micros is None:
+            return None
+        return ("update_budget", {"campaign": camp, "mode": "set_to", "value": int(micros) / 1e6})
+    if operation == "update_bid" and kind == "bid":
+        uniq = {int(x) for x in (before.get("before_micros") or [])}
+        if len(uniq) != 1:  # разные ставки по группам — одним set_to не вернуть (честно skip)
+            return None
+        return ("update_bid", {"campaign": camp, "mode": "set_to", "value": next(iter(uniq)) / 1e6})
+    if operation == "set_campaign_network" and kind == "network":
+        return (
+            "set_campaign_network",
+            {"campaign": camp, "search_partners": bool(before.get("before_search_partners"))},
+        )
+    if operation == "update_campaign" and kind == "name":
+        old, new = before.get("before_name"), params.get("new_name")
+        if not old or not new:
+            return None
+        return (
+            "update_campaign",
+            {"campaign": new, "new_name": old},
+        )  # текущее имя new → назад в old
+    if kind == "status":  # восстановить before_status противоположной операцией
+        bs = (before.get("before_status") or "").upper()
+        if operation in ("pause_campaign", "resume_campaign", "launch_campaign"):
+            if bs == "PAUSED":
+                return ("pause_campaign", {"campaign": camp})
+            if bs == "ENABLED":
+                return ("resume_campaign", {"campaign": camp})
+        elif operation in ("pause_ad_group", "resume_ad_group"):
+            ag = params.get("ad_group")
+            if ag and bs == "PAUSED":
+                return ("pause_ad_group", {"campaign": camp, "ad_group": ag})
+            if ag and bs == "ENABLED":
+                return ("resume_ad_group", {"campaign": camp, "ad_group": ag})
+        elif operation in ("pause_ad", "resume_ad"):
+            ag, ad = params.get("ad_group"), params.get("ad")
+            if ag and ad and bs == "PAUSED":
+                return ("pause_ad", {"campaign": camp, "ad_group": ag, "ad": ad})
+            if ag and ad and bs == "ENABLED":
+                return ("resume_ad", {"campaign": camp, "ad_group": ag, "ad": ad})
+    return None
 
 
 # ── C1/C3 (гибрид): пер-чат контекст диалога для разрешения ссылок-местоимений ──────
@@ -1846,10 +1994,20 @@ async def _read_account_rows(chat_id: int) -> list:
     замков (пикер = граница доступа). В legacy-проходе (auto + пустая таблица грантов) пер-юзер
     фильтр пропускает всё — прежнее одно-операторное поведение. Пустой обход MCC ⇒ как минимум
     Draft (список НИКОГДА не пуст)."""
-    from ads.client import discovered_read_children, discovered_read_children_meta
+    from ads.client import (
+        discovered_read_children,
+        discovered_read_children_meta,
+        ensure_read_children_discovered,
+    )
     from ads.read import ChildAccount
     from core.access import ensure_account_allowed_for_user
 
+    # Само-починка (2026-07): если обход MCC на старте не прошёл (транзиентный сбой/таймаут), набор
+    # дочерних пуст и пикер деградировал бы на Draft+env read-list до суточного re-discovery/ручного
+    # /refresh («часть аккаунтов пропала ВЕЗДЕ»). Обойти MCC СЕЙЧАС (no-op при непустом наборе —
+    # нулевая латентность здорового пути) ⇒ этот же тап показывает ВСЕ видимые аккаунты. Один
+    # чокпойнт лечит все пикеры (/report /export /sheets /campaigns /status /advise /account, §19/§20).
+    await ensure_read_children_discovered()
     meta = discovered_read_children_meta()
     candidate = [DRAFT_ACCOUNT_ID] + sorted(
         settings.allowed_customer_ids | settings.read_customer_ids | discovered_read_children()
@@ -2013,25 +2171,44 @@ async def _persist_and_set_model(model: str | None) -> None:
         log.warning("model_override не сохранён в БД: %s", type(e).__name__)
 
 
-async def _slash_mutate(m: Message, command: CommandObject, operation: str) -> None:
-    """Слэш-команда паузы/возобновления по имени кампании → черновик за confirm-гейтом
-    (тот же путь, что inline-кнопка и текстовая команда). Без имени — подсказка."""
-    name = (command.args or "").strip()
-    if not name:
-        key = "slash_pause_hint" if operation == "pause_campaign" else "slash_resume_hint"
-        await m.answer(i18n.t(key), parse_mode=ParseMode.HTML)
-        return
+# D4: пикер кампаний для /pause и /resume без аргумента — chat_id → отфильтрованный по статусу список.
+_SLASH_MUT_CACHE: dict[int, list[dict]] = {}
+
+
+async def _slash_mutate_present(message: Message, chat_id: int, operation: str, name: str) -> None:
+    """Мятие proposal паузы/возобновления по ИМЕНИ кампании (общий хвост текст-команды и пикера
+    D4). На АКТИВНОМ аккаунте (AD.4); при неоднозначности — форс-пикер аккаунта. Confirm-гейт."""
     try:
         cid, op, params, summary = _build_proposal(operation, campaign=name)
     except Exception as e:  # валидация схемы
-        await m.answer(f"⚠️ {ux.err_text(e)}")
+        await message.answer(f"⚠️ {ux.err_text(e)}")
+        return
+    await _present_proposal_active(
+        message, chat_id=chat_id, operation=op, params=params, summary=summary, cid=cid
+    )
+
+
+async def _slash_mutate(m: Message, command: CommandObject, operation: str) -> None:
+    """Слэш-команда паузы/возобновления по имени кампании → черновик за confirm-гейтом
+    (тот же путь, что inline-кнопка и текстовая команда). Без имени — D4: пикер подходящих
+    кампаний (ENABLED для паузы / PAUSED для возобновления); ввод имени командой остаётся."""
+    name = (command.args or "").strip()
+    if not name:
+        # D4: вместо только текст-подсказки — пикер кампаний нужного статуса (best-effort).
+        want = "ENABLED" if operation == "pause_campaign" else "PAUSED"
+        camps = [c for c in await _kw_add_load_campaigns(m.chat.id) if c.get("status") == want]
+        if camps:
+            _SLASH_MUT_CACHE[m.chat.id] = camps
+            key = "slash_pause_pick" if operation == "pause_campaign" else "slash_resume_pick"
+            await m.answer(i18n.t(key), reply_markup=slash_mutate_campaigns_kb(camps, operation))
+            return
+        key = "slash_pause_hint" if operation == "pause_campaign" else "slash_resume_hint"
+        await m.answer(i18n.t(key), parse_mode=ParseMode.HTML)
         return
     # AD.4: пауза/возобновление — на АКТИВНОМ аккаунте (не хардкод Draft). При неоднозначности
     # (не закреплён + живых >1) — форс-пикер; иначе _present_proposal на активном (кампания
     # резолвится на исполнении на итоговом аккаунте).
-    await _present_proposal_active(
-        m, chat_id=m.chat.id, operation=op, params=params, summary=summary, cid=cid
-    )
+    await _slash_mutate_present(m, m.chat.id, operation, name)
 
 
 async def _read_currency(client, customer_id: str | None = None) -> str:
@@ -2887,6 +3064,7 @@ async def _kw_run(
             url=url,
             language=language,
             negatives=negatives,
+            currency=currency,  # D8: валюта аккаунта в колонках ставок
         )
         await target.answer_document(FSInputFile(path, filename="aimash_keywords.xlsx"))
     except Exception as e:  # openpyxl/IO
@@ -2906,7 +3084,14 @@ async def _kw_run(
         fd, csv_path = tempfile.mkstemp(suffix=".csv", prefix="aimash_keywords_")
         os.close(fd)
         await asyncio.to_thread(
-            write_keywords_csv, clusters, ideas, csv_path, seeds=seeds, url=url, language=language
+            write_keywords_csv,
+            clusters,
+            ideas,
+            csv_path,
+            seeds=seeds,
+            url=url,
+            language=language,
+            currency=currency,  # D8: валюта аккаунта в колонках ставок
         )
         await target.answer_document(FSInputFile(csv_path, filename="aimash_keywords.csv"))
     except Exception:  # noqa: BLE001 — CSV — дубль данных .xlsx; сбой не критичен, не спамим
@@ -4020,8 +4205,9 @@ def _cc_build_create_params(draft) -> dict:
         bidding["target_cpa_micros"] = int(s["target_cpa_micros"])
     from ads import geo as adsgeo
 
-    # Страна-хинт для резолва гео: из настроек → из названий локаций → прежний дефолт UA.
-    geo_cc = s.get("geo_country_code") or adsgeo.resolve_country(s) or "UA"
+    # Страна-хинт для резолва гео: из настроек → из названий локаций → D7 конфиг-дефолт (env
+    # DEFAULT_GEO_COUNTRY_CODE, деплой Уганды → UG), НЕ захардкоженная Украина.
+    geo_cc = s.get("geo_country_code") or adsgeo.resolve_country(s) or settings.geo_default_country
     # §19: верифицированный список может быть большим — обрежем до потолка схемы, чтобы «Создать
     # черновик» не падал ValidationError (напр. 81 ключ > прежнего max_length=50). Обрезку не
     # молчим (см. правило «no silent caps») — логируем, сколько ключей отброшено.
@@ -4882,6 +5068,20 @@ async def _do_confirm(
     # (эскейп внутри) — texts.esc здесь дал бы двойное экранирование.
     human_result = texts.fmt_mutation_result(snap.operation if snap else "", result)
     await _safe_edit(cq, i18n.t("applied", result=human_result), parse_mode=ParseMode.HTML)
+    # D2: применена обратимая операция → предложить «↩️ Откатить» (мятие ОБРАТНОГО черновика за
+    # confirm-гейтом; прямого исполнения нет). Только если снимок _before достаточен для реверса.
+    if snap is not None and snap.operation in _ROLLBACKABLE_OPS:
+        rev = _reverse_spec(snap.operation, snap.params or {}, (snap.params or {}).get("_before"))
+        msg = _cq_msg(cq)
+        if rev is not None and msg is not None:
+            token = uuid.uuid4().hex
+            _ROLLBACK_CACHE[chat_id] = {
+                "token": token,
+                "operation": rev[0],
+                "params": rev[1],
+                "customer_id": snap.customer_id,
+            }
+            await msg.answer(i18n.t("rollback_offer"), reply_markup=rollback_kb(token))
     # partial_failure (батчи ключей/минус-слов): часть позиций отклонена сервером — честно
     # перечисляем причины (не молчим об «усечённом» успехе). Причины уже отредактированы.
     if isinstance(result, dict) and result.get("rejected"):

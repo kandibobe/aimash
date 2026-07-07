@@ -23,6 +23,7 @@ from adcopy.validate import (
     RSA_MIN_HEADLINES,
     STRUCTURED_SNIPPET_HEADERS,
     assert_asset_len,
+    find_duplicates,
 )
 from adcopy.validate import validate as _rsa_validate
 from ads import extensions
@@ -49,6 +50,12 @@ from core.resilience import (  # таймаут+ретрай на самом SDK
 # Длину/форму ключевых слов считает КОД (golden rule #4) — единый источник в ads.validation.
 # Алиас сохранён для обратной совместимости (тесты/вызовы mutations._assert_keyword_ok).
 _assert_keyword_ok = assert_keyword_ok
+
+
+def _find_dupes(items: list[str]) -> list[str]:
+    """D5: тексты повторных элементов набора (для сообщения об ошибке); [] если дублей нет."""
+    return [t for _, t in find_duplicates(items)]
+
 
 # Абсолютный потолок суммы (micros) — защита от галлюцинации/инъекции модели СВЕРХ диапазон-
 # валидации схемы (set_to/increase_by_amount без верхней границы). Это не бизнес-лимит, а
@@ -1133,6 +1140,14 @@ def _validate_rsa_inputs(
         ok, n = _rsa_validate(d, "description")
         if not ok:
             raise ValueError(f"описание превышает 90 ({n}): «{d}»")
+    # D5 (defense-in-depth): дубли в наборе (casefold) — Google Ads отклонит RSA (DUPLICATE_ASSET
+    # в одном объявлении). Ловим ДО claim на ЛЮБОМ пути create_rsa (ручная правка/генерация/визард).
+    dh = _find_dupes(headlines)
+    if dh:
+        raise ValueError(f"дубли заголовков в наборе: {', '.join(f'«{t}»' for t in dh)}")
+    dd = _find_dupes(descriptions)
+    if dd:
+        raise ValueError(f"дубли описаний в наборе: {', '.join(f'«{t}»' for t in dd)}")
     if path2 and not path1:
         raise ValueError("path2 нельзя без path1 (ограничение Google Ads)")
     for p, label in ((path1, "path1"), (path2, "path2")):

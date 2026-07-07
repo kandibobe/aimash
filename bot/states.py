@@ -105,6 +105,14 @@ class IngestWizard(StatesGroup):
     )  # ingest: файл принят без подписи → ждём задачу (контент в _PENDING_CONTEXT)
 
 
+class PickerSearch(StatesGroup):
+    """D1 (удобство 2026-07): «🔎 Найти» в пикерах кампаний (/campaigns, отчёт, /rsa) — по клику
+    ждём часть названия; текст = фильтр по подстроке (глобальные индексы → выбор работает без
+    изменений). Одноразовый: показали совпадения → state снят (повтор — снова «🔎 Найти»)."""
+
+    awaiting = State()  # ждём текст-запрос; kind/target — в state-data
+
+
 class ExtWizard(StatesGroup):
     # §3-assets: тип расширения выбран в меню → ждём текст/фото. Кампания в state-data (ext_campaign).
     awaiting_sitelinks = State()  # «Текст | url [| описание1 [| описание2]]» построчно

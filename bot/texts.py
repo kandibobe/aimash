@@ -811,6 +811,38 @@ def _before(params: dict) -> dict | None:
     return b if isinstance(b, dict) else None
 
 
+def _geo_before_str(b: dict, en: bool) -> str:
+    """D6: текущее ГЕО из снимка _before (kind='geo') одной строкой: локации + радиусы, либо
+    «все регионы» (пустой таргетинг = показ везде — это НЕ ошибка)."""
+    parts = list(b.get("before_locations") or []) + list(b.get("before_proximity") or [])
+    if not parts:
+        return "all regions" if en else "все регионы"
+    return ", ".join(str(x) for x in parts)
+
+
+# ENUM-имя стратегии (MAXIMIZE_CONVERSIONS) ИЛИ схемное значение (maximize_conversions) → человек.
+# Отдельно от _BIDDING_HUMAN (ниже, RU/EN-nested, только схемные ключи) — этот покрывает и ENUM
+# Google (для «было» из read_before), и расширенные типы (tCPA/tROAS/eCPC/tIS).
+_BIDDING_STRAT_HUMAN = {
+    "manual_cpc": ("Ручная CPC", "Manual CPC"),
+    "maximize_conversions": ("Максимум конверсий", "Maximize conversions"),
+    "maximize_conversion_value": ("Максимум ценности конверсий", "Maximize conversion value"),
+    "target_spend": ("Максимум кликов", "Maximize clicks"),
+    "target_cpa": ("Целевая цена конверсии (CPA)", "Target CPA"),
+    "target_roas": ("Целевая рентабельность (ROAS)", "Target ROAS"),
+    "enhanced_cpc": ("Улучшенная CPC", "Enhanced CPC"),
+    "target_impression_share": ("Целевой процент показов", "Target impression share"),
+    "": ("прежняя стратегия", "current strategy"),
+}
+
+
+def _bidding_human(value: str, en: bool) -> str:
+    """D6: имя стратегии ставок для показа. Принимает и ENUM Google (UPPER), и схемное (lower)."""
+    key = (value or "").strip().lower()
+    ru, eng = _BIDDING_STRAT_HUMAN.get(key, (value or "", value or ""))
+    return eng if en else ru
+
+
 def _money_summary(label: str, params: dict, lang: str | None = None) -> str:
     c = params.get("campaign", "")
     mode = params.get("mode")
@@ -975,23 +1007,24 @@ def fmt_mutation_summary(operation: str, params: dict, lang: str | None = None) 
             rs = str(params.get("radius_km"))
         city = params.get("city_name", "")
         cc = params.get("country_code", "")
-        return (
-            f"Кампания «{c}» — радиус {rs} км вокруг «{city}» ({cc}). Заменит прежний гео-радиус."
-        )
+        after = f"радиус {rs} км вокруг «{city}» ({cc})"
+        b = _before(params)
+        if b and b.get("kind") == "geo":  # D6: реальное «было → станет»
+            return f"Кампания «{c}» — гео: {_geo_before_str(b, False)} → {after}."
+        return f"Кампания «{c}» — {after}. Заменит прежний гео-радиус."
     if operation == "set_geo_location":
         locs = ", ".join(str(x) for x in (params.get("locations") or []))
         cc = params.get("country_code", "")
+        after = f"{locs} ({cc})"
+        b = _before(params)
+        if b and b.get("kind") == "geo":  # D6: реальное «было → станет»
+            return f"Кампания «{c}» — гео-таргетинг: {_geo_before_str(b, False)} → {after}."
         return (
-            f"Кампания «{c}» — гео-таргетинг: {locs} ({cc}). "
+            f"Кампания «{c}» — гео-таргетинг: {after}. "
             "Заменит прежний географический таргетинг кампании."
         )
     if operation == "set_bidding_strategy":
-        strat = {
-            "manual_cpc": "Ручная CPC",
-            "maximize_conversions": "Максимум конверсий",
-            "maximize_conversion_value": "Максимум ценности конверсий",
-            "target_spend": "Максимум кликов",
-        }.get(params.get("strategy", ""), params.get("strategy", ""))
+        strat = _bidding_human(params.get("strategy", ""), False)
         extra = ""
         if params.get("target_cpa"):
             extra = f", target CPA {float(params['target_cpa']):g}"
@@ -999,6 +1032,12 @@ def fmt_mutation_summary(operation: str, params: dict, lang: str | None = None) 
             extra = f", target ROAS {float(params['target_roas']):g}"
         elif params.get("strategy") == "manual_cpc" and params.get("enhanced_cpc"):
             extra = ", enhanced CPC"
+        b = _before(params)
+        if b and b.get("kind") == "bidding":  # D6: реальное «было → станет»
+            return (
+                f"Кампания «{c}» — стратегия ставок: "
+                f"{_bidding_human(b.get('before_strategy', ''), False)} → {strat}{extra}."
+            )
         return f"Кампания «{c}» — стратегия ставок → {strat}{extra}."
     if operation in (
         "add_keywords",
@@ -1140,21 +1179,24 @@ def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
             rs = str(params.get("radius_km"))
         city = params.get("city_name", "")
         cc = params.get("country_code", "")
-        return f"Campaign “{c}” — {rs} km radius around “{city}” ({cc}). Replaces the prior geo-radius."
+        after = f"{rs} km radius around “{city}” ({cc})"
+        b = _before(params)
+        if b and b.get("kind") == "geo":  # D6: real before → after
+            return f"Campaign “{c}” — geo: {_geo_before_str(b, True)} → {after}."
+        return f"Campaign “{c}” — {after}. Replaces the prior geo-radius."
     if operation == "set_geo_location":
         locs = ", ".join(str(x) for x in (params.get("locations") or []))
         cc = params.get("country_code", "")
+        after = f"{locs} ({cc})"
+        b = _before(params)
+        if b and b.get("kind") == "geo":  # D6: real before → after
+            return f"Campaign “{c}” — geo-targeting: {_geo_before_str(b, True)} → {after}."
         return (
-            f"Campaign “{c}” — geo-targeting: {locs} ({cc}). "
+            f"Campaign “{c}” — geo-targeting: {after}. "
             "Replaces the campaign's prior geographic targeting."
         )
     if operation == "set_bidding_strategy":
-        strat = {
-            "manual_cpc": "Manual CPC",
-            "maximize_conversions": "Maximize conversions",
-            "maximize_conversion_value": "Maximize conversion value",
-            "target_spend": "Maximize clicks",
-        }.get(params.get("strategy", ""), params.get("strategy", ""))
+        strat = _bidding_human(params.get("strategy", ""), True)
         extra = ""
         if params.get("target_cpa"):
             extra = f", target CPA {float(params['target_cpa']):g}"
@@ -1162,6 +1204,12 @@ def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
             extra = f", target ROAS {float(params['target_roas']):g}"
         elif params.get("strategy") == "manual_cpc" and params.get("enhanced_cpc"):
             extra = ", enhanced CPC"
+        b = _before(params)
+        if b and b.get("kind") == "bidding":  # D6: real before → after
+            return (
+                f"Campaign “{c}” — bidding strategy: "
+                f"{_bidding_human(b.get('before_strategy', ''), True)} → {strat}{extra}."
+            )
         return f"Campaign “{c}” — bidding strategy → {strat}{extra}."
     if operation in (
         "add_keywords",
@@ -1244,7 +1292,9 @@ def _kw_metrics_suffix(idea, currency: str, en: bool) -> str:
     parts: list[str] = []
     comp = (_COMP_EN if en else _COMP_RU).get(getattr(idea, "competition", "") or "")
     if comp:
-        parts.append(comp)
+        # D8: индекс конкуренции 0..100 (точнее, чем low/med/high) — если Google его вернул.
+        idx = int(getattr(idea, "competition_index", 0) or 0)
+        parts.append(f"{comp} ({idx})" if idx > 0 else comp)
     low, high = getattr(idea, "low_bid", 0.0) or 0.0, getattr(idea, "high_bid", 0.0) or 0.0
     if high > 0:
         cur = f" {esc(currency)}" if currency else ""

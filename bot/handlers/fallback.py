@@ -153,6 +153,18 @@ async def on_error(event: bm.ErrorEvent) -> bool:
     return True  # «обработано» — aiogram не пробрасывает дальше
 
 
+# D9: нераспознанная слэш-команда → понятная подсказка, НЕ отправка в LLM. Известные команды
+# перехватывают свои Command-хендлеры ВЫШЕ (порядок HANDLER_MODULES: commands/reports/… раньше
+# fallback) — сюда доходит только неизвестное «/…». Зарегистрирован строго ПЕРЕД on_text (иначе
+# catch-all проглотил бы «/фыва» и агент трактовал бы его как задачу, мог нафантазировать мутацию).
+@bm.dp.message(bm.F.text.startswith("/"))
+async def on_unknown_command(m: bm.Message) -> None:
+    cmd = (m.text or "").split(maxsplit=1)[0][:32]
+    await m.answer(
+        bm.i18n.t("unknown_command", cmd=bm.texts.esc(cmd)), parse_mode=bm.ParseMode.HTML
+    )
+
+
 # ВАЖНО: catch-all свободного текста регистрируется ПОСЛЕДНИМ message-хендлером (aiogram —
 # «первый совпавший в порядке регистрации»): всё, что окажется ниже, никогда не получит текст.
 # Регрессия этого инварианта уже случалась (/diag и rsa_list_edited были зарегистрированы после
