@@ -242,6 +242,12 @@ GDN / Video / Demand Gen, а UAC не реализуется намеренно.
 - **19.3 Этап 1 (описание → настройки):** `extract_campaign_settings` (LLM) + fallback «по аналогии»
   из медиан аккаунта (`ads/read.py::search_campaign_medians`, деньги кратны биллинг-единице — B2);
   правки командой (`_cc_apply_settings_patch`); кнопки ✅/✏️/❌.
+- **19.3 Сети (требование заказчика 2026-07-07):** дефолт — поисковые партнёры ВЫКЛ + КМС ВЫКЛ
+  (`_create_search_campaign_via_sdk`: `target_search_network = (networks=='search_partners')`,
+  `target_partner_search_network` не используется никогда — гард
+  `test_create_search_via_sdk_network_settings`); партнёры на СУЩЕСТВУЮЩЕЙ кампании —
+  `/campaigns → 🌐 Сети` или NL → `set_campaign_network` за confirm-гейтом с «было→станет»
+  (`apply_set_campaign_network`, гарды в `tests/test_write_layer.py`).
 - **19.4 Этап 2 (ключи):** свои — текст/файл XLSX·CSV/ссылка Sheets/`_cc_keywords_from_document`;
   генерация — `cc_kw_generate` → `KeywordPlanIdeaService` → фильтр релевантности → Google Sheets →
   round-trip `cc_kw_verify` (сверка `sheet_id`; ❌-строки и мусорные ключи отфильтровываются — B5);

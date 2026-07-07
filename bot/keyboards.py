@@ -1338,12 +1338,37 @@ def campaign_actions_kb(idx: int, status: str, lang: str | None = None) -> Inlin
         callback_data=CampCB(action="ext", idx=idx),
     )
     kb.button(
+        text="🌐 Networks" if en else "🌐 Сети",
+        callback_data=CampCB(action="network", idx=idx),
+    )
+    kb.button(
         text="🗑 Delete campaign" if en else "🗑 Удалить кампанию",
         callback_data=CampCB(action="delete", idx=idx),
     )
     kb.button(
         text="‹ Back to list" if en else "‹ Назад к списку",
         callback_data=CampCB(action="back", idx=idx),
+    )
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def campaign_network_kb(idx: int, lang: str | None = None) -> InlineKeyboardMarkup:
+    """§19.3: тумблер поисковых партнёров кампании. Кнопка лишь СОЗДАЁТ черновик
+    set_campaign_network (confirm-гейт); КМС/ограниченную партнёрскую сеть не трогаем."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="🚫 Partners OFF (recommended)" if en else "🚫 Партнёры ВЫКЛ (рекомендуется)",
+        callback_data=CampCB(action="net_off", idx=idx),
+    )
+    kb.button(
+        text="✅ Partners ON" if en else "✅ Партнёры ВКЛ",
+        callback_data=CampCB(action="net_on", idx=idx),
+    )
+    kb.button(
+        text="‹ Back" if en else "‹ Назад",
+        callback_data=CampCB(action="menu", idx=idx),
     )
     kb.adjust(1)
     return kb.as_markup()

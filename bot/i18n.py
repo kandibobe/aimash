@@ -753,6 +753,27 @@ CATALOG: dict[str, dict[str, str]] = {
         ),
         "en": '💾 Draft kept (step {step}/7). Return via "➕ Create campaign" or /newcampaign.',
     },
+    # B2: TTL-жизнь черновика больше не молчаливая — предупреждение до и уведомление после.
+    "cc_draft_expiring": {
+        "ru": (
+            "⏳ Черновик кампании (шаг {step}/7) будет удалён примерно через {left_h} ч "
+            "без активности. Продолжить: /newcampaign → «▶️ Продолжить»."
+        ),
+        "en": (
+            "⏳ Your campaign draft (step {step}/7) will be removed in about {left_h} h "
+            "of inactivity. Resume: /newcampaign → “▶️ Continue”."
+        ),
+    },
+    "cc_draft_expired": {
+        "ru": (
+            "🗑 Черновик кампании (шаг {step}/7) удалён по истечении срока хранения. "
+            "Начать заново: /newcampaign."
+        ),
+        "en": (
+            "🗑 Your campaign draft (step {step}/7) was removed after its storage period. "
+            "Start again: /newcampaign."
+        ),
+    },
     # W4: «Вперёд ›» по старому сообщению, когда идти уже некуда (черновик на максимуме маршрута).
     "cc_no_forward": {
         "ru": "Дальше пока некуда — этот шаг ещё не пройден.",
@@ -1029,6 +1050,20 @@ CATALOG: dict[str, dict[str, str]] = {
     "no_audiences": {
         "ru": texts.NO_AUDIENCES,
         "en": "👥 No available audiences (remarketing lists) found in the account.",
+    },
+    "camp_network_title": {
+        "ru": (
+            "🌐 Сети кампании «{camp}»\n\n"
+            "Поисковые партнёры Google — показы на сайтах-партнёрах поиска. Рекомендуется "
+            "ВЫКЛ (дефолт проекта); включайте только осознанно. КМС для Search-кампаний "
+            "всегда выключена. Изменение — после подтверждения."
+        ),
+        "en": (
+            "🌐 Networks of campaign “{camp}”\n\n"
+            "Google search partners — ads on search partner sites. Recommended OFF "
+            "(project default); enable only deliberately. Display network is always off "
+            "for Search campaigns. The change applies after confirmation."
+        ),
     },
     "aud_list_stale": {
         "ru": texts.AUD_LIST_STALE,
@@ -2232,23 +2267,31 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "⚠️ Google Ads doesn't serve Russia/Belarus as a geo — searched keywords without them.",
     },
     # G2: баннер аккаунта мутации (не-Draft) в карточке подтверждения — на ЧЬИ деньги идёт изменение.
+    # AD.2: баннер аккаунта мутации — на КАЖДОЙ карточке. Боевой (не-Draft) — с ⚠️ (реальные деньги);
     "mutation_account_banner": {
         "ru": "⚠️ Аккаунт изменения: {acct}",
         "en": "⚠️ Change account: {acct}",
     },
-    # G2: активный аккаунт только для чтения — мутации на нём не включены (управляемый список).
+    # Draft (песочница) — спокойный маркер, чтобы «реальные деньги» ⚠️ оставались отличимым сигналом.
+    "mutation_account_banner_draft": {
+        "ru": "🧪 Аккаунт изменения: {acct}",
+        "en": "🧪 Change account: {acct}",
+    },
+    # AD.1/AD.4: активный аккаунт только для чтения — мутации на нём не включены. В проде мутации
+    # включены на всех видимых по умолчанию; этот отказ теперь редкий (аккаунт вне видимости бота или
+    # набор сужен явным списком без него).
     "mutation_account_read_only": {
         "ru": (
             "⛔ Аккаунт {acct} доступен только для ЧТЕНИЯ — изменения на нём не включены.\n"
-            "Включить может администратор: добавить id в GOOGLE_ADS_ALLOWED_CUSTOMER_IDS (аккаунт должен "
-            "быть виден боту) и при другом MCC — зарегистрировать OAuth. Либо переключись на Draft "
-            "(/account reset) для теста."
+            "Включить может администратор: убедиться, что аккаунт виден боту (обход MCC), при другом "
+            "MCC — зарегистрировать OAuth; набор мутаций — GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (все "
+            "видимые) или явный список id. Проверка готовности — /mutready."
         ),
         "en": (
             "⛔ Account {acct} is READ-ONLY — changes are not enabled for it.\n"
-            "An admin can enable it: add the id to GOOGLE_ADS_ALLOWED_CUSTOMER_IDS (the account must be "
-            "visible to the bot) and register OAuth if it's under another MCC. Or switch to Draft "
-            "(/account reset) for testing."
+            "An admin can enable it: make sure the account is visible to the bot (MCC crawl), register "
+            "OAuth if it's under another MCC; mutation set — GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (all "
+            "visible) or an explicit id list. Check readiness with /mutready."
         ),
     },
     "cc_kw_not_a_link": {

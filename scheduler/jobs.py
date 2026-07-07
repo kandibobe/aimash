@@ -1036,20 +1036,34 @@ async def cleanup_stale_proposals(
         return len(stale)
 
 
+# B2: за сколько часов до истечения TTL черновика предупреждать владельца. При ttl <= окна
+# предупреждение пропускается (иначе warn прилетал бы сразу после создания черновика).
+DRAFT_EXPIRY_WARN_HOURS = 12
+
+
 async def cleanup_stale_campaign_drafts(
-    *, now: datetime | None = None, ttl_hours: int | None = None
+    bot=None, *, now: datetime | None = None, ttl_hours: int | None = None
 ) -> int:
     """§19: брошенные активные черновики визарда «Создание кампании» → status='abandoned'.
 
     Не proposal и не мутация — просто гасим залежавшиеся active-черновики (SDK не звался, деньги
     не тратились). Возраст считаем в Python (наивный created/updated трактуем как UTC) — корректно
     и на SQLite, и на Postgres. TTL щедрый (settings.campaign_draft_ttl_hours, дефолт 72ч): Этап-2
-    round-trip с Google Sheets может занять день."""
+    round-trip с Google Sheets может занять день.
+
+    B2 (живой тест 2026-07-07): истечение больше НЕ молчаливое. За DRAFT_EXPIRY_WARN_HOURS до
+    гашения владелец получает предупреждение (once per idle-период: повторный warn только если
+    черновик трогали после прошлого предупреждения), по факту abandon — уведомление с подсказкой
+    /newcampaign. bot=None (тесты/CLI) → без уведомлений, поведение как раньше."""
     ttl = settings.campaign_draft_ttl_hours if ttl_hours is None else ttl_hours
     with request_scope("scheduler:cleanup-drafts"):
-        cutoff = (now or datetime.now(timezone.utc)) - timedelta(hours=ttl)
+        now_dt = now or datetime.now(timezone.utc)
+        cutoff = now_dt - timedelta(hours=ttl)
+        warn_cutoff = now_dt - timedelta(hours=max(ttl - DRAFT_EXPIRY_WARN_HOURS, 0))
         n = 0
         orphan_media: list[str] = []
+        expired: list[tuple[int, int]] = []  # (chat_id, step) — уведомить после commit
+        expiring: list[tuple[int, int, int]] = []  # (chat_id, step, часов до гашения)
         async with Session() as s:
             rows = (
                 (await s.execute(select(CampaignDraft).where(CampaignDraft.status == "active")))
@@ -1073,12 +1087,63 @@ async def cleanup_stale_campaign_drafts(
                             mid = (spec.get("params") or {}).get("media_id")
                             if mid:
                                 orphan_media.append(str(mid))
-            if n:
+                    expired.append((int(d.chat_id), int(d.current_step or 0)))
+                elif updated < warn_cutoff and ttl > DRAFT_EXPIRY_WARN_HOURS:
+                    # приближается к TTL: предупреждаем один раз на idle-период (активность после
+                    # прошлого warn = новый период → предупредим снова при следующем простое)
+                    from sqlalchemy.orm.attributes import flag_modified
+
+                    ws = dict(d.wizard_state or {})
+                    nav = dict(ws.get("nav") or {})
+                    warned_raw = str(nav.get("expiry_warned_at") or "")
+                    try:
+                        warned_at = datetime.fromisoformat(warned_raw) if warned_raw else None
+                    except ValueError:
+                        warned_at = None
+                    if warned_at is not None and warned_at.tzinfo is None:
+                        warned_at = warned_at.replace(tzinfo=timezone.utc)
+                    if warned_at is not None and warned_at >= updated:
+                        continue  # уже предупреждали для этого простоя
+                    nav["expiry_warned_at"] = now_dt.isoformat()
+                    ws["nav"] = nav
+                    d.wizard_state = ws
+                    flag_modified(d, "wizard_state")
+                    left_h = max(
+                        1, int((updated + timedelta(hours=ttl) - now_dt).total_seconds() // 3600)
+                    )
+                    expiring.append((int(d.chat_id), int(d.current_step or 0), left_h))
+            if n or expiring:
                 await s.commit()
         if orphan_media:  # §19: чистим временные изображения брошенных черновиков (вне транзакции)
             from ads.assets import clear_pending_media_ids
 
             clear_pending_media_ids(orphan_media)
+        if bot is not None and (expired or expiring):
+            from bot import i18n
+
+            for chat_id, step, left_h in expiring:
+                try:
+                    await bot.send_message(
+                        chat_id,
+                        i18n.t(
+                            "cc_draft_expiring",
+                            i18n.get_lang(chat_id),
+                            step=max(1, min(step, 7)),
+                            left_h=left_h,
+                        ),
+                    )
+                except Exception:  # noqa: BLE001 — мёртвый чат не должен ронять cleanup
+                    log.warning("cleanup-drafts: warn не доставлен (chat=%s)", chat_id)
+            for chat_id, step in expired:
+                try:
+                    await bot.send_message(
+                        chat_id,
+                        i18n.t(
+                            "cc_draft_expired", i18n.get_lang(chat_id), step=max(1, min(step, 7))
+                        ),
+                    )
+                except Exception:  # noqa: BLE001
+                    log.warning("cleanup-drafts: expired-notify не доставлен (chat=%s)", chat_id)
         if n:
             log.info("scheduler: брошено просроченных черновиков визарда: %d", n)
         return n

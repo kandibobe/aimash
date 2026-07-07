@@ -31,6 +31,7 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
         "resume_campaign",
         "launch_campaign",
         "update_campaign",
+        "set_campaign_network",
         "remove_campaign",
         "remove_ad_group",
         "pause_ad_group",
@@ -66,6 +67,7 @@ _DIFFABLE_OPS = frozenset(
         "resume_campaign",
         "launch_campaign",
         "update_campaign",
+        "set_campaign_network",
         "pause_ad_group",
         "resume_ad_group",
     }
@@ -108,6 +110,15 @@ async def read_before(operation: str, params: dict, customer_id: str | None = No
             if ref is None:
                 return None
             return {"kind": "name", "before_name": ref.name}
+        if operation == "set_campaign_network":
+            info = await asyncio.to_thread(resolve.campaign_network_settings, client, cid, name)
+            if info is None:
+                return None
+            return {
+                "kind": "network",
+                "before_search_partners": bool(info["search_partners"]),
+                "after_search_partners": bool(params.get("search_partners")),
+            }
         if operation in ("pause_ad_group", "resume_ad_group"):
             ag = await asyncio.to_thread(
                 resolve.find_ad_group_by_name, client, cid, name, params.get("ad_group", "")
@@ -261,6 +272,21 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             customer_id=customer_id,
             campaign_id=ref.id,
             new_name=params["new_name"],
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
+    if op == "set_campaign_network":
+        ref = await asyncio.to_thread(
+            resolve.find_campaign_by_name, client, customer_id, params["campaign"]
+        )
+        if ref is None:
+            raise ValueError(f"кампания '{params['campaign']}' не найдена")
+        return await mutations.apply_set_campaign_network(
+            customer_id=customer_id,
+            campaign_id=ref.id,
+            search_partners=bool(params.get("search_partners")),
             confirmation_id=confirmation_id,
             confirm_store=store,
             ads_client=client,

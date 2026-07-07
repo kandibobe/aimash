@@ -132,6 +132,7 @@ from bot.keyboards import (
     BTN_STATUS_ALL,
     audiences_kb,
     campaign_actions_kb,
+    campaign_network_kb,
     campaigns_kb,
     cc_accounts_kb,
     client_card_kb,
@@ -517,18 +518,32 @@ class SlashCommandExitsWizardMiddleware(BaseMiddleware):
 
     async def __call__(self, handler, event: TelegramObject, data):
         text = getattr(event, "text", None)
+        cc_step: int | None = None
+        cli_flushed = False
         if isinstance(text, str) and text.startswith("/") and data.get("raw_state") is not None:
             cmd = text.split(maxsplit=1)[0].split("@", 1)[0].lower()
             state = data.get("state")
             if cmd not in _MW_SUSPEND_EXEMPT and state is not None:
                 try:
-                    await _suspend_active_flow_soft(event, state)  # lossless-сворачивание визарда
+                    # lossless-сворачивание визарда
+                    cc_step, cli_flushed = await _suspend_active_flow_soft(event, state)
                 except Exception:  # noqa: BLE001 — сбой сворачивания не должен ронять саму команду
                     await state.clear()
                 data["raw_state"] = (
                     None  # визард-StateFilter больше не совпадёт → команда сработает
                 )
-        return await handler(event, data)
+        result = await handler(event, data)
+        # B1 (живой тест 2026-07-07): раньше сворачивание было МОЛЧАЛИВЫМ — пользователь не знал,
+        # что черновик §19 сохранён и как вернуться. Подсказка ПОСЛЕ ответа команды (mirror
+        # menu_guard.btn_guard_menu). Сбой подсказки не роняет уже выполненную команду.
+        try:
+            if cc_step is not None:
+                await event.answer(i18n.t("cc_wizard_suspended", step=max(1, min(int(cc_step), 7))))
+            if cli_flushed:
+                await event.answer(i18n.t("cli_buf_flushed"))
+        except Exception:  # noqa: BLE001
+            pass
+        return result
 
 
 def _valid_idx(seq: list | None, idx: int) -> TypeGuard[list]:
@@ -1120,12 +1135,16 @@ async def _present_proposal(
     # Человекочитаемая сводка по operation+params (деньги — реальное «40.00 → 48.00 (+20%)»).
     # Для create_rsa/create_gdn у вызывающего свой богатый summary → fmt вернёт "".
     display = texts.fmt_mutation_summary(operation, params) or summary
-    # G2: не-Draft аккаунт мутации — баннер В СВОДКЕ (и в audit): менеджер видит, на ЧЬИ деньги идёт
-    # изменение, до нажатия ✅ (Draft не баннерим — он базовый/тестовый, чтобы не шуметь).
-    if customer_id != DRAFT_ACCOUNT_ID:
-        display = (
-            i18n.t("mutation_account_banner", acct=_account_label(customer_id)) + "\n\n" + display
-        )
+    # AD.2: баннер аккаунта — на КАЖДОЙ карточке (и в audit), включая Draft. Раз выбрано «одно
+    # подтверждение везде», всегда-видимый ярлык — единственная страховка от мутации не того
+    # аккаунта: менеджер видит, на ЧЬИ деньги идёт правка, до ✅. Боевой — ⚠️, Draft — 🧪 (спокойнее),
+    # так что «реальные деньги» остаётся отличимым сигналом; тихий фолбэк на Draft больше не невидим.
+    _banner_key = (
+        "mutation_account_banner_draft"
+        if customer_id == DRAFT_ACCOUNT_ID
+        else "mutation_account_banner"
+    )
+    display = i18n.t(_banner_key, acct=_account_label(customer_id)) + "\n\n" + display
     if external_context and operation in _MONEY_OPS_UI:
         # Денежное предложение при внешнем контенте — усиленное предупреждение В СВОДКЕ (и в audit).
         display = i18n.t("external_context_money_warn") + "\n\n" + display
@@ -4604,9 +4623,10 @@ def _actor(event: object) -> tuple[int | None, str | None]:
     return getattr(fu, "id", None), getattr(fu, "username", None)
 
 
-async def _camp_mutate(cq: CallbackQuery, idx: int, operation: str) -> None:
-    """Кнопка пауза/возобновление: СОЗДАЁТ черновик (как текстовая команда) → confirm-гейт.
-    НЕ исполняет мутацию напрямую — только после ✅ через ту же ветку, что и on_text."""
+async def _camp_mutate(cq: CallbackQuery, idx: int, operation: str, **extra) -> None:
+    """Кнопка пауза/возобновление/сети: СОЗДАЁТ черновик (как текстовая команда) → confirm-гейт.
+    НЕ исполняет мутацию напрямую — только после ✅ через ту же ветку, что и on_text.
+    extra — доп. параметры схемы операции (напр. search_partners для set_campaign_network)."""
     chat_id = _cq_chat_id(cq)
     camps = _CAMP_CACHE.get(chat_id)
     if not _valid_idx(camps, idx):
@@ -4614,7 +4634,7 @@ async def _camp_mutate(cq: CallbackQuery, idx: int, operation: str) -> None:
         return
     name = camps[idx]["name"]
     try:
-        cid, op, params, summary = _build_proposal(operation, campaign=name)
+        cid, op, params, summary = _build_proposal(operation, campaign=name, **extra)
     except Exception as e:  # валидация схемы
         await cq.answer(await _friendly_error(e, "camp:menu", short=True), show_alert=True)
         return

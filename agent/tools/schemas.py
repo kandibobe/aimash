@@ -104,6 +104,7 @@ MUTATION_TOOLS = {
     "pause_campaign",
     "resume_campaign",
     "update_campaign",
+    "set_campaign_network",
     "remove_campaign",
     "remove_ad_group",
     "pause_ad_group",
@@ -256,6 +257,15 @@ class UpdateCampaign(BaseModel):
     # Диапазон длины дублирует валидатор мутации (defense-in-depth: не доверяем модели).
     campaign: str
     new_name: str = Field(min_length=1, max_length=255)
+
+
+class SetCampaignNetwork(BaseModel):
+    """Сети кампании (§19.3): вкл/выкл ПОИСКОВЫХ ПАРТНЁРОВ на существующей кампании.
+    Дефолт проекта — партнёры ВЫКЛ (включение только явной командой менеджера). КМС и
+    ограниченную target_partner_search_network этот инструмент НЕ трогает (код)."""
+
+    campaign: str
+    search_partners: bool  # True = включить поисковых партнёров, False = выключить
 
 
 class PauseAdGroup(BaseModel):
@@ -1028,6 +1038,7 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "resume_campaign": ResumeCampaign,
     "launch_campaign": LaunchCampaign,
     "update_campaign": UpdateCampaign,
+    "set_campaign_network": SetCampaignNetwork,
     "pause_ad_group": PauseAdGroup,
     "resume_ad_group": ResumeAdGroup,
     "remove_campaign": RemoveCampaign,
@@ -1106,6 +1117,13 @@ TOOLS: list[dict] = [
         "Переименовать кампанию: campaign — текущее имя, new_name — новое. Для команд вида "
         "«переименуй кампанию X в Y» / «rename campaign X to Y».",
         UpdateCampaign,
+    ),
+    _tool(
+        "set_campaign_network",
+        "Включить/выключить сеть ПОИСКОВЫХ ПАРТНЁРОВ Google у существующей кампании. Для команд "
+        "«отключи поисковых партнёров на кампании X», «включи партнёрскую сеть». "
+        "search_partners=false — выключить (рекомендованный дефолт), true — включить.",
+        SetCampaignNetwork,
     ),
     _tool(
         "pause_ad_group",

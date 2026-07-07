@@ -488,6 +488,33 @@ async def camp_delete(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
     await bm._camp_mutate(cq, callback_data.idx, "remove_campaign")
 
 
+# ── §19.3 Сети: тумблер поисковых партнёров существующей кампании ────────────────
+@bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "network"))
+async def camp_network(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
+    """Подменю сетей кампании. READ-ONLY: только выбор; изменение — черновиком
+    set_campaign_network за confirm-гейтом («было→станет» подтянет read_before)."""
+    camps = bm._CAMP_CACHE.get(bm._cq_chat_id(cq))
+    if not bm._valid_idx(camps, callback_data.idx):
+        await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
+        return
+    await cq.answer()
+    await bm._safe_edit(
+        cq,
+        bm.i18n.t("camp_network_title", camp=camps[callback_data.idx]["name"]),
+        reply_markup=bm.campaign_network_kb(callback_data.idx),
+    )
+
+
+@bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "net_off"))
+async def camp_net_off(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
+    await bm._camp_mutate(cq, callback_data.idx, "set_campaign_network", search_partners=False)
+
+
+@bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "net_on"))
+async def camp_net_on(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
+    await bm._camp_mutate(cq, callback_data.idx, "set_campaign_network", search_partners=True)
+
+
 # ── §3 Аудитории: меню кампании → список аудиторий → черновик attach_audience ───────
 @bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "audience"))
 async def camp_audience(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:

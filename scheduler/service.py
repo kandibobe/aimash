@@ -158,6 +158,7 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
     sched.add_job(
         jobs.cleanup_stale_campaign_drafts,
         IntervalTrigger(minutes=settings.cleanup_interval_minutes),
+        args=[bot],  # B2: предупреждение до TTL + уведомление по факту гашения черновика
         id="cleanup_stale_drafts",
         replace_existing=True,
         misfire_grace_time=600,

@@ -563,6 +563,50 @@ async def test_apply_update_campaign_validates_empty_name_before_claim():
     assert calls["n"] == 0 and store.finalized is False
 
 
+# ── apply_set_campaign_network (§19.3): тумблер поисковых партнёров, НЕ деньги ────
+async def test_apply_set_campaign_network_happy_path():
+    called = {}
+
+    def fake(client, customer_id, campaign_id, search_partners):
+        called.update(
+            customer_id=customer_id, campaign_id=campaign_id, search_partners=search_partners
+        )
+        return {"applied": True, "search_partners": search_partners}
+
+    # user_initiated=False намеренно: сети — не деньги, гейтом user_initiated НЕ блокируются.
+    store = FakeStore(FakeProposal("set_campaign_network", "confirmed", user_initiated=False))
+    with patched(mut, "_set_campaign_network_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_set_campaign_network(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_id="23",
+            search_partners=False,
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+        )
+    assert res["applied"] is True
+    assert called["campaign_id"] == "23" and called["search_partners"] is False
+    assert store.finalized is True
+
+
+def test_set_campaign_network_via_sdk_mask_and_field_real_proto():
+    """На РЕАЛЬНЫХ прото: маска — лист network_settings.target_search_network (иначе сервер
+    отверг бы FIELD_HAS_SUBFIELDS); явный False тоже попадает в маску (это и есть «выключить»);
+    ограниченная partner_search_network и КМС в маске НЕ появляются никогда."""
+    for flag in (False, True):
+        client = _RealProtoClient()
+        res = mut._set_campaign_network_via_sdk(client, DRAFT_ACCOUNT_ID, "23", flag)
+        assert res["applied"] is True and res["search_partners"] is flag
+        op = client.captured["op"]
+        paths = list(op.update_mask.paths)
+        assert "network_settings.target_search_network" in paths, paths
+        _assert_mask_paths_are_leaf(paths)
+        assert bool(op.update.network_settings.target_search_network) is flag
+        assert not any("partner_search_network" in p or "content_network" in p for p in paths), (
+            paths
+        )
+
+
 # ── apply_pause_ad_group / apply_resume_ad_group (§16 AdGroupService): оба гейта, без денег ──
 async def test_apply_pause_ad_group_happy_path():
     called = {}
@@ -1781,6 +1825,12 @@ def _apply_case(op):
         return mut.apply_pause_campaign, {"campaign_id": "7", **base}
     if op == "update_campaign":
         return mut.apply_update_campaign, {"campaign_id": "7", "new_name": "Новое имя", **base}
+    if op == "set_campaign_network":
+        return mut.apply_set_campaign_network, {
+            "campaign_id": "7",
+            "search_partners": False,
+            **base,
+        }
     if op == "pause_ad_group":
         return mut.apply_pause_ad_group, {"ad_group_id": "77", **base}
     if op == "resume_ad_group":

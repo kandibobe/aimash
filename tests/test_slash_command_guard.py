@@ -85,3 +85,73 @@ async def test_command_without_active_state_untouched():
     # нет активного визарда → middleware ничего не сворачивает
     data, n, _, state = await _run("/templates", None)
     assert n == 1 and data["raw_state"] is None and state.cleared is False
+
+
+# ── B1 (живой тест 2026-07-07): сворачивание больше НЕ молчаливое ────────────────
+async def test_command_with_cc_draft_sends_saved_note_after_handler(monkeypatch):
+    """Команда посреди визарда §19: черновик остаётся active, а ПОСЛЕ ответа команды пользователь
+    получает подсказку «черновик сохранён (шаг N/7)» — раньше сворачивание было молчаливым."""
+
+    class _Draft:
+        status = "active"
+        current_step = 3
+        session_id = "s1"
+        wizard_state: dict = {}
+
+    class _Store:
+        async def get(self, sid, expected_chat_id=None):
+            return _Draft()
+
+    monkeypatch.setattr(bm, "CDRAFTS", _Store())
+    mw = bm.SlashCommandExitsWizardMiddleware()
+    state = _State()
+    state._data = {"cc_session": "s1"}
+    order: list[str] = []
+    msg = _Msg("/report")
+
+    async def answer(text, **kw):
+        order.append(f"note:{text}")
+
+    msg.answer = answer
+    data = {"raw_state": "CreateCampaignWizard:keywords", "state": state}
+
+    async def handler(event, d):
+        order.append("handler")
+        return "ok"
+
+    res = await mw(handler, msg, data)
+    assert res == "ok" and state.cleared is True and data["raw_state"] is None
+    notes = [x for x in order if x.startswith("note:")]
+    assert notes and "3/7" in notes[0]  # шаг черновика в подсказке
+    assert order[0] == "handler"  # подсказка ПОСЛЕ ответа команды, не вместо него
+
+
+async def test_note_failure_does_not_break_command(monkeypatch):
+    """Сбой отправки подсказки не роняет уже выполненную команду (handler-результат доходит)."""
+
+    class _Draft:
+        status = "active"
+        current_step = 2
+        session_id = "s1"
+        wizard_state: dict = {}
+
+    class _Store:
+        async def get(self, sid, expected_chat_id=None):
+            return _Draft()
+
+    monkeypatch.setattr(bm, "CDRAFTS", _Store())
+    mw = bm.SlashCommandExitsWizardMiddleware()
+    state = _State()
+    state._data = {"cc_session": "s1"}
+    msg = _Msg("/report")
+
+    async def answer(text, **kw):
+        raise RuntimeError("chat is dead")
+
+    msg.answer = answer
+    data = {"raw_state": "CreateCampaignWizard:keywords", "state": state}
+
+    async def handler(event, d):
+        return "ok"
+
+    assert await mw(handler, msg, data) == "ok"

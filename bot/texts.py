@@ -922,6 +922,14 @@ def fmt_mutation_summary(operation: str, params: dict, lang: str | None = None) 
         b = _before(params)
         old = b.get("before_name") if (b and b.get("kind") == "name") else c
         return f"Кампания «{old}» → переименовать в «{new}»."
+    if operation == "set_campaign_network":
+        # §19.3: тумблер поисковых партнёров. «Было→станет», если снимок есть.
+        after = "ВКЛ" if params.get("search_partners") else "ВЫКЛ"
+        b = _before(params)
+        if b and b.get("kind") == "network":
+            before = "ВКЛ" if b.get("before_search_partners") else "ВЫКЛ"
+            return f"Кампания «{c}»: поисковые партнёры {before} → {after}."
+        return f"Кампания «{c}»: поисковые партнёры → {after}."
     if operation == "remove_campaign":
         return f"🗑 УДАЛИТЬ кампанию «{c}» целиком.\n⚠️ Действие необратимо (статус станет REMOVED)."
     if operation == "remove_ad_group":
@@ -1063,6 +1071,13 @@ def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
         b = _before(params)
         old = b.get("before_name") if (b and b.get("kind") == "name") else c
         return f"Campaign “{old}” → rename to “{new}”."
+    if operation == "set_campaign_network":
+        after = "ON" if params.get("search_partners") else "OFF"
+        b = _before(params)
+        if b and b.get("kind") == "network":
+            before = "ON" if b.get("before_search_partners") else "OFF"
+            return f"Campaign “{c}”: search partners {before} → {after}."
+        return f"Campaign “{c}”: search partners → {after}."
     if operation == "remove_campaign":
         return f"🗑 DELETE the whole campaign “{c}”.\n⚠️ Irreversible (status becomes REMOVED)."
     if operation == "remove_ad_group":

@@ -149,6 +149,69 @@ async def test_cleanup_marks_stale_active_abandoned():
     assert snap is not None and snap.status == "abandoned"
 
 
+class _FakeBot:
+    def __init__(self):
+        self.sent: list[tuple[int, str]] = []
+
+    async def send_message(self, chat_id, text, **kw):
+        self.sent.append((int(chat_id), str(text)))
+
+
+@pytest.mark.asyncio
+async def test_cleanup_notifies_owner_on_expiry():
+    """B2: гашение по TTL больше не молчаливое — владелец получает уведомление с /newcampaign."""
+    await init_db()
+    chat = 7700014
+    st = CampaignDraftStore()
+    sid = await st.create(chat_id=chat, customer_id=DRAFT_ACCOUNT_ID)
+    await st.set_step(sid, 2)
+    bot = _FakeBot()
+    future = datetime.now(timezone.utc) + timedelta(days=2)
+    n = await cleanup_stale_campaign_drafts(bot, now=future, ttl_hours=0)
+    assert n >= 1
+    snap = await st.get(sid)
+    assert snap is not None and snap.status == "abandoned"
+    ours = [t for cid, t in bot.sent if cid == chat]
+    assert ours and "/newcampaign" in ours[-1]  # уведомление по факту + как вернуться
+
+
+@pytest.mark.asyncio
+async def test_cleanup_warns_before_expiry_once_per_idle():
+    """B2: предупреждение ДО истечения (окно DRAFT_EXPIRY_WARN_HOURS), черновик остаётся active;
+    повторный прогон того же простоя НЕ шлёт второй warn (идемпотентность на idle-период)."""
+    await init_db()
+    chat = 7700015
+    st = CampaignDraftStore()
+    sid = await st.create(chat_id=chat, customer_id=DRAFT_ACCOUNT_ID)
+    await st.set_step(sid, 3)
+    bot = _FakeBot()
+    # ttl=24ч, возраст ~20ч → внутри 12-часового окна предупреждения, но НЕ просрочен
+    warn_time = datetime.now(timezone.utc) + timedelta(hours=20)
+    await cleanup_stale_campaign_drafts(bot, now=warn_time, ttl_hours=24)
+    snap = await st.get(sid)
+    assert snap is not None and snap.status == "active"  # не погашен
+    ours = [t for cid, t in bot.sent if cid == chat]
+    assert len(ours) == 1 and "/newcampaign" in ours[0]  # предупреждение с подсказкой возврата
+    # повторный прогон того же простоя — warn не дублируется
+    bot2 = _FakeBot()
+    await cleanup_stale_campaign_drafts(bot2, now=warn_time + timedelta(hours=1), ttl_hours=24)
+    assert [t for cid, t in bot2.sent if cid == chat] == []
+    snap2 = await st.get(sid)
+    assert snap2 is not None and snap2.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_without_bot_stays_silent_compatible():
+    """B2: bot=None (тесты/CLI) — поведение как раньше: гасим, никого не уведомляем, не падаем."""
+    await init_db()
+    chat = 7700016
+    st = CampaignDraftStore()
+    await st.create(chat_id=chat, customer_id=DRAFT_ACCOUNT_ID)
+    future = datetime.now(timezone.utc) + timedelta(days=2)
+    n = await cleanup_stale_campaign_drafts(None, now=future, ttl_hours=0)
+    assert n >= 1
+
+
 # ── Хендлеры Этапа 1: накопление черновика БЕЗ минтинга proposal (чистота гейта) ──
 async def _count_proposals(chat_id: int) -> int:
     async with Session() as s:

@@ -214,6 +214,34 @@ async def apply_update_campaign(
     return result
 
 
+# ── Сети кампании (§19.3): вкл/выкл поисковых партнёров на СУЩЕСТВУЮЩЕЙ кампании ──
+# Заказчик (2026-07-07): «партнёрскую сеть и поисковых партнёров всегда отключать» —
+# дефолт при создании уже ВЫКЛ; этот инструмент чинит ранее созданные кампании и даёт
+# явное включение по команде. Меняется ТОЛЬКО target_search_network (партнёры);
+# target_partner_search_network (ограниченная сеть) и КМС не трогаем НИКОГДА.
+# НЕ денежная операция → user_initiated не требуется (как pause/resume). Оба гейта обязательны.
+async def apply_set_campaign_network(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    search_partners: bool,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    ensure_allowed(customer_id)
+    await _require_confirmation(confirm_store, confirmation_id, "set_campaign_network")
+    result = await run_ads_call(
+        _set_campaign_network_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_id,
+        bool(search_partners),
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
 # ── Пауза/возобновление ГРУППЫ объявлений (§16 AdGroupService) ───────────────────
 # Зеркало pause/resume кампании, но статус живёт на ad_group. Деньги НЕ трогаются →
 # user_initiated не требуется (как и для паузы кампании). Оба гейта обязательны.
@@ -1162,6 +1190,28 @@ def _update_campaign_name_via_sdk(
         "customer_id": customer_id,
         "campaign_id": str(campaign_id),
         "new_name": new_name,
+        "applied": True,
+    }
+
+
+def _set_campaign_network_via_sdk(
+    client, customer_id: str, campaign_id: str, search_partners: bool
+) -> dict:
+    """Тумблер поисковых партнёров кампании. В v24 партнёры = target_search_network;
+    target_partner_search_network — ограниченная сеть избранных аккаунтов, не трогаем НИКОГДА.
+    Маску ставим ЯВНО на лист (как _set_bidding_strategy_via_sdk): protobuf_helpers.field_mask
+    НЕ увидел бы False (proto3 не маскирует default-скаляры), а False — это и есть главный
+    сценарий «выключить партнёров»."""
+    svc = client.get_service("CampaignService")
+    op = client.get_type("CampaignOperation")
+    op.update.resource_name = svc.campaign_path(str(customer_id), str(campaign_id))
+    op.update.network_settings.target_search_network = bool(search_partners)
+    op.update_mask.paths.append("network_settings.target_search_network")
+    svc.mutate_campaigns(customer_id=str(customer_id), operations=[op])
+    return {
+        "customer_id": customer_id,
+        "campaign_id": str(campaign_id),
+        "search_partners": bool(search_partners),
         "applied": True,
     }
 
@@ -2162,7 +2212,8 @@ def _create_search_campaign_via_sdk(
         .resource_name
     )
 
-    # 2) Кампания (SEARCH, PAUSED, стратегия ставок, поиск + поисковые партнёры, опц. URL-опции).
+    # 2) Кампания (SEARCH, PAUSED, стратегия ставок, только Google-поиск (партнёры/КМС ВЫКЛ,
+    #    партнёры — лишь по явному networks='search_partners'), опц. URL-опции).
     camp_svc = client.get_service("CampaignService")
     cop = client.get_type("CampaignOperation")
     c = cop.create
@@ -2174,10 +2225,13 @@ def _create_search_campaign_via_sdk(
     bidding, bidding_note = _downgrade_bidding_if_no_conversions(client, cid, bidding)
     _apply_bidding_on_create(client, c, bidding)  # стратегия из §19.3 (по умолчанию manual CPC)
     c.network_settings.target_google_search = True
-    c.network_settings.target_search_network = True
-    c.network_settings.target_content_network = False
-    # §19.3: партнёрские сети — только по явному указанию менеджера (networks='search_partners').
-    c.network_settings.target_partner_search_network = networks == "search_partners"
+    # §19.3: поисковые партнёры — ТОЛЬКО по явному указанию менеджера (networks='search_partners').
+    # В API v24 партнёры = target_search_network (НЕ target_partner_search_network — то ограниченная
+    # «partner network» для избранных аккаунтов, на обычном роняет create
+    # CampaignError.CANNOT_TARGET_PARTNER_SEARCH_NETWORK; её не трогаем никогда).
+    c.network_settings.target_search_network = networks == "search_partners"
+    c.network_settings.target_content_network = False  # КМС всегда ВЫКЛ для Search
+    c.network_settings.target_partner_search_network = False
     # §19.3: даты запуска (ISO → YYYYMMDD как в официальных примерах). None ⇒ дефолты Google
     # (старт сегодня, без даты конца).
     if start_date:

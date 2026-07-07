@@ -332,6 +332,67 @@ def test_create_search_via_sdk_rolls_back_budget_on_campaign_failure():
     assert removed == ["customers/x/campaignBudgets/9"]  # осиротевший бюджет удалён
 
 
+# ── §19.3: сети на SDK-полях (класс-гард на перепутанные поля v24) ─────────────────
+# target_search_network = ПОИСКОВЫЕ ПАРТНЁРЫ (дефолт ВЫКЛ, вкл. только явным 'search_partners');
+# target_partner_search_network = ограниченная сеть избранных аккаунтов — НИКОГДА не True
+# (иначе CampaignError.CANNOT_TARGET_PARTNER_SEARCH_NETWORK роняет create на обычном аккаунте);
+# target_content_network (КМС) для Search всегда ВЫКЛ. Жалоба заказчика 2026-07-07.
+@pytest.mark.parametrize(
+    ("networks", "want_partners"),
+    [(None, False), ("search", False), ("search_partners", True)],
+)
+def test_create_search_via_sdk_network_settings(networks, want_partners):
+    captured: dict[str, object] = {}
+
+    class _BudgetSvc:
+        def mutate_campaign_budgets(self, customer_id, operations):
+            op = operations[0]
+            if isinstance(getattr(op, "remove", None), str):  # откат после нашего стопа
+                return _resp([])
+            return _resp(["customers/x/campaignBudgets/9"])
+
+    class _CampSvc:
+        def mutate_campaigns(self, customer_id, operations):
+            ns = operations[0].create.network_settings
+            captured["google_search"] = ns.target_google_search
+            captured["search_partners"] = ns.target_search_network
+            captured["content"] = ns.target_content_network
+            captured["partner_search"] = ns.target_partner_search_network
+            raise RuntimeError("STOP: network_settings захвачены")
+
+    services = {"CampaignBudgetService": _BudgetSvc(), "CampaignService": _CampSvc()}
+
+    class _Client:
+        enums = _Auto()
+
+        def get_service(self, name):
+            return services[name]
+
+        def get_type(self, name):
+            return _Auto()
+
+    kwargs = {} if networks is None else {"networks": networks}
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        with pytest.raises(RuntimeError):
+            mut._create_search_campaign_via_sdk(
+                _Client(),
+                DRAFT_ACCOUNT_ID,
+                campaign_name="Сети",
+                final_url="https://example.com/",
+                headlines=["Заголовок", "Второй", "Третий"],
+                descriptions=["Описание один", "Описание два"],
+                budget_micros=50_000_000,
+                keywords=[],
+                match_type="phrase",
+                cpc_bid_micros=500_000,
+                **kwargs,
+            )
+    assert captured["google_search"] is True
+    assert captured["search_partners"] is want_partners
+    assert captured["content"] is False  # КМС всегда ВЫКЛ
+    assert captured["partner_search"] is False  # ограниченную сеть не трогаем НИКОГДА
+
+
 # ── §19.8/§11: «Запустить» включает ВСЮ структуру, а не только кампанию (crux фикса) ──
 def test_launch_campaign_via_sdk_enables_whole_tree():
     """Регресс-гард на тихий дефект: визард создаёт кампанию/группу/RSA все PAUSED; включение

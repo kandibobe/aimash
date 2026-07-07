@@ -79,6 +79,24 @@ def find_campaign_by_name(
     return None
 
 
+def campaign_network_settings(client: GoogleAdsClient, customer_id: str, name: str) -> dict | None:
+    """Текущий тумблер поисковых партнёров кампании — для «было→станет» set_campaign_network
+    (§19.3). READ-ONLY. None = кампания не найдена."""
+    ensure_allowed(customer_id)
+    ga = client.get_service("GoogleAdsService")
+    safe = gaql_escape(name)
+    q = (
+        "SELECT campaign.id, campaign.network_settings.target_search_network FROM campaign "
+        f"WHERE campaign.name = '{safe}' LIMIT 1"
+    )
+    for row in ga.search(customer_id=str(customer_id), query=q):
+        return {
+            "id": str(row.campaign.id),
+            "search_partners": bool(row.campaign.network_settings.target_search_network),
+        }
+    return None
+
+
 def find_ad_groups(
     client: GoogleAdsClient, customer_id: str, campaign_name: str
 ) -> list[AdGroupRef]:
