@@ -34,6 +34,12 @@ os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_db.as_posix()}"
 # Ловит класс «зелёно локально, красно в CI» из-за зависимости теста от локального .env.
 os.environ["GOOGLE_ADS_ALLOWED_CUSTOMER_IDS"] = ""
 os.environ["GOOGLE_ADS_READ_CUSTOMER_IDS"] = ""
+# И login-MCC пустой (как CI без .env). Иначе ленивый само-обход дочерних
+# (ads.client.ensure_read_children_discovered, 2026-07: /accounts + пикеры → _read_account_rows)
+# дёргал бы РЕАЛЬНЫЙ Google Ads SDK на машине с живым .env: тест ~30 с (сетевой round-trip) и флак
+# SQLite (долгий await в loop'е рвал соседние тесты). Тесты обхода MCC задают login явно (_login()).
+os.environ["GOOGLE_ADS_LOGIN_CUSTOMER_ID"] = ""
+os.environ["GOOGLE_ADS_LOGIN_CUSTOMER_IDS"] = ""
 
 
 @pytest.fixture(autouse=True)

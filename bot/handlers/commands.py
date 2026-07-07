@@ -507,9 +507,11 @@ async def users_cmd(m: bm.Message) -> None:
 async def _render_adduser_pick(cq: bm.CallbackQuery, target: int, page: int) -> None:
     """Отрисовать пикер выбора аккаунтов для оператора (тап-тогл гранта чтения). Список — обнаруженные
     дочерние (meta), отметки ✅ — уже выданные гранты. Пусто ⇒ подсказка /refresh."""
-    from ads.client import discovered_read_children_meta
+    from ads.client import discovered_read_children_meta, ensure_read_children_discovered
     from core.access import list_user_account_ids
 
+    # само-починка: обход MCC на старте мог не пройти — обойти сейчас, чтобы грант-пикер был полон
+    await ensure_read_children_discovered()
     meta = discovered_read_children_meta()
     accounts = sorted(
         ((cid, (ch.name or cid)) for cid, ch in meta.items() if cid != bm.DRAFT_ACCOUNT_ID),
@@ -544,6 +546,10 @@ async def admin_access_cb(cq: bm.CallbackQuery, callback_data: bm.AdminCB) -> No
     )
 
     if action == "all":
+        from ads.client import ensure_read_children_discovered
+
+        # обойти MCC, если старт не успел — иначе грант «все» выдал бы неполный набор
+        await ensure_read_children_discovered()
         ids = _all_readable_ids()
         for cid in ids:
             await grant_account_access(target, cid)

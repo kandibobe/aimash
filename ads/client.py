@@ -25,6 +25,8 @@ ensure_allowed перепроверяется на исполнении, tests/t
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
@@ -209,6 +211,59 @@ async def discover_read_children() -> int:
         (" [" + ", ".join(inactive[:20]) + "]") if inactive else "",
     )
     return n
+
+
+# ── Ленивая само-починка обхода MCC перед показом пикера (2026-07) ────────────────────────
+# Если обход на СТАРТЕ не прошёл (транзиентный сбой/таймаут холодного старта SDK/OAuth), набор
+# `_READ_DISCOVERED` пуст и ВСЕ пикеры аккаунтов деградируют на Draft + env read-list — до суточного
+# re-discovery (`scheduler.jobs.run_mcc_rediscovery`) или ручного /refresh: окно «часть аккаунтов
+# пропала везде» может тянуться до `settings.mcc_rediscovery_hours`. Чтобы СЛЕДУЮЩИЙ тап сам починил
+# список, перечислитель пикеров (`bot.main._read_account_rows`) зовёт `ensure_read_children_discovered`.
+# Лок (без стампеда параллельных пикеров) создаём лениво — на первом await есть running loop.
+_discover_lock: asyncio.Lock | None = None
+_discover_last_attempt: float = 0.0
+_DISCOVER_RETRY_COOLDOWN_S = 60.0  # не бьём Google Ads на КАЖДЫЙ пикер, если обход стабильно падает
+
+
+def _discovery_lock() -> asyncio.Lock:
+    """Лениво создать лок обхода (module-level asyncio.Lock() до старта loop хрупок между версиями)."""
+    global _discover_lock
+    if _discover_lock is None:
+        _discover_lock = asyncio.Lock()
+    return _discover_lock
+
+
+async def ensure_read_children_discovered() -> int:
+    """Гарантировать, что обход MCC ВЫПОЛНЕН (ленивая само-починка перед перечислением аккаунтов).
+
+    Быстрый путь (нулевая латентность здорового старта): набор дочерних НЕПУСТ ⇒ no-op. Пуст И
+    настроен MCC ⇒ пробуем обойти ЕЩЁ раз: под локом (double-checked — параллельные пикеры не
+    запустят N обходов) и с кулдауном `_DISCOVER_RETRY_COOLDOWN_S` (обход стабильно падает — не
+    долбим API на каждый пикер). Возвращает размер набора после попытки.
+
+    READ-ONLY: замок обхода `ensure_manager_allowed` — внутри `discover_read_children`; исключение
+    НЕ роняет вызывающий пикер (best-effort). ⚠️ Мутации/потолок этим НЕ расширяются: наполняется
+    тот же `_READ_DISCOVERED` (ENABLED-листы), что и на старте — чинится лишь fail-quiet «обход не
+    прошёл» без рестарта, набор мутаций (`ensure_allowed`) не затрагивается."""
+    global _discover_last_attempt
+    if _READ_DISCOVERED:
+        return len(_READ_DISCOVERED)  # обход уже дал детей — быстрый путь (не трогаем API)
+    if not settings.login_customer_id_set:
+        return 0  # нет настроенного MCC ⇒ обход невозможен (fail-closed; набор остаётся пуст)
+    now = time.monotonic()
+    if (now - _discover_last_attempt) < _DISCOVER_RETRY_COOLDOWN_S:
+        return len(_READ_DISCOVERED)  # недавно пробовали и не вышло — ждём кулдаун (без спама API)
+    async with _discovery_lock():
+        if _READ_DISCOVERED:  # другой корутин успел обойти, пока ждали лок (double-check)
+            return len(_READ_DISCOVERED)
+        _discover_last_attempt = time.monotonic()
+        try:
+            return await discover_read_children()
+        except Exception as e:  # noqa: BLE001 — само-починка best-effort, не роняем пикер
+            from core.logging import log
+
+            log.warning("mcc discover (lazy): повторный обход не выполнен: %s", type(e).__name__)
+            return len(_READ_DISCOVERED)
 
 
 def has_oauth_runtime(account: str) -> bool:

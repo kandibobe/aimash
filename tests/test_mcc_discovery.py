@@ -152,6 +152,89 @@ def test_discover_fail_closed_without_managers():
         assert ac.discovered_read_children() == set()
 
 
+# ── Ленивая само-починка обхода MCC перед пикером (fail-quiet «обход на старте не прошёл») ──
+# asyncio.run() создаёт НОВЫЙ loop на каждый вызов, а asyncio.Lock биндится к loop'у первого
+# acquire → перед каждым тестом сбрасываем _discover_lock (свежий лок под loop теста) и кулдаун.
+def test_lazy_rediscovery_heals_empty_set():
+    # Обход на старте «не прошёл» (набор пуст) → первый пикер зовёт ensure_read_children_discovered,
+    # тот обходит MCC СЕЙЧАС и наполняет набор — аккаунты появляются без рестарта/ручного /refresh.
+    children = [_child(CH1, "USD"), _child(CH2, "EUR")]
+    with _login(MGR), _fake_hierarchy(children):
+        ac.set_discovered_read_children([])  # старт не наполнил набор
+        ac._discover_lock = None
+        ac._discover_last_attempt = 0.0
+        assert ac.discovered_read_children() == set()
+        n = asyncio.run(ac.ensure_read_children_discovered())
+        assert n == 2
+        assert ac.discovered_read_children() == {CH1, CH2}  # само-починка сработала
+
+
+def test_lazy_rediscovery_noop_when_already_populated():
+    # Набор непуст (обход на старте прошёл) → ленивый путь даже НЕ трогает API (нулевая латентность).
+    children = [_child(CH1, "USD")]
+    calls = {"n": 0}
+    orig = ac.discover_read_children
+
+    async def _counting():
+        calls["n"] += 1
+        return await orig()
+
+    with _login(MGR), _fake_hierarchy(children):
+        ac.discover_read_children = _counting
+        ac._discover_lock = None
+        ac._discover_last_attempt = 0.0
+        try:
+            asyncio.run(ac.ensure_read_children_discovered())  # 1-й: пусто → обход
+            asyncio.run(ac.ensure_read_children_discovered())  # 2-й: непусто → no-op (без обхода)
+            assert calls["n"] == 1
+        finally:
+            ac.discover_read_children = orig
+
+
+def test_lazy_rediscovery_cooldown_blocks_repeat_while_empty():
+    # Обход стабильно возвращает пусто → кулдаун не даёт долбить API на КАЖДЫЙ пикер.
+    calls = {"n": 0}
+    orig = ac.discover_read_children
+
+    async def _counting():
+        calls["n"] += 1
+        return await orig()
+
+    with _login(MGR), _fake_hierarchy([]):  # ни одного дочернего → набор остаётся пуст
+        ac.discover_read_children = _counting
+        ac._discover_lock = None
+        ac._discover_last_attempt = 0.0
+        try:
+            asyncio.run(ac.ensure_read_children_discovered())  # обход (результат пуст)
+            asyncio.run(ac.ensure_read_children_discovered())  # в кулдауне → без повторного обхода
+            assert calls["n"] == 1
+        finally:
+            ac.discover_read_children = orig
+
+
+def test_lazy_rediscovery_noop_without_mcc():
+    # Нет настроенного MCC → обход невозможен, ленивый путь даже не пытается (fail-closed).
+    calls = {"n": 0}
+    orig = ac.discover_read_children
+
+    async def _counting():
+        calls["n"] += 1
+        return await orig()
+
+    with _login(""):
+        ac.discover_read_children = _counting
+        ac.set_discovered_read_children([])
+        ac._discover_lock = None
+        ac._discover_last_attempt = 0.0
+        try:
+            n = asyncio.run(ac.ensure_read_children_discovered())
+            assert n == 0
+            assert calls["n"] == 0  # без MCC обход не запускается
+        finally:
+            ac.discover_read_children = orig
+            ac.set_discovered_read_children([])
+
+
 def test_ensure_read_allowed_fail_closed_when_all_empty():
     # allowed + read + discovered пусты → чтение запрещено.
     ac.set_discovered_read_children([])
@@ -254,6 +337,10 @@ if __name__ == "__main__":
     test_discover_populates_leaves_only()
     test_discovered_child_readable_but_not_mutable()
     test_discover_fail_closed_without_managers()
+    test_lazy_rediscovery_heals_empty_set()
+    test_lazy_rediscovery_noop_when_already_populated()
+    test_lazy_rediscovery_cooldown_blocks_repeat_while_empty()
+    test_lazy_rediscovery_noop_without_mcc()
     test_ensure_read_allowed_fail_closed_when_all_empty()
     test_async_summary_uses_per_account_timezone_window()
     test_login_set_drops_non_digit_garbage_token()
