@@ -45,6 +45,8 @@ cp .env.example .env
 | `ACCOUNT_ACCESS_MODE` | нет | `auto`/`enforced`/`legacy` — пер-юзер изоляция аккаунтов; админ (`ADMIN_CHAT_IDS`) видит всё на чтение |
 | `GOOGLE_ADS_LOGIN_CUSTOMER_IDS` | нет | доп. MCC для обхода дочерних (§8), CSV |
 | `GOOGLE_ADS_API_VERSION` | нет | `v24` (мажор API; SDK-пин — в `pyproject.toml`) |
+| `DEFAULT_GEO_COUNTRY_CODE` | нет | D7: страна-по-умолчанию для гео, когда бриф её не задал (ISO alpha-2). Дефолт `UA`. **Деплой на другую страну ставит свой код** (Уганда → `UG`) — иначе кампании без явной страны таргетятся на Украину |
+| `DEFAULT_GEO_LOCALE` | нет | D7: язык названий локаций по умолчанию. Дефолт `ru`. **Пусто** ⇒ язык выводится из страны (UG→en); явное значение (`en`) побеждает |
 | `GOOGLE_ADS_DAILY_OP_LIMIT` | нет | `15000` — дневной лимит операций API; на 95% мутации блокируются (`/quota`) |
 | `SENTRY_DSN` / `SENTRY_TRACES_SAMPLE_RATE` | DSN — да | опц. телеметрия ошибок (`""` = выкл.) |
 | `REPORT_SCHEDULE` | нет | `0 9 * * *` — cron плановых отчётов (§14) |
