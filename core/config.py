@@ -86,9 +86,12 @@ class Settings(BaseSettings):
     # логинится (Фаза 3 — аккаунты под разными MCC). CSV. Легаси-скаляр выше вложен в множество
     # (login_customer_id_set). Пусто => только основной login_customer_id (поведение не меняется).
     google_ads_login_customer_ids: str = ""
-    google_ads_allowed_customer_ids: str = (
-        ""  # белый список аккаунтов для МУТАЦИЙ (см. ads.client.ensure_allowed)
-    )
+    # Белый список аккаунтов для МУТАЦИЙ (см. ads.client.ensure_allowed). Сентинел «all»/«*» =
+    # мутации на ПОЛНОМ видимом наборе (allowed_ceiling(): Draft ∪ read-list ∪ обнаруженные
+    # дочерние MCC) — см. allow_all_visible. В ПРОД пусто => дефолт «all» (prod готов из коробки,
+    # _default_mutations_all_in_prod); в dev/test пусто => fail-closed (мутаций нет). Замок
+    # видимости и confirm-гейт остаются: чужой аккаунт вне MCC немутируем, «да» обязателен.
+    google_ads_allowed_customer_ids: str = ""
     # §8: аккаунты, доступные ТОЛЬКО на чтение (сводка по дочерним MCC) ПОМИМО мутационного списка.
     # fail-closed; мутации этим НЕ затрагиваются (свой узкий замок). Пусто => чтение, как и мутации,
     # только на разрешённый аккаунт (поведение не меняется). См. ads.client.ensure_read_allowed.
@@ -242,6 +245,17 @@ class Settings(BaseSettings):
         }
 
     @property
+    def allow_all_visible(self) -> bool:
+        """Сентинел «all»/«*» в GOOGLE_ADS_ALLOWED_CUSTOMER_IDS — мутации разрешены на ПОЛНОМ
+        видимом наборе (ads.client.allowed_ceiling(): Draft ∪ read-list ∪ дочерние, обнаруженные
+        обходом MCC). Это prod-дефолт (см. _default_mutations_all_in_prod). НЕ снимает две
+        страховки: (1) confirm-гейт («да» + confirmation_id, ensure_allowed на исполнении),
+        (2) потолок видимости — аккаунт вне MCC мутировать нельзя (бот его не видит). Динамически
+        ограничен фактически обнаруженным набором: сбой discovery ⇒ мутабелен только пол потолка
+        {Draft} (безопасная деградация, не эскалация)."""
+        return self.google_ads_allowed_customer_ids.strip().lower() in {"all", "*"}
+
+    @property
     def read_customer_ids(self) -> set[str]:
         """§8: аккаунты, доступные на ЧТЕНИЕ помимо мутационного allow-list (сводка по дочерним
         MCC), нормализованные. Замок чтения — ads.client.ensure_read_allowed (fail-closed).
@@ -321,6 +335,18 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _default_mutations_all_in_prod(self) -> "Settings":
+        """Решение владельца 2026-07: Draft-only доктрина СНЯТА — в prod бот готов к работе на
+        ВСЕХ видимых аккаунтах по умолчанию. Если ENV=prod и GOOGLE_ADS_ALLOWED_CUSTOMER_IDS
+        пуст ⇒ выставляем сентинел «all» (мутации на allowed_ceiling(): Draft ∪ read-list ∪
+        обнаруженные дочерние; всё так же ⊆ видимости + confirm-гейт). Владелец может СУЗИТЬ
+        явным списком id. В dev/test пусто остаётся fail-closed (не открываем локаль/CI). Должен
+        идти ДО _require_google_ads_in_prod, чтобы тот увидел уже заполненное значение."""
+        if self.env == "prod" and not self.google_ads_allowed_customer_ids.strip():
+            self.google_ads_allowed_customer_ids = "all"
+        return self
+
+    @model_validator(mode="after")
     def _require_whitelist_in_prod(self) -> "Settings":
         """Fail-fast: в prod пустой whitelist недопустим — иначе бот отвечал бы ВСЕМ (fail-open).
         В dev/тестах не требуем (удобство), но WhitelistMiddleware всё равно fail-closed (пустой
@@ -342,7 +368,10 @@ class Settings(BaseSettings):
             missing = []
             if not self.google_ads_developer_token.get_secret_value():
                 missing.append("GOOGLE_ADS_DEVELOPER_TOKEN")
-            if not self.allowed_customer_ids:
+            # Сентинел «all» (allow_all_visible) — валидная конфигурация мутаций (полный видимый
+            # набор). В prod он проставляется дефолтом (_default_mutations_all_in_prod), так что
+            # эта ветка практически недостижима пустой; проверка остаётся как явный инвариант.
+            if not (self.allow_all_visible or self.allowed_customer_ids):
                 missing.append("GOOGLE_ADS_ALLOWED_CUSTOMER_IDS")
             if missing:
                 raise ValueError(

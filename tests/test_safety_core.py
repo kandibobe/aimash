@@ -188,6 +188,36 @@ def test_allowed_ceiling_reflects_visible_accounts():
         assert "1234567890" not in ceiling  # невидимый чужой id — не в потолке
 
 
+# ── Сентинел «all» (решение владельца 2026-07: Draft-only доктрина снята, prod-дефолт) ──
+def test_all_sentinel_allows_every_visible_account():
+    # «all» ⇒ мутационный набор = ВЕСЬ видимый потолок (Draft ∪ read-list ∪ discovered).
+    with allowed_ids("all"), read_ids(_CHILD):
+        ensure_allowed(DRAFT_ACCOUNT_ID)
+        ensure_allowed(_CHILD)  # видимый дочерний мутируем без явного перечисления
+
+
+def test_all_sentinel_still_blocks_invisible_account():
+    # «all» — это ПОТОЛОК, а не «всё на свете»: аккаунт вне видимости бота — по-прежнему отказ.
+    with allowed_ids("all"), read_ids(_CHILD):
+        try:
+            ensure_allowed("1234567890")
+            raise AssertionError("«all» открыл невидимый аккаунт — регрессия потолка!")
+        except PermissionError:
+            pass
+
+
+def test_all_sentinel_star_alias_degrades_to_draft_floor():
+    # Алиас «*»; при пустой видимости (read-list пуст, discovery не бегал) набор = пол потолка
+    # {Draft} — безопасная деградация, не эскалация.
+    with allowed_ids("*"), read_ids(""):
+        ensure_allowed(DRAFT_ACCOUNT_ID)
+        try:
+            ensure_allowed(_CHILD)  # невидимый (нет в read/discovered) — отказ даже при «*»
+            raise AssertionError("«*» открыл невидимый дочерний — регрессия потолка!")
+        except PermissionError:
+            pass
+
+
 # ── Замок обхода MCC (ensure_manager_allowed): прямой юнит (раньше — лишь косвенно) ──
 def test_ensure_manager_allowed_fail_closed_when_empty():
     # Пустой login_customer_id → обход MCC запрещён (fail-closed), а не «разрешено всё».

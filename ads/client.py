@@ -1,19 +1,26 @@
 """Построение Google Ads клиента из .env + замок аккаунтов (раздельно ЧТЕНИЕ и МУТАЦИИ).
 
-⚠️ Менеджерский аккаунт (MCC) содержит реальные клиентские аккаунты. По умолчанию бот МЕНЯЕТ
-ТОЛЬКО один аккаунт — Aimash (Draft). ТОЧНЫЙ контракт замка МУТАЦИЙ (ensure_allowed), сверенный
-с кодом ниже — БЕЗ упрощения «Draft-only навсегда» (оно неверно для эффективного потолка):
-  1) КОД-минимум `ALLOWED_CEILING = {Draft}` — env не может его ПОНИЗИТЬ/убрать (Draft всегда в потолке);
+⚠️ Менеджерский аккаунт (MCC) содержит реальные клиентские аккаунты. Решение владельца 2026-07:
+Draft-only доктрина СНЯТА — бот готов менять ВСЕ аккаунты, ВИДИМЫЕ ему под его MCC. ТОЧНЫЙ
+контракт замка МУТАЦИЙ (ensure_allowed), сверенный с кодом ниже:
+  1) КОД-минимум `ALLOWED_CEILING = {Draft}` — env не может его ПОНИЗИТЬ/убрать (Draft всегда в
+     потолке). Это МИНИМУМ, а не «только Draft»;
   2) ЭФФЕКТИВНЫЙ потолок `allowed_ceiling()` = минимум ∪ аккаунты, ВИДИМЫЕ боту (env read-list +
-     дочерние обхода MCC). env МОЖЕТ добавить в потолок ТОЛЬКО ВИДИМЫЙ аккаунт (опечатка в чужой
-     боевой id отсекается — его нет среди видимых);
-  3) fail-closed — пустой мутационный allow-list ⇒ отказ (а не «разрешено всё»);
-  4) членство — `customer_id` обязан быть в allow-list (`settings.allowed_customer_ids`) ⊆ потолок.
-Включить мутации на не-Draft ВИДИМОМ аккаунте — УПРАВЛЯЕМО КОНФИГОМ (`GOOGLE_ADS_ALLOWED_CUSTOMER_IDS`,
-осознанное решение владельца, золотое правило #9); ПОНИЗИТЬ код-минимум {Draft} нельзя без правки
-этого файла. По умолчанию `allowed_customer_ids` пуст ⇒ мутаций нет вовсе (строже, чем Draft-only).
-ЧТЕНИЕ — отдельный, более широкий замок (`ensure_read_allowed`, §8). Детали — у `ALLOWED_CEILING`/
-`allowed_ceiling`/`ensure_allowed` ниже.
+     дочерние обхода MCC). Мутировать можно ТОЛЬКО видимый аккаунт (опечатка в чужой боевой id
+     отсекается — его нет среди видимых). Это ГЛАВНАЯ несменяемая страховка;
+  3) fail-closed на мисконфиг — пустой мутационный набор ⇒ отказ (а не «разрешено всё»);
+  4) членство — `customer_id` обязан быть в мутационном наборе ⊆ потолок.
+Мутационный набор:
+  • сентинел `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all` (или `*`, `settings.allow_all_visible`) ⇒ набор =
+    ВЕСЬ эффективный потолок `allowed_ceiling()` (все видимые). Это ПРОД-ДЕФОЛТ (см.
+    core.config._default_mutations_all_in_prod) — прод готов из коробки;
+  • иначе — явный список id (`settings.allowed_customer_ids`), чтобы СУЗИТЬ набор;
+  • в dev/test пусто ⇒ мутаций нет (fail-closed).
+Две несменяемые страховки поверх набора: confirm-гейт (мутация только после «да» + confirmation_id,
+ensure_allowed перепроверяется на исполнении, tests/test_execute_account_binding.py) и потолок
+видимости (аккаунт вне MCC немутируем). Бюджет из scheduler остаётся заблокирован всегда
+(user_initiated). ЧТЕНИЕ — отдельный, более широкий замок (`ensure_read_allowed`, §8). Детали — у
+`ALLOWED_CEILING`/`allowed_ceiling`/`ensure_allowed` ниже.
 """
 
 from __future__ import annotations
@@ -34,16 +41,16 @@ DRAFT_ACCOUNT_ID = "7753643025"
 # ∪ ВИДИМЫЕ боту аккаунты (env read-list + дочерние настроенного MCC). Мутационный набор
 # (settings.allowed_customer_ids) ⊆ эффективного потолка (см. ensure_allowed).
 #
-# ✅ ВКЛЮЧЕНИЕ МУТАЦИЙ на конкретном аккаунте (G, «управляемый список», решение владельца 2026-07) —
-# УПРАВЛЯЕМО КОНФИГОМ, без правки кода на каждый аккаунт:
-#   1) добавить его id в `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS` (env) — но он обязан быть ВИДИМ боту
-#      (Draft / GOOGLE_ADS_READ_CUSTOMER_IDS / дочерний настроенного MCC), иначе allowed_ceiling()
-#      его не пропустит (защита от опечатки в чужой боевой id);
-#   2) если аккаунт под ДРУГИМ MCC — зарегистрировать его per-account OAuth-токен
-#      (scripts/register_account.py → oauth_tokens), иначе build_client не аутентифицирует его.
-# Исполнение уже привязано к proposal.customer_id и ЗАНОВО ensure_allowed(cid) на исполнении
+# ✅ МУТАЦИИ на всех видимых аккаунтах (решение владельца 2026-07, Draft-only доктрина снята):
+#   • ПРОД-ДЕФОЛТ — `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all` (settings.allow_all_visible) ⇒ мутационный
+#     набор = ВЕСЬ allowed_ceiling() (Draft + read-list + дочерние обхода MCC). Аккаунт под ДРУГИМ
+#     MCC требует per-account OAuth-токена (scripts/register_account.py → oauth_tokens), иначе
+#     build_client его не аутентифицирует (видим для замка, но не подключён).
+#   • СУЗИТЬ — явный список id в `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS` (каждый обязан быть ВИДИМ боту,
+#     иначе allowed_ceiling() отсекает — защита от опечатки в чужой боевой id).
+#   • dev/test пусто ⇒ мутаций нет (fail-closed).
+# Исполнение привязано к proposal.customer_id и ЗАНОВО ensure_allowed(cid) на исполнении
 # (tests/test_execute_account_binding.py); _present_proposal штампует АКТИВНЫЙ аккаунт (G2).
-# По умолчанию allowed_customer_ids={Draft} ⇒ поведение НЕ меняется, пока владелец не включит аккаунт.
 # Бюджет из scheduler остаётся заблокирован всегда (user_initiated).
 ALLOWED_CEILING = frozenset({DRAFT_ACCOUNT_ID})
 
@@ -350,22 +357,30 @@ def ensure_allowed(customer_id: str) -> None:
     Это единственная точка, через которую ВСЕ мутации проверяют customer_id. Нормализуем id (только
     цифры), поэтому '775-364-3025' и '7753643025' эквивалентны.
 
-    G1: мутационный набор = `settings.allowed_customer_ids` (env, opt-in владельца), ограниченный
-    ЭФФЕКТИВНЫМ потолком `allowed_ceiling()` (Draft ∪ видимые аккаунты). По умолчанию allow-list =
-    {Draft} ⇒ поведение как раньше (мутации только на Draft), пока владелец не добавит видимый аккаунт.
+    Мутационный набор (решение владельца 2026-07, Draft-only доктрина снята):
+      • `settings.allow_all_visible` (сентинел `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all`, прод-дефолт)
+        ⇒ набор = ВЕСЬ `allowed_ceiling()` (все видимые: Draft ∪ read-list ∪ дочерние обхода MCC);
+      • иначе — явный `settings.allowed_customer_ids`, ограниченный тем же потолком (способ СУЗИТЬ).
+    Потолок видимости и confirm-гейт остаются несменяемыми страховками: аккаунт вне MCC немутируем,
+    «да» + confirmation_id обязательны (перепроверка на исполнении). В dev/test пусто ⇒ fail-closed.
     """
     cid = normalize_customer_id(customer_id)
-    allowed = {normalize_customer_id(x) for x in settings.allowed_customer_ids}
     ceiling = allowed_ceiling()
+    # Сентинел «all» ⇒ мутационный набор = весь видимый потолок (динамически ограничен фактически
+    # обнаруженным набором: сбой discovery ⇒ мутабелен лишь пол потолка {Draft}, а не больше).
+    if settings.allow_all_visible:
+        allowed = set(ceiling)
+    else:
+        allowed = {normalize_customer_id(x) for x in settings.allowed_customer_ids}
 
-    # (2) fail-closed: без явного allow-list ничего не разрешаем.
+    # (2) fail-closed: без явного allow-list (и без сентинела «all») ничего не разрешаем.
     if not allowed:
         raise PermissionError(
             "allowed_customer_ids пуст — операции запрещены (fail-closed). "
-            f"Задай GOOGLE_ADS_ALLOWED_CUSTOMER_IDS={DRAFT_ACCOUNT_ID} в .env"
+            f"Задай GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (все видимые) или ={DRAFT_ACCOUNT_ID} в .env"
         )
-    # (1) потолок: env может включить мутации только на аккаунте, который бот ВИДИТ (Draft/read/
-    # discovered) — чужой/боевой id вне видимости не пройдёт.
+    # (1) потолок: мутировать можно только аккаунт, который бот ВИДИТ (Draft/read/discovered) —
+    # чужой/боевой id вне видимости не пройдёт (при «all» набор == потолок, проверка тривиальна).
     if not allowed <= ceiling:
         raise PermissionError(
             f"allowed_customer_ids {sorted(allowed)} выходит за потолок мутаций "

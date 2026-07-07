@@ -84,10 +84,26 @@ def test_prod_without_google_ads_token_raises():
         Settings(**_prod_kwargs(google_ads_developer_token=""))
 
 
-def test_prod_without_allowed_customer_ids_raises():
-    # в prod пустой allow-list аккаунтов = нечего трогать (fail-closed) → падаем на старте
-    with pytest.raises(ValidationError):
-        Settings(**_prod_kwargs(google_ads_allowed_customer_ids=""))
+def test_prod_without_allowed_customer_ids_defaults_to_all_visible():
+    # Решение владельца 2026-07 (Draft-only доктрина снята): prod с пустым списком мутаций
+    # НЕ падает, а дефолтится в сентинел «all» — мутации на всём ВИДИМОМ потолке
+    # (allowed_ceiling(); замок видимости ensure_allowed и confirm-гейт остаются).
+    # Явный список id по-прежнему СУЖАЕТ набор; в dev/test пусто = fail-closed.
+    s = Settings(**_prod_kwargs(google_ads_allowed_customer_ids=""))
+    assert s.google_ads_allowed_customer_ids == "all"
+    assert s.allow_all_visible is True
+
+
+def test_prod_explicit_allowed_ids_narrow_not_all():
+    # Явный список в prod НЕ подменяется сентинелом — владелец сузил набор осознанно.
+    s = Settings(**_prod_kwargs(google_ads_allowed_customer_ids="7753643025"))
+    assert s.allow_all_visible is False and s.allowed_customer_ids == {"7753643025"}
+
+
+def test_dev_empty_allowed_ids_stays_fail_closed():
+    # В dev/test пустой список НЕ дефолтится в «all» (не открываем локаль/CI).
+    s = Settings(**_prod_kwargs(env="dev", google_ads_allowed_customer_ids=""))
+    assert s.allow_all_visible is False and s.allowed_customer_ids == set()
 
 
 def test_dev_without_google_ads_ok():
