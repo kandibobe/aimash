@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bot.main as bm  # noqa: E402
 from bot.callbacks import KwAddCB  # noqa: E402
-from bot.keyboards import kw_add_kb, match_type_kb  # noqa: E402
+from bot.keyboards import match_type_kb  # noqa: E402
 from confirm.store import ConfirmStore  # noqa: E402
 from db.session import init_db  # noqa: E402
 
@@ -94,12 +94,15 @@ def test_kw_add_put_caps_size_evicting_oldest():
 
 
 # ── клавиатуры ─────────────────────────────────────────────────────────────────────
-def test_kw_add_kb_single_start_button():
-    m = kw_add_kb("TOK")
-    btns = [b for row in m.inline_keyboard for b in row]
-    assert len(btns) == 1
-    cb = KwAddCB.unpack(btns[0].callback_data)
-    assert cb.action == "start" and cb.token == "TOK"
+def test_kw_add_button_removed_from_report():
+    """P3 (фидбэк заказчика 2026-07-06): кнопки «➕ Добавить ключи» под отчётом больше нет —
+    вход через /addkeys и меню «➕ Ещё» (класс-гард от возврата кнопки)."""
+    from bot import keyboards as kbm
+
+    assert not hasattr(kbm, "kw_add_kb")
+    more = kbm.more_menu_kb()
+    cbs = [b.callback_data for row in more.inline_keyboard for b in row]
+    assert any("addkeys" in c for c in cbs)  # вход в меню «➕ Ещё» есть
 
 
 def test_match_type_kb_has_three_match_types_plus_cancel():
@@ -203,3 +206,102 @@ async def test_kw_add_match_with_stale_token_no_proposal():
     await bm.on_kw_add_match(cq, KwAddCB(action="match", token="missing", mt="broad"))
     assert bm._LAST_PENDING.get(chat_id) is None  # черновик не создан
     assert cq.answers and cq.answers[-1][1] is True  # show_alert=True (stale)
+
+
+# ── P3: /addkeys — свой список файлом/ссылкой/текстом (фидбэк заказчика 2026-07-06) ─
+async def test_addkeys_flow_text_list_to_pending_proposal():
+    """/addkeys → кампания → текстовый список → тип → ТОЛЬКО pending-черновик add_keywords."""
+    await init_db()
+    bm._KW_ADD.clear()
+    chat_id = 30_720
+    state = FakeState()
+    m = FakeMessage(chat_id=chat_id, text="/addkeys")
+    await bm.addkeys_start(m, state)
+    assert await state.get_state() == bm.KwAdd.awaiting_campaign
+    token = (await state.get_data())["kw_add_token"]
+    assert bm._KW_ADD[token]["keywords"] == []  # свой список, кандидатов нет
+
+    m2 = FakeMessage(chat_id=chat_id, text="Search Spring")
+    await bm.kw_add_campaign(m2, state)
+    assert await state.get_state() == bm.KwAdd.awaiting_keywords
+    # без кандидатов — просим файл/ссылку/текст, а не показываем пустой список
+    assert any("xlsx" in (t or "") for t, _ in m2.answers)
+
+    await bm.kw_add_keywords(
+        FakeMessage(chat_id=chat_id, text="купить авто\nавто из японии, купить авто"), state
+    )
+    sess = bm._KW_ADD[token]
+    assert sess["keywords"] == ["купить авто", "авто из японии"]  # дедуп, порядок
+
+    await bm.on_kw_add_match(
+        FakeCallbackQuery(FakeMessage(chat_id=chat_id)),
+        KwAddCB(action="match", token=token, mt="exact"),
+    )
+    cid = bm._LAST_PENDING.get(chat_id)
+    snap = await ConfirmStore().get_confirmed(cid)
+    assert snap.operation == "add_keywords" and snap.status == "pending"
+    assert snap.params["keywords"] == ["купить авто", "авто из японии"]
+
+
+async def test_addkeys_accepts_sheet_link():
+    """Ссылка на Google Sheets в awaiting_keywords → read_keyword_column → выбор типа."""
+    await init_db()
+    bm._KW_ADD.clear()
+    chat_id = 30_721
+    state = FakeState()
+    await bm.addkeys_start(FakeMessage(chat_id=chat_id), state)
+    token = (await state.get_data())["kw_add_token"]
+    await bm.kw_add_campaign(FakeMessage(chat_id=chat_id, text="Search Spring"), state)
+
+    import bot.handlers.keywords_flow as kf
+    import reports.sheets as rs
+
+    with patched(rs, "read_keyword_column", lambda sid: ["kw one", "kw two"]):
+        assert kf  # ссылка идёт через reports.sheets, патчим модуль-источник
+        await bm.kw_add_keywords(
+            FakeMessage(
+                chat_id=chat_id,
+                text="https://docs.google.com/spreadsheets/d/ABC123_xyz-9/edit",
+            ),
+            state,
+        )
+    assert bm._KW_ADD[token]["keywords"] == ["kw one", "kw two"]
+    assert await state.get_state() is None  # перешли к выбору типа (state очищен)
+
+
+async def test_addkeys_sheet_read_failure_keeps_state_with_hint():
+    """Приватная таблица → понятная подсказка про доступ, остаёмся в awaiting_keywords."""
+    await init_db()
+    bm._KW_ADD.clear()
+    chat_id = 30_722
+    state = FakeState()
+    await bm.addkeys_start(FakeMessage(chat_id=chat_id), state)
+    await bm.kw_add_campaign(FakeMessage(chat_id=chat_id, text="Search Spring"), state)
+
+    import reports.sheets as rs
+
+    def _boom(sid):
+        raise RuntimeError("permission denied")
+
+    m = FakeMessage(
+        chat_id=chat_id, text="https://docs.google.com/spreadsheets/d/ABC123_xyz-9/edit"
+    )
+    with patched(rs, "read_keyword_column", _boom):
+        await bm.kw_add_keywords(m, state)
+    assert await state.get_state() == bm.KwAdd.awaiting_keywords  # остаёмся в шаге
+    assert m.answers  # подсказка про доступ отправлена
+
+
+async def test_addkeys_accepts_document():
+    """Файл xlsx/csv/txt в awaiting_keywords → список ключей (не задача агенту)."""
+    await init_db()
+    bm._KW_ADD.clear()
+    chat_id = 30_723
+    state = FakeState()
+    await bm.addkeys_start(FakeMessage(chat_id=chat_id), state)
+    token = (await state.get_data())["kw_add_token"]
+    await bm.kw_add_campaign(FakeMessage(chat_id=chat_id, text="Search Spring"), state)
+
+    m = FakeMessage(chat_id=chat_id)
+    await bm.kw_add_from_document(m, state, "kw alpha\nkw beta\n", "keys.txt")
+    assert bm._KW_ADD[token]["keywords"] == ["kw alpha", "kw beta"]

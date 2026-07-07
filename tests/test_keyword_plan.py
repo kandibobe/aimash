@@ -356,13 +356,19 @@ def test_normalize_intent_maps_to_tz_taxonomy():
     from keywords.cluster import INTENTS, normalize_intent
 
     assert (
-        normalize_intent("Брендовый") == "навигационный"
-    )  # «бренд»/навигация → навигационный (ТЗ §7)
+        normalize_intent("Брендовый") == "брендовый"
+    )  # P2 (живой тест 2026-07-06): бренды/конкуренты — СВОЯ категория
     assert normalize_intent("commercial") == "коммерческий"
     assert normalize_intent("ТРАНЗАКЦИОННЫЙ") == "транзакционный"
     assert normalize_intent("информационный") == "информационный"
     assert normalize_intent("чёрт-знает-что") == ""  # неизвестное → пусто (не мусорный лейбл)
-    assert set(INTENTS) == {"транзакционный", "коммерческий", "информационный", "навигационный"}
+    assert set(INTENTS) == {
+        "транзакционный",
+        "коммерческий",
+        "информационный",
+        "навигационный",
+        "брендовый",
+    }
 
 
 async def test_parse_normalizes_model_intent(monkeypatch):
@@ -373,7 +379,7 @@ async def test_parse_normalizes_model_intent(monkeypatch):
 
     monkeypatch.setattr(cl, "chat", _ok)
     clusters = await cl.cluster_keywords(["a"], "ru")
-    assert clusters[0].intent == "навигационный"  # «брендовый» от модели сведён к таксономии ТЗ
+    assert clusters[0].intent == "брендовый"  # P2: «брендовый» — своя категория таксономии
 
 
 def test_rank_clusters_orders_by_volume_and_intent():

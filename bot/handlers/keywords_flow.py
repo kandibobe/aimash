@@ -204,7 +204,23 @@ async def kw_lang_text(m: bm.Message, state: bm.FSMContext) -> None:
     await _kw_present_params(m, state)
 
 
-# ── §7: добавить подобранные ключи в кампанию (research → кампания → тип соответствия → «да») ──
+# ── §7: добавить ключи в кампанию (свой файл/ссылка/текст → тип соответствия → «да») ──
+async def addkeys_start(m: bm.Message, state: bm.FSMContext) -> None:
+    """P3 (фидбэк заказчика 2026-07-06): отдельный вход «добавить ключи в кампанию» из меню/
+    команды — вместо кнопки под отчётом research. Принимает СВОЙ список: файл xlsx/csv/txt,
+    ссылку на Google Sheets или текст. Ничего не меняет — сбор ввода до confirm-гейта."""
+    await state.clear()
+    token = bm._kw_add_put([], "manual")
+    await state.set_state(bm.KwAdd.awaiting_campaign)
+    await state.update_data(kw_add_token=token)
+    await m.answer(bm.i18n.t("kw_add_pick_campaign"), reply_markup=bm.nav_kb())
+
+
+@bm.dp.message(bm.Command("addkeys"))
+async def addkeys_cmd(m: bm.Message, state: bm.FSMContext) -> None:
+    await addkeys_start(m, state)
+
+
 @bm.dp.callback_query(bm.KwAddCB.filter(bm.F.action == "start"))
 async def on_kw_add_start(
     cq: bm.CallbackQuery, callback_data: bm.KwAddCB, state: bm.FSMContext
@@ -251,20 +267,28 @@ async def kw_add_campaign(m: bm.Message, state: bm.FSMContext) -> None:
     await state.set_state(
         bm.KwAdd.awaiting_keywords
     )  # §7 list-UX: правка списка ключей вместо кликов
+    if sess.get("keywords"):  # старт из research: кандидаты уже есть — показать для правки
+        await m.answer(
+            bm.i18n.t("kw_add_edit_prompt", camp=bm.texts.esc(campaign)),
+            reply_markup=bm.nav_kb(),
+            parse_mode=bm.ParseMode.HTML,
+        )
+        await m.answer(
+            bm.texts.fmt_kw_candidates(sess.get("keywords") or [])
+        )  # плейн — копируется как есть
+        return
+    # P3: свой список — файл xlsx/csv/txt, ссылка на Google Sheets или текст
     await m.answer(
-        bm.i18n.t("kw_add_edit_prompt", camp=bm.texts.esc(campaign)),
+        bm.i18n.t("kw_add_send_list", camp=bm.texts.esc(campaign)),
         reply_markup=bm.nav_kb(),
         parse_mode=bm.ParseMode.HTML,
     )
-    await m.answer(
-        bm.texts.fmt_kw_candidates(sess.get("keywords") or [])
-    )  # плейн — копируется как есть
 
 
-@bm.dp.message(bm.KwAdd.awaiting_keywords)
-async def kw_add_keywords(m: bm.Message, state: bm.FSMContext) -> None:
-    """§7 list-UX: менеджер прислал отредактированный список ключей (по одному в строке/через запятую).
-    Дедуп (регистронезависимо, порядок), обрезка до 50 (схема AddKeywords) → выбор типа соответствия."""
+async def kw_add_accept(m: bm.Message, state: bm.FSMContext, kws: list[str]) -> None:
+    """P3: ЕДИНАЯ точка приёма списка ключей (текст / ссылка на Sheets / файл — все адаптеры
+    сходятся сюда): дедуп (регистронезависимо, порядок), обрезка до лимита схемы AddKeywords,
+    затем выбор типа соответствия. Гейт не тратится — только сбор ввода."""
     data = await state.get_data()
     token = data.get("kw_add_token", "")
     sess = bm._KW_ADD.get(token)
@@ -272,29 +296,68 @@ async def kw_add_keywords(m: bm.Message, state: bm.FSMContext) -> None:
         await state.clear()
         await m.answer(bm.i18n.t("kw_add_stale"))
         return
-    items = [p.strip() for p in (m.text or "").replace("\n", ",").split(",") if p.strip()]
     seen: set[str] = set()
-    kws: list[str] = []
-    for it in items:  # дедуп регистронезависимо, порядок сохраняем
+    uniq: list[str] = []
+    for it in kws:  # дедуп регистронезависимо, порядок сохраняем
         key = it.lower()
         if key not in seen:
             seen.add(key)
-            kws.append(it)
-    if not kws:  # остаёмся в состоянии — менеджер пришлёт список снова
+            uniq.append(it)
+    if not uniq:  # остаёмся в состоянии — менеджер пришлёт список снова
         await m.answer(bm.i18n.t("kw_add_list_empty"), reply_markup=bm.nav_kb())
         return
     from agent.tools.schemas import ADD_KEYWORDS_MAX  # 2.6: единый источник лимита батча
 
-    if len(kws) > ADD_KEYWORDS_MAX:  # лимит схемы AddKeywords — честно сообщаем об обрезке
-        kws = kws[:ADD_KEYWORDS_MAX]
+    if len(uniq) > ADD_KEYWORDS_MAX:  # лимит схемы AddKeywords — честно сообщаем об обрезке
+        uniq = uniq[:ADD_KEYWORDS_MAX]
         await m.answer(bm.i18n.t("kw_add_truncated", n=ADD_KEYWORDS_MAX))
-    sess["keywords"] = kws
+    sess["keywords"] = uniq
     await state.clear()
     await m.answer(
-        bm.i18n.t("kw_add_pick_match", camp=bm.texts.esc(sess.get("campaign", "")), n=len(kws)),
+        bm.i18n.t("kw_add_pick_match", camp=bm.texts.esc(sess.get("campaign", "")), n=len(uniq)),
         reply_markup=bm.match_type_kb(token),
         parse_mode=bm.ParseMode.HTML,
     )
+
+
+async def kw_add_from_document(m: bm.Message, state: bm.FSMContext, text: str, name: str) -> None:
+    """P3: файл xlsx/csv/txt в состоянии KwAdd.awaiting_keywords — это СПИСОК КЛЮЧЕЙ (как на
+    Этапе 2 визарда §19.4.1), не задача агенту. Сбой парса оставляет в состоянии с подсказкой."""
+    from keywords.ingest import parse_keywords_text
+
+    parsed = parse_keywords_text(text)
+    if not parsed:
+        await m.answer(bm.i18n.t("kw_add_list_empty"), reply_markup=bm.nav_kb())
+        return
+    await m.answer(
+        bm.i18n.t("cc_kw_file_accepted", name=bm.texts.esc(name)), parse_mode=bm.ParseMode.HTML
+    )
+    await kw_add_accept(m, state, [k.text for k in parsed])
+
+
+@bm.dp.message(bm.KwAdd.awaiting_keywords)
+async def kw_add_keywords(m: bm.Message, state: bm.FSMContext) -> None:
+    """§7 list-UX + P3: менеджер прислал список ключей ТЕКСТОМ (по одному в строке/через запятую)
+    ИЛИ ссылкой на Google Sheets (колонка A; таблица должна быть доступна аккаунту бота)."""
+    text = m.text or ""
+    if "spreadsheets" in text.lower():
+        from reports.sheets import parse_spreadsheet_id, read_keyword_column
+
+        sid = parse_spreadsheet_id(text)
+        if sid:
+            try:
+                kws = await bm.asyncio.to_thread(read_keyword_column, sid)
+            except Exception as e:  # noqa: BLE001 — приватная таблица/нет scope → понятная подсказка
+                await m.answer(
+                    bm.i18n.t("kw_add_sheet_read_failed", err=bm.ux.err_text(e)),
+                    reply_markup=bm.nav_kb(),
+                    parse_mode=bm.ParseMode.HTML,
+                )
+                return  # остаёмся в состоянии — пришлёт файл/текст или расшарит таблицу
+            await kw_add_accept(m, state, kws)
+            return
+    items = [p.strip() for p in text.replace("\n", ",").split(",") if p.strip()]
+    await kw_add_accept(m, state, items)
 
 
 @bm.dp.callback_query(bm.KwAddCB.filter(bm.F.action == "cancel"))

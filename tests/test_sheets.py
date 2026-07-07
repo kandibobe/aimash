@@ -125,10 +125,33 @@ class FakeService:
         return _Spreadsheets(self.log)
 
 
+class _Perms:
+    def __init__(self, log, boom=False):
+        self.log, self._boom = log, boom
+
+    def create(self, *, fileId, body, fields):
+        if self._boom:
+            raise RuntimeError("drive down")
+        self.log.append(("permissions.create", fileId, body))
+        return _Exec({"id": "perm1"})
+
+
+class FakeDrive:
+    """Мок Drive v3 — фиксирует permissions.create (P1: anyone-with-link на созданных таблицах)."""
+
+    def __init__(self, boom=False):
+        self.log: list = []
+        self._boom = boom
+
+    def permissions(self):
+        return _Perms(self.log, self._boom)
+
+
 def test_publish_creates_spreadsheet_and_writes_values():
-    svc = FakeService()
-    url = publish_report_to_sheets(_report(), service=svc)
+    svc, drive = FakeService(), FakeDrive()
+    url, shared = publish_report_to_sheets(_report(), service=svc, drive_service=drive)
     assert url == "https://docs.google.com/spreadsheets/d/SID123"
+    assert shared is True
     kinds = [e[0] for e in svc.log]
     assert "create" in kinds and "values.batchUpdate" in kinds
     create = next(e for e in svc.log if e[0] == "create")
@@ -137,6 +160,18 @@ def test_publish_creates_spreadsheet_and_writes_values():
     batch = next(e for e in svc.log if e[0] == "values.batchUpdate")
     ranges = [d["range"] for d in batch[2]["data"]]
     assert ranges == ["'Сводка'!A1", "'Кампании'!A1"]
+    # P1: отчёт расшарен anyone-with-link ЧИТАТЕЛЕМ (не writer — финансовый артефакт)
+    perm = next(e for e in drive.log if e[0] == "permissions.create")
+    assert perm[1] == "SID123" and perm[2] == {"type": "anyone", "role": "reader"}
+
+
+def test_publish_share_failure_degrades_without_raising():
+    """P1: сбой Drive-шаринга НЕ роняет экспорт — ссылка возвращается, shared=False."""
+    url, shared = publish_report_to_sheets(
+        _report(), service=FakeService(), drive_service=FakeDrive(boom=True)
+    )
+    assert url == "https://docs.google.com/spreadsheets/d/SID123"
+    assert shared is False
 
 
 def test_publish_logs_success(caplog):
@@ -146,7 +181,7 @@ def test_publish_logs_success(caplog):
 
     svc = FakeService()
     with caplog.at_level(_logging.INFO, logger="aimash"):
-        publish_report_to_sheets(_report(), service=svc)
+        publish_report_to_sheets(_report(), service=svc, drive_service=FakeDrive())
     assert any("sheets-publish: ok" in r.getMessage() for r in caplog.records)
 
 

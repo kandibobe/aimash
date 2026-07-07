@@ -13,9 +13,12 @@ from __future__ import annotations
 import bot.main as bm
 
 
-def _is_admin(chat_id: int) -> bool:
-    """Админ бота (env ADMIN_CHAT_IDS). Пусто ⇒ никто (fail-closed)."""
-    return chat_id in bm.settings.admin_ids
+async def _is_admin(chat_id: int) -> bool:
+    """Админ бота: env ADMIN_CHAT_IDS ∪ рантайм-таблица admins (P4). Пусто/сбой БД ⇒ только env
+    (fail-closed). ⚠️ ASYNC: только `await _is_admin(...)`."""
+    from core.access import is_admin
+
+    return await is_admin(chat_id)
 
 
 async def reportbug_start(msg: bm.Message, state: bm.FSMContext) -> None:
@@ -70,9 +73,10 @@ async def _submit_bug(m: bm.Message, state: bm.FSMContext, text: str) -> None:
 
 async def _forward_to_admins(m, bug_id: int, text: str, ticket: str, username) -> None:
     """Немедленный форвард репорта админам (редактированно). Один недоступный админ не роняет остальных."""
+    from core.access import admin_ids_all
     from core.logging import redact_text
 
-    admins = set(bm.settings.admin_ids)
+    admins = await admin_ids_all()  # P4: env ∪ рантайм-админы (иначе /addadmin не получал бы баги)
     if not admins:
         return
     safe = redact_text((text or "").strip())
@@ -91,7 +95,7 @@ async def _forward_to_admins(m, bug_id: int, text: str, ticket: str, username) -
 @bm.dp.message(bm.Command("bugs"))
 async def bugs_cmd(m: bm.Message) -> None:
     """/bugs — список последних баг-репортов + триаж (ТОЛЬКО админ). Read-only до нажатия статуса."""
-    if not _is_admin(m.chat.id):
+    if not await _is_admin(m.chat.id):
         await m.answer(bm.i18n.t("admin_only"))
         return
     from core import bugs
@@ -108,7 +112,7 @@ async def bugs_cmd(m: bm.Message) -> None:
 async def on_bug_cb(cq: bm.CallbackQuery, callback_data: bm.BugCB) -> None:
     """Триаж баг-репорта (админ): статус new→triaged→closed либо обновить список. Локальная БД —
     Google Ads не трогаем, proposal не создаём."""
-    if not _is_admin(cq.from_user.id):
+    if not await _is_admin(cq.from_user.id):
         await cq.answer(bm.i18n.t("admin_only"), show_alert=True)
         return
     from core import bugs

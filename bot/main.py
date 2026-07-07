@@ -158,7 +158,6 @@ from bot.keyboards import (
     ext_menu_kb,
     ext_snippet_header_kb,
     geo_mode_kb,
-    kw_add_kb,
     kw_geo_kb,
     kw_lang_kb,
     kw_params_kb,
@@ -678,7 +677,9 @@ async def _notify_admins_started(bot) -> None:
     HEAD, число аккаунтов на чтение, активная parse-модель. Живой сигнал деплоя: не пришёл после
     redeploy ⇒ бот не поднялся (крэш-луп) — видно сразу, не дожидаясь первого сообщения. Best-effort:
     нет админов → тихо пропускаем (не спамим операторов); сбой доставки не роняет старт."""
-    admins = settings.admin_ids
+    from core.access import admin_ids_all
+
+    admins = await admin_ids_all()  # P4: env ∪ рантайм-админы
     if not admins:
         return
     head = "—"
@@ -2057,7 +2058,7 @@ async def _run_sheets(
                 client, acct, period, campaign_id=campaign_id, account_name=_account_name(acct)
             )
             report.currency = await _read_currency(client, acct)  # §9: валюта денежных метрик
-            url = await asyncio.to_thread(publish_report_to_sheets, report)
+            url, shared = await asyncio.to_thread(publish_report_to_sheets, report)
     except Exception as e:  # сеть/доступ/SDK/нет OAuth-scope Sheets
         # A4: если корень — деактивированный/недоступный аккаунт (ошибка Ads, НЕ Sheets-scope),
         # не показываем сбивающую подсказку про drive.file — даём честную причину.
@@ -2065,7 +2066,8 @@ async def _run_sheets(
         key = "err_account_inactive" if is_account_access_error(e) else "err_sheets"
         await m.answer(i18n.t(key, err=ux.err_text(e)))
         return
-    await m.answer(i18n.t("sheets_ready", url=url))
+    note = "" if shared else "\n" + i18n.t("sheets_share_failed_note")
+    await m.answer(i18n.t("sheets_ready", url=url) + note)
 
 
 def _mcc_period_factory(arg: str | None):
@@ -2742,20 +2744,11 @@ async def _kw_run(
         shown = ", ".join(texts.esc(x) for x in negatives[:15])
         more = i18n.t("list_more", n=len(negatives) - 15) if len(negatives) > 15 else ""
         summary += i18n.t("kw_negatives_advisory", shown=shown, more=more)
-    # §7: предложить ДОБАВИТЬ подобранные ключи в кампанию (только по команде → confirm-гейт).
-    # Берём топ по объёму (схема AddKeywords: ≤50), исключив помеченные нецелевыми (§19.4.2).
-    # Кнопка лишь СТАРТУЕТ флоу, ничего не меняет.
-    top_kw = [
-        t
-        for t, _ in sorted(by_text.items(), key=lambda kv: kv[1] or 0, reverse=True)
-        if t not in off_topic
-    ][:50]
-    token = _kw_add_put(top_kw, src) if top_kw else ""
-    await target.answer(
-        summary,
-        parse_mode=ParseMode.HTML,
-        reply_markup=kw_add_kb(token) if token else None,
-    )
+    # §7 (P3, фидбэк заказчика 2026-07-06): кнопку «➕ Добавить ключи в кампанию» из отчёта
+    # УБРАЛИ — сгенерированный список редко идёт в кампанию как есть. Добавление ключей (своих
+    # файлом/ссылкой/текстом или из этого отчёта) — отдельный вход /addkeys и меню «➕ Ещё».
+    summary += "\n" + i18n.t("kw_addkeys_hint")
+    await target.answer(summary, parse_mode=ParseMode.HTML)
 
     path: str | None = None
     try:

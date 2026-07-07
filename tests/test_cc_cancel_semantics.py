@@ -183,7 +183,7 @@ async def test_exit_stay_rerenders_current_stage():
 
 def test_wizard_keyboards_cancel_reachable_by_exit_dialog():
     """Класс-гард: у всех cc_*-клавиатур кнопка «Отмена» пакуется в nav:cancel — единственный
-    콜бэк, который перехватывает _maybe_cc_exit_dialog. Новая клавиатура с иным cancel-путём
+    колбэк, который перехватывает _maybe_cc_exit_dialog. Новая клавиатура с иным cancel-путём
     молча вернула бы безвозвратный abandon."""
     from bot import keyboards as kb
 

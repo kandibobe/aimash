@@ -70,6 +70,10 @@ async def on_document(m: bm.Message, state: bm.FSMContext, bot: bm.Bot) -> None:
     if await state.get_state() == bm.CreateCampaignWizard.keywords:
         await bm._cc_keywords_from_document(m, state, text, source)
         return
+    # P3: /addkeys ждёт ключи — файл это СПИСОК КЛЮЧЕЙ для добавления в кампанию (не задача агенту).
+    if await state.get_state() == bm.KwAdd.awaiting_keywords:
+        await bm.kw_add_from_document(m, state, text, source)
+        return
     caption = (m.caption or "").strip()
     await state.clear()
     if caption:

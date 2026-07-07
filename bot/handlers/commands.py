@@ -237,9 +237,13 @@ async def account_cmd(m: bm.Message, command: bm.CommandObject) -> None:
 
 
 # ── 2C: пер-пользовательские гранты аккаунтов (админ) + самодиагностика доступа ──
-def _is_admin(chat_id: int) -> bool:
-    """Админ бота (env ADMIN_CHAT_IDS). Пусто ⇒ никто (fail-closed, фича опциональна)."""
-    return chat_id in bm.settings.admin_ids
+async def _is_admin(chat_id: int) -> bool:
+    """Админ бота: env ADMIN_CHAT_IDS ∪ рантайм-таблица admins (P4). Пусто/сбой БД ⇒ только env;
+    пусто везде ⇒ никто (fail-closed). ⚠️ ASYNC: только `await _is_admin(...)` — неawait-нутая
+    корутина truthy = fail-open (гард-тест test_runtime_admins проверяет каждый вызов)."""
+    from core.access import is_admin
+
+    return await is_admin(chat_id)
 
 
 @bm.dp.message(bm.Command("mutready"))
@@ -248,7 +252,7 @@ async def mutready_cmd(m: bm.Message, command: bm.CommandObject) -> None:
     ДИАГНОСТИКА: видимость (потолок) / статус / OAuth / живой probe / гранты / 2FA / членство в
     allowed-list. НИКАКОЙ автозаписи конфига: финальный шаг (GOOGLE_ADS_ALLOWED_CUSTOMER_IDS)
     владелец делает руками (docs/DEPLOYMENT.md §2.1); замок ensure_allowed не трогается."""
-    if not _is_admin(m.chat.id):
+    if not await _is_admin(m.chat.id):
         await m.answer(bm.i18n.t("admin_only"))
         return
     arg = (command.args or "").strip()
@@ -275,7 +279,7 @@ async def grant_cmd(m: bm.Message, command: bm.CommandObject) -> None:
     """/grant <chat_id> <customer_id> — выдать оператору доступ к аккаунту ЧТЕНИЯ (только админ).
     cid обязан пройти глобальный read-замок (гранты только на реально читаемое). МУТАЦИИ гранты
     НЕ открывают (замок ensure_allowed/ALLOWED_CEILING отдельный, golden rule 9)."""
-    if not _is_admin(m.chat.id):
+    if not await _is_admin(m.chat.id):
         await m.answer(bm.i18n.t("admin_only"))
         return
     parts = (command.args or "").split()
@@ -306,7 +310,7 @@ async def grant_cmd(m: bm.Message, command: bm.CommandObject) -> None:
 async def revoke_cmd(m: bm.Message, command: bm.CommandObject) -> None:
     """/revoke <chat_id> <customer_id> — снять грант (только админ). Активный аккаунт оператора
     сам откатится на Draft при следующем чтении (get_active_account перепроверяет грант)."""
-    if not _is_admin(m.chat.id):
+    if not await _is_admin(m.chat.id):
         await m.answer(bm.i18n.t("admin_only"))
         return
     parts = (command.args or "").split()
@@ -339,7 +343,7 @@ async def adduser_cmd(m: bm.Message, command: bm.CommandObject) -> None:
     """/adduser <chat_id> [заметка] — открыть новому оператору доступ к боту БЕЗ рестарта (рантайм-
     whitelist, env ∪ БД). Затем inline-выбор объёма ЧТЕНИЯ (Все / Выбрать / только бот). Мутации НЕ
     открывает (замок ensure_allowed отдельный). Только админ (ADMIN_CHAT_IDS)."""
-    if not _is_admin(m.chat.id):
+    if not await _is_admin(m.chat.id):
         await m.answer(bm.i18n.t("admin_only"))
         return
     parts = (command.args or "").split(maxsplit=1)
@@ -363,7 +367,7 @@ async def adduser_cmd(m: bm.Message, command: bm.CommandObject) -> None:
 async def removeuser_cmd(m: bm.Message, command: bm.CommandObject) -> None:
     """/removeuser <chat_id> — закрыть оператору доступ к боту (убрать из рантайм-whitelist + снять
     гранты аккаунтов). Env-операторов (.env) убрать нельзя — только правкой .env. Только админ."""
-    if not _is_admin(m.chat.id):
+    if not await _is_admin(m.chat.id):
         await m.answer(bm.i18n.t("admin_only"))
         return
     arg = (command.args or "").strip()
@@ -389,10 +393,85 @@ async def removeuser_cmd(m: bm.Message, command: bm.CommandObject) -> None:
     await m.answer(bm.i18n.t("removeuser_ok", chat=target), parse_mode=bm.ParseMode.HTML)
 
 
+@bm.dp.message(bm.Command("addadmin"))
+async def addadmin_cmd(m: bm.Message, command: bm.CommandObject) -> None:
+    """/addadmin <chat_id> [заметка] — выдать админку БЕЗ рестарта (P4, рантайм-таблица admins;
+    is_admin = env ∪ БД). Цель заодно whitelist-ится (иначе «админ», которому бот не отвечает).
+    Открывает /grant//adduser//addadmin и read-bypass пер-юзер грантов; МУТАЦИИ НЕ открывает
+    (замок ensure_allowed/Draft отдельный). Только действующий админ."""
+    if not await _is_admin(m.chat.id):
+        await m.answer(bm.i18n.t("admin_only"))
+        return
+    parts = (command.args or "").split(maxsplit=1)
+    if not parts or not parts[0].lstrip("-").isdigit():
+        await m.answer(bm.i18n.t("addadmin_bad_args"), parse_mode=bm.ParseMode.HTML)
+        return
+    target = int(parts[0])
+    note = parts[1].strip() if len(parts) > 1 else None
+    from core.access import add_admin, add_whitelisted_user
+
+    await add_whitelisted_user(target, added_by=m.chat.id, note=note)  # идемпотентно
+    added = await add_admin(target, added_by=m.chat.id, note=note)
+    key = "addadmin_added" if added else "addadmin_exists"
+    await m.answer(bm.i18n.t(key, chat=target), parse_mode=bm.ParseMode.HTML)
+
+
+@bm.dp.message(bm.Command("removeadmin"))
+async def removeadmin_cmd(m: bm.Message, command: bm.CommandObject) -> None:
+    """/removeadmin <chat_id> — снять рантайм-админку. Гарды от самоблокировки: env-админы
+    неснимаемы (только правкой .env); нельзя снять СЕБЯ; нельзя снять ПОСЛЕДНЕГО админа.
+    Из whitelist НЕ убирает (оператором остаётся — /removeuser отдельно). Только админ."""
+    if not await _is_admin(m.chat.id):
+        await m.answer(bm.i18n.t("admin_only"))
+        return
+    arg = (command.args or "").strip()
+    if not arg.lstrip("-").isdigit():
+        await m.answer(bm.i18n.t("removeadmin_bad_args"), parse_mode=bm.ParseMode.HTML)
+        return
+    target = int(arg)
+    if target in bm.settings.admin_ids:  # env-бутстрап — снять можно только правкой .env
+        await m.answer(bm.i18n.t("removeadmin_env", chat=target), parse_mode=bm.ParseMode.HTML)
+        return
+    if target == m.chat.id:  # самоснятие — прямой путь к локауту
+        await m.answer(bm.i18n.t("removeadmin_self"))
+        return
+    from core.access import admin_ids_all, remove_admin
+
+    remaining = await admin_ids_all() - {target}
+    if not remaining:  # последний админ — некому будет управлять доступом
+        await m.answer(bm.i18n.t("removeadmin_last"))
+        return
+    await remove_admin(target)
+    await m.answer(bm.i18n.t("removeadmin_ok", chat=target), parse_mode=bm.ParseMode.HTML)
+
+
+@bm.dp.message(bm.Command("admins"))
+async def admins_cmd(m: bm.Message) -> None:
+    """/admins — админы бота: env (.env, неснимаемые) + БД (/addadmin). Только админ."""
+    if not await _is_admin(m.chat.id):
+        await m.answer(bm.i18n.t("admin_only"))
+        return
+    from core.access import list_admins
+
+    env_ids = sorted(bm.settings.admin_ids)
+    env_txt = ", ".join(f"<code>{i}</code>" for i in env_ids) or bm.i18n.t("users_empty_db")
+    rows = await list_admins()
+    if rows:
+        db_txt = "\n" + "\n".join(
+            f"• <code>{r.chat_id}</code>"
+            + (f" — {bm.texts.esc(r.note)}" if r.note else "")
+            + (f" (by <code>{r.added_by}</code>)" if r.added_by else "")
+            for r in rows
+        )
+    else:
+        db_txt = bm.i18n.t("users_empty_db")
+    await m.answer(bm.i18n.t("admins_title", env=env_txt, db=db_txt), parse_mode=bm.ParseMode.HTML)
+
+
 @bm.dp.message(bm.Command("users"))
 async def users_cmd(m: bm.Message) -> None:
     """/users — операторы бота: env (.env, бутстрап) + БД (/adduser). Только админ."""
-    if not _is_admin(m.chat.id):
+    if not await _is_admin(m.chat.id):
         await m.answer(bm.i18n.t("admin_only"))
         return
     from core.access import list_whitelisted_users
@@ -440,7 +519,7 @@ async def admin_access_cb(cq: bm.CallbackQuery, callback_data: bm.AdminCB) -> No
     """P0-A: выбор объёма чтения после /adduser. Только админ. Выдаёт ТОЛЬКО гранты чтения
     (account_access) — мутации не открывает. all=грант всех дочерних; pick=пикер; grant=тогл одного;
     done=завершить."""
-    if not _is_admin(cq.from_user.id):
+    if not await _is_admin(cq.from_user.id):
         await cq.answer(bm.i18n.t("admin_only"), show_alert=True)
         return
     target = callback_data.chat
@@ -517,7 +596,7 @@ async def whoami_cmd(m: bm.Message) -> None:
             active=active,
             mode=mode,
             enforced="✅" if enforced else "—",
-            admin="✅" if _is_admin(m.chat.id) else "—",
+            admin="✅" if await _is_admin(m.chat.id) else "—",
         ),
         parse_mode=bm.ParseMode.HTML,
     )
@@ -686,7 +765,7 @@ async def diag(m: bm.Message) -> None:
         return
     await m.answer(
         bm.texts.fmt_errors(rows),
-        reply_markup=bm.diag_kb(rows, today=False, is_admin=_is_admin(m.chat.id)),
+        reply_markup=bm.diag_kb(rows, today=False, is_admin=await _is_admin(m.chat.id)),
         parse_mode=bm.ParseMode.HTML,
     )
 
@@ -714,7 +793,9 @@ async def on_diag_cb(cq: bm.CallbackQuery, callback_data: bm.DiagCB) -> None:
             )
         return
     if action == "detail":
-        if not _is_admin(cq.from_user.id):  # traceback — операционная деталь (диаг открыт всем WL)
+        if not await _is_admin(
+            cq.from_user.id
+        ):  # traceback — операционная деталь (диаг открыт всем WL)
             await cq.answer(bm.i18n.t("admin_only"), show_alert=True)
             return
         row = await bm._load_error_detail(callback_data.rid)
@@ -734,7 +815,7 @@ async def on_diag_cb(cq: bm.CallbackQuery, callback_data: bm.DiagCB) -> None:
     await bm._safe_edit(
         cq,
         bm.texts.fmt_errors(rows),
-        reply_markup=bm.diag_kb(rows, today=today, is_admin=_is_admin(cq.from_user.id)),
+        reply_markup=bm.diag_kb(rows, today=today, is_admin=await _is_admin(cq.from_user.id)),
         parse_mode=bm.ParseMode.HTML,
     )
 
@@ -760,6 +841,8 @@ async def on_more(cq: bm.CallbackQuery, callback_data: bm.MoreCB, state: bm.FSMC
         await bm.newvideo_cmd(msg, state)
     elif action == "templates":
         await bm._send_templates(msg, bm._cq_chat_id(cq))
+    elif action == "addkeys":
+        await bm.addkeys_start(msg, state)  # P3: ключи в кампанию (файл/ссылка/текст)
     elif action == "recent":
         await bm._send_recent(msg, bm._cq_chat_id(cq))
     elif action == "quota":

@@ -178,6 +178,7 @@ CATALOG: dict[str, dict[str, str]] = {
             "/recent — recent actions: repeat in one tap (with confirmation)\n\n"
             "<b>🔑 Keywords and ad copy</b>\n"
             "/keywords — keyword research (volume, competition, clusters) + .xlsx\n"
+            "/addkeys — add keywords to a campaign (your file/link/text, via confirmation)\n"
             "/rsa — generate ad copy (RSA), element-by-element confirm (created paused)\n\n"
             "<b>📊 Reports</b>\n"
             "/status — quick stats (30 days)\n"
@@ -282,6 +283,45 @@ CATALOG: dict[str, dict[str, str]] = {
     "kw_add_pick_campaign": {
         "ru": "В какую кампанию добавить ключи? Пришли название кампании одним сообщением.",
         "en": "Which campaign should I add the keywords to? Send the campaign name in one message.",
+    },
+    # P3 (фидбэк заказчика 2026-07-06): вместо кнопки под отчётом — отдельный вход /addkeys.
+    "kw_addkeys_hint": {
+        "ru": (
+            "➕ Добавить ключи в кампанию (свои файлом/ссылкой/текстом или из этого списка): "
+            "/addkeys или меню «➕ Ещё»."
+        ),
+        "en": (
+            "➕ Add keywords to a campaign (your own file/link/text or from this list): "
+            "/addkeys or the “➕ More” menu."
+        ),
+    },
+    "kw_add_send_list": {
+        "ru": (
+            "Пришлите список ключей для «{camp}» любым способом:\n"
+            "• файлом <b>xlsx / csv / txt</b> (ключи в первой колонке/по строкам);\n"
+            "• ссылкой на <b>Google Sheets</b> (ключи в колонке A; таблица должна быть доступна "
+            "по ссылке или расшарена аккаунту бота);\n"
+            "• простым текстом — по одному в строке или через запятую."
+        ),
+        "en": (
+            "Send the keyword list for “{camp}” in any form:\n"
+            "• an <b>xlsx / csv / txt</b> file (keywords in the first column/lines);\n"
+            "• a <b>Google Sheets</b> link (keywords in column A; the sheet must be link-accessible "
+            "or shared with the bot's account);\n"
+            "• plain text — one per line or comma-separated."
+        ),
+    },
+    "kw_add_sheet_read_failed": {
+        "ru": (
+            "⚠️ Не смог прочитать таблицу: {err}\n"
+            "Откройте доступ по ссылке (или расшарьте аккаунту бота) и пришлите ссылку ещё раз — "
+            "либо пришлите ключи файлом/текстом."
+        ),
+        "en": (
+            "⚠️ Couldn't read the sheet: {err}\n"
+            "Enable link access (or share it with the bot's account) and resend the link — "
+            "or send the keywords as a file/text."
+        ),
     },
     "kw_add_empty_campaign": {
         "ru": "Пришли НАЗВАНИЕ кампании одним сообщением (например: <code>Search Spring</code>).",
@@ -868,6 +908,55 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "👥 <b>Bot operators</b>\nEnv (.env): {env}\nDB (/adduser): {db}",
     },
     "users_empty_db": {"ru": "— нет —", "en": "— none —"},
+    # P4 (живой тест 2026-07-06): рантайм-админка без рестарта VPS (env ∪ таблица admins).
+    "addadmin_bad_args": {
+        "ru": "Формат: <code>/addadmin &lt;chat_id&gt; [заметка]</code>. Chat_id виден в /whoami.",
+        "en": "Usage: <code>/addadmin &lt;chat_id&gt; [note]</code>. Chat_id is shown by /whoami.",
+    },
+    "addadmin_added": {
+        "ru": (
+            "✅ <code>{chat}</code> теперь админ (без рестарта): /grant, /adduser, /addadmin, "
+            "чтение всех доступных аккаунтов. Мутации остаются только на Draft."
+        ),
+        "en": (
+            "✅ <code>{chat}</code> is now an admin (no restart): /grant, /adduser, /addadmin, "
+            "read access to all available accounts. Mutations stay Draft-only."
+        ),
+    },
+    "addadmin_exists": {
+        "ru": "ℹ️ <code>{chat}</code> уже админ.",
+        "en": "ℹ️ <code>{chat}</code> is already an admin.",
+    },
+    "removeadmin_bad_args": {
+        "ru": "Формат: <code>/removeadmin &lt;chat_id&gt;</code>.",
+        "en": "Usage: <code>/removeadmin &lt;chat_id&gt;</code>.",
+    },
+    "removeadmin_env": {
+        "ru": (
+            "⚠️ <code>{chat}</code> — env-админ (ADMIN_CHAT_IDS): в рантайме неснимаем, "
+            "только правкой .env и рестартом."
+        ),
+        "en": (
+            "⚠️ <code>{chat}</code> is an env admin (ADMIN_CHAT_IDS): can't be removed at "
+            "runtime — edit .env and restart."
+        ),
+    },
+    "removeadmin_self": {
+        "ru": "⚠️ Нельзя снять админку с СЕБЯ (защита от самоблокировки).",
+        "en": "⚠️ You can't remove YOUR OWN admin role (lockout protection).",
+    },
+    "removeadmin_last": {
+        "ru": "⚠️ Это последний админ — снять нельзя (некому будет управлять доступом).",
+        "en": "⚠️ That's the last admin — can't remove (no one would manage access).",
+    },
+    "removeadmin_ok": {
+        "ru": "✅ Админка снята с <code>{chat}</code> (оператором в whitelist он остаётся).",
+        "en": "✅ Admin role removed from <code>{chat}</code> (still a whitelisted operator).",
+    },
+    "admins_title": {
+        "ru": "🛡 <b>Админы бота</b>\nEnv (.env, неснимаемые): {env}\nБД (/addadmin): {db}",
+        "en": "🛡 <b>Bot admins</b>\nEnv (.env, irremovable): {env}\nDB (/addadmin): {db}",
+    },
     "accounts_title": {
         "ru": "🏢 <b>Твои аккаунты (чтение)</b> · {n}:",
         "en": "🏢 <b>Your accounts (read)</b> · {n}:",
@@ -1403,6 +1492,17 @@ CATALOG: dict[str, dict[str, str]] = {
     "sheets_ready": {
         "ru": "✅ Google Sheets готов: {url}",
         "en": "✅ Google Sheets is ready: {url}",
+    },
+    # P1 (живой тест 2026-07-06): не удалось открыть anyone-with-link — таблица осталась приватной.
+    "sheets_share_failed_note": {
+        "ru": (
+            "⚠️ Не удалось открыть доступ по ссылке — откройте таблицу и нажмите "
+            "«Request access», либо напишите администратору."
+        ),
+        "en": (
+            "⚠️ Couldn't enable link sharing — open the sheet and press "
+            "“Request access”, or contact the administrator."
+        ),
     },
     # — префиксы ошибок (plain text, {err} = ux.err_text(e)) —
     "err_stats": {

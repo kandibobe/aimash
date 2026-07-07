@@ -96,6 +96,7 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="recent", description="Недавние действия: повторить"),
     BotCommand(command="cancel", description="Отменить текущий черновик"),
     BotCommand(command="keywords", description="Подбор ключевых слов"),
+    BotCommand(command="addkeys", description="Добавить ключи в кампанию (файл/ссылка/текст)"),
     BotCommand(command="model", description="Модель ИИ (OpenRouter)"),
     BotCommand(command="balance", description="Бюджет ИИ: баланс OpenRouter и траты"),
     BotCommand(command="journal", description="Журнал изменений (что/когда/кто)"),
@@ -136,6 +137,7 @@ BOT_COMMANDS_EN: list[BotCommand] = [
     BotCommand(command="recent", description="Recent actions: repeat"),
     BotCommand(command="cancel", description="Cancel the current draft"),
     BotCommand(command="keywords", description="Keyword research"),
+    BotCommand(command="addkeys", description="Add keywords to a campaign (file/link/text)"),
     BotCommand(command="model", description="AI model (OpenRouter)"),
     BotCommand(command="balance", description="AI budget: OpenRouter balance and spend"),
     BotCommand(command="journal", description="Change journal (what/when/who)"),
@@ -580,6 +582,8 @@ def more_menu_kb(lang: str | None = None) -> InlineKeyboardMarkup:
         ("🔎 Search campaign (quick)", "🔎 Поисковая кампания (быстро)", "newsearch"),
         ("🎬 Campaign from video", "🎬 Кампания из видео", "newvideo"),
         ("📁 Campaign templates", "📁 Шаблоны кампаний", "templates"),
+        # P3: добавление ключей в кампанию — свой файл/ссылка/текст (бывшая кнопка под отчётом)
+        ("➕ Keywords to a campaign", "➕ Ключи в кампанию", "addkeys"),
         ("↻ Recent actions", "↻ Недавние действия", "recent"),
         ("📉 API quota", "📉 Квота API", "quota"),
         ("🔔 Alert thresholds", "🔔 Пороги алертов", "alerts"),
@@ -587,7 +591,7 @@ def more_menu_kb(lang: str | None = None) -> InlineKeyboardMarkup:
         ("⚙️ Service / Accounts", "⚙️ Сервис / Аккаунты", "service"),
     ):
         kb.button(text=label_en if en else label_ru, callback_data=MoreCB(action=action))
-    kb.adjust(1, 1, 1, 2, 2, 1, 1)
+    kb.adjust(1, 1, 1, 2, 2, 2, 1)
     return kb.as_markup()
 
 
@@ -688,17 +692,9 @@ def nav_kb(back_cb: CallbackData | None = None, lang: str | None = None) -> Inli
 
 
 # ── Inline: подтверждение мутации (главный — confirm-гейт) ───────────────────────
-def kw_add_kb(token: str, lang: str | None = None) -> InlineKeyboardMarkup:
-    """§7: под сводкой keyword-research — предложить ДОБАВИТЬ подобранные ключи в кампанию.
-    Кнопка лишь СТАРТУЕТ флоу (кампания → тип соответствия → confirm-гейт), ничего не меняет."""
-    en = _lang(lang) == "en"
-    kb = InlineKeyboardBuilder()
-    kb.button(
-        text="➕ Add keywords to a campaign" if en else "➕ Добавить ключи в кампанию",
-        callback_data=KwAddCB(action="start", token=token),
-    )
-    kb.adjust(1)
-    return kb.as_markup()
+# P3 (фидбэк заказчика 2026-07-06): kw_add_kb (кнопка «➕ Добавить ключи» под отчётом research)
+# УДАЛЕНА — вход теперь /addkeys и меню «➕ Ещё» (приём файла/ссылки/текста). Старые кнопки в
+# истории чата деградируют в kw_add_stale (on_kw_add_start проверяет токен).
 
 
 def match_type_kb(token: str, lang: str | None = None) -> InlineKeyboardMarkup:

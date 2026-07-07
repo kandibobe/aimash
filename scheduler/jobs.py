@@ -325,7 +325,9 @@ async def run_error_alerts(bot) -> int:
     (max(id)) и НЕ шлёт — не спамим историей на старте. Возвращает число новых инцидентов."""
     global _error_alert_last_id
     with request_scope("scheduler:error-alerts"):  # §15: корреляция логов джобы по request_id
-        admins = set(settings.admin_ids)
+        from core.access import admin_ids_all
+
+        admins = await admin_ids_all()  # P4: env ∪ рантайм-админы (/addadmin — без рестарта)
         if not admins:
             return 0
         from db.models import ErrorEvent
@@ -416,7 +418,9 @@ async def run_weekly_digest(bot) -> int:
     from reports.diag_export import build_weekly_digest_file
 
     with request_scope("scheduler:weekly-digest"):  # §15: корреляция логов джобы по request_id
-        admins = set(settings.admin_ids)
+        from core.access import admin_ids_all
+
+        admins = await admin_ids_all()  # P4: env ∪ рантайм-админы
         if not admins:
             return 0
         errors = await _error_events_since(WEEKLY_DIGEST_DAYS)

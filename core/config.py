@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     llm_parsing: str = "deepseek/deepseek-chat"  # A/B: дёшево, ≈Claude на парсинге
     llm_copy: str = "anthropic/claude-sonnet-4.6"  # копирайт RU — лучшее качество (RSA)
     llm_fallback: str = "anthropic/claude-sonnet-4.6"  # Hermes выбыл (нет tool use на OpenRouter)
+    # P2: отдельная роль КЛАСТЕРИЗАЦИИ/интента keyword research (вопрос заказчика 2026-07-06
+    # «какая модель?»). Пусто ⇒ = llm_parsing (поведение прежнее байт-в-байт); LLM_CLUSTERING
+    # в .env позволяет прогнать A/B сильной модели ТОЛЬКО на интент-классификации.
+    llm_clustering: str = ""
     # Пресеты для рантайм-переключателя /model (CSV slug'ов OpenRouter). Пусто => дефолт в
     # agent.router._DEFAULT_CHOICES (tool-use-capable модели). Своя модель — через /model в боте.
     model_choices: str = ""

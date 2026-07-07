@@ -36,7 +36,10 @@ def _cmd(args: str | None = None):
 
 
 async def test_mutready_denied_for_non_admin(monkeypatch):
-    monkeypatch.setattr(bc, "_is_admin", lambda cid: False)
+    async def _no(cid):
+        return False
+
+    monkeypatch.setattr(bc, "_is_admin", _no)  # P4: _is_admin теперь async
     msg = _FakeMsg()
     await bc.mutready_cmd(msg, _cmd("7753643025"))
     assert msg.answers and "ADMIN_CHAT_IDS" in msg.answers[0][0]
@@ -95,7 +98,10 @@ async def test_mutready_probe_failure_is_honest(monkeypatch):
 
 
 async def test_mutready_usage_on_garbage(monkeypatch):
-    monkeypatch.setattr(bc, "_is_admin", lambda cid: True)
+    async def _yes(cid):
+        return True
+
+    monkeypatch.setattr(bc, "_is_admin", _yes)  # P4: _is_admin теперь async
 
     async def _resolve_fail(chat_id, raw):
         raise LookupError("нет")

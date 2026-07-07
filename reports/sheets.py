@@ -93,21 +93,21 @@ def _default_title(report: ReportData) -> str:
     return f"Aimash {report.customer_id} {p.date_from.isoformat()}—{p.date_to.isoformat()}"
 
 
-def _build_service() -> Any:
-    """Sheets v4 service из OAuth-кредов (.env). Ленивый импорт google-libs."""
+def _oauth_credentials() -> Any:
+    """OAuth-креды (.env) для Google API. Ленивый импорт google-libs.
+
+    scopes=None НАМЕРЕННО: при refresh-гранте нельзя запрашивать scope ШИРЕ выданного токену —
+    иначе Google вернёт invalid_scope (Bad Request) и упадёт ВЕСЬ Sheets-экспорт (не только чтение
+    чужих таблиц). None ⇒ scope в запросе не шлём, токен обновляется с тем набором, что был выдан
+    на consent: drive.file → создание работает; spreadsheets.readonly появится после re-OAuth и
+    чтение чужой таблицы (§19.4.1) заработает само. SHEETS_SCOPES — это список для CONSENT
+    (scripts/get_refresh_token.py), НЕ для refresh. Без re-OAuth чтение чужой таблицы даст 403
+    (не invalid_scope) — ловим и просим прислать ключи текстом."""
     from google.oauth2.credentials import Credentials
-    from googleapiclient.discovery import build
 
     from core.config import settings
 
-    # scopes=None НАМЕРЕННО: при refresh-гранте нельзя запрашивать scope ШИРЕ выданного токену —
-    # иначе Google вернёт invalid_scope (Bad Request) и упадёт ВЕСЬ Sheets-экспорт (не только чтение
-    # чужих таблиц). None ⇒ scope в запросе не шлём, токен обновляется с тем набором, что был выдан
-    # на consent: drive.file → создание работает; spreadsheets.readonly появится после re-OAuth и
-    # чтение чужой таблицы (§19.4.1) заработает само. SHEETS_SCOPES — это список для CONSENT
-    # (scripts/get_refresh_token.py), НЕ для refresh. Без re-OAuth чтение чужой таблицы даст 403
-    # (не invalid_scope) — ловим и просим прислать ключи текстом.
-    creds = Credentials(
+    return Credentials(
         token=None,
         refresh_token=settings.google_ads_refresh_token.get_secret_value(),
         token_uri=_TOKEN_URI,
@@ -115,7 +115,38 @@ def _build_service() -> Any:
         client_secret=settings.google_ads_client_secret.get_secret_value(),
         scopes=None,
     )
-    return build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+
+def _build_service() -> Any:
+    """Sheets v4 service из OAuth-кредов (.env)."""
+    from googleapiclient.discovery import build
+
+    return build("sheets", "v4", credentials=_oauth_credentials(), cache_discovery=False)
+
+
+def _build_drive_service() -> Any:
+    """Drive v3 service — ТОЛЬКО для permissions.create на созданных нами файлах (drive.file
+    это разрешает без доп. scope). Sheets v4 API управлять доступом не умеет."""
+    from googleapiclient.discovery import build
+
+    return build("drive", "v3", credentials=_oauth_credentials(), cache_discovery=False)
+
+
+def _share_anyone(spreadsheet_id: str, *, role: str, drive_service: Any = None) -> bool:
+    """Живой тест 2026-07-06: созданная таблица была приватной для OAuth-аккаунта бота —
+    заказчик не мог открыть ссылку. Открываем anyone-with-link (role: writer — таблицы ключей,
+    флоу просит их править; reader — отчёты). НИКОГДА не raise: сбой шаринга не должен ронять
+    экспорт — ссылка всё равно уходит, вызыватель добавит подсказку «запросите доступ».
+    Возвращает True при успехе."""
+    try:
+        svc = drive_service or _build_drive_service()
+        svc.permissions().create(
+            fileId=spreadsheet_id, body={"type": "anyone", "role": role}, fields="id"
+        ).execute()
+        return True
+    except Exception as e:  # noqa: BLE001 — деградация: таблица останется приватной
+        log.warning("sheets-share: %s — таблица останется приватной", type(e).__name__)
+        return False
 
 
 def _format_headers(svc: Any, spreadsheet_id: str, n_tabs: int) -> None:
@@ -150,11 +181,16 @@ def _format_headers(svc: Any, spreadsheet_id: str, n_tabs: int) -> None:
 
 
 def publish_report_to_sheets(
-    report: ReportData, *, title: str | None = None, service: Any = None
-) -> str:
-    """Создать новую таблицу с вкладками отчёта и вернуть ссылку. `service` — для тестов (мок).
-    Логирует вызовы Sheets API (создание + запись значений, длительность, исход — БЕЗ секретов;
-    §15): раньше путь был «молчащим» — при сбое scope/сети не было трейса для разбора."""
+    report: ReportData,
+    *,
+    title: str | None = None,
+    service: Any = None,
+    drive_service: Any = None,
+) -> tuple[str, bool]:
+    """Создать новую таблицу с вкладками отчёта и вернуть (ссылка, расшарена_ли). `service`/
+    `drive_service` — для тестов (моки). Отчёт открывается anyone-with-link ЧИТАТЕЛЕМ (финансовый
+    артефакт — писать в него никому не нужно). Логирует вызовы Sheets API (создание + запись
+    значений, длительность, исход — БЕЗ секретов; §15)."""
     tabs = build_sheets_data(report)
     svc = service or _build_service()
     start = time.monotonic()
@@ -192,10 +228,14 @@ def publish_report_to_sheets(
             len(tabs),
         )
         raise
+    shared = _share_anyone(sid, role="reader", drive_service=drive_service)
     log.info(
-        "sheets-publish: ok за %dмс (вкладок=%d)", int((time.monotonic() - start) * 1000), len(tabs)
+        "sheets-publish: ok за %dмс (вкладок=%d, shared=%s)",
+        int((time.monotonic() - start) * 1000),
+        len(tabs),
+        shared,
     )
-    return url
+    return url, shared
 
 
 # ── §19.4.2: выгрузка ключей с пометкой релевантности + чтение верифицированного списка ─────
@@ -232,10 +272,17 @@ def build_keyword_sheet_rows(ideas, relevance: dict[str, bool]) -> list[list]:
 
 
 def publish_keywords_to_sheets(
-    ideas, relevance: dict[str, bool], *, title: str, service: Any = None
-) -> tuple[str, str]:
-    """Создать таблицу ключей с колонкой «Релевантность» и вернуть (url, spreadsheet_id). service —
-    для тестов (мок). spreadsheet_id нужен на возврате для сверки присланной менеджером ссылки."""
+    ideas,
+    relevance: dict[str, bool],
+    *,
+    title: str,
+    service: Any = None,
+    drive_service: Any = None,
+) -> tuple[str, str, bool]:
+    """Создать таблицу ключей с колонкой «Релевантность» и вернуть (url, spreadsheet_id,
+    расшарена_ли). service/drive_service — для тестов (моки). spreadsheet_id нужен на возврате
+    для сверки присланной менеджером ссылки. Таблица открывается anyone-with-link РЕДАКТОРОМ:
+    флоу просит менеджера/заказчика править её («удалите лишние строки») с любого Google-аккаунта."""
     rows = build_keyword_sheet_rows(ideas, relevance)
     svc = service or _build_service()
     start = time.monotonic()
@@ -268,12 +315,14 @@ def publish_keywords_to_sheets(
             len(rows),
         )
         raise
+    shared = _share_anyone(sid, role="writer", drive_service=drive_service)
     log.info(
-        "sheets-kw-publish: ok за %dмс (строк=%d)",
+        "sheets-kw-publish: ok за %dмс (строк=%d, shared=%s)",
         int((time.monotonic() - start) * 1000),
         len(rows),
+        shared,
     )
-    return url, sid
+    return url, sid, shared
 
 
 def parse_spreadsheet_id(url_or_id: str) -> str | None:

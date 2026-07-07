@@ -68,6 +68,22 @@ class Whitelist(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class Admin(Base):
+    """Рантайм-админы бота (0021, P4 — фиксы по живому тесту 2026-07-06). is_admin = env
+    ADMIN_CHAT_IDS ∪ эта таблица (core.access.is_admin, зеркало Whitelist/0017): env — бутстрап
+    первого админа (в рантайме неснимаем), таблица — /addadmin//removeadmin без рестарта VPS.
+    Fail-closed: сбой БД ⇒ только env; пустые оба ⇒ админов нет. Админка даёт /grant//adduser/
+    /addadmin и read-bypass пер-юзер грантов; мутационный замок Draft НЕ затрагивает."""
+
+    __tablename__ = "admins"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True, nullable=False)
+    added_by: Mapped[int | None] = mapped_column(BigInteger)  # chat_id админа, выдавшего админку
+    note: Mapped[str | None] = mapped_column(String(255))  # опц. заметка (имя и т.п.)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class UserSettings(Base):
     __tablename__ = "user_settings"
 

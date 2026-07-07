@@ -56,12 +56,12 @@ def test_every_migration_has_real_downgrade():
     assert not bad, f"миграции без реального downgrade: {bad}"
 
 
-def test_single_alembic_head_is_0020():
+def test_single_alembic_head_is_0021():
     revs = _revisions()
     assert revs, "не найдено ни одной миграции — сломан парс migrations/versions"
     downs = {d for d in revs.values() if d}
     heads = [r for r in revs if r not in downs]
-    assert heads == ["0020_audit_chat_index"], (
-        f"ожидался ровно один head=0020_audit_chat_index, получено {heads} — "
+    assert heads == ["0021_admins_runtime"], (
+        f"ожидался ровно один head=0021_admins_runtime, получено {heads} — "
         "ветвление/забытый down_revision в migrations/versions"
     )

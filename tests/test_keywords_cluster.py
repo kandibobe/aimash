@@ -34,14 +34,38 @@ def _fake_chat(content: str | None = None, *, raises: bool = False):
     return _chat
 
 
-# ── normalize_intent: КОД сводит ответ модели к таксономии §7 (4 значения) ────────
+# ── normalize_intent: КОД сводит ответ модели к таксономии §7 (5 значений) ────────
 def test_normalize_intent_synonyms_and_unknown():
     assert C.normalize_intent("transactional") == "транзакционный"
     assert C.normalize_intent("  Коммерческий ") == "коммерческий"
-    assert C.normalize_intent("brand") == "навигационный"  # бренд → навигационный (§7)
+    # P2 (живой тест 2026-07-06): бренды/конкуренты — СВОЯ категория, не навигационный
+    assert C.normalize_intent("brand") == "брендовый"
+    assert C.normalize_intent("branded") == "брендовый"
+    assert C.normalize_intent("конкурентный") == "брендовый"
+    assert C.normalize_intent("competitor") == "брендовый"
     assert C.normalize_intent("информационный") == "информационный"
     assert C.normalize_intent("чтотоещё") == ""  # неизвестное → пусто (не показываем мусор)
     assert C.normalize_intent("") == ""
+
+
+def test_intent_taxonomy_consistency_guards():
+    """Класс-гард «добавил категорию — забыл карту»: каждая категория INTENTS нормализуется в
+    себя, имеет вес приоритезации и упомянута в промпте кластеризации."""
+    assert all(C.normalize_intent(x) == x for x in C.INTENTS)
+    assert set(C._INTENT_WEIGHT) == set(C.INTENTS)
+    assert all(x in C._SYSTEM for x in C.INTENTS)
+
+
+def test_branded_cluster_ranks_between_commercial_and_navigational():
+    """P2: вес «брендовый» между коммерческим и навигационным (конкурентные бренды — горячий
+    спрос). Одинаковый объём ⇒ порядок по весу интента."""
+    clusters = [
+        C.Cluster(name="Nav", intent="навигационный", keywords=["a"]),
+        C.Cluster(name="Brand", intent="брендовый", keywords=["b"]),
+        C.Cluster(name="Comm", intent="коммерческий", keywords=["c"]),
+    ]
+    ranked = C.rank_clusters(clusters, {"a": 100, "b": 100, "c": 100})
+    assert [c.name for c in ranked] == ["Comm", "Brand", "Nav"]
 
 
 # ── _parse: только реальные ключи, дедуп между группами, leftover → «Прочее» ──────

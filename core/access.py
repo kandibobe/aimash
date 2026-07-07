@@ -26,7 +26,7 @@ from sqlalchemy import delete, select
 from ads.client import DRAFT_ACCOUNT_ID, ensure_read_allowed
 from core.config import normalize_customer_id, settings
 from core.logging import log
-from db.models import AccountAccess, UserSettings, Whitelist
+from db.models import AccountAccess, Admin, UserSettings, Whitelist
 from db.session import Session
 
 # Кэш «есть ли хоть один грант» (режим auto): (deadline_monotonic, value). TTL короткий — граница
@@ -154,6 +154,88 @@ async def list_whitelisted_users() -> list[Whitelist]:
         )
 
 
+# ── Рантайм-админы (P4, живой тест 2026-07-06): env ∪ БД, fail-closed ─────────────────────
+# Зеркало рантайм-whitelist выше: env ADMIN_CHAT_IDS — бутстрап (неснимаем в рантайме), таблица
+# admins — /addadmin//removeadmin без рестарта VPS. Кэш короткий; add/remove инвалидируют сразу.
+_ADM_TTL_S = 30.0
+_adm_cache: tuple[float, frozenset[int]] | None = None
+_adm_db_warned = False  # один WARNING на процесс, если таблица недоступна (миграция 0021)
+
+
+def _invalidate_admin_cache() -> None:
+    global _adm_cache
+    _adm_cache = None
+
+
+async def _db_admin_ids() -> frozenset[int]:
+    """chat_id из таблицы admins (кэш _ADM_TTL_S). Любой сбой БД ⇒ ПУСТОЙ набор (fail-closed:
+    действует только env-бутстрап; рантайм-админы при недоступной БД получают отказ, не доступ)."""
+    global _adm_cache, _adm_db_warned
+    now = time.monotonic()
+    if _adm_cache is not None and _adm_cache[0] > now:
+        return _adm_cache[1]
+    try:
+        async with Session() as s:
+            rows = (await s.execute(select(Admin.chat_id))).scalars().all()
+    except Exception as e:  # noqa: BLE001 — БД недоступна/таблицы нет → fail-closed (пустой набор)
+        if not _adm_db_warned:
+            _adm_db_warned = True
+            log.warning(
+                "admins: таблица недоступна (%s) — рантайм-админы пусты, действует только env. "
+                "Применить миграцию 0021 (alembic upgrade head).",
+                type(e).__name__,
+            )
+        return frozenset()
+    ids = frozenset(int(x) for x in rows)
+    _adm_cache = (now + _ADM_TTL_S, ids)
+    return ids
+
+
+async def is_admin(chat_id: int | None) -> bool:
+    """Админ ли chat_id: env ADMIN_CHAT_IDS ∪ таблица admins (fail-closed — None/нигде ⇒ False).
+    ЕДИНСТВЕННАЯ точка проверки админства (гард-тест запрещает прямые settings.admin_ids)."""
+    if chat_id is None:
+        return False
+    if chat_id in settings.admin_ids:
+        return True
+    return chat_id in await _db_admin_ids()
+
+
+async def admin_ids_all() -> set[int]:
+    """ВЕСЬ набор админов (env ∪ БД) — для рассылок (алерты об ошибках, weekly digest,
+    старт-нотификации, форвард баг-репортов). Fail-closed: сбой БД ⇒ только env."""
+    return set(settings.admin_ids) | set(await _db_admin_ids())
+
+
+async def add_admin(chat_id: int, *, added_by: int | None = None, note: str | None = None) -> bool:
+    """Выдать админку в рантайме (идемпотентно). True — добавлен, False — уже был.
+    Инвалидирует кэш немедленно (новый админ действует сразу, без рестарта)."""
+    async with Session() as s:
+        exists = (await s.execute(select(Admin.id).where(Admin.chat_id == chat_id))).first()
+        if exists is not None:
+            return False
+        s.add(Admin(chat_id=chat_id, added_by=added_by, note=note))
+        await s.commit()
+    _invalidate_admin_cache()
+    return True
+
+
+async def remove_admin(chat_id: int) -> None:
+    """Снять рантайм-админку (no-op, если её не было). Env-админы этим НЕ затрагиваются
+    (бутстрап снимается только правкой .env — защита от самоблокировки)."""
+    async with Session() as s:
+        await s.execute(delete(Admin).where(Admin.chat_id == chat_id))
+        await s.commit()
+    _invalidate_admin_cache()
+
+
+async def list_admins() -> list[Admin]:
+    """Рантайм-админы (БД), по дате добавления. Env-админы не в таблице — /admins помечает их
+    отдельно из settings.admin_ids."""
+    async with Session() as s:
+        return list((await s.execute(select(Admin).order_by(Admin.created_at))).scalars().all())
+
+
 async def ensure_account_allowed_for_user(chat_id: int, customer_id: str) -> None:
     """Пер-пользовательский замок. Draft — всем whitelisted (без записи). Прочие — по явному
     гранту в account_access, КОГДА enforcement активен (см. режимы в докстринге модуля); в
@@ -163,11 +245,11 @@ async def ensure_account_allowed_for_user(chat_id: int, customer_id: str) -> Non
     cid = normalize_customer_id(customer_id)
     if cid == DRAFT_ACCOUNT_ID:
         return
-    # F: админ бота (ADMIN_CHAT_IDS) читает ВСЁ read-allowed без пер-юзер гранта — он и так управляет
-    # грантами (/grant), чтение ≠ деньги. Владелец-одиночка видит все активные дочерние во всех пикерах
-    # (раньше первый же /grant включал enforcement и прятал не-гранованные аккаунты). Не-админ операторы
-    # сохраняют изоляцию. Мутационный замок этим НЕ затрагивается (ensure_allowed — отдельный).
-    if chat_id in settings.admin_ids:
+    # F: админ бота (env ∪ рантайм-таблица, P4) читает ВСЁ read-allowed без пер-юзер гранта — он и
+    # так управляет грантами (/grant), чтение ≠ деньги. Владелец-одиночка видит все активные дочерние
+    # во всех пикерах (раньше первый же /grant включал enforcement и прятал не-гранованные аккаунты).
+    # Не-админ операторы сохраняют изоляцию. Мутационный замок НЕ затрагивается (ensure_allowed).
+    if await is_admin(chat_id):
         return
     if not await per_user_enforcement_active():
         return  # legacy-проход: пер-юзер изоляция не включена (авторитетен глобальный замок)

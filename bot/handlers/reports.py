@@ -155,7 +155,9 @@ async def on_report_account(cq: bm.CallbackQuery, callback_data: bm.ReportAcctCB
     if callback_data.idx == -3:  # 2.2: «Все аккаунты (MCC)» — кросс-аккаунтная ветка
         chat_id = bm._cq_chat_id(cq)
         if callback_data.target == "export":
-            # deep-xlsx: сентинел в выбор → дальше обычный пикер периода (period_export роутит).
+            # deep-xlsx: ОДНОРАЗОВЫЙ сентинел в выбор → дальше обычный пикер периода
+            # (period_export его pop-ает). Если пользователь бросил пикер периода, сентинел
+            # висит до следующего флоу отчёта — безвреден: любой новый выбор его перезапишет.
             bm._REPORT_SEL[chat_id] = {
                 "account": bm.MCC_ALL,
                 "campaign_id": None,
@@ -168,6 +170,9 @@ async def on_report_account(cq: bm.CallbackQuery, callback_data: bm.ReportAcctCB
             )
             return
         # report/sheets → готовая сводка /mcc (текст + лёгкая таблица по всем аккаунтам).
+        # Для target=sheets это ОСОЗНАННЫЙ фолбэк: кросс-аккаунтного Google Sheets нет
+        # (деньги в разных валютах не суммируются без FX — golden rule 4); полная детализация
+        # по всем аккаунтам — «Все аккаунты (MCC)» в /export (deep-xlsx, лист на аккаунт).
         await bm._send_mcc(msg, None)
         return
     if callback_data.idx == -2:  # §UX-память: «↻ повторить прошлый отчёт» (аккаунт+кампания+период)

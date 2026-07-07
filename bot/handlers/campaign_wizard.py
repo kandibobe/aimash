@@ -679,7 +679,7 @@ async def cc_kw_generate(
         from reports.sheets import publish_keywords_to_sheets
 
         title = f"kw-{(topic or 'campaign')[:40]}"
-        url, sid = await bm.asyncio.to_thread(
+        url, sid, shared = await bm.asyncio.to_thread(
             publish_keywords_to_sheets, ideas, relevance, title=title
         )
     except Exception as e:  # noqa: BLE001 — нет drive.file scope/сети → fallback
@@ -715,7 +715,8 @@ async def cc_kw_generate(
     )
     await state.set_state(bm.CreateCampaignWizard.kw_verify)
     await state.update_data(cc_session=session_id)
-    await msg.answer(bm.i18n.t("cc_kw_sheet_ready", url=url))
+    share_note = "" if shared else "\n" + bm.i18n.t("sheets_share_failed_note")
+    await msg.answer(bm.i18n.t("cc_kw_sheet_ready", url=url) + share_note)
     await msg.answer(
         bm.i18n.t("cc_kw_verify_prompt_v2", n=len(relevant)),
         reply_markup=bm.cc_kw_verify_kb(),

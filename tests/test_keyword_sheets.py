@@ -139,13 +139,57 @@ class _FakeService:
         return self._s
 
 
-def test_publish_keywords_returns_url_and_id():
+class _FakePerms:
+    def __init__(self, log, boom=False):
+        self.log, self._boom = log, boom
+
+    def create(self, *, fileId, body, fields):  # noqa: N803 — зеркалим API
+        if self._boom:
+            raise RuntimeError("drive down")
+        self.log.append((fileId, body))
+        return SimpleNamespace(execute=lambda: {"id": "perm1"})
+
+    def execute(self):
+        return {}
+
+
+class _FakeDrive:
+    def __init__(self, boom=False):
+        self.log: list = []
+        self._boom = boom
+
+    def permissions(self):
+        return _FakePerms(self.log, self._boom)
+
+
+def test_publish_keywords_returns_url_id_and_shares_writer():
     ideas = [_idea("used cars", avg_monthly_searches=100)]
-    url, sid = publish_keywords_to_sheets(
-        ideas, {"used cars": True}, title="kw-test", service=_FakeService(created_id="XYZ")
+    drive = _FakeDrive()
+    url, sid, shared = publish_keywords_to_sheets(
+        ideas,
+        {"used cars": True},
+        title="kw-test",
+        service=_FakeService(created_id="XYZ"),
+        drive_service=drive,
     )
     assert sid == "XYZ"
     assert "XYZ" in url
+    # P1 (живой тест 2026-07-06): таблица ключей — anyone-with-link РЕДАКТОР (флоу просит её править)
+    assert shared is True
+    assert drive.log == [("XYZ", {"type": "anyone", "role": "writer"})]
+
+
+def test_publish_keywords_share_failure_degrades_without_raising():
+    ideas = [_idea("used cars", avg_monthly_searches=100)]
+    url, sid, shared = publish_keywords_to_sheets(
+        ideas,
+        {"used cars": True},
+        title="kw-test",
+        service=_FakeService(created_id="XYZ"),
+        drive_service=_FakeDrive(boom=True),
+    )
+    assert sid == "XYZ" and "XYZ" in url
+    assert shared is False  # ссылка всё равно уходит, бот добавит подсказку «запросите доступ»
 
 
 def test_read_keyword_column_skips_header_and_dedups():
