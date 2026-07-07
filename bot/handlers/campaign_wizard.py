@@ -77,6 +77,20 @@ async def cc_account_cb(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.
     # НЕ входить заново в settings_desc: свободный текст там пересобрал бы настройки с нуля
     # (дефолты перетёрли бы правки — data-loss). Показываем сохранённую сводку (settings_confirm).
     if snap is not None and (snap.wizard_state.get("settings") or {}):
+        # Ревью 2026-07-07: при смене аккаунта валюта/денежные ДЕФОЛТЫ старого аккаунта не должны
+        # пережить переключение (сводка врала бы валютой). Пересеиваем только by_default-деньги
+        # и метку валюты; пользовательские значения не трогаем.
+        new_cur = await bm._cc_account_currency(preview_id)
+        reseeded = bm._cc_reseed_currency_defaults(snap.wizard_state.get("settings") or {}, new_cur)
+        if reseeded is not None:
+            snap = (
+                await bm.CDRAFTS.patch(
+                    session_id,
+                    lambda s: s.__setitem__("settings", reseeded),
+                    expected_chat_id=chat_id,
+                )
+                or snap
+            )
         msg = bm._cq_msg(cq)
         await bm._safe_edit(
             cq,
@@ -283,7 +297,8 @@ async def cc_settings_desc(m: bm.Message, state: bm.FSMContext) -> None:
         # W4 (belt-and-brace): настройки уже собраны, а мы всё же в settings_desc (любой обходной
         # путь навигации) — текст трактуем как ПРАВКУ (merge-patch), а не пересборку с нуля:
         # полный assemble_settings перетёр бы пользовательские значения дефолтами (data-loss).
-        if extracted.is_empty():
+        merged = None if extracted.is_empty() else bm._cc_apply_settings_patch(existing, extracted)
+        if merged is None or merged == existing:  # пустой ИЛИ no-op патч — честный отказ
             await state.set_state(bm.CreateCampaignWizard.settings_confirm)
             await m.answer(
                 bm.i18n.t("cc_settings_edit_not_understood"),
@@ -291,7 +306,6 @@ async def cc_settings_desc(m: bm.Message, state: bm.FSMContext) -> None:
                 parse_mode=bm.ParseMode.HTML,
             )
             return
-        merged = bm._cc_apply_settings_patch(existing, extracted)
         await bm.CDRAFTS.patch(
             session_id, lambda s: s.__setitem__("settings", merged), expected_chat_id=m.chat.id
         )
@@ -346,16 +360,18 @@ async def cc_settings_edit(m: bm.Message, state: bm.FSMContext) -> None:
             bm.i18n.t("err_text_gen", err=bm.ux.err_text(e)), reply_markup=bm.cc_settings_kb()
         )
         return
-    if patch.is_empty():
-        # Живой тест 2026-07-06: нераспознанная правка МОЛЧА ре-рендерила ту же карточку —
-        # выглядело как «применилось». Честный отказ + список редактируемых полей.
+    existing_s = draft.wizard_state.get("settings") or {}
+    merged = None if patch.is_empty() else bm._cc_apply_settings_patch(existing_s, patch)
+    if merged is None or merged == existing_s:
+        # Живой тест 2026-07-06 + ревью 2026-07-07: нераспознанная ИЛИ no-op правка (пустой патч,
+        # «CPC 0», нераспознанное расписание) МОЛЧА ре-рендерила ту же карточку — выглядело как
+        # «применилось». Честный отказ, если черновик не изменился ни на байт.
         await m.answer(
             bm.i18n.t("cc_settings_edit_not_understood"),
             reply_markup=bm.cc_settings_kb(can_forward=bm._cc_max_step(draft) > 1),
             parse_mode=bm.ParseMode.HTML,
         )
         return
-    merged = bm._cc_apply_settings_patch(draft.wizard_state.get("settings") or {}, patch)
     await bm.CDRAFTS.patch(
         session_id, lambda s: s.__setitem__("settings", merged), expected_chat_id=m.chat.id
     )
@@ -547,7 +563,9 @@ async def cc_kw_confirm(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.
     await bm._cc_present_stage3(msg, chat_id, session_id, state)
 
 
-@bm.dp.message(bm.CreateCampaignWizard.keywords)
+# F.text ОБЯЗАТЕЛЕН (ревью 2026-07-07): без него state-фильтр матчит и ДОКУМЕНТЫ — файл ключей
+# перехватывался здесь (text=None) и НЕ доходил до fallback.on_document → _cc_keywords_from_document.
+@bm.dp.message(bm.CreateCampaignWizard.keywords, bm.F.text)
 async def cc_keywords_text(m: bm.Message, state: bm.FSMContext) -> None:
     """Этап 2 (ввод A): свои ключи текстом ИЛИ ссылкой на Google-таблицу. Тип соответствия — по
     маркерам/инструкции (default phrase); смешанные типы сохраняются per-keyword (§19.4.1).
@@ -719,7 +737,7 @@ async def cc_kw_generate(
     await msg.answer(bm.i18n.t("cc_kw_sheet_ready", url=url) + share_note)
     await msg.answer(
         bm.i18n.t("cc_kw_verify_prompt_v2", n=len(relevant)),
-        reply_markup=bm.cc_kw_verify_kb(),
+        reply_markup=bm.cc_kw_verify_kb(can_forward=bm._cc_max_step(draft) > 2),
         parse_mode=bm.ParseMode.HTML,
     )
 
@@ -860,7 +878,9 @@ async def cc_use_assets(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.
     )
     await msg.answer(bm.i18n.t("cc_assets_reused", n=len(reuse), types=types_s))
     await msg.answer(
-        bm.i18n.t("cc_assets_prompt"), reply_markup=bm.cc_assets_kb(), parse_mode=bm.ParseMode.HTML
+        bm.i18n.t("cc_assets_prompt"),
+        reply_markup=bm.cc_assets_kb(can_forward=bm._cc_max_step(draft) > 5),
+        parse_mode=bm.ParseMode.HTML,
     )
 
 
@@ -881,10 +901,11 @@ async def cc_assets_back(
     cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.FSMContext
 ) -> None:
     await cq.answer()
+    draft = await bm.CDRAFTS.get_active(bm._cq_chat_id(cq))
     await bm._safe_edit(
         cq,
         bm.i18n.t("cc_assets_prompt"),
-        reply_markup=bm.cc_assets_kb(),
+        reply_markup=bm.cc_assets_kb(can_forward=bm._cc_max_step(draft) > 5),
         parse_mode=bm.ParseMode.HTML,
     )
 
@@ -997,7 +1018,9 @@ async def cc_asset_type(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.
         # §20.6: честно сообщаем, что ссылки — из реальной карты сайта (краул), не выдуманы
         await msg.answer(bm.i18n.t("cc_asset_sitelinks_from_crawl", n=len(site_pages)))
     await msg.answer(
-        bm.i18n.t("cc_assets_prompt"), reply_markup=bm.cc_assets_kb(), parse_mode=bm.ParseMode.HTML
+        bm.i18n.t("cc_assets_prompt"),
+        reply_markup=bm.cc_assets_kb(can_forward=bm._cc_max_step(snap) > 5),
+        parse_mode=bm.ParseMode.HTML,
     )
 
 
@@ -1061,7 +1084,9 @@ async def cc_asset_lead_form_url(m: bm.Message, state: bm.FSMContext) -> None:
     n = len(((snap.wizard_state if snap else {}).get("assets") or {}).get("new") or [])
     await m.answer(bm.i18n.t("cc_asset_added", label=bm.texts.fmt_asset_spec_label(spec), n=n))
     await m.answer(
-        bm.i18n.t("cc_assets_prompt"), reply_markup=bm.cc_assets_kb(), parse_mode=bm.ParseMode.HTML
+        bm.i18n.t("cc_assets_prompt"),
+        reply_markup=bm.cc_assets_kb(can_forward=bm._cc_max_step(snap or draft) > 5),
+        parse_mode=bm.ParseMode.HTML,
     )
 
 

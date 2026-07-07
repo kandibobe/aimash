@@ -2953,6 +2953,28 @@ async def _cc_profile_site(draft) -> str | None:
         return None
 
 
+def _cc_reseed_currency_defaults(settings_d: dict, currency: str) -> dict | None:
+    """Ревью 2026-07-07 (смена аккаунта на Этапе 0 при собранных настройках): валюта и ДЕФОЛТНЫЕ
+    деньги старого аккаунта не должны пережить переключение — сводка показывала бы «1 500 JPY
+    (по умолчанию)» для USD-аккаунта. Пересеивает ТОЛЬКО поля с тегом by_default (bюджет/CPC —
+    значения пользователя и «по аналогии» не трогаем) + метку currency. None ⇒ менять нечего
+    (валюта неизвестна или совпадает)."""
+    cur = (currency or "").strip().upper()
+    if not cur or (settings_d.get("currency") or "").strip().upper() == cur:
+        return None
+    from core.limits import wizard_default_money_units
+
+    s = dict(settings_d)
+    s["currency"] = cur
+    bd = set(s.get("by_default") or [])
+    def_budget, def_cpc = wizard_default_money_units(cur)
+    if "budget_daily_micros" in bd:
+        s["budget_daily_micros"] = units_to_micros(def_budget)
+    if "cpc_bid_micros" in bd:
+        s["cpc_bid_micros"] = units_to_micros(def_cpc)
+    return s
+
+
 def _cc_max_step(draft) -> int:
     """W4: максимально достигнутый этап черновика (high-water nav.max_step из store.set_step;
     старые черновики без nav → current_step). Управляет показом «Вперёд ›» после «Назад»."""
@@ -3649,7 +3671,10 @@ async def _cc_image_from_photo(m: Message, state: FSMContext, bot: Bot) -> None:
     n = len(((snap.wizard_state if snap else {}).get("images") or {}).get("media_ids") or [])
     # Остаёмся на Этапе 4: можно прислать ещё фото; «Готово/Пропустить» (cc_skip) → Этап 5. НЕ
     # продвигаем здесь — иначе второе фото попадёт в чужой стейт и перехватится GDN-веткой on_photo.
-    await m.answer(i18n.t("cc_image_saved", n=n), reply_markup=cc_skip_kb())
+    await m.answer(
+        i18n.t("cc_image_saved", n=n),
+        reply_markup=cc_skip_kb(can_forward=_cc_max_step(snap) > 4),
+    )
 
 
 # ── Этап 2: ключевые слова (свои текстом/ссылкой ИЛИ генерация → Sheets → верификация) ─
@@ -3775,7 +3800,8 @@ async def _cc_save_keywords(
             }
         )
 
-    if await CDRAFTS.patch(session_id, _save, expected_chat_id=chat_id) is None:
+    snap = await CDRAFTS.patch(session_id, _save, expected_chat_id=chat_id)
+    if snap is None:
         # B3: черновик уже не active (TTL-abandon за время Sheets round-trip / заменён) — patch — no-op.
         # Не рапортуем ложный «список готов»: сообщаем, что черновик устарел, и выходим.
         await target.answer(i18n.t("cc_draft_stale"))
@@ -3790,7 +3816,7 @@ async def _cc_save_keywords(
     await state.update_data(cc_session=session_id)
     await target.answer(
         i18n.t("cc_kw_review", n=len(kw_list), mt=texts.esc(mt_label), preview=preview),
-        reply_markup=cc_kw_confirm_kb(),
+        reply_markup=cc_kw_confirm_kb(can_forward=_cc_max_step(snap) > 2),
         parse_mode=ParseMode.HTML,
     )
 
@@ -3828,7 +3854,7 @@ async def _cc_asset_logo_from_photo(m: Message, state: FSMContext, bot: Bot) -> 
     await asyncio.to_thread(save_pending_media, media_id, square, square)
     name = (draft.wizard_state.get("settings") or {}).get("campaign_name") or "logo"
     spec = {"family": "business_logo", "params": {"media_id": media_id, "name": f"{name}_logo"}}
-    await CDRAFTS.patch(
+    snap = await CDRAFTS.patch(
         session_id, lambda st: st["assets"]["new"].append(spec), expected_chat_id=m.chat.id
     )
     await state.set_state(CreateCampaignWizard.assets)
@@ -3836,7 +3862,7 @@ async def _cc_asset_logo_from_photo(m: Message, state: FSMContext, bot: Bot) -> 
     await m.answer(i18n.t("cc_asset_logo_added"))
     await m.answer(
         _cc_crumb(5) + i18n.t("cc_assets_prompt"),
-        reply_markup=cc_assets_kb(),
+        reply_markup=cc_assets_kb(can_forward=_cc_max_step(snap or draft) > 5),
         parse_mode=ParseMode.HTML,
     )
 

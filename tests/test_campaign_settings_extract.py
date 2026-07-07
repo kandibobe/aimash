@@ -356,10 +356,16 @@ def test_assemble_currency_aware_defaults_jpy():
         assert key in out["by_default"]
 
 
-def test_assemble_explicit_currency_beats_account_currency():
-    out = assemble_settings(CampaignSettings(currency="usd"), topic="т", account_currency="JPY")
-    assert out["currency"] == "USD"  # явная валюта из текста побеждает (и нормализуется)
+def test_assemble_account_currency_beats_explicit():
+    # Ревью 2026-07-07: Google бронирует деньги в валюте АККАУНТА — она авторитетна для
+    # сводки/дефолтов; «йен» в тексте на USD-аккаунте не должна врать в карточке.
+    out = assemble_settings(CampaignSettings(currency="jpy"), topic="т", account_currency="USD")
+    assert out["currency"] == "USD"
     assert out["cpc_bid_micros"] == 500_000  # дефолты по USD
+    # валюта аккаунта неизвестна (тест-аккаунт) → явная из текста используется (и нормализуется)
+    out2 = assemble_settings(CampaignSettings(currency="jpy"), topic="т")
+    assert out2["currency"] == "JPY"
+    assert out2["cpc_bid_micros"] == 75_000_000  # дефолты по JPY
 
 
 def test_assemble_unknown_currency_falls_back_to_legacy_defaults():
@@ -403,3 +409,22 @@ def test_wizard_default_money_units_table_consistency():
         assert budget > cpc, cur  # дневной бюджет всегда больше клика
     assert wizard_default_money_units(None) == (10.0, 0.5)
     assert wizard_default_money_units("jpy") == WIZARD_DEFAULT_MONEY_UNITS["JPY"]
+
+
+def test_final_summary_zero_decimal_currency():
+    """Ревью 2026-07-07: финальная сводка (Этап 7) тоже без копеек у zero-decimal валют."""
+    from bot.texts import fmt_cc_final_summary
+
+    state = {
+        "settings": {
+            "campaign_name": "Тест",
+            "budget_daily_micros": 1_500_000_000,
+            "currency": "JPY",
+            "geo_locations": ["Уганда"],
+        },
+        "ad": {"final_url": "https://x.example", "headlines": [], "descriptions": []},
+        "keywords": {"list": []},
+    }
+    out = fmt_cc_final_summary(state, lang="ru")
+    assert "1 500 JPY" in out
+    assert "1 500.00" not in out

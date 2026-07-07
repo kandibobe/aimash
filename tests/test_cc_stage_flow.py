@@ -772,3 +772,41 @@ async def test_settings_desc_with_existing_settings_merges_not_overwrites():
     assert s["geo_locations"] == ["Уганда"]  # остальное цело
     assert s["cpc_bid_micros"] == 75_000_000
     assert called["assemble"] is False
+
+
+@pytest.mark.asyncio
+async def test_stage0_repick_other_account_reseeds_currency_defaults():
+    """Ревью 2026-07-07: смена аккаунта на Этапе 0 при собранных настройках пересеивает валюту и
+    by_default-деньги под НОВЫЙ аккаунт; пользовательские значения не трогаются."""
+    from types import SimpleNamespace
+
+    await init_db()
+    chat = 93_105
+    sid = await bm.CDRAFTS.create(chat_id=chat, customer_id=DRAFT_ACCOUNT_ID)
+    settings0 = {
+        "campaign_name": "Уганда · авто · Search",
+        "budget_daily_micros": 1_900_000_000,  # задан пользователем — НЕ трогаем
+        "cpc_bid_micros": 75_000_000,  # by_default (JPY) — пересеется под USD
+        "currency": "JPY",
+        "by_analogy": [],
+        "by_default": ["cpc_bid_micros"],
+    }
+    await bm.CDRAFTS.patch(
+        sid, lambda st: st.__setitem__("settings", dict(settings0)), expected_chat_id=chat
+    )
+    await bm.CDRAFTS.set_step(sid, 1, expected_chat_id=chat)
+    bm._CC_ACCT_CACHE[chat] = [SimpleNamespace(id="1234567890", name="USD acct", manager=False)]
+
+    async def _usd(cid):
+        return "USD"
+
+    msg = _NavMsg(chat)
+    state = _NavState({"cc_session": sid})
+    with patched(bm, "_cc_account_currency", _usd):
+        await bm.cc_account_cb(FakeCallbackQuery(msg, uid=chat), CcCB(action="acct", idx=0), state)
+
+    snap = await bm.CDRAFTS.get(sid, expected_chat_id=chat)
+    s = snap.wizard_state["settings"]
+    assert s["currency"] == "USD"  # метка валюты — нового аккаунта
+    assert s["cpc_bid_micros"] == 500_000  # by_default CPC пересеян под USD (0.5)
+    assert s["budget_daily_micros"] == 1_900_000_000  # пользовательский бюджет цел

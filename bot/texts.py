@@ -143,6 +143,7 @@ HELP = (
     "/adduser &lt;chat_id&gt; — открыть оператору доступ к боту (без рестарта) + выбрать аккаунты\n"
     "/removeuser &lt;chat_id&gt; — закрыть доступ · /users — список операторов\n"
     "/grant &lt;chat_id&gt; &lt;id&gt; · /revoke &lt;chat_id&gt; &lt;id&gt; — точечный доступ к аккаунту (чтение)\n"
+    "/addadmin &lt;chat_id&gt; · /removeadmin &lt;chat_id&gt; — админка без рестарта · /admins — список\n"
     "/bugs — очередь баг-репортов (триаж) · /mutready &lt;id&gt; — готовность аккаунта к мутациям\n\n"
     "<b>Как в другой кампании / по брифу</b>\n"
     "• «сделай кампанию N с настройками как в кампании X» — клонирую настройки.\n"
@@ -2203,8 +2204,10 @@ def fmt_cc_final_summary(state: dict, lang: str | None = None) -> str:
     assets = state.get("assets") or {}
     url = state.get("url_options") or {}
     geo = ", ".join(s.get("geo_locations") or []) or "—"
-    budget = _thou(int(s.get("budget_daily_micros", 0)) / 1_000_000, 2)
     cur = (s.get("currency") or "").strip()
+    # Как в fmt_cc_settings_summary: zero-decimal валюты без копеек («1 500 JPY», не «1 500.00 JPY»)
+    digits = 0 if cur.upper() in ZERO_DECIMAL_CURRENCIES else 2
+    budget = _thou(int(s.get("budget_daily_micros", 0)) / 1_000_000, digits)
     cur_s = f" {esc(cur)}" if cur else ""
     strat = _BIDDING_HUMAN[lng].get(s.get("bidding_strategy") or "manual_cpc", "—")
     path = "/".join(p for p in (ad.get("path1"), ad.get("path2")) if p)

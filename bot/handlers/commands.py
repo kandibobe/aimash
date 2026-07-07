@@ -378,12 +378,15 @@ async def removeuser_cmd(m: bm.Message, command: bm.CommandObject) -> None:
     if target in bm.settings.whitelist:  # env-оператор — из БД убирать нечего
         await m.answer(bm.i18n.t("removeuser_env", chat=target), parse_mode=bm.ParseMode.HTML)
         return
-    from core.access import remove_whitelisted_user
+    from core.access import remove_admin, remove_whitelisted_user
     from db.models import AccountAccess
     from db.session import Session
     from sqlalchemy import delete as _sa_delete
 
     await remove_whitelisted_user(target)
+    # Ревью 2026-07-07: рантайм-админка тоже снимается — иначе удалённый оператор оставался в
+    # admins (получал алерты-рассылки), а повторный /adduser молча возвращал ему полную админку.
+    await remove_admin(target)
     async with Session() as s:  # заодно снимаем все гранты аккаунтов этого оператора
         await s.execute(_sa_delete(AccountAccess).where(AccountAccess.chat_id == target))
         await s.commit()

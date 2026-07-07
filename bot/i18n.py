@@ -206,6 +206,8 @@ CATALOG: dict[str, dict[str, str]] = {
             "/adduser &lt;chat_id&gt; — let an operator use the bot (no restart) + pick accounts\n"
             "/removeuser &lt;chat_id&gt; — revoke access · /users — list operators\n"
             "/grant &lt;chat_id&gt; &lt;id&gt; · /revoke &lt;chat_id&gt; &lt;id&gt; — per-account read access\n"
+            "/addadmin &lt;chat_id&gt; · /removeadmin &lt;chat_id&gt; — admin role, no restart · "
+            "/admins — list\n"
             "/bugs — bug-report queue (triage) · /mutready &lt;id&gt; — mutation readiness\n\n"
             "<b>Like another campaign / from a brief</b>\n"
             "• “create campaign N with settings like campaign X” — I clone the settings.\n"

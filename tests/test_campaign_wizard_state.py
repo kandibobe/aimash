@@ -307,3 +307,27 @@ async def test_stage1_edit_max_cpc_updates_draft():
     assert snap.wizard_state["settings"]["cpc_bid_micros"] == 75_000_000
     assert "cpc_bid_micros" not in snap.wizard_state["settings"]["by_default"]
     assert await _count_proposals(chat) == 0  # правка черновика — НЕ мутация
+
+
+@pytest.mark.asyncio
+async def test_stage1_edit_noop_patch_answers_not_understood():
+    """Ревью 2026-07-07: патч, который ничего не меняет (напр. «цена за клик 0» → ветка
+    игнорирует <=0), — тоже честный отказ, а не ре-рендер «как будто применилось»."""
+    await init_db()
+    chat = 7700018
+    sid = await bm.CDRAFTS.create(chat_id=chat, customer_id=DRAFT_ACCOUNT_ID)
+    settings0 = {"cpc_bid_micros": 500_000, "by_analogy": [], "by_default": ["cpc_bid_micros"]}
+    await bm.CDRAFTS.patch(sid, lambda s: s.__setitem__("settings", dict(settings0)))
+    fsm = FakeFSM({"cc_session": sid})
+
+    async def _zero_cpc(text, *, language="ru"):
+        return CampaignSettings(max_cpc_units=0)  # «поставь цену за клик 0» — no-op патч
+
+    msg = FakeMessage("поставь цену за клик 0", chat_id=chat)
+    with patched(bm, "extract_campaign_settings", _zero_cpc):
+        await bm.cc_settings_edit(msg, fsm)
+
+    snap = await bm.CDRAFTS.get(sid)
+    assert snap.wizard_state["settings"] == settings0  # не изменилось
+    not_understood = bm.i18n.t("cc_settings_edit_not_understood")
+    assert any(not_understood == t for t, _ in msg.answers)  # честный отказ, не «применилось»

@@ -305,3 +305,114 @@ async def test_addkeys_accepts_document():
     m = FakeMessage(chat_id=chat_id)
     await bm.kw_add_from_document(m, state, "kw alpha\nkw beta\n", "keys.txt")
     assert bm._KW_ADD[token]["keywords"] == ["kw alpha", "kw beta"]
+
+
+# ── Ревью 2026-07-07: диспатч-уровень (кнопка меню, документ, ссылка, живучесть сессии) ─
+def test_keyword_state_text_handlers_require_f_text():
+    """Класс-гард: state-хендлеры этапов «жду ключи» ОБЯЗАНЫ иметь F.text — без него они
+    перехватывают ДОКУМЕНТЫ раньше fallback.on_document (файл ключей молча умирал)."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    kf = (root / "bot" / "handlers" / "keywords_flow.py").read_text(encoding="utf-8")
+    cw = (root / "bot" / "handlers" / "campaign_wizard.py").read_text(encoding="utf-8")
+    assert "@bm.dp.message(bm.KwAdd.awaiting_keywords, bm.F.text)" in kf
+    assert "@bm.dp.message(bm.CreateCampaignWizard.keywords, bm.F.text)" in cw
+
+
+async def test_on_more_addkeys_routes_to_flow():
+    """Кнопка «➕ Ключи в кампанию» в хабе «Ещё» реально стартует /addkeys-флоу."""
+    from bot.callbacks import MoreCB
+
+    await init_db()
+    bm._KW_ADD.clear()
+    chat_id = 30_730
+    state = FakeState()
+    msg = FakeMessage(chat_id=chat_id)
+    await bm.on_more(FakeCallbackQuery(msg, uid=chat_id), MoreCB(action="addkeys"), state)
+    assert await state.get_state() == bm.KwAdd.awaiting_campaign
+    token = (await state.get_data()).get("kw_add_token")
+    assert token in bm._KW_ADD
+
+
+async def test_on_document_routes_to_kw_add(monkeypatch):
+    """Файл в состоянии KwAdd.awaiting_keywords проходит ЧЕРЕЗ on_document (реальный роутинг),
+    а не только прямым вызовом kw_add_from_document."""
+    from types import SimpleNamespace
+
+    await init_db()
+    bm._KW_ADD.clear()
+    chat_id = 30_731
+    state = FakeState()
+    await bm.addkeys_start(FakeMessage(chat_id=chat_id), state)
+    token = (await state.get_data())["kw_add_token"]
+    await bm.kw_add_campaign(FakeMessage(chat_id=chat_id, text="Search Spring"), state)
+    assert await state.get_state() == bm.KwAdd.awaiting_keywords
+
+    class FakeBot:
+        async def download(self, doc, destination):
+            destination.write(b"stub")
+
+    monkeypatch.setattr(bm.ingest, "extract_file_text", lambda name, data: "kw alpha\nkw beta")
+    m = FakeMessage(chat_id=chat_id)
+    m.document = SimpleNamespace(file_size=10, mime_type="text/plain", file_name="keys.txt")
+    m.caption = None
+    from bot.handlers.fallback import on_document
+
+    await on_document(m, state, FakeBot())
+    assert bm._KW_ADD[token]["keywords"] == ["kw alpha", "kw beta"]
+
+
+async def test_match_validation_failure_keeps_session_alive():
+    """Ревью 2026-07-07: ошибка валидации схемы НЕ расходует сессию — кнопки типа соответствия
+    остаются рабочими (раньше pop до сборки превращал всё в kw_add_stale-тупик)."""
+    await init_db()
+    bm._KW_ADD.clear()
+    chat_id = 30_732
+    token = bm._kw_add_put(["x" * 200], "manual")  # заведомо невалидный ключ (>80 симв.)
+    bm._KW_ADD[token]["campaign"] = "Search Spring"
+    bm._KW_ADD[token]["keywords"] = ["x" * 200]
+    cq = FakeCallbackQuery(FakeMessage(chat_id=chat_id))
+    await bm.on_kw_add_match(cq, KwAddCB(action="match", token=token, mt="broad"))
+    assert token in bm._KW_ADD  # сессия жива — можно исправить список и повторить
+    assert cq.answers and cq.answers[-1][1] is True  # понятный alert
+
+
+async def test_addkeys_sheet_cells_sanitized(monkeypatch):
+    """B5-класс: мусорная ячейка колонки A (>10 слов) отбрасывается с пометкой, валидные идут дальше."""
+    await init_db()
+    bm._KW_ADD.clear()
+    chat_id = 30_733
+    state = FakeState()
+    await bm.addkeys_start(FakeMessage(chat_id=chat_id), state)
+    token = (await state.get_data())["kw_add_token"]
+    await bm.kw_add_campaign(FakeMessage(chat_id=chat_id, text="Search Spring"), state)
+
+    import reports.sheets as rs
+
+    junk = "слово " * 12  # >10 слов — assert_keyword_ok отверг бы весь батч
+    with patched(rs, "read_keyword_column", lambda sid: ["kw one", junk.strip(), "kw two"]):
+        m = FakeMessage(
+            chat_id=chat_id, text="https://docs.google.com/spreadsheets/d/ABC123_xyz-9/edit"
+        )
+        await bm.kw_add_keywords(m, state)
+    assert bm._KW_ADD[token]["keywords"] == ["kw one", "kw two"]
+    assert any("Отброшено" in (t or "") for t, _ in m.answers)  # честная пометка
+
+
+async def test_addkeys_unparseable_sheets_url_gives_hint_not_keyword():
+    """Ревью 2026-07-07: ссылка формы /u/<n>/d/… не парсится — подсказка, а НЕ literal-ключ."""
+    await init_db()
+    bm._KW_ADD.clear()
+    chat_id = 30_734
+    state = FakeState()
+    await bm.addkeys_start(FakeMessage(chat_id=chat_id), state)
+    token = (await state.get_data())["kw_add_token"]
+    await bm.kw_add_campaign(FakeMessage(chat_id=chat_id, text="Search Spring"), state)
+    m = FakeMessage(
+        chat_id=chat_id,
+        text="https://docs.google.com/spreadsheets/u/1/d/ABCDEFGHIJKLMNOPQRSTUVWX/edit#gid=0",
+    )
+    await bm.kw_add_keywords(m, state)
+    assert await state.get_state() == bm.KwAdd.awaiting_keywords  # остаёмся в шаге
+    assert bm._KW_ADD[token]["keywords"] == []  # URL НЕ стал «ключевым словом»

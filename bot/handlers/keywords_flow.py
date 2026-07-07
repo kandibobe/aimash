@@ -335,7 +335,9 @@ async def kw_add_from_document(m: bm.Message, state: bm.FSMContext, text: str, n
     await kw_add_accept(m, state, [k.text for k in parsed])
 
 
-@bm.dp.message(bm.KwAdd.awaiting_keywords)
+# F.text ОБЯЗАТЕЛЕН (ревью 2026-07-07): без него state-фильтр матчит и ДОКУМЕНТЫ — файл ключей
+# перехватывался здесь (text=None → «пустой список») и никогда не доходил до fallback.on_document.
+@bm.dp.message(bm.KwAdd.awaiting_keywords, bm.F.text)
 async def kw_add_keywords(m: bm.Message, state: bm.FSMContext) -> None:
     """§7 list-UX + P3: менеджер прислал список ключей ТЕКСТОМ (по одному в строке/через запятую)
     ИЛИ ссылкой на Google Sheets (колонка A; таблица должна быть доступна аккаунту бота)."""
@@ -344,18 +346,28 @@ async def kw_add_keywords(m: bm.Message, state: bm.FSMContext) -> None:
         from reports.sheets import parse_spreadsheet_id, read_keyword_column
 
         sid = parse_spreadsheet_id(text)
-        if sid:
-            try:
-                kws = await bm.asyncio.to_thread(read_keyword_column, sid)
-            except Exception as e:  # noqa: BLE001 — приватная таблица/нет scope → понятная подсказка
-                await m.answer(
-                    bm.i18n.t("kw_add_sheet_read_failed", err=bm.ux.err_text(e)),
-                    reply_markup=bm.nav_kb(),
-                    parse_mode=bm.ParseMode.HTML,
-                )
-                return  # остаёмся в состоянии — пришлёт файл/текст или расшарит таблицу
-            await kw_add_accept(m, state, kws)
+        if not sid:
+            # Ссылка на таблицу, которую не распарсили (форма /u/<n>/d/…) — НЕ трактуем URL как
+            # «ключевое слово» (ревью 2026-07-07: URL минтился literal-ключом в proposal).
+            await m.answer(bm.i18n.t("cc_kw_not_a_link"), reply_markup=bm.nav_kb())
             return
+        try:
+            kws = await bm.asyncio.to_thread(read_keyword_column, sid)
+        except Exception as e:  # noqa: BLE001 — приватная таблица/нет scope → понятная подсказка
+            # БЕЗ parse_mode: err_text — plain (сырой HttpError с '<' ломал HTML-парс Telegram,
+            # и пользователь не получал подсказку вовсе — ревью 2026-07-07).
+            await m.answer(
+                bm.i18n.t("kw_add_sheet_read_failed", err=bm.ux.err_text(e)),
+                reply_markup=bm.nav_kb(),
+            )
+            return  # остаёмся в состоянии — пришлёт файл/текст или расшарит таблицу
+        # B5-класс: сырые ячейки колонки A фильтруем ЗДЕСЬ (длина/число слов) — иначе один
+        # мусорный «ключ» валил весь батч на _build_proposal уже после расхода сессии.
+        kws, dropped = bm._cc_sanitize_keywords(kws)
+        if dropped:
+            await m.answer(bm.i18n.t("cc_kw_dropped", n=dropped))
+        await kw_add_accept(m, state, kws)
+        return
     items = [p.strip() for p in text.replace("\n", ",").split(",") if p.strip()]
     await kw_add_accept(m, state, items)
 
@@ -371,7 +383,9 @@ async def on_kw_add_cancel(cq: bm.CallbackQuery, callback_data: bm.KwAddCB) -> N
 async def on_kw_add_match(cq: bm.CallbackQuery, callback_data: bm.KwAddCB) -> None:
     """Тип соответствия выбран → собрать черновик add_keywords (confirm-гейт + XLSX-для-списка,
     как любой keyword-черновик §5). Само добавление — только после ✅."""
-    sess = bm._KW_ADD.pop(callback_data.token, None)
+    # НЕ pop до успешной сборки (ревью 2026-07-07): ошибка валидации схемы при уже расходованной
+    # сессии превращала все кнопки в «kw_add_stale» — тупик; теперь сессию тратит только успех.
+    sess = bm._KW_ADD.get(callback_data.token)
     msg = bm._cq_msg(cq)
     if not sess or not sess.get("campaign") or msg is None:
         await cq.answer(bm.i18n.t("kw_add_stale"), show_alert=True)
@@ -384,6 +398,7 @@ async def on_kw_add_match(cq: bm.CallbackQuery, callback_data: bm.KwAddCB) -> No
     except Exception as e:  # noqa: BLE001 — валидация схемы (длина/пустой список) → понятный ответ
         await cq.answer(await bm._friendly_error(e, "kw:add", short=True), show_alert=True)
         return
+    bm._KW_ADD.pop(callback_data.token, None)
     await cq.answer()
     await bm._present_proposal(
         msg,
