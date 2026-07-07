@@ -283,10 +283,11 @@ async def kw_add_keywords(m: bm.Message, state: bm.FSMContext) -> None:
     if not kws:  # остаёмся в состоянии — менеджер пришлёт список снова
         await m.answer(bm.i18n.t("kw_add_list_empty"), reply_markup=bm.nav_kb())
         return
-    en = bm.i18n.current_lang() == "en"
-    if len(kws) > 50:  # схема AddKeywords.keywords max 50 — честно сообщаем об обрезке
-        kws = kws[:50]
-        await m.answer("Оставил первые 50 ключей." if not en else "Kept the first 50 keywords.")
+    from agent.tools.schemas import ADD_KEYWORDS_MAX  # 2.6: единый источник лимита батча
+
+    if len(kws) > ADD_KEYWORDS_MAX:  # лимит схемы AddKeywords — честно сообщаем об обрезке
+        kws = kws[:ADD_KEYWORDS_MAX]
+        await m.answer(bm.i18n.t("kw_add_truncated", n=ADD_KEYWORDS_MAX))
     sess["keywords"] = kws
     await state.clear()
     await m.answer(

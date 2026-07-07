@@ -230,6 +230,23 @@ class AdviseCB(CallbackData, prefix="adv"):
     rec: str  # rec_uid (hex uuid); для auto — "on"|"off"
 
 
+class MySchedCB(CallbackData, prefix="msch"):
+    """2.11 (§14): /myschedule — персональное расписание планового отчёта (настройка БОТА,
+    UserSettings.report_schedule; confirm-гейт не нужен, как /alerts). action:
+    daily|weekly|custom|off."""
+
+    action: str  # "daily" | "weekly" | "custom" | "off"
+
+
+class ThrTuneCB(CallbackData, prefix="thr"):
+    """2.11 (§14): предложение авто-подстройки порогов аномалий (scheduler.run_threshold_tuning).
+    Кнопка «Принять» пишет UserSettings.alert_thresholds['per_account'] ТОЛЬКО по тапу человека
+    (настройка бота, НЕ мутация Ads). token — hex12 из ui_prefs-блоба (анти-stale)."""
+
+    action: str  # "acc" | "dec"
+    token: str  # hex12 предложения
+
+
 class DiagCB(CallbackData, prefix="diag"):
     """A3 (§15): кнопки под /diag (последние error_events). Read-only навигация — БД/Ads не мутирует.
     action: refresh (перечитать) | today (только за сегодня UTC) | all (снять фильтр) |

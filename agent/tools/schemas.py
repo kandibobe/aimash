@@ -83,6 +83,11 @@ MatchType = Literal["broad", "phrase", "exact"]
 # конечный потолок (защита от абсурда/одного гигантского mutate). Бот обрезает список до него.
 MAX_CAMPAIGN_KEYWORDS = 2000
 
+# 2.6: потолок батча add/remove(-negative)_keywords — ЕДИНЫЙ источник (раньше «50» дублировался
+# литералом в bot/handlers/keywords_flow при обрезке списка; при смене лимита схемы срез и текст
+# молча разошлись бы).
+ADD_KEYWORDS_MAX = 50
+
 # Абсолютный «очевидно неверно» потолок суммы (в единицах валюты аккаунта) для set_to/
 # increase_by_amount. Защита от галлюцинации модели сверх gt=0. Единый источник — core.limits
 # (mutations использует ту же границу в micros: MONEY_MAX_MICROS). Имя MAX_AMOUNT сохранено.
@@ -187,7 +192,7 @@ class UpdateBid(BaseModel):
 
 class AddKeywords(BaseModel):
     campaign: str  # обязателен: ключи добавляются в группы этой кампании
-    keywords: list[str] = Field(min_length=1, max_length=50)
+    keywords: list[str] = Field(min_length=1, max_length=ADD_KEYWORDS_MAX)
     match_type: MatchType
 
     @field_validator("keywords")
@@ -198,7 +203,7 @@ class AddKeywords(BaseModel):
 
 class RemoveKeywords(BaseModel):
     campaign: str  # обязателен: ключи удаляются из групп этой кампании (по тексту+типу)
-    keywords: list[str] = Field(min_length=1, max_length=50)
+    keywords: list[str] = Field(min_length=1, max_length=ADD_KEYWORDS_MAX)
     match_type: MatchType
 
     @field_validator("keywords")
@@ -210,7 +215,7 @@ class RemoveKeywords(BaseModel):
 class AddNegativeKeywords(BaseModel):
     # campaign обязателен: минус-слова добавляются на уровне кампании.
     campaign: str
-    keywords: list[str] = Field(min_length=1, max_length=50)
+    keywords: list[str] = Field(min_length=1, max_length=ADD_KEYWORDS_MAX)
     match_type: MatchType = "broad"
 
     @field_validator("keywords")
@@ -222,7 +227,7 @@ class AddNegativeKeywords(BaseModel):
 class RemoveNegativeKeywords(BaseModel):
     # Симметрично AddNegativeKeywords: снять минус-слова кампании по тексту+типу.
     campaign: str
-    keywords: list[str] = Field(min_length=1, max_length=50)
+    keywords: list[str] = Field(min_length=1, max_length=ADD_KEYWORDS_MAX)
     match_type: MatchType = "broad"
 
     @field_validator("keywords")

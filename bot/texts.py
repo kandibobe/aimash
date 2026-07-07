@@ -139,7 +139,8 @@ HELP = (
     "<b>👤 Для админа (ADMIN_CHAT_IDS)</b>\n"
     "/adduser &lt;chat_id&gt; — открыть оператору доступ к боту (без рестарта) + выбрать аккаунты\n"
     "/removeuser &lt;chat_id&gt; — закрыть доступ · /users — список операторов\n"
-    "/grant &lt;chat_id&gt; &lt;id&gt; · /revoke &lt;chat_id&gt; &lt;id&gt; — точечный доступ к аккаунту (чтение)\n\n"
+    "/grant &lt;chat_id&gt; &lt;id&gt; · /revoke &lt;chat_id&gt; &lt;id&gt; — точечный доступ к аккаунту (чтение)\n"
+    "/bugs — очередь баг-репортов (триаж) · /mutready &lt;id&gt; — готовность аккаунта к мутациям\n\n"
     "<b>Как в другой кампании / по брифу</b>\n"
     "• «сделай кампанию N с настройками как в кампании X» — клонирую настройки.\n"
     "• 🧩 в /campaigns → «Расширения»: быстрые ссылки, уточнения, структурные описания, картинка.\n"
@@ -216,21 +217,20 @@ MODEL_BAD = (
 )
 
 # ── Keyword research (Фаза 3, БЛОК E) ────────────────────────────────────────────
+# 2.7: единый регистр «ты» внутри фичи (KW_EMPTY/KW_BAD_INPUT уже на «ты» — брендовый голос).
 KW_ASK = (
     "🔍 <b>Подбор ключевых слов</b>\n"
-    "Пришлите сид-слова через запятую и/или ссылку одним сообщением — можно вставить <b>свои "
+    "Пришли сид-слова через запятую и/или ссылку одним сообщением — можно вставить <b>свои "
     "ключи</b> или просто <b>описать нишу словами</b>, я подберу похожие и оценю объёмы.\n"
-    "Например (нажмите, чтобы скопировать): <code>доставка цветов, букеты, 101 роза</code>\n"
+    "Например (нажми, чтобы скопировать): <code>доставка цветов, букеты, 101 роза</code>\n"
     "или ссылку <code>https://example.com</code>\n"
-    "<i>Спецсимволы не нужны. Для точных метрик выберите живой аккаунт: /account</i>"
+    "<i>Спецсимволы не нужны. Для точных метрик выбери живой аккаунт: /account</i>"
 )
 KW_SEARCHING = "⏳ Подбираю ключевые слова и группирую по интенту…"
 KW_EMPTY = "Ничего не нашлось по этим сидам. Попробуй другие слова или ссылку: /keywords"
 KW_BAD_INPUT = "Нужны сид-слова или ссылка. Пришли, например: <code>купить телефон, смартфон</code>"
 
-PROPOSAL_PENDING = (
-    "📝 <b>Черновик изменения</b>\n\n{summary}\n\nПодтвердить? <i>(черновик действует 24 ч)</i>"
-)
+PROPOSAL_PENDING = "📝 <b>Черновик изменения</b>\n\n{summary}\n\nПодтвердить? <i>(черновик действует {ttl_h} ч)</i>"
 EXECUTING = "⏳ Выполняю…"
 APPLIED = "✅ <b>Готово.</b>\n{result}"
 # 3C: без технического {kind} (имя класса исключения) — {err} уже человекочитаем (humanize).
@@ -536,8 +536,11 @@ def fmt_search_proposal_summary(
     P1-A: опц. таргетинг-поля (гео/язык/сети/расписание/даты) выводятся блоком, если переданы —
     полное «было→станет» в точке ✅ (§5/§19.8). /clone их НЕ передаёт (там гео не переносится)."""
     lng = _lang(lang)
-    h_lines = "\n".join(f"  • {h}" for h in headlines)
-    d_lines = "\n".join(f"  • {d}" for d in descriptions)
+    from adcopy.validate import LIMITS, rsa_len  # 2.10 (§19.8): «…заголовки и описания (с длинами)»
+
+    hl, dl = LIMITS["headline"], LIMITS["description"]
+    h_lines = "\n".join(f"  • {h} [{rsa_len(h)}/{hl}]" for h in headlines)
+    d_lines = "\n".join(f"  • {d} [{rsa_len(d)}/{dl}]" for d in descriptions)
     tgt_block = _targeting_block(
         lng,
         geo_locations=geo_locations,
@@ -1275,10 +1278,18 @@ def fmt_keywords_summary(
 
 # ── Рендер с данными ─────────────────────────────────────────────────────────────
 def fmt_stats(
-    account: str, days: int, st: dict, currency: str = "", lang: str | None = None
+    account: str,
+    days: int,
+    st: dict,
+    currency: str = "",
+    lang: str | None = None,
+    *,
+    name: str = "",
 ) -> str:
     """Статистика аккаунта с вычисленными в КОДЕ CTR/CPC (контракт read не трогаем).
-    currency (§9) — код валюты аккаунта для денежных строк; пустой → без явной валюты."""
+    currency (§9) — код валюты аккаунта для денежных строк; пустой → без явной валюты.
+    name (2.1) — имя аккаунта из meta обхода MCC: заголовок «Башня · …2039» как в пикере;
+    пустое → прежняя маска «…{last4}» (kw-only, старые вызовы не ломаются)."""
     imp = int(st.get("impressions") or 0)
     clk = int(st.get("clicks") or 0)
     cost = float(st.get("cost") or 0)
@@ -1287,9 +1298,10 @@ def fmt_stats(
     ctr = (clk / imp * 100) if imp else 0.0
     cpc = (cost / clk) if clk else 0.0
     cur = f" {esc(currency)}" if currency else ""
+    label = f"{esc(name)} · …{esc(str(account)[-4:])}" if name else f"…{esc(str(account)[-4:])}"
     if _lang(lang) == "en":
         return (
-            f"📊 <b>Account …{esc(str(account)[-4:])}</b> · {days} d.\n\n"
+            f"📊 <b>Account {label}</b> · {days} d.\n\n"
             f"Impressions: <b>{_thou(imp)}</b>\n"
             f"Clicks:      <b>{_thou(clk)}</b>  (CTR {ctr:.2f}%)\n"
             f"Cost:        <b>{_thou(cost, 2)}{cur}</b>\n"
@@ -1298,7 +1310,7 @@ def fmt_stats(
             f"Value:       <b>{_thou(cval, 2)}{cur}</b>"
         )
     return (
-        f"📊 <b>Аккаунт …{esc(str(account)[-4:])}</b> · {days} дн.\n\n"
+        f"📊 <b>Аккаунт {label}</b> · {days} дн.\n\n"
         f"Показы:      <b>{_thou(imp)}</b>\n"
         f"Клики:       <b>{_thou(clk)}</b>  (CTR {ctr:.2f}%)\n"
         f"Расход:      <b>{_thou(cost, 2)}{cur}</b>\n"
@@ -1306,6 +1318,72 @@ def fmt_stats(
         f"Конверсии:   <b>{conv:g}</b>\n"
         f"Ценность:    <b>{_thou(cval, 2)}{cur}</b>"
     )
+
+
+def fmt_mutready(r: dict, lang: str | None = None) -> str:
+    """2.5: чек-лист готовности аккаунта к ВКЛЮЧЕНИЮ МУТАЦИЙ (/mutready, только админ). Диагностика,
+    НИЧЕГО не меняет: последний шаг (добавить в GOOGLE_ADS_ALLOWED_CUSTOMER_IDS) делает ВЛАДЕЛЕЦ
+    руками в конфиге (golden rule 9 — бот конфиг не трогает). r — dict из _mutready_check."""
+    en = _lang(lang) == "en"
+
+    def _mark(ok: bool | None) -> str:
+        return "✅" if ok else ("⚠️" if ok is None else "❌")
+
+    cid = esc(str(r.get("cid", "")))
+    name = esc(str(r.get("name", "") or ""))
+    title = f"{name} · {cid}" if name else cid
+    ops = r.get("operators") or []
+    ops_s = ", ".join(str(o) for o in ops[:10]) or ("none" if en else "нет")
+    probe_err = esc(str(r.get("probe_error", "") or ""))
+    if en:
+        lines = [
+            f"🧰 <b>Mutation readiness: {title}</b>",
+            f"{_mark(r.get('visible'))} visible to the bot (allowed ceiling)",
+            f"{_mark(r.get('enabled'))} status: {esc(str(r.get('status', '') or '?'))}",
+            f"{_mark(r.get('oauth'))} OAuth: "
+            + (
+                "per-account token loaded"
+                if r.get("oauth_runtime")
+                else ("covered by env MCC token" if r.get("oauth") else "no credentials")
+            ),
+            f"{_mark(r.get('probe'))} live read probe"
+            + (f" — {probe_err}" if probe_err and not r.get("probe") else ""),
+            f"{_mark(bool(ops) or None)} operator grants: {ops_s}",
+            f"{_mark(r.get('twofa'))} 2FA: "
+            + ("ready" if r.get("twofa") else "off/not ready (recommended before enabling)"),
+        ]
+        if r.get("mutations_enabled"):
+            lines.append("✅ mutations ALREADY enabled (GOOGLE_ADS_ALLOWED_CUSTOMER_IDS)")
+        else:
+            lines.append(
+                "⏭ final step (OWNER, by hand): add the id to GOOGLE_ADS_ALLOWED_CUSTOMER_IDS "
+                "(docs/DEPLOYMENT.md §2.1). The bot never changes this config itself."
+            )
+        return "\n".join(lines)
+    lines = [
+        f"🧰 <b>Готовность к мутациям: {title}</b>",
+        f"{_mark(r.get('visible'))} видим боту (потолок allowed_ceiling)",
+        f"{_mark(r.get('enabled'))} статус: {esc(str(r.get('status', '') or '?'))}",
+        f"{_mark(r.get('oauth'))} OAuth: "
+        + (
+            "per-account токен загружен"
+            if r.get("oauth_runtime")
+            else ("покрыт env-токеном MCC" if r.get("oauth") else "кредов нет")
+        ),
+        f"{_mark(r.get('probe'))} живое чтение (probe)"
+        + (f" — {probe_err}" if probe_err and not r.get("probe") else ""),
+        f"{_mark(bool(ops) or None)} гранты операторам: {ops_s}",
+        f"{_mark(r.get('twofa'))} 2FA: "
+        + ("готова" if r.get("twofa") else "выкл/не готова (рекомендуется включить до мутаций)"),
+    ]
+    if r.get("mutations_enabled"):
+        lines.append("✅ мутации УЖЕ включены (GOOGLE_ADS_ALLOWED_CUSTOMER_IDS)")
+    else:
+        lines.append(
+            "⏭ финальный шаг (ВЛАДЕЛЕЦ, руками): добавить id в GOOGLE_ADS_ALLOWED_CUSTOMER_IDS "
+            "(docs/DEPLOYMENT.md §2.1). Бот этот конфиг сам НЕ меняет."
+        )
+    return "\n".join(lines)
 
 
 def _usd_live(n: float | None) -> str:
@@ -1916,10 +1994,12 @@ def fmt_campaign_targeting(t, lang: str | None = None) -> str:
     return "\n".join(L)
 
 
-def campaigns_title(account: str, lang: str | None = None) -> str:
+def campaigns_title(account: str, lang: str | None = None, *, name: str = "") -> str:
+    """2.1: name — имя аккаунта из meta («Башня»); пустое → прежняя маска «…{last4}»."""
+    label = f"{esc(name)} · …{esc(str(account)[-4:])}" if name else f"…{esc(str(account)[-4:])}"
     if _lang(lang) == "en":
-        return f"📋 <b>Campaigns of account …{esc(str(account)[-4:])}</b>\nChoose a campaign:"
-    return f"📋 <b>Кампании аккаунта …{esc(str(account)[-4:])}</b>\nВыбери кампанию:"
+        return f"📋 <b>Campaigns of account {label}</b>\nChoose a campaign:"
+    return f"📋 <b>Кампании аккаунта {label}</b>\nВыбери кампанию:"
 
 
 def fmt_campaign_header(c: dict, lang: str | None = None) -> str:
@@ -2132,26 +2212,44 @@ def fmt_cc_final_summary(state: dict, lang: str | None = None) -> str:
         )
         if b
     ]
+    # 2.10 (§19.8): «утверждённые заголовки и описания (с длинами)» — тексты, а не только счётчики.
+    from adcopy.validate import LIMITS, rsa_len
+
+    hl, dl = LIMITS["headline"], LIMITS["description"]
+    h_list = "\n".join(f"  • {esc(h)} [{rsa_len(h)}/{hl}]" for h in (ad.get("headlines") or []))
+    d_list = "\n".join(f"  • {esc(d)} [{rsa_len(d)}/{dl}]" for d in (ad.get("descriptions") or []))
     head = "🆕 <b>Final summary</b>" if lng == "en" else "🆕 <b>Финальная сводка</b>"
     if lng == "en":
+        ad_block = f"\nAd: {n_h} headlines / {n_d} descriptions"
+        if h_list:
+            ad_block += f"\nHeadlines:\n{h_list}"
+        if d_list:
+            ad_block += f"\nDescriptions:\n{d_list}"
         body = (
             f"Campaign: {esc(s.get('campaign_name') or '—')}\n"
             f"Geo: {esc(geo)} · Budget/day: {budget}{cur_s} · {esc(strat)}\n"
             f"Final URL: {esc(ad.get('final_url') or '—')}"
             + (f" · path: {esc(path)}" if path else "")
-            + f"\nAd: {n_h} headlines / {n_d} descriptions · keywords: {n_kw} "
+            + ad_block
+            + f"\nKeywords: {n_kw} "
             f"({match_type_human(kw.get('match_type') or 'phrase', lng)})\n"
             f"Images: {n_img} · assets: {n_reuse} reused, {n_new} new\n"
             f"URL options: {', '.join(url_bits) or '—'}\n\n"
             "Edit by command (e.g. <i>set budget 60</i>), or create the draft."
         )
     else:
+        ad_block = f"\nОбъявление: {n_h} заголовков / {n_d} описаний"
+        if h_list:
+            ad_block += f"\nЗаголовки:\n{h_list}"
+        if d_list:
+            ad_block += f"\nОписания:\n{d_list}"
         body = (
             f"Кампания: {esc(s.get('campaign_name') or '—')}\n"
             f"ГЕО: {esc(geo)} · Бюджет/день: {budget}{cur_s} · {esc(strat)}\n"
             f"Final URL: {esc(ad.get('final_url') or '—')}"
             + (f" · path: {esc(path)}" if path else "")
-            + f"\nОбъявление: {n_h} заголовков / {n_d} описаний · ключей: {n_kw} "
+            + ad_block
+            + f"\nКлючей: {n_kw} "
             f"({match_type_human(kw.get('match_type') or 'phrase', lng)})\n"
             f"Изображения: {n_img} · ассеты: {n_reuse} переисп., {n_new} новых\n"
             f"URL-опции: {', '.join(url_bits) or '—'}\n\n"
@@ -2228,8 +2326,15 @@ def fmt_client_card(profile: dict | None, customer_id: str, lang: str | None = N
             s = esc(it.get("name", ""))
             if it.get("price"):
                 s += f" ({esc(it['price'])})"
+            if it.get("category"):  # 2.10 (§20.6): категория видна менеджеру, а не «мёртвые данные»
+                s += f" [{esc(it['category'])}]"
             svc.append(s)
         lines.append(("Services: " if lng == "en" else "Услуги: ") + "; ".join(x for x in svc if x))
+        cats = sorted({str(it.get("category") or "").strip() for it in services} - {""})
+        if cats:
+            lines.append(
+                ("Categories: " if lng == "en" else "Категории: ") + esc(", ".join(cats[:12]))
+            )
     contacts = profile.get("contacts") or []
     if contacts:
         cs = "; ".join(esc(c.get("value", "")) for c in contacts[:6] if c.get("value"))

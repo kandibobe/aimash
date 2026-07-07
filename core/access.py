@@ -253,6 +253,21 @@ async def live_read_accounts(chat_id: int) -> list[str]:
     return out
 
 
+async def list_account_operators(customer_id: str) -> list[int]:
+    """2.5: chat_id операторов с грантом на аккаунт (reverse-select по account_access) — для
+    /mutready-чек-листа «кому уже выдан доступ чтения». READ-ONLY, только локальная БД."""
+    cid = normalize_customer_id(customer_id)
+    if not cid:
+        return []
+    async with Session() as s:
+        rows = (
+            (await s.execute(select(AccountAccess.chat_id).where(AccountAccess.customer_id == cid)))
+            .scalars()
+            .all()
+        )
+    return sorted({int(r) for r in rows})
+
+
 async def _default_live_account(chat_id: int) -> str:
     """§8 «читать РЕАЛЬНЫЙ аккаунт целиком»: дефолт аккаунта ЧТЕНИЯ, когда оператор не выбрал явно.
     Если оператору доступен РОВНО ОДИН живой read-аккаунт (см. live_read_accounts) → он. Иначе ''
@@ -310,7 +325,10 @@ async def get_active_account(chat_id: int) -> str:
         # живой аккаунт — оператор осознанно смотрит песочницу. «Авто» доступно через /account reset.
         return DRAFT_ACCOUNT_ID
     try:
-        ensure_read_allowed(cid)  # глобальный read-замок (fail-closed)
+        # Персист — это ЯВНЫЙ выбор оператора (/account <id>): explicit=True разрешает и
+        # неактивный дочерний наших MCC (2.3, чтение истории). Fail-closed сохранён: отзыв
+        # доступа/чужой id по-прежнему откатывают на Draft.
+        ensure_read_allowed(cid, explicit=True)  # глобальный read-замок (fail-closed)
         await ensure_account_allowed_for_user(chat_id, cid)  # пер-пользователь
     except PermissionError:
         log.info("active-account: доступ к %s для chat %s отозван → откат на Draft", cid, chat_id)
@@ -347,15 +365,16 @@ async def resolve_read_account(chat_id: int, raw: str | None) -> str:
     if not text:
         return await get_active_account(chat_id)
     cid = normalize_customer_id(text)
-    if cid:  # похоже на id
-        ensure_read_allowed(cid)
+    if cid:  # похоже на id — ЯВНЫЙ запрос оператора (2.3: вкл. неактивные дочерние наших MCC)
+        ensure_read_allowed(cid, explicit=True)
         await ensure_account_allowed_for_user(chat_id, cid)
         return cid
-    # матч по имени (только читаемые дочерние из meta — не открывает ничего сверх замков)
-    from ads.client import discovered_read_children_meta
+    # матч по имени: читаемые дочерние ∪ неактивные (2.3, явный запрос). Сверх замков ничего не
+    # открывается — ensure_read_allowed(explicit=True) проверяет членство заново (fail-closed).
+    from ads.client import discovered_inactive_children_meta, discovered_read_children_meta
 
     needle = text.casefold()
-    meta = discovered_read_children_meta()
+    meta = {**discovered_inactive_children_meta(), **discovered_read_children_meta()}
     exact = [c for c, ch in meta.items() if (ch.name or "").casefold() == needle]
     candidates = exact or [c for c, ch in meta.items() if needle in (ch.name or "").casefold()]
     if len(candidates) != 1:
@@ -365,6 +384,6 @@ async def resolve_read_account(chat_id: int, raw: str | None) -> str:
             + (f" (кандидаты: {', '.join(names)})" if names else "")
         )
     cid = candidates[0]
-    ensure_read_allowed(cid)
+    ensure_read_allowed(cid, explicit=True)
     await ensure_account_allowed_for_user(chat_id, cid)
     return cid

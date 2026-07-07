@@ -322,8 +322,17 @@ class ClientProfileStore:
                 line = it.get("name", "")
                 if it.get("price"):
                     line += f" ({it['price']})"
+                if it.get(
+                    "category"
+                ):  # 2.10 (§20.6): категория — сигнал для snippets/релевантности
+                    line += f" [{it['category']}]"
                 svc.append(line)
             parts.append("Услуги/товары: " + "; ".join(x for x in svc if x))
+            # 2.10: сводная строка КАТЕГОРИЙ — раньше services.category собирались краулером/LLM,
+            # но никуда не подавались («мёртвые данные»); structured snippets генерились догадкой.
+            cats = sorted({str(it.get("category") or "").strip() for it in services} - {""})
+            if cats:
+                parts.append("Категории услуг/товаров: " + ", ".join(cats[:12]))
         if prof.get("notes"):
             parts.append(f"Заметки: {prof['notes']}")
         return "\n".join(parts).strip()[:max_chars]

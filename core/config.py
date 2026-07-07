@@ -141,11 +141,28 @@ class Settings(BaseSettings):
     advise_digest_send_pause: float = 0.7
     # 1.6: недельный БИЗНЕС-дайджест менеджерам (WoW + топ-3 совета + аномалии), opt-in /bizdigest.
     business_digest_schedule: str = "0 9 * * 1"  # crontab: пн 09:00
+    # 2.4: суточная фоновая re-discovery детей MCC (0 = выкл, набор аккаунтов — снимок на старте).
+    mcc_rediscovery_hours: int = 24
+    # 2.11 (§14): авто-подстройка порогов аномалий — READ-ONLY джоба СЧИТАЕТ волатильность и
+    # ПРЕДЛАГАЕТ per-account пороги кнопкой «Принять» (пишет настройку бота только тап человека).
+    # Opt-in (дефолт ВЫКЛ — анти-спам); расписание — crontab (вт 10:00).
+    threshold_tune_enabled: bool = False
+    threshold_tune_schedule: str = "0 10 * * 2"
+    # 2.6: окна планового отчёта/сравнения аномалий (дни) — раньше зашиты в scheduler/jobs.
+    report_window_days: int = 7
+    anomaly_window_days: int = 7
+    # 2.6: таймауты денежного пути (сек) — крутятся без пересборки образа (env ADS_TIMEOUT_S/
+    # LLM_TIMEOUT_S); влияют на деградацию OpenRouter/Google Ads.
+    ads_timeout_s: float = 60.0
+    llm_timeout_s: float = 45.0
     cleanup_interval_minutes: int = 60  # очистка просроченных черновиков каждые N минут
     # §19: TTL активного черновика визарда «Создание кампании» (campaign_drafts). Щедрый по
     # умолчанию — Этап-2 round-trip с Google Sheets может занять день. Старше → status='abandoned'
     # (та же очистка, что и просроченные proposals; cleanup_interval_minutes задаёт кадэнс).
     campaign_draft_ttl_hours: int = 72
+    # 2.6: TTL неподтверждённого черновика мутации (часы) — раньше был зашит в scheduler/jobs
+    # (и продублирован литералом «24 ч» в текстах карточки; теперь тексты берут {ttl_h} отсюда).
+    proposal_ttl_hours: int = 24
 
     # §20: краулинг сайта клиента (clients.crawler). Статический краулер (без headless) с жёсткими
     # лимитами — не перегружать чужой сайт и не голодить общий event loop (краул в фоне, bounded).
@@ -287,6 +304,16 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "SECRETS_ENCRYPTION_KEY невалиден (нужен ключ Fernet.generate_key())"
                 ) from e
+        return self
+
+    @model_validator(mode="after")
+    def _default_llm_cap_in_prod(self) -> "Settings":
+        """2.12: в prod пер-юзер LLM-лимит НЕ должен быть выключен молча — один оператор (или
+        скомпрометированный Telegram) выжег бы общий баланс OpenRouter для всех. 0 в prod →
+        разумный дефолт 500 вызовов/сутки (широкая ручная работа не упирается; env переопределяет
+        явно). В dev дефолт остаётся 0 (не мешаем отладке)."""
+        if self.env == "prod" and int(self.llm_daily_calls_per_user or 0) <= 0:
+            self.llm_daily_calls_per_user = 500
         return self
 
     @model_validator(mode="after")

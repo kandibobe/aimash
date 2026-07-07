@@ -75,6 +75,29 @@ _READ_DISCOVERED: set[str] = set()
 # на id-метки, доступ НЕ открывается. Наполняется вместе с `_READ_DISCOVERED` в `discover_read_children`.
 _READ_CHILDREN_META: dict[str, "ChildAccount"] = {}
 
+# 2.3 (аудит 2026-07-06): МЕТА НЕАКТИВНЫХ дочерних (CANCELED/SUSPENDED/CLOSED) из обхода MCC.
+# НЕ авторизация по умолчанию: в `_READ_DISCOVERED` их нет ⇒ авто-пикеры/scheduler/allowed_ceiling
+# не затронуты. Разрешает ТОЛЬКО ЯВНОЕ чтение (`ensure_read_allowed(..., explicit=True)`) — история
+# приостановленного аккаунта по прямому запросу id/имени; Google, вероятно, всё равно откажет
+# (CUSTOMER_NOT_ENABLED) — бот покажет честную причину, а не generic-ошибку.
+_READ_INACTIVE_META: dict[str, "ChildAccount"] = {}
+
+
+def set_discovered_inactive_children_meta(children: Iterable["ChildAccount"]) -> int:
+    """Заменить мета неактивных дочерних (зеркало set_discovered_read_children_meta). Идемпотентно."""
+    _READ_INACTIVE_META.clear()
+    for ch in children:
+        cid = normalize_customer_id(ch.id)
+        if cid:
+            _READ_INACTIVE_META[cid] = ch
+    return len(_READ_INACTIVE_META)
+
+
+def discovered_inactive_children_meta() -> dict[str, "ChildAccount"]:
+    """Копия мета неактивных дочерних (id → ChildAccount) — для явного резолва по id/имени и
+    честных сообщений «аккаунт в статусе X». Пусто, пока не прошёл обход MCC."""
+    return dict(_READ_INACTIVE_META)
+
 
 def set_discovered_read_children(ids: Iterable[str]) -> int:
     """Заменить набор обнаруженных дочерних (read-only §8) на нормализованные `ids`. Возвращает
@@ -133,6 +156,7 @@ async def discover_read_children() -> int:
     found_meta: dict[str, "ChildAccount"] = {}  # id → ChildAccount (для пикера; не авторизация)
     total_leaves = 0  # P1-10: сколько НЕ-менеджерских дочерних всего (для диагностики «почему N»)
     inactive: list[str] = []  # id + статус пропущенных не-ENABLED (для лога)
+    inactive_meta: dict[str, "ChildAccount"] = {}  # 2.3: мета неактивных (явное чтение по запросу)
     for mid in sorted(managers):
         if not mid:
             continue  # defense-in-depth: пустой id (мусор из конфига) — не делаем ga.search('')
@@ -156,7 +180,10 @@ async def discover_read_children() -> int:
             # /mcc-сводка их всё равно покажет отдельной секцией «неактивные» (reports.mcc._is_active),
             # т.к. заново обходит MCC. Мутационный замок (ensure_allowed) — отдельный, не затронут.
             if (ch.status or "").upper() != "ENABLED":
-                inactive.append(f"{normalize_customer_id(ch.id)}:{(ch.status or '?')}")
+                _icid = normalize_customer_id(ch.id)
+                inactive.append(f"{_icid}:{(ch.status or '?')}")
+                if _icid:
+                    inactive_meta[_icid] = ch  # 2.3: явное чтение истории по прямому запросу
                 continue
             cid = normalize_customer_id(ch.id)
             if cid:
@@ -164,6 +191,7 @@ async def discover_read_children() -> int:
                 found_meta[cid] = ch  # имя/валюта/статус для UI-пикера
     n = set_discovered_read_children(found)
     set_discovered_read_children_meta(found_meta.values())  # meta для пикера (не влияет на доступ)
+    set_discovered_inactive_children_meta(inactive_meta.values())  # 2.3: НЕ в _READ_DISCOVERED
     # P1-10: явная диагностика «почему в пикере N аккаунтов» — всего дочерних / ENABLED показано /
     # неактивных скрыто (со статусами). Отвечает на «почему только 3»: остальные не-ENABLED.
     log.info(
@@ -174,6 +202,12 @@ async def discover_read_children() -> int:
         (" [" + ", ".join(inactive[:20]) + "]") if inactive else "",
     )
     return n
+
+
+def has_oauth_runtime(account: str) -> bool:
+    """2.5: есть ли в рантайм-кэше per-account OAuth-креды для аккаунта (для /mutready-чек-листа).
+    ТОЛЬКО bool — сам секрет наружу не выносим (golden rule 5)."""
+    return normalize_customer_id(account) in _OAUTH_RUNTIME
 
 
 def set_oauth_runtime(account: str, refresh_token: str, login_customer_id: str | None) -> None:
@@ -345,7 +379,7 @@ def ensure_allowed(customer_id: str) -> None:
         )
 
 
-def ensure_read_allowed(customer_id: str) -> None:
+def ensure_read_allowed(customer_id: str, *, explicit: bool = False) -> None:
     """Замок ЧТЕНИЯ per-account (§8: сводный отчёт по дочерним аккаунтам MCC).
 
     Шире мутационного, но НЕ открытый. Множество разрешённого чтения =
@@ -354,6 +388,12 @@ def ensure_read_allowed(customer_id: str) -> None:
     дочерние (`_READ_DISCOVERED`, §8-полный-мульти-аккаунт — заполняется `discover_read_children`
     на старте под замком `ensure_manager_allowed`). Все три пусты ⇒ отказ (fail-closed). Нормализуем
     id (только цифры), '775-364-3025' ≡ '7753643025'.
+
+    explicit=True (2.3) — ЯВНЫЙ запрос оператора по id/имени (`/account <id>`, NL): множество
+    дополняется НЕАКТИВНЫМИ дочерними наших MCC (`_READ_INACTIVE_META`) — чтение истории
+    CANCELED/SUSPENDED аккаунта по прямому запросу. Дефолт False = байт-в-байт старое поведение;
+    авто-пикеры/scheduler/дефолты explicit НЕ ставят. Неактивные НЕ попадают в `allowed_ceiling`
+    (он строится от `_READ_DISCOVERED`) — потолок мутаций не расширяется (golden rule 9).
 
     ⚠️ Мутации этим НЕ затрагиваются: у них свой узкий замок `ensure_allowed` с код-потолком
     `ALLOWED_CEILING`. Расширение read-allow-list (перечисление дочерних MCC) НЕ даёт права их
@@ -364,6 +404,8 @@ def ensure_read_allowed(customer_id: str) -> None:
     mutate = {normalize_customer_id(x) for x in settings.allowed_customer_ids}
     read = {normalize_customer_id(x) for x in settings.read_customer_ids}
     allowed = mutate | read | _READ_DISCOVERED  # ∪ дочерние, обнаруженные обходом MCC (§8)
+    if explicit:  # 2.3: только по прямому запросу оператора — неактивные дочерние наших MCC
+        allowed = allowed | set(_READ_INACTIVE_META)
 
     # fail-closed: без явного списка И без обнаруженных дочерних ничего не читаем per-account.
     if not allowed:

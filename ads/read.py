@@ -189,9 +189,11 @@ def list_campaigns(
     (раньше ORDER BY campaign.id давал «случайный» для оператора порядок)."""
     ensure_read_allowed(customer_id)
     ga = client.get_service("GoogleAdsService")
-    where = ""
+    # 2.9: REMOVED-кампании — вон из WHERE (а не только в хвост сортировки): они засоряли пикеры
+    # /report/RSA и «клонировать как в X» мёртвыми строками (как в read_campaign_config q2/q3).
+    where = " WHERE campaign.status != 'REMOVED'"
     if channel_type:
-        where = f" WHERE campaign.advertising_channel_type = '{channel_type}'"
+        where += f" AND campaign.advertising_channel_type = '{channel_type}'"
     q = f"SELECT campaign.id, campaign.name, campaign.status FROM campaign{where}"
     rows = [
         {"id": str(r.campaign.id), "name": r.campaign.name, "status": r.campaign.status.name}

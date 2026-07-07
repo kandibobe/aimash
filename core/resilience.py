@@ -30,17 +30,20 @@ from tenacity import (
     wait_random_exponential,
 )
 
+from core.config import settings as _settings
 from core.logging import log
 
 T = TypeVar("T")
 
 # ── Параметры (читаются на момент вызова → тесты могут переопределить) ───────────
-ADS_TIMEOUT_S: float = 60.0
+# 2.6: таймауты — из env (core.config: ADS_TIMEOUT_S/LLM_TIMEOUT_S); модульные имена сохранены
+# (тесты/код переопределяют их напрямую, живое значение читается на момент вызова).
+ADS_TIMEOUT_S: float = float(_settings.ads_timeout_s)
 ADS_MAX_ATTEMPTS: int = 4
 ADS_WAIT_MULTIPLIER: float = 0.5
 ADS_WAIT_MAX: float = 20.0
 
-LLM_TIMEOUT_S: float = 45.0
+LLM_TIMEOUT_S: float = float(_settings.llm_timeout_s)
 LLM_MAX_ATTEMPTS: int = 3
 LLM_WAIT_MULTIPLIER: float = 0.5
 LLM_WAIT_MAX: float = 20.0
@@ -72,6 +75,7 @@ def _get_ads_semaphore() -> asyncio.Semaphore:
 
 # Транзиентные коды Google Ads (сравнение по ИМЕНИ enum — версионно-безопасно, как в
 # ads.mutations._apply_bid_via_sdk). Auth/permission/validation/неизвестное — НЕ ретраим.
+# Полный набор — для ЧТЕНИЙ (идемпотентны, повтор безопасен).
 RETRYABLE_ADS_NAMES: frozenset[str] = frozenset(
     {
         "RESOURCE_EXHAUSTED",
@@ -83,8 +87,21 @@ RETRYABLE_ADS_NAMES: frozenset[str] = frozenset(
     }
 )
 
+# 2.9 (аудит 2026-07-06): у МУТАЦИЙ набор УЖЕ. Серверные INTERNAL_ERROR/DEADLINE_EXCEEDED значат
+# «исход неизвестен — запрос МОГ примениться на сервере»: авто-повтор неидемпотентного батча
+# (add_keywords и т.п.) рискует дублями (раньше спасал только partial_failure-дедуп Google).
+# Оставляем коды «запрос точно НЕ выполнен»: rate-limit/квота/явный TRANSIENT.
+RETRYABLE_ADS_MUTATE_NAMES: frozenset[str] = frozenset(
+    {
+        "RESOURCE_EXHAUSTED",
+        "RATE_EXCEEDED",
+        "RESOURCE_TEMPORARILY_EXHAUSTED",
+        "TRANSIENT_ERROR",
+    }
+)
 
-def _is_retryable_ads(exc: BaseException) -> bool:
+
+def _retryable_by_names(exc: BaseException, names: frozenset[str], *, server_5xx: bool) -> bool:
     # Импорт внутри — google.ads тяжёлый; держим модуль дешёвым, если ADS-путь не задействован.
     # Имена кодов извлекает единый источник core.ads_errors.error_code_names (раньше логика
     # была продублирована здесь как _ads_error_names).
@@ -94,28 +111,32 @@ def _is_retryable_ads(exc: BaseException) -> bool:
         from google.ads.googleads.errors import GoogleAdsException
 
         if isinstance(exc, GoogleAdsException):
-            return bool(error_code_names(exc) & RETRYABLE_ADS_NAMES)
+            return bool(error_code_names(exc) & names)
     except Exception:  # pragma: no cover - SDK всегда есть, но не падаем из-за импорта
         pass
     try:
         from google.api_core import exceptions as gapi
     except Exception:  # pragma: no cover
         return False
-    return isinstance(
-        exc,
-        (
-            gapi.ServiceUnavailable,
-            gapi.DeadlineExceeded,
-            gapi.InternalServerError,
-            gapi.TooManyRequests,
-        ),
-    )
+    transport: tuple = (gapi.ServiceUnavailable, gapi.TooManyRequests)
+    if server_5xx:  # DeadlineExceeded/InternalServerError — только где повтор безопасен (чтения)
+        transport = (*transport, gapi.DeadlineExceeded, gapi.InternalServerError)
+    return isinstance(exc, transport)
+
+
+def _is_retryable_ads(exc: BaseException) -> bool:
+    """Предикат ретрая МУТАЦИЙ (2.9): БЕЗ серверных INTERNAL/DEADLINE — исход мог примениться,
+    повтор неидемпотентного батча дал бы дубли. Финальный страж от double-spend — одноразовый
+    claim, но он живёт ВЫШЕ ретрая; сам SDK-вызов повторять нельзя."""
+    return _retryable_by_names(exc, RETRYABLE_ADS_MUTATE_NAMES, server_5xx=False)
 
 
 def _is_retryable_ads_read(exc: BaseException) -> bool:
-    """Для ЧТЕНИЙ Google Ads (идемпотентны) ретраим всё, что и для мутаций, ПЛЮС TimeoutError —
-    повторный read не «трогает деньги», поэтому таймаут безопасно повторить (в отличие от мутаций)."""
-    return isinstance(exc, TimeoutError) or _is_retryable_ads(exc)
+    """Для ЧТЕНИЙ Google Ads (идемпотентны) ретраим ПОЛНЫЙ транзиентный набор (вкл. INTERNAL/
+    DEADLINE) ПЛЮС TimeoutError — повторный read не «трогает деньги»."""
+    return isinstance(exc, TimeoutError) or _retryable_by_names(
+        exc, RETRYABLE_ADS_NAMES, server_5xx=True
+    )
 
 
 def _is_retryable_llm(exc: BaseException) -> bool:

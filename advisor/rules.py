@@ -29,14 +29,20 @@ DEFAULT_ADVISOR_THRESHOLDS: dict[str, float] = {
     "low_ctr_factor": 0.5,
     # Тема structure: единственная ENABLED-кампания с расходом ≥ порога → рассмотреть разделение.
     "single_campaign_min_spend": 10.0,
+    # 2.6: порог «крупных денег» для suppress (см. SUPPRESS_MONEY_FLOOR) — переопределяем per-chat,
+    # как остальные пороги: у клиента дочерние в USD/UAH/KES/PLN, единый «50» означает ~13× разброс
+    # значимости. Значение — В ВАЛЮТЕ АККАУНТА (FX не выдумываем, golden rule #4).
+    "suppress_money_floor": 50.0,
 }
 
 # Вес важности (severity) для приоритета — деньги-под-риском доминируют, severity лишь модулирует.
 _SEVERITY_WEIGHT: dict[str, float] = {"warning": 1.0, "info": 0.5}
 
-# Порог «крупных денег»: suppress (оператор замьютил вид многими 👎) НИКОГДА не прячет совет с
+# Порог «крупных денег»: suppress (оператор замьютил вид многими 👎/🙈) НИКОГДА не прячет совет с
 # деньгами-под-риском ≥ этого значения — крупный слив бюджета важнее усталости от вида. Ниже порога
-# приглушённый вид отсекается (в валюте аккаунта; для одно-аккаунтного /advise валюта однородна).
+# приглушённый вид отсекается (в валюте аккаунта). 2.6: живое значение — из порогов
+# DEFAULT_ADVISOR_THRESHOLDS['suppress_money_floor'] (переопределяемо per-chat, как /alerts);
+# константа осталась ДЕФОЛТОМ и якорем для тестов/импортов.
 SUPPRESS_MONEY_FLOOR: float = 50.0
 
 
@@ -350,23 +356,27 @@ def rank_cross_account(items: list[tuple], top_n: int = 5) -> list[tuple]:
     return ranked[: max(1, int(top_n))]
 
 
-def rank_recommendations(recs: list[Recommendation], experience=None) -> list[Recommendation]:
+def rank_recommendations(
+    recs: list[Recommendation], experience=None, *, thresholds: dict | None = None
+) -> list[Recommendation]:
     """priority = вес severity × (1 + деньги-под-риском) × множитель опыта; отсев suppress-видов.
     experience (Слой B) — ДВУХУРОВНЕВЫЙ dict: {kind: {...}} (account-wide, как раньше) И
     {(kind, target_campaign): {...}} (пер-кампанийная усталость); None ⇒ веса 1.0.
     Детерминированно (образец rank_clusters): опыт — посчитанный КОДОМ множитель, не сырьё для LLM.
 
     suppress приглушает НАДОЕВШИЙ оператору вид (много 👎 / устойчивый 🙈-игнор) — на любом из
-    двух уровней, но НЕ прячет совет с деньгами-под-риском ≥ SUPPRESS_MONEY_FLOOR: 3 👎 по одной
-    кампании не должны молча скрыть крупный слив бюджета. Money-floor guard действует для ОБОИХ
-    уровней. Пер-кампанийный ключ гасит совет только по СВОЕЙ кампании."""
+    двух уровней, но НЕ прячет совет с деньгами-под-риском ≥ money-floor: 3 👎 по одной кампании
+    не должны молча скрыть крупный слив бюджета. Money-floor guard действует для ОБОИХ уровней;
+    2.6: порог берётся из thresholds['suppress_money_floor'] (per-chat, в валюте аккаунта),
+    дефолт — SUPPRESS_MONEY_FLOOR. Пер-кампанийный ключ гасит совет только по СВОЕЙ кампании."""
     exp = experience or {}
+    floor = float(_thr(thresholds).get("suppress_money_floor", SUPPRESS_MONEY_FLOOR))
     ranked: list[Recommendation] = []
     for r in recs:
         e_kind = exp.get(r.kind) or {}
         e_camp = exp.get((r.kind, r.target_campaign or "")) or {}
         suppressed = bool(e_kind.get("suppress")) or bool(e_camp.get("suppress"))
-        if suppressed and _magnitude(r) < SUPPRESS_MONEY_FLOOR:
+        if suppressed and _magnitude(r) < floor:
             continue
         weight = max(
             0.2,

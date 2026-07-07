@@ -253,12 +253,42 @@ def split_by_lines(text: str, limit: int = SAFE_LIMIT) -> list[str]:
     return chunks
 
 
+# 2.8: пауза между чанками многосерийного сообщения (Telegram flood-limits ~1 msg/s на чат) и
+# потолок повторов на TelegramRetryAfter (не зависаем навсегда, если лимит держится).
+CHUNK_SEND_PAUSE_S = 0.35
+_RETRY_AFTER_MAX_ATTEMPTS = 3
+
+
+async def answer_with_flood_retry(message: object, text: str, **kw) -> None:
+    """2.8: message.answer с обработкой flood-control (429/TelegramRetryAfter): подождать
+    retry_after и повторить (до _RETRY_AFTER_MAX_ATTEMPTS попыток). Раньше крупный /mcc-дайджест
+    по 7 аккаунтам ронял хвост чанков сырой ошибкой. Прочие исключения — наружу (как раньше)."""
+    import asyncio
+
+    from aiogram.exceptions import TelegramRetryAfter
+
+    for attempt in range(_RETRY_AFTER_MAX_ATTEMPTS):
+        try:
+            await message.answer(text, **kw)  # type: ignore[attr-defined]
+            return
+        except TelegramRetryAfter as e:
+            if attempt == _RETRY_AFTER_MAX_ATTEMPTS - 1:
+                raise
+            await asyncio.sleep(float(getattr(e, "retry_after", 1.0)) + 0.1)
+
+
 async def send_html_chunks(message: object, text: str, limit: int = SAFE_LIMIT) -> None:
-    """Отправить длинный HTML-текст несколькими сообщениями (parse_mode=HTML), деля по строкам."""
+    """Отправить длинный HTML-текст несколькими сообщениями (parse_mode=HTML), деля по строкам.
+    2.8: между чанками — пауза, каждый send — с retry на flood-control (429)."""
+    import asyncio
+
     from aiogram.enums import ParseMode
 
-    for chunk in split_by_lines(text, limit):
-        await message.answer(chunk, parse_mode=ParseMode.HTML)  # type: ignore[attr-defined]
+    chunks = split_by_lines(text, limit)
+    for i, chunk in enumerate(chunks):
+        if i:  # пауза только МЕЖДУ чанками (одиночное сообщение — без задержки, как раньше)
+            await asyncio.sleep(CHUNK_SEND_PAUSE_S)
+        await answer_with_flood_retry(message, chunk, parse_mode=ParseMode.HTML)
 
 
 async def send_proposal_text(

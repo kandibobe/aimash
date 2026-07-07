@@ -43,9 +43,24 @@ def _keyword_texts(report, limit: int = 40) -> list[str]:
     return out
 
 
-async def _negative_keywords_extra(report, topics, lang: str) -> list[str]:
+async def _client_profile_context(customer_id) -> str:
+    """2.11 (§20.6): компактный профиль клиента как КОНТЕКСТ advisor-LLM (тон/терминология ниши,
+    «не минусуй бренд»). Best-effort: нет профиля/сбой БД → '' (advisor работает как раньше).
+    Решения по-прежнему принимает КОД (rules) — профиль в детекторы НЕ подаётся."""
+    try:
+        from clients.store import ClientStore
+
+        return await ClientStore().profile_context_text(str(customer_id), max_chars=600)
+    except Exception:  # noqa: BLE001 — контекст-косметика
+        return ""
+
+
+async def _negative_keywords_extra(
+    report, topics, lang: str, client_context: str = ""
+) -> list[str]:
     """#3: LLM-предложение минус-слов по ключам аккаунта (advisory, ничего не добавляет — как §7).
-    Только для темы keywords и при наличии ключей. Сбой/пусто → [] (не роняем /advise)."""
+    Только для темы keywords и при наличии ключей. Сбой/пусто → [] (не роняем /advise).
+    client_context (2.11) — бренд/услуги клиента: тематика точнее, брендовые слова не минусуются."""
     if topics and "keywords" not in topics:
         return []
     kws = _keyword_texts(report)
@@ -56,7 +71,10 @@ async def _negative_keywords_extra(report, topics, lang: str) -> list[str]:
         from keywords.cluster import suggest_negative_keywords
 
         negs = await suggest_negative_keywords(
-            "", kws, language=(lang if lang in ("ru", "uk", "en") else "ru"), limit=12
+            client_context[:400],
+            kws,
+            language=(lang if lang in ("ru", "uk", "en") else "ru"),
+            limit=12,
         )
         if not negs:
             return []
@@ -156,11 +174,15 @@ async def build_recommendations(
     cands = rank_recommendations(
         build_candidates(report, alerts, thresholds=thresholds, topics=topics),
         experience=experience,
+        thresholds=thresholds,  # 2.6: per-chat suppress_money_floor (валюта аккаунта, без FX)
     )[:MAX_RECS]
 
     if use_llm:
-        bodies = await formulate.phrase(cands, lang)
+        # 2.11 (§20.6): профиль клиента — контекст формулировок (тон/термины ниши); решения — в КОДЕ.
+        client_ctx = await _client_profile_context(customer_id)
+        bodies = await formulate.phrase(cands, lang, client_context=client_ctx)
     else:
+        client_ctx = ""
         bodies = [render.render_recommendation(r, lang) for r in cands]
     for r, b in zip(cands, bodies):
         r.body = b
@@ -169,7 +191,11 @@ async def build_recommendations(
         await store.record_recommendations(chat_id, customer_id, cands, source)
 
     # #3: advisory LLM-минус-слова (тема keywords) — только на интерактивном пути (use_llm).
-    extras = await _negative_keywords_extra(report, topics, lang) if use_llm else []
+    extras = (
+        await _negative_keywords_extra(report, topics, lang, client_context=client_ctx)
+        if use_llm
+        else []
+    )
 
     return RecommendationSet(
         account=str(customer_id),

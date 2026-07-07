@@ -119,6 +119,84 @@ def build_mcc_summary(
     return summary
 
 
+@dataclass
+class MccDeep:
+    """2.2 (аудит 2026-07-06): ГЛУБОКИЙ отчёт по всем дочерним MCC — ReportData (§9-разбивки)
+    на каждый read-allowed ENABLED лист. items: (ChildAccount, ReportData). Бухгалтерия пропусков —
+    как в MccSummary (без тихого замалчивания)."""
+
+    manager_id: str
+    period: Period
+    items: list = field(default_factory=list)  # (ChildAccount, reports.service.ReportData)
+    skipped: list[str] = field(default_factory=list)
+    managers: list[str] = field(default_factory=list)
+    inactive: list[ChildAccount] = field(default_factory=list)
+    errors: list[tuple[str, str]] = field(default_factory=list)
+
+
+async def build_mcc_deep_async(
+    client,
+    manager_id: str,
+    period: Period,
+    *,
+    list_children=list_child_accounts,
+    build_report=None,
+    tz_of=None,
+    period_for=None,
+) -> MccDeep:
+    """2.2: DEEP-отчёт по всем дочерним MCC (лист на аккаунт в xlsx) — поверх обхода
+    build_mcc_summary_async, но на каждый ребёнок собирается ПОЛНЫЙ ReportData
+    (build_account_report_async: totals+prev+7 разбивок §9, все GAQL параллелятся под общим
+    семафором). READ-ONLY; замки те же: ensure_manager_allowed (list_children) +
+    ensure_read_allowed per-child (не в read-list ⇒ skipped, fail-closed). Сбой одного ребёнка →
+    errors, не провал книги (gather return_exceptions). ~7 акк. × ~10 GAQL ≈ 70+ запросов —
+    вызывающий показывает прогресс и держит общий таймаут (asyncio.wait_for)."""
+    if build_report is None:
+        from reports.service import build_account_report_async as build_report  # noqa: N813
+
+    deep = MccDeep(manager_id=str(manager_id), period=period)
+    children = await run_ads_read_call(list_children, client, manager_id, label="mccdeep_children")
+    eligible: list[ChildAccount] = []
+    for ch in children:
+        if ch.manager:
+            deep.managers.append(ch.id)
+            continue
+        try:
+            ensure_read_allowed(ch.id)
+        except PermissionError:
+            deep.skipped.append(ch.id)
+            continue
+        if not _is_active(ch):
+            deep.inactive.append(ch)
+            continue
+        eligible.append(ch)
+
+    async def _deep_child(ch: ChildAccount):
+        per = period
+        if tz_of is not None and period_for is not None:
+            try:
+                tz = await run_ads_read_call(tz_of, client, ch.id, label=f"mccdeep_tz_{ch.id}")
+                if tz:
+                    per = period_for(tz) or period
+            except Exception:  # noqa: BLE001 — TZ best-effort, общий period
+                per = period
+        return await build_report(
+            client,
+            ch.id,
+            per,
+            currency=ch.currency or "",
+            account_name=getattr(ch, "name", "") or "",
+        )
+
+    results = await asyncio.gather(*[_deep_child(ch) for ch in eligible], return_exceptions=True)
+    for ch, res in zip(eligible, results):
+        if isinstance(res, Exception):
+            deep.errors.append((ch.id, f"{type(res).__name__}: {redact_text(str(res))}"))
+            continue
+        deep.items.append((ch, res))
+    return deep
+
+
 async def build_mcc_summary_async(
     client,
     manager_id: str,

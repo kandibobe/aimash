@@ -186,6 +186,22 @@ def test_catalog_placeholders_match_ru_en():
     assert not bad, f"рассинхрон плейсхолдеров RU/EN: {bad}"
 
 
+def test_every_t_literal_lives_in_catalog():
+    """2.7: каждый литеральный вызов i18n.t('ключ') в рантайм-коде обязан бить в CATALOG.
+    Ключ вне каталога тихо мостится к texts.<KEY> (всегда RU) или возвращает сам ключ — латентная
+    RU-утечка в EN, которую глазами не поймать. Скан — по bot/, scheduler/, clients/, agent/."""
+    import pathlib
+
+    pat = re.compile(r"""\bt\(\s*["']([a-z0-9_]+)["']""")
+    root = pathlib.Path(i18n.__file__).resolve().parents[1]
+    used: set[str] = set()
+    for d in ("bot", "scheduler", "clients", "agent"):
+        for p in (root / d).rglob("*.py"):
+            used |= set(pat.findall(p.read_text(encoding="utf-8")))
+    missing = sorted(k for k in used if k not in i18n.CATALOG)
+    assert not missing, f"ключи i18n.t вне CATALOG (RU-утечка в EN): {missing}"
+
+
 def test_hardened_keys_render_both_langs():
     """Новые «вторичные» ключи (callback-тосты, ошибки, хинты, agent.loop) отдают перевод, а не
     мост к texts.* и не сам ключ. Проверяем оба языка + подстановку kw."""

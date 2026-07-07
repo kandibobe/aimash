@@ -91,6 +91,7 @@ from bot.callbacks import (
     LangCB,
     ModelCB,
     MoreCB,
+    MySchedCB,
     NavCB,
     PageCB,
     PeriodCB,
@@ -100,6 +101,7 @@ from bot.callbacks import (
     RsaCB,
     RsaPickCB,
     TemplateCB,
+    ThrTuneCB,
     VideoCB,
 )
 from bot.keyboards import (
@@ -162,7 +164,9 @@ from bot.keyboards import (
     lang_kb,
     main_menu,
     more_menu_kb,
+    mysched_kb,
     match_type_kb,
+    thr_tune_kb,
     model_kb,
     nav_kb,
     recent_kb,
@@ -314,6 +318,10 @@ _AUD_CACHE: dict[
 _REPORT_ACCT_CACHE: dict[int, list] = {}  # chat_id → read-allowed аккаунты (idx→ChildAccount)
 _REPORT_CAMP_CACHE: dict[int, list[dict]] = {}  # chat_id → кампании выбранного аккаунта (idx→dict)
 _REPORT_SEL: dict[int, dict] = {}  # chat_id → {"account", "campaign_id", "campaign_name"}
+# 2.2: сентинел «Все аккаунты (MCC)» в пикере /export → deep-xlsx по всем дочерним. НЕ аккаунт:
+# normalize_customer_id('') на нём пуст ⇒ _report_target fail-closed откатится на Draft, если
+# сентинел каким-то образом доживёт до одиночного пути.
+MCC_ALL = "__mcc__"
 _ADVISE_TOPIC_CACHE: dict[int, str | None] = {}  # chat_id → тема /advise, переживает выбор в пикере
 
 
@@ -338,6 +346,7 @@ from bot.states import (  # noqa: E402
     KwAdd,
     KwWizard,
     ModelWizard,
+    MyScheduleWizard,
     RsaList,
     RsaRefine,
     RsaWizard,
@@ -717,6 +726,40 @@ async def _send_help(message: Message) -> None:
     await message.answer(i18n.t("help"), parse_mode=ParseMode.HTML)
 
 
+def _inactive_read_hint(acct: str) -> str:
+    """2.3: если аккаунт — НЕАКТИВНЫЙ дочерний наших MCC (CANCELED/SUSPENDED), вернуть честную
+    причину отказа чтения (Google отклоняет API-чтение таких аккаунтов) вместо generic-ошибки.
+    Не из meta неактивных → '' (обычный err-путь)."""
+    try:
+        from ads.client import discovered_inactive_children_meta
+
+        ch = discovered_inactive_children_meta().get(normalize_customer_id(str(acct)))
+    except Exception:  # noqa: BLE001 — подсказка-косметика
+        return ""
+    if ch is None:
+        return ""
+    return i18n.t(
+        "account_inactive_read_failed",
+        name=texts.esc(getattr(ch, "name", "") or str(acct)),
+        status=texts.esc(getattr(ch, "status", "") or "?"),
+    )
+
+
+def _account_name(cid: str) -> str:
+    """2.1: имя аккаунта из meta обхода MCC («Башня») для заголовков «Имя · id» — как в пикере.
+    Нет meta/имя совпадает с id → '' (вызывающий печатает голый id, как раньше). Косметика:
+    сбой не критичен."""
+    try:
+        from ads.client import discovered_read_children_meta
+
+        ch = discovered_read_children_meta().get(normalize_customer_id(str(cid)))
+        if ch is not None and (ch.name or "") and str(ch.name) != str(ch.id):
+            return str(ch.name)
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 async def _render_status(message: Message, acct: str) -> None:
     """Показать статистику КОНКРЕТНОГО аккаунта за 30 дн. (read-only). acct уже прошёл замок чтения
     (пикер/резолв). Draft без живых данных → подсказка выбрать живой аккаунт (§8 F)."""
@@ -730,7 +773,13 @@ async def _render_status(message: Message, acct: str) -> None:
             cur = await _read_currency(client, acct)  # §9: валюта в денежных строках
     except Exception as e:  # сеть/доступ/SDK
         await _capture_cmd_error(e, "cmd:status")  # A2: в /diag + алерт админам
-        await message.answer(i18n.t("err_stats", err=ux.err_text(e)))
+        hint = (
+            _inactive_read_hint(acct) if is_account_access_error(e) else ""
+        )  # 2.3: честная причина
+        if hint:
+            await message.answer(hint, parse_mode=ParseMode.HTML)
+        else:
+            await message.answer(i18n.t("err_stats", err=ux.err_text(e)))
         await _heal_if_stuck_global(message, acct)  # само-восстановление залипшего аккаунта
         return
     await message.answer(
@@ -745,6 +794,7 @@ async def _render_status(message: Message, acct: str) -> None:
                 "conv_value": round(st.conv_value, 2),
             },
             cur,
+            name=_account_name(acct),  # 2.1: «Башня · …2039» как в пикере
         ),
         parse_mode=ParseMode.HTML,
     )
@@ -837,7 +887,13 @@ async def _send_balance(message: Message) -> None:
         await _capture_cmd_error(e, "cmd:balance")  # A2: в /diag + алерт админам
         await message.answer(i18n.t("err_balance", err=ux.err_text(e)))
         return
-    await message.answer(texts.fmt_balance(acct, snapshot()), parse_mode=ParseMode.HTML)
+    text = texts.fmt_balance(acct, snapshot())
+    from core import llm_budget
+
+    cap = llm_budget.snapshot(message.chat.id)  # 2.12: видимость пер-юзер лимита (C3)
+    if cap.get("limit", 0) > 0:
+        text += "\n" + i18n.t("balance_llm_cap", used=cap["used"], limit=cap["limit"])
+    await message.answer(text, parse_mode=ParseMode.HTML)
 
 
 async def _send_journal(message: Message) -> None:
@@ -893,7 +949,7 @@ async def _send_campaigns_for(message: Message, chat_id: int, acct: str) -> None
     _CAMP_CACHE[chat_id] = camps
     _CAMP_ACCT[chat_id] = acct
     await message.answer(
-        texts.campaigns_title(acct),
+        texts.campaigns_title(acct, name=_account_name(acct)),  # 2.1: «Башня · …2039»
         reply_markup=campaigns_kb(camps),
         parse_mode=ParseMode.HTML,
     )
@@ -1103,12 +1159,16 @@ async def _present_proposal(
             keywords=kws,
             match_type=params.get("match_type", ""),
             action=texts.keyword_action_label(operation),
-            header_html=i18n.t("proposal_pending", summary=texts.esc(display)),
+            header_html=i18n.t(
+                "proposal_pending", summary=texts.esc(display), ttl_h=settings.proposal_ttl_hours
+            ),
             reply_markup=confirm_markup,
             parse_mode=ParseMode.HTML,
         )
         return
-    rendered = i18n.t("proposal_pending", summary=texts.esc(display))
+    rendered = i18n.t(
+        "proposal_pending", summary=texts.esc(display), ttl_h=settings.proposal_ttl_hours
+    )
     if ux.proposal_fits(rendered):
         await message.answer(rendered, reply_markup=confirm_markup, parse_mode=ParseMode.HTML)
     else:
@@ -1202,6 +1262,76 @@ async def _save_selected_account(chat_id: int, customer_id: str | None) -> None:
 # §UX-память: последний выбранный период отчётов (chat_id → код пресета "7"|"30"|"90"|"MTD").
 # In-memory кэш поверх user_settings.ui_prefs (персист переживает рестарт).
 _LAST_PERIOD_CODE: dict[int, str] = {}
+
+# 2.11: живой планировщик (ставится в main() после setup_scheduler) — /myschedule применяет
+# персональное расписание без рестарта; None (тесты/ранний старт) → «применится после рестарта».
+SCHED = None
+
+
+async def _save_report_schedule(chat_id: int, cron: str | None) -> None:
+    """2.11 (§14): персист персонального расписания отчёта (UserSettings.report_schedule).
+    None → NULL (оператор вернётся на глобальное). Валидацию crontab делает вызывающий UI
+    (CronTrigger.from_crontab); здесь только запись (переживает рестарт)."""
+    from sqlalchemy import select as _select
+
+    from db.models import UserSettings as _US
+    from db.session import Session as _S
+
+    val = (cron or "").strip()[:128] or None
+    async with _S() as s:
+        row = (
+            await s.execute(_select(_US).where(_US.chat_id == int(chat_id)))
+        ).scalar_one_or_none()
+        if row is None:
+            s.add(_US(chat_id=int(chat_id), report_schedule=val))
+        else:
+            row.report_schedule = val
+        await s.commit()
+
+
+async def _apply_report_schedule_live(bot, chat_id: int, cron: str | None) -> bool:
+    """2.11: применить персональное расписание в ЖИВОМ планировщике (без рестарта). SCHED нет
+    (тесты/ранний старт) → False («после рестарта»). off → снять per-chat джобу."""
+    if SCHED is None:
+        return False
+    try:
+        from scheduler.service import register_user_report_schedules
+
+        if not cron:
+            try:  # register только добавляет — снятую джобу убираем явно
+                SCHED.remove_job(f"scheduled_report_{int(chat_id)}")
+            except Exception:  # noqa: BLE001 — джобы могло не быть
+                pass
+            return True
+        await register_user_report_schedules(SCHED, bot)
+        return True
+    except Exception:  # noqa: BLE001 — live-применение best-effort, персист уже сделан
+        return False
+
+
+async def _save_per_account_thresholds(chat_id: int, acct: str, values: dict) -> None:
+    """2.11 (§14): записать per-account оверлей порогов аномалий (alert_thresholds['per_account']).
+    НАСТРОЙКА БОТА (как /alerts) — пишется ТОЛЬКО по тапу человека («✅ Принять» в предложении
+    тюнера); Google Ads не трогается. JSON переприсваиваем целиком (конвенция SQLAlchemy)."""
+    from sqlalchemy import select as _select
+
+    from db.models import UserSettings as _US
+    from db.session import Session as _S
+
+    acct = normalize_customer_id(acct)
+    async with _S() as s:
+        row = (
+            await s.execute(_select(_US).where(_US.chat_id == int(chat_id)))
+        ).scalar_one_or_none()
+        base = dict((row.alert_thresholds if row is not None else None) or {})
+        per = dict(base.get("per_account") or {})
+        per[acct] = {k: float(v) for k, v in values.items()}
+        base["per_account"] = per
+        if row is None:
+            s.add(_US(chat_id=int(chat_id), alert_thresholds=base))
+        else:
+            row.alert_thresholds = base
+        await s.commit()
 
 
 async def _load_ui_pref(chat_id: int, key: str) -> str | None:
@@ -1789,11 +1919,25 @@ async def _run_report(
         client = await build_client_async(acct)  # холодная сборка — вне loop
         async with ux.typing_action(m):
             # build_account_report_async параллелит 9 GAQL-запросов под семафором (≈2.5-3x быстрее)
-            report = await build_account_report_async(client, acct, period, campaign_id=campaign_id)
+            report = await build_account_report_async(
+                client, acct, period, campaign_id=campaign_id, account_name=_account_name(acct)
+            )
             report.currency = await _read_currency(client, acct)  # §9: валюта денежных метрик
     except Exception as e:  # сеть/доступ/SDK
-        await m.answer(i18n.t("err_report", err=ux.err_text(e)))
+        hint = _inactive_read_hint(acct) if is_account_access_error(e) else ""  # 2.3
+        if hint:
+            await m.answer(hint, parse_mode=ParseMode.HTML)
+        else:
+            await m.answer(i18n.t("err_report", err=ux.err_text(e)))
         await _heal_if_stuck_global(m, acct)  # само-восстановление залипшего аккаунта
+        return
+    t = report.totals
+    if not (t.impressions or t.clicks or t.cost_micros):  # 2.7: не «стена нулей», а внятный ответ
+        hint = _live_account_hint(acct)
+        await m.answer(
+            i18n.t("report_empty_state") + (("\n\n" + hint) if hint else ""),
+            parse_mode=ParseMode.HTML,
+        )
         return
     await m.answer(summary_text(report) + _scope_note(campaign_name))
 
@@ -1814,7 +1958,9 @@ async def _run_export(
 
         client = await build_client_async(acct)  # холодная сборка — вне loop
         async with ux.upload_action(m):  # «отправляет документ…» пока строим .xlsx
-            report = await build_account_report_async(client, acct, period, campaign_id=campaign_id)
+            report = await build_account_report_async(
+                client, acct, period, campaign_id=campaign_id, account_name=_account_name(acct)
+            )
             report.currency = await _read_currency(client, acct)  # §9: валюта денежных метрик
             fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_report_")
             os.close(fd)
@@ -1849,7 +1995,9 @@ async def _run_sheets(
 
         client = await build_client_async(acct)  # холодная сборка — вне loop
         async with ux.typing_action(m):
-            report = await build_account_report_async(client, acct, period, campaign_id=campaign_id)
+            report = await build_account_report_async(
+                client, acct, period, campaign_id=campaign_id, account_name=_account_name(acct)
+            )
             report.currency = await _read_currency(client, acct)  # §9: валюта денежных метрик
             url = await asyncio.to_thread(publish_report_to_sheets, report)
     except Exception as e:  # сеть/доступ/SDK/нет OAuth-scope Sheets
@@ -1987,6 +2135,117 @@ async def _send_mcc_xlsx(m: Message, summaries: list, period) -> None:
                         os.remove(path)
                     except OSError:
                         pass
+
+
+async def _mutready_check(cid: str) -> dict:
+    """2.5: чек-лист готовности аккаунта к ВКЛЮЧЕНИЮ МУТАЦИЙ (диагностика для /mutready).
+    READ-ONLY и только membership-проверки: НИЧЕГО не меняет — ни settings, ни env, ни
+    oauth-рантайм; ensure_allowed «на пропуск» не вызывается (инвариант test_mutready).
+    Финальный шаг (GOOGLE_ADS_ALLOWED_CUSTOMER_IDS) всегда за владельцем, руками."""
+    from ads.client import (
+        allowed_ceiling,
+        discovered_inactive_children_meta,
+        discovered_read_children,
+        discovered_read_children_meta,
+        has_oauth_runtime,
+    )
+    from core import twofa
+    from core.access import list_account_operators
+
+    ncid = normalize_customer_id(cid)
+    meta = discovered_read_children_meta().get(ncid)
+    imeta = discovered_inactive_children_meta().get(ncid)
+    ch = meta or imeta
+    r: dict = {
+        "cid": ncid,
+        "name": (getattr(ch, "name", "") or "") if ch is not None else "",
+        "status": ((getattr(ch, "status", "") or "") if ch is not None else "")
+        or ("ENABLED" if ncid == DRAFT_ACCOUNT_ID else "?"),
+        "visible": ncid in allowed_ceiling(),
+        "enabled": bool(meta) or ncid == DRAFT_ACCOUNT_ID,
+        "oauth_runtime": has_oauth_runtime(ncid),
+    }
+    # OAuth-покрытие: per-account токен ИЛИ дочерний настроенного MCC (env-токен MCC покрывает).
+    r["oauth"] = bool(
+        r["oauth_runtime"] or ncid in discovered_read_children() or ncid == DRAFT_ACCOUNT_ID
+    )
+    r["probe"], r["probe_error"] = False, ""
+    try:  # живой probe: 1 лёгкий GAQL (валюта) — честный ❌ с причиной, если чтение не работает
+        from ads.client import build_client_async
+        from ads.read import account_currency
+
+        client = await build_client_async(ncid)
+        r["currency"] = await run_ads_read_call(
+            account_currency, client, ncid, label="mutready_probe"
+        )
+        r["probe"] = True
+    except Exception as e:  # noqa: BLE001 — диагностика, не падаем
+        r["probe_error"] = ux.err_text(e)
+    try:
+        r["operators"] = await list_account_operators(ncid)
+    except Exception:  # noqa: BLE001
+        r["operators"] = []
+    r["twofa"] = twofa.is_ready()
+    r["mutations_enabled"] = ncid in {
+        normalize_customer_id(x) for x in settings.allowed_customer_ids
+    }
+    return r
+
+
+async def _run_mcc_deep_export(m: Message, period, arg_code: str | None) -> None:
+    """2.2: ГЛУБОКИЙ .xlsx по ВСЕМ дочерним всех настроенных MCC — лист на аккаунт (итоги+
+    сравнение+кампании), «Сводка» и «Пропущено и ошибки». READ-ONLY. ~7 акк. × ~10 GAQL —
+    прогресс-сообщение + общий wait_for(300с) на MCC; сбой одного MCC не валит остальные."""
+    import os
+    import tempfile
+
+    managers = sorted(settings.login_customer_id_set)
+    if not managers:
+        await m.answer(i18n.t("mcc_no_manager"))
+        return
+    await m.answer(i18n.t("mcc_deep_preparing"), parse_mode=ParseMode.HTML)
+    from ads.client import build_client_async
+    from ads.read import account_timezone
+    from reports.mcc import build_mcc_deep_async
+    from reports.xlsx import write_mcc_deep_xlsx
+
+    sent_any = False
+    async with ux.upload_action(m):
+        for manager_id in managers:
+            path: str | None = None
+            try:
+                client = await build_client_async(manager_id)
+                deep = await asyncio.wait_for(
+                    build_mcc_deep_async(
+                        client,
+                        manager_id,
+                        period,
+                        tz_of=account_timezone,
+                        period_for=_mcc_period_factory(arg_code),
+                    ),
+                    timeout=300,
+                )
+                if not deep.items and not (deep.inactive or deep.skipped or deep.errors):
+                    continue  # пустой MCC — нет смысла слать пустую книгу
+                fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_mcc_deep_")
+                os.close(fd)
+                await asyncio.to_thread(write_mcc_deep_xlsx, deep, path)
+                fname = f"aimash_mcc_deep_{manager_id}_{period.date_from}_{period.date_to}.xlsx"
+                await m.answer_document(FSInputFile(path, filename=fname))
+                sent_any = True
+            except Exception as e:  # noqa: BLE001 — один MCC не валит остальные
+                await _capture_cmd_error(e, f"mcc_deep:{manager_id}")
+                await m.answer(
+                    i18n.t("mcc_deep_failed", mid=texts.esc(manager_id), err=ux.err_text(e))
+                )
+            finally:
+                if path and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+    if not sent_any:
+        await m.answer(i18n.t("mcc_deep_empty"))
 
 
 # ── RSA-генерация (фаза 2.C): /rsa визард → курация → confirm-гейт create_rsa ─────
@@ -4181,6 +4440,7 @@ async def _dispatch_command_result(
                 res.get("days", 30),
                 res.get("stats", {}),
                 res.get("currency", ""),
+                name=res.get("account_name", ""),  # 2.1: имя кладёт agent/loop из meta
             ),
             parse_mode=ParseMode.HTML,
         )
@@ -4588,6 +4848,7 @@ async def main() -> None:
     ):
         if isinstance(r, Exception):  # не критично — бот поднимется и без меню-команд/описаний
             log.warning("set_my_* (команды/описание) не удалось: %s: %s", type(r).__name__, r)
+    global SCHED
     sched = None
     try:
         from scheduler.service import register_user_report_schedules, setup_scheduler
@@ -4595,6 +4856,7 @@ async def main() -> None:
         # Плановые отчёты/аномалии/очистка просроченных черновиков. READ-ONLY: планировщик
         # НИКОГДА не меняет аккаунт (golden rule #3) — только чтение и уведомления.
         sched = setup_scheduler(bot)
+        SCHED = sched  # 2.11: /myschedule применяет персональное расписание БЕЗ рестарта
         # §14 (P1-I): персональные расписания отчёта операторов (UserSettings.report_schedule) —
         # per-chat cron поверх глобального (оживляет ранее «мёртвую» колонку). Опционально, не роняем.
         try:

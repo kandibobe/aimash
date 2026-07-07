@@ -18,6 +18,11 @@ class Period:
     date_from: date
     date_to: date
     label: str
+    # 2.7: КЛЮЧ пресета для локализации подписи (label выше остаётся RU — обратная совместимость
+    # тестов/xlsx). kind: last_n | mtd | custom; prev=True — «предыдущий период» для сравнения.
+    kind: str = "custom"
+    n: int = 0
+    prev: bool = False
 
     @property
     def days(self) -> int:
@@ -34,7 +39,22 @@ class Period:
         n = self.days
         prev_to = self.date_from - timedelta(days=1)
         prev_from = prev_to - timedelta(days=n - 1)
-        return Period(prev_from, prev_to, f"{self.label} (пред.)")
+        return Period(prev_from, prev_to, f"{self.label} (пред.)", self.kind, self.n, True)
+
+
+def label_i18n(p: Period, lang: str | None = None) -> str:
+    """2.7: локализованная подпись периода. Раньше RU-метки («последние 30 дн.») протекали в
+    EN-отчёты/advise (label зашивался при создании Period). RU → label как есть; EN — рендер по
+    kind/n. Старые Period без kind (дефолт custom, label уже ISO-диапазон) деградируют честно."""
+    if (lang or "ru") != "en":
+        return p.label
+    if p.kind == "last_n" and p.n > 0:
+        base = f"last {p.n} days"
+    elif p.kind == "mtd":
+        base = "month to date"
+    else:
+        base = f"{p.date_from.isoformat()} — {p.date_to.isoformat()}"
+    return f"{base} (prev.)" if p.prev else base
 
 
 def last_n_days(n: int, *, today: date | None = None) -> Period:
@@ -43,7 +63,7 @@ def last_n_days(n: int, *, today: date | None = None) -> Period:
     today = today or date.today()
     end = today - timedelta(days=1)  # вчера (как Google LAST_N_DAYS — без неполного сегодня)
     start = end - timedelta(days=n - 1)
-    return Period(start, end, f"последние {n} дн.")
+    return Period(start, end, f"последние {n} дн.", "last_n", n)
 
 
 def month_to_date(*, today: date | None = None) -> Period:
@@ -52,13 +72,13 @@ def month_to_date(*, today: date | None = None) -> Period:
     end = today - timedelta(days=1)
     if end < start:  # сегодня — 1-е число: полных дней в месяце ещё нет
         end = start
-    return Period(start, end, "с начала месяца")
+    return Period(start, end, "с начала месяца", "mtd")
 
 
 def custom(date_from: date, date_to: date) -> Period:
     if date_to < date_from:
         raise ValueError("date_to раньше date_from")
-    return Period(date_from, date_to, f"{date_from.isoformat()} — {date_to.isoformat()}")
+    return Period(date_from, date_to, f"{date_from.isoformat()} — {date_to.isoformat()}", "custom")
 
 
 def from_preset(preset: str, *, today: date | None = None) -> Period:

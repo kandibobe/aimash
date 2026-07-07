@@ -204,7 +204,8 @@ CATALOG: dict[str, dict[str, str]] = {
             "<b>👤 For the admin (ADMIN_CHAT_IDS)</b>\n"
             "/adduser &lt;chat_id&gt; — let an operator use the bot (no restart) + pick accounts\n"
             "/removeuser &lt;chat_id&gt; — revoke access · /users — list operators\n"
-            "/grant &lt;chat_id&gt; &lt;id&gt; · /revoke &lt;chat_id&gt; &lt;id&gt; — per-account read access\n\n"
+            "/grant &lt;chat_id&gt; &lt;id&gt; · /revoke &lt;chat_id&gt; &lt;id&gt; — per-account read access\n"
+            "/bugs — bug-report queue (triage) · /mutready &lt;id&gt; — mutation readiness\n\n"
             "<b>Like another campaign / from a brief</b>\n"
             "• “create campaign N with settings like campaign X” — I clone the settings.\n"
             "• 🧩 in /campaigns → “Extensions”: sitelinks, callouts, structured snippets, image.\n"
@@ -264,7 +265,7 @@ CATALOG: dict[str, dict[str, str]] = {
     "kw_metrics_test_note": {
         "ru": (
             "ℹ️ Живой аккаунт для метрик не выбран — считаю на тест-аккаунте, где Keyword Planner "
-            "возвращает пустые объёмы/CPC (мало идей, сортировка не работает). Выберите живой "
+            "возвращает пустые объёмы/CPC (мало идей, сортировка не работает). Выбери живой "
             "аккаунт командой /account — и подбор станет полным и отсортированным."
         ),
         "en": (
@@ -372,7 +373,7 @@ CATALOG: dict[str, dict[str, str]] = {
     # — confirm-гейт / статусы —
     "proposal_pending": {
         "ru": texts.PROPOSAL_PENDING,
-        "en": "📝 <b>Change draft</b>\n\n{summary}\n\nConfirm? <i>(draft valid for 24h)</i>",
+        "en": "📝 <b>Change draft</b>\n\n{summary}\n\nConfirm? <i>(draft valid for {ttl_h}h)</i>",
     },
     "photo_in_flow_hint": {
         "ru": (
@@ -468,6 +469,113 @@ CATALOG: dict[str, dict[str, str]] = {
     "advise_digest_share": {
         "ru": "≈{p}% расхода аккаунта",
         "en": "≈{p}% of account spend",
+    },
+    # 2.12 (C3): видимость пер-юзер дневного лимита LLM в /balance.
+    "balance_llm_cap": {
+        "ru": "🚦 Твой дневной лимит LLM-вызовов: {used}/{limit}.",
+        "en": "🚦 Your daily LLM-call limit: {used}/{limit}.",
+    },
+    # 2.11 (§14): /myschedule — персональное расписание планового отчёта.
+    "mysched_title": {
+        "ru": "🗓 <b>Личное расписание отчёта.</b> Текущее: <code>{cur}</code>",
+        "en": "🗓 <b>Personal report schedule.</b> Current: <code>{cur}</code>",
+    },
+    "mysched_global": {
+        "ru": "глобальное (по умолчанию)",
+        "en": "global (default)",
+    },
+    "mysched_ask_cron": {
+        "ru": "Пришли crontab-строку, напр. <code>0 9 * * 1-5</code> (мин час день месяц день_недели).",
+        "en": "Send a crontab string, e.g. <code>0 9 * * 1-5</code> (min hour day month weekday).",
+    },
+    "mysched_bad_cron": {
+        "ru": "⚠️ Не похоже на валидный crontab. Пример: <code>0 9 * * 1</code> (пн 09:00).",
+        "en": "⚠️ Doesn't look like a valid crontab. Example: <code>0 9 * * 1</code> (Mon 09:00).",
+    },
+    "mysched_saved": {
+        "ru": "✅ Готово: <code>{cron}</code>. Уже действует (глобальная рассылка тебя пропустит).",
+        "en": "✅ Done: <code>{cron}</code>. Already active (the global digest will skip you).",
+    },
+    "mysched_saved_restart": {
+        "ru": "✅ Сохранено: <code>{cron}</code>. Применится после рестарта бота.",
+        "en": "✅ Saved: <code>{cron}</code>. Takes effect after the bot restarts.",
+    },
+    "mysched_off_done": {
+        "ru": "🔕 Личное расписание выключено — снова действует глобальное.",
+        "en": "🔕 Personal schedule is off — the global one applies again.",
+    },
+    # 2.11 (§14): предложение авто-подстройки порогов аномалий (scheduler.run_threshold_tuning).
+    "thr_tune_offer": {
+        "ru": "🔧 По волатильности <b>{account}</b> за {weeks} нед. предлагаю персональные пороги "
+        "алертов: рост расхода ≥{spike}% (сейчас {cur_spike}%), падение конверсий ≥{drop}% "
+        "(сейчас {cur_drop}%), мин. расход {minspend} {currency} (сейчас {cur_minspend}).\n"
+        "<i>Это настройка бота (как /alerts) — Google Ads не меняется.</i>",
+        "en": "🔧 Based on <b>{account}</b> volatility over {weeks} weeks I suggest personal alert "
+        "thresholds: spend spike ≥{spike}% (now {cur_spike}%), conversion drop ≥{drop}% "
+        "(now {cur_drop}%), min spend {minspend} {currency} (now {cur_minspend}).\n"
+        "<i>This is a bot setting (like /alerts) — Google Ads is not changed.</i>",
+    },
+    "thr_tune_accepted": {
+        "ru": "✅ Готово — пороги для {account} обновлены (см. /alerts).",
+        "en": "✅ Done — thresholds for {account} updated (see /alerts).",
+    },
+    "thr_tune_declined": {
+        "ru": "Ок, оставляю как есть и не буду предлагать ~4 недели.",
+        "en": "OK, keeping current — I won't suggest again for ~4 weeks.",
+    },
+    "thr_tune_stale": {
+        "ru": "Предложение устарело — дождись следующего (или настрой /alerts вручную).",
+        "en": "This suggestion is stale — wait for the next one (or set /alerts manually).",
+    },
+    # 2.7: /report без данных за период — внятный empty-state вместо «стены нулей».
+    "report_empty_state": {
+        "ru": "🟡 За выбранный период на этом аккаунте нет данных (показы/клики/расход = 0).\n"
+        "Проверь даты периода или выбери рабочий аккаунт: /account · /accounts.",
+        "en": "🟡 No data on this account for the selected period (impressions/clicks/cost = 0).\n"
+        "Check the period dates or pick a working account: /account · /accounts.",
+    },
+    # 2.6: обрезка батча ключей до лимита схемы (n = agent.tools.schemas.ADD_KEYWORDS_MAX).
+    "kw_add_truncated": {
+        "ru": "Оставил первые {n} ключей (лимит одного добавления).",
+        "en": "Kept the first {n} keywords (single-batch limit).",
+    },
+    # 2.5: /mutready — чек-лист готовности к включению мутаций (админ; бот конфиг НЕ меняет).
+    "mutready_usage": {
+        "ru": "Использование: /mutready &lt;id или имя аккаунта&gt; (без аргумента — активный).",
+        "en": "Usage: /mutready &lt;id or account name&gt; (no argument — the active account).",
+    },
+    # 2.4: cooldown /refresh (анти-спам API; admin-gate осознанно не ставим — read-only).
+    "refresh_cooldown": {
+        "ru": "⏳ /refresh уже выполнялся только что — подожди минуту.",
+        "en": "⏳ /refresh just ran — wait a minute.",
+    },
+    # 2.3: явное чтение НЕАКТИВНЫХ дочерних (история CANCELED/SUSPENDED по прямому запросу).
+    "account_inactive_note": {
+        "ru": "😴 Аккаунт {name} в статусе {status} — данные исторические; часть чтений Google "
+        "может отклонять для неактивных аккаунтов.",
+        "en": "😴 Account {name} is {status} — data is historical; Google may reject some reads "
+        "for inactive accounts.",
+    },
+    "account_inactive_read_failed": {
+        "ru": "😴 Аккаунт {name} в статусе {status} — Google отклоняет API-чтение отменённых/"
+        "приостановленных аккаунтов. Данные за прошлые периоды недоступны через API.",
+        "en": "😴 Account {name} is {status} — Google rejects API reads for canceled/suspended "
+        "accounts. Historical data is not available via the API.",
+    },
+    # 2.2: deep-xlsx по всем дочерним MCC (кнопка «Все аккаунты» в пикере /export).
+    "mcc_deep_preparing": {
+        "ru": "⏳ Собираю глубокий отчёт по всем аккаунтам MCC — лист на аккаунт. "
+        "Это может занять до пары минут…",
+        "en": "⏳ Building the deep report for all MCC accounts — one sheet per account. "
+        "This can take up to a couple of minutes…",
+    },
+    "mcc_deep_failed": {
+        "ru": "⚠️ MCC {mid}: глубокий отчёт не собран — {err}",
+        "en": "⚠️ MCC {mid}: deep report failed — {err}",
+    },
+    "mcc_deep_empty": {
+        "ru": "🤷 Не нашлось ни одного аккаунта с данными для глубокого отчёта.",
+        "en": "🤷 No accounts with data for the deep report.",
     },
     # 1.6: недельный бизнес-дайджест (/bizdigest, scheduler.run_business_digest).
     "bizdigest_header": {
@@ -582,7 +690,7 @@ CATALOG: dict[str, dict[str, str]] = {
         ),
         "en": (
             "🤷 Couldn't parse the edit. Examples: “set budget 60”, “add city Nairobi”, "
-            "“change “Fast and reliable” to “Reliable and fast””."
+            "“change ‘Fast and reliable’ to ‘Reliable and fast’”."
         ),
     },
     # — 3A: кнопка меню во время визарда (мягкое сворачивание без потери работы) —
@@ -1907,7 +2015,7 @@ CATALOG: dict[str, dict[str, str]] = {
     },
     "delete_confirm_alert": {
         "ru": "⚠️ Это НЕОБРАТИМО. Нажмите «Да, удалить безвозвратно» для подтверждения.",
-        "en": "⚠️ This is IRREVERSIBLE. Tap «Yes, delete permanently» to confirm.",
+        "en": "⚠️ This is IRREVERSIBLE. Tap “Yes, delete permanently” to confirm.",
     },
     "dg_budget_below_min": {
         "ru": (
@@ -2095,8 +2203,8 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "No existing account assets found. Skipping this stage.",
     },
     "cc_assets_reused": {
-        "ru": "✅ Переиспользую {n} ассет(ов) аккаунта.",
-        "en": "✅ Reusing {n} account asset(s).",
+        "ru": "✅ Переиспользую {n} ассет(ов) аккаунта: {types}.",
+        "en": "✅ Reusing {n} account asset(s): {types}.",
     },
     "cc_assets_pick_type": {
         "ru": "Какой ассет добавить? Сгенерирую наполнение по теме и сайту, вы сможете подтвердить.",

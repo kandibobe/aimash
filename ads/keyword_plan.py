@@ -13,8 +13,6 @@ competition, competition_index, *_top_of_page_bid_micros, average_cpc_micros). �
 
 from __future__ import annotations
 
-import asyncio
-import time
 from dataclasses import dataclass, field
 
 from ads.client import ensure_read_allowed
@@ -182,17 +180,8 @@ def _idea(r) -> KeywordIdea:
     )
 
 
-def _is_retryable(e: Exception) -> bool:
-    """Транзиентная ошибка Google Ads (rate-limit/квота/internal/deadline) — research read-only
-    и идемпотентен, повтор безопасен. Классификация делегируется core.resilience._is_retryable_ads
-    (по ИМЕНАМ enum-кодов — версионно-безопасно; единый источник истины с мутационным/read путём);
-    текстовый матч — лишь фолбэк для необёрнутых/нестандартных ошибок без структуры кода."""
-    from core.resilience import _is_retryable_ads
-
-    if _is_retryable_ads(e):
-        return True
-    s = str(e).upper()  # фолбэк: ошибка без protobuf-структуры (напр. обёрнута/перепакована)
-    return any(t in s for t in ("RESOURCE_EXHAUSTED", "RATE_EXCEEDED", "QUOTA"))
+# 2.9: локальный _is_retryable удалён вместе с внутренним retry-loop — классификацию и backoff
+# держит ЕДИНЫЙ core.resilience.run_ads_read_call на вызывающей стороне (двойной ретрай убран).
 
 
 # §7: имена месяцев MonthOfYearEnum в календарном порядке — ТОЛЬКО по именам (в proto
@@ -290,35 +279,15 @@ def generate_keyword_ideas(
             req.url_seed.url = url
         return req
 
+    # 2.9: внутреннего retry-loop (time.sleep 2**attempt) больше НЕТ — обе точки вызова оборачивают
+    # функцию в core.resilience.run_ads_read_call (таймаут + backoff на транзиентных), и внутренний
+    # цикл давал ДВОЙНОЙ backoff (до _RETRIES × ADS_MAX_ATTEMPTS попыток), а его time.sleep не
+    # отменялся внешним asyncio.timeout (to_thread-поток спал дальше). Единый ретрай — снаружи.
     ideas: list[KeywordIdea] = []
-    for attempt in range(1, _RETRIES + 1):
-        try:
-            ideas = []
-            for r in svc.generate_keyword_ideas(request=_build_request()):
-                ideas.append(_idea(r))
-                if len(ideas) >= _FETCH_CEILING:
-                    break
+    for r in svc.generate_keyword_ideas(request=_build_request()):
+        ideas.append(_idea(r))
+        if len(ideas) >= _FETCH_CEILING:
             break
-        except Exception as e:  # noqa: BLE001 — backoff только на транзиентных, иначе пробрасываем
-            if _is_retryable(e) and attempt < _RETRIES:
-                wait = 2**attempt
-                log.warning(
-                    "keyword_plan: rate-limit, повтор через %dс (попытка %d)", wait, attempt
-                )
-                # Гард event loop: эта функция СИНХРОННАЯ и обязана зваться через asyncio.to_thread
-                # (все вызыватели так и делают). Если кто-то позовёт её НА event loop, time.sleep
-                # заблокирует петлю (зависнут все хендлеры/джобы). Громко предупреждаем — не молчим.
-                try:
-                    asyncio.get_running_loop()
-                    log.warning(
-                        "keyword_plan: вызвана НА event loop — sleep блокирует петлю; "
-                        "зови через asyncio.to_thread"
-                    )
-                except RuntimeError:
-                    pass  # нормальный путь: в worker-потоке running loop нет
-                time.sleep(wait)
-                continue
-            raise
 
     # Сортируем ВЕСЬ собранный пул по объёму и берём топ-`limit`: API отдаёт по релевантности,
     # поэтому обрезка ДО сортировки теряла бы ёмкие ключи на дальних позициях.

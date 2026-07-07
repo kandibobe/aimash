@@ -674,6 +674,18 @@ async def cc_kw_use_generated(
     )
 
 
+@bm.dp.callback_query(bm.CcCB.filter(bm.F.action == "kw_own"))
+async def cc_kw_own(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.FSMContext) -> None:
+    """2.10 (§19.4): кнопка «📎 Загрузить свои» — визуальная развилка документа. Путь ввода
+    (текст/файл XLSX·CSV/ссылка Sheets) уже поддержан хендлерами Этапа 2 — кнопка показывает
+    инструкцию по форматам (тот же cc_kw_prompt), состояние не меняется."""
+    await cq.answer()
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        return
+    await msg.answer(bm.i18n.t("cc_kw_prompt"), parse_mode=bm.ParseMode.HTML)
+
+
 @bm.dp.callback_query(bm.CcCB.filter(bm.F.action == "use_assets"))
 async def cc_use_assets(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.FSMContext) -> None:
     """Этап 5: читаем существующие ассеты аккаунта и кладём в черновик ссылки для переиспользования."""
@@ -713,7 +725,15 @@ async def cc_use_assets(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.
         lambda st: st["assets"].__setitem__("reuse_links", reuse),
         expected_chat_id=chat_id,
     )
-    await msg.answer(bm.i18n.t("cc_assets_reused", n=len(reuse)))
+    # 2.10 (§19.7): разбивка по типам — менеджер видит СОСТАВ («SITELINK×4, CALLOUT×6, CALL×1»),
+    # а не безликое «N ассетов». Выбор подмножества по типам — backlog (пока переиспользуем всё).
+    from collections import Counter
+
+    by_type = Counter(str(r.get("field_type") or "?") for r in reuse)
+    types_s = ", ".join(
+        f"{t}×{n}" for t, n in sorted(by_type.items(), key=lambda kv: (-kv[1], kv[0]))
+    )
+    await msg.answer(bm.i18n.t("cc_assets_reused", n=len(reuse), types=types_s))
     await msg.answer(
         bm.i18n.t("cc_assets_prompt"), reply_markup=bm.cc_assets_kb(), parse_mode=bm.ParseMode.HTML
     )

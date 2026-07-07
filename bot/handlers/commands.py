@@ -206,7 +206,8 @@ async def account_cmd(m: bm.Message, command: bm.CommandObject) -> None:
         return
     cid = bm.normalize_customer_id(arg)
     try:
-        bm.ensure_read_allowed(cid)
+        # 2.3: явный запрос оператора → разрешаем и НЕАКТИВНЫЕ дочерние наших MCC (история).
+        bm.ensure_read_allowed(cid, explicit=True)
         from core.access import ensure_account_allowed_for_user
 
         await ensure_account_allowed_for_user(m.chat.id, cid)  # пер-юзер грант (2B, fail-closed)
@@ -217,12 +218,52 @@ async def account_cmd(m: bm.Message, command: bm.CommandObject) -> None:
         return
     await bm._save_selected_account(m.chat.id, cid)
     await m.answer(bm.i18n.t("account_set", cid=cid), parse_mode=bm.ParseMode.HTML)
+    from ads.client import discovered_inactive_children_meta
+
+    ch = discovered_inactive_children_meta().get(cid)
+    if ch is not None:  # 2.3: мягкая пометка «аккаунт не ENABLED» — читаем историю, не живой
+        await m.answer(
+            bm.i18n.t(
+                "account_inactive_note",
+                name=bm.texts.esc(getattr(ch, "name", "") or cid),
+                status=bm.texts.esc(getattr(ch, "status", "") or "?"),
+            ),
+            parse_mode=bm.ParseMode.HTML,
+        )
 
 
 # ── 2C: пер-пользовательские гранты аккаунтов (админ) + самодиагностика доступа ──
 def _is_admin(chat_id: int) -> bool:
     """Админ бота (env ADMIN_CHAT_IDS). Пусто ⇒ никто (fail-closed, фича опциональна)."""
     return chat_id in bm.settings.admin_ids
+
+
+@bm.dp.message(bm.Command("mutready"))
+async def mutready_cmd(m: bm.Message, command: bm.CommandObject) -> None:
+    """2.5: /mutready [id|имя] — чек-лист готовности аккаунта к включению мутаций (только админ).
+    ДИАГНОСТИКА: видимость (потолок) / статус / OAuth / живой probe / гранты / 2FA / членство в
+    allowed-list. НИКАКОЙ автозаписи конфига: финальный шаг (GOOGLE_ADS_ALLOWED_CUSTOMER_IDS)
+    владелец делает руками (docs/DEPLOYMENT.md §2.1); замок ensure_allowed не трогается."""
+    if not _is_admin(m.chat.id):
+        await m.answer(bm.i18n.t("admin_only"))
+        return
+    arg = (command.args or "").strip()
+    if arg:
+        from core.access import resolve_read_account
+
+        try:
+            cid = await resolve_read_account(m.chat.id, arg)
+        except (PermissionError, LookupError):
+            # Админ хочет диагностику и по НЕвидимому id — чек-лист честно покажет ❌ «не видим».
+            cid = bm.normalize_customer_id(arg)
+            if not cid:
+                await m.answer(bm.i18n.t("mutready_usage"))
+                return
+    else:
+        cid = await bm._active_read_account(m.chat.id)
+    async with bm.ux.typing_action(m):
+        r = await bm._mutready_check(cid)
+    await m.answer(bm.texts.fmt_mutready(r), parse_mode=bm.ParseMode.HTML)
 
 
 @bm.dp.message(bm.Command("grant"))
@@ -478,14 +519,29 @@ async def whoami_cmd(m: bm.Message) -> None:
     )
 
 
+_REFRESH_TS: dict[int, float] = {}  # 2.4: пер-чат cooldown /refresh (анти-спам API, не admin-gate)
+_REFRESH_COOLDOWN_S = 60.0
+
+
 @bm.dp.message(bm.Command("refresh"))
 async def refresh_(m: bm.Message) -> None:
     """§8: обновить данные БЕЗ рестарта бота. Пере-обход дочерних MCC (список аккаунтов для пикера +
     имена/валюты) и сброс кэшей: SDK-клиенты (подхватить ставший доступным аккаунт), валюты/таймзоны.
-    Нужно после изменения аккаунтов/доступов в Google Ads или правки GOOGLE_ADS_READ_CUSTOMER_IDS."""
+    Нужно после изменения аккаунтов/доступов в Google Ads или правки GOOGLE_ADS_READ_CUSTOMER_IDS.
+
+    2.4: admin-gate НЕ ставим осознанно — команда read-only и идемпотентна, discovery расширяет
+    чтение только детьми УЖЕ настроенных MCC (замок ensure_manager_allowed); легитимный сценарий —
+    оператор добавил аккаунт в Google Ads и хочет увидеть его в пикере. Против API-спама — пер-чат
+    cooldown 60с (плюс суточная фоновая re-discovery в scheduler)."""
+    import time as _time
+
     from ads.client import clear_client_cache, discover_read_children
     from ads.read import clear_read_caches
 
+    if (_time.monotonic() - _REFRESH_TS.get(m.chat.id, 0.0)) < _REFRESH_COOLDOWN_S:
+        await m.answer(bm.i18n.t("refresh_cooldown"))
+        return
+    _REFRESH_TS[m.chat.id] = _time.monotonic()
     await m.answer(bm.i18n.t("refresh_working"))
     try:
         clear_client_cache()  # пересобрать клиентов (новый токен/ставший доступным аккаунт)
@@ -734,6 +790,148 @@ async def advise_cmd(m: bm.Message) -> None:
     topic = arg if arg in _ADVISE_TOPICS else None
     # >1 аккаунта чтения → пикер (advisor работает на выбранном); 1 аккаунт → сразу прогон.
     await bm._start_advise_picker(m, topic=topic)
+
+
+# ── 2.11 (§14): ответ на предложение авто-подстройки порогов аномалий ─────────────
+@bm.dp.callback_query(bm.ThrTuneCB.filter())
+async def on_thr_tune(cq: bm.CallbackQuery, callback_data: bm.ThrTuneCB) -> None:
+    """«✅ Принять» — записать per-account пороги (НАСТРОЙКА БОТА, как /alerts; пишется ТОЛЬКО
+    по этому тапу — сама джоба ничего не меняет). «✖ Оставить» — отказ + анти-спам 4 недели.
+    token из блоба ui_prefs (анти-stale: старые кнопки после нового предложения не сработают)."""
+    import json
+    from datetime import datetime, timezone
+
+    chat_id = bm._cq_chat_id(cq)
+    msg = bm._cq_msg(cq)
+    # найти блоб предложения по token среди thr_tune_* этого чата
+    from sqlalchemy import select
+
+    from db.models import UserSettings
+    from db.session import Session
+
+    async with Session() as s:
+        prefs = (
+            await s.execute(select(UserSettings.ui_prefs).where(UserSettings.chat_id == chat_id))
+        ).scalar_one_or_none()
+    found_key, blob = None, None
+    for k, raw in (prefs or {}).items() if isinstance(prefs, dict) else []:
+        if not str(k).startswith("thr_tune_"):
+            continue
+        try:
+            d = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        except Exception:  # noqa: BLE001 — битый блоб пропускаем
+            continue
+        if isinstance(d, dict) and d.get("token") == callback_data.token:
+            found_key, blob = str(k), d
+            break
+    if blob is None or msg is None:
+        await cq.answer(bm.i18n.t("thr_tune_stale"), show_alert=True)
+        return
+    acct = str(blob.get("acct") or found_key.removeprefix("thr_tune_"))
+    if callback_data.action == "dec":
+        blob["declined_at"] = datetime.now(timezone.utc).isoformat()
+        from scheduler.jobs import _save_ui_pref_blob
+
+        await _save_ui_pref_blob(chat_id, found_key, blob)
+        await cq.answer()
+        await msg.answer(bm.i18n.t("thr_tune_declined"))
+        return
+    values = {
+        k: float(v)
+        for k, v in (blob.get("values") or {}).items()
+        if k in ("spend_spike_pct", "conv_drop_pct", "min_spend")
+    }
+    # defense-in-depth: значения ещё раз через UI-валидатор /alerts (диапазоны)
+    if not values or not all(bm._alert_value_ok(k, v) for k, v in values.items()):
+        await cq.answer(bm.i18n.t("thr_tune_stale"), show_alert=True)
+        return
+    await bm._save_per_account_thresholds(chat_id, acct, values)  # запись — ТОЛЬКО по этому тапу
+    await cq.answer()
+    try:  # кнопки под принятым предложением убираем (косметика)
+        await msg.edit_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+    await msg.answer(bm.i18n.t("thr_tune_accepted", account=bm.texts.esc(acct)))
+
+
+# ── 2.11 (§14): /myschedule — персональное расписание планового отчёта ────────────
+@bm.dp.message(bm.Command("myschedule"))
+async def myschedule_cmd(m: bm.Message) -> None:
+    """Персональное расписание планового отчёта (UserSettings.report_schedule): пресеты/свой cron/
+    выкл. НАСТРОЙКА БОТА (как /alerts) — confirm-гейт не нужен; рассылку делает существующая
+    per-chat джоба (register_user_report_schedules). Раньше колонка была без сеттера в UI."""
+    from sqlalchemy import select
+
+    from db.models import UserSettings
+    from db.session import Session
+
+    cur = None
+    try:
+        async with Session() as s:
+            cur = (
+                await s.execute(
+                    select(UserSettings.report_schedule).where(UserSettings.chat_id == m.chat.id)
+                )
+            ).scalar_one_or_none()
+    except Exception:  # noqa: BLE001 — показ текущего best-effort
+        cur = None
+    cur_s = cur or bm.i18n.t("mysched_global")
+    await m.answer(
+        bm.i18n.t("mysched_title", cur=bm.texts.esc(cur_s)),
+        reply_markup=bm.mysched_kb(),
+        parse_mode=bm.ParseMode.HTML,
+    )
+
+
+_MYSCHED_PRESETS = {"daily": "0 9 * * *", "weekly": "0 9 * * 1"}
+
+
+@bm.dp.callback_query(bm.MySchedCB.filter())
+async def on_mysched(
+    cq: bm.CallbackQuery, callback_data: bm.MySchedCB, state: bm.FSMContext
+) -> None:
+    """Пресет/выкл — сразу персист + live-применение; custom → FSM-ввод crontab-строки."""
+    chat_id = bm._cq_chat_id(cq)
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    action = callback_data.action
+    if action == "custom":
+        await cq.answer()
+        await state.set_state(bm.MyScheduleWizard.awaiting_cron)
+        await msg.answer(bm.i18n.t("mysched_ask_cron"), reply_markup=bm.nav_kb())
+        return
+    await cq.answer()
+    cron = None if action == "off" else _MYSCHED_PRESETS.get(action)
+    if action != "off" and not cron:  # неизвестный action (старые кнопки) — тихий stale
+        await msg.answer(bm.i18n.t("stale"))
+        return
+    await bm._save_report_schedule(chat_id, cron)
+    live = await bm._apply_report_schedule_live(cq.bot, chat_id, cron)
+    if action == "off":
+        await msg.answer(bm.i18n.t("mysched_off_done"))
+    else:
+        key = "mysched_saved" if live else "mysched_saved_restart"
+        await msg.answer(bm.i18n.t(key, cron=bm.texts.esc(cron)))
+
+
+@bm.dp.message(bm.MyScheduleWizard.awaiting_cron)
+async def mysched_cron_text(m: bm.Message, state: bm.FSMContext) -> None:
+    """Свой crontab: валидирует КОД (CronTrigger.from_crontab); невалидный → остаёмся в состоянии."""
+    from apscheduler.triggers.cron import CronTrigger
+
+    raw = (m.text or "").strip()
+    try:
+        CronTrigger.from_crontab(raw)
+    except (ValueError, TypeError):
+        await m.answer(bm.i18n.t("mysched_bad_cron"), reply_markup=bm.nav_kb())
+        return
+    await state.clear()
+    await bm._save_report_schedule(m.chat.id, raw)
+    live = await bm._apply_report_schedule_live(m.bot, m.chat.id, raw)
+    key = "mysched_saved" if live else "mysched_saved_restart"
+    await m.answer(bm.i18n.t(key, cron=bm.texts.esc(raw)))
 
 
 # ── 1.6 (аудит 2026-07-06): /bizdigest — тогл недельного бизнес-дайджеста ─────────

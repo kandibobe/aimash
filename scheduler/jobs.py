@@ -29,9 +29,11 @@ from reports.queries import fetch_totals
 from reports.service import build_account_report_async, summary_text
 from scheduler.anomaly import detect_anomalies
 
-REPORT_WINDOW_DAYS = 7  # окно планового отчёта
-ANOMALY_WINDOW_DAYS = 7  # окно сравнения для аномалий (текущие N дн. vs предыдущие N дн.)
-PROPOSAL_TTL_HOURS = 24  # сколько живёт неподтверждённый черновик до авто-отклонения
+# 2.6: окна — из core.config (env REPORT_WINDOW_DAYS/ANOMALY_WINDOW_DAYS); алиасы для тестов.
+REPORT_WINDOW_DAYS = int(settings.report_window_days)  # окно планового отчёта
+ANOMALY_WINDOW_DAYS = int(settings.anomaly_window_days)  # окно сравнения аномалий (N дн. vs пред.)
+# 2.6: TTL черновика — из core.config (env PROPOSAL_TTL_HOURS); имя-алиас сохранён для тестов.
+PROPOSAL_TTL_HOURS = int(settings.proposal_ttl_hours)
 _DIGEST_MAX = 3800  # потолок длины дайджеста для Telegram (лимит 4096, оставляем запас)
 
 
@@ -596,6 +598,19 @@ async def run_recommendations_digest(bot) -> None:
                 pass
 
 
+async def run_mcc_rediscovery() -> None:
+    """2.4 (аудит 2026-07-06): суточный пере-обход детей MCC — новый/закрытый дочерний виден в
+    пикерах/scheduler БЕЗ рестарта и без ручного /refresh («набор аккаунтов = снимок на старте»).
+    READ-ONLY, под замком ensure_manager_allowed (внутри discover_read_children); идемпотентна и
+    сама fail-safe per-MCC. Кэши клиентов/валют НЕ сбрасываем (в отличие от /refresh): за сутки
+    они не протухают, а фоновый сброс дал бы латентный спайк."""
+    with request_scope("scheduler:rediscovery"):
+        from ads.client import discover_read_children
+
+        n = await discover_read_children()
+        log.info("scheduler: re-discovery дочерних MCC: %d", n)
+
+
 async def _business_digest_chats(recipients: set[int]) -> set[int]:
     """Операторы с включённым недельным БИЗНЕС-дайджестом (ui_prefs.business_digest, тогл
     /bizdigest). По умолчанию ВЫКЛ (fail-closed к анти-спаму). READ-ONLY."""
@@ -748,6 +763,170 @@ async def run_business_digest(bot) -> None:
                 log.warning("bizdigest не доставлен в %s: %s", chat_id, type(e).__name__)
 
 
+# ── 2.11 (§14): авто-подстройка порогов аномалий — READ-ONLY анализ + ПРЕДЛОЖЕНИЕ ──
+_THR_TUNE_PROPOSE_COOLDOWN_D = 14  # не предлагать чаще раза в 2 недели
+_THR_TUNE_DECLINE_COOLDOWN_D = 28  # после отказа молчим ~4 недели
+
+
+async def _ui_pref_blob(chat_id: int, key: str) -> dict | None:
+    """ui_prefs[key] как JSON-блоб (прецедент last_report_sel). Нет/битый → None. READ-ONLY."""
+    import json
+
+    async with Session() as s:
+        prefs = (
+            await s.execute(select(UserSettings.ui_prefs).where(UserSettings.chat_id == chat_id))
+        ).scalar_one_or_none()
+    raw = (prefs or {}).get(key) if isinstance(prefs, dict) else None
+    if not raw:
+        return None
+    try:
+        d = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        return d if isinstance(d, dict) else None
+    except Exception:  # noqa: BLE001 — битый блоб = нет блоба
+        return None
+
+
+async def _save_ui_pref_blob(chat_id: int, key: str, blob: dict) -> None:
+    """Записать JSON-блоб в ui_prefs[key] (настройка БОТА; JSON переприсваиваем целиком)."""
+    import json
+
+    async with Session() as s:
+        row = (
+            await s.execute(select(UserSettings).where(UserSettings.chat_id == chat_id))
+        ).scalar_one_or_none()
+        prefs = dict((row.ui_prefs if row is not None else None) or {})
+        prefs[key] = json.dumps(blob, ensure_ascii=False)
+        if row is None:
+            s.add(UserSettings(chat_id=chat_id, ui_prefs=prefs))
+        else:
+            row.ui_prefs = prefs
+        await s.commit()
+
+
+def _thr_tune_on_cooldown(blob: dict | None, now: datetime) -> bool:
+    """Анти-спам: недавнее предложение (14д) или недавний отказ (28д) → молчим."""
+    if not blob:
+        return False
+    for field, days in (
+        ("proposed_at", _THR_TUNE_PROPOSE_COOLDOWN_D),
+        ("declined_at", _THR_TUNE_DECLINE_COOLDOWN_D),
+    ):
+        raw = blob.get(field)
+        if not raw:
+            continue
+        try:
+            ts = datetime.fromisoformat(str(raw))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if (now - ts).days < days:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+async def run_threshold_tuning(bot) -> None:
+    """2.11 (§14): персональные пороги аномалий по ВОЛАТИЛЬНОСТИ аккаунта. READ-ONLY + notify:
+    джоба читает дневную динамику (fetch_by_day, trailing 12 недель), считает предложение ЧИСТЫМИ
+    формулами (scheduler.threshold_tuner) и ПРЕДЛАГАЕТ оверлей сообщением с кнопками. Сама НИЧЕГО
+    не пишет в настройки — запись делает хендлер «✅ Принять» (bm._save_per_account_thresholds),
+    т.е. только по тапу человека. Google Ads не мутируется (golden rule #3). Opt-in
+    (threshold_tune_enabled) + анти-спам 14/28 дней в ui_prefs."""
+    with request_scope("scheduler:thr-tune"):
+        from uuid import uuid4
+
+        from bot import i18n
+        from bot.keyboards import thr_tune_kb
+        from reports.period import custom as period_custom
+        from reports.queries import fetch_by_day
+        from scheduler.threshold_tuner import TRAILING_DAYS, suggest_thresholds, weekly_buckets
+
+        recipients = await _recipients()
+        if not recipients:
+            return
+        accounts = _scheduled_accounts()
+        if not accounts:
+            return
+        thr_by_chat = await _thresholds_by_chat(recipients)
+        now = datetime.now(timezone.utc)
+        today = now.date()
+        period = period_custom(today - timedelta(days=TRAILING_DAYS), today - timedelta(days=1))
+
+        for acct in accounts:
+            tok_ctx = set_context(customer_id=acct)
+            try:
+                client = await build_client_async(acct)
+                day_bd = await run_ads_read_call(
+                    fetch_by_day, client, acct, period, None, label=f"thr_tune_{acct}"
+                )
+                costs, convs = weekly_buckets(getattr(day_bd, "rows", None) or [])
+                currency = ""
+                try:
+                    from ads.read import account_currency
+
+                    currency = await run_ads_read_call(
+                        account_currency, client, acct, label=f"thr_cur_{acct}"
+                    )
+                except Exception:  # noqa: BLE001 — валюта best-effort
+                    currency = ""
+            except Exception as e:  # сбой одного аккаунта не валит джобу
+                if is_account_access_error(e):
+                    log.info("thr-tune: аккаунт %s недоступен (ожидаемо, пропуск)", acct)
+                else:
+                    await capture_exception(e, where=f"scheduler:thr-tune:{acct}")
+                continue
+            finally:
+                reset_context(tok_ctx)
+            if not costs:
+                continue
+            for chat_id in recipients:
+                key = f"thr_tune_{acct}"
+                blob = await _ui_pref_blob(chat_id, key)
+                if _thr_tune_on_cooldown(blob, now):
+                    continue
+                current = _effective_thresholds(thr_by_chat.get(chat_id), acct) or {}
+                from scheduler.anomaly import DEFAULT_THRESHOLDS
+
+                cur_all = {**DEFAULT_THRESHOLDS, **current}
+                suggestion = suggest_thresholds(costs, convs, cur_all)
+                if not suggestion:
+                    continue
+                token = uuid4().hex[:12]
+                await _save_ui_pref_blob(
+                    chat_id,
+                    key,
+                    {
+                        "token": token,
+                        "acct": str(acct),
+                        "values": suggestion,
+                        "proposed_at": now.isoformat(),
+                        "declined_at": (blob or {}).get("declined_at"),
+                    },
+                )
+                lang = i18n.get_lang(chat_id)
+                try:
+                    await bot.send_message(
+                        chat_id,
+                        i18n.t(
+                            "thr_tune_offer",
+                            lang,
+                            account=_digest_account_label(acct),
+                            weeks=len(costs),
+                            spike=f"{suggestion['spend_spike_pct']:.0f}",
+                            cur_spike=f"{cur_all.get('spend_spike_pct', 0):.0f}",
+                            drop=f"{suggestion['conv_drop_pct']:.0f}",
+                            cur_drop=f"{cur_all.get('conv_drop_pct', 0):.0f}",
+                            minspend=f"{suggestion['min_spend']:g}",
+                            cur_minspend=f"{cur_all.get('min_spend', 0):g}",
+                            currency=currency or "",
+                        ),
+                        reply_markup=thr_tune_kb(token, lang),
+                        parse_mode="HTML",
+                    )
+                except Exception as e:  # один недоступный чат не роняет рассылку
+                    log.warning("thr-tune не доставлен в %s: %s", chat_id, type(e).__name__)
+
+
 async def _notify_outcome(bot, outcome, verdict: str) -> None:
     """§advisor #2: сообщить оператору исход применённого совета (improved/worse) — обучение видимо.
     READ-ONLY (только уведомление). chat_id берём из связанной рекомендации по rec_uid."""
@@ -806,13 +985,15 @@ async def run_recommendation_followups(bot=None) -> int:
 
 
 async def cleanup_stale_proposals(
-    *, now: datetime | None = None, ttl_hours: int = PROPOSAL_TTL_HOURS
+    *, now: datetime | None = None, ttl_hours: int | None = None
 ) -> int:
     """Просроченные pending-черновики → reject (с аудитом). Возвращает число отклонённых.
 
     Сравнение возраста — в Python (а не в SQL), чтобы корректно работать и на SQLite (наивный
     UTC), и на Postgres (tz-aware): наивный created_at трактуем как UTC."""
     with request_scope("scheduler:cleanup"):  # §15: корреляция логов джобы по request_id
+        if ttl_hours is None:  # 2.6: живое значение из config (тесты могут передать своё)
+            ttl_hours = int(settings.proposal_ttl_hours)
         cutoff = (now or datetime.now(timezone.utc)) - timedelta(hours=ttl_hours)
         store = ConfirmStore()
         async with Session() as s:

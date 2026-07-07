@@ -43,6 +43,19 @@ def _revisions() -> dict[str, str | None]:
     return out
 
 
+def test_every_migration_has_real_downgrade():
+    """2.12: каждая миграция обратима — downgrade() существует и содержит реальные op.* вызовы
+    (не pass-заглушку). Гард гигиены: расхождение upgrade/downgrade всплывает на ревью, а не при
+    аварийном откате прода."""
+    bad = []
+    for py in _VERSIONS.glob("*.py"):
+        text = py.read_text(encoding="utf-8")
+        m = re.search(r"def downgrade\(\)[^:]*:\n(.*?)(?=\ndef |\Z)", text, re.S)
+        if not m or "op." not in m.group(1):
+            bad.append(py.name)
+    assert not bad, f"миграции без реального downgrade: {bad}"
+
+
 def test_single_alembic_head_is_0020():
     revs = _revisions()
     assert revs, "не найдено ни одной миграции — сломан парс migrations/versions"

@@ -55,16 +55,26 @@ def _parse(content: str, n: int) -> list[str] | None:
     return out if all(out) else None
 
 
-async def phrase(recs, lang: str = "ru") -> list[str]:
+async def phrase(recs, lang: str = "ru", *, client_context: str = "") -> list[str]:
     """Вернуть список текстов рекомендаций (в порядке recs). База — детерминированный render; LLM
-    лишь переписывает. Пустой список / сбой LLM / рассинхрон → база (fallback)."""
+    лишь переписывает. Пустой список / сбой LLM / рассинхрон → база (fallback).
+
+    client_context (2.11, §20.6) — компактный профиль клиента (бренд/услуги/гео) ТОЛЬКО для тона
+    и терминологии ниши: модель НЕ получает права добавлять советы или менять числа — fact-guard
+    _facts_preserved по-прежнему откатывает любое искажение на render (решения остаются в rules)."""
     base = [render.render_recommendation(r, lang) for r in recs]
     if not base:
         return base
+    system = _SYSTEM.format(n=len(base))
+    if client_context:
+        system += (
+            "\nКонтекст клиента (ТОЛЬКО для тона и терминологии; НЕ добавляй новых советов и не "
+            f"меняй числа/названия): {client_context[:600]}"
+        )
     try:
         msg = await chat(
             [
-                {"role": "system", "content": _SYSTEM.format(n=len(base))},
+                {"role": "system", "content": system},
                 {"role": "user", "content": json.dumps(base, ensure_ascii=False)},
             ],
             role="copy",

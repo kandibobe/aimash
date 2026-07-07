@@ -152,6 +152,24 @@ async def on_report_account(cq: bm.CallbackQuery, callback_data: bm.ReportAcctCB
     msg = bm._cq_msg(cq)
     if msg is None:
         return
+    if callback_data.idx == -3:  # 2.2: «Все аккаунты (MCC)» — кросс-аккаунтная ветка
+        chat_id = bm._cq_chat_id(cq)
+        if callback_data.target == "export":
+            # deep-xlsx: сентинел в выбор → дальше обычный пикер периода (period_export роутит).
+            bm._REPORT_SEL[chat_id] = {
+                "account": bm.MCC_ALL,
+                "campaign_id": None,
+                "campaign_name": None,
+            }
+            await bm._safe_edit(
+                cq,
+                bm.i18n.t("period_pick_export"),
+                reply_markup=bm.period_kb("export", last=await bm._last_period(chat_id)),
+            )
+            return
+        # report/sheets → готовая сводка /mcc (текст + лёгкая таблица по всем аккаунтам).
+        await bm._send_mcc(msg, None)
+        return
     if callback_data.idx == -2:  # §UX-память: «↻ повторить прошлый отчёт» (аккаунт+кампания+период)
         recall = await bm._load_report_recall(bm._cq_chat_id(cq))
         if not recall:
@@ -272,7 +290,13 @@ async def period_export(cq: bm.CallbackQuery, callback_data: bm.PeriodCB) -> Non
         await msg.answer(bm.i18n.t("err_period"))
         return
     await bm._remember_period(bm._cq_chat_id(cq), callback_data.code)  # §UX-память
-    acct, campaign_id, campaign_name = await bm._report_target(bm._cq_chat_id(cq))
+    chat_id = bm._cq_chat_id(cq)
+    sel = bm._REPORT_SEL.get(chat_id) or {}
+    if sel.get("account") == bm.MCC_ALL:  # 2.2: deep-xlsx по всем аккаунтам MCC
+        bm._REPORT_SEL.pop(chat_id, None)  # одноразовый сентинел (не липнет к след. отчёту)
+        await bm._run_mcc_deep_export(msg, period, callback_data.code)
+        return
+    acct, campaign_id, campaign_name = await bm._report_target(chat_id)
     await bm._run_export(msg, period, acct, campaign_id, campaign_name)
 
 

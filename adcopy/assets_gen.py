@@ -140,7 +140,9 @@ async def _gen_snippets(topic, url, profile, language) -> dict:
     headers = ", ".join(sorted(STRUCTURED_SNIPPET_HEADERS))
     data = await _llm(
         "Ты — специалист по Google Ads. Подбери ОДНО структурное описание: header строго из списка "
-        f"[{headers}] и 4–8 значений (каждое ≤25 симв) по теме. Верни СТРОГО JSON-объект "
+        f"[{headers}] и 4–8 значений (каждое ≤25 симв) по теме. Если в профиле клиента есть строка "
+        "«Категории услуг/товаров» — используй В ПЕРВУЮ ОЧЕРЕДЬ эти реальные категории как значения "
+        "(не выдумывай свои). Верни СТРОГО JSON-объект "
         '{"header":"...","values":["..."]} без пояснений.',
         _ctx(topic, url, profile, language),
         "{",

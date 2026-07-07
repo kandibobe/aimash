@@ -220,32 +220,24 @@ class _FlakyClient(_Client):
         self.svc = _FlakySvc(rows, errors)
 
 
-def test_retries_transient_then_succeeds(monkeypatch):
+def test_no_internal_retry_single_attempt():
+    """2.9: внутренний retry-loop УДАЛЁН — любая ошибка (даже транзиентная) уходит наружу с
+    ПЕРВОЙ попытки. Backoff/повторы держит единый core.resilience.run_ads_read_call на вызывающей
+    стороне (раньше был двойной ретрай: до _RETRIES × ADS_MAX_ATTEMPTS попыток, а time.sleep
+    внутреннего цикла не отменялся внешним asyncio.timeout)."""
     import ads.keyword_plan as kp
 
-    monkeypatch.setattr(kp.time, "sleep", lambda *_a: None)  # без реальных пауз backoff
     client = _FlakyClient([_row("x", 5)], errors=[Exception("RATE_EXCEEDED: slow down")])
-    with allowed_ids(DRAFT_ACCOUNT_ID):
-        ideas = kp.generate_keyword_ideas(client, DRAFT_ACCOUNT_ID, seeds=["s"])
-    assert [i.text for i in ideas] == ["x"]
-    assert client.svc.calls == 2  # один транзиентный сбой → один повтор → успех
-
-
-def test_non_retryable_propagates_without_retry(monkeypatch):
-    import ads.keyword_plan as kp
-
-    monkeypatch.setattr(kp.time, "sleep", lambda *_a: None)
-    client = _FlakyClient([_row("x", 5)], errors=[ValueError("INVALID_ARGUMENT: bad seed")])
-    with allowed_ids(DRAFT_ACCOUNT_ID), pytest.raises(ValueError):
+    with allowed_ids(DRAFT_ACCOUNT_ID), pytest.raises(Exception, match="RATE_EXCEEDED"):
         kp.generate_keyword_ideas(client, DRAFT_ACCOUNT_ID, seeds=["s"])
-    assert client.svc.calls == 1  # нетранзиентная ошибка не повторяется
+    assert client.svc.calls == 1  # ровно одна попытка — без внутреннего backoff
 
+    client2 = _FlakyClient([_row("x", 5)], errors=[ValueError("INVALID_ARGUMENT: bad seed")])
+    with allowed_ids(DRAFT_ACCOUNT_ID), pytest.raises(ValueError):
+        kp.generate_keyword_ideas(client2, DRAFT_ACCOUNT_ID, seeds=["s"])
+    assert client2.svc.calls == 1
 
-def test_is_retryable_unifies_with_resilience():
-    import ads.keyword_plan as kp
-
-    assert kp._is_retryable(Exception("RATE_EXCEEDED")) is True  # текстовый фолбэк
-    assert kp._is_retryable(ValueError("INVALID_ARGUMENT")) is False  # не транзиентная
+    assert not hasattr(kp, "_is_retryable")  # гард: локальный классификатор не возродился
 
 
 # ── Сезонность (§7): пик месяца из monthly_search_volumes ───────────────────────

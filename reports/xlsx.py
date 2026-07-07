@@ -199,3 +199,92 @@ def write_mcc_xlsx(summary, path: str) -> str:
     """Сохранить MCC-сводку в .xlsx по пути path. Возвращает path."""
     build_mcc_workbook(summary).save(path)
     return path
+
+
+# ── 2.2 (аудит 2026-07-06): DEEP-книга по всем дочерним MCC — лист на аккаунт ─────────
+_SHEET_BAD_CHARS = set("\\/*?:[]")
+
+
+def _sheet_title(name: str, cid: str) -> str:
+    """Имя листа openpyxl: «Имя_last4», санитизация запрещённых символов, ≤31 симв."""
+    base = (name or cid or "acct").strip() or "acct"
+    base = "".join(("_" if ch in _SHEET_BAD_CHARS else ch) for ch in base)
+    return f"{base[:24]}_{str(cid)[-4:]}"[:31]
+
+
+def build_mcc_deep_workbook(deep) -> Workbook:
+    """Книга DEEP-отчёта (reports.mcc.MccDeep, duck-typed): лист «Сводка» (строка на аккаунт,
+    метрики в валюте аккаунта — БЕЗ FX) → по ЛИСТУ НА АККАУНТ (итоги+сравнение периода, как
+    write_report_xlsx, + таблица разбивки по кампаниям — не 8 листов × N акк.) → «Пропущено и
+    ошибки» (без тихого замалчивания)."""
+    wb = Workbook()
+    p = deep.period
+
+    ws = wb.active
+    ws.title = "Сводка"
+    ws.append([f"Глубокий отчёт по MCC {deep.manager_id}"])
+    ws.append([f"Период: {p.label} ({p.date_from.isoformat()} — {p.date_to.isoformat()})"])
+    ws.append([])
+    headers = ["ID", "Аккаунт", "Валюта", *metric_headers("")]
+    ws.append(headers)
+    header_row = ws.max_row
+    for ch, report in deep.items:
+        ws.append(
+            [
+                ch.id,
+                getattr(ch, "name", "") or "",
+                ch.currency or "",
+                *report.totals.as_row(),
+            ]
+        )
+    for c in range(1, len(headers) + 1):
+        ws.cell(row=header_row, column=c).fill = _HEADER_FILL
+        ws.cell(row=header_row, column=c).font = _HEADER_FONT
+    _apply_metric_formats_at(ws, 3, header_row + 1, len(deep.items))
+    ws.cell(row=1, column=1).font = Font(bold=True, size=14)
+    _autosize(ws, len(headers))
+
+    used_titles = {ws.title}
+    for ch, report in deep.items:
+        title = _sheet_title(getattr(ch, "name", "") or "", ch.id)
+        while title in used_titles:  # коллизия имён (обрезка) — дособираем суффикс
+            title = (title[:29] + "_x")[:31]
+        used_titles.add(title)
+        acc_ws = wb.create_sheet(title=title)
+        _write_summary(acc_ws, report)
+        camp = next((b for b in report.breakdowns if b.key == "campaign"), None)
+        if camp and camp.rows:
+            acc_ws.append([])
+            camp_headers = camp.dim_headers + metric_headers(report.currency or "")
+            acc_ws.append(camp_headers)
+            hrow = acc_ws.max_row
+            for dims, m in camp.rows:
+                acc_ws.append(list(dims) + m.as_row())
+            for c in range(1, len(camp_headers) + 1):
+                acc_ws.cell(row=hrow, column=c).fill = _HEADER_FILL
+                acc_ws.cell(row=hrow, column=c).font = _HEADER_FONT
+            _apply_metric_formats_at(acc_ws, len(camp.dim_headers), hrow + 1, len(camp.rows))
+            _autosize(acc_ws, len(camp_headers))
+
+    iss = wb.create_sheet(title="Пропущено и ошибки")
+    iss.append(["Тип", "Аккаунт", "Причина"])
+    _style_header_row(iss, 3)
+    for ch in deep.inactive:
+        name = getattr(ch, "name", "") or ch.id
+        iss.append(
+            ["неактивный (не ENABLED)", f"{name} ({ch.id})", getattr(ch, "status", "") or ""]
+        )
+    for cid in deep.skipped:
+        iss.append(["пропущен (нет доступа на чтение)", cid, ""])
+    for cid in deep.managers:
+        iss.append(["менеджерский (без собственных метрик)", cid, ""])
+    for cid, reason in deep.errors:
+        iss.append(["ошибка чтения", cid, reason])
+    _autosize(iss, 3)
+    return wb
+
+
+def write_mcc_deep_xlsx(deep, path: str) -> str:
+    """Сохранить DEEP-книгу по пути path. Возвращает path."""
+    build_mcc_deep_workbook(deep).save(path)
+    return path

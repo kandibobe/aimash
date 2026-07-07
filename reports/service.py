@@ -15,7 +15,7 @@ from typing import Any
 
 from ads.client import ensure_read_allowed
 from core.resilience import run_ads_read_call
-from reports.period import Period
+from reports.period import Period, label_i18n
 from reports.queries import BREAKDOWN_FETCHERS, Breakdown, Metrics, fetch_totals
 
 
@@ -27,6 +27,9 @@ class ReportData:
     prev_totals: Metrics | None  # None, если сравнение не запрашивали
     breakdowns: list[Breakdown]
     currency: str = ""  # код валюты аккаунта (§9), напр. "USD"; "" → не показываем
+    # 2.1 (аудит 2026-07-06): имя аккаунта («Башня») для заголовков — пикер показывает имена,
+    # а сводка раньше печатала голый id. В КОНЦЕ dataclass: позиционные конструкторы не ломаются.
+    account_name: str = ""
 
 
 def build_account_report(
@@ -37,6 +40,7 @@ def build_account_report(
     with_comparison: bool = True,
     currency: str = "",
     campaign_id: str | None = None,
+    account_name: str = "",
 ) -> ReportData:
     """Собрать отчёт: итоги, (опц.) предыдущий равный период, все разбивки ТЗ §9.
 
@@ -51,7 +55,9 @@ def build_account_report(
         else None
     )
     breakdowns = [f(client, customer_id, period, campaign_id) for f in BREAKDOWN_FETCHERS]
-    return ReportData(str(customer_id), period, totals, prev_totals, breakdowns, currency)
+    return ReportData(
+        str(customer_id), period, totals, prev_totals, breakdowns, currency, account_name
+    )
 
 
 async def build_account_report_async(
@@ -62,6 +68,7 @@ async def build_account_report_async(
     with_comparison: bool = True,
     currency: str = "",
     campaign_id: str | None = None,
+    account_name: str = "",
 ) -> ReportData:
     """Async-сборка отчёта — ИДЕНТИЧНА build_account_report по данным, но независимые GAQL-фетчеры
     идут ПАРАЛЛЕЛЬНО, а не последовательно (раньше 9 round-trip подряд в одном to_thread).
@@ -101,7 +108,9 @@ async def build_account_report_async(
         prev_totals = results[idx]
         idx += 1
     breakdowns = list(results[idx:])  # порядок == BREAKDOWN_FETCHERS
-    return ReportData(str(customer_id), period, totals, prev_totals, breakdowns, currency)
+    return ReportData(
+        str(customer_id), period, totals, prev_totals, breakdowns, currency, account_name
+    )
 
 
 def _thou(n: float, dec: int = 0) -> str:
@@ -140,9 +149,15 @@ def summary_text(report: ReportData, lang: str | None = None) -> str:
     t = report.totals
     p = report.period
     cur = report.currency
+    # 2.1: «Имя · id» — как в пикере; без имени (нет meta) — голый id, как раньше.
+    acct_label = (
+        f"{report.account_name} · {report.customer_id}"
+        if getattr(report, "account_name", "")
+        else report.customer_id
+    )
     if _resolve_lang(lang) == "en":
         lines = [
-            f"📊 Account {report.customer_id} · {p.label} ({p.date_from} — {p.date_to})",
+            f"📊 Account {acct_label} · {label_i18n(p, 'en')} ({p.date_from} — {p.date_to})",
             f"Impressions {_thou(t.impressions)} · Clicks {_thou(t.clicks)} · "
             f"CTR {t.ctr * 100:.1f}%",
             f"Cost {_money(t.cost, cur)} · CPC {_money(t.avg_cpc, cur)} · "
@@ -167,7 +182,7 @@ def summary_text(report: ReportData, lang: str | None = None) -> str:
                 )
         return "\n".join(lines)
     lines = [
-        f"📊 Аккаунт {report.customer_id} · {p.label} ({p.date_from} — {p.date_to})",
+        f"📊 Аккаунт {acct_label} · {p.label} ({p.date_from} — {p.date_to})",
         f"Показы {_thou(t.impressions)} · Клики {_thou(t.clicks)} · CTR {t.ctr * 100:.1f}%",
         f"Расход {_money(t.cost, cur)} · CPC {_money(t.avg_cpc, cur)} · Конв. {t.conversions:.1f} · "
         f"CPA {_money(t.cpa, cur)} · ROAS {t.roas:.2f}",
@@ -229,7 +244,8 @@ def summary_text_mcc(summary, lang: str | None = None) -> str:
     n_children = len(summary.children)
     L = _MCC_LABELS_EN if en else _MCC_LABELS_RU
     lines = [
-        f"🏢 <b>MCC {summary.manager_id}</b> · {p.label} ({p.date_from} — {p.date_to})",
+        f"🏢 <b>MCC {summary.manager_id}</b> · "
+        f"{label_i18n(p, 'en' if en else 'ru')} ({p.date_from} — {p.date_to})",
         f"{L['with_data']}: <b>{n_children}</b>",
     ]
 
@@ -326,7 +342,7 @@ _MCC_LABELS_RU = {
     "inactive": "Неактивные (не ENABLED)",
     "no_access": "Нет доступа на чтение",
     "errors": "Ошибки чтения",
-    "full_export": "Полная таблица по всем аккаунтам — /export",
+    "full_export": "Полная таблица по всем аккаунтам приложена ниже (.xlsx)",
 }
 _MCC_LABELS_EN = {
     "with_data": "Accounts with data",
@@ -341,5 +357,5 @@ _MCC_LABELS_EN = {
     "inactive": "Inactive (not ENABLED)",
     "no_access": "No read access",
     "errors": "Read errors",
-    "full_export": "Full per-account table — /export",
+    "full_export": "Full per-account table is attached below (.xlsx)",
 }

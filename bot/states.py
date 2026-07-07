@@ -70,6 +70,12 @@ class ModelWizard(StatesGroup):
     awaiting_model = State()  # ждём свой slug модели OpenRouter для /model
 
 
+class MyScheduleWizard(StatesGroup):
+    """2.11 (§14): персональное расписание планового отчёта (/myschedule → «Свой cron»)."""
+
+    awaiting_cron = State()  # ждём crontab-строку (валидирует CronTrigger.from_crontab)
+
+
 class TwoFactor(StatesGroup):
     """§12 2FA: ждём PIN-код перед исполнением опасной операции. Ожидающий черновик (cid) + исходный
     CallbackQuery живут в bot.main._TWOFA_PENDING[chat_id] (переживают только процесс, не рестарт —

@@ -76,3 +76,35 @@ def test_weekly_digest_crontab_parses(monkeypatch):
 def test_weekly_digest_invalid_falls_back(monkeypatch):
     _set_digest(monkeypatch, "мусор")
     assert str(weekly_digest_trigger()) == str(CronTrigger(**_DEFAULT_WEEKLY_DIGEST_CRON))
+
+
+# ── 1.6/2.4: бизнес-дайджест и re-discovery — конфиг с fail-safe дефолтами ─────────
+def test_business_digest_and_rediscovery_defaults():
+    assert settings.business_digest_schedule == "0 9 * * 1"
+    assert settings.mcc_rediscovery_hours == 24  # 0 = выкл (снимок на старте, как раньше)
+    assert settings.advise_digest_top_n == 5
+
+
+def test_business_digest_trigger_fail_safe(monkeypatch):
+    from scheduler.service import business_digest_trigger
+
+    monkeypatch.setattr(settings, "business_digest_schedule", "45 7 * * 3", raising=False)
+    assert str(business_digest_trigger()) == str(CronTrigger.from_crontab("45 7 * * 3"))
+    monkeypatch.setattr(settings, "business_digest_schedule", "мусор", raising=False)
+    assert str(business_digest_trigger()) == str(CronTrigger(**_DEFAULT_WEEKLY_DIGEST_CRON))
+
+
+async def test_rediscovery_job_calls_discover(monkeypatch):
+    """2.4: джоба зовёт ТОЛЬКО discover_read_children (read-only; кэши клиентов не сбрасывает)."""
+    import ads.client as ads_client
+    from scheduler import jobs
+
+    called = {"n": 0}
+
+    async def _fake_discover():
+        called["n"] += 1
+        return 7
+
+    monkeypatch.setattr(ads_client, "discover_read_children", _fake_discover)
+    await jobs.run_mcc_rediscovery()
+    assert called["n"] == 1

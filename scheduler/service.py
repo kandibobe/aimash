@@ -79,11 +79,15 @@ async def register_user_report_schedules(sched: AsyncIOScheduler, bot) -> int:
     Runtime-изменения расписания подхватываются на рестарте (или повторным вызовом из /refresh)."""
     from sqlalchemy import select
 
-    from core.config import settings as _settings
     from db.models import UserSettings
     from db.session import Session
 
-    wl = set(_settings.whitelist)
+    # 2.11 (D9-консистентность): env ∪ БД-whitelist (как jobs._recipients) — рантайм-добавленный
+    # /adduser оператор тоже получает персональное расписание (раньше env-only). Fail-closed:
+    # сбой БД внутри whitelisted_ids ⇒ только env.
+    from core.access import whitelisted_ids
+
+    wl = await whitelisted_ids()
     if not wl:
         return 0
     async with Session() as s:
@@ -229,6 +233,35 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
             weekly_digest_trigger(),
             args=[bot],
             id="weekly_digest",
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
+    # 2.11 (§14): авто-подстройка порогов аномалий — READ-ONLY предложение с кнопками; запись
+    # порогов делает ТОЛЬКО тап человека («✅ Принять»). Opt-in (дефолт ВЫКЛ), fail-safe cron.
+    if settings.threshold_tune_enabled:
+        try:
+            thr_trig = CronTrigger.from_crontab((settings.threshold_tune_schedule or "").strip())
+        except (ValueError, TypeError):
+            log.warning(
+                "THRESHOLD_TUNE_SCHEDULE=%r невалиден — откат на вт 10:00",
+                settings.threshold_tune_schedule,
+            )
+            thr_trig = CronTrigger(day_of_week="tue", hour=10, minute=0)
+        sched.add_job(
+            jobs.run_threshold_tuning,
+            thr_trig,
+            args=[bot],
+            id="threshold_tuning",
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
+    # 2.4: суточная re-discovery детей MCC (новый дочерний виден без рестарта/ручного /refresh).
+    # READ-ONLY под ensure_manager_allowed; 0 = выкл (fail-safe к прежнему поведению «снимок на старте»).
+    if settings.mcc_rediscovery_hours > 0:
+        sched.add_job(
+            jobs.run_mcc_rediscovery,
+            IntervalTrigger(hours=settings.mcc_rediscovery_hours),
+            id="mcc_rediscovery",
             replace_existing=True,
             misfire_grace_time=3600,
         )

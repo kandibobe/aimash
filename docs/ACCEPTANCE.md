@@ -455,3 +455,63 @@ GDN / Video / Demand Gen, а UAC не реализуется намеренно.
   `/adduser` оператор получает отчёты без рестарта. Тесты `test_runtime_whitelist.py`.
 - **B5 доки-оверклеймы:** §11-ссылки ACCEPTANCE переведены на имена функций (номера строк дрейфовали);
   честно отмечено, что воспроизводимого GDN live-smoke пока нет (покрыт DG/Video).
+
+## Дельты предсдаточного плана 2026-07-06 (Фазы 1–2: мультиаккаунт/квота/UX/самообучаемость)
+
+По утверждённому плану (аудит 11 агентов по 3 ТЗ-докам; P0-блокеров не найдено). Замок мутаций
+(Draft-only, `ensure_allowed`) НЕ менялся ни в одном пункте.
+
+**Фаза 1 (P1-ядро):**
+- **§8 мультиаккаунт-дефолт** — авто-дефолт активного аккаунта на ЕДИНСТВЕННЫЙ живой read-аккаунт
+  (`core.access._default_live_account`); при НЕСКОЛЬКИХ живых быстрые пути (`/report N`, `/export`,
+  `/sheets`, `/campaigns`, NL-статистика) показывают ПИКЕР вместо тихого пустого Draft
+  (`bm._require_read_account`, `account_choice_pending`; agent-loop → `need_account`).
+  Тесты: `test_forced_account_pick.py`, `test_access.py`.
+- **§3 квота создателей** — композитные создания кампаний (Search/GDN/Video/DG) и ассет-мутации
+  идут через `run_ads_create_call` (`check_mutation_allowed` ДО SDK, `quota.record(op_count)`,
+  timeout+семафор, БЕЗ ретраев — неидемпотентны). Раньше голый `to_thread` мимо квоты 15k/день.
+  Тесты: `test_quota.py`.
+- **UX ошибок** — имена классов исключений убраны из ответов менеджеру (`cb_error` удалён;
+  `bm._friendly_error`: Pydantic → локализованные правила, прочее → код инцидента для /diag).
+  Гард класса: `test_friendly_errors.py`.
+- **Самообучаемость** — 🙈 «Скрыть» (dismissed учится, слабее 👎) + пер-кампанийная усталость
+  (`(kind, campaign)`-ключ опыта, money-floor сохранён); «утренний экран действий» (проактивный
+  дайджест карточками с кнопками, кросс-аккаунтный Top-N по ДОЛЕ расхода под риском — без FX);
+  недельный бизнес-дайджест `/bizdigest` (opt-in); ⭐ «частые аккаунты» в пикерах (+инд. 0020).
+  Тесты: `test_advise_dismiss.py`, `test_advise_digest.py`, `test_business_digest.py`,
+  `test_frequent_accounts.py`.
+
+**Фаза 2 (P2-доводка):**
+- **2.1** заголовки отчёта/статуса/кампаний — «Имя · id» как в пикере (`ReportData.account_name`).
+- **2.2** кнопка «📊 Все аккаунты (MCC)» в пикерах + глубокий xlsx по всем дочерним (лист на
+  аккаунт): `build_mcc_deep_async`/`build_mcc_deep_workbook`; подсказка /mcc про /export исправлена.
+  Тесты: `test_mcc_deep_export.py`.
+- **2.3** явное чтение НЕАКТИВНЫХ дочерних (история) — `ensure_read_allowed(explicit=True)` только
+  для прямого запроса id/имени; не в пикерах/scheduler; потолок мутаций не расширен.
+  Тесты: `test_inactive_read.py`.
+- **2.4** суточная re-discovery детей MCC (`MCC_REDISCOVERY_HOURS`) + кулдаун 60с на /refresh.
+- **2.5** `/mutready` — чек-лист готовности к включению мутаций (админ; диагностика БЕЗ автозаписи
+  конфига — финальный шаг всегда «владелец, руками», DEPLOYMENT §2.1 «Шаг 0»). Тесты:
+  `test_mutready.py`.
+- **2.6** хардкод → конфиг/i18n: `PROPOSAL_TTL_HOURS` (+`{ttl_h}` в текстах), `ADD_KEYWORDS_MAX`
+  (единый лимит батча + i18n), `suppress_money_floor` per-chat, `ADS_TIMEOUT_S`/`LLM_TIMEOUT_S`/
+  `REPORT_WINDOW_DAYS`/`ANOMALY_WINDOW_DAYS` — env; демо-скрипт без реального id клиента.
+- **2.7** тексты: локализация меток периода (RU-утечка в EN закрыта, `label_i18n`), empty-state
+  /report, /bugs+/mutready в админ-справке, EN-кавычки, «ты» в keyword-фиче, гард «каждый
+  i18n.t-литерал в CATALOG».
+- **2.8** flood-control исходящих: `TelegramRetryAfter` → sleep+повтор, паузы между чанками
+  (`ux.answer_with_flood_retry`). Тесты: `test_flood_control.py`.
+- **2.9** SDK: раздельные ретрай-предикаты (мутации НЕ повторяют серверные INTERNAL/DEADLINE —
+  риск дублей), `REMOVED` вырезан из WHERE `list_campaigns`, двойной retry-loop keyword_plan убран.
+- **2.10** §19.8 финальная сводка — тексты заголовков/описаний С ДЛИНАМИ; §19.7 разбивка
+  переиспользуемых ассетов по типам; кнопка «📎 Загрузить свои» на развилке ключей;
+  §20.6 services.category — в контекст генерации/карточку/подсказку snippets.
+- **2.11** авто-подстройка порогов аномалий (READ-ONLY предложение + «✅ Принять» пишет настройку
+  бота; opt-in `THRESHOLD_TUNE_ENABLED`); `/myschedule` (живое применение, D9: env∪БД whitelist);
+  профиль §20 — контекст advisor-LLM (fact-guard не тронут). Тесты: `test_threshold_tuner.py`.
+- **2.12** prod-дефолт пер-юзер LLM-лимита (0→500 в prod) + видимость в /balance; SECURITY.md —
+  2FA/модель угроз «захват Telegram»; гард обратимости миграций; stale .pyc удалён.
+
+**Осознанные переносы в backlog (Фаза 3):** validate_only-предпроверка composite-create (связана с
+переходом на атомарный GoogleAdsService.mutate), мультивыбор переиспользуемых ассетов по типам,
+Sheets-выгрузка deep-отчёта, SearchStream.

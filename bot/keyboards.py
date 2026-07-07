@@ -30,6 +30,7 @@ from bot.callbacks import (
     LangCB,
     ModelCB,
     MoreCB,
+    MySchedCB,
     NavCB,
     PageCB,
     PeriodCB,
@@ -39,6 +40,7 @@ from bot.callbacks import (
     RsaCB,
     RsaPickCB,
     TemplateCB,
+    ThrTuneCB,
     VideoCB,
 )
 
@@ -983,8 +985,48 @@ def cc_settings_kb(lang: str | None = None) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def mysched_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """2.11 (§14): /myschedule — пресеты персонального расписания планового отчёта. Настройка
+    БОТА (UserSettings.report_schedule), confirm-гейт не нужен (как /alerts)."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="Daily 09:00" if en else "Ежедневно 09:00", callback_data=MySchedCB(action="daily")
+    )
+    kb.button(
+        text="Weekly, Mon 09:00" if en else "Еженедельно, пн 09:00",
+        callback_data=MySchedCB(action="weekly"),
+    )
+    kb.button(
+        text="✏️ Custom cron" if en else "✏️ Свой cron", callback_data=MySchedCB(action="custom")
+    )
+    kb.button(
+        text="🔕 Off (use global)" if en else "🔕 Выключить (глобальное)",
+        callback_data=MySchedCB(action="off"),
+    )
+    kb.adjust(1, 1, 2)
+    return kb.as_markup()
+
+
+def thr_tune_kb(token: str, lang: str | None = None) -> InlineKeyboardMarkup:
+    """2.11 (§14): предложение авто-подстройки порогов аномалий. «Принять» пишет НАСТРОЙКУ БОТА
+    (alert_thresholds.per_account) ТОЛЬКО по тапу человека; Google Ads не трогается."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="✅ Accept" if en else "✅ Принять", callback_data=ThrTuneCB(action="acc", token=token)
+    )
+    kb.button(
+        text="✖ Keep current" if en else "✖ Оставить как есть",
+        callback_data=ThrTuneCB(action="dec", token=token),
+    )
+    kb.adjust(2)
+    return kb.as_markup()
+
+
 def cc_kw_kb(lang: str | None = None) -> InlineKeyboardMarkup:
-    """Этап 2: «🔎 Генерация» (CcCB kw_generate) или прислать свои ключи текстом/файлом/ссылкой;
+    """Этап 2: «🔎 Генерация» (CcCB kw_generate) / «📎 Загрузить свои» (2.10 §19.4: визуальная
+    развилка из документа — кнопка показывает инструкцию по форматам, сам ввод — текст/файл/ссылка);
     «⏭ Пропустить» / «✖ Отмена»."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
@@ -992,10 +1034,14 @@ def cc_kw_kb(lang: str | None = None) -> InlineKeyboardMarkup:
         text="🔎 Generate keywords" if en else "🔎 Генерация ключевых слов",
         callback_data=CcCB(action="kw_generate"),
     )
+    kb.button(
+        text="📎 Upload your own" if en else "📎 Загрузить свои",
+        callback_data=CcCB(action="kw_own"),
+    )
     kb.button(text="⏭ Skip" if en else "⏭ Пропустить", callback_data=CcCB(action="skip"))
     _cc_back_btn(kb, en)
     kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
-    kb.adjust(1, 1, 2)
+    kb.adjust(1, 1, 1, 2)
     return kb.as_markup()
 
 
@@ -1499,6 +1545,14 @@ def report_accounts_kb(
         nm = _ellipsize(getattr(r, "name", "") or getattr(r, "id", ""))
         repeat = f"↻ {nm} — same as last time" if en else f"↻ {nm} — как в прошлый раз"
         kb.button(text=repeat, callback_data=ReportAcctCB(target=target, idx=last_idx))
+        extra += 1
+    if target in ("report", "export", "sheets") and page == 0:
+        # 2.2: «Все аккаунты (MCC)» — сводка/deep-xlsx по всем дочерним разом (idx=-3 сентинел;
+        # -1/-2 заняты «весь аккаунт»/«повторить прошлый»).
+        kb.button(
+            text="📊 All accounts (MCC)" if en else "📊 Все аккаунты (MCC)",
+            callback_data=ReportAcctCB(target=target, idx=-3),
+        )
         extra += 1
     if frequent and page == 0:  # 1.7: ⭐-закрепы частых (только присутствующие в rows — замок цел)
         pinned: set[int] = {last_idx} if last_idx is not None else set()

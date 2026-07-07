@@ -351,10 +351,21 @@ async def _do_read(name: str, args: dict[str, Any], chat_id: int = 0) -> dict[st
             )
         except Exception:  # noqa: BLE001
             currency = ""
+        # 2.1: имя аккаунта из meta обхода MCC — заголовок «Башня · …» рисует bot-слой (fmt_stats).
+        account_name = ""
+        try:
+            from ads.client import discovered_read_children_meta
+
+            _ch = discovered_read_children_meta().get(cid)
+            if _ch is not None and (_ch.name or "") and str(_ch.name) != str(_ch.id):
+                account_name = str(_ch.name)
+        except Exception:  # noqa: BLE001 — косметика
+            account_name = ""
         return {
             "type": "read",
             "tool": name,
             "account": cid,
+            "account_name": account_name,
             "days": days,
             "currency": currency,
             "stats": {
