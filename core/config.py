@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     # «какая модель?»). Пусто ⇒ = llm_parsing (поведение прежнее байт-в-байт); LLM_CLUSTERING
     # в .env позволяет прогнать A/B сильной модели ТОЛЬКО на интент-классификации.
     llm_clustering: str = ""
+    # P3: роль АНАЛИТИКА (агентный нарратив /audit — multi-turn read-only рассуждение поверх уже
+    # посчитанного КОДОМ аудита). Пусто ⇒ = llm_parsing (дешёвый дефолт; галлюцинации безвредны —
+    # на выходе fact-guard + детерминированный fallback). LLM_ANALYST в .env = A/B сильной модели.
+    llm_analyst: str = ""
     # Пресеты для рантайм-переключателя /model (CSV slug'ов OpenRouter). Пусто => дефолт в
     # agent.router._DEFAULT_CHOICES (tool-use-capable модели). Своя модель — через /model в боте.
     model_choices: str = ""
@@ -51,6 +55,13 @@ class Settings(BaseSettings):
     # agent.router.ROLE_MAX_TOKENS). Парсинг → крошечный tool-call; копирайт → короткий JSON.
     llm_max_tokens_parsing: int = 1024
     llm_max_tokens_copy: int = 2048
+    # P3: потолок нарратива аналитика (короткий человеческий разбор аудита; без него OpenRouter
+    # резервирует полный max-output против дневного бюджета — см. agent.router.ROLE_MAX_TOKENS).
+    llm_max_tokens_analyst: int = 1536
+    # P3: включать ли агентный НАРРАТИВ в /audit (multi-turn LLM поверх детерминированного ядра).
+    # True (дефолт) — карточка предваряется человеческим разбором; сбой/timeout/fact-guard молча
+    # откатывают на детерминированную карточку (числа — всегда КОД). False — только детерминир. карточка.
+    audit_agentic_narrative: bool = True
     # :floor — роутинг к самому дешёвому провайдеру (тот же вес = текст-нейтрально, но фиксирует
     # на одном эндпоинте → операционно рискованнее). По умолчанию ВЫКЛ (fail-safe к надёжности).
     openrouter_price_floor: bool = False

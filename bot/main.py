@@ -4839,6 +4839,108 @@ async def _advise_run(
     await target.answer(i18n.t("advise_disclaimer", lang))
 
 
+def _audit_facts(result, days: int) -> dict:
+    """Компактный dict из AuditResult для СИДА агентного нарратива (числа = КОД движка audit/). Валюту-
+    строку не кладём (лишний шум); имена кампаний — данные клиента (как в /report), не секрет."""
+    return {
+        "customer_id": result.customer_id,
+        "currency": result.currency,
+        "period_days": days,
+        "score": result.score,
+        "grade": result.grade,
+        "total_spend": result.total_spend,
+        "money_at_risk": result.at_risk,
+        "google_optimization_score": result.optimization_score,
+        "findings_count": len(result.findings),
+        "families": {
+            fam: {"count": info["count"], "at_risk": info["at_risk"]}
+            for fam, info in result.families.items()
+        },
+        "findings": [
+            {
+                "issue": f.check_id,
+                "family": f.family,
+                "severity": f.severity,
+                "campaign": f.target_campaign,
+                "at_risk": f.at_risk,
+                **{k: v for k, v in (f.facts or {}).items() if k != "currency"},
+            }
+            for f in result.findings[:_AUDIT_MAX_FINDINGS]
+        ],
+    }
+
+
+def _campaign_cfg_facts(cfg) -> dict:
+    """CampaignConfig → компактный dict для drill get_campaign_detail (бюджет/группы/ключи/RSA). Числа
+    (дневной бюджет из micros) попадают в множество дозволенных для fact-guard (это КОД-чтение)."""
+    ags = list(getattr(cfg, "ad_groups", []) or [])
+    sample_kw: list[dict] = []
+    for g in ags:
+        for k in getattr(g, "keywords", []) or []:
+            sample_kw.append(
+                {"text": getattr(k, "text", ""), "match_type": getattr(k, "match_type", "")}
+            )
+            if len(sample_kw) >= 15:
+                break
+        if len(sample_kw) >= 15:
+            break
+    return {
+        "found": True,
+        "campaign": getattr(cfg, "name", ""),
+        "status": getattr(cfg, "status", ""),
+        "channel_type": getattr(cfg, "channel_type", ""),
+        "daily_budget": round(int(getattr(cfg, "budget_micros", 0) or 0) / 1_000_000, 2),
+        "ad_groups_count": len(ags),
+        "keywords_total": sum(len(getattr(g, "keywords", []) or []) for g in ags),
+        "sample_keywords": sample_kw,
+        "rsa_headlines_total": sum(len(getattr(g, "headlines", []) or []) for g in ags),
+        "rsa_descriptions_total": sum(len(getattr(g, "descriptions", []) or []) for g in ags),
+    }
+
+
+def _make_audit_drill(client, acct: str, period):
+    """Собрать async drill-callback для run_analysis_agent: READ-ONLY чтения залоченного аккаунта
+    (ensure_read_allowed внутри ридеров; cid фиксирован — не межаккаунтно). Неизвестный тул → error."""
+
+    async def _drill(name: str, args: dict) -> dict:
+        from core.resilience import run_ads_read_call
+
+        if name == "get_campaign_detail":
+            camp = str((args or {}).get("campaign") or "").strip()
+            if not camp:
+                return {"error": "campaign name required"}
+            from ads.read import read_campaign_config
+
+            cfg = await run_ads_read_call(
+                read_campaign_config, client, acct, camp, label="audit_drill_campaign"
+            )
+            if cfg is None:
+                return {"found": False, "campaign": camp}
+            return _campaign_cfg_facts(cfg)
+        if name == "get_search_terms":
+            from reports.queries import fetch_search_terms
+
+            rows = await run_ads_read_call(
+                fetch_search_terms, client, acct, period, None, 40, label="audit_drill_terms"
+            )
+            out = []
+            for r in (rows or [])[:25]:
+                m = getattr(r, "metrics", None)
+                out.append(
+                    {
+                        "term": getattr(r, "search_term", ""),
+                        "campaign": getattr(r, "campaign", ""),
+                        "cost": round(float(getattr(m, "cost", 0.0) or 0.0), 2),
+                        "clicks": getattr(m, "clicks", 0),
+                        "conversions": getattr(m, "conversions", 0.0),
+                    }
+                )
+            return {"search_terms": out}
+        return {"error": "unknown tool"}
+
+    return _drill
+
+
 async def _audit_run(
     target: Message,
     chat_id: int,
@@ -4881,7 +4983,8 @@ async def _audit_run(
     async with ux.typing_action(target):
         try:
             client = await build_client_async(acct)
-            result = await gather_audit(client, acct, last_n_days(days), target_cpa=target_cpa)
+            period = last_n_days(days)
+            result = await gather_audit(client, acct, period, target_cpa=target_cpa)
         except Exception as e:  # сеть/доступ/SDK — не роняем денежный путь, показываем ошибку
             await target.answer(i18n.t("advise_error", err=ux.err_text(e)))
             return
@@ -4894,6 +4997,24 @@ async def _audit_run(
         return
     # Обзор (score + семьи + Google-балл) БЕЗ топ-3 — действия идут отдельными сообщениями с кнопками.
     await target.answer(render_audit(result, lang, actions=False), parse_mode=None)
+    # P3: агентный НАРРАТИВ поверх детерминированной карточки (числа = КОД, разбор = LLM). READ-ONLY,
+    # multi-turn (может уточнить кампанию/поисковые запросы drill-инструментами). Сбой/timeout/бюджет-
+    # стоп/выдуманное число ⇒ None → просто нет разбора (карточка выше уже показана). Конфиг-гейт.
+    if settings.audit_agentic_narrative:
+        async with ux.typing_action(target):
+            try:
+                from agent.loop import run_analysis_agent
+
+                narrative = await run_analysis_agent(
+                    _audit_facts(result, days),
+                    chat_id=chat_id,
+                    lang=lang,
+                    drill=_make_audit_drill(client, acct, period),
+                )
+            except Exception:  # noqa: BLE001 — нарратив не критичен, карточка уже доставлена
+                narrative = None
+        if narrative:
+            await target.answer(("🧠 " + narrative), parse_mode=None)
     # Находки → Recommendation (advisor.store, source='audit') → per-finding сообщение с 👍/👎/🙈
     # (+ «применить» ТОЛЬКО для не-денежных op из _ADVISE_APPLY_OPS). apply переиспользует существующий
     # _advise_apply → confirm-гейт; rec.customer_id = ПРОАУДИРОВАННЫЙ аккаунт (минтит proposal на него,

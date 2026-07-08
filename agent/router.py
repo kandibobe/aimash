@@ -25,6 +25,8 @@ ROLE_MODELS = {
     "fallback": settings.llm_fallback,
     # P2: кластеризация/интент keyword research; пусто в .env ⇒ модель parsing (как раньше)
     "clustering": settings.llm_clustering or settings.llm_parsing,
+    # P3: аналитик (агентный нарратив /audit); пусто ⇒ модель parsing (дешёвый дефолт)
+    "analyst": settings.llm_analyst or settings.llm_parsing,
 }
 
 # Потолок генерации по ролям (явный max_tokens). Зачем ЯВНО: без max_tokens OpenRouter
@@ -37,6 +39,7 @@ ROLE_MAX_TOKENS = {
     "copy": settings.llm_max_tokens_copy,
     "fallback": settings.llm_max_tokens_copy,
     "clustering": settings.llm_max_tokens_parsing,  # ответ — компактный JSON групп
+    "analyst": settings.llm_max_tokens_analyst,  # короткий человеческий разбор аудита
 }
 
 # Кандидаты для A/B-теста (см. scripts/ab_test_models.py)

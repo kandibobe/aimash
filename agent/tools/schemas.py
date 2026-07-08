@@ -1347,3 +1347,41 @@ TOOLS: list[dict] = [
         },
     },
 ]
+
+
+# ── P3: ANALYSIS_TOOLS — отдельный READ-ONLY набор для агентного НАРРАТИВА /audit ────────
+# НИКОГДА не мёржится в TOOLS (парс-путь денег). Аккаунт ЗАЛОЧЕН на проаудированный customer_id —
+# у схем НЕТ поля account (GR9: цель читает bot-слой, модель её не выбирает). Инвариант S4: набор
+# НЕ пересекается с MUTATION_TOOLS (ноль пути к деньгам из нарратив-цикла, GR6/GR8) — assert ниже.
+class GetCampaignDetailArgs(BaseModel):
+    """get_campaign_detail (read-only): имя кампании из аудита для чтения деталей."""
+
+    campaign: str = Field(min_length=1, description="Точное имя кампании из данных аудита")
+
+
+class GetSearchTermsArgs(BaseModel):
+    """get_search_terms (read-only): без параметров — топ поисковых запросов аккаунта по расходу."""
+
+
+ANALYSIS_TOOLS: list[dict] = [
+    _tool(
+        "get_campaign_detail",
+        "Прочитать детали ОДНОЙ кампании (бюджет, группы объявлений, ключевые слова, тексты RSA) по "
+        "её имени — чтобы объяснить проблему конкретикой. READ-ONLY: ничего не меняет.",
+        GetCampaignDetailArgs,
+    ),
+    _tool(
+        "get_search_terms",
+        "Прочитать топ реальных поисковых запросов аккаунта по расходу (что люди вводили в Google) — "
+        "чтобы показать, на что уходят деньги, и найти кандидатов в минус-слова. READ-ONLY, без аргументов.",
+        GetSearchTermsArgs,
+    ),
+]
+ANALYSIS_TOOL_NAMES = frozenset(t["function"]["name"] for t in ANALYSIS_TOOLS)
+
+# S4 (construction-time): ни один аналитический инструмент не является мутацией. Провал = баг
+# конфигурации → роняем импорт немедленно (лучше, чем тихо открыть денежный путь в read-only цикле).
+assert ANALYSIS_TOOL_NAMES.isdisjoint(MUTATION_TOOLS), (
+    "ANALYSIS_TOOLS содержит мутационный инструмент (нарушение S4/GR6): "
+    f"{ANALYSIS_TOOL_NAMES & MUTATION_TOOLS}"
+)
