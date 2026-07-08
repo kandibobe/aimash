@@ -924,6 +924,13 @@ async def audit_cmd(m: bm.Message) -> None:
     await bm._start_audit_picker(m, period_days=days)
 
 
+@bm.dp.message(bm.Command("target"))
+async def target_cmd(m: bm.Message) -> None:
+    """/target [CPA] — целевой CPA активного аккаунта (разблокирует правило 3× Kill в /audit). Без
+    аргумента — показать; /target reset — сбросить. НАСТРОЙКА БОТА — Google Ads не трогает."""
+    await bm._target_cmd(m)
+
+
 # ── 2.11 (§14): ответ на предложение авто-подстройки порогов аномалий ─────────────
 @bm.dp.callback_query(bm.ThrTuneCB.filter())
 async def on_thr_tune(cq: bm.CallbackQuery, callback_data: bm.ThrTuneCB) -> None:

@@ -879,6 +879,75 @@ _AUDIT_PERIOD_CACHE: dict[int, int] = {}  # период /audit пережива
 _AUDIT_MAX_FINDINGS = 8  # сколько находок показываем отдельными сообщениями (анти-спам)
 
 
+def _target_key(cid: str) -> str:
+    """Ключ ui_prefs для целевого CPA per-account (namespaced, чтобы не мешать anomaly-порогам)."""
+    return f"target_cpa::{cid}"
+
+
+async def _load_target_cpa(chat_id: int, cid: str) -> float | None:
+    """Целевой CPA аккаунта (для 3×-Kill в /audit), заданный /target. Нет/некорректно → None
+    (правило молчит — не фабрикуем «×цель»). Значение — в валюте аккаунта (FX не выдумываем)."""
+    raw = await _load_ui_pref(chat_id, _target_key(cid))
+    try:
+        v = float(raw) if raw else 0.0
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+async def _target_cmd(m: Message) -> None:
+    """/target [CPA] — целевой CPA АКТИВНОГО аккаунта чтения (разблокирует правило 3×-Kill в /audit:
+    кампания с CPA ≥ 3× цели → кандидат на паузу). Без аргумента — показать; /target reset — сбросить.
+    Значение в валюте аккаунта (FX не выдумываем). НАСТРОЙКА БОТА — Google Ads не трогает."""
+    import re
+
+    chat_id = m.chat.id
+    lang = i18n.get_lang(chat_id)
+    en = lang == "en"
+    acct = await _active_read_account(chat_id)
+    key = _target_key(acct)
+    arg = ""
+    parts = (m.text or "").split(maxsplit=1)
+    if len(parts) > 1:
+        arg = parts[1].strip().lower()
+
+    if arg in ("reset", "off", "clear", "сброс", "0"):
+        await _save_ui_pref(chat_id, key, "")
+        await m.answer("🎯 Target CPA cleared." if en else "🎯 Цель CPA сброшена.")
+        return
+    if arg:
+        mm = re.search(r"\d+(?:[.,]\d+)?", arg.replace("cpa", ""))
+        val = float(mm.group().replace(",", ".")) if mm else 0.0
+        if val <= 0:
+            await m.answer(
+                "Format: /target 68 (or /target reset)."
+                if en
+                else "Формат: /target 68 (или /target reset)."
+            )
+            return
+        await _save_ui_pref(chat_id, key, f"{val:.2f}")
+        await m.answer(
+            f"🎯 Target CPA for {acct}: {val:.2f}. /audit will now flag campaigns with CPA ≥ 3× target for pausing."
+            if en
+            else f"🎯 Цель CPA для {acct}: {val:.2f}. Теперь /audit предложит паузу для кампаний с CPA ≥ 3× цели."
+        )
+        return
+
+    cur = await _load_ui_pref(chat_id, key)
+    if cur:
+        await m.answer(
+            f"🎯 Target CPA for {acct}: {cur}. Clear — /target reset."
+            if en
+            else f"🎯 Цель CPA для {acct}: {cur}. Сбросить — /target reset."
+        )
+    else:
+        await m.answer(
+            "🎯 No target CPA set. Set it — /target 68 — then /audit flags campaigns with CPA ≥ 3× target."
+            if en
+            else "🎯 Цель CPA не задана. Задай — /target 68 — тогда /audit предложит паузу для кампаний с CPA ≥ 3× цели."
+        )
+
+
 async def _start_audit_picker(message: Message, *, period_days: int | None = None) -> None:
     """Пикер аккаунта → аудит (read-only). Один доступный аккаунт → сразу прогон (без клика). Период
     живёт в _AUDIT_PERIOD_CACHE (переживает выбор). Переиспользует пикер /report (target='audit')."""
@@ -4806,10 +4875,13 @@ async def _audit_run(
         acct = await _active_read_account(chat_id)
     lang = i18n.get_lang(chat_id)
     days = period_days if isinstance(period_days, int) and period_days > 0 else 30
+    target_cpa = await _load_target_cpa(
+        chat_id, acct
+    )  # /target: разблокирует 3×-Kill (пауза дорогих)
     async with ux.typing_action(target):
         try:
             client = await build_client_async(acct)
-            result = await gather_audit(client, acct, last_n_days(days))
+            result = await gather_audit(client, acct, last_n_days(days), target_cpa=target_cpa)
         except Exception as e:  # сеть/доступ/SDK — не роняем денежный путь, показываем ошибку
             await target.answer(i18n.t("advise_error", err=ux.err_text(e)))
             return
@@ -4853,6 +4925,14 @@ async def _audit_run(
                 reply_markup=advise_feedback_kb(r.rec_uid, lang, apply_op=apply_op),
                 parse_mode=None,
             )
+    # C10 onboarding: есть дорогая кампания (high_cpa), но цель не задана → 3×-Kill молчит и бот НЕ
+    # может предложить паузу. Подсказываем /target, иначе флагман «ничего не нашёл» на дорогом аккаунте.
+    if target_cpa is None and any(f.check_id == "high_cpa" for f in findings):
+        await target.answer(
+            "💡 Set /target <CPA> so the bot can flag pricey campaigns (CPA ≥ 3× target) for pausing."
+            if lang == "en"
+            else "💡 Задай /target <CPA> — тогда бот предложит паузу для дорогих кампаний (CPA ≥ 3× цели)."
+        )
     await target.answer(i18n.t("advise_disclaimer", lang))
 
 
