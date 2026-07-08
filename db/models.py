@@ -18,6 +18,7 @@
 - recommendation_feedback — 👍/👎 оператора на рекомендацию (Слой B: сигнал для experience)
 - recommendation_outcome — сшивка рекомендация→applied-мутация→delta метрик (Слой B: замер результата)
 - bug_reports       — пользовательские баг-репорты (/reportbug, §6): текст РЕДАКТ., статус триажа
+- account_health_snapshot — агрегаты health-score /audit на дату (субстрат трендов, N1.1; без PII)
 
 ⚠️ Секреты (refresh-токены) хранятся ТОЛЬКО зашифрованными (oauth_tokens.refresh_token_enc).
 В audit_log/proposals секретов нет. PII клиента (§20) — не секрет проекта, но в логи сырьём не
@@ -478,6 +479,50 @@ class RecommendationOutcome(Base):
     )  # NULL=ждёт замера
     verdict: Mapped[str | None] = mapped_column(String(16))  # improved|worse|neutral (КОД)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AccountHealthSnapshot(Base):
+    """N1.1: агрегированный снапшот health-score аккаунта на дату — субстрат трендов (WoW-дельта в
+    /audit, дайджесты позже). ТОЛЬКО агрегаты (score/grade/деньги/штрафы семей) — БЕЗ PII и имён
+    кампаний (per-finding детали живут в recommendation). snapshot_date — ISO-дата в ТАЙМЗОНЕ
+    АККАУНТА (границы дня аккаунта, не хоста). Идемпотентно per (customer_id, snapshot_date,
+    period_days): повторный /audit в тот же день С ТЕМ ЖЕ окном перезаписывает агрегаты, а другое
+    окно (/audit 7 vs 30) НЕ клоббрит базу тренда (ревью 2026-07-08). Дельты сравнимы ТОЛЬКО в
+    пределах одной score_model_version И одного period_days (N1.0a) — сравнение делает КОД
+    (audit/snapshot.py), разные версии → «н/д». Запись fail-OPEN: сбой не роняет аудит.
+
+    На SQLite (dev) таблицу создаёт create_all; на Postgres (prod) — Alembic (0022). Индексы
+    объявлены и здесь — против дрейфа create_all/autogenerate (как Recommendation)."""
+
+    __tablename__ = "account_health_snapshot"
+    __table_args__ = (
+        Index(
+            "ux_account_health_snapshot_cid_date_period",
+            "customer_id",
+            "snapshot_date",
+            "period_days",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    customer_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    # ISO YYYY-MM-DD (TZ аккаунта): строка сортируется хронологически на SQLite и Postgres одинаково.
+    snapshot_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    score: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )  # 0..100, считает КОД (audit/engine)
+    grade: Mapped[str] = mapped_column(String(4), nullable=False)
+    total_spend: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    at_risk: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    currency: Mapped[str] = mapped_column(String(8), default="", nullable=False)
+    period_days: Mapped[int] = mapped_column(Integer, default=30, nullable=False)  # окно аудита
+    family_penalty: Mapped[dict | None] = mapped_column(JSON)  # family → penalty (агрегат, без PII)
+    score_model_version: Mapped[str] = mapped_column(String(16), nullable=False)  # N1.0a
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class BugReport(Base):

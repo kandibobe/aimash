@@ -173,6 +173,12 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "▶️ Какую кампанию возобновить? Выберите приостановленную из списка:",
         "en": "▶️ Which campaign to resume? Pick a paused one from the list:",
     },
+    # N1.4: опечатка в имени кампании → подсказка ТОЧНЫХ имён кнопками (никогда не исполняем на
+    # угаданном имени — выбор всегда за оператором, дальше обычный confirm-гейт).
+    "campaign_typo_suggest": {
+        "ru": "🔎 Кампания «{name}» не найдена. Возможно, вы имели в виду:",
+        "en": "🔎 Campaign “{name}” not found. Did you mean:",
+    },
     # — крупные статичные тексты (RU = texts.<KEY>, EN — перевод) —
     "start": {
         "ru": texts.START,

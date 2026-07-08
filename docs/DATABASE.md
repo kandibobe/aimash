@@ -26,8 +26,9 @@ Alembic-миграцией (см. колонку «Миграция»). Коло
 | `client_site_pages` | карта страниц сайта после краулинга (§20.7) → будущие sitelinks | `profile_id`, `url`, `title`, `page_type`, `key_links` (JSON), `content_hash` | `0013` (+`0014` hash) | ACTIVE |
 | `crawl_jobs` | журнал задач краулинга сайта (§20.4): статус/страницы/ошибка | `job_id` (unique), `customer_id`, `chat_id`, `domain`, `mode`, `status`, `pages_crawled`, `error` | `0013` | ACTIVE |
 | `client_profile_history` | версии профиля «до» для отката/аудита (§20.5); переживают clear | `customer_id`, `snapshot` (JSON), `operation`, `confirmation_id` | `0013` | ACTIVE |
+| `account_health_snapshot` | агрегаты health-score `/audit` на дату в TZ аккаунта (субстрат трендов, N1.1); без PII/имён кампаний | `customer_id` + `snapshot_date` + `period_days` (unique тройка), `score`, `grade`, `at_risk`, `family_penalty` (JSON), `score_model_version` | `0022` | ACTIVE |
 
-> Все 15 таблиц объявлены в `db/models.py` и создаются миграциями `0001`–`0017`
+> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0022`
 > (`op.create_table(...)`). Инициалка `0001` создаёт базовые таблицы
 > (`whitelist`, `user_settings`, `proposals`, `audit_log`, `oauth_tokens`;
 > [`migrations/versions/0001_initial.py:22-92`](../migrations/versions/0001_initial.py)), остальные —
@@ -106,7 +107,9 @@ alembic history                          # список ревизий
 `0010` (campaign_templates) → `0011` (customer_id в error_events) → `0012` (campaign_drafts) →
 `0013` (§20 client KB: 6 таблиц) → `0014` (content_hash в client_site_pages) →
 `0015` (ui_prefs в user_settings) → `0016` (drop мёртвой whitelist) →
-`0017` (возврат whitelist рантайм-активной: `added_by`/`note`) — **head**.
+`0017` (возврат whitelist рантайм-активной: `added_by`/`note`) → `0018` (recommendations) →
+`0019` (bug_reports) → `0020` (индекс chat_id в audit_log) → `0021` (admins рантайм) →
+`0022` (account_health_snapshot: снапшоты health-score `/audit`, волна N1.1) — **head**.
 
 ### Добавить миграцию
 ```bash

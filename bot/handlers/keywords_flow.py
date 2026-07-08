@@ -211,10 +211,10 @@ async def _kw_add_present_campaign(msg: bm.Message, chat_id: int, token: str) ->
     сбой чтения ⇒ только текст-подсказка (пикер опционален)."""
     camps = await bm._kw_add_load_campaigns(chat_id)
     if camps:
-        bm._KW_ADD_CAMP_CACHE[chat_id] = camps
+        gen = bm._kw_add_store(chat_id, camps)
         await msg.answer(
             bm.i18n.t("kw_add_pick_campaign_list"),
-            reply_markup=bm.kw_add_campaigns_kb(camps, token),
+            reply_markup=bm.kw_add_campaigns_kb(camps, token, gen=gen),
             parse_mode=bm.ParseMode.HTML,
         )
     else:
@@ -293,8 +293,15 @@ async def on_kw_add_pick_campaign(
     cq: bm.CallbackQuery, callback_data: bm.KwAddCB, state: bm.FSMContext
 ) -> None:
     """D3: выбор кампании в пикере /addkeys → тот же хвост, что и текст-ввод (сбор до confirm-гейта)."""
-    camps = bm._KW_ADD_CAMP_CACHE.get(bm._cq_chat_id(cq))
-    if not camps or not (0 <= callback_data.idx < len(camps)):
+    chat_id = bm._cq_chat_id(cq)
+    camps = bm._KW_ADD_CAMP_CACHE.get(chat_id)
+    # N1.4-ревью: gen сверяет клавиатуру со СВОИМ снапшотом списка (кэш мог перезаписать
+    # fuzzy-подсказка опечатки — idx старой кнопки указывал бы в другой список).
+    if (
+        not camps
+        or not (0 <= callback_data.idx < len(camps))
+        or int(getattr(callback_data, "gen", 0)) != bm._KW_ADD_CAMP_GEN.get(chat_id, 0)
+    ):
         await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
         return
     msg = bm._cq_msg(cq)
@@ -322,6 +329,20 @@ async def kw_add_campaign(m: bm.Message, state: bm.FSMContext) -> None:
         )
         return  # остаёмся в состоянии — пользователь пришлёт название ещё раз
     data = await state.get_data()
+    # N1.4: опечатка в имени → подсказка ТОЧНЫХ имён кнопками (fail-closed: не подставляем
+    # угаданное имя сами — клик идёт штатным пикером on_kw_add_pick_campaign). Сбой/таймаут
+    # загрузки/пустой список → старое поведение (имя как есть; «не найдена» скажет исполнение).
+    camps = await bm._load_campaigns_briefly(m.chat.id)
+    if camps and not any((c.get("name") or "") == campaign for c in camps):
+        cands = bm._fuzzy_campaign_candidates(camps, campaign)
+        if cands:
+            gen = bm._kw_add_store(m.chat.id, cands)
+            await m.answer(
+                bm.i18n.t("campaign_typo_suggest", name=bm.texts.esc(campaign)),
+                reply_markup=bm.kw_add_campaigns_kb(cands, data.get("kw_add_token", ""), gen=gen),
+                parse_mode=bm.ParseMode.HTML,
+            )
+            return  # остаёмся в состоянии — клик по кнопке или новое имя текстом
     await _kw_add_set_campaign(m, state, data.get("kw_add_token", ""), campaign)
 
 

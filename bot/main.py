@@ -1121,8 +1121,39 @@ def _picker_rest_state(kind: str):
     return RsaWizard.picking if kind == "rsa" else None
 
 
+def _fuzzy_campaign_candidates(camps: list[dict], query: str, *, n: int = 4) -> list[dict]:
+    """N1.4: кандидаты «возможно, вы имели в виду» при опечатке имени кампании — difflib по
+    casefold-именам + подстрочное вхождение. ТОЛЬКО подсказка точных имён кнопками: НИКОГДА не
+    исполняем на угаданном имени (fail-closed) — выбор за оператором, дальше обычный confirm-гейт."""
+    import difflib
+
+    q = query.strip().casefold()
+    if not q:
+        return []
+    by_cf: dict[str, dict] = {}
+    for c in camps:
+        nm = c.get("name") or ""
+        if nm:
+            by_cf.setdefault(nm.casefold(), c)
+    matches = difflib.get_close_matches(q, list(by_cf), n=n, cutoff=0.6)
+    subs = [cf for cf in by_cf if q in cf and cf not in matches]  # difflib слеп к подстрокам
+    return [by_cf[cf] for cf in (matches + subs)[:n]]
+
+
 # ── D3: пикер кампаний для /addkeys (best-effort; текст-ввод названия остаётся) ──────
 _KW_ADD_CAMP_CACHE: dict[int, list[dict]] = {}
+# N1.4-ревью: поколение списка per-chat — кэш перезаписывается вторым писателем (fuzzy-подсказка
+# опечатки), клик по кнопке СТАРОЙ клавиатуры резолвил бы idx в ДРУГОЙ список. Писать кэш ТОЛЬКО
+# через _kw_add_store/_slash_mut_store; хендлеры сверяют gen из callback_data → «список устарел».
+_KW_ADD_CAMP_GEN: dict[int, int] = {}
+
+
+def _kw_add_store(chat_id: int, camps: list[dict]) -> int:
+    """Записать список пикера /addkeys с новым поколением (см. комментарий _KW_ADD_CAMP_GEN)."""
+    gen = _KW_ADD_CAMP_GEN.get(chat_id, 0) + 1
+    _KW_ADD_CAMP_GEN[chat_id] = gen
+    _KW_ADD_CAMP_CACHE[chat_id] = camps
+    return gen
 
 
 async def _kw_add_load_campaigns(chat_id: int) -> list[dict]:
@@ -1138,6 +1169,22 @@ async def _kw_add_load_campaigns(chat_id: int) -> list[dict]:
         camps = await run_ads_read_call(list_campaigns, client, acct, label="kw_add_campaigns")
         return camps or []
     except Exception:  # noqa: BLE001 — пикер опционален; текст-фолбэк всегда работает
+        return []
+
+
+async def _load_campaigns_briefly(chat_id: int, timeout_s: float = 5.0) -> list[dict]:
+    """N1.4: список кампаний для fuzzy-подсказки с ЖЁСТКИМ бюджетом времени — подсказка об
+    опечатке не стоит ретрай-шторма на happy-path команды. Таймаут/сбой → [] (без подсказки,
+    старое поведение). Пропуск при неоднозначном аккаунте (AD.3: мутация уйдёт на аккаунт из
+    форс-пикера — сверять имя со списком АКТИВНОГО было бы сверкой не с тем аккаунтом)."""
+    try:
+        if await _active_read_account(chat_id) == DRAFT_ACCOUNT_ID:
+            from core.access import account_choice_pending
+
+            if await account_choice_pending(chat_id):
+                return []
+        return await asyncio.wait_for(_kw_add_load_campaigns(chat_id), timeout=timeout_s)
+    except Exception:  # noqa: BLE001 — подсказка best-effort
         return []
 
 
@@ -2271,6 +2318,16 @@ async def _persist_and_set_model(model: str | None) -> None:
 
 # D4: пикер кампаний для /pause и /resume без аргумента — chat_id → отфильтрованный по статусу список.
 _SLASH_MUT_CACHE: dict[int, list[dict]] = {}
+_SLASH_MUT_GEN: dict[int, int] = {}  # поколение списка (N1.4-ревью, как _KW_ADD_CAMP_GEN)
+
+
+def _slash_mut_store(chat_id: int, camps: list[dict]) -> int:
+    """Записать список D4-пикера с новым поколением: клик по старой клавиатуре после перезаписи
+    кэша (fuzzy-подсказка/повторный пикер) обязан дать «список устарел», а не другую кампанию."""
+    gen = _SLASH_MUT_GEN.get(chat_id, 0) + 1
+    _SLASH_MUT_GEN[chat_id] = gen
+    _SLASH_MUT_CACHE[chat_id] = camps
+    return gen
 
 
 async def _slash_mutate_present(message: Message, chat_id: int, operation: str, name: str) -> None:
@@ -2291,18 +2348,37 @@ async def _slash_mutate(m: Message, command: CommandObject, operation: str) -> N
     (тот же путь, что inline-кнопка и текстовая команда). Без имени — D4: пикер подходящих
     кампаний (ENABLED для паузы / PAUSED для возобновления); ввод имени командой остаётся."""
     name = (command.args or "").strip()
+    want = "ENABLED" if operation == "pause_campaign" else "PAUSED"
     if not name:
         # D4: вместо только текст-подсказки — пикер кампаний нужного статуса (best-effort).
-        want = "ENABLED" if operation == "pause_campaign" else "PAUSED"
         camps = [c for c in await _kw_add_load_campaigns(m.chat.id) if c.get("status") == want]
         if camps:
-            _SLASH_MUT_CACHE[m.chat.id] = camps
+            gen = _slash_mut_store(m.chat.id, camps)
             key = "slash_pause_pick" if operation == "pause_campaign" else "slash_resume_pick"
-            await m.answer(i18n.t(key), reply_markup=slash_mutate_campaigns_kb(camps, operation))
+            await m.answer(
+                i18n.t(key), reply_markup=slash_mutate_campaigns_kb(camps, operation, gen=gen)
+            )
             return
         key = "slash_pause_hint" if operation == "pause_campaign" else "slash_resume_hint"
         await m.answer(i18n.t(key), parse_mode=ParseMode.HTML)
         return
+    # N1.4: опечатка в имени → подсказка ТОЧНЫХ имён кнопками вместо обречённого черновика
+    # (GAQL-матч имени точный и регистрозависимый). Fail-closed: не исполняем на угаданном имени —
+    # клик по кнопке идёт тем же D4-путём (on_slash_mutate_pick → confirm-гейт). Кандидаты — только
+    # целевого статуса (как D4: паузить PAUSED бессмысленно), точное имя сверяем по ПОЛНОМУ списку.
+    # Сбой/таймаут/неоднозначный аккаунт → старое поведение (черновик минтится, ошибку честно
+    # покажет исполнение).
+    camps = await _load_campaigns_briefly(m.chat.id)
+    if camps and not any((c.get("name") or "") == name for c in camps):
+        cands = _fuzzy_campaign_candidates([c for c in camps if c.get("status") == want], name)
+        if cands:
+            gen = _slash_mut_store(m.chat.id, cands)
+            await m.answer(
+                i18n.t("campaign_typo_suggest", name=texts.esc(name)),
+                reply_markup=slash_mutate_campaigns_kb(cands, operation, gen=gen),
+                parse_mode=ParseMode.HTML,
+            )
+            return
     # AD.4: пауза/возобновление — на АКТИВНОМ аккаунте (не хардкод Draft). При неоднозначности
     # (не закреплён + живых >1) — форс-пикер; иначе _present_proposal на активном (кампания
     # резолвится на исполнении на итоговом аккаунте).
@@ -4941,6 +5017,52 @@ def _make_audit_drill(client, acct: str, period):
     return _drill
 
 
+async def _account_local_date(client, acct: str) -> str:
+    """Сегодня в ТАЙМЗОНЕ аккаунта (ISO YYYY-MM-DD) — границы дня снапшота считаем по аккаунту,
+    не по хосту (N1.1, зеркало scheduler._account_period). TZ best-effort: сбой → host-дата."""
+    from datetime import datetime as _dt
+
+    try:
+        from zoneinfo import ZoneInfo
+
+        from ads.read import account_timezone
+
+        tz = await run_ads_read_call(account_timezone, client, acct, label="audit_tz")
+        if tz:
+            return _dt.now(ZoneInfo(tz)).date().isoformat()
+    except Exception:  # noqa: BLE001 — TZ не прочитана → окно по host-дате (как раньше)
+        pass
+    return _dt.now().date().isoformat()
+
+
+async def _audit_trend_line(result, client, acct: str, days: int, lang: str) -> str:
+    """N1.1: записать снапшот health-score (ЛОКАЛЬНАЯ БД, fail-open) и вернуть строку тренда Δ
+    к предыдущему прогону. Δ считается ТОЛЬКО между снапшотами ОДНОЙ score_model_version и ОДНОГО
+    окна (N1.0a): смена модели оценки → честное «н/д», не ложный «−10 за неделю». '' → без строки."""
+    try:
+        from audit.snapshot import previous_snapshot, record_snapshot
+
+        snap_date = await _account_local_date(client, acct)
+        prev = await previous_snapshot(acct, before_date=snap_date, period_days=days)
+        await record_snapshot(result, snapshot_date=snap_date, period_days=days)
+        if prev is None or result.score is None:
+            return ""
+        if prev.score_model_version != result.score_model_version:
+            return (
+                "\n📊 Trend: n/a (scoring model updated)"
+                if lang == "en"
+                else "\n📊 Тренд: н/д (модель оценки обновилась)"
+            )
+        d = int(result.score) - int(prev.score)
+        arrow = "▲" if d > 0 else ("▼" if d < 0 else "→")
+        delta = f"+{d}" if d > 0 else str(d)
+        if lang == "en":
+            return f"\n📊 Trend: {arrow} {delta} vs {prev.snapshot_date} ({prev.score}/100)"
+        return f"\n📊 Тренд: {arrow} {delta} к {prev.snapshot_date} ({prev.score}/100)"
+    except Exception:  # noqa: BLE001 — снапшот/тренд не критичны, карточка важнее
+        return ""
+
+
 async def _audit_run(
     target: Message,
     chat_id: int,
@@ -4995,8 +5117,10 @@ async def _audit_run(
         text = render_audit(result, lang)
         await target.answer(text + (("\n\n" + hint) if hint else ""), parse_mode=None)
         return
+    # N1.1: снапшот health-score в ЛОКАЛЬНУЮ БД (fail-open) + честная Δ к прошлому прогону.
+    trend_line = await _audit_trend_line(result, client, acct, days, lang)
     # Обзор (score + семьи + Google-балл) БЕЗ топ-3 — действия идут отдельными сообщениями с кнопками.
-    await target.answer(render_audit(result, lang, actions=False), parse_mode=None)
+    await target.answer(render_audit(result, lang, actions=False) + trend_line, parse_mode=None)
     # P3: агентный НАРРАТИВ поверх детерминированной карточки (числа = КОД, разбор = LLM). READ-ONLY,
     # multi-turn (может уточнить кампанию/поисковые запросы drill-инструментами). Сбой/timeout/бюджет-
     # стоп/выдуманное число ⇒ None → просто нет разбора (карточка выше уже показана). Конфиг-гейт.

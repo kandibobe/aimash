@@ -1200,9 +1200,11 @@ def post_create_kb(launch_cid: str = "", lang: str | None = None) -> InlineKeybo
 
 
 def kw_add_campaigns_kb(
-    camps: list[dict], token: str, lang: str | None = None
+    camps: list[dict], token: str, lang: str | None = None, *, gen: int = 0
 ) -> InlineKeyboardMarkup:
     """D3: пикер кампаний для /addkeys — кнопка на кампанию (idx → позиция в _KW_ADD_CAMP_CACHE).
+    gen — поколение списка (N1.4-ревью): кэш может перезаписать fuzzy-подсказка, клик по старой
+    клавиатуре обязан дать «список устарел», а не другую кампанию по тому же idx.
     Показываем первую страницу (до _CAMP_PAGE): текст-фолбэк (kw_add_campaign) всегда ловит имя,
     поэтому на крупном аккаунте остальные кампании доступны вводом названия — без REPLY_MARKUP_TOO_LONG."""
     en = _lang(lang) == "en"
@@ -1211,7 +1213,7 @@ def kw_add_campaigns_kb(
         mark = {"ENABLED": "▶️", "PAUSED": "⏸"}.get(c.get("status", ""), "•")
         kb.button(
             text=f"{mark} {_ellipsize(c['name'])}",
-            callback_data=KwAddCB(action="camp", token=token, idx=i),
+            callback_data=KwAddCB(action="camp", token=token, idx=i, gen=gen),
         )
     kb.button(
         text="✖ Cancel" if en else "✖ Отмена", callback_data=KwAddCB(action="cancel", token=token)
@@ -1221,16 +1223,21 @@ def kw_add_campaigns_kb(
 
 
 def slash_mutate_campaigns_kb(
-    camps: list[dict], op: str, lang: str | None = None
+    camps: list[dict], op: str, lang: str | None = None, *, gen: int = 0
 ) -> InlineKeyboardMarkup:
     """D4: пикер кампаний для /pause и /resume без аргумента. idx → позиция в _SLASH_MUT_CACHE.
+    gen — поколение списка (N1.4-ревью): кэш может перезаписать fuzzy-подсказка, клик по старой
+    клавиатуре обязан дать «список устарел», а не другую кампанию по тому же idx.
     Список уже отфильтрован по статусу (ENABLED для паузы / PAUSED для возобновления). Первая
     страница (до _CAMP_PAGE): ввод имени командой остаётся фолбэком на крупном аккаунте."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     for i, c in enumerate(camps[:_CAMP_PAGE]):
         mark = {"ENABLED": "▶️", "PAUSED": "⏸"}.get(c.get("status", ""), "•")
-        kb.button(text=f"{mark} {_ellipsize(c['name'])}", callback_data=SlashMutCB(op=op, idx=i))
+        kb.button(
+            text=f"{mark} {_ellipsize(c['name'])}",
+            callback_data=SlashMutCB(op=op, idx=i, gen=gen),
+        )
     kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
     kb.adjust(1)
     return kb.as_markup()

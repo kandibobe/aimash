@@ -1306,19 +1306,20 @@ def _older_than(ts: datetime | None, cutoff: datetime) -> bool:
 
 
 async def purge_stale_rows(*, now: datetime | None = None) -> dict[str, int]:
-    """C2 (§15): УДАЛИТЬ старые строки монотонно растущих таблиц (error_events / crawl_jobs).
-    Остальные cleanup-джобы лишь меняют статус — эти таблицы копятся вечно. Пороги —
-    settings.error_events_retain_days / crawl_jobs_retain_days (0 ⇒ ВЫКЛ для этой таблицы,
-    fail-safe: не удаляем ничего). crawl_jobs чистим ТОЛЬКО в терминальном статусе (done|failed) —
-    running/незавершённые закрывает reconcile_stale_crawls. ⛔ audit_log НЕ трогаем НИКОГДА (денежный
-    реестр, ручной колд-архив — docs/BACKUP.md). Возраст — в Python (tz-нейтрально). Возвращает
-    {table: удалено}. Удаляем батчами по 500 id (лимит переменных SQLite)."""
+    """C2 (§15): УДАЛИТЬ старые строки монотонно растущих таблиц (error_events / crawl_jobs /
+    account_health_snapshot). Остальные cleanup-джобы лишь меняют статус — эти таблицы копятся
+    вечно. Пороги — settings.error_events_retain_days / crawl_jobs_retain_days /
+    account_health_retain_days (0 ⇒ ВЫКЛ для этой таблицы, fail-safe: не удаляем ничего).
+    crawl_jobs чистим ТОЛЬКО в терминальном статусе (done|failed) — running/незавершённые закрывает
+    reconcile_stale_crawls. ⛔ audit_log НЕ трогаем НИКОГДА (денежный реестр, ручной колд-архив —
+    docs/BACKUP.md). Возраст — в Python (tz-нейтрально). Возвращает {table: удалено}.
+    Удаляем батчами по 500 id (лимит переменных SQLite)."""
     from sqlalchemy import delete as sa_delete
 
-    from db.models import CrawlJob, ErrorEvent
+    from db.models import AccountHealthSnapshot, CrawlJob, ErrorEvent
 
     now = now or datetime.now(timezone.utc)
-    result = {"error_events": 0, "crawl_jobs": 0}
+    result = {"error_events": 0, "crawl_jobs": 0, "account_health_snapshot": 0}
     with request_scope("scheduler:purge"):  # §15: корреляция логов джобы по request_id
         async with Session() as s:
             if settings.error_events_retain_days > 0:
@@ -1343,12 +1344,28 @@ async def purge_stale_rows(*, now: datetime | None = None) -> dict[str, int]:
                 for i in range(0, len(stale), 500):
                     await s.execute(sa_delete(CrawlJob).where(CrawlJob.id.in_(stale[i : i + 500])))
                 result["crawl_jobs"] = len(stale)
-            if result["error_events"] or result["crawl_jobs"]:
+            if settings.account_health_retain_days > 0:  # N1.1: снапшоты health-score (тренды)
+                cutoff = now - timedelta(days=settings.account_health_retain_days)
+                rows = (
+                    await s.execute(
+                        select(AccountHealthSnapshot.id, AccountHealthSnapshot.created_at)
+                    )
+                ).all()
+                stale = [rid for rid, ca in rows if _older_than(ca, cutoff)]
+                for i in range(0, len(stale), 500):
+                    await s.execute(
+                        sa_delete(AccountHealthSnapshot).where(
+                            AccountHealthSnapshot.id.in_(stale[i : i + 500])
+                        )
+                    )
+                result["account_health_snapshot"] = len(stale)
+            if any(result.values()):
                 await s.commit()
-        if result["error_events"] or result["crawl_jobs"]:
+        if any(result.values()):
             log.info(
-                "scheduler: purge — error_events удалено %d, crawl_jobs %d",
+                "scheduler: purge — error_events удалено %d, crawl_jobs %d, health-снапшотов %d",
                 result["error_events"],
                 result["crawl_jobs"],
+                result["account_health_snapshot"],
             )
         return result

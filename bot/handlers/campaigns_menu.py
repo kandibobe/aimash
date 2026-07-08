@@ -17,7 +17,13 @@ async def on_slash_mutate_pick(cq: bm.CallbackQuery, callback_data: bm.SlashMutC
     возобновления за confirm-гейтом (тот же хвост, что ввод имени командой)."""
     chat_id = bm._cq_chat_id(cq)
     camps = bm._SLASH_MUT_CACHE.get(chat_id)
-    if not camps or not (0 <= callback_data.idx < len(camps)):
+    # N1.4-ревью: gen сверяет клавиатуру со СВОИМ снапшотом списка — кэш мог перезаписать второй
+    # писатель (fuzzy-подсказка), и idx старой кнопки указывал бы в ДРУГОЙ список (подмена интента).
+    if (
+        not camps
+        or not (0 <= callback_data.idx < len(camps))
+        or int(getattr(callback_data, "gen", 0)) != bm._SLASH_MUT_GEN.get(chat_id, 0)
+    ):
         await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
         return
     msg = bm._cq_msg(cq)

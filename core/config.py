@@ -225,6 +225,9 @@ class Settings(BaseSettings):
     # порога. audit_log НЕ трогаем (денежный реестр — ручной колд-архив, docs/BACKUP.md). 0 ⇒ ВЫКЛ.
     error_events_retain_days: int = 90
     crawl_jobs_retain_days: int = 30
+    # N1.1: снапшоты health-score /audit (account_health_snapshot) — по строке на (аккаунт, день);
+    # субстрат трендов, год истории достаточно. 0 ⇒ ВЫКЛ (не удаляем).
+    account_health_retain_days: int = 365
     # §12 (C3): пер-юзер дневной потолок LLM-вызовов (анти-абуз/защита OpenRouter-бюджета). Единственный
     # тормоз до этого — message-throttle 0.7/с + баланс OpenRouter (не enforced). core.llm_budget
     # считает вызовы per chat_id за сутки; warn на 80%, отказ (fail-closed) на 100%. 0 ⇒ ВЫКЛ (без

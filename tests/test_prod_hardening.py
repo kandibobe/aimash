@@ -139,6 +139,7 @@ async def test_purge_disabled_when_retain_zero(monkeypatch):
     await init_db()
     monkeypatch.setattr(settings, "error_events_retain_days", 0)  # 0 ⇒ не чистить
     monkeypatch.setattr(settings, "crawl_jobs_retain_days", 0)
+    monkeypatch.setattr(settings, "account_health_retain_days", 0)  # N1.1: та же семантика
     async with Session() as s:
         await s.execute(delete(ErrorEvent))
         s.add(
@@ -151,7 +152,11 @@ async def test_purge_disabled_when_retain_zero(monkeypatch):
             )
         )
         await s.commit()
-    assert await jobs.purge_stale_rows() == {"error_events": 0, "crawl_jobs": 0}
+    assert await jobs.purge_stale_rows() == {
+        "error_events": 0,
+        "crawl_jobs": 0,
+        "account_health_snapshot": 0,
+    }
     async with Session() as s:
         cnt = (await s.execute(select(func.count()).select_from(ErrorEvent))).scalar()
     assert cnt >= 1  # ничего не удалено

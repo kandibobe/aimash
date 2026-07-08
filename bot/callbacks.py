@@ -139,6 +139,7 @@ class KwAddCB(CallbackData, prefix="kwadd"):
     token: str  # hex-токен сессии _KW_ADD (bot.main)
     mt: str = ""  # "broad" | "phrase" | "exact" (только для action='match')
     idx: int = -1  # D3: индекс кампании в _KW_ADD_CAMP_CACHE (только для action='camp')
+    gen: int = 0  # поколение списка кампаний для action='camp' (N1.4-ревью, как SlashMutCB.gen)
 
 
 class GeoCB(CallbackData, prefix="geo"):
@@ -179,10 +180,14 @@ class RollbackCB(CallbackData, prefix="rbk"):
 
 class SlashMutCB(CallbackData, prefix="smut"):
     """D4: пикер кампаний для /pause и /resume без аргумента. op — pause_campaign|resume_campaign;
-    idx — позиция кампании в _SLASH_MUT_CACHE[chat_id]. Клик минтит proposal (confirm-гейт)."""
+    idx — позиция кампании в _SLASH_MUT_CACHE[chat_id]. gen — поколение списка (N1.4-ревью):
+    кэш перезаписывается вторым писателем (fuzzy-подсказка опечатки), клик по кнопке СТАРОЙ
+    клавиатуры резолвил бы idx в ДРУГОЙ список — несовпадение gen ⇒ «список устарел».
+    Клик минтит proposal (confirm-гейт)."""
 
     op: str
     idx: int
+    gen: int = 0
 
 
 class TemplateCB(CallbackData, prefix="tpl"):
