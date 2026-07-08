@@ -33,6 +33,7 @@ async def gather_audit(
         fetch_impression_share,
         fetch_optimization_score,
         fetch_recommendations,
+        fetch_search_terms,
         read_campaign_bidding,
     )
     from reports.service import build_account_report_async
@@ -47,13 +48,14 @@ async def gather_audit(
 
     currency = (await _safe(account_currency, client, cid, label="audit_currency")) or ""
     # Отчёт (totals + разбивки) — базис; фетчеры аудита идут параллельно с ним.
-    report, is_rows, opt, cas, bidding, recs = await asyncio.gather(
+    report, is_rows, opt, cas, bidding, recs, st = await asyncio.gather(
         build_account_report_async(client, cid, period, with_comparison=False, currency=currency),
         _safe(fetch_impression_share, client, cid, period, label="audit_is"),
         _safe(fetch_optimization_score, client, cid, label="audit_opt_score"),
         _safe(fetch_conversion_health, client, cid, label="audit_conv"),
         _safe(read_campaign_bidding, client, cid, label="audit_bidding"),
         _safe(fetch_recommendations, client, cid, label="audit_recs"),
+        _safe(fetch_search_terms, client, cid, period, label="audit_search_terms"),
     )
 
     return build_audit(
@@ -65,4 +67,5 @@ async def gather_audit(
         bidding=bidding,
         optimization_score=opt,
         recommendations=recs,
+        search_terms=st,
     )

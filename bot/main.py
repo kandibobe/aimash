@@ -4948,7 +4948,10 @@ def _advise_apply_params(rec) -> dict | None:
         kw = (rec.evidence or {}).get("keyword")
         if not kw:
             return None
-        return {"campaign": campaign, "keywords": [kw], "match_type": "broad"}
+        # match_type из evidence: audit search-terms → 'exact' (режет только этот запрос, не шире);
+        # дефолт 'broad' (advisor wasteful_keyword — как раньше). Схема add_negative_keywords ревалидирует.
+        mt = (rec.evidence or {}).get("match_type") or "broad"
+        return {"campaign": campaign, "keywords": [kw], "match_type": mt}
     return None
 
 

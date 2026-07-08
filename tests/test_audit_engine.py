@@ -329,6 +329,33 @@ def test_audit_headline_empty_and_active():
     assert "85/100" in hl and "· B" in hl and "/audit" in hl and "под риском" in hl
 
 
+def test_wasteful_search_term_mining():
+    """Дорогой поисковый запрос без конверсий → находка wasteful_search_term (one-tap минус, EXACT).
+    Отдельный kind от wasteful_keyword; минус — точное соответствие (режет только этот запрос)."""
+    totals = Metrics(impressions=2000, clicks=200, cost_micros=500_000000, conversions=5)
+    rows = [
+        (
+            ("Search", "ENABLED"),
+            Metrics(impressions=2000, clicks=200, cost_micros=500_000000, conversions=5),
+        )
+    ]
+    st = SimpleNamespace(
+        search_term="бесплатно скачать",
+        campaign="Search",
+        ad_group="grp",
+        keyword="скачать",
+        match_type="BROAD",
+        metrics=Metrics(impressions=300, clicks=120, cost_micros=90_000000, conversions=0),
+    )
+    res = build_audit(_report(totals, rows), search_terms=[st])
+    f = next(f for f in res.findings if f.check_id == "wasteful_search_term")
+    assert f.suggested_operation == "add_negative_keywords"
+    assert f.one_tap is True
+    assert f.evidence["keyword"] == "бесплатно скачать"
+    assert f.evidence["match_type"] == "exact"
+    assert f.at_risk == 90.0
+
+
 def test_money_findings_never_one_tap():
     """Денежные находки (high_cpa / budget_imbalance / IS) — НЕ one-tap: apply-кнопка им не положена
     (golden rule #3, бюджет/ставка только прямой командой). Только pause/минус-слова — one-tap."""

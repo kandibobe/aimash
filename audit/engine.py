@@ -76,6 +76,7 @@ class _Ctx:
     target_cpa: float | None = None
     is_rows: list | None = None
     conversion_actions: list | None = None
+    search_terms: list | None = None
     bidding_by_name: dict = field(default_factory=dict)
 
     def target_for(self, campaign_name: str) -> float | None:
@@ -237,6 +238,49 @@ def check_wasteful_keyword(report, thr: dict, ctx: _Ctx) -> list[Finding]:
                         "currency": cur,
                     },
                     evidence={"cost": round(m.cost, 2), "clicks": m.clicks, "keyword": kw_text},
+                )
+            )
+    out.sort(key=lambda f: -float(f.evidence.get("cost", 0) or 0))
+    return out[: int(thr.get("kw_top_n", 5))]
+
+
+def check_wasteful_search_term(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Поисковый запрос (search_term_view) с расходом ≥ порога и кликами, но 0 конверсий → кандидат
+    в МИНУС-СЛОВА (семья keywords). ОТДЕЛЬНЫЙ kind от wasteful_keyword (запрос vs существующий ключ) —
+    дедуп по сегменту «st::». Минус по умолчанию EXACT (режет только этот запрос, не шире). Топ-N."""
+    rows = ctx.search_terms or []
+    cur = getattr(report, "currency", "")
+    out: list[Finding] = []
+    for st in rows:
+        m = getattr(st, "metrics", None)
+        if m is None:
+            continue
+        if m.cost >= thr["kw_min_spend"] and m.clicks > 0 and m.conversions == 0:
+            term = getattr(st, "search_term", "")
+            campaign = getattr(st, "campaign", "")
+            out.append(
+                Finding(
+                    check_id="wasteful_search_term",
+                    family="keywords",
+                    severity="warning",
+                    at_risk=round(m.cost, 2),
+                    spend_segment=f"st::{campaign}::{term}",
+                    target_campaign=campaign,
+                    suggested_operation="add_negative_keywords",
+                    facts={
+                        "campaign": campaign,
+                        "search_term": term,
+                        "cost": round(m.cost, 2),
+                        "clicks": m.clicks,
+                        "currency": cur,
+                    },
+                    # match_type=exact → _advise_apply_params добавит ТОЧНЫЙ минус (не broad).
+                    evidence={
+                        "keyword": term,
+                        "match_type": "exact",
+                        "cost": round(m.cost, 2),
+                        "clicks": m.clicks,
+                    },
                 )
             )
     out.sort(key=lambda f: -float(f.evidence.get("cost", 0) or 0))
@@ -470,6 +514,7 @@ _CHECKS = (
     check_kill_rule,
     check_high_cpa,
     check_wasteful_keyword,
+    check_wasteful_search_term,
     check_impression_share,
     check_budget_imbalance,
     check_low_ctr_ad,
@@ -523,6 +568,7 @@ def build_audit(
     bidding: list | None = None,
     optimization_score=None,
     recommendations: list | None = None,
+    search_terms: list | None = None,
 ) -> AuditResult:
     """Собрать аудит по УЖЕ прочитанным данным. Чистая функция (без сети/SDK). Опц. живые данные
     (is_rows / conversion_actions / bidding / optimization_score / recommendations) — duck-typed,
@@ -561,6 +607,7 @@ def build_audit(
         target_cpa=target_cpa,
         is_rows=is_rows,
         conversion_actions=conversion_actions,
+        search_terms=search_terms,
         bidding_by_name=bidding_by_name,
     )
 
