@@ -876,6 +876,7 @@ async def _start_advise_picker(message: Message, *, topic: str | None = None) ->
 
 
 _AUDIT_PERIOD_CACHE: dict[int, int] = {}  # период /audit переживает выбор аккаунта в пикере
+_AUDIT_MAX_FINDINGS = 8  # сколько находок показываем отдельными сообщениями (анти-спам)
 
 
 async def _start_audit_picker(message: Message, *, period_days: int | None = None) -> None:
@@ -4812,13 +4813,47 @@ async def _audit_run(
         except Exception as e:  # сеть/доступ/SDK — не роняем денежный путь, показываем ошибку
             await target.answer(i18n.t("advise_error", err=ux.err_text(e)))
             return
-    text = render_audit(result, lang)
-    if not result.has_activity:  # пустой Draft/тест ≠ «всё в норме» — подсказать живой аккаунт
+    # Нет активности → карточка «—» + подсказка про живой аккаунт (как раньше). parse_mode=None:
+    # карточка — чистый текст (имена кампаний от клиента), HTML-парсер не нужен.
+    if not result.has_activity:
         hint = _live_account_hint(acct)
-        if hint:
-            text = text + "\n\n" + hint
-    # parse_mode=None: карточка — чистый текст (имена кампаний от клиента), HTML-парсер не нужен.
-    await target.answer(text, parse_mode=None)
+        text = render_audit(result, lang)
+        await target.answer(text + (("\n\n" + hint) if hint else ""), parse_mode=None)
+        return
+    # Обзор (score + семьи + Google-балл) БЕЗ топ-3 — действия идут отдельными сообщениями с кнопками.
+    await target.answer(render_audit(result, lang, actions=False), parse_mode=None)
+    # Находки → Recommendation (advisor.store, source='audit') → per-finding сообщение с 👍/👎/🙈
+    # (+ «применить» ТОЛЬКО для не-денежных op из _ADVISE_APPLY_OPS). apply переиспользует существующий
+    # _advise_apply → confirm-гейт; rec.customer_id = ПРОАУДИРОВАННЫЙ аккаунт (минтит proposal на него,
+    # не на чужой). Сам аудит proposal НЕ создаёт (record_recommendations пишет только в локальную БД).
+    findings = result.findings[:_AUDIT_MAX_FINDINGS]
+    if findings:
+        from advisor import store as advisor_store
+        from advisor.rules import Recommendation
+        from audit.render import finding_text
+
+        recs = [
+            Recommendation(
+                kind=f"audit_{f.check_id}",
+                topic=f.family,
+                severity=f.severity,
+                target_campaign=f.target_campaign,
+                suggested_operation=f.suggested_operation,
+                facts=f.facts,
+                evidence=f.evidence,
+                body=finding_text(f, lang, result.currency),
+            )
+            for f in findings
+        ]
+        await advisor_store.record_recommendations(chat_id, acct, recs, source="audit")
+        for f, r in zip(findings, recs):
+            apply_op = f.suggested_operation if f.suggested_operation in _ADVISE_APPLY_OPS else None
+            await target.answer(
+                r.body,
+                reply_markup=advise_feedback_kb(r.rec_uid, lang, apply_op=apply_op),
+                parse_mode=None,
+            )
+    await target.answer(i18n.t("advise_disclaimer", lang))
 
 
 def _advise_apply_params(rec) -> dict | None:

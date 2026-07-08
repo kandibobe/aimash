@@ -329,6 +329,33 @@ def test_audit_headline_empty_and_active():
     assert "85/100" in hl and "· B" in hl and "/audit" in hl and "под риском" in hl
 
 
+def test_money_findings_never_one_tap():
+    """Денежные находки (high_cpa / budget_imbalance / IS) — НЕ one-tap: apply-кнопка им не положена
+    (golden rule #3, бюджет/ставка только прямой командой). Только pause/минус-слова — one-tap."""
+    totals = Metrics(
+        impressions=2000, clicks=200, cost_micros=1_000_000000, conversions=10
+    )  # acct_cpa 100
+    rows = [
+        (
+            ("Expensive", "ENABLED"),
+            Metrics(impressions=1000, clicks=50, cost_micros=600_000000, conversions=1),
+        ),  # cpa 600, 60% spend
+        (
+            ("Cheap", "ENABLED"),
+            Metrics(impressions=1000, clicks=150, cost_micros=400_000000, conversions=9),
+        ),
+    ]
+    is_rows = [_is("Expensive", 0.5, 0.4, 0.1)]  # budget-constrained
+    res = build_audit(_report(totals, rows), is_rows=is_rows)
+    money_kinds = {"high_cpa", "budget_imbalance", "is_budget_constrained", "is_rank_constrained"}
+    for f in res.findings:
+        if f.check_id in money_kinds:
+            assert f.one_tap is False
+            assert f.suggested_operation is None
+    assert any(f.check_id == "high_cpa" for f in res.findings)
+    assert any(f.check_id == "is_budget_constrained" for f in res.findings)
+
+
 def test_audit_never_imports_mutations():
     """Инвариант: пакет audit/ read-only — не тянет ads.mutations / ads.service (GR6/GR8)."""
     pkg = pathlib.Path(__file__).resolve().parent.parent / "audit"

@@ -93,6 +93,11 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
     return camp or f.check_id
 
 
+def finding_text(f: Finding, lang: str, cur: str) -> str:
+    """Публичная строка одной находки (для per-finding сообщений bot-слоя с кнопкой «применить»)."""
+    return _finding_line(f, lang, cur)
+
+
 def audit_headline(result: AuditResult, lang: str = "ru") -> str:
     """Одна строка «здоровья» аккаунта для префикса /report (engine-only, без доп-чтений, крит-фикс C11).
     Пусто → нет активности (звать /audit не на чем)."""
@@ -110,8 +115,10 @@ def audit_headline(result: AuditResult, lang: str = "ru") -> str:
     return s + " · /audit"
 
 
-def render_audit(result: AuditResult, lang: str = "ru") -> str:
-    """Собрать текстовую карточку аудита из AuditResult. Всегда доступна offline (fallback)."""
+def render_audit(result: AuditResult, lang: str = "ru", *, actions: bool = True) -> str:
+    """Собрать карточку аудита из AuditResult. actions=True → самодостаточная (топ-3 + дисклеймер);
+    actions=False → ОБЗОР (score + семьи + Google-балл) без топ-3/дисклеймера — действия шлёт bot-слой
+    отдельными сообщениями с кнопками «применить». Всегда доступна offline (fallback)."""
     lang = "en" if lang == "en" else "ru"
     cur = result.currency
     labels = _FAMILY_LABEL[lang]
@@ -172,20 +179,23 @@ def render_audit(result: AuditResult, lang: str = "ru") -> str:
             else:
                 lines.append(f"{_family_emoji(fam)} {label} — {n} {noun}")
 
-    # Топ-3 действия.
-    top = result.findings[:3]
-    if top:
+    # Топ-3 действия + дисклеймер — только в самодостаточной карточке (actions=True). При actions=False
+    # это ОБЗОР: действия идут отдельными сообщениями с кнопками (bot-слой), дисклеймер шлётся там же.
+    if actions:
+        top = result.findings[:3]
+        if top:
+            lines.append("")
+            lines.append("Do this now (top 3):" if lang == "en" else "Что сделать сейчас (топ-3):")
+            for i, f in enumerate(top, 1):
+                lines.append(
+                    f"{i}. {_SEV_EMOJI.get(f.severity, '•')} {_finding_line(f, lang, cur)}"
+                )
         lines.append("")
-        lines.append("Do this now (top 3):" if lang == "en" else "Что сделать сейчас (топ-3):")
-        for i, f in enumerate(top, 1):
-            lines.append(f"{i}. {_SEV_EMOJI.get(f.severity, '•')} {_finding_line(f, lang, cur)}")
-
-    lines.append("")
-    lines.append(
-        "These are suggestions — I don't change anything myself. Decide and give the command."
-        if lang == "en"
-        else "Это подсказки — сам я ничего не меняю. Реши и дай команду."
-    )
+        lines.append(
+            "These are suggestions — I don't change anything myself. Decide and give the command."
+            if lang == "en"
+            else "Это подсказки — сам я ничего не меняю. Реши и дай команду."
+        )
     return "\n".join(lines)
 
 
