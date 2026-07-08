@@ -63,6 +63,9 @@ Python 3.12 · aiogram 3.x (async; один event loop с APScheduler) · `opena
 ## Команды для модели разработки (Claude Code)
 - Архитектура/сложное — Opus 4.8; объём (CRUD, отчёты, тесты, бойлерплейт) — Sonnet 4.6.
 - Релевантные скилы: `new-mutation`, `gaql-query`, `check-rsa-copy`, `gads-version`, `confirm-gate-audit`.
+- Slash-команды (`.claude/commands/`): `/add-bot-command` (4-файловый UI lock-step + гард on_text-last), `/verify-live` (единый вход в live-смоук), `/restart-bot` (409/lock/double-import).
+- **Windows-консоль:** запускай скрипты с `PYTHONIOENCODING=utf-8` (или зови `scripts/_win_console.enable_utf8()` в начале скрипта) — иначе cp1251 роняет emoji/кириллицу `UnicodeEncodeError`.
+- **pre-commit гочи:** `ruff-format` переписывает файлы прямо в хуке → 1-й `git commit` падает («files were modified by this hook») → повтори `git add -A && git commit` (со ВТОРОГО раза проходит). Пин `ruff==0.14.10` синхронен в 3 местах (pyproject `[dev]` / `.pre-commit-config.yaml` / CI) — не бампай одно без остальных.
 
 ## Что НЕ делать
 - Не вызывать `ads/mutations.py` без `confirmation_id`.

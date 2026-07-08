@@ -27,12 +27,10 @@ import sys
 import uuid
 from pathlib import Path
 
-# Windows-консоль часто cp1251 → emoji в выводе роняют скрипт UnicodeEncodeError. UTF-8 + replace.
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
-    except (AttributeError, ValueError):
-        pass
+# Windows-консоль (cp1251) роняет emoji/кириллицу в выводе → UTF-8 (общий хелпер).
+from _win_console import enable_utf8  # noqa: E402
+
+enable_utf8()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

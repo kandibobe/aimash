@@ -14,11 +14,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# Windows cp1251-консоль падает на эмодзи (✅⚠️) в выводе — принудительно UTF-8.
-try:
-    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
-except Exception:
-    pass
+# Windows-консоль (cp1251) роняет emoji/кириллицу в выводе → UTF-8 (общий хелпер).
+from _win_console import enable_utf8  # noqa: E402
+
+enable_utf8()
 
 from google.ads.googleads.errors import GoogleAdsException  # noqa: E402
 

@@ -18,10 +18,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-try:  # Windows cp1251-консоль падает на эмодзи — принудительно UTF-8.
-    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
-except Exception:
-    pass
+# Windows-консоль (cp1251) роняет emoji/кириллицу в выводе → UTF-8 (общий хелпер).
+from _win_console import enable_utf8  # noqa: E402
+
+enable_utf8()
 
 from PIL import Image  # noqa: E402
 from sqlalchemy import select  # noqa: E402
