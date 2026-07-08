@@ -135,7 +135,7 @@ async def test_geo_location_flow_builds_pending_set_geo_location():
     assert snap.status == "pending"  # НЕ исполнено — ждёт ✅
     assert snap.params["campaign"] == "Search Spring"
     assert snap.params["locations"] == ["Киев", "Львов"]
-    assert snap.params.get("country_code") == "UA"  # дефолт схемы
+    assert snap.params.get("country_code") == ""  # дефолт схемы ПУСТ (без биаса «UA»)
 
 
 # ── полный флоу (радиус): способ → текст → ТОЛЬКО черновик set_geo_proximity ─────────

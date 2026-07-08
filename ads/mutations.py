@@ -558,8 +558,8 @@ def _validate_locations(locations: list[str], country_code: str) -> None:
         if not t or len(t) > 80:
             raise ValueError("название локации — 1–80 символов")
     cc = str(country_code or "").strip()
-    if len(cc) != 2 or not cc.isalpha():
-        raise ValueError("country_code — ISO-3166 alpha-2 (напр. UA)")
+    if cc and (len(cc) != 2 or not cc.isalpha()):  # пусто РАЗРЕШЕНО (без страны-биаса)
+        raise ValueError("country_code — ISO-3166 alpha-2 (напр. UG) или пусто")
 
 
 async def apply_set_geo_location(
@@ -567,7 +567,7 @@ async def apply_set_geo_location(
     customer_id: str,
     campaign_id: str,
     locations: list[str],
-    country_code: str = "UA",
+    country_code: str = "",
     locale: str = "ru",
     confirmation_id: str,
     confirm_store: ConfirmStore,
@@ -2043,7 +2043,7 @@ async def apply_create_search_campaign(
     cpc_bid_micros: int = 500_000,
     # §19 (необязательные, обратно совместимы — без них поведение прежнее):
     geo_locations: list[str] | None = None,
-    geo_country_code: str = "UA",
+    geo_country_code: str = "",
     geo_locale: str = "ru",
     languages: list[str] | None = None,
     bidding: dict | None = None,
@@ -2288,7 +2288,7 @@ def _create_search_campaign_via_sdk(
     keyword_match_types: list[str] | None = None,
     cpc_bid_micros: int,
     geo_locations: list[str] | None = None,
-    geo_country_code: str = "UA",
+    geo_country_code: str = "",
     geo_locale: str = "ru",
     languages: list[str] | None = None,
     bidding: dict | None = None,
@@ -2699,7 +2699,7 @@ async def apply_create_gdn_campaign(
     budget_daily_micros: int,
     cpc_bid_micros: int = 500_000,
     geo_locations: list[str] | None = None,
-    geo_country_code: str = "UA",
+    geo_country_code: str = "",
     geo_locale: str = "ru",
     confirmation_id: str,
     confirm_store: ConfirmStore,
@@ -2764,7 +2764,7 @@ def _create_gdn_campaign_via_sdk(
     budget_micros: int,
     cpc_bid_micros: int,
     geo_locations: list[str] | None = None,
-    geo_country_code: str = "UA",
+    geo_country_code: str = "",
     geo_locale: str = "ru",
 ) -> dict:
     """Синхронная 5-шаговая цепочка v24 (сверено live): asset×2 → budget → campaign(DISPLAY,PAUSED)
@@ -2976,7 +2976,7 @@ async def apply_create_demand_gen_campaign(
     logo_bytes: bytes | None = None,
     goal: str = "clicks",
     geo_locations: list[str] | None = None,
-    geo_country_code: str = "UA",
+    geo_country_code: str = "",
     geo_locale: str = "ru",
     confirmation_id: str,
     confirm_store: ConfirmStore,
@@ -3053,7 +3053,7 @@ def _create_demand_gen_campaign_via_sdk(
     logo_bytes: bytes | None,
     goal: str,
     geo_locations: list[str] | None = None,
-    geo_country_code: str = "UA",
+    geo_country_code: str = "",
     geo_locale: str = "ru",
 ) -> dict:
     """Синхронная цепочка v24 (по официальному add_demand_gen_campaign.py; ⚠️ live-сверка перед
@@ -3240,7 +3240,7 @@ async def apply_create_video_campaign(
     final_url: str,
     budget_daily_micros: int,
     geo_locations: list[str] | None = None,
-    geo_country_code: str = "UA",
+    geo_country_code: str = "",
     geo_locale: str = "ru",
     confirmation_id: str,
     confirm_store: ConfirmStore,
@@ -3308,7 +3308,7 @@ def _create_video_campaign_via_sdk(
     final_url: str,
     budget_micros: int,
     geo_locations: list[str] | None = None,
-    geo_country_code: str = "UA",
+    geo_country_code: str = "",
     geo_locale: str = "ru",
 ) -> dict:
     """Синхронная цепочка v24 (⚠️ live-сверка перед сдачей): yt-asset → budget →

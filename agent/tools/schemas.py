@@ -334,8 +334,8 @@ class RemoveAdGroup(BaseModel):
 
 class SetGeoProximity(BaseModel):
     """Радиус-таргетинг кампании (proximity). Адрес — СТРУКТУРНЫЙ (city_name + country_code),
-    Google сам геокодит точку — клиентский геокодинг не нужен. country_code по умолчанию UA
-    (проект ориентирован на Украину)."""
+    Google сам геокодит точку — клиентский геокодинг не нужен. country_code — из запроса
+    (опц. env-дом-дефолт), НЕ захардкожен; пусто = без страны-биаса."""
 
     campaign: str  # обязателен: радиус-таргетинг привязывается к кампании
     radius_km: float = Field(gt=0, le=2000)  # лимит Google Ads
@@ -347,9 +347,11 @@ class SetGeoProximity(BaseModel):
     @field_validator("country_code")
     @classmethod
     def _cc(cls, v):
-        v = str(v or "UA").strip().upper()
-        if len(v) != 2 or not v.isalpha():
-            raise ValueError("country_code — ISO-3166 alpha-2 (напр. UA)")
+        # Пусто РАЗРЕШЕНО (нет хардкода «UA»): пустой country_code = без страны-биаса при резолве
+        # названий локаций. Непустой обязан быть валидным ISO alpha-2.
+        v = str(v or "").strip().upper()
+        if v and (len(v) != 2 or not v.isalpha()):
+            raise ValueError("country_code — ISO-3166 alpha-2 (напр. UG) или пусто")
         return v
 
 
@@ -357,7 +359,7 @@ class SetGeoLocation(BaseModel):
     """Гео-таргетинг кампании по стране/городу/региону через geoTargetConstants (§3). Модель даёт
     НАЗВАНИЯ локаций (напр. ['Украина', 'Киев']); КОД резолвит их в geoTargetConstant и заменяет
     весь географический таргетинг кампании (remove-before-create). country_code сужает поиск
-    (по умолчанию UA), locale — язык названий."""
+    названий (из запроса, НЕ захардкожен; пусто = без биаса), locale — язык названий."""
 
     campaign: str  # обязателен: гео-таргетинг привязывается к кампании
     locations: list[str] = Field(min_length=1, max_length=20)
@@ -378,9 +380,11 @@ class SetGeoLocation(BaseModel):
     @field_validator("country_code")
     @classmethod
     def _cc(cls, v):
-        v = str(v or "UA").strip().upper()
-        if len(v) != 2 or not v.isalpha():
-            raise ValueError("country_code — ISO-3166 alpha-2 (напр. UA)")
+        # Пусто РАЗРЕШЕНО (нет хардкода «UA»): пустой country_code = без страны-биаса при резолве
+        # названий локаций. Непустой обязан быть валидным ISO alpha-2.
+        v = str(v or "").strip().upper()
+        if v and (len(v) != 2 or not v.isalpha()):
+            raise ValueError("country_code — ISO-3166 alpha-2 (напр. UG) или пусто")
         return v
 
 

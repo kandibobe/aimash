@@ -710,6 +710,22 @@ def language_for_country(iso: str | None) -> str | None:
     return _ISO_TO_LANGUAGE.get((iso or "").upper()) if iso else None
 
 
+# Реверс алиасов: ISO alpha-2 → основное (первое = русское) имя страны. Первое вхождение на страну
+# (dict хранит порядок вставки: у каждой страны RU-имя идёт первым).
+_ISO_TO_COUNTRY_NAME: dict[str, str] = {}
+for _nm, _iso in _COUNTRY_ALIASES.items():
+    _ISO_TO_COUNTRY_NAME.setdefault(_iso, _nm)
+
+
+def country_name(iso: str | None) -> str | None:
+    """ISO alpha-2 → человекочитаемое имя страны (для ДОСБОРА geo_locations, когда пользователь
+    назвал страну без города → таргетим страну целиком). С заглавной. Неизвестный ISO → None."""
+    if not iso:
+        return None
+    nm = _ISO_TO_COUNTRY_NAME.get(iso.strip().upper())
+    return nm.title() if nm else None
+
+
 def language_name(iso: str | None) -> str | None:
     """ISO языка → имя для критерия языка кампании (ads.mutations). Неподдержанное → None."""
     return _LANG_ISO_TO_NAME.get((iso or "").lower()) if iso else None

@@ -2,7 +2,8 @@
 
 Раньше «UA»/«ru» были зашиты в 20+ местах; заказчик на Уганде получал Украину. Теперь ЕДИНЫЙ
 источник (settings.geo_default_country/locale, env DEFAULT_GEO_COUNTRY_CODE/LOCALE): деплой Уганды
-ставит UG → и схемы (default_factory), и резолв в service читают его. Дефолт кода — UA/ru (совместимость).
+ставит UG → и схемы (default_factory), и резолв в service читают его. Дефолт СТРАНЫ — ПУСТО (без
+биаса, гео из запроса); locale — «ru» (совместимость).
 """
 
 from __future__ import annotations
@@ -26,9 +27,12 @@ def geo_env(country: str, locale: str):
         settings.default_geo_country_code, settings.default_geo_locale = a, b
 
 
-def test_default_is_ukraine_for_backward_compat():
-    assert settings.geo_default_country == "UA"
-    assert settings.geo_default_locale == "ru"  # прежнее поведение UA-рынка сохранено
+def test_default_country_is_empty_no_bias():
+    # Дефолт страны ПУСТ (2026-07): без хардкод-биаса «UA» — страна берётся ИЗ ЗАПРОСА, а при её
+    # отсутствии создание кампании показывает «глобально!» в превью и требует «да» (confirm-гейт).
+    # env DEFAULT_GEO_COUNTRY_CODE=UG переопределяет глобально. locale по-прежнему «ru».
+    assert settings.geo_default_country == ""
+    assert settings.geo_default_locale == "ru"
 
 
 def test_env_override_switches_country():
