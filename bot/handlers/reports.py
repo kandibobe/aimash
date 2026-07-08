@@ -302,6 +302,12 @@ async def on_report_account(cq: bm.CallbackQuery, callback_data: bm.ReportAcctCB
         topic = bm._ADVISE_TOPIC_CACHE.pop(bm._cq_chat_id(cq), None)  # тема из пикера (или все)
         await bm._advise_run(msg, bm._cq_chat_id(cq), topic=topic, account=acct)
         return
+    if callback_data.target == "audit":  # аудит на ВЫБРАННОМ аккаунте (замок — в _audit_run)
+        pd = bm._AUDIT_PERIOD_CACHE.pop(
+            bm._cq_chat_id(cq), None
+        )  # период из пикера (или дефолт 30)
+        await bm._audit_run(msg, bm._cq_chat_id(cq), account=acct, period_days=pd)
+        return
     if callback_data.target == "setacct":  # E/§8 F: выбрать АКТИВНЫЙ аккаунт чтения (персист)
         chat_id = bm._cq_chat_id(cq)
         try:  # TOCTOU: rows уже read-allowed, но перепроверяем замок × пер-юзер грант (fail-closed)

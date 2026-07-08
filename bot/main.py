@@ -875,6 +875,34 @@ async def _start_advise_picker(message: Message, *, topic: str | None = None) ->
     )
 
 
+_AUDIT_PERIOD_CACHE: dict[int, int] = {}  # период /audit переживает выбор аккаунта в пикере
+
+
+async def _start_audit_picker(message: Message, *, period_days: int | None = None) -> None:
+    """Пикер аккаунта → аудит (read-only). Один доступный аккаунт → сразу прогон (без клика). Период
+    живёт в _AUDIT_PERIOD_CACHE (переживает выбор). Переиспользует пикер /report (target='audit')."""
+    chat_id = message.chat.id
+    rows = await _read_account_rows(chat_id)
+    _REPORT_ACCT_CACHE[chat_id] = rows
+    if period_days:
+        _AUDIT_PERIOD_CACHE[chat_id] = period_days
+    else:
+        _AUDIT_PERIOD_CACHE.pop(chat_id, None)
+    if len(rows) <= 1:  # только Draft/один аккаунт — сразу аудит (пикер не нужен)
+        await _audit_run(message, chat_id, period_days=period_days)
+        return
+    await message.answer(
+        "🩺 " + i18n.t("advise_pick_account"),
+        reply_markup=report_accounts_kb(
+            rows,
+            "audit",
+            last=await _last_account(chat_id),
+            frequent=await _frequent_accounts(chat_id),
+        ),
+        parse_mode=ParseMode.HTML,
+    )
+
+
 async def _start_setacct_picker(message: Message) -> None:
     """E/§8 F: пикер выбора АКТИВНОГО аккаунта ЧТЕНИЯ (персист per-chat, переживает рестарт) —
     ключ к «данные со всего аккаунта, а не только Draft». Переиспользует пикер /report
@@ -2282,7 +2310,20 @@ async def _run_report(
             parse_mode=ParseMode.HTML,
         )
         return
-    await m.answer(summary_text(report) + _scope_note(campaign_name))
+    body = summary_text(report) + _scope_note(campaign_name)
+    # Строка «здоровья» для отчёта ПО АККАУНТУ (не по одной кампании): движок аудита по УЖЕ собранному
+    # отчёту — engine-only, без единого доп-чтения (крит-фикс C11). Косметика: сбой не роняет отчёт.
+    if campaign_id is None:
+        try:
+            from audit.engine import build_audit
+            from audit.render import audit_headline
+
+            hl = audit_headline(build_audit(report), i18n.get_lang(m.chat.id))
+            if hl:
+                body = hl + "\n\n" + body
+        except Exception:  # noqa: BLE001 — health-строка необязательна
+            pass
+    await m.answer(body)
 
 
 async def _run_export(
@@ -4726,6 +4767,58 @@ async def _advise_run(
     for extra in getattr(rec_set, "extras", []):  # #3: advisory-довески (LLM-минус-слова)
         await target.answer(extra)
     await target.answer(i18n.t("advise_disclaimer", lang))
+
+
+async def _audit_run(
+    target: Message,
+    chat_id: int,
+    *,
+    account: str | None = None,
+    period_days: int | None = None,
+    source: str = "audit",
+) -> None:
+    """/audit — health-аудит аккаунта: НАШ score (0-100) + семьи находок + топ-3 действий + нативный
+    Google optimization_score («второе мнение»). READ-ONLY: собирает данные и СОВЕТУЕТ; ничего не
+    меняет и proposal НЕ создаёт — исполнение любого совета идёт ОТДЕЛЬНОЙ командой через confirm-гейт
+    (golden rule #1/#3). Резолв аккаунта — тот же композитный read-замок × грант, что /report/_advise
+    (fail-closed). Числа считает КОД (движок audit/), не модель."""
+    from ads.client import build_client_async
+    from audit.collect import gather_audit
+    from audit.render import render_audit
+    from core.access import resolve_read_account
+    from reports.period import last_n_days
+
+    try:  # тот же резолв, что /report и _advise: read-замок × пер-юзер грант (fail-closed)
+        acct = await resolve_read_account(chat_id, account)
+    except PermissionError:
+        await target.answer(i18n.t("loop_account_denied", account=str(account or "")))
+        return
+    except LookupError as e:
+        await target.answer(i18n.t("loop_account_not_found", detail=ux.err_text(e)))
+        return
+    except Exception:  # noqa: BLE001
+        # Явный аккаунт + сбой резолва (напр. грант-БД недоступна) = ОТКАЗ (fail-closed, rule #9/#10):
+        # НЕ даунгрейдим на активный (иначе тихо ответим по ДРУГОМУ аккаунту, чем просили). None → ок.
+        if account:
+            await target.answer(i18n.t("loop_account_denied", account=str(account)))
+            return
+        acct = await _active_read_account(chat_id)
+    lang = i18n.get_lang(chat_id)
+    days = period_days if isinstance(period_days, int) and period_days > 0 else 30
+    async with ux.typing_action(target):
+        try:
+            client = await build_client_async(acct)
+            result = await gather_audit(client, acct, last_n_days(days))
+        except Exception as e:  # сеть/доступ/SDK — не роняем денежный путь, показываем ошибку
+            await target.answer(i18n.t("advise_error", err=ux.err_text(e)))
+            return
+    text = render_audit(result, lang)
+    if not result.has_activity:  # пустой Draft/тест ≠ «всё в норме» — подсказать живой аккаунт
+        hint = _live_account_hint(acct)
+        if hint:
+            text = text + "\n\n" + hint
+    # parse_mode=None: карточка — чистый текст (имена кампаний от клиента), HTML-парсер не нужен.
+    await target.answer(text, parse_mode=None)
 
 
 def _advise_apply_params(rec) -> dict | None:

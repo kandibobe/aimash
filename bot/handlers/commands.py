@@ -870,6 +870,10 @@ async def on_more(cq: bm.CallbackQuery, callback_data: bm.MoreCB, state: bm.FSMC
         await bm.alerts_cmd(msg)  # 3H: настройка порогов аномалий
     elif action == "advise":
         await bm._start_advise_picker(msg)  # 💡 рекомендации (advisory, read-only) — пикер аккаунта
+    elif action == "audit":
+        await bm._start_audit_picker(
+            msg
+        )  # 🩺 аудит аккаунта (score + что чинить), read-only — пикер
     elif action == "reportbug":
         await bm.reportbug_start(msg, state)  # 🐞 сообщить об ошибке (§6)
     elif action == "service":  # E: открыть суб-хаб «⚙️ Сервис/Аккаунты»
@@ -901,6 +905,23 @@ async def advise_cmd(m: bm.Message) -> None:
     topic = arg if arg in _ADVISE_TOPICS else None
     # >1 аккаунта чтения → пикер (advisor работает на выбранном); 1 аккаунт → сразу прогон.
     await bm._start_advise_picker(m, topic=topic)
+
+
+@bm.dp.message(bm.Command("audit"))
+async def audit_cmd(m: bm.Message) -> None:
+    """/audit [дней] — health-аудит активного аккаунта: наш score (0-100) + что чинить (по деньгам) +
+    нативный Google optimization_score. READ-ONLY — ничего не меняет; исполнение любого совета идёт
+    отдельной командой через confirm-гейт. Аккаунт — активный чтения (composite read-замок × грант)."""
+    import re
+
+    parts = (m.text or "").split(maxsplit=1)
+    days = None
+    if len(parts) > 1:
+        mm = re.search(r"\d+", parts[1])
+        if mm:
+            days = max(1, min(int(mm.group()), 365))
+    # >1 аккаунта чтения → пикер (аудит на выбранном); 1 аккаунт → сразу прогон.
+    await bm._start_audit_picker(m, period_days=days)
 
 
 # ── 2.11 (§14): ответ на предложение авто-подстройки порогов аномалий ─────────────

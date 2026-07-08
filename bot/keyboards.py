@@ -88,6 +88,7 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="refresh", description="Обновить аккаунты/кэши без рестарта"),
     BotCommand(command="quota", description="Дневная квота Google Ads API"),
     BotCommand(command="advise", description="💡 Рекомендации по улучшению аккаунта"),
+    BotCommand(command="audit", description="🩺 Аудит аккаунта: оценка 0-100 + что чинить"),
     BotCommand(command="alerts", description="Пороги алертов аномалий (расход/конверсии)"),
     BotCommand(command="rsa", description="Сгенерировать тексты объявления (RSA)"),
     BotCommand(command="newsearch", description="Создать поисковую кампанию (RSA + ключи)"),
@@ -129,6 +130,7 @@ BOT_COMMANDS_EN: list[BotCommand] = [
     BotCommand(command="refresh", description="Refresh accounts/caches without a restart"),
     BotCommand(command="quota", description="Google Ads API daily quota"),
     BotCommand(command="advise", description="💡 Recommendations to improve the account"),
+    BotCommand(command="audit", description="🩺 Account audit: 0-100 score + what to fix"),
     BotCommand(command="alerts", description="Anomaly alert thresholds (spend/conversions)"),
     BotCommand(command="rsa", description="Generate ad copy (RSA)"),
     BotCommand(command="newsearch", description="Create a search campaign (RSA + keywords)"),
@@ -582,6 +584,7 @@ def more_menu_kb(lang: str | None = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for label_en, label_ru, action in (
         ("💡 Recommendations", "💡 Рекомендации", "advise"),
+        ("🩺 Account audit", "🩺 Аудит аккаунта", "audit"),
         ("🔎 Search campaign (quick)", "🔎 Поисковая кампания (быстро)", "newsearch"),
         ("🎬 Campaign from video", "🎬 Кампания из видео", "newvideo"),
         ("📁 Campaign templates", "📁 Шаблоны кампаний", "templates"),
@@ -594,7 +597,7 @@ def more_menu_kb(lang: str | None = None) -> InlineKeyboardMarkup:
         ("⚙️ Service / Accounts", "⚙️ Сервис / Аккаунты", "service"),
     ):
         kb.button(text=label_en if en else label_ru, callback_data=MoreCB(action=action))
-    kb.adjust(1, 1, 1, 2, 2, 2, 1)
+    kb.adjust(2, 1, 1, 2, 2, 2, 1)
     return kb.as_markup()
 
 
