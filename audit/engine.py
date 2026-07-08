@@ -14,12 +14,16 @@ Google-optimization_score показываем как «второе мнени�
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 
 from audit.thresholds import (
     DEFAULT_AUDIT_THRESHOLDS,
     FAMILY_WEIGHT,
+    GRADE_BANDS,
     NONMONEY_INTENSITY,
+    SCORE_MODEL_EPOCH,
     SEVERITY_MULT,
     grade_for,
 )
@@ -67,6 +71,15 @@ class AuditResult:
     optimization_uplift: int | None = None
     # Нативные Google-рекомендации (тип → число активных) — показ, НЕ применяем (см. render).
     google_recommendations: dict = field(default_factory=dict)
+    # N1.0a: версия score-модели (хэш весов/порогов/набора проверок) — тренд-дельты сравнимы ТОЛЬКО
+    # в пределах одной версии, иначе деплой нового чека читается клиентом как ложный «−10 за неделю».
+    score_model_version: str = ""
+    # N1.3: best-effort сигналы, которые collect НЕ получил (сбой фетчера → None). None → collect
+    # не запускался вовсе (engine-only вызов, напр. /report health) — рендер тогда молчит про семьи.
+    data_gaps: list | None = None
+    # N1.5: расход есть, а активной PRIMARY-конверсии нет → баннер «сначала почини измерение»
+    # НАД score (сам score не подавляем — честность). False и при отсутствии живых conversion_actions.
+    measurement_gap: bool = False
 
 
 @dataclass
@@ -507,19 +520,174 @@ def check_impression_share(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     return out
 
 
+# Стратегии БЕЗ конверсионного автобиддинга (N1.2). Whitelist-детект: неизвестная/новая стратегия →
+# НЕ флагуем (fail-safe, не гадаем). Знание-детектор из README FGRibreau/mcp-google-ads (MIT);
+# сам сервер (31 write-тул) отвергнут — берём только правило «BROAD без Smart Bidding = риск».
+_NON_SMART_BIDDING = frozenset(
+    {"MANUAL_CPC", "MANUAL_CPM", "MANUAL_CPV", "TARGET_SPEND", "PERCENT_CPC"}
+)
+
+
+def check_broad_unmanaged(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """BROAD-ключи в ENABLED-кампании со стратегией БЕЗ Smart Bidding (семья bidding, N1.2):
+    широкое соответствие без конверсионного сигнала льёт нецелевой трафик. ТОЛЬКО прозой —
+    сужение соответствия/минус-слова требуют курации, не one-tap (rule #3/#6). Нет данных о
+    стратегии (ctx.bidding_by_name пуст / кампания не найдена) → молчим (fail-safe).
+    НЕДЕНЕЖНАЯ (ревью 2026-07-08): это риск КОНФИГУРАЦИИ, а не измеренный слив — BROAD-расход
+    может конвертить; деньги-под-риском считают проверки слива (wasteful_keyword/spend_no_conv),
+    иначе headline задваивал бы тот же ключ и инфлировался конвертящим расходом. Полный
+    BROAD-расход остаётся в facts/evidence для прозы."""
+    if not ctx.bidding_by_name:
+        return []
+    status_by_name = {name: status for (name, status), _m in _campaign_rows(report)}
+    cur = getattr(report, "currency", "")
+    agg: dict[str, dict] = {}
+    for dims, m in _breakdown_rows(report, "keyword"):
+        campaign, _ad_group, _kw, match_type = (list(dims) + ["", "", "", ""])[:4]
+        if match_type != "BROAD" or status_by_name.get(campaign) != "ENABLED":
+            continue
+        b = ctx.bidding_by_name.get(campaign)
+        if b is None or getattr(b, "strategy_type", "") not in _NON_SMART_BIDDING:
+            continue
+        a = agg.setdefault(
+            campaign, {"cost": 0.0, "n": 0, "strategy": getattr(b, "strategy_type", "")}
+        )
+        a["cost"] += float(m.cost)
+        a["n"] += 1
+    out: list[Finding] = []
+    for campaign, a in agg.items():
+        if a["cost"] < thr["broad_min_spend"]:
+            continue
+        out.append(
+            Finding(
+                check_id="broad_unmanaged",
+                family="bidding",
+                severity="warning",
+                at_risk=0.0,  # риск конфигурации, не измеренный слив (см. docstring)
+                spend_segment=None,
+                target_campaign=campaign,
+                suggested_operation=None,  # курация соответствий/минусов — НЕ one-tap
+                facts={
+                    "campaign": campaign,
+                    "strategy_type": a["strategy"],
+                    "cost": round(a["cost"], 2),
+                    "kw_count": a["n"],
+                    "currency": cur,
+                },
+                evidence={
+                    "cost": round(a["cost"], 2),
+                    "kw_count": a["n"],
+                    "strategy_type": a["strategy"],
+                },
+            )
+        )
+    return out
+
+
+def check_duplicate_conversions(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Консервативный детект двойного счёта конверсий (N1.5): ≥2 ENABLED PRIMARY-действий ОДНОЙ
+    содержательной категории пишут в столбец «Конверсии» → Smart Bidding учится на задвоенных
+    данных. Только прозой, без кнопки. Без живых conversion_actions/категорий → молчим."""
+    cas = ctx.conversion_actions
+    if not cas:
+        return []
+    by_cat: dict[str, int] = {}
+    for c in cas:
+        if getattr(c, "status", "") != "ENABLED" or not getattr(c, "primary_for_goal", False):
+            continue
+        cat = str(getattr(c, "category", "") or "")
+        if cat in ("", "DEFAULT", "UNSPECIFIED", "UNKNOWN"):
+            continue  # категория-заглушка — не повод для флага (консервативно)
+        by_cat[cat] = by_cat.get(cat, 0) + 1
+    out: list[Finding] = []
+    for cat, n in sorted(by_cat.items()):
+        if n >= 2:
+            out.append(
+                Finding(
+                    check_id="duplicate_conversions",
+                    family="conversion_tracking",
+                    severity="info",
+                    at_risk=0.0,
+                    spend_segment=None,
+                    suggested_operation=None,
+                    facts={"category": cat, "count": n},
+                    evidence={"category": cat, "count": n},
+                )
+            )
+    return out
+
+
 # Порядок проверок = порядок запуска (на рендер не влияет — там сортировка по важности).
 _CHECKS = (
     check_no_conversion_tracking,
+    check_duplicate_conversions,
     check_spend_no_conv,
     check_kill_rule,
     check_high_cpa,
     check_wasteful_keyword,
     check_wasteful_search_term,
+    check_broad_unmanaged,
     check_impression_share,
     check_budget_imbalance,
     check_low_ctr_ad,
     check_single_campaign,
 )
+
+# N1.0a: полный реестр эмитируемых проверок check_id → (family, severity) — входит в версию
+# score-модели (правка семьи/severity чека тоже сдвигает измерение!). Дрейф с телами проверок
+# ловит tests/test_audit_engine.py (regex по исходнику): новый чек ОБЯЗАН попасть и сюда.
+CHECK_REGISTRY: dict[str, tuple[str, str]] = {
+    "spend_no_conv": ("waste", "warning"),
+    "high_cpa": ("waste", "warning"),
+    "kill_rule": ("waste", "warning"),
+    "wasteful_keyword": ("keywords", "warning"),
+    "wasteful_search_term": ("keywords", "warning"),
+    "low_ctr_ad": ("rsa", "info"),
+    "budget_imbalance": ("budget", "info"),
+    "single_campaign": ("structure", "info"),
+    "no_conversion_tracking": ("conversion_tracking", "warning"),
+    "zero_conversions": ("conversion_tracking", "warning"),
+    "is_budget_constrained": ("budget", "info"),
+    "is_rank_constrained": ("rsa", "info"),
+    "broad_unmanaged": ("bidding", "warning"),
+    "duplicate_conversions": ("conversion_tracking", "info"),
+}
+CHECK_IDS = frozenset(CHECK_REGISTRY)
+
+
+def compute_score_model_version(
+    *,
+    family_weight: dict | None = None,
+    severity_mult: dict | None = None,
+    nonmoney_intensity: float | None = None,
+    grade_bands=None,
+    thresholds: dict | None = None,
+    check_registry: dict | None = None,
+    epoch: int | None = None,
+) -> str:
+    """N1.0a: стабильная версия score-модели — sha256 (12 hex) от ВСЕХ констант измерения: весов
+    семей, множителей severity, порогов, бэндов, реестра проверок (check_id → family/severity) и
+    ручной эпохи (SCORE_MODEL_EPOCH — бампается при правке СЕМАНТИКИ тел проверок, которую хэш не
+    видит). Любая правка модели → новая версия → тренды между версиями честно «н/д», а не ложная
+    дельта (outward-facing деньги). Kwargs — только для тестов чувствительности."""
+    reg = check_registry if check_registry is not None else CHECK_REGISTRY
+    payload = {
+        "family_weight": family_weight if family_weight is not None else FAMILY_WEIGHT,
+        "severity_mult": severity_mult if severity_mult is not None else SEVERITY_MULT,
+        "nonmoney_intensity": (
+            nonmoney_intensity if nonmoney_intensity is not None else NONMONEY_INTENSITY
+        ),
+        "grade_bands": [list(b) for b in (grade_bands if grade_bands is not None else GRADE_BANDS)],
+        "thresholds": thresholds if thresholds is not None else DEFAULT_AUDIT_THRESHOLDS,
+        "check_registry": {k: list(v) for k, v in sorted(reg.items())},
+        "epoch": epoch if epoch is not None else SCORE_MODEL_EPOCH,
+    }
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
+
+
+# Константы модели не меняются в рантайме → версия вычисляется один раз при импорте.
+SCORE_MODEL_VERSION = compute_score_model_version()
 
 
 def _intensity(f: Finding, total_spend: float) -> float:
@@ -569,6 +737,7 @@ def build_audit(
     optimization_score=None,
     recommendations: list | None = None,
     search_terms: list | None = None,
+    data_gaps: list | None = None,
 ) -> AuditResult:
     """Собрать аудит по УЖЕ прочитанным данным. Чистая функция (без сети/SDK). Опц. живые данные
     (is_rows / conversion_actions / bidding / optimization_score / recommendations) — duck-typed,
@@ -598,7 +767,20 @@ def build_audit(
     has_activity = impressions > 0 or total_spend > 0
     if not has_activity:
         return AuditResult(
-            cid, currency, None, "—", 0.0, 0.0, [], {}, False, opt_score, opt_uplift, grec
+            cid,
+            currency,
+            None,
+            "—",
+            0.0,
+            0.0,
+            [],
+            {},
+            False,
+            opt_score,
+            opt_uplift,
+            grec,
+            score_model_version=SCORE_MODEL_VERSION,
+            data_gaps=data_gaps,
         )
 
     campaign_cost = {name: m.cost for (name, _status), m in _campaign_rows(report)}
@@ -610,6 +792,34 @@ def build_audit(
         search_terms=search_terms,
         bidding_by_name=bidding_by_name,
     )
+
+    # N1.3 (ревью): IS-строки прочитаны, но НИ ОДНА не прошла tolerance-гейт (proto3-нули) —
+    # check_impression_share промолчит «нет данных», и без этой пометки рендер показал бы
+    # budget/rsa «в норме». Пробел честнее: сигнал есть формально, данных в нём нет.
+    if data_gaps is not None and is_rows and "impression_share" not in data_gaps:
+        tol = thr.get("is_data_tolerance", 0.02)
+        usable = any(
+            getattr(r, "channel_type", "SEARCH") in ("SEARCH", "SHOPPING")
+            and 1.0 - tol
+            <= (
+                float(getattr(r, "search_is", 0.0) or 0.0)
+                + float(getattr(r, "budget_lost_is", 0.0) or 0.0)
+                + float(getattr(r, "rank_lost_is", 0.0) or 0.0)
+            )
+            <= 1.0 + tol
+            for r in is_rows
+        )
+        if not usable:
+            data_gaps = [*data_gaps, "impression_share"]
+
+    # N1.5: разрыв измерения — расход есть, а активной PRIMARY-конверсии нет: Smart Bidding и все
+    # числа ниже опираются на неполные данные. Только при ЖИВЫХ conversion_actions (None → data gap).
+    measurement_gap = False
+    if conversion_actions is not None and total_spend >= thr["no_conv_min_spend"]:
+        measurement_gap = not any(
+            getattr(c, "status", "") == "ENABLED" and getattr(c, "primary_for_goal", False)
+            for c in conversion_actions
+        )
 
     findings: list[Finding] = []
     for check in _CHECKS:
@@ -648,4 +858,7 @@ def build_audit(
         optimization_score=opt_score,
         optimization_uplift=opt_uplift,
         google_recommendations=grec,
+        score_model_version=SCORE_MODEL_VERSION,
+        data_gaps=data_gaps,
+        measurement_gap=measurement_gap,
     )

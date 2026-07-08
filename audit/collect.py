@@ -58,6 +58,22 @@ async def gather_audit(
         _safe(fetch_search_terms, client, cid, period, label="audit_search_terms"),
     )
 
+    # N1.3: какие best-effort сигналы НЕ получены (сбой → None). Пустой список ([]) — НЕ пробел:
+    # чтение прошло, данных просто нет. Рендер честно покажет «недостаточно данных» вместо
+    # молчаливого «в норме» (GR8: нет данных ≠ здорово).
+    data_gaps = [
+        name
+        for name, val in (
+            ("impression_share", is_rows),
+            ("optimization_score", opt),
+            ("conversion_actions", cas),
+            ("bidding", bidding),
+            ("recommendations", recs),
+            ("search_terms", st),
+        )
+        if val is None
+    ]
+
     return build_audit(
         report,
         thresholds,
@@ -68,4 +84,5 @@ async def gather_audit(
         optimization_score=opt,
         recommendations=recs,
         search_terms=st,
+        data_gaps=data_gaps,
     )

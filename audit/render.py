@@ -35,6 +35,48 @@ _FAMILY_LABEL = {
 
 _SEV_EMOJI = {"warning": "❗", "info": "🟡"}
 
+# N1.3: человекочитаемые метки best-effort сигналов collect-слоя (для строки «недостаточно данных»).
+_SIGNAL_LABEL = {
+    "ru": {
+        "impression_share": "доля показов (IS)",
+        "conversion_actions": "действия-конверсии",
+        "bidding": "стратегии ставок",
+        "search_terms": "поисковые запросы",
+        "optimization_score": "оценка Google",
+        "recommendations": "рекомендации Google",
+    },
+    "en": {
+        "impression_share": "impression share",
+        "conversion_actions": "conversion actions",
+        "bidding": "bidding strategies",
+        "search_terms": "search terms",
+        "optimization_score": "Google optimization score",
+        "recommendations": "Google recommendations",
+    },
+}
+
+# N1.3: семья → доп-сигналы, без которых «✅ в норме» утверждать нечестно (сигнал упал → семья
+# не попадает в «в норме», а сигнал показывается строкой «недостаточно данных»).
+_FAMILY_SIGNALS = {
+    "keywords": ("search_terms",),
+    "budget": ("impression_share",),
+    "rsa": ("impression_share",),
+    "conversion_tracking": ("conversion_actions",),
+    "bidding": ("bidding",),
+}
+
+# Семьи с реализованными проверками (geo/assets — заделы: про них не утверждаем ни «в норме»,
+# ни «нет данных» — проверок ещё нет).
+_IMPLEMENTED_FAMILIES = (
+    "waste",
+    "conversion_tracking",
+    "budget",
+    "bidding",
+    "keywords",
+    "rsa",
+    "structure",
+)
+
 
 def _money(v: float, cur: str) -> str:
     s = f"{v:,.2f}".replace(",", " ")
@@ -95,6 +137,18 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
         if lang == "en":
             return f"All traffic in one campaign «{camp}» — consider splitting by theme/geo/match type."
         return f"Весь трафик в одной кампании «{camp}» — рассмотри разделение по темам/гео/типам соответствия."
+    if f.check_id == "broad_unmanaged":
+        n = fa.get("kw_count", 0)
+        strat = fa.get("strategy_type", "")
+        if lang == "en":
+            return f"«{camp}»: {n} broad-match keywords spent {_money(fa.get('cost', 0), cur)} on {strat} without Smart Bidding — tighten match types or add negatives (needs curation)."
+        return f"«{camp}»: {n} BROAD-ключей на {_money(fa.get('cost', 0), cur)} при стратегии {strat} без Smart Bidding — сузь типы соответствия или добавь минус-слова (нужна курация)."
+    if f.check_id == "duplicate_conversions":
+        cat = fa.get("category", "")
+        n = fa.get("count", 0)
+        if lang == "en":
+            return f"Possible conversion double-counting: {n} enabled primary actions in category {cat} — make sure only one counts into “Conversions”."
+        return f"Похоже на двойной счёт конверсий: {n} активных primary-действия категории {cat} — проверь, что в «Конверсии» пишет только одно."
     return camp or f.check_id
 
 
@@ -139,6 +193,13 @@ def render_audit(result: AuditResult, lang: str = "ru", *, actions: bool = True)
         lines.append("No activity in this period." if lang == "en" else "Нет активности за период.")
         return "\n".join(lines)
 
+    # N1.5: разрыв измерения — HEADLINE НАД score (score не подавляем: честность, не алармизм).
+    if result.measurement_gap:
+        lines.append(
+            "⚠️ Fix measurement first: no enabled primary conversion action — the numbers below are incomplete."
+            if lang == "en"
+            else "⚠️ Сначала почини измерение: нет активной primary-конверсии — числа ниже неполные."
+        )
     lines.append(f"{result.score}/100 · {result.grade}")
     if result.optimization_score is not None:
         up = result.optimization_uplift or 0
@@ -183,6 +244,37 @@ def render_audit(result: AuditResult, lang: str = "ru", *, actions: bool = True)
                 lines.append(f"{_family_emoji(fam)} {label} — {n} {noun} · ~{_money(money, cur)}")
             else:
                 lines.append(f"{_family_emoji(fam)} {label} — {n} {noun}")
+
+    # N1.3: «нет данных» ≠ «в норме» (GR8). Только когда collect-слой ЯВНО отчитался о сигналах
+    # (data_gaps is not None) — engine-only вызовы (/report health) семьи не комментируют вовсе.
+    # «✅ в норме» — лишь семьи БЕЗ находок, чьи доп-сигналы получены; упавшие сигналы — отдельной
+    # строкой ℹ️ без штрафа score.
+    if result.data_gaps is not None:
+        gaps = set(result.data_gaps)
+        ok_fams = [
+            f
+            for f in _IMPLEMENTED_FAMILIES
+            if f not in result.families and not (set(_FAMILY_SIGNALS.get(f, ())) & gaps)
+        ]
+        if ok_fams or gaps:
+            lines.append("")
+            if ok_fams:
+                # Префиксная форма: лейблы семей проблемно-ориентированы («Слив бюджета»),
+                # «{лейбл} — в норме» читался бы наоборот (ревью 2026-07-08).
+                names = " · ".join(labels.get(f, f) for f in ok_fams)
+                lines.append(
+                    f"✅ Checked, no issues: {names}"
+                    if lang == "en"
+                    else f"✅ Проверено, проблем нет: {names}"
+                )
+            if gaps:
+                slabels = _SIGNAL_LABEL[lang]
+                names = ", ".join(slabels.get(s, s) for s in sorted(gaps))
+                lines.append(
+                    f"ℹ️ Not enough data: {names} (no score impact)"
+                    if lang == "en"
+                    else f"ℹ️ Недостаточно данных: {names} (на score не влияет)"
+                )
 
     # Топ-3 действия + дисклеймер — только в самодостаточной карточке (actions=True). При actions=False
     # это ОБЗОР: действия идут отдельными сообщениями с кнопками (bot-слой), дисклеймер шлётся там же.

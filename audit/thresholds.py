@@ -57,7 +57,15 @@ DEFAULT_AUDIT_THRESHOLDS: dict[str, float] = {
     "no_conv_min_spend": 10.0,  # аккаунт: расход есть, конверсий 0 → подозрение на трекинг
     "is_lost_min": 0.10,  # потеря impression-share (по бюджету/рангу) ≥ 10% → флаг
     "is_data_tolerance": 0.02,  # |Σ долей − 1.0| ≤ tol → данные полны (иначе proto3-zero «нет данных»)
+    "broad_min_spend": 5.0,  # N1.2: BROAD-ключи без Smart Bidding — флаг от этого расхода на кампанию
 }
+
+
+# N1.0a (ревью 2026-07-08): ручная эпоха score-модели. Веса/пороги/реестр проверок хэшируются
+# автоматически (audit.engine.compute_score_model_version), но СЕМАНТИКУ тела проверки (формулу
+# at_risk, условия срабатывания) хэш не видит. Правишь смысл существующего чека БЕЗ смены его
+# check_id/family/severity/порогов → БАМПНИ эпоху, иначе тренд покажет ложную дельту клиенту.
+SCORE_MODEL_EPOCH: int = 1
 
 
 def grade_for(score: float | None) -> str:
