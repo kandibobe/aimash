@@ -209,26 +209,45 @@ class ConfirmStore:
         chat_id: int,
         actor_user_id: int | None = None,
         actor_username: str | None = None,
-    ) -> None:
+    ) -> bool:
+        """pending → rejected (АТОМАРНО, одноразово). True если отклонил, иначе False.
+
+        B2: compare-and-set (зеркало confirm), а НЕ select-then-modify — раньше это был единственный
+        не-CAS переход статуса. Гонка ❌/✅ (Telegram может доставить оба колбэка почти одновременно;
+        на Postgres нет single-writer): при select-then-modify reject мог прочитать status='pending'
+        ДО коммита confirm и затем перезаписать уже confirmed/executing черновик в 'rejected'
+        (пометив применяемую мутацию отменённой). Один UPDATE … WHERE status='pending' AND
+        chat_id=? исключает это: второй/гоночный переход не совпадёт по WHERE → rowcount=0 → False,
+        без спурьёзной audit-строки. Гард владения (chat_id) сохранён — отклонить может только
+        владелец (cleanup_stale_proposals передаёт p.chat_id сам)."""
         async with Session() as s:
+            res = await s.execute(
+                update(Proposal)
+                .where(
+                    Proposal.confirmation_id == confirmation_id,
+                    Proposal.status == "pending",
+                    Proposal.chat_id == chat_id,  # владение: только владелец черновика
+                )
+                .values(status="rejected", decided_at=func.now())
+            )
+            # cast: DML возвращает CursorResult (есть .rowcount); async-стаб видит общий Result.
+            if cast(CursorResult, res).rowcount != 1:  # нет/не pending/чужой/гонка
+                await s.rollback()
+                return False
             p = (
                 await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
-            ).scalar_one_or_none()
-            # Гард владения (как confirm): отклонить может только владелец черновика. Чужой chat_id
-            # → тихо ничего не делаем (fail-closed). cleanup_stale_proposals передаёт p.chat_id сам.
-            if p is not None and p.status == "pending" and p.chat_id == chat_id:
-                p.status = "rejected"
-                p.decided_at = func.now()
-                s.add(
-                    _audit(
-                        p,
-                        chat_id,
-                        "rejected",
-                        actor_user_id=actor_user_id,
-                        actor_username=actor_username,
-                    )
+            ).scalar_one()
+            s.add(
+                _audit(
+                    p,
+                    chat_id,
+                    "rejected",
+                    actor_user_id=actor_user_id,
+                    actor_username=actor_username,
                 )
-                await s.commit()
+            )
+            await s.commit()
+            return True
 
     async def finalize(self, confirmation_id: str, *, result: object) -> None:
         """Успех: executing → applied (терминальный) + audit applied. Терминальный статус
