@@ -497,16 +497,22 @@ async def _advise_proactive_chats(recipients: set[int]) -> set[int]:
 
 
 def _digest_account_label(acct: str) -> str:
-    """Имя аккаунта для карточки дайджеста («Башня · 5437782039»); нет meta → голый id."""
+    """Имя аккаунта для карточки дайджеста («Башня · 5437782039»); нет meta → голый id.
+
+    B14: имя аккаунта из Google Ads может содержать «<»/«&» — все потребители шлют его с
+    parse_mode=HTML (thr_tune_offer, recommendations digest), поэтому ЭКРАНИРУЕМ здесь (единый
+    источник): без escape сообщение с «<» в имени молча НЕ доставлялось (Telegram отвергал разметку)."""
+    from bot.texts import esc
+
     try:
         from ads.client import discovered_read_children_meta
 
         ch = discovered_read_children_meta().get(str(acct))
         if ch is not None and (ch.name or "") and str(ch.name) != str(acct):
-            return f"{ch.name} · {acct}"
+            return esc(f"{ch.name} · {acct}")
     except Exception:  # noqa: BLE001 — ярлык-косметика
         pass
-    return str(acct)
+    return esc(str(acct))
 
 
 async def run_recommendations_digest(bot) -> None:
