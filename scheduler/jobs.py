@@ -892,6 +892,16 @@ async def run_threshold_tuning(bot) -> None:
         if not accounts:
             return
         thr_by_chat = await _thresholds_by_chat(recipients)
+        # A8/C2: per-account предложение НЕ должно уходить оператору без доступа к аккаунту
+        # (enforced-режим). Все прочие per-account рассылки (report/anomaly/recommendations/
+        # business) уже фильтруют через accessible_accounts_for_user — thr-tune был единственной
+        # дырой. Считаем разрешённые аккаунты по каждому получателю ОДИН раз (до цикла по акк.).
+        from core.access import accessible_accounts_for_user
+
+        allowed_by_chat = {
+            chat_id: set(await accessible_accounts_for_user(chat_id, accounts))
+            for chat_id in recipients
+        }
         now = datetime.now(timezone.utc)
         today = now.date()
         period = period_custom(today - timedelta(days=TRAILING_DAYS), today - timedelta(days=1))
@@ -924,6 +934,8 @@ async def run_threshold_tuning(bot) -> None:
             if not costs:
                 continue
             for chat_id in recipients:
+                if acct not in allowed_by_chat.get(chat_id, set()):
+                    continue  # A8: нет доступа к аккаунту → не шлём его пороги
                 key = f"thr_tune_{acct}"
                 blob = await _ui_pref_blob(chat_id, key)
                 if _thr_tune_on_cooldown(blob, now):
@@ -1256,6 +1268,68 @@ async def reconcile_stale_executing(
                     )
         if n:
             log.warning("scheduler: зависших executing-черновиков помечено needs_review: %d", n)
+        return n
+
+
+async def reconcile_stale_confirmed(
+    bot=None, *, now: datetime | None = None, stale_minutes: int | None = None
+) -> int:
+    """A6: черновики, зависшие в 'confirmed' дольше N мин: процесс упал в окне МЕЖДУ confirm()
+    (pending→confirmed) и claim() (confirmed→executing, внутри apply_* перед SDK). Пока статус
+    'confirmed', SDK НЕ вызывался (в отличие от 'executing' — reconcile_stale_executing) → изменение
+    ТОЧНО не применено. Раньше этот статус не покрывал НИКТО (cleanup_stale_proposals — только
+    'pending', reconcile_stale_executing — только 'executing'), и черновик висел в 'confirmed'
+    навсегда, занимая слот и вводя в заблуждение в /journal.
+
+    Помечаем 'failed' (mark_confirmed_failed, атомарный CAS confirmed→failed) + audit-строка +
+    уведомление владельца «прервано ДО вызова SDK — НЕ применено, повтори команду». Пометка —
+    запись в ЛОКАЛЬНУЮ БД, не мутация Ads (golden rule #3). Порог = executing_stale_minutes
+    (тот же дефолт 30): до claim проходят секунды, живой процесс не зацепим (гонку с ним выигрывает
+    CAS). bot=None (тесты) → без уведомлений."""
+    stale = settings.executing_stale_minutes if stale_minutes is None else stale_minutes
+    with request_scope("scheduler:reconcile-confirmed"):
+        cutoff = (now or datetime.now(timezone.utc)) - timedelta(minutes=stale)
+        store = ConfirmStore()
+        async with Session() as s:
+            rows = (
+                (await s.execute(select(Proposal).where(Proposal.status == "confirmed")))
+                .scalars()
+                .all()
+            )
+            stale_rows: list[tuple[str, str, int]] = []
+            for p in rows:
+                ts = p.decided_at or p.created_at  # decided_at = момент confirm()
+                if ts is None:
+                    continue
+                if ts.tzinfo is None:  # SQLite хранит наивный UTC
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts < cutoff:
+                    stale_rows.append((p.confirmation_id, p.operation, p.chat_id))
+        n = 0
+        for cid, op, chat_id in stale_rows:
+            err = (
+                f"исполнение прервано (рестарт до вызова SDK, зависло >{stale} мин в confirmed) — "
+                "изменение НЕ применено, повтори команду"
+            )
+            if not await store.mark_confirmed_failed(cid, error=err):
+                continue  # живой процесс успел claim — не наша строка
+            n += 1
+            if bot is not None:
+                try:
+                    await bot.send_message(
+                        chat_id,
+                        f"⚠️ Операция «{op}» была прервана рестартом бота ДО обращения к Google "
+                        "Ads — изменение НЕ применено. Повтори команду, если оно ещё нужно.",
+                    )
+                except Exception as e:  # один недоступный чат не должен ронять реконсиляцию
+                    log.warning(
+                        "scheduler: confirmed-fail уведомление не доставлено в %s: %s: %s",
+                        chat_id,
+                        type(e).__name__,
+                        e,
+                    )
+        if n:
+            log.warning("scheduler: зависших confirmed-черновиков помечено failed: %d", n)
         return n
 
 

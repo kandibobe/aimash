@@ -182,6 +182,18 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
         misfire_grace_time=600,
         next_run_time=datetime.now(timezone.utc),
     )
+    sched.add_job(
+        # A6: черновики, зависшие в 'confirmed' (процесс упал МЕЖДУ confirm() и claim(), ДО SDK) →
+        # failed + уведомление «не применено, повтори». next_run_time=now: рестарт — момент рождения
+        # таких зависших, прогоняем сразу.
+        jobs.reconcile_stale_confirmed,
+        IntervalTrigger(minutes=settings.cleanup_interval_minutes),
+        args=[bot],
+        id="reconcile_stale_confirmed",
+        replace_existing=True,
+        misfire_grace_time=600,
+        next_run_time=datetime.now(timezone.utc),
+    )
     # §advisor Слой B: замер результата применённых рекомендаций (read-only, delta+verdict в КОДЕ).
     sched.add_job(
         jobs.run_recommendation_followups,

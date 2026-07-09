@@ -290,6 +290,39 @@ class ConfirmStore:
             await s.commit()
             return True
 
+    async def mark_confirmed_failed(self, confirmation_id: str, *, error: str) -> bool:
+        """confirmed → failed (АТОМАРНО, одноразово; для реконсиляции A6 «завис в confirmed»).
+
+        Процесс упал в окне МЕЖДУ confirm() (pending→confirmed) и claim() (confirmed→executing,
+        внутри apply_* перед самим SDK-вызовом). Пока статус 'confirmed', SDK НЕ вызывался — в
+        отличие от 'executing' (mark_needs_review, там исход неизвестен). Поэтому здесь безопасен
+        честный 'failed' («не применено»): оператор просто повторяет команду.
+
+        CAS: UPDATE … WHERE status='confirmed' — гонку с ЖИВЫМ claim выигрывает тот, кто первый:
+        claim победил → 'executing', наш rowcount=0 → False (не трогаем исполняемое); мы победили →
+        'failed', последующий claim живого процесса даст rowcount=0 → None → мутация не выполнится
+        (double-spend невозможен). Порог ≫ времени до claim (секунды) → живой процесс не зацепим.
+        Пишет audit-строку 'failed' с редактированной ошибкой (golden rule #5)."""
+        async with Session() as s:
+            res = await s.execute(
+                update(Proposal)
+                .where(
+                    Proposal.confirmation_id == confirmation_id,
+                    Proposal.status == "confirmed",
+                )
+                .values(status="failed", decided_at=func.now())
+            )
+            # cast: DML возвращает CursorResult (есть .rowcount); async-стаб видит общий Result.
+            if cast(CursorResult, res).rowcount != 1:  # живой процесс успел claim/иное
+                await s.rollback()
+                return False
+            p = (
+                await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
+            ).scalar_one()
+            s.add(_audit(p, p.chat_id, "failed", result={"error": redact_text(str(error))}))
+            await s.commit()
+            return True
+
     async def record_failure(self, confirmation_id: str, *, error: str) -> None:
         """Ошибка выполнения → failed (терминальный) + audit failed.
 

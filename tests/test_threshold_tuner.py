@@ -68,9 +68,18 @@ def test_cooldown_logic():
 async def test_tuner_job_offers_but_never_writes_thresholds(monkeypatch):
     from sqlalchemy import delete, select
 
+    import core.access as acc
+    from core.config import settings as cfg
     from db.models import UserSettings
     from db.session import Session, init_db
     from scheduler import jobs
+
+    # A8: thr-tune теперь фильтрует получателей через accessible_accounts_for_user (как все
+    # per-account рассылки). Этот тест проверяет ЛОГИКУ предложения, не доступ — фиксируем legacy
+    # (иначе гранты, оставленные другими тест-файлами в общей SQLite, в auto-режиме включили бы
+    # enforcement и C2-фильтр съел бы аккаунт). Enforced-семантика — в test_jobs_access_filter.py.
+    monkeypatch.setattr(cfg, "account_access_mode", "legacy")
+    acc._invalidate_enforcement_cache()
 
     await init_db()
     chat, acct = 6501, "1112223334"
