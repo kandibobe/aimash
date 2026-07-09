@@ -4975,7 +4975,9 @@ async def _advise_run(
         await target.answer(i18n.t("loop_account_denied", account=str(account or "")))
         return
     except LookupError as e:
-        await target.answer(i18n.t("loop_account_not_found", detail=str(e)))
+        # B12: через err_text (редактирует секрето-подобное) — последний шов класса «текст
+        # исключения наружу только через ux.err_text», а не сырой str(e).
+        await target.answer(i18n.t("loop_account_not_found", detail=ux.err_text(e)))
         return
     except Exception:  # noqa: BLE001 — сбой резолва настройки не должен ломать /advise
         acct = await _active_read_account(chat_id)
