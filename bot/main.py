@@ -5923,6 +5923,11 @@ async def main() -> None:
         )
     log.info("Aimash bot запущен (polling).")
     await _notify_admins_started(bot)  # B1: readiness-пинг админам (живой сигнал успешного деплоя)
+    # B9: heartbeat живости event-loop для честного Docker HEALTHCHECK — на ТОМ ЖЕ loop, что polling;
+    # завис loop ⇒ файл протухает ⇒ healthcheck unhealthy ⇒ рестарт (раньше зависший polling был healthy).
+    from core.heartbeat import heartbeat_loop
+
+    _hb_task = asyncio.create_task(heartbeat_loop())
     # start_polling сам ставит обработчики SIGINT/SIGTERM и завершается штатно по сигналу;
     # finally гарантирует graceful-освобождение ресурсов (P2 lifecycle), что бы ни остановило polling.
     try:
@@ -5936,6 +5941,7 @@ async def main() -> None:
             log.warning("drop_pending_updates не выполнен: %s", type(e).__name__)
         await dp.start_polling(bot)
     finally:
+        _hb_task.cancel()  # B9: остановить heartbeat (teardown)
         if sched is not None:
             # wait=True: ДОЖИДАЕМСЯ завершения работающих джоб (они read-only и ограничены
             # ADS_TIMEOUT_S — ждать безопасно и недолго), чтобы SIGTERM не оборвал джобу на полу-
