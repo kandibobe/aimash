@@ -341,6 +341,21 @@ class Settings(BaseSettings):
         return self.env == "prod"
 
     @model_validator(mode="after")
+    def _validate_env_name(self) -> "Settings":
+        """B5: ENV должен быть dev|test|prod. Опечатка (напр. «production», «Prod») раньше молча
+        трактовалась как НЕ-prod → ВСЕ prod-гейты (whitelist/ключ шифрования/мутации fail-fast)
+        тихо отключались, а бот поднимался в небезопасной конфигурации. Нормализуем регистр/пробелы;
+        неизвестное значение — падаем на старте (fail-fast, а не тихий небезопасный dev-режим)."""
+        raw = (self.env or "").strip().lower()
+        if raw not in {"dev", "test", "prod"}:
+            raise ValueError(
+                f"ENV={self.env!r} недопустимо — ожидается dev|test|prod. Опечатка (напр. "
+                "'production') молча отключила бы все prod-гейты безопасности (fail-fast)."
+            )
+        self.env = raw
+        return self
+
+    @model_validator(mode="after")
     def _require_encryption_key_in_prod(self) -> "Settings":
         """Fail-fast: в prod пустой/невалидный SECRETS_ENCRYPTION_KEY недопустим (токены
         шифруются at-rest). В dev/тестах (SQLite, без шифрования) — не требуем, чтобы суйта
