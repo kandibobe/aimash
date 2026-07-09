@@ -26,6 +26,10 @@ from core.ingest import (
     _is_public_host,
 )
 
+# B13: типы контента, которые краулер парсит как текст (кроме них — всё text/*). Прочее
+# (application/pdf, image/*, application/zip…) отвергаем ДО чтения тела — бинарь не в LLM-профиль.
+_ALLOWED_CONTENT_TYPES = frozenset({"text/html", "text/plain", "application/xhtml+xml"})
+
 _PHONE_RE = re.compile(r"\+?\d[\d\s()\-]{7,}\d")
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _SOCIAL_HOSTS = {
@@ -312,6 +316,11 @@ async def fetch_url_html(url: str) -> str:
     ) as client:
         async with client.stream("GET", url) as r:
             r.raise_for_status()
+            # B13: не тянем и не декодируем НЕ-HTML (PDF/картинки/архивы) — иначе бинарь уходил в
+            # LLM-сведение профиля как мусорный «текст». Content-Type проверяем ДО чтения тела.
+            ctype = (r.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+            if ctype and not (ctype in _ALLOWED_CONTENT_TYPES or ctype.startswith("text/")):
+                raise ValueError(f"неподдерживаемый тип контента: {ctype} ({url})")
             chunks: list[bytes] = []
             total = 0
             async for chunk in r.aiter_bytes():
