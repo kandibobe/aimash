@@ -2627,7 +2627,9 @@ async def _run_sheets(
         key = "err_account_inactive" if is_account_access_error(e) else "err_sheets"
         await m.answer(i18n.t(key, err=ux.err_text(e)))
         return
-    note = "" if shared else "\n" + i18n.t("sheets_share_failed_note")
+    # B3: shared=True ⇒ таблица публична (anyone-with-link) → предупреждаем; иначе (сбой шаринга
+    # ИЛИ владелец выключил SHEETS_PUBLIC_LINK) — подсказка «запросите доступ».
+    note = "\n" + i18n.t("sheets_public_warn" if shared else "sheets_share_failed_note")
     await m.answer(i18n.t("sheets_ready", url=url) + note)
 
 

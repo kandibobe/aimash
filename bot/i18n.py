@@ -1623,6 +1623,12 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "✅ Google Sheets готов: {url}",
         "en": "✅ Google Sheets is ready: {url}",
     },
+    # B3: таблица открыта anyone-with-link (settings.sheets_public_link) — финансовые данные видны
+    # всем, у кого есть ссылка. Владелец может выключить SHEETS_PUBLIC_LINK (тогда таблица приватна).
+    "sheets_public_warn": {
+        "ru": "⚠️ Таблица доступна ВСЕМ по ссылке. Не пересылайте её посторонним.",
+        "en": "⚠️ The sheet is accessible to ANYONE with the link. Don't share it with outsiders.",
+    },
     # P1 (живой тест 2026-07-06): не удалось открыть anyone-with-link — таблица осталась приватной.
     "sheets_share_failed_note": {
         "ru": (

@@ -137,7 +137,15 @@ def _share_anyone(spreadsheet_id: str, *, role: str, drive_service: Any = None) 
     заказчик не мог открыть ссылку. Открываем anyone-with-link (role: writer — таблицы ключей,
     флоу просит их править; reader — отчёты). НИКОГДА не raise: сбой шаринга не должен ронять
     экспорт — ссылка всё равно уходит, вызыватель добавит подсказку «запросите доступ».
-    Возвращает True при успехе."""
+    Возвращает True при успехе.
+
+    B3: под флагом settings.sheets_public_link (дефолт True — прежнее поведение). False ⇒ НЕ шарим
+    публично (финансовые данные клиента не за периметром): таблица остаётся приватной, получатель
+    запрашивает доступ. Флаг решает владелец в проде."""
+    from core.config import settings
+
+    if not settings.sheets_public_link:
+        return False  # приватная таблица (владелец отключил публичную ссылку)
     try:
         svc = drive_service or _build_drive_service()
         svc.permissions().create(

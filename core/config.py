@@ -150,6 +150,12 @@ class Settings(BaseSettings):
     # Реальное значение — только через .get_secret_value() (db.session, migrations.env).
     database_url: SecretStr = SecretStr("postgresql+asyncpg://aimash:aimash@localhost:5432/aimash")
 
+    # B3: публичность экспортных Google Sheets. True (дефолт — прежнее поведение: заказчик мог
+    # открыть ссылку без запроса доступа) => таблица шарится anyone-with-link. False => таблица
+    # остаётся приватной для OAuth-аккаунта бота (финансовые данные клиента НЕ за периметром;
+    # получатель запрашивает доступ). При True бот предупреждает «доступно всем по ссылке».
+    sheets_public_link: bool = True
+
     # Наблюдаемость / мониторинг ошибок (Sentry, опционально). Пусто => ВЫКЛ (core.observability):
     # ноль накладных расходов и сети. SecretStr — DSN считается чувствительным. Перф-трейсинг по
     # умолчанию 0.0 (без оверхеда на запросах); ошибки сэмплируются 100%.
