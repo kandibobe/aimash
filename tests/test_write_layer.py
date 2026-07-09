@@ -496,6 +496,67 @@ def test_remove_keywords_via_sdk_reports_not_found():
     assert res["removed"] == [] and res["not_found"] == ["нетакого"]  # явно, без «тихого» молчания
 
 
+def test_remove_keywords_query_excludes_negatives_and_removed():
+    """B11: GAQL резолва ключей к удалению фильтрует negative=FALSE и status!=REMOVED — иначе
+    «удали ключ X» снёс бы и групповое МИНУС-слово X (оба type=KEYWORD)."""
+    seen = {}
+
+    class _GA:
+        def search(self, customer_id, query):
+            seen["q"] = query
+            return []
+
+    class _Client:
+        def get_service(self, name):
+            return _GA()
+
+        def get_type(self, name):
+            return SimpleNamespace(remove=None)
+
+    mut._remove_keywords_via_sdk(_Client(), DRAFT_ACCOUNT_ID, ["1"], ["x"], "broad")
+    assert "ad_group_criterion.negative = FALSE" in seen["q"]
+    assert "ad_group_criterion.status != 'REMOVED'" in seen["q"]
+
+
+def test_remove_keywords_does_not_touch_group_negative_of_same_text():
+    """Функциональный B11: групповой минус «x» (negative=TRUE) не попадает под удаление позитивного
+    ключа «x» — status-aware фейк уважает фильтр negative=FALSE, как реальный сервер."""
+    positive = SimpleNamespace(
+        ad_group_criterion=SimpleNamespace(
+            resource_name="rn_pos", keyword=SimpleNamespace(text="x"), negative=False
+        )
+    )
+    negative = SimpleNamespace(
+        ad_group_criterion=SimpleNamespace(
+            resource_name="rn_neg", keyword=SimpleNamespace(text="x"), negative=True
+        )
+    )
+
+    class _GA:
+        def search(self, customer_id, query):
+            all_rows = [positive, negative]
+            if "ad_group_criterion.negative = FALSE" in query:
+                return [r for r in all_rows if not r.ad_group_criterion.negative]
+            return all_rows
+
+    class _Crit:
+        def mutate_ad_group_criteria(self, customer_id, operations):
+            return SimpleNamespace(
+                results=[SimpleNamespace(resource_name=o.remove) for o in operations]
+            )
+
+    class _Client:
+        def get_service(self, name):
+            return _GA() if name == "GoogleAdsService" else _Crit()
+
+        def get_type(self, name):
+            return SimpleNamespace(remove=None)
+
+    res = mut._remove_keywords_via_sdk(_Client(), DRAFT_ACCOUNT_ID, ["1"], ["x"], "broad")
+    assert res["removed"] == ["rn_pos"]  # снят только позитивный ключ
+    assert "rn_neg" not in res["removed"]  # групповой минус НЕ тронут
+
+
 # ── apply_resume_campaign: реюз статус-исполнителя со статусом ENABLED ───────────
 async def test_apply_resume_campaign_happy_path():
     called = {}

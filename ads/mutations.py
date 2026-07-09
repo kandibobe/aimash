@@ -1617,9 +1617,13 @@ def _remove_keywords_via_sdk(
     mt = str(match_type).upper()  # из Literal broad/phrase/exact → BROAD/PHRASE/EXACT (безопасно)
     wanted = {str(k).casefold() for k in keywords}
     ag_in = ", ".join(str(int(a)) for a in ad_group_ids)
+    # B11: negative = FALSE — НЕ трогаем ГРУППОВЫЕ МИНУС-СЛОВА. Минус-слово тоже type=KEYWORD; без
+    # этого фильтра «удали ключ X» снёс бы и групповой минус «X» с тем же текстом/типом (тихая
+    # потеря защиты от нецелевого трафика). status != REMOVED — не адресуем уже удалённые (idempotent).
     q = (
         "SELECT ad_group_criterion.resource_name, ad_group_criterion.keyword.text "
         "FROM ad_group_criterion WHERE ad_group_criterion.type = KEYWORD "
+        "AND ad_group_criterion.negative = FALSE AND ad_group_criterion.status != 'REMOVED' "
         f"AND ad_group_criterion.keyword.match_type = '{mt}' AND ad_group.id IN ({ag_in})"
     )
     to_remove, found = [], set()
