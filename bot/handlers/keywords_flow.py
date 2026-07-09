@@ -77,12 +77,16 @@ async def _kw_run_from_state(m: bm.Message, state: bm.FSMContext) -> None:
         await m.answer(bm.i18n.t("kw_params_need_seeds"))
         return
     lang = str(cfg.get("kw_lang") or "ru")
-    geo_iso = str(cfg.get("kw_geo_iso") or "UA")
+    # A1: дефолт гео — из settings.geo_default_country (пусто ⇒ «any» = глобально), без хардкода «UA».
+    from core.config import settings
+
+    geo_iso = str(cfg.get("kw_geo_iso") or (settings.geo_default_country or "any"))
     if geo_iso == "any":
-        geo_ids: tuple[int, ...] | None = ()
+        geo_ids: tuple[int, ...] | None = ()  # явно «все страны» → глобальный подбор (не Украина)
     else:
         gid = geo_id_for_country(geo_iso)
-        geo_ids = (gid,) if gid else None  # неизвестный ISO → дефолт (_kw_run подставит Украину)
+        # неизвестный ISO → None: _kw_run подставит «домашний» дефолт из settings (не Украину)
+        geo_ids = (gid,) if gid else None
     months_raw = int(cfg.get("kw_months") or 0)
     # state НЕ чистим до/после запуска: пользователь остаётся на экране параметров (может подправить
     # и пере-запустить), а любой текст тут ловит kw_params_text (не утекает в агента). Выход — /cancel

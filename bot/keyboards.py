@@ -389,7 +389,10 @@ def kw_params_kb(cfg: dict, lang: str | None = None) -> InlineKeyboardMarkup:
     kw_months}). Тапы по строкам циклят/открывают выбор; «🚀 Подобрать» — запуск."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
-    geo = cfg.get("kw_geo_iso") or "UA"
+    # A1: показываемый дефолт гео — из settings.geo_default_country (пусто ⇒ «any»), без хардкода «UA».
+    from core.config import settings
+
+    geo = cfg.get("kw_geo_iso") or (settings.geo_default_country or "any")
     geo_label = {"any": "🌐 " + ("all countries" if en else "все страны")}.get(geo, geo)
     kb.button(
         text=("🌍 Geo: " if en else "🌍 ГЕО: ") + str(geo_label),

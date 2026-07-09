@@ -144,8 +144,10 @@ def test_seed_type_keyword_and_url():
     assert req.keyword_and_url_seed.url == "https://x.io"
     assert list(req.keyword_and_url_seed.keywords) == ["a", "b"]
     assert req.keyword_plan_network == "GOOGLE_SEARCH"
-    assert req.language == "languageConstants/1031"  # ru
-    assert req.geo_target_constants == ["geoTargetConstants/2804"]  # Украина
+    # A1: нейтральные дефолты — без языка/гео (language="", geo_ids=()) → глобальный подбор без
+    # биаса (раньше молча подставлялись ru + Украина). Язык/гео задаёт вызывающий явно.
+    assert req.language == ""  # без languageConstant
+    assert req.geo_target_constants == []  # без geoTargetConstants
 
 
 # ── K: RU/BY не обслуживаются Keyword Planner — отфильтровываются перед SDK-запросом ──

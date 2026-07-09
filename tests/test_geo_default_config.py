@@ -74,3 +74,63 @@ def test_create_campaign_schema_geo_default_from_config():
         assert cc is not None and loc is not None  # именно factory, не статичный «UA»
         with geo_env("UG", "en"):
             assert cc() == "UG" and loc() == "en"
+
+
+# ── A1: подбор ключей без UA-биаса (keyword_plan/_kw_run) ──────────────────────────
+def test_keyword_plan_default_geo_and_language_are_neutral():
+    # Модульные дефолты БЕЗ биаса: пусто → generate_keyword_ideas не задаёт гео/язык (глобально).
+    import ads.keyword_plan as kp
+
+    assert kp.DEFAULT_GEO_IDS == ()  # не (2804 Украина)
+    assert kp.DEFAULT_LANGUAGE == ""  # не «ru»
+
+
+def test_default_kw_geo_from_settings():
+    """_default_kw_geo: пусто → () (глобально); env-страна → её geo id; неизвестная → ()."""
+    import bot.main as bm
+    from ads.geo import geo_id_for_country
+
+    with geo_env("", "ru"):
+        assert bm._default_kw_geo() == ()  # без биаса
+    with geo_env("UG", "en"):
+        assert bm._default_kw_geo() == (geo_id_for_country("UG"),)  # Уганда, не Украина
+    with geo_env("ZZ", "ru"):
+        assert bm._default_kw_geo() == ()  # неизвестная страна → глобально, не падаем
+
+
+def test_resolve_kw_geo_distinguishes_none_and_empty():
+    """Ключевой инвариант A1: geo_ids=() (явно «все страны») НЕ схлопывается в страну; None берёт
+    «домашний» дефолт из settings; непустой кортеж — как есть. Раньше falsy-() давало Украину."""
+    import bot.main as bm
+    from ads.geo import geo_id_for_country
+
+    with geo_env("UG", "en"):
+        ug = geo_id_for_country("UG")
+        assert bm._resolve_kw_geo(None) == (ug,)  # None → домашний дефолт (Уганда, не Украина)
+        assert bm._resolve_kw_geo(()) == ()  # явно «все страны» → глобально (НЕ схлоп в страну)
+        assert bm._resolve_kw_geo((1234,)) == (1234,)  # конкретное гео — как есть
+    with geo_env("", "ru"):
+        assert bm._resolve_kw_geo(None) == ()  # гео не задано, дефолта нет → глобально, без биаса
+        assert bm._resolve_kw_geo(()) == ()
+
+
+def test_no_hardcoded_ua_geo_id_in_ads_and_bot():
+    """Греп-гард класса A1: нет module-level литерала украинского geo id (2804) вне settings-пути.
+    Новый хардкод гео-биаса (как исходный DEFAULT_GEO_IDS=(2804,)) валит тест."""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    offenders = []
+    for pkg in ("ads", "bot"):
+        for py in (root / pkg).rglob("*.py"):
+            if "__pycache__" in str(py):
+                continue
+            for i, line in enumerate(py.read_text(encoding="utf-8").splitlines(), 1):
+                s = line.strip()
+                if s.startswith("#"):
+                    continue
+                # 2804 = geoTargetConstants Украины. Разрешён только в таблицах маппинга ISO→id
+                # (ads/geo.py) — там он привязан к "UA", а не задаётся дефолтом.
+                if "2804" in s and "geo.py" not in py.name:
+                    offenders.append(f"{py.relative_to(root)}:{i}: {s}")
+    assert not offenders, "хардкод UA geo id (2804) вне settings-пути:\n" + "\n".join(offenders)

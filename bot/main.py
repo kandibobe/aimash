@@ -3185,6 +3185,26 @@ def _parse_geo_proximity(text: str) -> tuple[str, float] | None:
     return city, radius
 
 
+def _default_kw_geo() -> tuple[int, ...]:
+    """A1: «домашнее» гео подбора ключей, когда запрос его НЕ задал — из settings.geo_default_country
+    (ISO задан агентством, если оно всегда льёт на одну страну). Пусто ⇒ () = глобальный подбор без
+    биаса (ровно как визард §19 не подставляет чужую страну). Никакого хардкода «UA»."""
+    from ads.geo import geo_id_for_country
+
+    iso = settings.geo_default_country
+    if not iso:
+        return ()
+    gid = geo_id_for_country(iso)
+    return (gid,) if gid else ()
+
+
+def _resolve_kw_geo(geo_ids: tuple[int, ...] | None) -> tuple[int, ...]:
+    """A1: эффективное гео подбора ключей. РАЗЛИЧАЕМ None и (): None = гео НЕ задано → «домашний»
+    дефолт (settings); () = пользователь ЯВНО выбрал «все страны» → глобально (НЕ схлопывать в
+    страну — исходный дефект: falsy-() давало Украину); непустой кортеж — как есть."""
+    return _default_kw_geo() if geo_ids is None else tuple(geo_ids)
+
+
 async def _kw_run(
     target: Message,
     chat_id: int,
@@ -3197,8 +3217,9 @@ async def _kw_run(
     months: int | None = None,
 ) -> None:
     """Подобрать идеи → кластеризовать по интенту → сводка + .xlsx. READ-ONLY (advisory).
-    3F (§7): geo_ids/network/months — параметры research (раньше зашиты); None/дефолт =
-    прежнее поведение (Украина / Search / окно API)."""
+    3F (§7): geo_ids/network/months — параметры research. geo_ids: None = не задано (→ «домашний»
+    дефолт из settings.geo_default_country, пусто ⇒ глобально); () = явно «все страны» (глобально);
+    непустой кортеж = конкретные гео (A1: без хардкода «UA»)."""
     import os
     import tempfile
 
@@ -3213,9 +3234,9 @@ async def _kw_run(
     # Draft — нули). Замок чтения держит generate_keyword_ideas (ensure_read_allowed); если активный
     # аккаунт вышел из read-list, _active_read_account сам откатывается на Draft (fail-closed).
     from ads.client import build_client_async
-    from ads.keyword_plan import DEFAULT_GEO_IDS, generate_keyword_ideas
+    from ads.keyword_plan import generate_keyword_ideas
 
-    eff_geo = tuple(geo_ids) if geo_ids else DEFAULT_GEO_IDS
+    eff_geo = _resolve_kw_geo(geo_ids)  # A1: None=дефолт из settings, ()=глобально, кортеж=как есть
 
     async def _gen(cid: str):
         client = await build_client_async(cid)  # холодная сборка — вне loop
@@ -3398,7 +3419,8 @@ async def _kw_start_from_intent(m: Message, brief: dict, state: FSMContext) -> N
     if geo_raw:
         geo_iso = country_iso(geo_raw) or geo_raw.upper()
         gid = geo_id_for_country(geo_iso)
-        geo_ids = (gid,) if gid else None  # неизвестная страна → дефолт (_kw_run подставит Украину)
+        # неизвестная страна → None: _kw_run подставит «домашний» дефолт из settings (A1, не Украину)
+        geo_ids = (gid,) if gid else None
     # §7: язык — из брифа; иначе ВЫВОДИМ ИЗ СТРАНЫ (Германия→de, а не язык интерфейса — иначе идеи на
     # чужом рынку языке → «мало слов»); иначе язык интерфейса. keyword_ideas_lang нормализует/опускает.
     language = keyword_ideas_lang(
