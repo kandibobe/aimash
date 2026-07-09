@@ -17,6 +17,7 @@ _FAMILY_LABEL = {
         "keywords": "Ключевые слова",
         "rsa": "Тексты и качество",
         "structure": "Структура",
+        "delivery": "Показ и модерация",
         "geo": "Гео и таргетинг",
         "assets": "Расширения",
     },
@@ -28,6 +29,7 @@ _FAMILY_LABEL = {
         "keywords": "Keywords",
         "rsa": "Ads & quality",
         "structure": "Structure",
+        "delivery": "Delivery & policy",
         "geo": "Geo & targeting",
         "assets": "Assets",
     },
@@ -44,6 +46,7 @@ _SIGNAL_LABEL = {
         "search_terms": "поисковые запросы",
         "optimization_score": "оценка Google",
         "recommendations": "рекомендации Google",
+        "ad_policy": "модерация объявлений",
     },
     "en": {
         "impression_share": "impression share",
@@ -52,21 +55,27 @@ _SIGNAL_LABEL = {
         "search_terms": "search terms",
         "optimization_score": "Google optimization score",
         "recommendations": "Google recommendations",
+        "ad_policy": "ad policy status",
     },
 }
 
 # N1.3: семья → доп-сигналы, без которых «✅ в норме» утверждать нечестно (сигнал упал → семья
 # не попадает в «в норме», а сигнал показывается строкой «недостаточно данных»).
 _FAMILY_SIGNALS = {
-    "keywords": ("search_terms",),
+    "keywords": ("search_terms", "negative_lists"),
     "budget": ("impression_share",),
-    "rsa": ("impression_share",),
+    "rsa": ("impression_share", "adgroup_structure", "keyword_quality"),
     "conversion_tracking": ("conversion_actions",),
     "bidding": ("bidding",),
+    "delivery": (
+        "ad_policy",
+    ),  # упал ad_policy → delivery не «в норме» (zero_impressions — из отчёта)
+    "structure": ("adgroup_structure",),  # D: без структуры групп не утверждаем «структура в норме»
+    "geo": ("geo_waste",),  # A: без geographic_view не утверждаем «гео в норме»
 }
 
-# Семьи с реализованными проверками (geo/assets — заделы: про них не утверждаем ни «в норме»,
-# ни «нет данных» — проверок ещё нет).
+# Семьи с реализованными проверками (assets — задел: про неё не утверждаем ни «в норме», ни «нет
+# данных» — проверок ещё нет). geo стала реализованной (geo_no_conv/schedule_waste, A).
 _IMPLEMENTED_FAMILIES = (
     "waste",
     "conversion_tracking",
@@ -75,6 +84,8 @@ _IMPLEMENTED_FAMILIES = (
     "keywords",
     "rsa",
     "structure",
+    "delivery",
+    "geo",
 )
 
 
@@ -121,6 +132,10 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
         if lang == "en":
             return f"«{camp}»: losing {fa.get('budget_lost', 0)}% of impressions to budget — budget-constrained (change only on your command)."
         return f"«{camp}»: теряешь {fa.get('budget_lost', 0)}% показов из-за бюджета — упирается в бюджет (менять только по твоей команде)."
+    if f.check_id == "is_lost_revenue":
+        if lang == "en":
+            return f"«{camp}»: losing {fa.get('budget_lost', 0)}% of impressions to budget — est. ~{fa.get('lost_conv', 0)} conversions / {_money(fa.get('lost_revenue', 0), cur)} left on the table (raise budget only on your command)."
+        return f"«{camp}»: теряешь {fa.get('budget_lost', 0)}% показов из-за бюджета — оценка ~{fa.get('lost_conv', 0)} конв. / {_money(fa.get('lost_revenue', 0), cur)} упущено (бюджет — только по твоей команде)."
     if f.check_id == "is_rank_constrained":
         if lang == "en":
             return f"«{camp}»: losing {fa.get('rank_lost', 0)}% of impressions to rank — improve ad relevance/quality."
@@ -149,6 +164,59 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
         if lang == "en":
             return f"Possible conversion double-counting: {n} enabled primary actions in category {cat} — make sure only one counts into “Conversions”."
         return f"Похоже на двойной счёт конверсий: {n} активных primary-действия категории {cat} — проверь, что в «Конверсии» пишет только одно."
+    if f.check_id == "ads_disapproved":
+        n = fa.get("count", 0)
+        dis = fa.get("disapproved", 0)
+        if lang == "en":
+            return f"«{camp}»: {n} ads not fully serving ({dis} disapproved) — silently losing traffic; fix the ad/landing page."
+        return f"«{camp}»: {n} объявлений не показываются полноценно ({dis} отклонено) — тихо теряешь трафик; почини объявление/посадочную."
+    if f.check_id == "zero_impressions":
+        if lang == "en":
+            return f"«{camp}»: enabled but 0 impressions — not serving (broken ads / too-narrow targeting / empty ad groups)."
+        return f"«{camp}»: включена, но 0 показов — не крутится (сломанные объявления / узкий таргет / пустые группы)."
+    if f.check_id == "adgroup_bloat":
+        n = fa.get("count", 0)
+        if lang == "en":
+            return f"{n} ad group(s) have more than {fa.get('cap', 20)} keywords (worst «{fa.get('worst_group', '')}»: {fa.get('worst_kw', 0)}) — split by theme so Quality Score isn't diluted."
+        return f"{n} групп с числом ключей больше {fa.get('cap', 20)} (худшая «{fa.get('worst_group', '')}»: {fa.get('worst_kw', 0)}) — раздели по темам, иначе размывается релевантность/Quality Score."
+    if f.check_id == "rsa_thin":
+        n = fa.get("count", 0)
+        if lang == "en":
+            return f"{n} ad group(s) have fewer than {fa.get('need', 2)} enabled RSAs (worst «{fa.get('worst_group', '')}»: {fa.get('worst_rsa', 0)}) — add responsive search ads for more reach/optimization."
+        return f"{n} групп с числом активных RSA меньше {fa.get('need', 2)} (худшая «{fa.get('worst_group', '')}»: {fa.get('worst_rsa', 0)}) — добавь адаптивные поисковые объявления."
+    if f.check_id == "no_negative_list":
+        if lang == "en":
+            return "No shared negative-keyword lists in the account — basic hygiene missing; add themed lists (competitor/jobs/free/irrelevant) to cut wasted traffic."
+        return "В аккаунте нет ни одного списка минус-слов — базовая гигиена не настроена; заведи тематические списки (конкуренты/работа/бесплатно/нерелевантное), чтобы отсечь мусорный трафик."
+    if f.check_id == "qs_low":
+        if lang == "en":
+            return f"{fa.get('count', 0)} paying keyword(s) with Quality Score ≤ {fa.get('qs_fail', 4)} (worst «{fa.get('worst_kw', '')}»: {fa.get('worst_qs', 0)}) — fix relevance/CTR/landing page or drop them."
+        return f"{fa.get('count', 0)} платящих ключей с Quality Score ≤ {fa.get('qs_fail', 4)} (худший «{fa.get('worst_kw', '')}»: {fa.get('worst_qs', 0)}) — подними релевантность/CTR/посадочную или убери."
+    if f.check_id == "qs_ctr_below":
+        if lang == "en":
+            return f"{fa.get('share', 0)}% of keywords have below-average Expected CTR — rewrite ads to match search intent."
+        return f"{fa.get('share', 0)}% ключей с ожидаемым CTR ниже среднего — перепиши объявления под интент запроса."
+    if f.check_id == "qs_relevance_below":
+        if lang == "en":
+            return f"{fa.get('share', 0)}% of keywords have below-average Ad Relevance — align ad copy with the keyword themes."
+        return f"{fa.get('share', 0)}% ключей с релевантностью объявления ниже среднего — согласуй тексты с темами ключей."
+    if f.check_id == "qs_landing_below":
+        if lang == "en":
+            return f"{fa.get('share', 0)}% of keywords have below-average Landing Page Experience — improve page speed/relevance/mobile UX."
+        return f"{fa.get('share', 0)}% ключей со слабым опытом посадочной — улучши скорость/релевантность/мобильную вёрстку страницы."
+    if f.check_id == "manual_bid_high_vol":
+        if lang == "en":
+            return f"«{camp}»: {fa.get('conversions', 0)} conversions on manual bidding ({fa.get('strategy_type', '')}) — Smart Bidding would optimize better at this volume."
+        return f"«{camp}»: {fa.get('conversions', 0)} конверсий на ручной стратегии ({fa.get('strategy_type', '')}) — при таком объёме Smart Bidding отработает лучше."
+    if f.check_id == "geo_no_conv":
+        reg = fa.get("region", "")
+        if lang == "en":
+            return f"«{camp}» / {reg}: {_money(fa.get('cost', 0), cur)}, {fa.get('clicks', 0)} clicks, 0 conversions — exclude or bid down this location."
+        return f"«{camp}» / {reg}: {_money(fa.get('cost', 0), cur)}, {fa.get('clicks', 0)} кликов, 0 конверсий — исключи локацию или срежь ставку."
+    if f.check_id == "schedule_waste":
+        if lang == "en":
+            return f"{fa.get('count', 0)} time slot(s) spend {_money(fa.get('cost', 0), cur)} with 0 conversions (worst {fa.get('worst_day', '')} @ {fa.get('worst_hour', 0)}h) — adjust ad schedule/bids by time."
+        return f"{fa.get('count', 0)} временных ячеек тратят {_money(fa.get('cost', 0), cur)} при 0 конверсий (худшая {fa.get('worst_day', '')} в {fa.get('worst_hour', 0)}ч) — настрой расписание/ставки по времени."
     return camp or f.check_id
 
 
@@ -174,19 +242,39 @@ def audit_headline(result: AuditResult, lang: str = "ru") -> str:
     return s + " · /audit"
 
 
-def render_audit(result: AuditResult, lang: str = "ru", *, actions: bool = True) -> str:
+def render_audit(
+    result: AuditResult,
+    lang: str = "ru",
+    *,
+    actions: bool = True,
+    period_label: str | None = None,
+    momentary: bool = False,
+) -> str:
     """Собрать карточку аудита из AuditResult. actions=True → самодостаточная (топ-3 + дисклеймер);
     actions=False → ОБЗОР (score + семьи + Google-балл) без топ-3/дисклеймера — действия шлёт bot-слой
-    отдельными сообщениями с кнопками «применить». Всегда доступна offline (fallback)."""
+    отдельными сообщениями с кнопками «применить». period_label — подпись выбранного периода в заголовке;
+    momentary=True (аудит за произвольный ИСТОРИЧЕСКИЙ период) → баннер, что моментальные сигналы (Google-
+    балл/рекомендации/статус/модерация/ставки/конверсии) — на СЕЙЧАС, не за период. Всегда offline."""
     lang = "en" if lang == "en" else "ru"
     cur = result.currency
     labels = _FAMILY_LABEL[lang]
     lines: list[str] = []
 
+    _period = f" · {period_label}" if period_label else ""
     if lang == "en":
-        lines.append(f"🩺 Audit · Account {result.customer_id}")
+        lines.append(f"🩺 Audit · Account {result.customer_id}{_period}")
     else:
-        lines.append(f"🩺 Аудит · Аккаунт {result.customer_id}")
+        lines.append(f"🩺 Аудит · Аккаунт {result.customer_id}{_period}")
+
+    # Heartbeat: аккаунт приостановлен/отменён/закрыт — катастрофа, перекрывает всё ниже (в т.ч.
+    # «нет активности» и «почини измерение»). Ставим ПЕРВЫМ, до раннего no-activity выхода.
+    if result.account_status:
+        st = result.account_status
+        lines.append(
+            f"⛔ Account {st}: ads are not serving — this overrides everything below."
+            if lang == "en"
+            else f"⛔ Аккаунт {st}: показы остановлены — это перекрывает всё ниже."
+        )
 
     if not result.has_activity or result.score is None:
         lines.append("—")
@@ -201,6 +289,16 @@ def render_audit(result: AuditResult, lang: str = "ru", *, actions: bool = True)
             else "⚠️ Сначала почини измерение: нет активной primary-конверсии — числа ниже неполные."
         )
     lines.append(f"{result.score}/100 · {result.grade}")
+    # Аудит за произвольный исторический период: моментальные сигналы (конфигурация «на сейчас») не
+    # относятся к выбранным датам — честно помечаем, чтобы клиент не принял их за состояние периода.
+    if momentary:
+        lines.append(
+            "ℹ️ Google score, recommendations, account status, ad approvals, bid strategies and "
+            "conversion health reflect the account NOW, not the selected period."
+            if lang == "en"
+            else "ℹ️ Google-балл, рекомендации, статус аккаунта, модерация, стратегии ставок и "
+            "здоровье конверсий — на СЕЙЧАС, не за выбранный период."
+        )
     if result.optimization_score is not None:
         up = result.optimization_uplift or 0
         if lang == "en":
@@ -226,6 +324,16 @@ def render_audit(result: AuditResult, lang: str = "ru", *, actions: bool = True)
         else:
             lines.append(
                 f"💸 Под риском: {_money(result.at_risk, cur)} из {_money(result.total_spend, cur)} расхода"
+            )
+    # C: упущенная выгода — ОЦЕНКА (не потраченное). Отдельно от «под риском», явно помечена как оценка.
+    if getattr(result, "lost_opportunity", 0.0) > 0:
+        if lang == "en":
+            lines.append(
+                f"💡 Est. missed: ~{_money(result.lost_opportunity, cur)} in revenue lost to budget caps (estimate)"
+            )
+        else:
+            lines.append(
+                f"💡 Упущено (оценка): ~{_money(result.lost_opportunity, cur)} выручки из-за упора в бюджет"
             )
 
     # Семьи с находками — по штрафу убыв.
@@ -305,6 +413,7 @@ def _family_emoji(family: str) -> str:
         "rsa": "🟡",
         "structure": "🧱",
         "bidding": "🎯",
+        "delivery": "🚫",
         "geo": "📍",
         "assets": "🔗",
     }.get(family, "•")

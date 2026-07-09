@@ -490,3 +490,253 @@ def read_campaign_bidding(client, customer_id: str) -> list[CampaignBidding]:
             )
         )
     return out
+
+
+@dataclass
+class AdPolicyRow:
+    campaign: str
+    ad_group: str
+    ad_id: str
+    approval_status: str  # DISAPPROVED / APPROVED_LIMITED / AREA_OF_INTEREST_ONLY / APPROVED / …
+
+
+def fetch_ad_policy_health(client, customer_id: str) -> list[AdPolicyRow]:
+    """Heartbeat: модерация ENABLED-объявлений (approval_status). Impaired-статусы (дизапрув/
+    ограничение) → объявление молча не показывается — тихая потеря без расхода (флагует движок аудита).
+    Серверный фильтр `!= 'APPROVED'` режет основную массу (одобренных); точный impaired-набор
+    оставляет движок. Поля сверены по доке v24 (образец «Get all disapproved ads»). READ-ONLY."""
+    ensure_read_allowed(customer_id)
+    q = (
+        "SELECT campaign.name, ad_group.name, ad_group_ad.ad.id, "
+        "ad_group_ad.policy_summary.approval_status FROM ad_group_ad "
+        "WHERE campaign.status = 'ENABLED' AND ad_group.status = 'ENABLED' "
+        "AND ad_group_ad.status = 'ENABLED' "
+        "AND ad_group_ad.policy_summary.approval_status != 'APPROVED' "
+        "ORDER BY campaign.name LIMIT 1000"
+    )
+    out: list[AdPolicyRow] = []
+    for r in _search(client, customer_id, q):
+        out.append(
+            AdPolicyRow(
+                campaign=r.campaign.name,
+                ad_group=r.ad_group.name,
+                ad_id=str(r.ad_group_ad.ad.id),
+                approval_status=_enum_name(r.ad_group_ad.policy_summary.approval_status),
+            )
+        )
+    return out
+
+
+def fetch_account_status(client, customer_id: str) -> str | None:
+    """Heartbeat: customer.status аккаунта (ENABLED/SUSPENDED/CANCELED/CLOSED). SUSPENDED/CANCELED/
+    CLOSED → показы остановлены (баннер-катастрофа в аудите). None при пустом ответе. READ-ONLY."""
+    ensure_read_allowed(customer_id)
+    q = "SELECT customer.status FROM customer LIMIT 1"
+    for r in _search(client, customer_id, q):
+        return _enum_name(r.customer.status)
+    return None
+
+
+@dataclass
+class AdGroupStructureRow:
+    campaign: str
+    ad_group: str
+    kw_count: int  # активных ключей в группе (структура: 5-15 норма, >20 «свалка», G03)
+    rsa_count: int  # активных Responsive Search Ad в группе (≥2 норма, <2 — тонкое покрытие)
+
+
+def fetch_adgroup_structure(client, customer_id: str) -> list[AdGroupStructureRow]:
+    """Структура ENABLED ad group: число активных ключей + RSA (D, эвристики claude-ads G03/copilot).
+    GAQL НЕ умеет COUNT/GROUP BY → тянем строки и считаем в КОДЕ по ad_group.id (два запроса:
+    ad_group_criterion для ключей, ad_group_ad для RSA). Поля публичны (сверить на TEST MCC). READ-ONLY."""
+    ensure_read_allowed(customer_id)
+    names: dict[str, tuple[str, str]] = {}  # ad_group_id → (campaign, ad_group)
+    kw: dict[str, int] = {}
+    q_kw = (
+        "SELECT ad_group.id, ad_group.name, campaign.name FROM ad_group_criterion "
+        "WHERE ad_group_criterion.type = 'KEYWORD' AND ad_group_criterion.status != 'REMOVED' "
+        "AND ad_group.status = 'ENABLED' AND campaign.status = 'ENABLED'"
+    )
+    for r in _search(client, customer_id, q_kw):
+        agid = str(r.ad_group.id)
+        names.setdefault(agid, (r.campaign.name, r.ad_group.name))
+        kw[agid] = kw.get(agid, 0) + 1
+    rsa: dict[str, int] = {}
+    q_ad = (
+        "SELECT ad_group.id, ad_group.name, campaign.name, ad_group_ad.ad.type "
+        "FROM ad_group_ad WHERE ad_group_ad.status = 'ENABLED' AND ad_group.status = 'ENABLED' "
+        "AND campaign.status = 'ENABLED'"
+    )
+    for r in _search(client, customer_id, q_ad):
+        agid = str(r.ad_group.id)
+        names.setdefault(agid, (r.campaign.name, r.ad_group.name))
+        if _enum_name(r.ad_group_ad.ad.type_) == "RESPONSIVE_SEARCH_AD":
+            rsa[agid] = rsa.get(agid, 0) + 1
+        else:
+            rsa.setdefault(agid, 0)
+    return [
+        AdGroupStructureRow(
+            campaign=names[agid][0],
+            ad_group=names[agid][1],
+            kw_count=kw.get(agid, 0),
+            rsa_count=rsa.get(agid, 0),
+        )
+        for agid in names
+    ]
+
+
+@dataclass
+class NegativeListsInfo:
+    count: int  # число ENABLED shared_set типа NEGATIVE_KEYWORDS в аккаунте
+    attached_campaigns: int  # сколько кампаний имеют привязанный негатив-список
+
+
+def fetch_negative_lists(client, customer_id: str) -> NegativeListsInfo:
+    """Списки минус-слов аккаунта (shared_set NEGATIVE_KEYWORDS) + их привязка к кампаниям (D, G14).
+    Нет списков вообще при активном keyword-трафике → красный флаг гигиены (движок аудита). member_count
+    НЕ селектим (в v24 сверить отдельно) — для сигнала достаточно факта наличия/привязки. READ-ONLY."""
+    ensure_read_allowed(customer_id)
+    q_sets = (
+        "SELECT shared_set.id FROM shared_set "
+        "WHERE shared_set.type = 'NEGATIVE_KEYWORDS' AND shared_set.status = 'ENABLED'"
+    )
+    count = sum(1 for _ in _search(client, customer_id, q_sets))
+    q_att = (
+        "SELECT campaign_shared_set.campaign FROM campaign_shared_set "
+        "WHERE campaign_shared_set.status = 'ENABLED'"
+    )
+    attached = {str(r.campaign_shared_set.campaign) for r in _search(client, customer_id, q_att)}
+    return NegativeListsInfo(count=count, attached_campaigns=len(attached))
+
+
+@dataclass
+class KeywordQualityRow:
+    campaign: str
+    ad_group: str
+    keyword: str
+    quality_score: int  # 1-10; 0 → нет данных (proto3-zero, гейтит движок аудита)
+    expected_ctr: str  # BELOW_AVERAGE/AVERAGE/ABOVE_AVERAGE (search_predicted_ctr)
+    ad_relevance: str  # creative_quality_score
+    landing_page: str  # post_click_quality_score
+    metrics: Metrics
+
+
+def fetch_keyword_quality(
+    client, customer_id: str, period, limit: int = 500
+) -> list[KeywordQualityRow]:
+    """Quality Score активных ключей + 3 компонента (Expected CTR / Ad Relevance / Landing Page) —
+    B (claude-ads G20-G24 + Hassanelsisi). quality_score часто 0 (proto3, мало данных) → гейтит движок.
+    date ТОЛЬКО в WHERE. Топ по расходу (анти-хвост). Поля публичны (сверить на TEST MCC). READ-ONLY."""
+    ensure_read_allowed(customer_id)
+    q = (
+        "SELECT campaign.name, ad_group.name, ad_group_criterion.keyword.text, "
+        "ad_group_criterion.quality_info.quality_score, "
+        "ad_group_criterion.quality_info.search_predicted_ctr, "
+        "ad_group_criterion.quality_info.creative_quality_score, "
+        "ad_group_criterion.quality_info.post_click_quality_score, "
+        f"{_METRICS_SELECT} FROM keyword_view WHERE {_where(period, None)} "
+        "AND ad_group_criterion.status = 'ENABLED' AND ad_group.status = 'ENABLED' "
+        f"AND campaign.status = 'ENABLED' ORDER BY metrics.cost_micros DESC LIMIT {int(limit)}"
+    )
+    out: list[KeywordQualityRow] = []
+    for r in _search(client, customer_id, q):
+        qi = r.ad_group_criterion.quality_info
+        out.append(
+            KeywordQualityRow(
+                campaign=r.campaign.name,
+                ad_group=r.ad_group.name,
+                keyword=r.ad_group_criterion.keyword.text,
+                quality_score=int(getattr(qi, "quality_score", 0) or 0),
+                expected_ctr=_enum_name(qi.search_predicted_ctr),
+                ad_relevance=_enum_name(qi.creative_quality_score),
+                landing_page=_enum_name(qi.post_click_quality_score),
+                metrics=_metrics(r.metrics),
+            )
+        )
+    return out
+
+
+@dataclass
+class GeoWasteRow:
+    campaign: str
+    region: str  # человекочитаемое имя локации (canonical) или id (fallback)
+    metrics: Metrics
+
+
+def _resolve_geo_names(client, customer_id: str, resource_names: set) -> dict:
+    """geo_target_constant.resource_name → canonical_name (best-effort). Сбой/пусто → {}. READ-ONLY."""
+    if not resource_names:
+        return {}
+    ids = ", ".join(f"'{rn}'" for rn in resource_names if rn)
+    if not ids:
+        return {}
+    q = (
+        "SELECT geo_target_constant.resource_name, geo_target_constant.canonical_name "
+        f"FROM geo_target_constant WHERE geo_target_constant.resource_name IN ({ids})"
+    )
+    out: dict = {}
+    try:
+        for r in _search(client, customer_id, q):
+            out[r.geo_target_constant.resource_name] = r.geo_target_constant.canonical_name
+    except Exception:  # noqa: BLE001 — имена не критичны, покажем id
+        return {}
+    return out
+
+
+def fetch_geo_waste(client, customer_id: str, period, limit: int = 200) -> list[GeoWasteRow]:
+    """Слив по ГЕО: geographic_view сегментированный ПО КАМПАНИИ и региону (A). Фильтр
+    location_type='LOCATION_OF_PRESENCE' ОБЯЗАТЕЛЕН — иначе LOP+AOI задваивают расход региона. Имя
+    региона резолвим best-effort. campaign.name → target_campaign (для дедупа: cost региона ⊂ cost
+    кампании). Поля публичны (сверить на TEST MCC). READ-ONLY."""
+    ensure_read_allowed(customer_id)
+    q = (
+        "SELECT campaign.name, segments.geo_target_region, "
+        f"{_METRICS_SELECT} FROM geographic_view "
+        f"WHERE {_where(period, None)} AND geographic_view.location_type = 'LOCATION_OF_PRESENCE' "
+        f"AND campaign.status = 'ENABLED' ORDER BY metrics.cost_micros DESC LIMIT {int(limit)}"
+    )
+    raw: list[tuple] = []
+    region_res: set = set()
+    for r in _search(client, customer_id, q):
+        res = getattr(r.segments, "geo_target_region", "") or ""
+        raw.append((r.campaign.name, res, _metrics(r.metrics)))
+        if res:
+            region_res.add(res)
+    names = _resolve_geo_names(client, customer_id, region_res)
+    return [
+        GeoWasteRow(
+            campaign=c,
+            region=names.get(res, res.split("/")[-1] if res else "—"),
+            metrics=m,
+        )
+        for c, res, m in raw
+    ]
+
+
+@dataclass
+class ScheduleCell:
+    campaign: str
+    day_of_week: str
+    hour: int
+    metrics: Metrics
+
+
+def fetch_schedule(client, customer_id: str, period, limit: int = 500) -> list[ScheduleCell]:
+    """Расписание: campaign × segments.day_of_week × segments.hour (A, heatmap час×день) — временные
+    ячейки со сливом. Поля публичны (сверить на TEST MCC). READ-ONLY."""
+    ensure_read_allowed(customer_id)
+    q = (
+        "SELECT campaign.name, segments.day_of_week, segments.hour, "
+        f"{_METRICS_SELECT} FROM campaign "
+        f"WHERE {_where(period, None)} AND campaign.status = 'ENABLED' "
+        f"ORDER BY metrics.cost_micros DESC LIMIT {int(limit)}"
+    )
+    return [
+        ScheduleCell(
+            campaign=r.campaign.name,
+            day_of_week=_enum_name(r.segments.day_of_week),
+            hour=int(getattr(r.segments, "hour", 0) or 0),
+            metrics=_metrics(r.metrics),
+        )
+        for r in _search(client, customer_id, q)
+    ]

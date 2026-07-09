@@ -23,16 +23,24 @@ async def gather_audit(
     thresholds: dict | None = None,
     target_cpa: float | None = None,
 ) -> AuditResult:
-    """Собрать отчёт + аудит-фетчеры (IS / optimization_score / конверсии / стратегии ставок) и
-    построить AuditResult. Доп-чтения best-effort (сбой одного не роняет аудит). READ-ONLY."""
+    """Собрать отчёт + аудит-фетчеры (IS / optimization_score / конверсии / стратегии ставок /
+    Heartbeat: модерация объявлений + статус аккаунта) и построить AuditResult. Доп-чтения
+    best-effort (сбой одного не роняет аудит). READ-ONLY."""
     # Ленивая загрузка: не тянем reports/ads.read на уровне модуля (audit/ должен оставаться лёгким).
     from ads.read import account_currency
     from core.resilience import run_ads_read_call
     from reports.queries import (
+        fetch_account_status,
+        fetch_ad_policy_health,
+        fetch_adgroup_structure,
         fetch_conversion_health,
+        fetch_geo_waste,
         fetch_impression_share,
+        fetch_keyword_quality,
+        fetch_negative_lists,
         fetch_optimization_score,
         fetch_recommendations,
+        fetch_schedule,
         fetch_search_terms,
         read_campaign_bidding,
     )
@@ -48,7 +56,22 @@ async def gather_audit(
 
     currency = (await _safe(account_currency, client, cid, label="audit_currency")) or ""
     # Отчёт (totals + разбивки) — базис; фетчеры аудита идут параллельно с ним.
-    report, is_rows, opt, cas, bidding, recs, st = await asyncio.gather(
+    (
+        report,
+        is_rows,
+        opt,
+        cas,
+        bidding,
+        recs,
+        st,
+        ad_policy,
+        acct_status,
+        adgroup_structure,
+        negative_lists,
+        keyword_quality,
+        geo_waste,
+        schedule,
+    ) = await asyncio.gather(
         build_account_report_async(client, cid, period, with_comparison=False, currency=currency),
         _safe(fetch_impression_share, client, cid, period, label="audit_is"),
         _safe(fetch_optimization_score, client, cid, label="audit_opt_score"),
@@ -56,11 +79,19 @@ async def gather_audit(
         _safe(read_campaign_bidding, client, cid, label="audit_bidding"),
         _safe(fetch_recommendations, client, cid, label="audit_recs"),
         _safe(fetch_search_terms, client, cid, period, label="audit_search_terms"),
+        _safe(fetch_ad_policy_health, client, cid, label="audit_ad_policy"),
+        _safe(fetch_account_status, client, cid, label="audit_account_status"),
+        _safe(fetch_adgroup_structure, client, cid, label="audit_adgroup_structure"),
+        _safe(fetch_negative_lists, client, cid, label="audit_negative_lists"),
+        _safe(fetch_keyword_quality, client, cid, period, label="audit_keyword_quality"),
+        _safe(fetch_geo_waste, client, cid, period, label="audit_geo_waste"),
+        _safe(fetch_schedule, client, cid, period, label="audit_schedule"),
     )
 
     # N1.3: какие best-effort сигналы НЕ получены (сбой → None). Пустой список ([]) — НЕ пробел:
     # чтение прошло, данных просто нет. Рендер честно покажет «недостаточно данных» вместо
-    # молчаливого «в норме» (GR8: нет данных ≠ здорово).
+    # молчаливого «в норме» (GR8: нет данных ≠ здорово). account_status — детектор катастрофы,
+    # а не «здоровье семьи»: его отсутствие НЕ пробел (в data_gaps не добавляем).
     data_gaps = [
         name
         for name, val in (
@@ -70,6 +101,12 @@ async def gather_audit(
             ("bidding", bidding),
             ("recommendations", recs),
             ("search_terms", st),
+            ("ad_policy", ad_policy),
+            ("adgroup_structure", adgroup_structure),
+            ("negative_lists", negative_lists),
+            ("keyword_quality", keyword_quality),
+            ("geo_waste", geo_waste),
+            ("schedule", schedule),
         )
         if val is None
     ]
@@ -84,5 +121,12 @@ async def gather_audit(
         optimization_score=opt,
         recommendations=recs,
         search_terms=st,
+        ad_policy=ad_policy,
+        account_status=acct_status,
         data_gaps=data_gaps,
+        adgroup_structure=adgroup_structure,
+        negative_lists=negative_lists,
+        keyword_quality=keyword_quality,
+        geo_waste=geo_waste,
+        schedule=schedule,
     )

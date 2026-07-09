@@ -962,7 +962,9 @@ async def _start_advise_picker(message: Message, *, topic: str | None = None) ->
     )
 
 
-_AUDIT_PERIOD_CACHE: dict[int, int] = {}  # период /audit переживает выбор аккаунта в пикере
+_AUDIT_PERIOD_CACHE: dict[
+    int, object
+] = {}  # значения — reports.period.Period; переживают выбор аккаунта в пикере
 _AUDIT_MAX_FINDINGS = 8  # сколько находок показываем отдельными сообщениями (анти-спам)
 
 
@@ -1035,18 +1037,18 @@ async def _target_cmd(m: Message) -> None:
         )
 
 
-async def _start_audit_picker(message: Message, *, period_days: int | None = None) -> None:
-    """Пикер аккаунта → аудит (read-only). Один доступный аккаунт → сразу прогон (без клика). Период
+async def _start_audit_picker(message: Message, *, period=None) -> None:
+    """Пикер аккаунта → аудит (read-only). Один доступный аккаунт → сразу прогон (без клика). Period
     живёт в _AUDIT_PERIOD_CACHE (переживает выбор). Переиспользует пикер /report (target='audit')."""
     chat_id = message.chat.id
     rows = await _read_account_rows(chat_id)
     _REPORT_ACCT_CACHE[chat_id] = rows
-    if period_days:
-        _AUDIT_PERIOD_CACHE[chat_id] = period_days
+    if period is not None:
+        _AUDIT_PERIOD_CACHE[chat_id] = period
     else:
         _AUDIT_PERIOD_CACHE.pop(chat_id, None)
     if len(rows) <= 1:  # только Draft/один аккаунт — сразу аудит (пикер не нужен)
-        await _audit_run(message, chat_id, period_days=period_days)
+        await _audit_run(message, chat_id, period=period)
         return
     await message.answer(
         "🩺 " + i18n.t("advise_pick_account"),
@@ -2508,6 +2510,27 @@ def _period_from_arg(arg: str | None):
             raise ValueError("дата в формате ГГГГ-ММ-ДД, напр. 2026-06-01") from e
         return custom(ds[0], ds[0]) if len(ds) == 1 else custom(min(ds), max(ds))
     return from_preset(s)
+
+
+def _audit_period_from_arg(arg: str | None):
+    """Аргумент /audit → Period. Пусто → последние 30 дн (rolling). Голое число N → последние N дн
+    (кламп 1..365, как раньше). Иначе — свободная фраза (parse_period_text: «июнь 2025», «прошлый
+    месяц», ISO-диапазон, «с 1 по 15 июня», «вчера») → пресеты/ISO (_period_from_arg). Нераспознано →
+    30 дн (fail-soft, аудит всё равно даёт полезную карточку). НИКОГДА не бросает — путь /audit read-only."""
+    from reports.period import last_n_days, parse_period_text
+
+    s = (arg or "").strip()
+    if not s:
+        return last_n_days(30)
+    if s.isdigit():
+        return last_n_days(max(1, min(int(s), 365)))
+    p = parse_period_text(s)
+    if p is not None:
+        return p
+    try:
+        return _period_from_arg(s)
+    except ValueError:
+        return last_n_days(30)
 
 
 def _scope_note(campaign_name: str | None) -> str:
@@ -5184,7 +5207,7 @@ async def _audit_run(
     chat_id: int,
     *,
     account: str | None = None,
-    period_days: int | None = None,
+    period=None,
     source: str = "audit",
 ) -> None:
     """/audit — health-аудит аккаунта: НАШ score (0-100) + семьи находок + топ-3 действий + нативный
@@ -5196,7 +5219,7 @@ async def _audit_run(
     from audit.collect import gather_audit
     from audit.render import render_audit
     from core.access import resolve_read_account
-    from reports.period import last_n_days
+    from reports.period import label_i18n, last_n_days
 
     try:  # тот же резолв, что /report и _advise: read-замок × пер-юзер грант (fail-closed)
         acct = await resolve_read_account(chat_id, account)
@@ -5214,14 +5237,17 @@ async def _audit_run(
             return
         acct = await _active_read_account(chat_id)
     lang = i18n.get_lang(chat_id)
-    days = period_days if isinstance(period_days, int) and period_days > 0 else 30
+    if period is None:
+        period = last_n_days(30)
+    days = period.days
+    is_custom = getattr(period, "kind", "") == "custom"  # произвольный историч. период (не rolling)
+    plabel = label_i18n(period, lang)
     target_cpa = await _load_target_cpa(
         chat_id, acct
     )  # /target: разблокирует 3×-Kill (пауза дорогих)
     async with ux.typing_action(target):
         try:
             client = await build_client_async(acct)
-            period = last_n_days(days)
             result = await gather_audit(client, acct, period, target_cpa=target_cpa)
         except Exception as e:  # сеть/доступ/SDK — не роняем денежный путь, показываем ошибку
             await target.answer(i18n.t("advise_error", err=ux.err_text(e)))
@@ -5230,13 +5256,27 @@ async def _audit_run(
     # карточка — чистый текст (имена кампаний от клиента), HTML-парсер не нужен.
     if not result.has_activity:
         hint = _live_account_hint(acct)
-        text = render_audit(result, lang)
+        text = render_audit(result, lang, period_label=plabel, momentary=is_custom)
         await target.answer(text + (("\n\n" + hint) if hint else ""), parse_mode=None)
         return
-    # N1.1: снапшот health-score в ЛОКАЛЬНУЮ БД (fail-open) + честная Δ к прошлому прогону.
-    trend_line = await _audit_trend_line(result, client, acct, days, lang)
+    # N1.1: снапшот health-score в ЛОКАЛЬНУЮ БД (fail-open) + честная Δ к прошлому прогону. Аудит за
+    # произвольный ИСТОРИЧЕСКИЙ период (kind=custom) НЕ пишем в снапшот и НЕ считаем тренд: ключ
+    # (customer, сегодня, period_days) склобберил бы rolling-окно и дал ложную Δ (историч. vs скользящее
+    # бессмысленно). Только rolling (last_n/mtd, кончаются вчера) идут в тренд.
+    if is_custom:
+        trend_line = (
+            "\n📊 Trend: n/a (custom period)"
+            if lang == "en"
+            else "\n📊 Тренд: н/д (произвольный период)"
+        )
+    else:
+        trend_line = await _audit_trend_line(result, client, acct, days, lang)
     # Обзор (score + семьи + Google-балл) БЕЗ топ-3 — действия идут отдельными сообщениями с кнопками.
-    await target.answer(render_audit(result, lang, actions=False) + trend_line, parse_mode=None)
+    await target.answer(
+        render_audit(result, lang, actions=False, period_label=plabel, momentary=is_custom)
+        + trend_line,
+        parse_mode=None,
+    )
     # P3: агентный НАРРАТИВ поверх детерминированной карточки (числа = КОД, разбор = LLM). READ-ONLY,
     # multi-turn (может уточнить кампанию/поисковые запросы drill-инструментами). Сбой/timeout/бюджет-
     # стоп/выдуманное число ⇒ None → просто нет разбора (карточка выше уже показана). Конфиг-гейт.

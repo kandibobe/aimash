@@ -12,18 +12,25 @@ FAMILY_WEIGHT суммируются в 100 (полный провал всех 
 
 from __future__ import annotations
 
-# Макс. штраф score НА СЕМЬЮ проверок (Σ = 100). Семьи без реализованных в P1 проверок
-# (bidding/geo/assets) присутствуют как задел будущих фаз — без находок дают 0 штрафа.
+# Макс. штраф score НА СЕМЬЮ проверок (Σ = 100). Семьи без реализованных проверок дают 0 штрафа.
+# Heartbeat (2026-07): добавлена семья delivery=8 (дизапрувы + 0-показов — тихая потеря без расхода).
+# Экспертное расширение (2026-07-09): гео стало ДЕНЕЖНОЙ семьёй (geo_no_conv/schedule_waste), rsa/
+# structure принимают Quality Score / SKAG / RSA-покрытие / brand-isolation. Ре-баланс профинансирован
+# из bidding (broad_unmanaged — слабейшая evidence) и пустого assets (задел без проверок → честный 0):
+# geo 2→8, rsa 6→7, structure 4→5; доноры delivery 8→6, bidding 8→4, assets 2→0. Σ доноров −8 = Σ
+# получателей +8. waste/conversion_tracking/keywords НЕ тронуты → golden-баллы A–F не сдвигаются. Смена
+# вектора ротирует SCORE_MODEL_VERSION (веса в хэше) → тренд честно «н/д» через версию (N1.0a).
 FAMILY_WEIGHT: dict[str, float] = {
     "waste": 30.0,
     "conversion_tracking": 20.0,
-    "budget": 12.0,
-    "bidding": 10.0,
+    "budget": 10.0,
     "keywords": 10.0,
-    "rsa": 8.0,
-    "structure": 6.0,
-    "geo": 2.0,
-    "assets": 2.0,
+    "geo": 8.0,
+    "rsa": 7.0,
+    "delivery": 6.0,
+    "structure": 5.0,
+    "bidding": 4.0,
+    "assets": 0.0,
 }
 
 # Множитель важности находки. warning доминирует, info лишь модулирует.
@@ -55,9 +62,18 @@ DEFAULT_AUDIT_THRESHOLDS: dict[str, float] = {
     "low_ctr_factor": 0.5,  # CTR < factor × средний по аккаунту → освежить тексты
     "single_campaign_min_spend": 10.0,  # единственная ENABLED-кампания с расходом ≥ порога
     "no_conv_min_spend": 10.0,  # аккаунт: расход есть, конверсий 0 → подозрение на трекинг
-    "is_lost_min": 0.10,  # потеря impression-share (по бюджету/рангу) ≥ 10% → флаг
+    "is_lost_min": 0.10,  # потеря impression-share ПО БЮДЖЕТУ ≥ 10% → флаг (North Country/Hassanelsisi)
+    "is_rank_lost_min": 0.20,  # C: потеря IS ПО РАНГУ ≥ 20% → флаг (ранг чинится качеством, не бюджетом)
+    "is_search_floor": 0.05,  # C: пол search_is для оценки упущенного (иначе impr/search_is → взрыв)
     "is_data_tolerance": 0.02,  # |Σ долей − 1.0| ≤ tol → данные полны (иначе proto3-zero «нет данных»)
     "broad_min_spend": 5.0,  # N1.2: BROAD-ключи без Smart Bidding — флаг от этого расхода на кампанию
+    "kw_per_group_max": 20,  # D: >N активных ключей в группе → «свалка» (G03: ≤10 норма, >20 fail)
+    "rsa_min_per_group": 2,  # D: <N активных RSA в группе → тонкое покрытие (North Country ≥2-3)
+    "qs_fail": 4,  # B: Quality Score ≤ N (при cost ≥ kw_min_spend) → низкий (claude-ads G20: ≤4 fail)
+    "qs_component_below_pct": 0.35,  # B: доля ключей с компонентом QS «ниже среднего» ≥ N → флаг (G22-24)
+    "smart_bid_min_conv": 30,  # bidding: ручная стратегия при > N конв/период → Smart Bidding лучше (G40)
+    "geo_min_spend": 20.0,  # A: регион с расходом ≥ N и 0 конверсий → слив гео (North Country)
+    "schedule_min_spend": 20.0,  # A: час×день с расходом ≥ N и 0 конверсий → слив по расписанию
 }
 
 
@@ -65,7 +81,9 @@ DEFAULT_AUDIT_THRESHOLDS: dict[str, float] = {
 # автоматически (audit.engine.compute_score_model_version), но СЕМАНТИКУ тела проверки (формулу
 # at_risk, условия срабатывания) хэш не видит. Правишь смысл существующего чека БЕЗ смены его
 # check_id/family/severity/порогов → БАМПНИ эпоху, иначе тренд покажет ложную дельту клиенту.
-SCORE_MODEL_EPOCH: int = 1
+# Эпоха 2 (2026-07-09): экспертное расширение — новый механизм score_intensity (упущенная выгода IS
+# влияет на балл при at_risk=0) + семантика усиленных чеков (high_cpa 2.0→1.5× и т.п.) хэшу не видна.
+SCORE_MODEL_EPOCH: int = 2
 
 
 def grade_for(score: float | None) -> str:

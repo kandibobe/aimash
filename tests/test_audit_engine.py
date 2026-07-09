@@ -185,6 +185,198 @@ def test_impression_share_budget_vs_rank_and_nodata():
     assert not any(f.target_campaign == "NoData-Camp" for f in res.findings)
 
 
+def test_is_lost_revenue_estimate_scores_via_intensity_not_at_risk():
+    """C: кампания С конверсиями упирается в бюджет → ОЦЕНКА упущенной выручки. Вклад в score через
+    score_intensity (не at_risk — инвариант at_risk ≤ расход и headline не задваиваются). lost_opportunity
+    показывается отдельным числом. Без конверсий / ненадёжного search_is → info is_budget_constrained."""
+    totals = Metrics(
+        impressions=2000, clicks=200, cost_micros=1_000_000_000, conversions=10
+    )  # acct_cpa 100
+    rows = [
+        _campaign("Constrained", 500, 100, 5),  # конвертит → есть способность
+        _campaign("Fine", 500, 100, 5),
+    ]
+    # search_is 0.5, budget-lost 0.4 → lost_conv = 5×0.4/0.5 = 4; value=acct_cpa 100 → lost_rev=400
+    res = build_audit(_report(totals, rows), is_rows=[_is("Constrained", 0.5, 0.4, 0.1)])
+    f = next(f for f in res.findings if f.check_id == "is_lost_revenue")
+    assert f.facts["lost_conv"] == 4.0 and f.facts["lost_revenue"] == 400.0
+    assert f.at_risk == 0.0  # инвариант: упущенное НЕ в at_risk
+    assert res.at_risk == 0.0 and res.lost_opportunity == 400.0
+    assert f.severity == "warning" and f.one_tap is False
+    # score среагировал (budget вес 10, intensity 400/1000=0.4 → штраф 4 → 96), но БЕЗ is_rows — 100
+    assert res.score == 96
+    assert build_audit(_report(totals, rows)).score == 100
+    # search_is=0 (Σ≠1) → нет данных, молчим; кампания без конверсий → info, не оценка
+    quiet = build_audit(_report(totals, rows), is_rows=[_is("Constrained", 0.0, 0.0, 0.0)])
+    assert not any(f.check_id == "is_lost_revenue" for f in quiet.findings)
+    solo = [_campaign("NoConv", 1000, 100, 0)]
+    noconv = build_audit(
+        _report(
+            Metrics(impressions=2000, clicks=100, cost_micros=1_000_000_000, conversions=0), solo
+        ),
+        is_rows=[_is("NoConv", 0.5, 0.4, 0.1)],
+    )
+    assert any(f.check_id == "is_budget_constrained" for f in noconv.findings)
+    assert not any(f.check_id == "is_lost_revenue" for f in noconv.findings)
+
+
+def test_structure_checks_bloat_thin_and_no_negatives():
+    """D: adgroup_bloat (>20 ключей), rsa_thin (<2 RSA), no_negative_list (0 списков при трафике).
+    Все info/неденежные/не one-tap; нет данных структуры/списков → молчим (fail-safe)."""
+    totals = Metrics(impressions=3000, clicks=300, cost_micros=1_000_000_000, conversions=5)
+    rows = [_campaign("Main", 1000, 300, 5)]  # конвертит → без spend_no_conv, но трафик есть
+    ag = [
+        SimpleNamespace(campaign="Main", ad_group="Bloated", kw_count=35, rsa_count=1),
+        SimpleNamespace(campaign="Main", ad_group="Ok", kw_count=8, rsa_count=3),
+    ]
+    res = build_audit(
+        _report(totals, rows),
+        adgroup_structure=ag,
+        negative_lists=SimpleNamespace(count=0, attached_campaigns=0),
+    )
+    ids = {f.check_id: f for f in res.findings}
+    assert (
+        ids["adgroup_bloat"].facts["worst_kw"] == 35 and ids["adgroup_bloat"].family == "structure"
+    )
+    assert ids["rsa_thin"].facts["worst_rsa"] == 1 and ids["rsa_thin"].family == "rsa"
+    assert ids["no_negative_list"].family == "keywords"
+    for cid in ("adgroup_bloat", "rsa_thin", "no_negative_list"):
+        assert ids[cid].severity == "info" and ids[cid].at_risk == 0.0 and ids[cid].one_tap is False
+    # нет данных структуры/списков → молчим (fail-safe)
+    quiet = build_audit(_report(totals, rows))
+    assert not any(
+        f.check_id in ("adgroup_bloat", "rsa_thin", "no_negative_list") for f in quiet.findings
+    )
+    # список минус-слов есть → no_negative_list молчит
+    ok = build_audit(
+        _report(totals, rows), negative_lists=SimpleNamespace(count=2, attached_campaigns=1)
+    )
+    assert not any(f.check_id == "no_negative_list" for f in ok.findings)
+
+
+def _kq(kw, qs, ctr, rel, lp, cost=100.0, campaign="Main"):
+    return SimpleNamespace(
+        campaign=campaign,
+        ad_group="grp",
+        keyword=kw,
+        quality_score=qs,
+        expected_ctr=ctr,
+        ad_relevance=rel,
+        landing_page=lp,
+        metrics=Metrics(
+            impressions=500, clicks=50, cost_micros=int(cost * 1_000_000), conversions=1
+        ),
+    )
+
+
+def test_quality_score_low_and_component_decomposition():
+    """B: qs_low (QS ≤ 4 при расходе); компоненты qs_ctr/relevance/landing_below (доля «ниже среднего»
+    ≥ 35%). proto3-zero QS не учитывается; мелкий расход отсекается; нет данных → молчим. Всё info/rsa."""
+    totals = Metrics(impressions=3000, clicks=300, cost_micros=1_000_000_000, conversions=5)
+    rows = [_campaign("Main", 1000, 300, 5)]
+    kq = [
+        _kq("cheap junk", 2, "BELOW_AVERAGE", "BELOW_AVERAGE", "AVERAGE"),
+        _kq("weak", 4, "BELOW_AVERAGE", "AVERAGE", "AVERAGE"),
+        _kq("good", 8, "ABOVE_AVERAGE", "ABOVE_AVERAGE", "ABOVE_AVERAGE"),
+        _kq("nodata", 0, "AVERAGE", "AVERAGE", "AVERAGE"),  # proto3-zero → не учитываем
+        _kq(
+            "tiny", 1, "BELOW_AVERAGE", "BELOW_AVERAGE", "BELOW_AVERAGE", cost=0.5
+        ),  # мелочь → отсекаем
+    ]
+    res = build_audit(_report(totals, rows), keyword_quality=kq)
+    ids = {f.check_id: f for f in res.findings}
+    # учтено 3 ключа (QS>0 и cost≥3): cheap(2), weak(4), good(8)
+    assert ids["qs_low"].facts["count"] == 2 and ids["qs_low"].facts["worst_qs"] == 2
+    # CTR below: cheap+weak = 2/3 = 67% ≥ 35% → флаг
+    assert "qs_ctr_below" in ids and ids["qs_ctr_below"].facts["share"] == 67
+    # relevance below: только cheap = 1/3 = 33% < 35% → нет флага
+    assert "qs_relevance_below" not in ids
+    for cid in ("qs_low", "qs_ctr_below"):
+        assert ids[cid].family == "rsa" and ids[cid].severity == "info" and ids[cid].at_risk == 0.0
+    # нет данных QS → молчим (fail-safe)
+    quiet = build_audit(_report(totals, rows))
+    assert not any(f.check_id.startswith("qs_") for f in quiet.findings)
+
+
+def test_manual_bid_high_vol_flags_manual_at_scale():
+    """Bidding (G40): ENABLED-кампания на ручной стратегии с >30 конв → совет Smart Bidding. Smart-
+    стратегия / мало конверсий / нет данных о стратегии → молчим. info/неденежное/не one-tap."""
+    totals = Metrics(impressions=5000, clicks=500, cost_micros=1_000_000_000, conversions=50)
+    rows = [
+        _campaign("ManualBig", 600, 300, 40),  # ручная, 40 конв → флаг
+        _campaign("ManualSmall", 200, 100, 10),  # ручная, 10 конв → нет (≤30)
+        _campaign("Smart", 200, 100, 40),  # Smart → нет, несмотря на объём
+    ]
+    bidding = [
+        SimpleNamespace(name="ManualBig", strategy_type="MANUAL_CPC", target_cpa=None),
+        SimpleNamespace(name="ManualSmall", strategy_type="MANUAL_CPC", target_cpa=None),
+        SimpleNamespace(name="Smart", strategy_type="MAXIMIZE_CONVERSIONS", target_cpa=None),
+    ]
+    res = build_audit(_report(totals, rows), bidding=bidding)
+    mb = [f for f in res.findings if f.check_id == "manual_bid_high_vol"]
+    assert len(mb) == 1 and mb[0].target_campaign == "ManualBig"
+    assert mb[0].family == "bidding" and mb[0].severity == "info"
+    assert mb[0].at_risk == 0.0 and mb[0].one_tap is False
+    # нет данных о стратегии → молчим (fail-safe)
+    assert not any(
+        f.check_id == "manual_bid_high_vol" for f in build_audit(_report(totals, rows)).findings
+    )
+
+
+def _geo(campaign, region, cost, clicks, conv):
+    return SimpleNamespace(
+        campaign=campaign,
+        region=region,
+        metrics=Metrics(
+            impressions=1000, clicks=clicks, cost_micros=int(cost * 1_000_000), conversions=conv
+        ),
+    )
+
+
+def _cell(campaign, day, hour, cost, clicks, conv):
+    return SimpleNamespace(
+        campaign=campaign,
+        day_of_week=day,
+        hour=hour,
+        metrics=Metrics(
+            impressions=500, clicks=clicks, cost_micros=int(cost * 1_000_000), conversions=conv
+        ),
+    )
+
+
+def test_geo_no_conv_money_dedup_and_schedule_waste():
+    """A: geo_no_conv — денежная (at_risk=cost, семья geo), дедуп cost региона ⊂ cost кампании (не
+    задваивает spend_no_conv). schedule_waste — info/at_risk=0. Нет данных → молчим (fail-safe)."""
+    totals = Metrics(impressions=4000, clicks=400, cost_micros=1_000_000_000, conversions=8)
+    rows = [
+        _campaign("Search", 500, 200, 8),
+        _campaign("Other", 500, 200, 0),
+    ]  # Other → spend_no_conv 500
+    geo = [
+        _geo("Search", "Kyiv", 60, 100, 0),  # $60, 0 конв → флаг
+        _geo("Search", "Lviv", 10, 50, 0),  # $10 < 20 → нет
+        _geo("Search", "Odesa", 40, 80, 3),  # конвертит → нет
+    ]
+    res = build_audit(_report(totals, rows), geo_waste=geo)
+    g = [f for f in res.findings if f.check_id == "geo_no_conv"]
+    assert len(g) == 1 and g[0].facts["region"] == "Kyiv" and g[0].at_risk == 60.0
+    assert g[0].family == "geo" and g[0].severity == "warning" and g[0].one_tap is False
+    assert g[0].spend_segment == "geo::Search::Kyiv"
+    # дедуп: geo Kyiv ($60) ⊂ Search ($500, конвертит) + Other spend_no_conv ($500) = 560 ≤ total 1000
+    assert res.at_risk == 560.0
+    assert not any(f.check_id == "geo_no_conv" for f in build_audit(_report(totals, rows)).findings)
+    # schedule_waste
+    sched = [
+        _cell("Search", "MONDAY", 3, 25, 30, 0),  # $25, 0 конв → флаг
+        _cell("Search", "TUESDAY", 14, 40, 50, 2),  # конвертит → нет
+    ]
+    res2 = build_audit(_report(totals, rows), schedule=sched)
+    sw = [f for f in res2.findings if f.check_id == "schedule_waste"]
+    assert len(sw) == 1 and sw[0].at_risk == 0.0
+    assert sw[0].family == "geo" and sw[0].severity == "info"
+    assert sw[0].facts["worst_hour"] == 3 and sw[0].facts["count"] == 1
+
+
 def test_conversion_tracking_with_live_actions():
     """С живыми conversion_action: нет активных → no_conversion_tracking; есть, но 0 конв → zero_conversions;
     есть и конверсии есть → тихо."""
@@ -390,15 +582,24 @@ def test_money_findings_never_one_tap():
             Metrics(impressions=1000, clicks=150, cost_micros=400_000000, conversions=9),
         ),
     ]
-    is_rows = [_is("Expensive", 0.5, 0.4, 0.1)]  # budget-constrained
+    is_rows = [
+        _is("Expensive", 0.5, 0.4, 0.1)
+    ]  # budget-lost + у Expensive есть конверсии → is_lost_revenue
     res = build_audit(_report(totals, rows), is_rows=is_rows)
-    money_kinds = {"high_cpa", "budget_imbalance", "is_budget_constrained", "is_rank_constrained"}
+    money_kinds = {
+        "high_cpa",
+        "budget_imbalance",
+        "is_budget_constrained",
+        "is_lost_revenue",
+        "is_rank_constrained",
+    }
     for f in res.findings:
         if f.check_id in money_kinds:
             assert f.one_tap is False
             assert f.suggested_operation is None
     assert any(f.check_id == "high_cpa" for f in res.findings)
-    assert any(f.check_id == "is_budget_constrained" for f in res.findings)
+    # Expensive конвертит (1 конв) и упирается в бюджет → оценка упущенной выручки (не is_budget_constrained)
+    assert any(f.check_id == "is_lost_revenue" for f in res.findings)
 
 
 # ── N1.0b: golden-МАТРИЦА по всем grade-бэндам + снапшот полного вектора весов ────────
@@ -499,13 +700,14 @@ def test_weight_vector_snapshot_pins_full_model():
     assert FAMILY_WEIGHT == {
         "waste": 30.0,
         "conversion_tracking": 20.0,
-        "budget": 12.0,
-        "bidding": 10.0,
+        "budget": 10.0,
         "keywords": 10.0,
-        "rsa": 8.0,
-        "structure": 6.0,
-        "geo": 2.0,
-        "assets": 2.0,
+        "geo": 8.0,
+        "rsa": 7.0,
+        "delivery": 6.0,
+        "structure": 5.0,
+        "bidding": 4.0,
+        "assets": 0.0,
     }
     assert sum(FAMILY_WEIGHT.values()) == 100.0
     assert SEVERITY_MULT == {"warning": 1.0, "info": 0.4}
@@ -524,8 +726,17 @@ def test_weight_vector_snapshot_pins_full_model():
         "single_campaign_min_spend": 10.0,
         "no_conv_min_spend": 10.0,
         "is_lost_min": 0.10,
+        "is_rank_lost_min": 0.20,
+        "is_search_floor": 0.05,
         "is_data_tolerance": 0.02,
         "broad_min_spend": 5.0,
+        "kw_per_group_max": 20,
+        "rsa_min_per_group": 2,
+        "qs_fail": 4,
+        "qs_component_below_pct": 0.35,
+        "smart_bid_min_conv": 30,
+        "geo_min_spend": 20.0,
+        "schedule_min_spend": 20.0,
     }
 
 
@@ -750,6 +961,122 @@ async def test_gather_audit_records_data_gaps(monkeypatch):
     monkeypatch.setattr("core.resilience.run_ads_read_call", fake_run)
     res = await gather_audit(object(), "1", None)
     assert set(res.data_gaps) == {"impression_share", "bidding"}
+
+
+# ── Heartbeat: дизапрувы / 0-показов / приостановка аккаунта (delivery, все НЕденежные) ──
+def _policy(campaign, ad_group, ad_id, status):
+    return SimpleNamespace(
+        campaign=campaign, ad_group=ad_group, ad_id=ad_id, approval_status=status
+    )
+
+
+def test_ads_disapproved_per_campaign_prose_only():
+    totals = Metrics(impressions=3000, clicks=300, cost_micros=1_000_000_000, conversions=5)
+    rows = [_campaign("Brand", 500, 100, 5), _campaign("Generic", 500, 200, 5, imps=2000)]
+    ap = [
+        _policy("Brand", "g1", "1", "DISAPPROVED"),
+        _policy("Brand", "g1", "2", "APPROVED_LIMITED"),
+        _policy("Brand", "g2", "3", "AREA_OF_INTEREST_ONLY"),
+        _policy("Generic", "g3", "4", "APPROVED"),  # одобрено → не в счёт
+    ]
+    res = build_audit(_report(totals, rows), ad_policy=ap)
+    f = next(f for f in res.findings if f.check_id == "ads_disapproved")
+    assert f.family == "delivery"
+    assert f.at_risk == 0.0 and res.at_risk == 0.0  # НЕденежная — headline чист
+    assert f.one_tap is False and f.suggested_operation is None
+    assert f.facts["campaign"] == "Brand"
+    assert f.facts["count"] == 3 and f.facts["disapproved"] == 1  # per-campaign агрегат
+    assert not any(ff.target_campaign == "Generic" for ff in res.findings)
+
+
+def test_ads_disapproved_silent_without_policy_or_all_approved():
+    totals = Metrics(impressions=3000, clicks=300, cost_micros=1_000_000_000, conversions=5)
+    rows = [_campaign("Brand", 500, 100, 5), _campaign("Generic", 500, 200, 5, imps=2000)]
+    # None → сигнал не прочитан (fail-safe): молчим
+    assert not any(
+        f.check_id == "ads_disapproved" for f in build_audit(_report(totals, rows)).findings
+    )
+    # все APPROVED → молчим
+    ap = [_policy("Brand", "g1", "1", "APPROVED")]
+    assert not any(
+        f.check_id == "ads_disapproved"
+        for f in build_audit(_report(totals, rows), ad_policy=ap).findings
+    )
+
+
+def test_zero_impressions_enabled_silent_campaign():
+    totals = Metrics(impressions=3000, clicks=300, cost_micros=500_000_000, conversions=5)
+    rows = [
+        _campaign("Live", 500, 300, 5, imps=3000),
+        (("Silent", "ENABLED"), Metrics(impressions=0, clicks=0, cost_micros=0, conversions=0)),
+    ]
+    res = build_audit(_report(totals, rows))
+    f = next(f for f in res.findings if f.check_id == "zero_impressions")
+    assert f.family == "delivery" and f.target_campaign == "Silent"
+    assert f.at_risk == 0.0 and f.one_tap is False
+
+
+def test_zero_impressions_guards_and_status():
+    # мёртвый аккаунт (totals.impressions == 0) → не флагаем (иначе весь Draft красный)
+    dead = Metrics(impressions=0, clicks=0, cost_micros=0, conversions=0)
+    rows = [(("Silent", "ENABLED"), Metrics(impressions=0, clicks=0, cost_micros=0, conversions=0))]
+    assert build_audit(_report(dead, rows)).findings == []  # (нет активности → ранний выход)
+    # PAUSED-кампания с 0 показов → не флагаем (её и не должно крутить)
+    totals = Metrics(impressions=3000, clicks=300, cost_micros=500_000_000, conversions=5)
+    rows2 = [
+        _campaign("Live", 500, 300, 5, imps=3000),
+        (("Paused", "PAUSED"), Metrics(impressions=0, clicks=0, cost_micros=0, conversions=0)),
+    ]
+    assert not any(
+        f.check_id == "zero_impressions" for f in build_audit(_report(totals, rows2)).findings
+    )
+    # регресс: golden не приобрёл zero_impressions (все кампании с показами)
+    g = build_audit(
+        _report(
+            Metrics(impressions=3000, clicks=300, cost_micros=1_000_000_000, conversions=5),
+            [_campaign("Brand", 500, 100, 0), _campaign("Generic", 500, 200, 5, imps=2000)],
+        )
+    )
+    assert [f.check_id for f in g.findings] == ["spend_no_conv"]
+
+
+def test_account_status_banner_over_score_not_suppressed():
+    from audit.render import render_audit
+
+    totals = Metrics(impressions=3000, clicks=300, cost_micros=1_000_000_000, conversions=5)
+    rows = [_campaign("Brand", 500, 100, 0), _campaign("Generic", 500, 200, 5, imps=2000)]
+    # активный статус / None → баннера нет
+    assert build_audit(_report(totals, rows), account_status="ENABLED").account_status is None
+    assert build_audit(_report(totals, rows)).account_status is None
+    # SUSPENDED → баннер НАД score, score НЕ подавлен
+    res = build_audit(_report(totals, rows), account_status="SUSPENDED")
+    assert res.account_status == "SUSPENDED" and res.score == 85
+    card = render_audit(res, "ru")
+    assert "показы остановлены" in card
+    assert card.index("показы остановлены") < card.index(f"{res.score}/100")
+    # баннер и на мёртвом аккаунте (suspension объясняет отсутствие активности)
+    dead = build_audit(_report(Metrics(), []), account_status="CANCELED")
+    assert dead.account_status == "CANCELED" and dead.score is None
+    assert "показы остановлены" in render_audit(dead, "ru")
+
+
+def test_delivery_data_gap_not_claimed_healthy():
+    from audit.render import render_audit
+
+    totals = Metrics(impressions=3000, clicks=300, cost_micros=1_000_000_000, conversions=5)
+    rows = [_campaign("Brand", 500, 100, 0), _campaign("Generic", 500, 200, 5, imps=2000)]
+    # ad_policy упал (None → data gap) → delivery НЕ «в норме», сигнал — ℹ️
+    res = build_audit(
+        _report(totals, rows),
+        search_terms=[],
+        is_rows=[],
+        conversion_actions=[SimpleNamespace(status="ENABLED", primary_for_goal=True, category="X")],
+        data_gaps=["ad_policy"],
+    )
+    card = render_audit(res, "ru", actions=False)
+    assert "Недостаточно данных" in card and "модерация объявлений" in card
+    ok_line = next((line for line in card.splitlines() if line.startswith("✅")), "")
+    assert "Показ и модерация" not in ok_line
 
 
 def test_audit_never_imports_mutations():

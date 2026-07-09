@@ -915,19 +915,14 @@ async def advise_cmd(m: bm.Message) -> None:
 
 @bm.dp.message(bm.Command("audit"))
 async def audit_cmd(m: bm.Message) -> None:
-    """/audit [дней] — health-аудит активного аккаунта: наш score (0-100) + что чинить (по деньгам) +
-    нативный Google optimization_score. READ-ONLY — ничего не меняет; исполнение любого совета идёт
-    отдельной командой через confirm-гейт. Аккаунт — активный чтения (composite read-замок × грант)."""
-    import re
-
+    """/audit [период] — health-аудит активного аккаунта: наш score (0-100) + что чинить (по деньгам) +
+    нативный Google optimization_score. Период: число дней (по умолч. 30), «июнь 2025», «прошлый месяц»,
+    ISO-диапазон ГГГГ-ММ-ДД … ГГГГ-ММ-ДД, «вчера», «с 1 по 15 июня». READ-ONLY — ничего не меняет;
+    исполнение любого совета идёт отдельной командой через confirm-гейт. Аккаунт — активный чтения."""
     parts = (m.text or "").split(maxsplit=1)
-    days = None
-    if len(parts) > 1:
-        mm = re.search(r"\d+", parts[1])
-        if mm:
-            days = max(1, min(int(mm.group()), 365))
+    period = bm._audit_period_from_arg(parts[1] if len(parts) > 1 else None)
     # >1 аккаунта чтения → пикер (аудит на выбранном); 1 аккаунт → сразу прогон.
-    await bm._start_audit_picker(m, period_days=days)
+    await bm._start_audit_picker(m, period=period)
 
 
 @bm.dp.message(bm.Command("target"))
