@@ -13,6 +13,18 @@ from openpyxl.utils import get_column_letter
 
 from ads.keyword_plan import KeywordIdea, seasonality_sparkline
 from keywords.cluster import Cluster
+from reports.safe_cell import safe_row  # A9: защита от формула-инъекции в ячейках
+
+
+def _append(ws, row) -> None:
+    """A9: ws.append с обезвреживанием ячеек (safe_row) — имена/ключи из данных клиента."""
+    ws.append(safe_row(row))
+
+
+def _writerow(w, row) -> None:
+    """A9: csv.writerow с обезвреживанием ячеек (safe_row) — CSV injection в тексте ключа."""
+    w.writerow(safe_row(row))
+
 
 _HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
 _HEADER_FONT = Font(bold=True, color="FFFFFF")
@@ -70,13 +82,13 @@ def build_workbook(
     ws.title = "Ключевые слова"
 
     src = ", ".join(seeds or []) or (url or "")
-    ws.append([f"Keyword research — сиды: {src} (язык: {language})"])
+    _append(ws, [f"Keyword research — сиды: {src} (язык: {language})"])
     ws.cell(row=1, column=1).font = Font(bold=True, size=14)
-    ws.append([f"Всего ключей: {len(by_text)}, кластеров: {len(clusters)}"])
-    ws.append([])
+    _append(ws, [f"Всего ключей: {len(by_text)}, кластеров: {len(clusters)}"])
+    _append(ws, [])
 
     header_row = ws.max_row + 1
-    ws.append(headers)
+    _append(ws, headers)
     for c in range(1, len(headers) + 1):
         ws.cell(row=header_row, column=c).fill = _HEADER_FILL
         ws.cell(row=header_row, column=c).font = _HEADER_FONT
@@ -91,7 +103,8 @@ def build_workbook(
         for idea in rows:
             if idea is None:
                 continue
-            ws.append(
+            _append(
+                ws,
                 [
                     cl.name,
                     cl.intent,
@@ -104,7 +117,7 @@ def build_workbook(
                     round(idea.high_bid, 2),
                     idea.peak_month,
                     seasonality_sparkline(getattr(idea, "monthly", None)),
-                ]
+                ],
             )
 
     for col, fmt in _NUM_FORMATS.items():
@@ -115,19 +128,19 @@ def build_workbook(
     # §7 «предложение минус-слов» — отдельный лист (advisory; добавление идёт командой за confirm-гейтом).
     if negatives:
         ws2 = wb.create_sheet("Минус-слова")
-        ws2.append(
-            ["Предложенные минус-слова (добавляются отдельной командой после подтверждения)"]
+        _append(
+            ws2, ["Предложенные минус-слова (добавляются отдельной командой после подтверждения)"]
         )
         ws2.cell(row=1, column=1).font = Font(bold=True, size=14)
-        ws2.append([])
+        _append(ws2, [])
         hr = ws2.max_row + 1
-        ws2.append(["#", "Минус-слово"])
+        _append(ws2, ["#", "Минус-слово"])
         for c in range(1, 3):
             ws2.cell(row=hr, column=c).fill = _HEADER_FILL
             ws2.cell(row=hr, column=c).font = _HEADER_FONT
         ws2.freeze_panes = f"A{hr + 1}"
         for i, n in enumerate(negatives, 1):
-            ws2.append([i, n])
+            _append(ws2, [i, n])
         _autosize(ws2, 2)
     return wb
 
@@ -174,7 +187,7 @@ def write_keywords_csv(
     by_text = {i.text: i for i in ideas}
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
-        w.writerow(_headers(currency))  # D8: денежные колонки с валютой аккаунта
+        _writerow(w, _headers(currency))  # D8: денежные колонки с валютой аккаунта
         for cl in clusters:
             rows = sorted(
                 (by_text.get(k) for k in cl.keywords),
@@ -184,7 +197,8 @@ def write_keywords_csv(
             for idea in rows:
                 if idea is None:
                     continue
-                w.writerow(
+                _writerow(
+                    w,
                     [
                         cl.name,
                         cl.intent,
@@ -197,7 +211,7 @@ def write_keywords_csv(
                         round(idea.high_bid, 2),
                         idea.peak_month,
                         seasonality_sparkline(getattr(idea, "monthly", None)),
-                    ]
+                    ],
                 )
     return path
 
@@ -209,20 +223,20 @@ def write_keyword_list_xlsx(keywords: list[str], match_type: str, action: str, p
     wb = Workbook()
     ws = wb.active
     ws.title = "Черновик ключей"
-    ws.append([f"{action} — {len(keywords)} шт. (тип соответствия: {match_type})"])
+    _append(ws, [f"{action} — {len(keywords)} шт. (тип соответствия: {match_type})"])
     ws.cell(row=1, column=1).font = Font(bold=True, size=14)
-    ws.append([])
+    _append(ws, [])
 
     header_row = ws.max_row + 1
     headers = ["#", "Ключевое слово", "Тип соответствия", "Действие"]
-    ws.append(headers)
+    _append(ws, headers)
     for c in range(1, len(headers) + 1):
         ws.cell(row=header_row, column=c).fill = _HEADER_FILL
         ws.cell(row=header_row, column=c).font = _HEADER_FONT
     ws.freeze_panes = f"A{header_row + 1}"
 
     for i, kw in enumerate(keywords, 1):
-        ws.append([i, kw, match_type, action])
+        _append(ws, [i, kw, match_type, action])
     _autosize(ws, len(headers))
     wb.save(path)
     return path
