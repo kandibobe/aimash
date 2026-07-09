@@ -22,8 +22,10 @@ REDACTED = "***REDACTED***"
 
 # Паттерны секрето-подобных строк. Замена — на REDACTED (ключ в key=value сохраняем).
 _PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    # Telegram bot token: <digits>:<35+ url-safe>
-    (re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{30,}\b"), REDACTED),
+    # Telegram bot token: <digits>:<30+ url-safe>. (?<!\d) — не начинать посреди длинного числа,
+    # но допускаем буквенный префикс (api.telegram.org/bot<token> — раньше \b после «bot» не давал
+    # границы, и токен в URL утекал; B4).
+    (re.compile(r"(?<!\d)\d{6,12}:[A-Za-z0-9_-]{30,}\b"), REDACTED),
     # Google OAuth client secret
     (re.compile(r"\bGOCSPX-[A-Za-z0-9_\-]{8,}\b"), REDACTED),
     # OAuth refresh token (префикс 1//)
@@ -34,13 +36,19 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]+"), "Bearer " + REDACTED),
     # OpenRouter / OpenAI-стиль API-ключи (sk-or-v1-…, sk-…) — у них есть префикс sk-
     (re.compile(r"\bsk-(?:or-)?[A-Za-z0-9_\-]{16,}\b"), REDACTED),
-    # key=value / key: value для чувствительных ключей (значение скрываем, ключ оставляем)
+    # B4: пароль в DSN-URL (postgresql://user:PASSWORD@host, redis://:PASSWORD@host) — раньше не
+    # ловился ничем (database_url это SecretStr в repr, но СЫРАЯ строка DSN в логе/трейсбеке — нет).
+    (re.compile(r"(?i)(://[^:/@\s]*:)([^@\s/]+)(@)"), r"\1" + REDACTED + r"\3"),
+    # key=value / key: value для чувствительных ключей (значение скрываем, ключ оставляем).
+    # B4: ключ может нести подчёркнутый ПРЕФИКС (developer_token, client_secret, DB_PASSWORD) —
+    # раньше \bsecret\b не матчил «client_secret» (нет границы слова через '_') → секрет утекал.
+    # Ведущий [\w.-]* поглощает префикс; опц. кавычка после [=:] покрывает JSON-форму "token":"…".
     (
         re.compile(
-            r"(?i)\b(api[_-]?key|secret|token|refresh_token|access_token|password|passwd|pwd)\b"
-            r"(\s*[=:]\s*)([^\s,;}'\"]+)"
+            r"(?i)([\w.-]*(?:api[_-]?key|secret|token|password|passwd|pwd|pin))"
+            r"([\"']?\s*[=:]\s*)([\"']?)([^\s,;}'\"]+)"  # опц. закрыв. кавычка ключа (JSON "token":…)
         ),
-        r"\1\2" + REDACTED,
+        r"\1\2\3" + REDACTED,
     ),
 ]
 
@@ -78,6 +86,11 @@ def _known_secret_values() -> set[str]:
             "google_ads_client_secret",
             "google_ads_refresh_token",
             "secrets_encryption_key",
+            # B4: раньше отсутствовали — DSN несёт пароль БД, sentry_dsn — ключ проекта,
+            # two_factor_pin — код 2FA; все могут попасть в лог/трейсбек сырой строкой.
+            "database_url",
+            "sentry_dsn",
+            "two_factor_pin",
         ):
             sv = getattr(settings, attr, None)
             if sv is None or not hasattr(sv, "get_secret_value"):

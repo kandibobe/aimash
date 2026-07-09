@@ -49,6 +49,60 @@ def test_redact_key_value_pairs():
     assert out.count(L.REDACTED) == 2
 
 
+# ── B4: расширенные формы утечки (подчёркнутые ключи, JSON, DSN-URL, PIN) ──────────
+def test_redact_underscore_prefixed_keys():
+    # раньше \bsecret\b/\btoken\b не матчили client_secret/developer_token (граница через '_')
+    for form, secret in (
+        ("developer_token=DEVsecretVALUE123", "DEVsecretVALUE123"),
+        ("client_secret: CLIENTsecret999", "CLIENTsecret999"),
+        ("DB_PASSWORD=hunter2pass", "hunter2pass"),
+        ("two_factor_pin=246810", "246810"),
+    ):
+        out = L.redact_text(form)
+        assert secret not in out and L.REDACTED in out, form
+
+
+def test_redact_json_quoted_values():
+    # Синтетические (несуществующие) значения — фикстуры проверки редакции, не реальные креды.
+    for form, secret in (
+        ('{"token": "abcXYZ123456"}', "abcXYZ123456"),  # gitleaks:allow
+        ('{"refresh_token":"1//0abcSECRET"}', "1//0abcSECRET"),  # gitleaks:allow
+    ):
+        out = L.redact_text(form)
+        assert secret not in out and L.REDACTED in out, form
+
+
+def test_redact_dsn_password_in_url():
+    out = L.redact_text("postgresql+asyncpg://aimash:S3cretPW@db.host:5432/aimash")
+    assert "S3cretPW" not in out and L.REDACTED in out
+    assert "db.host" in out  # хост НЕ секрет — остаётся
+
+
+def test_redact_telegram_token_in_url():
+    # api.telegram.org/bot<token> — токен после «bot» (без границы слова) раньше утекал
+    out = L.redact_text(f"POST https://api.telegram.org/bot{TG_TOKEN}/sendMessage")
+    assert TG_TOKEN not in out and L.REDACTED in out
+
+
+def test_redact_leaves_safe_text_untouched():
+    for safe in (
+        "budget = 100",
+        "campaign name = Летняя распродажа",
+        "просто лог без секретов",
+        "CTR: 3.5%",
+    ):
+        assert L.redact_text(safe) == safe
+
+
+def test_known_secret_values_includes_dsn_sentry_pin():
+    # реестр точных значений покрывает DSN/sentry/pin (для секретов без узнаваемой формы)
+    import inspect
+
+    src = inspect.getsource(L._known_secret_values)
+    for attr in ("database_url", "sentry_dsn", "two_factor_pin"):
+        assert attr in src, f"_known_secret_values должен включать {attr}"
+
+
 def test_filter_redacts_message_body():
     lg, buf = _logger_with(True, L._RedactingTextFormatter("%(message)s"))
     lg.info("connecting with %s now", TG_TOKEN)
