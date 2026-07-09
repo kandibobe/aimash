@@ -6,7 +6,10 @@ ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 COPY . .
-RUN pip install -e .            # только рантайм-зависимости (без [dev])
+# A11: устанавливаем с ПИНАМИ (constraints.txt) — воспроизводимый образ. Без -c каждый деплой
+# ресолвил бы новейшие версии заново (прод менялся без изменения кода). Бамп версий — отдельным
+# PR (перегенерация constraints.txt через uv pip compile).
+RUN pip install -e . -c constraints.txt    # только рантайм-зависимости (без [dev]), запиннены
 
 FROM python:3.12-slim AS runtime
 ENV PATH="/opt/venv/bin:$PATH" \

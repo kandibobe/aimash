@@ -20,7 +20,14 @@ jobs:
           cache: pip
 
       - name: Install
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev]" -c constraints.txt   # A11: воспроизводимые пины
+
+      # A11: известные CVE в зависимостях — блокирующий шаг (не advisory). Ставим сам pip-audit
+      # ВНЕ constraints (это инструмент проверки, не рантайм-зависимость), сканируем окружение.
+      - name: pip-audit (известные уязвимости зависимостей)
+        run: |
+          pip install pip-audit
+          pip-audit --strict --desc
 
       - name: Ruff (lint)
         run: ruff check .
