@@ -107,7 +107,9 @@ def test_compute_increase_by_percent():
     assert (
         compute_new_micros(1_000_000, "increase_by_percent", 0) == 1_000_000
     )  # +0% = без изменений
-    assert compute_new_micros(1_000_000, "increase_by_percent", 12.5) == 1_125_000
+    # A2: результат округляется до кратного BILLING_UNIT_MICROS. 1_125_000 не кратно 10 000
+    # (1_125_000/10 000 = 112.5) → округление к чётному → 1_120_000 (иначе API reject).
+    assert compute_new_micros(1_000_000, "increase_by_percent", 12.5) == 1_120_000
 
 
 def test_compute_increase_by_amount():
@@ -118,13 +120,41 @@ def test_compute_increase_by_amount():
 
 def test_compute_set_to():
     assert compute_new_micros(999, "set_to", 10) == 10_000_000  # текущий бюджет игнорируется
-    assert compute_new_micros(0, "set_to", 9.99) == 9_990_000
+    assert compute_new_micros(0, "set_to", 9.99) == 9_990_000  # 9_990_000 уже кратно 10 000
 
 
-def test_compute_rounding_is_banker_half_to_even():
-    # int(round(...)) — округление Python «к чётному». 3 micros +50% = 4.5 → 4 (не 5).
-    assert compute_new_micros(3, "increase_by_percent", 50) == 4
-    assert compute_new_micros(1, "increase_by_percent", 50) == 2  # 1.5 → 2
+def test_compute_result_is_always_billing_unit_multiple():
+    """Гард класса NON_MULTIPLE_OF_MINIMUM_CURRENCY_UNIT (A2): ЛЮБОЙ выход compute_new_micros
+    кратен BILLING_UNIT_MICROS (иначе Google Ads отклоняет update_budget/update_bid ПОСЛЕ «да»).
+    Особый упор на increase_by_percent — почти всегда даёт не-кратное сырое значение."""
+    from core.limits import BILLING_UNIT_MICROS
+
+    cases = [
+        ("increase_by_percent", 7),  # 5 550 000 × 1.07 = 5 938 500 — не кратно 10 000
+        ("increase_by_percent", 12.5),
+        ("increase_by_percent", 33.33),
+        ("increase_by_percent", 3),
+        ("increase_by_amount", 1.234),
+        ("increase_by_amount", 0.005),
+        ("set_to", 5.555),
+        ("set_to", 100.001),
+    ]
+    bases = [5_550_000, 1_000_000, 333_000, 10_010_000, 7_777_777]
+    for base in bases:
+        for mode, value in cases:
+            out = compute_new_micros(base, mode, value)
+            assert out % BILLING_UNIT_MICROS == 0, f"{base}/{mode}/{value} → {out} не кратно"
+            assert (
+                out > 0
+            )  # положительное значение не обнуляем (round_micros: минимум одна единица)
+
+
+def test_compute_tiny_positive_floors_to_one_billing_unit():
+    # Ниже одной биллинг-единицы, но > 0: округляем ВВЕРХ до BILLING_UNIT_MICROS, не до нуля
+    # (0 бюджет API отклонит иначе). 3 micros +50% = 4.5 → 4 (sub-unit) → 10 000.
+    from core.limits import BILLING_UNIT_MICROS
+
+    assert compute_new_micros(3, "increase_by_percent", 50) == BILLING_UNIT_MICROS
 
 
 def test_compute_unknown_mode_raises():

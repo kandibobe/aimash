@@ -1216,13 +1216,18 @@ def _apply_budget_via_sdk(
     svc = client.get_service("CampaignBudgetService")
     op = client.get_type("CampaignBudgetOperation")
     op.update.resource_name = budget_rn
-    op.update.amount_micros = int(new_budget_micros)
+    # Defense-in-depth: округляем у границы SDK, даже если вызывающий передал не-кратное значение
+    # (компьют идёт через resolve.compute_new_micros, который уже округляет; здесь — страховка того
+    # же класса, что для bid ниже и для всех create-путей: иначе API reject
+    # NON_MULTIPLE_OF_MINIMUM_CURRENCY_UNIT).
+    applied_micros = _round_micros(int(new_budget_micros))
+    op.update.amount_micros = applied_micros
     client.copy_from(op.update_mask, protobuf_helpers.field_mask(None, op.update._pb))
     svc.mutate_campaign_budgets(customer_id=str(customer_id), operations=[op])
     return {
         "customer_id": customer_id,
         "campaign_id": str(campaign_id),
-        "new_budget_micros": int(new_budget_micros),
+        "new_budget_micros": applied_micros,
         "applied": True,
     }
 
@@ -1495,7 +1500,11 @@ def _apply_bid_via_sdk(client, customer_id: str, campaign_id: str, bids: list) -
     return {
         "customer_id": customer_id,
         "campaign_id": str(campaign_id),
-        "ad_groups": [{"ad_group_id": str(ag), "new_cpc_bid_micros": int(m)} for ag, m in bids],
+        # Пишем ПРИМЕНЁННОЕ (округлённое) значение — то же _round_micros, что ушло в SDK выше;
+        # иначе audit-строка врёт (заявляет не-кратное, а применилось кратное).
+        "ad_groups": [
+            {"ad_group_id": str(ag), "new_cpc_bid_micros": _round_micros(int(m))} for ag, m in bids
+        ],
         "applied": True,
     }
 

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from google.ads.googleads.client import GoogleAdsClient
 
 from ads.client import ensure_allowed
+from core.limits import round_micros
 
 
 @dataclass
@@ -276,11 +277,20 @@ def currency_mismatch(operation: str, params: dict, account_currency: str) -> st
 
 
 def compute_new_micros(current_micros: int, mode: str, value: float) -> int:
-    """Пересчёт бюджета в micros по режиму команды. Валюта не конвертируется (значение в валюте аккаунта)."""
+    """Пересчёт бюджета/ставки в micros по режиму команды. Валюта не конвертируется (значение в
+    валюте аккаунта).
+
+    Результат ОКРУГЛЯЕТСЯ до кратного BILLING_UNIT_MICROS (core.limits.round_micros): суммы, не
+    кратные минимальной биллинг-единице, Google Ads отклоняет (NON_MULTIPLE_OF_MINIMUM_CURRENCY_UNIT),
+    а increase_by_percent почти всегда даёт не-кратное значение. Округление ЗДЕСЬ — единый источник:
+    превью «станет» (ads.service._read_before) считается тем же вызовом, что и применяемое значение
+    (execute_confirmed), поэтому карточка «было→станет» == реально применённому (как в create-путях)."""
     if mode == "increase_by_percent":
-        return int(round(current_micros * (1 + value / 100)))
-    if mode == "increase_by_amount":
-        return int(round(current_micros + value * 1_000_000))
-    if mode == "set_to":
-        return int(round(value * 1_000_000))
-    raise ValueError(f"неизвестный mode бюджета: {mode}")
+        raw = int(round(current_micros * (1 + value / 100)))
+    elif mode == "increase_by_amount":
+        raw = int(round(current_micros + value * 1_000_000))
+    elif mode == "set_to":
+        raw = int(round(value * 1_000_000))
+    else:
+        raise ValueError(f"неизвестный mode бюджета: {mode}")
+    return round_micros(raw)
