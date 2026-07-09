@@ -39,6 +39,11 @@ htmlcov/
 *.db
 data/
 dumps/
+# A10: авто-дампы pg_dump (docker-compose backup-сайдкар ./backups:/backups) — pg_dump -Fc ВСЕЙ БД
+# (включая audit_log и шифрованные oauth_tokens). НЕ запекать в образ через `COPY . .` (симметрия
+# с .gitignore; дрейф двух списков ловит tests/test_ignore_sync.py).
+backups/
+*.dump
 
 # Не нужно в рантайме бота
 tests/
