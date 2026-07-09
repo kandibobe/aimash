@@ -15,6 +15,7 @@ from openai import AsyncOpenAI
 from core.config import _VALID_PROVIDER_SORTS, settings
 from core.resilience import (
     LLM_TIMEOUT_S,
+    _is_retryable_llm,  # A4: транзиентность ошибки → решаем, стоит ли деградировать на fallback
     call_llm,
 )  # таймаут+ретрай на rate-limit/timeout OpenRouter
 
@@ -160,10 +161,17 @@ async def chat(
     mutation-инструменты только предлагают proposal, выполняет код после «да».
     """
     chosen = model or effective_model(role)  # явный model > рантайм-override > дефолт роли
-    kwargs: dict[str, Any] = {"model": _with_price_floor(chosen), "messages": messages}
+    kwargs: dict[str, Any] = {"messages": messages}  # model проставляется в _call (для fallback)
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
+        # A5: денежный путь — ОДНО действие за вызов. Без этого модели, умеющие параллельные
+        # tool-calls (gpt-4o, deepseek), на «поставь на паузу А и Б» отдают два вызова, а
+        # handle_command берёт только tool_calls[0] → пользователь видит ОДИН черновик, а думает,
+        # что подтвердил оба (тихая потеря действия на чужих деньгах). Только для parsing (там это
+        # критично); для copy/clustering параллельность безвредна.
+        if role == "parsing":
+            kwargs["parallel_tool_calls"] = False
     if temperature is not None:
         kwargs["temperature"] = temperature
     # Явный потолок генерации (ROLE_MAX_TOKENS) — экономия бюджета без потери качества (см. выше).
@@ -183,17 +191,41 @@ async def chat(
     if role == "parsing" and sort and sort in _VALID_PROVIDER_SORTS:
         extra_body["provider"] = {"sort": sort}
     kwargs["extra_body"] = extra_body
-    # call_llm: zero-arg фабрика — tenacity создаёт свежую корутину на каждую попытку.
-    # label → лог запроса к LLM (модель/роль, без секретов; ТЗ §15).
-    resp = await call_llm(
-        lambda: _client().chat.completions.create(**kwargs), label=f"{chosen}/{role}"
-    )
-    # Учёт расхода (токены + реальная стоимость OpenRouter) для /balance. Наблюдаемость не должна
-    # ронять денежный путь — любую проблему с usage глотаем (record() и сам в try, тут — страховка).
-    try:
-        from core.usage import record
 
-        record(role, getattr(resp, "usage", None))
-    except Exception:  # noqa: BLE001
-        pass
-    return resp.choices[0].message
+    async def _call(model_slug: str) -> Any:
+        # call_llm: zero-arg фабрика — tenacity создаёт свежую корутину на каждую попытку.
+        # label → лог запроса к LLM (модель/роль, без секретов; ТЗ §15).
+        call_kwargs = {**kwargs, "model": _with_price_floor(model_slug)}
+        resp = await call_llm(
+            lambda: _client().chat.completions.create(**call_kwargs), label=f"{model_slug}/{role}"
+        )
+        # Учёт расхода (токены + реальная стоимость OpenRouter) для /balance. Наблюдаемость не
+        # должна ронять денежный путь — любую проблему с usage глотаем (record() и сам в try).
+        try:
+            from core.usage import record
+
+            record(role, getattr(resp, "usage", None))
+        except Exception:  # noqa: BLE001
+            pass
+        return resp.choices[0].message
+
+    try:
+        return await _call(chosen)
+    except Exception as e:
+        # A4: деградация при ТРАНЗИЕНТНОМ отказе основной модели (rate-limit/timeout/5xx после
+        # исчерпания ретраев call_llm) — ОДНА попытка на резервную модель, если она отлична от уже
+        # испробованной. Нетранзиентные (BadRequest/невалидная схема) НЕ фолбэчим (та же ошибка).
+        # Раньше роль fallback была объявлена в конфиге и /balance, но не вызывалась нигде — деградации
+        # LLM не было; сбой основной модели просто ронял парсинг.
+        fb = ROLE_MODELS.get("fallback") or settings.llm_fallback
+        if _is_retryable_llm(e) and fb and fb != chosen:
+            import logging
+
+            logging.getLogger("aimash.router").warning(
+                "основная модель %s недоступна (%s) — переключаюсь на резервную %s",
+                chosen,
+                type(e).__name__,
+                fb,
+            )
+            return await _call(fb)
+        raise

@@ -124,6 +124,45 @@ async def test_unknown_tool_name():
     assert out["type"] == "text" and "неизвестный инструмент" in out["text"]
 
 
+# ── A5: несколько tool-call'ов → обработан первый + видимое предупреждение ─────────
+async def test_multiple_tool_calls_processes_first_with_notice():
+    """Модель вернула ДВА действия (пауза A и B) — обрабатываем первое, но НЕ молчим о втором:
+    к результату прикреплён notice (бот покажет его пользователю), чтобы тот не думал, что
+    подтвердил оба (тихая потеря действия на денежном пути — исходный дефект A5)."""
+    two = _msg(
+        [
+            _tc("pause_campaign", {"campaign": "A"}),
+            _tc("pause_campaign", {"campaign": "B"}),
+        ]
+    )
+    fake, _ = _chat_returning(two)
+    with patched(L, "chat", fake):
+        out = await L.handle_command("поставь на паузу A и B", chat_id=7)
+    assert out["type"] == "proposal" and out["params"]["campaign"] == "A"  # первый
+    assert "notice" in out and "pause_campaign" in out["notice"]  # предупреждение о втором
+
+
+async def test_single_tool_call_has_no_notice():
+    fake, _ = _chat_returning(_msg([_tc("pause_campaign", {"campaign": "A"})]))
+    with patched(L, "chat", fake):
+        out = await L.handle_command("поставь на паузу A", chat_id=7)
+    assert out["type"] == "proposal" and "notice" not in out
+
+
+async def test_multiple_tool_calls_clarify_not_polluted_by_notice():
+    """clarify/text-исходы «потерянного» действия не несут — notice к ним не клеим."""
+    two = _msg(
+        [
+            _tc("ask_clarification", {"question": "Какую кампанию?"}),
+            _tc("pause_campaign", {"campaign": "B"}),
+        ]
+    )
+    fake, _ = _chat_returning(two)
+    with patched(L, "chat", fake):
+        out = await L.handle_command("...", chat_id=7)
+    assert out["type"] == "clarify" and "notice" not in out
+
+
 # ── 2D: get_stats резолвит аккаунт (не молчаливый allowed[0]) ─────────────────────
 def _fake_stats_env(monkeypatch, seen: dict):
     """Подменить чтение SDK: фиксируем, какой cid реально читается."""

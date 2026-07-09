@@ -1874,6 +1874,12 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "некорректные аргументы для {name}: {errors}",
         "en": "invalid arguments for {name}: {errors}",
     },
+    "loop_multi_actions": {
+        "ru": "⚠️ Распознано несколько действий — обработал только первое ({name}). "
+        "Остальные пришли, пожалуйста, отдельными сообщениями по одному.",
+        "en": "⚠️ Recognized several actions — handled only the first ({name}). "
+        "Please send the others one per message.",
+    },
     "loop_unsupported": {
         "ru": (
             "Операция «{name}» пока не поддерживается — выполнить не смогу, поэтому "

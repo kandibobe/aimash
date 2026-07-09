@@ -53,7 +53,12 @@ SYSTEM = (
     # C2/C3 (гибрид): местоимения-ссылки резолвим по КОНТЕКСТУ ДИАЛОГА.
     "Если пользователь ссылается на кампанию местоимением («эта кампания», «её», «текущую», "
     "«this campaign», «it»), подставь ИМЯ кампании из блока КОНТЕКСТ ДИАЛОГА (последняя кампания). "
-    "Между репликами СОХРАНЯЙ ранее названную кампанию, если пользователь не назвал другую."
+    "Между репликами СОХРАНЯЙ ранее названную кампанию, если пользователь не назвал другую. "
+    # A5: одно действие за сообщение — денежный путь обрабатывает ровно один вызов.
+    "ОДНО действие за сообщение: вызывай РОВНО ОДНУ функцию. Если пользователь просит несколько "
+    "действий сразу («поставь на паузу А и Б») — вызови ask_clarification и попроси прислать их "
+    "по одному. One action per message: call EXACTLY ONE function; if several are requested, use "
+    "ask_clarification and ask to send them one at a time."
 )
 
 
@@ -210,6 +215,24 @@ async def handle_command(
     except json.JSONDecodeError:
         return {"type": "text", "text": i18n.t("loop_bad_tool_args")}
 
+    result = await _classify_tool_call(name, args, chat_id, context)
+    # A5: страховка поверх parallel_tool_calls=False — если модель всё же вернула НЕСКОЛЬКО вызовов,
+    # мы обработали только первый (tool_calls[0]). Не молчим об этом: прикрепляем видимое
+    # предупреждение к результату (бот покажет ДО черновика), чтобы пользователь не думал, что
+    # подтвердил все действия. clarify/text-исходы не засоряем (там нет «потерянного» действия).
+    if len(getattr(msg, "tool_calls", None) or []) > 1 and result.get("type") not in (
+        "clarify",
+        "text",
+    ):
+        result["notice"] = i18n.t("loop_multi_actions", name=name)
+    return result
+
+
+async def _classify_tool_call(
+    name: str, args: dict[str, Any], chat_id: int, context: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Разбор ОДНОГО tool-call модели в структуру результата (clarify|read|proposal|intent|text).
+    Вынесено из handle_command, чтобы обработку «несколько вызовов» (A5) держать в одном месте."""
     if name == "ask_clarification":
         return {
             "type": "clarify",

@@ -5360,6 +5360,10 @@ async def _dispatch_command_result(
     external_context=True — команда шла со СПРАВОЧНЫМ контентом (файл/ссылка): денежные черновики
     получают предупреждение в сводке (см. _present_proposal)."""
     t = res.get("type")
+    # A5: модель вернула несколько действий — обработали первое; предупреждаем ДО основного исхода.
+    notice = res.get("notice")
+    if notice:
+        await m.answer(notice)
     if t == "proposal":
         # G2/G3/AD.3: NL-команда изменения нацелена на АКТИВНЫЙ аккаунт чата. Если он НЕ закреплён,
         # а живых несколько — _present_proposal_active заставит выбрать аккаунт ДО черновика (не
