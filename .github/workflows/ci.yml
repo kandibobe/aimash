@@ -24,10 +24,12 @@ jobs:
 
       # A11: известные CVE в зависимостях — блокирующий шаг (не advisory). Ставим сам pip-audit
       # ВНЕ constraints (это инструмент проверки, не рантайм-зависимость), сканируем окружение.
+      # --skip-editable: локальный editable-пакет aimash не на PyPI → под --strict pip-audit падал
+      # «Dependency not found on PyPI»; пропускаем сам проект, реальные зависимости аудитим (2026-07-09).
       - name: pip-audit (известные уязвимости зависимостей)
         run: |
           pip install pip-audit
-          pip-audit --strict --desc
+          pip-audit --strict --desc --skip-editable
 
       - name: Ruff (lint)
         run: ruff check .
