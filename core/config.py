@@ -139,6 +139,10 @@ class Settings(BaseSettings):
     two_factor_ops_csv: str = (
         "remove_campaign,remove_ad_group,update_budget,update_bid,set_bidding_strategy"
     )
+    # A14: базовый кулдаун (мин) после _TWOFA_MAX_ATTEMPTS неверных PIN подряд — вход в 2FA-режим
+    # блокируется (fail-closed: опасная op недоступна), при повторных локаутах растёт экспоненциально
+    # (bot.main._twofa_register_fail). Анти-перебор PIN: раньше счётчик обнулялся каждым новым ✅.
+    two_factor_lockout_minutes: int = 15
 
     # Безопасность / БД
     secrets_encryption_key: SecretStr = SecretStr("")
@@ -416,6 +420,20 @@ class Settings(BaseSettings):
                 raise ValueError(
                     f"В prod обязательны: {', '.join(missing)} — иначе бот не сможет работать с "
                     "Google Ads (fail-fast на старте, а не на первом вызове API)."
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _require_strong_2fa_pin_in_prod(self) -> "Settings":
+        """A14: в prod включённый 2FA с ЗАДАННЫМ, но слишком коротким PIN (<6 символов) — fail-fast
+        на старте. Короткий PIN тривиально перебирается; вместе с кулдауном (bot.main) это база
+        анти-перебора. Пустой PIN при включённом 2FA НЕ роняет старт (is_ready() fail-closed
+        блокирует опасные ops в рантайме); в dev/тестах длину не требуем (короткие PIN в фикстурах)."""
+        if self.env == "prod" and self.two_factor_enabled:
+            pin = (self.two_factor_pin.get_secret_value() or "").strip()
+            if pin and len(pin) < 6:
+                raise ValueError(
+                    "TWO_FACTOR_PIN должен быть ≥6 символов в prod (короткий PIN легко перебрать)"
                 )
         return self
 

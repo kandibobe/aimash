@@ -100,16 +100,22 @@ async def on_twofa_code(m: bm.Message, state: bm.FSMContext) -> None:
         await m.answer(bm.i18n.t("twofa_aborted"))
         return
     if not bm.twofa.verify(code):
-        waiting["attempts"] = int(waiting.get("attempts", 0)) + 1
-        left = bm._TWOFA_MAX_ATTEMPTS - waiting["attempts"]
-        if left <= 0:  # исчерпаны попытки — сбрасываем ожидание (черновик НЕ сжигаем)
+        # A14: неудачи копятся в ПЕРСИСТЕНТНОМ счётчике (bm._TWOFA_FAILS), а не в waiting — новый ✅
+        # больше не обнуляет лимит. Порог достигнут → кулдаун (fail-closed) + алерт админам.
+        fails, lock_s = bm._twofa_register_fail(chat_id)
+        if lock_s > 0:  # локаут — сбрасываем ожидание (черновик НЕ сжигаем), уведомляем админов
             bm._TWOFA_PENDING.pop(chat_id, None)
             await state.clear()
-            await m.answer(bm.i18n.t("twofa_too_many"))
+            lock_min = max(1, round(lock_s / 60))
+            await m.answer(bm.i18n.t("twofa_too_many", min=lock_min))
+            if m.bot is not None:
+                await bm._notify_admins_twofa_lockout(m.bot, chat_id, lock_min)
             return
-        await m.answer(bm.i18n.t("twofa_wrong", left=left))
+        await m.answer(bm.i18n.t("twofa_wrong", left=bm._TWOFA_MAX_ATTEMPTS - fails))
         return
-    # Верный код: очищаем ожидание/состояние и исполняем на ИСХОДНОМ CallbackQuery (минуя гейт).
+    # Верный код: сбрасываем счётчик неудач/локаутов, очищаем ожидание/состояние и исполняем на
+    # ИСХОДНОМ CallbackQuery (минуя гейт).
+    bm._twofa_reset_fails(chat_id)
     bm._TWOFA_PENDING.pop(chat_id, None)
     await state.clear()
     await bm._do_confirm(waiting["cq"], waiting["cid"], state=state, twofa_ok=True)

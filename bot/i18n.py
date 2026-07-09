@@ -48,10 +48,16 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "❌ Wrong code. Attempts left: {left}. Send the PIN again or “cancel”.",
     },
     "twofa_too_many": {
-        "ru": "🚫 Слишком много неверных попыток — подтверждение прервано. Черновик сохранён: "
-        "нажми ✅ ещё раз, чтобы повторить.",
-        "en": "🚫 Too many wrong attempts — confirmation aborted. The draft is kept: "
-        "tap ✅ again to retry.",
+        "ru": "🚫 Слишком много неверных попыток PIN — ввод кода заблокирован на {min} мин "
+        "(fail-closed). Черновик сохранён; админы уведомлены.",
+        "en": "🚫 Too many wrong PIN attempts — code entry is locked for {min} min "
+        "(fail-closed). The draft is kept; admins were notified.",
+    },
+    "twofa_locked": {
+        "ru": "🚫 Ввод PIN временно заблокирован после серии неверных попыток. "
+        "Подожди ещё {min} мин и повтори ✅.",
+        "en": "🚫 PIN entry is temporarily locked after repeated wrong attempts. "
+        "Wait {min} more min and tap ✅ again.",
     },
     "twofa_aborted": {
         "ru": "↩️ Подтверждение прервано. Черновик сохранён — нажми ✅ ещё раз, чтобы повторить.",

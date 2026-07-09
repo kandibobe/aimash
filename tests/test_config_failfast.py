@@ -114,6 +114,29 @@ def test_dev_without_google_ads_ok():
     assert s.is_prod is False
 
 
+def test_prod_short_2fa_pin_raises():
+    # A14: включённый 2FA с ЗАДАННЫМ коротким PIN (<6) в prod → fail-fast (легко перебрать)
+    with pytest.raises(ValidationError):
+        Settings(**_prod_kwargs(two_factor_enabled=True, two_factor_pin="123"))
+
+
+def test_prod_strong_2fa_pin_ok():
+    s = Settings(**_prod_kwargs(two_factor_enabled=True, two_factor_pin="123456"))
+    assert s.two_factor_enabled is True
+
+
+def test_prod_empty_2fa_pin_does_not_raise():
+    # пустой PIN при включённом 2FA НЕ роняет старт — is_ready() fail-closed блокирует ops в рантайме
+    s = Settings(**_prod_kwargs(two_factor_enabled=True, two_factor_pin=""))
+    assert s.is_prod is True
+
+
+def test_dev_short_2fa_pin_ok():
+    # в dev/тестах короткий PIN допустим (фикстуры вроде "2468")
+    s = Settings(**_prod_kwargs(env="dev", two_factor_enabled=True, two_factor_pin="2468"))
+    assert s.is_prod is False
+
+
 def test_provider_sort_valid_values_normalized():
     """price|throughput|latency допустимы; регистр/пробелы нормализуются (strip+lower)."""
     for raw, want in (("latency", "latency"), (" Throughput ", "throughput"), ("PRICE", "price")):

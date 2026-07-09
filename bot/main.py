@@ -336,10 +336,84 @@ MCC_ALL = "__mcc__"
 _ADVISE_TOPIC_CACHE: dict[int, str | None] = {}  # chat_id → тема /advise, переживает выбор в пикере
 
 
-# §12: chat_id → ожидающий 2FA-код черновик {"cid", "cq" (исходный ✅-CallbackQuery), "attempts"}.
-# Черновик при ожидании остаётся `pending` (не сжигается) — неверный код/отмена → повторить ✅ можно.
+# §12: chat_id → ожидающий 2FA-код черновик {"cid", "cq" (исходный ✅-CallbackQuery)}. Счётчик
+# неудач вынесен в _TWOFA_FAILS (A14: переживает новые ✅). Черновик при ожидании остаётся `pending`
+# (не сжигается) — неверный код/отмена → повторить ✅ можно.
 _TWOFA_PENDING: dict[int, dict] = {}
-_TWOFA_MAX_ATTEMPTS = 3  # неверных вводов до отмены (черновик НЕ сжигается — повторить ✅ можно)
+_TWOFA_MAX_ATTEMPTS = (
+    3  # неверных вводов ПОДРЯД до локаута (черновик НЕ сжигается — повторить ✅ можно)
+)
+# A14: ПЕРСИСТЕНТНЫЙ (переживает новые ✅) счётчик неудач PIN + локаут per chat_id. Раньше счётчик
+# жил в _TWOFA_PENDING и обнулялся КАЖДЫМ новым ✅ ⇒ перебор PIN ничем, кроме message-троттла, не
+# ограничивался. Теперь неудачи копятся здесь; при _TWOFA_MAX_ATTEMPTS подряд — кулдаун (fail-closed:
+# вход в 2FA-режим закрыт, опасная op заблокирована) + алерт админам. Верный PIN сбрасывает запись.
+# {"fails": int, "until": float(monotonic-дедлайн локаута|0), "lockouts": int(для эскалации)}.
+_TWOFA_FAILS: dict[int, dict] = {}
+
+
+def _twofa_lock_remaining_s(chat_id: int) -> float:
+    """Секунд до конца локаута ввода PIN (0 — не заблокирован). monotonic: невосприимчив к сдвигу
+    системных часов. Истёкший локаут сам обнуляет счётчик неудач (свежее окно попыток)."""
+    import time as _time
+
+    rec = _TWOFA_FAILS.get(chat_id)
+    if not rec:
+        return 0.0
+    until = float(rec.get("until") or 0.0)
+    if until <= 0.0:
+        return 0.0
+    left = until - _time.monotonic()
+    if left <= 0.0:  # локаут истёк — сбрасываем неудачи, сохраняем счётчик локаутов для эскалации
+        rec["fails"] = 0
+        rec["until"] = 0.0
+        return 0.0
+    return left
+
+
+def _twofa_register_fail(chat_id: int) -> tuple[int, float]:
+    """Учесть неверный PIN. Возвращает (fails_подряд, lock_seconds): lock_seconds>0 ⇒ достигнут
+    порог, поставлен экспоненциальный кулдаун (base × 2^(lockouts-1), потолок 24ч)."""
+    import time as _time
+
+    rec = _TWOFA_FAILS.setdefault(chat_id, {"fails": 0, "until": 0.0, "lockouts": 0})
+    rec["fails"] = int(rec.get("fails", 0)) + 1
+    if rec["fails"] < _TWOFA_MAX_ATTEMPTS:
+        return rec["fails"], 0.0
+    rec["lockouts"] = int(rec.get("lockouts", 0)) + 1
+    base_s = max(1, int(settings.two_factor_lockout_minutes)) * 60
+    lock_s = min(base_s * (2 ** (rec["lockouts"] - 1)), 24 * 3600)
+    rec["until"] = _time.monotonic() + lock_s
+    rec["fails"] = 0  # неудачи текущего окна поглощены локаутом; следующее окно — свежее
+    return _TWOFA_MAX_ATTEMPTS, float(lock_s)
+
+
+def _twofa_reset_fails(chat_id: int) -> None:
+    """Верный PIN — снять весь трекинг неудач/локаутов chat_id (чистый старт)."""
+    _TWOFA_FAILS.pop(chat_id, None)
+
+
+async def _notify_admins_twofa_lockout(bot, chat_id: int, lock_minutes: int) -> None:
+    """A14: алерт админам (env ∪ рантайм) о локауте ввода PIN — сигнал возможного перебора. Best-
+    effort: нет админов/сбой доставки не роняет поток 2FA (это уведомление, а не гейт)."""
+    try:
+        from core.access import admin_ids_all
+
+        admins = await admin_ids_all()
+    except Exception:  # noqa: BLE001 — доступ к списку админов не должен ронять 2FA-поток
+        return
+    for admin in admins:
+        en = i18n.get_lang(admin) == "en"
+        body = (
+            f"🚫 2FA lockout: chat <code>{chat_id}</code> — too many wrong PINs, "
+            f"code entry locked for {lock_minutes} min."
+            if en
+            else f"🚫 2FA-локаут: чат <code>{chat_id}</code> — серия неверных PIN, "
+            f"ввод кода заблокирован на {lock_minutes} мин."
+        )
+        try:
+            await bot.send_message(admin, body, parse_mode=ParseMode.HTML)
+        except Exception as e:  # noqa: BLE001 — недоступный админ не роняет поток
+            log.warning("2FA-lockout алерт не доставлен админу %s: %s", admin, type(e).__name__)
 
 
 # 4A: FSM-состояния всех визардов вынесены в bot/states.py (декомпозиция god-module).
@@ -599,6 +673,18 @@ async def _safe_edit_markup(cq: CallbackQuery, markup) -> None:
         return
     try:
         await m.edit_reply_markup(reply_markup=markup)
+    except TelegramBadRequest:
+        pass
+
+
+async def _safe_answer(cq: CallbackQuery, text: str = "", **kwargs) -> None:
+    """Безопасно ответить на callback (A13): Telegram отвергает answerCallbackQuery на уже
+    отвеченном/протухшем (>~15с) callback ошибкой TelegramBadRequest «query is too old … or query
+    ID is invalid». Раньше на re-entry 2FA (верный PIN → _do_confirm на ИСХОДНОМ ✅, который уже был
+    отвечен в _twofa_begin) повторный cq.answer БРОСАЛ это исключение ДО try-блока execute → черновик
+    сжигался confirmed-без-исполнения. Глотаем только этот косметический класс."""
+    try:
+        await cq.answer(text, **kwargs)
     except TelegramBadRequest:
         pass
 
@@ -5428,11 +5514,19 @@ async def _twofa_begin(
         await _safe_edit(cq, i18n.t("twofa_not_configured"))
         return False
     if state is None:  # нет FSM-канала для приёма кода (редкий вызов) → fail-closed блок
-        await cq.answer(i18n.t("twofa_need_button"), show_alert=True)
+        await _safe_answer(cq, i18n.t("twofa_need_button"), show_alert=True)
         return False
-    _TWOFA_PENDING[chat_id] = {"cid": cid, "cq": cq, "attempts": 0}
+    # A14: локаут после серии неверных PIN — вход в 2FA-режим закрыт (fail-closed: опасная op
+    # блокируется). Персистентный счётчик не даёт обнулить лимит новым ✅.
+    lock_left = _twofa_lock_remaining_s(chat_id)
+    if lock_left > 0:
+        await _safe_answer(
+            cq, i18n.t("twofa_locked", min=max(1, round(lock_left / 60))), show_alert=True
+        )
+        return False
+    _TWOFA_PENDING[chat_id] = {"cid": cid, "cq": cq}
     await state.set_state(TwoFactor.awaiting_code)
-    await cq.answer()
+    await _safe_answer(cq)
     await _safe_edit(
         cq, i18n.t("twofa_prompt", op=texts.esc(str(operation))), parse_mode=ParseMode.HTML
     )
@@ -5461,10 +5555,12 @@ async def _do_confirm(
     if not await STORE.confirm(
         cid, chat_id=chat_id, actor_user_id=actor_id, actor_username=actor_name
     ):
-        await cq.answer(i18n.t("stale"), show_alert=True)
+        await _safe_answer(cq, i18n.t("stale"), show_alert=True)
         return False
     _LAST_PENDING.pop(chat_id, None)
-    await cq.answer(i18n.t("cb_working"))
+    # A13: _safe_answer — на re-entry 2FA cq (waiting['cq']) уже отвечен в _twofa_begin; повторный
+    # cq.answer БРОСИЛ бы TelegramBadRequest ДО try-блока execute и сжёг бы черновик без исполнения.
+    await _safe_answer(cq, i18n.t("cb_working"))
     await _safe_edit(cq, i18n.t("executing"))  # убирает кнопки
     # ВАЖНО (денежный путь): успешное исполнение и косметический edit_text РАЗДЕЛЕНЫ. execute_confirmed
     # уже применил мутацию и записал finalize → если бы пост-успешный edit_text (часто бросает
