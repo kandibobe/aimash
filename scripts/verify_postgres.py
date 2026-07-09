@@ -9,8 +9,8 @@
 
 Шаги:
 1. Проверить, что DSN — Postgres (не sqlite), иначе отказ с инструкцией.
-2. `alembic upgrade head` (subprocess) — накатить миграции до текущего head (0021_admins_runtime).
-3. Сверить alembic current == head.
+2. `alembic upgrade head` (subprocess) — накатить миграции до текущего head.
+3. Сверить alembic current == head (head определяется ДИНАМИЧЕСКИ из дерева ревизий, A15).
 4. init_db() — на Postgres это no-op create_all (таблицы уже созданы миграциями); heal_sqlite
    НЕ вызывается. Служит детектором дрейфа «модель ⟂ миграции» (создал бы недостающую таблицу).
 5. Смоук-чтение ключевых таблиц (proposals/audit_log/whitelist/bug_reports) — SELECT count.
@@ -38,7 +38,15 @@ from sqlalchemy import func, select  # noqa: E402
 
 from core.config import settings  # noqa: E402
 
-_HEAD = "0019_bug_reports"  # текущий head миграций (обновлять при добавлении ревизий)
+
+def _alembic_head() -> str:
+    """A15: текущий head миграций — ВЫЧИСЛЯЕМ из дерева ревизий (alembic ScriptDirectory), а не
+    храним хардкод-литерал (тот протухал при каждой новой ревизии → верификация всегда красная).
+    Класс «обновлять при добавлении ревизий» закрыт удалением ручной синхронизации."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    return ScriptDirectory.from_config(Config(str(_ROOT / "alembic.ini"))).get_current_head() or ""
 
 
 def _mask_dsn(dsn: str) -> str:
@@ -71,7 +79,11 @@ def _run_alembic_upgrade() -> bool:
 
 
 def _check_alembic_head() -> bool:
-    print(f"3) сверка alembic current == head ({_HEAD}) …")
+    head = _alembic_head()  # A15: динамически из дерева ревизий, не хардкод
+    print(f"3) сверка alembic current == head ({head or '<не определён>'}) …")
+    if not head:
+        print("   ❌ не удалось определить head миграций (сломан alembic.ini / versions?)")
+        return False
     proc = subprocess.run(
         [sys.executable, "-m", "alembic", "current"],
         cwd=str(_ROOT),
@@ -80,8 +92,8 @@ def _check_alembic_head() -> bool:
     )
     out = (proc.stdout + proc.stderr).strip()
     print("   " + (out or "<пусто>"))
-    if _HEAD not in out:
-        print(f"   ❌ current не на {_HEAD}")
+    if head not in out:
+        print(f"   ❌ current не на {head}")
         return False
     print("   ✅ на head")
     return True
