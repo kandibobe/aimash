@@ -315,3 +315,14 @@ class ExtCB(CallbackData, prefix="ext"):
     action: str  # "sitelink" | "callout" | "snippet" | "snip_h" | "show" | "remove"
     idx: int = -1
     sub: str = ""  # header структурного описания (для action='snip_h')
+
+
+class SearchTermsCB(CallbackData, prefix="sterm"):
+    """§7: /searchterms — топ «мусорных» поисковых запросов (клики без конверсий) → предложить
+    в МИНУС-слова. idx — позиция запроса в _SEARCH_TERMS_CACHE[chat_id]; gen — поколение списка
+    (анти-stale, как SlashMutCB.gen). action='neg' минтит proposal add_negative_keywords (confirm-
+    гейт + «да»); 'cancel' — закрыть. SDK-вызов НЕ здесь — только после подтверждения (правило 1/2)."""
+
+    action: str  # "neg" | "cancel"
+    idx: int = -1
+    gen: int = 0

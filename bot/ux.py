@@ -200,6 +200,11 @@ def fmt_rsa_diagnostics(
     # §10 best practice: хотя бы ОДИН призыв к действию (CTA) в наборе. Advisory (эвристика по
     # лексикону), не блокирует — просто подсказка «добавьте CTA», если его нигде не нашли.
     no_cta = bool(all_texts) and not any_cta(all_texts)
+    # §10 (П1, advisory): покрытие ключей в заголовках. keyword_coverage=1.0 ⇒ ключей не было ИЛИ
+    # все покрыты — молчим; предупреждаем только при явно низком (<0.5). НЕ блокирует (менеджер
+    # решает догенерировать/править). Длину/КАПС считает КОД отдельно.
+    cov = getattr(draft, "keyword_coverage", 1.0)
+    low_cov = isinstance(cov, (int, float)) and cov < 0.5
     if lang == "en":
         h = f"{got_h}/{n_headlines} headlines" + (f" ({drop_h} too long)" if drop_h else "")
         d = f"{got_d}/{n_descriptions} descriptions" + (f" ({drop_d} too long)" if drop_d else "")
@@ -211,6 +216,11 @@ def fmt_rsa_diagnostics(
             )
         if no_cta:
             out += "\n💡 No clear call-to-action found — consider adding one (Buy, Order, Call…)."
+        if low_cov:
+            out += (
+                f"\n💡 Low keyword coverage in headlines ({int(cov * 100)}%)"
+                " — keywords are best placed in headlines."
+            )
         return out
     h_word = _plural_ru(got_h, "заголовок", "заголовков")
     d_word = _plural_ru(got_d, "описание", "описаний")
@@ -224,6 +234,11 @@ def fmt_rsa_diagnostics(
         )
     if no_cta:
         out += "\n💡 Призыв к действию не найден — добавьте (Купить, Заказать, Звоните…)."
+    if low_cov:
+        out += (
+            f"\n💡 Низкое покрытие ключей в заголовках ({int(cov * 100)}%)"
+            " — ключи лучше включать в заголовки."
+        )
     return out
 
 

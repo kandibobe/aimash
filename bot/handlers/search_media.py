@@ -117,10 +117,21 @@ async def search_brief(m: bm.Message, state: bm.FSMContext) -> None:
         return  # остаёмся в состоянии — пользователь пришлёт бриф ещё раз (или «✖ Отмена»)
     name, url, budget_units, topic, keywords = parsed
     await m.answer(bm.i18n.t("search_generating"))
+    # §8/§10: резолвим активный аккаунт и профиль клиента ДО генерации — RSA получает ключи брифа
+    # (были распарсены на :118, но терялись) и §20-профиль (бренд/бизнес/УТП). Раньше бриф был
+    # topic-only → тексты слабее по релевантности, чем в /rsa и визарде §19.
+    customer_id = await bm._active_read_account(m.chat.id)  # §8: создаём на активном аккаунте
+    prof = await bm._cc_profile_ctx_account(customer_id)
     try:
         async with bm.ux.typing_action(m):  # 3I: живой индикатор на 10–30с генерации
             draft = await bm._generate_rsa(
-                bm.CopyBrief(topic=topic, n_headlines=15, n_descriptions=4)
+                bm.CopyBrief(
+                    topic=topic,
+                    keywords=(keywords or [])[:50],  # §10: ключи в контекст генерации
+                    profile=(prof or None),  # §20: бренд/бизнес/УТП клиента
+                    n_headlines=15,
+                    n_descriptions=4,
+                )
             )
     except Exception as e:  # LLM/сеть
         await state.clear()
@@ -136,8 +147,9 @@ async def search_brief(m: bm.Message, state: bm.FSMContext) -> None:
     # core.limits по валюте АКТИВНОГО аккаунта; ставка ВИДНА на карточке и правится кнопкой.
     from core.limits import wizard_default_money_units
 
-    customer_id = await bm._active_read_account(m.chat.id)  # §8: создаём на активном аккаунте
-    currency = await _account_currency_safe(customer_id)
+    currency = await _account_currency_safe(
+        customer_id
+    )  # customer_id уже резолвнут выше (до генерации)
     _, cpc_units = wizard_default_money_units(currency)
     cpc_micros = int(round(cpc_units * 1_000_000))
     try:  # defense-in-depth: схема ещё раз проверит длины/составы/URL/бюджет + нормализует ключи
@@ -368,10 +380,13 @@ async def video_brief(m: bm.Message, state: bm.FSMContext) -> None:
         return
     name, url, budget_units, geo_locations = parsed
     await m.answer(bm.i18n.t("gdn_generating"))
+    prof = await bm._cc_profile_ctx_account(
+        await bm._active_read_account(m.chat.id)
+    )  # §20 контекст
     try:
         async with bm.ux.typing_action(m):  # 3I: живой индикатор на генерации
             draft = await bm._generate_rsa(
-                bm.CopyBrief(topic=name, n_headlines=5, n_descriptions=5)
+                bm.CopyBrief(topic=name, profile=(prof or None), n_headlines=5, n_descriptions=5)
             )
     except Exception as e:  # LLM/сеть
         await state.clear()
@@ -441,10 +456,13 @@ async def gdn_brief(m: bm.Message, state: bm.FSMContext) -> None:
         return  # остаёмся в состоянии — пользователь пришлёт бриф ещё раз (или «✖ Отмена»)
     name, url, budget_units, geo_locations = parsed
     await m.answer(bm.i18n.t("gdn_generating"))
+    prof = await bm._cc_profile_ctx_account(
+        await bm._active_read_account(m.chat.id)
+    )  # §20 контекст
     try:
         async with bm.ux.typing_action(m):  # 3I: живой индикатор на генерации
             draft = await bm._generate_rsa(
-                bm.CopyBrief(topic=name, n_headlines=5, n_descriptions=4)
+                bm.CopyBrief(topic=name, profile=(prof or None), n_headlines=5, n_descriptions=4)
             )
     except Exception as e:  # LLM/сеть
         await bm._gdn_cleanup(state, media_id)

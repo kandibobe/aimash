@@ -30,12 +30,14 @@ _HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
 _HEADER_FONT = Font(bold=True, color="FFFFFF")
 
 
-def _headers(currency: str = "") -> list[str]:
+def _headers(currency: str = "", with_relevance: bool = False) -> list[str]:
     """D8: заголовки таблицы. Денежные колонки несут ВАЛЮТУ АККАУНТА (ставки в micros→валюту уже
     посчитал КОД, ads.keyword_plan) — раньше «Ставка/CPC» без валюты вводили в заблуждение при
-    не-USD аккаунте. Пустая валюта (тест-аккаунт/сбой чтения) → без суффикса, как раньше."""
+    не-USD аккаунте. Пустая валюта (тест-аккаунт/сбой чтения) → без суффикса, как раньше.
+    with_relevance (§19.4.2) добавляет колонку «Релевантность» В КОНЕЦ (позиция 12) — чтобы НЕ
+    сдвигать индексы _NUM_FORMATS/спарклайна; включается только когда есть вердикты."""
     suf = f" ({currency})" if currency else ""
-    return [
+    cols = [
         "Кластер",
         "Интент",
         "Ключевое слово",
@@ -48,11 +50,19 @@ def _headers(currency: str = "") -> list[str]:
         "Пик сезона",
         "Сезонность (12 мес)",  # §7: полная кривая как unicode-спарклайн
     ]
+    # §19.4.2: колонка «Релевантность» (релевантно | низкая) — только когда есть вердикты.
+    return cols + (["Релевантность"] if with_relevance else [])
 
 
 HEADERS = _headers()  # обратная совместимость (тесты/старые вызовы без валюты)
-# Форматы числовых колонок (с позиции «Объём/мес»); «Пик сезона» (10)/«Сезонность» (11) — текст.
+# Форматы числовых колонок (с позиции «Объём/мес»); «Пик сезона» (10)/«Сезонность» (11)/
+# «Релевантность» (12) — текст.
 _NUM_FORMATS = {4: "#,##0", 6: "0", 7: "#,##0.00", 8: "#,##0.00", 9: "#,##0.00"}
+
+
+def _relevance_cell(relevance: dict | None, text: str) -> str:
+    """§19.4.2: текст ячейки релевантности. Fail-open: отсутствующее/пустое → «релевантно»."""
+    return "релевантно" if (relevance or {}).get(text, True) else "низкая"
 
 
 def _autosize(ws, ncols: int, *, cap: int = 50) -> None:
@@ -74,9 +84,11 @@ def build_workbook(
     language: str = "ru",
     negatives: list[str] | None = None,
     currency: str = "",
+    relevance: dict | None = None,
 ) -> Workbook:
     by_text = {i.text: i for i in ideas}  # метрики по тексту ключа
-    headers = _headers(currency)  # D8: денежные колонки с валютой аккаунта
+    with_rel = relevance is not None  # §19.4.2: колонка вердикта только когда есть вердикты
+    headers = _headers(currency, with_rel)  # D8: денежные колонки с валютой аккаунта
     wb = Workbook()
     ws = wb.active
     ws.title = "Ключевые слова"
@@ -103,22 +115,20 @@ def build_workbook(
         for idea in rows:
             if idea is None:
                 continue
-            _append(
-                ws,
-                [
-                    cl.name,
-                    cl.intent,
-                    idea.text,
-                    idea.avg_monthly_searches,
-                    idea.competition,
-                    idea.competition_index,
-                    round(idea.avg_cpc, 2),
-                    round(idea.low_bid, 2),
-                    round(idea.high_bid, 2),
-                    idea.peak_month,
-                    seasonality_sparkline(getattr(idea, "monthly", None)),
-                ],
-            )
+            row = [
+                cl.name,
+                cl.intent,
+                idea.text,
+                idea.avg_monthly_searches,
+                idea.competition,
+                idea.competition_index,
+                round(idea.avg_cpc, 2),
+                round(idea.low_bid, 2),
+                round(idea.high_bid, 2),
+                idea.peak_month,
+                seasonality_sparkline(getattr(idea, "monthly", None)),
+            ] + ([_relevance_cell(relevance, idea.text)] if with_rel else [])
+            _append(ws, row)
 
     for col, fmt in _NUM_FORMATS.items():
         for r in range(header_row + 1, ws.max_row + 1):
@@ -155,8 +165,10 @@ def write_keywords_xlsx(
     language: str = "ru",
     negatives: list[str] | None = None,
     currency: str = "",
+    relevance: dict | None = None,
 ) -> str:
-    """Сохранить .xlsx по пути path. Возвращает path. currency (D8) — валюта аккаунта в колонках ставок."""
+    """Сохранить .xlsx по пути path. Возвращает path. currency (D8) — валюта аккаунта в колонках ставок.
+    relevance (§19.4.2) — {ключ: релевантно?}; задан ⇒ добавляется колонка «Релевантность»."""
     build_workbook(
         clusters,
         ideas,
@@ -165,6 +177,7 @@ def write_keywords_xlsx(
         language=language,
         negatives=negatives,
         currency=currency,
+        relevance=relevance,
     ).save(path)
     return path
 
@@ -178,16 +191,19 @@ def write_keywords_csv(
     url: str | None = None,
     language: str = "ru",
     currency: str = "",
+    relevance: dict | None = None,
 ) -> str:
     """ТЗ §7 «CSV/table export»: те же данные, что .xlsx, но плоским CSV (для импорта в таблицы/BI).
     Кодировка utf-8-sig (BOM) — Excel корректно открывает кириллицу. Группировка по кластеру, внутри —
-    по убыванию объёма (как в .xlsx). Возвращает path. Минус-слова сюда не кладём (advisory, отдельно)."""
+    по убыванию объёма (как в .xlsx). Возвращает path. Минус-слова сюда не кладём (advisory, отдельно).
+    relevance (§19.4.2) — {ключ: релевантно?}; задан ⇒ добавляется колонка «Релевантность»."""
     import csv
 
     by_text = {i.text: i for i in ideas}
+    with_rel = relevance is not None
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
-        _writerow(w, _headers(currency))  # D8: денежные колонки с валютой аккаунта
+        _writerow(w, _headers(currency, with_rel))  # D8: денежные колонки с валютой аккаунта
         for cl in clusters:
             rows = sorted(
                 (by_text.get(k) for k in cl.keywords),
@@ -197,22 +213,20 @@ def write_keywords_csv(
             for idea in rows:
                 if idea is None:
                     continue
-                _writerow(
-                    w,
-                    [
-                        cl.name,
-                        cl.intent,
-                        idea.text,
-                        idea.avg_monthly_searches,
-                        idea.competition,
-                        idea.competition_index,
-                        round(idea.avg_cpc, 2),
-                        round(idea.low_bid, 2),
-                        round(idea.high_bid, 2),
-                        idea.peak_month,
-                        seasonality_sparkline(getattr(idea, "monthly", None)),
-                    ],
-                )
+                row = [
+                    cl.name,
+                    cl.intent,
+                    idea.text,
+                    idea.avg_monthly_searches,
+                    idea.competition,
+                    idea.competition_index,
+                    round(idea.avg_cpc, 2),
+                    round(idea.low_bid, 2),
+                    round(idea.high_bid, 2),
+                    idea.peak_month,
+                    seasonality_sparkline(getattr(idea, "monthly", None)),
+                ] + ([_relevance_cell(relevance, idea.text)] if with_rel else [])
+                _writerow(w, row)
     return path
 
 

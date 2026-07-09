@@ -683,7 +683,7 @@ async def cc_kw_generate(
         from keywords.cluster import suggest_negative_keywords
 
         negs = await suggest_negative_keywords(
-            topic, [i.text for i in ideas], language=gen_lang, limit=10
+            topic, [i.text for i in ideas], language=gen_lang, limit=10, profile=prof
         )
         if negs:
             await msg.answer(

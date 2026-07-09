@@ -137,3 +137,56 @@ async def test_copy_role_does_not_set_parallel_tool_calls():
     with _router_env(behavior, captured):
         await R.chat([{"role": "user", "content": "hi"}], role="copy", tools=tools)
     assert "parallel_tool_calls" not in captured[0]
+
+
+# ── Гард sampling-параметров: Opus 4.7+/Sonnet 5/Fable 5 отклоняют temperature (400) ──
+def test_omits_sampling_by_slug():
+    """«Строгие» семейства (точка ИЛИ дефис в версии) — да; deepseek/sonnet-4.6 — нет."""
+    assert R._omits_sampling("anthropic/claude-opus-4.8")
+    assert R._omits_sampling("anthropic/claude-opus-4-8")
+    assert R._omits_sampling("anthropic/claude-sonnet-5")
+    assert R._omits_sampling("anthropic/claude-fable-5")
+    assert not R._omits_sampling("deepseek/deepseek-chat")
+    assert not R._omits_sampling("anthropic/claude-sonnet-4.6")
+    assert not R._omits_sampling("")
+
+
+async def test_temperature_stripped_for_strict_model():
+    """Opus 4.8 отклоняет temperature на нативном API → chat НЕ кладёт его в payload (по слагу)."""
+    captured: list[dict] = []
+    with _router_env(
+        lambda m: _resp("ok"), captured, chosen="anthropic/claude-opus-4.8", fallback="fb/model"
+    ):
+        await R.chat([{"role": "user", "content": "hi"}], role="parsing", temperature=0.4)
+    assert "temperature" not in captured[0]
+
+
+async def test_temperature_sent_for_lenient_model():
+    """Дешёвая модель (deepseek) temperature ПРИНИМАЕТ → передаём как есть."""
+    captured: list[dict] = []
+    with _router_env(
+        lambda m: _resp("ok"), captured, chosen="deepseek/deepseek-chat", fallback="fb/model"
+    ):
+        await R.chat([{"role": "user", "content": "hi"}], role="parsing", temperature=0.4)
+    assert captured[0].get("temperature") == 0.4
+
+
+async def test_temperature_guard_is_per_model_on_fallback():
+    """Ключевое: гард решает ПО ФАКТИЧЕСКОМУ слагу — primary(lenient) получил temperature, а
+    fallback(strict opus) после сбоя — уже без него (иначе fallback на opus ронял бы 400)."""
+    captured: list[dict] = []
+
+    def behavior(model):
+        if model == "deepseek/deepseek-chat":
+            raise TimeoutError("boom")  # транзиентно → уходим на fallback
+        return _resp("ok")
+
+    with _router_env(
+        behavior,
+        captured,
+        chosen="deepseek/deepseek-chat",
+        fallback="anthropic/claude-opus-4.8",
+    ):
+        await R.chat([{"role": "user", "content": "hi"}], role="parsing", temperature=0.3)
+    assert captured[0].get("temperature") == 0.3  # primary (lenient) — с temperature
+    assert "temperature" not in captured[1]  # fallback (strict opus) — без temperature

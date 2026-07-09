@@ -36,13 +36,20 @@ class Settings(BaseSettings):
     #   parsing — разбор команд (function calling, денежный путь): дёшево и точно, ошибку
     #             ловит confirm-гейт + код-валидация → дорогая модель тут не нужна.
     #   copy    — генерация RSA-текстов: качество РУССКОГО важнее цены → сильная модель.
-    llm_parsing: str = "deepseek/deepseek-chat"  # A/B: дёшево, ≈Claude на парсинге
-    llm_copy: str = "anthropic/claude-sonnet-4.6"  # копирайт RU — лучшее качество (RSA)
+    llm_parsing: str = "deepseek/deepseek-chat"  # A/B: дёшево, ≈Claude на парсинге команд
+    llm_copy: str = "anthropic/claude-opus-4.8"  # копирайт RU — максимум качества RSA (решение владельца 2026-07)
     llm_fallback: str = "anthropic/claude-sonnet-4.6"  # Hermes выбыл (нет tool use на OpenRouter)
     # P2: отдельная роль КЛАСТЕРИЗАЦИИ/интента keyword research (вопрос заказчика 2026-07-06
     # «какая модель?»). Пусто ⇒ = llm_parsing (поведение прежнее байт-в-байт); LLM_CLUSTERING
     # в .env позволяет прогнать A/B сильной модели ТОЛЬКО на интент-классификации.
     llm_clustering: str = ""
+    # Отдельная роль СМЫСЛОВЫХ keyword-задач (решение владельца 2026-07): seed-ключи, оценка
+    # релевантности, генерация минус-слов, кластеризация, извлечение профиля клиента §20 —
+    # редкие и качество-критичные, но РАЗ отделены от латентно-чувствительного командного парсинга
+    # (agent/loop.py остаётся на дешёвой llm_parsing). Дефолт — сильная модель ради RU-семантики;
+    # пусто ⇒ = llm_parsing (обратная совместимость). Сменяемо в .env / рантайм /model (override
+    # бьёт все роли).
+    llm_keywords: str = "anthropic/claude-opus-4.8"
     # P3: роль АНАЛИТИКА (агентный нарратив /audit — multi-turn read-only рассуждение поверх уже
     # посчитанного КОДОМ аудита). Пусто ⇒ = llm_parsing (дешёвый дефолт; галлюцинации безвредны —
     # на выходе fact-guard + детерминированный fallback). LLM_ANALYST в .env = A/B сильной модели.
@@ -55,6 +62,9 @@ class Settings(BaseSettings):
     # agent.router.ROLE_MAX_TOKENS). Парсинг → крошечный tool-call; копирайт → короткий JSON.
     llm_max_tokens_parsing: int = 1024
     llm_max_tokens_copy: int = 2048
+    # Потолок смысловых keyword-задач: фильтр релевантности на 120 ключей отдаёт JSON крупнее
+    # parsing-1024 (объект {ключ: bool}), поэтому берём copy-уровень.
+    llm_max_tokens_keywords: int = 2048
     # P3: потолок нарратива аналитика (короткий человеческий разбор аудита; без него OpenRouter
     # резервирует полный max-output против дневного бюджета — см. agent.router.ROLE_MAX_TOKENS).
     llm_max_tokens_analyst: int = 1536

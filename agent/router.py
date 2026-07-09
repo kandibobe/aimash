@@ -24,6 +24,10 @@ ROLE_MODELS = {
     "parsing": settings.llm_parsing,  # парсинг команд → function calling (денежный путь)
     "copy": settings.llm_copy,  # генерация RSA-текстов
     "fallback": settings.llm_fallback,
+    # Смысловые keyword-задачи (seed/релевантность/минус-слова/кластеризация/профиль §20);
+    # пусто в .env ⇒ модель parsing (обратная совместимость). Отделено от латентно-чувствительного
+    # командного парсинга — качество RU-семантики важнее скорости на этих РЕДКИХ вызовах.
+    "keywords": settings.llm_keywords or settings.llm_parsing,
     # P2: кластеризация/интент keyword research; пусто в .env ⇒ модель parsing (как раньше)
     "clustering": settings.llm_clustering or settings.llm_parsing,
     # P3: аналитик (агентный нарратив /audit); пусто ⇒ модель parsing (дешёвый дефолт)
@@ -39,9 +43,33 @@ ROLE_MAX_TOKENS = {
     "parsing": settings.llm_max_tokens_parsing,
     "copy": settings.llm_max_tokens_copy,
     "fallback": settings.llm_max_tokens_copy,
+    "keywords": settings.llm_max_tokens_keywords,  # фильтр релевантности на 120 ключей крупнее parsing
     "clustering": settings.llm_max_tokens_parsing,  # ответ — компактный JSON групп
     "analyst": settings.llm_max_tokens_analyst,  # короткий человеческий разбор аудита
 }
+
+
+# Семейства моделей, ОТКЛОНЯЮЩИЕ sampling-параметры (temperature/top_p/top_k) на нативном Anthropic
+# API (400). Через OpenRouter поведение не гарантировано (может пробросить и словить 400), поэтому
+# срезаем на нашей стороне по слагу РЕЗОЛВНУТОЙ модели (см. chat._call). Матч по подстроке —
+# терпим и точку, и дефис в версии (anthropic/claude-opus-4.8 ~ ...-4-8). Дешёвая деградация:
+# без temperature модель идёт на своём дефолте — качество keyword/copy это не роняет.
+_SAMPLING_STRICT_SUBSTRINGS = (
+    "claude-opus-4.8",
+    "claude-opus-4-8",
+    "claude-opus-4.7",
+    "claude-opus-4-7",
+    "claude-sonnet-5",
+    "claude-fable-5",
+)
+
+
+def _omits_sampling(model: str) -> bool:
+    """True, если модель (по слагу) отклоняет temperature/top_p/top_k (Opus 4.7+/Sonnet 5/Fable 5).
+    Тогда chat() НЕ добавляет temperature в payload (иначе риск 400 при пробросе OpenRouter)."""
+    m = (model or "").casefold()
+    return any(s in m for s in _SAMPLING_STRICT_SUBSTRINGS)
+
 
 # Кандидаты для A/B-теста (см. scripts/ab_test_models.py)
 AB_CANDIDATES = [
@@ -172,8 +200,9 @@ async def chat(
         # критично); для copy/clustering параллельность безвредна.
         if role == "parsing":
             kwargs["parallel_tool_calls"] = False
-    if temperature is not None:
-        kwargs["temperature"] = temperature
+    # temperature добавляется в _call ПО фактическому слагу (не тут): «строгие» семейства
+    # (Opus 4.7+/Sonnet 5/Fable 5) отклоняют sampling-параметры → _omits_sampling их срезает.
+    # Это покрывает и fallback-путь (fb может быть другой моделью, чем chosen).
     # Явный потолок генерации (ROLE_MAX_TOKENS) — экономия бюджета без потери качества (см. выше).
     mt = max_tokens if max_tokens is not None else ROLE_MAX_TOKENS.get(role)
     if mt:
@@ -196,6 +225,9 @@ async def chat(
         # call_llm: zero-arg фабрика — tenacity создаёт свежую корутину на каждую попытку.
         # label → лог запроса к LLM (модель/роль, без секретов; ТЗ §15).
         call_kwargs = {**kwargs, "model": _with_price_floor(model_slug)}
+        # temperature — только если модель его принимает (Opus 4.7+/Sonnet 5/Fable 5 отклоняют).
+        if temperature is not None and not _omits_sampling(model_slug):
+            call_kwargs["temperature"] = temperature
         resp = await call_llm(
             lambda: _client().chat.completions.create(**call_kwargs), label=f"{model_slug}/{role}"
         )

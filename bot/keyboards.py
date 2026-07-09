@@ -41,6 +41,7 @@ from bot.callbacks import (
     RollbackCB,
     RsaCB,
     RsaPickCB,
+    SearchTermsCB,
     SlashMutCB,
     TemplateCB,
     ThrTuneCB,
@@ -48,6 +49,21 @@ from bot.callbacks import (
 )
 
 _NAME_LIMIT = 40
+
+
+def searchterms_kb(items: list[dict], gen: int) -> InlineKeyboardMarkup:
+    """§7: клавиатура /searchterms — по кнопке «🚫 <запрос>» на каждый «мусорный» запрос (idx+gen
+    анти-stale) + «Закрыть». Клик минтит черновик add_negative_keywords (confirm-гейт), сам SDK —
+    только после «да». Имя запроса в callback_data НЕ кладём (idx резолвится по chat_id в bot.main)."""
+    from bot import i18n
+
+    b = InlineKeyboardBuilder()
+    for i, it in enumerate(items):
+        term = _ellipsize(str(it.get("term") or ""))
+        b.button(text=f"🚫 {term}", callback_data=SearchTermsCB(action="neg", idx=i, gen=gen))
+    b.button(text=i18n.t("searchterms_cancel_btn"), callback_data=SearchTermsCB(action="cancel"))
+    b.adjust(1)
+    return b.as_markup()
 
 
 def _ellipsize(s: str, limit: int = _NAME_LIMIT) -> str:
@@ -102,6 +118,7 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="cancel", description="Отменить текущий черновик"),
     BotCommand(command="keywords", description="Подбор ключевых слов"),
     BotCommand(command="addkeys", description="Добавить ключи в кампанию (файл/ссылка/текст)"),
+    BotCommand(command="searchterms", description="Мусорные поисковые запросы → минус-слова"),
     BotCommand(command="model", description="Модель ИИ (OpenRouter)"),
     BotCommand(command="balance", description="Бюджет ИИ: баланс OpenRouter и траты"),
     BotCommand(command="journal", description="Журнал изменений (что/когда/кто)"),

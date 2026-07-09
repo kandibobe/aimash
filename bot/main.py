@@ -103,6 +103,7 @@ from bot.callbacks import (
     RsaCB,
     RsaPickCB,
     SearchBidCB,
+    SearchTermsCB,
     SlashMutCB,
     TemplateCB,
     ThrTuneCB,
@@ -188,6 +189,7 @@ from bot.keyboards import (
     report_campaigns_kb,
     report_recall_kb,
     rollback_kb,
+    searchterms_kb,
     slash_mutate_campaigns_kb,
     rsa_aslist_kb,
     rsa_item_kb,
@@ -2422,6 +2424,85 @@ def _slash_mut_store(chat_id: int, camps: list[dict]) -> int:
     return gen
 
 
+# §7: /searchterms — топ «мусорных» поисковых запросов (клики без конверсий) → предложить в
+# минус-слова за confirm-гейтом. Кэш кандидатов на chat_id (имя запроса не влезает в callback_data).
+_SEARCH_TERMS_CACHE: dict[int, list[dict]] = {}
+_SEARCH_TERMS_GEN: dict[int, int] = {}  # поколение списка (анти-stale, как _SLASH_MUT_GEN)
+
+
+def _searchterms_store(chat_id: int, items: list[dict]) -> int:
+    """Записать список кандидатов /searchterms с новым поколением: клик по СТАРОЙ клавиатуре после
+    повторного /searchterms обязан дать «список устарел», а не другой запрос (idx указывал бы в иной
+    список)."""
+    gen = _SEARCH_TERMS_GEN.get(chat_id, 0) + 1
+    _SEARCH_TERMS_GEN[chat_id] = gen
+    _SEARCH_TERMS_CACHE[chat_id] = items
+    return gen
+
+
+async def _searchterms_run(m: Message, period) -> None:
+    """§7 search-terms → минус-слова: читаем отчёт по поисковым запросам активного аккаунта ЧТЕНИЯ,
+    КОД отбирает «мусорные» (есть клики, 0 конверсий), показываем топ по расходу с кнопками «🚫 в
+    минус». Добавление — ТОЛЬКО через confirm-гейт по тапу (proposal add_negative_keywords). READ-ONLY
+    до «да». Метрики к модели не уходят (golden rule #4) — фильтр детерминированный; LLM только
+    advisory-тег релевантности (W8)."""
+    acct = await _require_read_account(m, "searchterms")
+    if acct is None:
+        return  # показан пикер аккаунта — оператор выберет и повторит
+    from ads.client import build_client_async
+    from reports.queries import fetch_search_terms
+
+    await m.answer(i18n.t("searchterms_loading"))
+    try:
+        client = await build_client_async(acct)
+        rows = await run_ads_read_call(
+            fetch_search_terms, client, acct, period, label="fetch_search_terms"
+        )
+    except Exception as e:  # сеть/доступ/SDK
+        await m.answer(i18n.t("err_searchterms", err=ux.err_text(e)))
+        return
+    # «Мусорные»: клики есть, конверсий нет, расход >0 (как audit.check_wasteful_search_term).
+    # fetch_search_terms уже сортирует по cost_micros DESC → берём топ по расходу.
+    waste = [
+        r
+        for r in rows
+        if r.metrics.clicks > 0 and (r.metrics.conversions or 0) == 0 and r.metrics.cost > 0
+    ][:10]
+    if not waste:
+        await m.answer(i18n.t("searchterms_none"))
+        return
+    items = [
+        {
+            "term": r.search_term,
+            "campaign": r.campaign,
+            "cost": round(r.metrics.cost, 2),
+            "clicks": r.metrics.clicks,
+        }
+        for r in waste
+    ]
+    # W8 (advisory): семантический тег «похоже не по теме» ПОВЕРХ финансовой эвристики — прогон
+    # AI-релевантности самих текстов запросов к профилю клиента (маленький набор). Никогда не гейтит
+    # находку, только помечает; метрики модели не отдаём (rule #4). Сбой/нет профиля → без тегов.
+    try:
+        prof = await _cc_profile_ctx_account(acct)
+        if (prof or "").strip():
+            from keywords.filter import filter_relevance
+
+            rel = await filter_relevance(texts=[it["term"] for it in items], topic="", profile=prof)
+            for it in items:
+                if rel.get(it["term"], True) is False:
+                    it["off_topic"] = True
+    except Exception:  # noqa: BLE001 — тег релевантности advisory, не критичен
+        pass
+    currency = await _read_currency(client, acct)  # §9: валюта для расхода в сводке
+    gen = _searchterms_store(m.chat.id, items)
+    await m.answer(
+        texts.fmt_searchterms(items, currency=currency),
+        reply_markup=searchterms_kb(items, gen),
+        parse_mode=ParseMode.HTML,
+    )
+
+
 async def _slash_mutate_present(message: Message, chat_id: int, operation: str, name: str) -> None:
     """Мятие proposal паузы/возобновления по ИМЕНИ кампании (общий хвост текст-команды и пикера
     D4). На АКТИВНОМ аккаунте (AD.4); при неоднозначности — форс-пикер аккаунта. Confirm-гейт."""
@@ -3323,13 +3404,21 @@ async def _kw_run(
 
     idea_texts = [i.text for i in ideas]
     src = ", ".join(seeds) or (url or "")
+    # §7/§19.4.2: профиль клиента активного аккаунта как БИЗНЕС-контекст релевантности и минус-слов.
+    # Раньше standalone /keywords его НЕ грузил → релевантность оценивалась «ключ vs сам сид», а
+    # минус-слова не знали бизнеса/бренда. Это DB-чтения (НЕ LLM) — латентность к gather не добавляют.
+    prof = await _cc_profile_ctx_account(acct)
+    protected = await CLIENTS.protected_negative_terms(acct)  # бренд/услуги — не предлагать в минус
     # §7: кластеризация по интенту, предложение минус-слов и AI-релевантность (§19.4.2) независимы →
     # параллельно (без наценки латентности к 2 уже идущим). Все advisory с внутренним fallback;
-    # return_exceptions страхует от пробрасывания (фича не падает). topic = сиды/URL пользователя.
+    # return_exceptions страхует от пробрасывания (фича не падает). topic = сиды/URL; бизнес-контекст
+    # подаётся через profile.
     clusters_res, negatives, relevance = await asyncio.gather(
         cluster_keywords(idea_texts, language),
-        suggest_negative_keywords(src, idea_texts, language=language),
-        filter_relevance(texts=idea_texts, topic=src, language=language),
+        suggest_negative_keywords(
+            src, idea_texts, language=language, profile=prof, protected=protected
+        ),
+        filter_relevance(texts=idea_texts, topic=src, language=language, profile=prof),
         return_exceptions=True,
     )
     clusters = (
@@ -3348,8 +3437,8 @@ async def _kw_run(
     # таблицы/.xlsx (менеджер видит всё), но исключаем из набора «добавить в кампанию».
     off_topic = {t for t in idea_texts if relevance.get(t, True) is False}
     clusters = rank_clusters(
-        clusters, by_text
-    )  # §7: приоритезация (объём × интент) — порядок показа
+        clusters, by_text, off_topic
+    )  # §7: приоритезация (объём × интент, off-topic топит кластер) — порядок показа
     currency = await _read_currency(await build_client_async(acct), acct)  # §9: валюта аккаунта
     summary = texts.fmt_keywords_summary(
         clusters,
@@ -3359,6 +3448,7 @@ async def _kw_run(
         by_idea=by_idea,
         currency=currency,
         irrelevant=len(off_topic),
+        off_topic=off_topic,
     )
     if (
         negatives
@@ -3388,6 +3478,7 @@ async def _kw_run(
             language=language,
             negatives=negatives,
             currency=currency,  # D8: валюта аккаунта в колонках ставок
+            relevance=relevance or None,  # §19.4.2: колонка вердикта (пусто ⇒ без колонки)
         )
         await target.answer_document(FSInputFile(path, filename="aimash_keywords.xlsx"))
     except Exception as e:  # openpyxl/IO
@@ -3415,6 +3506,7 @@ async def _kw_run(
             url=url,
             language=language,
             currency=currency,  # D8: валюта аккаунта в колонках ставок
+            relevance=relevance or None,  # §19.4.2: колонка вердикта (пусто ⇒ без колонки)
         )
         await target.answer_document(FSInputFile(csv_path, filename="aimash_keywords.csv"))
     except Exception:  # noqa: BLE001 — CSV — дубль данных .xlsx; сбой не критичен, не спамим
@@ -4842,6 +4934,7 @@ async def _search_params_from_cfg(
     campaign_name: str,
     budget_units: float | None = None,
     final_url: str | None = None,
+    profile: str = "",
 ) -> tuple[dict, float, int, bool]:
     """Из CampaignConfig источника собрать ВАЛИДИРОВАННЫЕ params create_search_campaign под новым
     именем (общая логика клона §2A и шаблона-из-кампании §2B). Берём ad_group[0] (схема делает одну
@@ -4867,7 +4960,13 @@ async def _search_params_from_cfg(
     if len(headlines) < RSA_MIN_HEADLINES or len(descriptions) < RSA_MIN_DESCRIPTIONS:
         try:
             draft = await _generate_rsa(
-                CopyBrief(topic=campaign_name, n_headlines=15, n_descriptions=4)
+                CopyBrief(
+                    topic=campaign_name,
+                    keywords=[k.text for k in ag.keywords][:50],  # §10: ключи источника в контекст
+                    profile=(profile or None),  # §20: контекст клиента (если передал вызывающий)
+                    n_headlines=15,
+                    n_descriptions=4,
+                )
             )
         except Exception as e:  # LLM/сеть
             raise _SearchBuildError("err_text_gen", err=ux.err_text(e)) from e
@@ -4946,6 +5045,7 @@ async def _clone_from_intent(m: Message, brief: dict) -> None:
             campaign_name=new_name,
             budget_units=brief.get("budget_daily_units"),
             final_url=brief.get("final_url"),
+            profile=await _cc_profile_ctx_account(acct),  # §20: контекст клиента для regen-текстов
         )
     except _SearchBuildError as e:
         await m.answer(i18n.t(e.key, **e.kw))

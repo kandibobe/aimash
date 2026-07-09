@@ -116,6 +116,7 @@ HELP = (
     "<b>🔑 Ключевые слова и тексты</b>\n"
     "/keywords — подбор ключевых слов (объём, конкуренция, кластеры) + .xlsx\n"
     "/addkeys — добавить ключи в кампанию (свой файл/ссылка/текст, через подтверждение)\n"
+    "/searchterms — мусорные поисковые запросы (клики без конверсий) → минус-слова (через подтверждение)\n"
     "/rsa — сгенерировать тексты объявления (RSA), поэлементный confirm (создаётся на паузе)\n\n"
     "<b>📊 Отчёты</b>\n"
     "/status — быстрая статистика (30 дн.)\n"
@@ -1327,13 +1328,16 @@ def fmt_keywords_summary(
     by_idea: dict | None = None,
     currency: str = "",
     irrelevant: int = 0,
+    off_topic=frozenset(),
 ) -> str:
     """Сводка keyword research: топ-кластеры с топ-ключами и метриками. Полная таблица — в .xlsx.
 
     clusters — объекты с .name/.intent/.keywords (duck-typed); by_text — {ключ: объём/мес}.
     by_idea (§7) — {ключ: KeywordIdea}; если задан, к строке ключа добавляем конкуренцию/ставку/
     сезон (то, что раньше жило ТОЛЬКО в .xlsx). irrelevant — сколько идей помечено нерелевантными
-    (§19.4.2 AI-релевантность), показываем счётчиком. Усечение помечаем явно, без «тихого» обрезания."""
+    (§19.4.2 AI-релевантность). off_topic — сами эти ключи: помечаем их 🚫 в топе и перечисляем
+    (не просто счётчик — менеджеру важно ВИДЕТЬ, что сочтено нецелевым). Ключи из таблицы НЕ
+    удаляются (контракт «менеджер видит всё»). Усечение помечаем явно, без «тихого» обрезания."""
     # Плоский топ (15) — главная витрина «best→worst»; кластеры компактнее, полное — в .xlsx.
     # Границы держим так, чтобы сводка влезала в лимит одного сообщения Telegram (~4096 символов).
     max_clusters, max_kw, flat_top_n = 5, 4, 15
@@ -1351,7 +1355,8 @@ def fmt_keywords_summary(
             lines.append("🏆 <b>Top by volume</b> (best → worst):")
             for kw in flat_top:
                 suffix = _kw_metrics_suffix(by_idea.get(kw), currency, True)
-                lines.append(f"  • {esc(kw)} — {_thou(by_text.get(kw, 0))}/mo{suffix}")
+                mark = "🚫 " if kw in off_topic else ""
+                lines.append(f"  • {mark}{esc(kw)} — {_thou(by_text.get(kw, 0))}/mo{suffix}")
             lines.append("")
         for cl in clusters[:max_clusters]:
             intent = f" · <i>{esc(cl.intent)}</i>" if cl.intent else ""
@@ -1364,10 +1369,15 @@ def fmt_keywords_summary(
                 lines.append(f"  …{len(cl.keywords) - max_kw} more — see .xlsx")
         if len(clusters) > max_clusters:
             lines.append(f"\n…{len(clusters) - max_clusters} more clusters — see .xlsx")
-        if irrelevant > 0:
+        off = list(off_topic)[:8]
+        if off:
+            more = f" +{irrelevant - len(off)}" if irrelevant > len(off) else ""
             lines.append(
-                f"\n🚫 {irrelevant} idea(s) flagged likely off-topic — excluded from ‘add’."
+                "\n🚫 <b>Likely off-topic vs the client's business</b>"
+                f"{more}: {', '.join(esc(t) for t in off)}. Review before adding."
             )
+        elif irrelevant > 0:
+            lines.append(f"\n🚫 {irrelevant} idea(s) flagged likely off-topic.")
         lines.append(
             "\n<i>This is a suggestion, not an action. Full table is in the attachment.</i>"
         )
@@ -1380,7 +1390,8 @@ def fmt_keywords_summary(
         lines.append("🏆 <b>Топ по объёму</b> (лучшие → слабее):")
         for kw in flat_top:
             suffix = _kw_metrics_suffix(by_idea.get(kw), currency, False)
-            lines.append(f"  • {esc(kw)} — {_thou(by_text.get(kw, 0))}/мес{suffix}")
+            mark = "🚫 " if kw in off_topic else ""
+            lines.append(f"  • {mark}{esc(kw)} — {_thou(by_text.get(kw, 0))}/мес{suffix}")
         lines.append("")
     for cl in clusters[:max_clusters]:
         intent = f" · <i>{esc(cl.intent)}</i>" if cl.intent else ""
@@ -1393,9 +1404,42 @@ def fmt_keywords_summary(
             lines.append(f"  …ещё {len(cl.keywords) - max_kw} — см. .xlsx")
     if len(clusters) > max_clusters:
         lines.append(f"\n…ещё {len(clusters) - max_clusters} кластеров — см. .xlsx")
-    if irrelevant > 0:
-        lines.append(f"\n🚫 {irrelevant} идей помечены нецелевыми — исключены из «добавить».")
+    off = list(off_topic)[:8]
+    if off:
+        more = f" +{irrelevant - len(off)}" if irrelevant > len(off) else ""
+        lines.append(
+            "\n🚫 <b>Низкая релевантность бизнесу клиента</b>"
+            f"{more}: {', '.join(esc(t) for t in off)}. Проверьте перед добавлением."
+        )
+    elif irrelevant > 0:
+        lines.append(f"\n🚫 {irrelevant} идей помечены нецелевыми.")
     lines.append("\n<i>Это подсказка, не действие. Полная таблица — во вложении.</i>")
+    return "\n".join(lines)
+
+
+def fmt_searchterms(items: list[dict], *, currency: str = "", lang: str | None = None) -> str:
+    """§7: список «мусорных» поисковых запросов (клики без конверсий) с расходом и кампанией.
+    Кнопки под сообщением предлагают добавить запрос в минус-слова (за confirm-гейтом). off_topic
+    (§19.4.2, advisory) — тег «похоже не по теме бизнеса» по AI-релевантности к профилю клиента."""
+    cur = f" {currency}" if currency else ""
+    if _lang(lang) == "en":
+        lines = ["🔎 <b>Wasteful search terms</b> (clicks, no conversions):", ""]
+        for it in items:
+            tag = " 🚫off-topic" if it.get("off_topic") else ""
+            lines.append(
+                f"• <b>{esc(it['term'])}</b>{tag} — {it['clicks']} clicks, "
+                f"{round(float(it['cost']), 2)}{cur} · {esc(it['campaign'])}"
+            )
+        lines.append("\n<i>Tap 🚫 to add a term to negative keywords (confirmation required).</i>")
+        return "\n".join(lines)
+    lines = ["🔎 <b>«Мусорные» поисковые запросы</b> (клики без конверсий):", ""]
+    for it in items:
+        tag = " 🚫не по теме" if it.get("off_topic") else ""
+        lines.append(
+            f"• <b>{esc(it['term'])}</b>{tag} — {it['clicks']} кл., "
+            f"{round(float(it['cost']), 2)}{cur} · {esc(it['campaign'])}"
+        )
+    lines.append("\n<i>Нажми 🚫, чтобы добавить запрос в минус-слова (нужно подтверждение).</i>")
     return "\n".join(lines)
 
 

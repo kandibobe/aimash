@@ -85,6 +85,62 @@ async def mcc_(m: bm.Message, command: bm.CommandObject) -> None:
     await bm._send_mcc(m, command.args)
 
 
+@bm.dp.message(bm.Command("searchterms"))
+async def searchterms_(m: bm.Message, command: bm.CommandObject) -> None:
+    """§7: топ «мусорных» поисковых запросов (клики без конверсий) → предложить в минус-слова за
+    confirm-гейтом. Без аргумента — за 30 дн.; с аргументом-периодом (7/30/90/MTD/ISO) — за него.
+    Read-only до «да»: клик по «🚫» минтит черновик add_negative_keywords (правило 1/2)."""
+    try:
+        period = bm._period_from_arg(command.args)
+    except ValueError:
+        await m.answer(bm.i18n.t("err_period"))
+        return
+    await bm._searchterms_run(m, period)
+
+
+@bm.dp.callback_query(bm.SearchTermsCB.filter(bm.F.action == "cancel"))
+async def on_searchterms_cancel(cq: bm.CallbackQuery, callback_data: bm.SearchTermsCB) -> None:
+    """§7: закрыть список /searchterms. Ничего не мутирует."""
+    bm._SEARCH_TERMS_CACHE.pop(bm._cq_chat_id(cq), None)
+    await cq.answer(bm.i18n.t("cb_cancelled"))
+    await bm._safe_edit(cq, bm.i18n.t("rejected"))
+
+
+@bm.dp.callback_query(bm.SearchTermsCB.filter(bm.F.action == "neg"))
+async def on_searchterms_neg(cq: bm.CallbackQuery, callback_data: bm.SearchTermsCB) -> None:
+    """§7: «🚫 в минус» по запросу → черновик add_negative_keywords (EXACT — режет только этот запрос,
+    не шире) за confirm-гейтом. Само добавление — только после «да» (confirmation_id, правило 2).
+    idx+gen анти-stale (клик по старой клавиатуре после повторного /searchterms → «список устарел»)."""
+    chat_id = bm._cq_chat_id(cq)
+    items = bm._SEARCH_TERMS_CACHE.get(chat_id)
+    if (
+        not items
+        or not (0 <= callback_data.idx < len(items))
+        or int(getattr(callback_data, "gen", 0)) != bm._SEARCH_TERMS_GEN.get(chat_id, 0)
+    ):
+        await cq.answer(bm.i18n.t("searchterms_stale"), show_alert=True)
+        return
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    it = items[callback_data.idx]
+    try:
+        cid, operation, params, summary = bm._build_proposal(
+            "add_negative_keywords",
+            campaign=it["campaign"],
+            keywords=[it["term"]],
+            match_type="exact",
+        )
+    except Exception as e:  # noqa: BLE001 — валидация схемы (пустой/длинный ключ) → понятный ответ
+        await cq.answer(await bm._friendly_error(e, "searchterms:neg", short=True), show_alert=True)
+        return
+    await cq.answer()
+    await bm._present_proposal_active(
+        msg, chat_id=chat_id, operation=operation, params=params, summary=summary, cid=cid
+    )
+
+
 @bm.dp.message(bm.F.text.in_(bm.BTN_REPORT_ALL))
 async def btn_report(m: bm.Message) -> None:
     await bm._start_report_picker(m, "report")  # §8: аккаунт → кампания → период

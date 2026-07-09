@@ -19,6 +19,7 @@ patch['replace_services']/['replace_contacts'] (LLM ставит их ТОЛЬК
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sqlalchemy import delete, func, select
@@ -336,6 +337,27 @@ class ClientProfileStore:
         if prof.get("notes"):
             parts.append(f"Заметки: {prof['notes']}")
         return "\n".join(parts).strip()[:max_chars]
+
+    async def protected_negative_terms(self, customer_id: str) -> set[str]:
+        """Токены бренда и услуг/товаров клиента для защиты от минус-слов (§7): их НЕ предлагаем
+        в минус, иначе клиент перестанет показываться по собственному бренду/услуге. Читает тот же
+        профиль, что и profile_context_text. Токены — casefold, длиной ≥3 (короче — шум/стоп-слова).
+        Нет профиля/сбой → пустой набор (пост-фильтр просто не срабатывает)."""
+        try:
+            prof = await self.get_by_account(customer_id)
+        except Exception:  # noqa: BLE001 — защита опциональна, не роняем генерацию
+            return set()
+        if not prof:
+            return set()
+        sources = [str(prof.get("brand") or "")]
+        for it in prof.get("services") or []:
+            sources.append(str(it.get("name") or ""))
+        terms: set[str] = set()
+        for src in sources:
+            for tok in re.split(r"[^0-9a-zа-яё]+", src.casefold()):
+                if len(tok) >= 3:
+                    terms.add(tok)
+        return terms
 
     # ── писатели (вызываются из clients.execute за confirm-гейтом, и из краулера auto-save) ──
     async def apply_upsert(

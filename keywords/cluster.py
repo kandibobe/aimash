@@ -10,6 +10,7 @@ fallback на одну группу «Все ключи», чтобы фича �
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 
 from agent.router import chat
@@ -119,8 +120,8 @@ def _parse(content: str, valid: list[str]) -> list[Cluster]:
 
 
 async def cluster_keywords(keywords: list[str], language: str = "ru") -> list[Cluster]:
-    """Сгруппировать ключи по интенту через LLM (роль clustering: env LLM_CLUSTERING, пусто =
-    parsing — дёшево). Fallback при сбое — одна группа «Все ключи». Вход дедуплицируется,
+    """Сгруппировать ключи по интенту через LLM (роль keywords: env LLM_KEYWORDS, пусто =
+    parsing). Fallback при сбое — одна группа «Все ключи». Вход дедуплицируется,
     порядок сохраняется."""
     uniq = list(dict.fromkeys(k.strip() for k in keywords if k.strip()))  # дедуп + порядок
     if not uniq:
@@ -132,7 +133,7 @@ async def cluster_keywords(keywords: list[str], language: str = "ru") -> list[Cl
                 {"role": "system", "content": _SYSTEM},
                 {"role": "user", "content": _user_prompt(sample, language)},
             ],
-            role="clustering",
+            role="keywords",
             temperature=0.3,
         )
         clusters = _parse(getattr(msg, "content", "") or "", sample)
@@ -159,27 +160,70 @@ _INTENT_WEIGHT = {
 _DEFAULT_INTENT_WEIGHT = 0.4  # интент не распознан — нейтральный вес
 
 
-def rank_clusters(clusters: list[Cluster], by_text: dict[str, int]) -> list[Cluster]:
+def rank_clusters(
+    clusters: list[Cluster], by_text: dict[str, int], off_topic: set[str] = frozenset()
+) -> list[Cluster]:
     """Проставить priority = суммарный объём × вес интента и вернуть кластеры по убыванию приоритета
-    (§7). «Технические» группы («Прочее…») всегда в конце. by_text — {ключ: средн. объём/мес}."""
+    (§7). «Технические» группы («Прочее…») всегда в конце. by_text — {ключ: средн. объём/мес}.
+    off_topic — ключи, помеченные нерелевантными (§19.4.2): их объём НЕ идёт в приоритет, поэтому
+    кластеры, забитые нерелевантным, тонут вниз. Ничего НЕ удаляется — контракт «менеджер видит всё»
+    сохраняется (ключи остаются в кластерах/экспорте)."""
 
     def _leftover(c: Cluster) -> bool:
         return c.name.startswith("Прочее")
 
     for c in clusters:
-        vol = sum(int(by_text.get(k, 0) or 0) for k in c.keywords)
+        vol = sum(int(by_text.get(k, 0) or 0) for k in c.keywords if k not in off_topic)
         c.priority = round(vol * _INTENT_WEIGHT.get(c.intent, _DEFAULT_INTENT_WEIGHT), 2)
     return sorted(clusters, key=lambda c: (_leftover(c), -c.priority))
 
 
 # ── Предложение минус-слов (ТЗ §7 «предложение минус-слов») — advisory ────────────
-_NEG_SYSTEM = (
-    "Ты — специалист по контекстной рекламе Google Ads. По теме и списку идей ключевых слов "
-    "предложи МИНУС-СЛОВА — слова, по которым показывать объявление НЕ стоит (нерелевантный/"
-    "нецелевой трафик: напр. «бесплатно», «скачать», «своими руками», «вакансии», «бу», «отзывы», "
-    "«фото», «википедия» — но ТОЛЬКО уместные ДЛЯ ЭТОЙ темы). Верни СТРОГО JSON-массив строк "
-    '["…"] без пояснений и markdown, до 20 штук, в нижнем регистре.'
+# База + примеры «мусорных» намерений ПО ЯЗЫКУ кампании. Раньше RU-хардкод («бесплатно/скачать/…»)
+# подавался и для не-RU рынков → биас. Теперь примеры выбираются по language; для неизвестного —
+# опускаем (пусть модель судит по теме/профилю). Профиль клиента подаётся отдельным блоком.
+_NEG_BASE = (
+    "Ты — специалист по контекстной рекламе Google Ads. По теме кампании, информации о клиенте "
+    "и списку идей ключевых слов предложи МИНУС-СЛОВА — слова, по которым показывать объявление "
+    "НЕ стоит (нерелевантный/нецелевой трафик), но ТОЛЬКО уместные ДЛЯ ЭТОЙ темы и этого бизнеса. "
 )
+_NEG_EXAMPLES = {
+    "ru": "Примеры мусорных намерений: «бесплатно», «скачать», «своими руками», «вакансии», «бу», "
+    "«отзывы», «фото», «википедия». ",
+    "en": 'Examples of junk intent: "free", "download", "diy", "jobs", "used", "reviews", '
+    '"wikipedia". ',
+}
+_NEG_TAIL = (
+    'Верни СТРОГО JSON-массив строк ["…"] без пояснений и markdown, до 20 штук, в нижнем регистре.'
+)
+
+
+def _neg_system(language: str) -> str:
+    """Системный промпт минус-слов с примерами ПО ЯЗЫКУ (RU/EN) или без — чтобы не тащить RU-биас
+    на не-RU рынки (живой тест: RU few-shot искажал минус-слова для англоязычных кампаний)."""
+    lang = (language or "").strip().casefold()
+    if lang.startswith("ru"):
+        ex = _NEG_EXAMPLES["ru"]
+    elif lang.startswith("en"):
+        ex = _NEG_EXAMPLES["en"]
+    else:
+        ex = ""  # неизвестный язык — без языко-специфичных примеров (биас недопустим)
+    return _NEG_BASE + ex + _NEG_TAIL
+
+
+def _drop_protected(negatives: list[str], protected: set[str]) -> list[str]:
+    """Выкинуть минус-слова, чьи casefold-токены пересекают защищённые токены (бренд/услуги клиента).
+    Иначе модель может предложить в минус собственный бренд/услугу клиента — и он перестанет
+    показываться по своим же запросам. protected — набор уже-casefold токенов."""
+    if not protected:
+        return negatives
+    out: list[str] = []
+    for neg in negatives:
+        toks = {t for t in re.split(r"[^0-9a-zа-яё]+", neg.casefold()) if t}
+        if toks & protected:
+            continue  # минус-слово задевает бренд/услугу клиента — не предлагаем
+        out.append(neg)
+    return out
 
 
 def _parse_neg(content: str, limit: int) -> list[str]:
@@ -207,26 +251,36 @@ def _parse_neg(content: str, limit: int) -> list[str]:
 
 
 async def suggest_negative_keywords(
-    topic: str, idea_texts: list[str], *, language: str = "ru", limit: int = 20
+    topic: str,
+    idea_texts: list[str],
+    *,
+    language: str = "ru",
+    limit: int = 20,
+    profile: str = "",
+    protected: set[str] = frozenset(),
 ) -> list[str]:
-    """Предложить минус-слова по теме + идеям (§7). ADVISORY: ничего не меняет, в аккаунт НЕ пишет —
-    добавление минус-слов идёт ОТДЕЛЬНОЙ командой через confirm-гейт. Fallback [] при сбое/пустом."""
+    """Предложить минус-слова по теме + идеям + профилю клиента (§7). ADVISORY: ничего не меняет,
+    в аккаунт НЕ пишет — добавление минус-слов идёт ОТДЕЛЬНОЙ командой через confirm-гейт.
+    profile — бизнес-контекст (чтобы минус-слова отражали бизнес, а не только тему-строку).
+    protected — токены бренда/услуг клиента (пост-фильтр: не предлагаем их в минус).
+    Fallback [] при сбое/пустом."""
     sample = [t for t in idea_texts[:120] if t and t.strip()]
     if not (topic or "").strip() and not sample:
         return []
+    ctx = f"Язык: {language}. Тема: {topic}.\n"
+    if (profile or "").strip():
+        ctx += f"О клиенте:\n{profile[:1000]}\n"
+    ctx += "Идеи ключей:\n" + "\n".join(sample)
     try:
         msg = await chat(
             [
-                {"role": "system", "content": _NEG_SYSTEM},
-                {
-                    "role": "user",
-                    "content": f"Язык: {language}. Тема: {topic}.\nИдеи ключей:\n"
-                    + "\n".join(sample),
-                },
+                {"role": "system", "content": _neg_system(language)},
+                {"role": "user", "content": ctx},
             ],
-            role="parsing",
+            role="keywords",
             temperature=0.3,
         )
-        return _parse_neg(getattr(msg, "content", "") or "", limit)
+        negs = _parse_neg(getattr(msg, "content", "") or "", limit)
     except Exception:  # noqa: BLE001 — advisory, не критично; всегда есть пустой fallback
         return []
+    return _drop_protected(negs, protected)

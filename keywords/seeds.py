@@ -73,7 +73,7 @@ async def generate_seed_keywords(
     language: str = "ru",
     n: int = SEED_COUNT,
 ) -> list[str]:
-    """Сгенерировать до n seed-ключей (роль parsing). profile — текст профиля/посадочной (контекст).
+    """Сгенерировать до n seed-ключей (роль keywords). profile — текст профиля/посадочной (контекст).
     Fallback на эвристику из темы при сбое/пустом ответе. Пустые тема и профиль → []."""
     topic = (topic or "").strip()
     if not topic and not (profile or "").strip():
@@ -89,7 +89,7 @@ async def generate_seed_keywords(
                 {"role": "system", "content": _SYSTEM.format(n=n)},
                 {"role": "user", "content": ctx},
             ],
-            role="parsing",
+            role="keywords",
             temperature=0.4,
         )
         seeds = _parse(getattr(msg, "content", "") or "", n)

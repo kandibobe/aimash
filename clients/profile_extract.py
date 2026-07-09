@@ -161,7 +161,7 @@ def _coerce(data: dict) -> ClientProfileExtract:
 
 
 async def extract_profile(text: str, *, language: str = "ru") -> ClientProfileExtract:
-    """Распарсить свободный текст менеджера в ClientProfileExtract (роль parsing). Пустой ввод →
+    """Распарсить свободный текст менеджера в ClientProfileExtract (роль keywords). Пустой ввод →
     пустой объект без вызова LLM. Fallback при сбое — пустой объект (менеджер увидит и дополнит)."""
     body = (text or "").strip()
     if not body:
@@ -172,7 +172,7 @@ async def extract_profile(text: str, *, language: str = "ru") -> ClientProfileEx
                 {"role": "system", "content": _SYSTEM},
                 {"role": "user", "content": f"Язык интерфейса: {language}.\nТекст:\n{body}"},
             ],
-            role="parsing",
+            role="keywords",
             temperature=0.2,
         )
         data = _extract_json_object(getattr(msg, "content", "") or "")

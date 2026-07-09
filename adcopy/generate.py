@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
@@ -42,6 +43,35 @@ class RsaDraft:
     dropped_headlines: int = 0  # отброшено кодом за превышение лимита
     dropped_descriptions: int = 0
     attempts: int = 0
+    # §10 (advisory): доля заголовков, содержащих хотя бы один токен ключа. 1.0 = все покрывают ИЛИ
+    # ключей не было (нечего мерить). Заголовки НЕ выбрасываем по низкому покрытию — только сигнал.
+    keyword_coverage: float = 1.0
+
+
+def _tok_match(a: str, b: str) -> bool:
+    """Совпадение токенов терпимо к словоформам (RU-инфлексия): точное ИЛИ общий префикс ≥4 симв.
+    (ноутбук/ноутбука/ноутбуки → покрыто). Без этого точный матч часто ложно занижал покрытие."""
+    if a == b:
+        return True
+    return len(a) >= 4 and len(b) >= 4 and (a.startswith(b) or b.startswith(a))
+
+
+def _keyword_coverage(headlines: list[str], keywords: list[str]) -> float:
+    """§10: доля заголовков, покрывающих ХОТЯ БЫ один токен ключевого слова (см. _tok_match — терпит
+    словоформы). Отдельно от длины (её считает validate/rsa_len — golden rule #4). Пустые ключи/
+    заголовки → 1.0 (нечего мерить, не флагаем). Токен ≥3 символов — отсекаем шум/стоп-слова."""
+    kw_tokens = {
+        t for kw in keywords for t in re.split(r"[^0-9a-zа-яё]+", kw.casefold()) if len(t) >= 3
+    }
+    if not kw_tokens or not headlines:
+        return 1.0
+
+    def _covered(h: str) -> bool:
+        htoks = {t for t in re.split(r"[^0-9a-zа-яё]+", h.casefold()) if t}
+        return any(_tok_match(ht, kt) for ht in htoks for kt in kw_tokens)
+
+    hit = sum(1 for h in headlines if _covered(h))
+    return round(hit / len(headlines), 2)
 
 
 _SYSTEM = (
@@ -272,4 +302,7 @@ async def generate_rsa(brief: CopyBrief) -> RsaDraft:
         await _repair_too_long(brief, "headline", too_long_h, headlines, seen_h, brief.n_headlines)
         _fill_by_trim(too_long_h, "headline", headlines, seen_h, brief.n_headlines)
 
-    return RsaDraft(headlines, descriptions, dropped_h, dropped_d, attempts)
+    # §10 (advisory): покрытие ключей в заголовках — сигнал релевантности, не гейт (заголовки не
+    # выбрасываем). Показывается в сводке; менеджер решает, догенерировать/править вручную.
+    cov = _keyword_coverage(headlines, brief.keywords)
+    return RsaDraft(headlines, descriptions, dropped_h, dropped_d, attempts, keyword_coverage=cov)

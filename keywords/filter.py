@@ -85,7 +85,7 @@ async def filter_relevance(
                     {"role": "system", "content": _SYSTEM},
                     {"role": "user", "content": ctx},
                 ],
-                role="parsing",
+                role="keywords",
                 temperature=0.2,
             )
             verdicts = _parse(getattr(msg, "content", "") or "", batch)

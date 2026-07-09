@@ -223,6 +223,7 @@ CATALOG: dict[str, dict[str, str]] = {
             "<b>🔑 Keywords and ad copy</b>\n"
             "/keywords — keyword research (volume, competition, clusters) + .xlsx\n"
             "/addkeys — add keywords to a campaign (your file/link/text, via confirmation)\n"
+            "/searchterms — wasteful search terms (clicks, no conversions) → negatives (via confirmation)\n"
             "/rsa — generate ad copy (RSA), element-by-element confirm (created paused)\n\n"
             "<b>📊 Reports</b>\n"
             "/status — quick stats (30 days)\n"
@@ -407,6 +408,24 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "Список подобранных ключей устарел — запусти /keywords заново.",
         "en": "The researched keyword list expired — run /keywords again.",
     },
+    # §7: /searchterms — «мусорные» поисковые запросы → минус-слова (за confirm-гейтом)
+    "searchterms_loading": {
+        "ru": "🔎 Читаю отчёт по поисковым запросам…",
+        "en": "🔎 Reading the search-terms report…",
+    },
+    "searchterms_none": {
+        "ru": "✅ «Мусорных» запросов (клики без конверсий) за период не найдено.",
+        "en": "✅ No wasteful search terms (clicks without conversions) in this period.",
+    },
+    "err_searchterms": {
+        "ru": "⚠️ Не удалось получить поисковые запросы: {err}",
+        "en": "⚠️ Couldn't fetch search terms: {err}",
+    },
+    "searchterms_stale": {
+        "ru": "Список устарел — запусти /searchterms заново.",
+        "en": "The list is stale — run /searchterms again.",
+    },
+    "searchterms_cancel_btn": {"ru": "✖ Закрыть", "en": "✖ Close"},
     "kw_acct_fallback": {
         "ru": (
             "⚠️ Аккаунт <code>{acct}</code> недоступен для подбора (не под настроенным MCC или "
