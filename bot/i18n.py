@@ -1384,6 +1384,21 @@ CATALOG: dict[str, dict[str, str]] = {
             "Try another topic: /newsearch"
         ),
     },
+    "search_edit_bid_btn": {"ru": "✏️ Изменить ставку", "en": "✏️ Edit bid"},
+    "search_ask_new_bid": {
+        "ru": "Текущая max CPC-ставка: {cur:g}{sfx}. Пришли новое значение одним числом "
+        "(в валюте аккаунта), например «0.35».",
+        "en": "Current max CPC bid: {cur:g}{sfx}. Send a new value as a single number "
+        "(in the account currency), e.g. “0.35”.",
+    },
+    "search_bid_bad": {
+        "ru": "Не понял ставку. Пришли положительное число, например «0.35».",
+        "en": "Couldn't read the bid. Send a positive number, e.g. “0.35”.",
+    },
+    "search_bid_stale": {
+        "ru": "Черновик кампании устарел. Запусти /newsearch заново.",
+        "en": "The campaign draft is stale. Start /newsearch again.",
+    },
     "search_bad_brief": {
         "ru": texts.SEARCH_BAD_BRIEF,
         "en": (

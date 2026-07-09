@@ -52,6 +52,7 @@ class Geo(StatesGroup):
 
 class SearchWizard(StatesGroup):
     awaiting_brief = State()  # ждём «название | url | бюджет [| тематика [| ключи]]» (/newsearch)
+    awaiting_bid = State()  # A7: ждём новое значение CPC-ставки после «✏️ Изменить ставку»
 
 
 class GdnWizard(StatesGroup):

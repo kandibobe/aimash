@@ -532,6 +532,8 @@ def fmt_search_proposal_summary(
     match_type: str,
     lang: str | None = None,
     *,
+    cpc_units: float | None = None,
+    currency: str = "",
     geo_locations: list[str] | None = None,
     languages: list[str] | None = None,
     networks: str | None = None,
@@ -541,8 +543,13 @@ def fmt_search_proposal_summary(
 ) -> str:
     """Плейн-текст сводка create_search_campaign для confirm-гейта (esc применяется при показе).
     P1-A: опц. таргетинг-поля (гео/язык/сети/расписание/даты) выводятся блоком, если переданы —
-    полное «было→станет» в точке ✅ (§5/§19.8). /clone их НЕ передаёт (там гео не переносится)."""
+    полное «было→станет» в точке ✅ (§5/§19.8). /clone их НЕ передаёт (там гео не переносится).
+    A7: cpc_units — max CPC-ставка (в валюте аккаунта), печатается строкой на карточке; раньше
+    ставка была скрыта (валютно-слепой хардкод 0.5) и менеджер жал ✅ на невидимом значении."""
     lng = _lang(lang)
+    cur_sfx = f" {currency}" if currency else ""
+    cpc_line_ru = f"\nMax CPC-ставка: {cpc_units:g}{cur_sfx}" if cpc_units is not None else ""
+    cpc_line_en = f"\nMax CPC bid: {cpc_units:g}{cur_sfx}" if cpc_units is not None else ""
     from adcopy.validate import LIMITS, rsa_len  # 2.10 (§19.8): «…заголовки и описания (с длинами)»
 
     hl, dl = LIMITS["headline"], LIMITS["description"]
@@ -574,7 +581,8 @@ def fmt_search_proposal_summary(
         return (
             f"Create a search campaign “{name}” — paused.\n"
             f"Link: {url}\n"
-            f"Daily budget: {budget_units:g}"
+            f"Daily budget: {budget_units:g}{cur_sfx}"
+            f"{cpc_line_en}"
             f"{tgt_block}\n\n"
             f"Headlines ({len(headlines)}):\n{h_lines}\n\n"
             f"Descriptions ({len(descriptions)}):\n{d_lines}"
@@ -592,7 +600,8 @@ def fmt_search_proposal_summary(
     return (
         f"Создать поисковую кампанию «{name}» — на паузе.\n"
         f"Ссылка: {url}\n"
-        f"Дневной бюджет: {budget_units:g}"
+        f"Дневной бюджет: {budget_units:g}{cur_sfx}"
+        f"{cpc_line_ru}"
         f"{tgt_block}\n\n"
         f"Заголовки ({len(headlines)}):\n{h_lines}\n\n"
         f"Описания ({len(descriptions)}):\n{d_lines}"

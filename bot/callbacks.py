@@ -178,6 +178,14 @@ class RollbackCB(CallbackData, prefix="rbk"):
     token: str
 
 
+class SearchBidCB(CallbackData, prefix="sbid"):
+    """A7: «✏️ Изменить ставку» на карточке черновика create_search_campaign (/newsearch). token —
+    ключ _SEARCH_BID_EDIT[chat_id] (не confirmation_id: правка ставки минтит НОВЫЙ черновик). Не
+    исполняет — только просит новое значение CPC и пере-показывает черновик за тем же confirm-гейтом."""
+
+    token: str
+
+
 class SlashMutCB(CallbackData, prefix="smut"):
     """D4: пикер кампаний для /pause и /resume без аргумента. op — pause_campaign|resume_campaign;
     idx — позиция кампании в _SLASH_MUT_CACHE[chat_id]. gen — поколение списка (N1.4-ревью):

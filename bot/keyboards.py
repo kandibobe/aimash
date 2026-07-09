@@ -726,16 +726,22 @@ def match_type_kb(token: str, lang: str | None = None) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def confirm_kb(cid: str, lang: str | None = None) -> InlineKeyboardMarkup:
+def confirm_kb(
+    cid: str, lang: str | None = None, *, extra_top: tuple[str, object] | None = None
+) -> InlineKeyboardMarkup:
+    """✅/❌ карточки черновика. extra_top (A7): опц. кнопка ОТДЕЛЬНОЙ строкой над ✅/❌
+    (напр. «✏️ Изменить ставку» для create_search_campaign) — (текст, callback_data)."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
+    if extra_top is not None:
+        kb.button(text=extra_top[0], callback_data=extra_top[1])
     kb.button(
         text="✅ Confirm" if en else "✅ Подтвердить", callback_data=ConfirmCB(action="ok", cid=cid)
     )
     kb.button(
         text="❌ Cancel" if en else "❌ Отмена", callback_data=ConfirmCB(action="no", cid=cid)
     )
-    kb.adjust(2)
+    kb.adjust(1, 2) if extra_top is not None else kb.adjust(2)
     return kb.as_markup()
 
 

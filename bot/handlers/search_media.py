@@ -10,6 +10,91 @@ from __future__ import annotations
 
 import bot.main as bm
 
+# A7: контекст «✏️ Изменить ставку» per chat_id — параметры последнего черновика /newsearch,
+# валюта аккаунта и токен (== cid текущей карточки). Правка ставки минтит НОВЫЙ черновик.
+_BID_EDIT: dict[int, dict] = {}
+
+
+async def _account_currency_safe(customer_id: str) -> str:
+    """Валюта аккаунта (ISO) best-effort — для валютно-верного дефолта CPC и подписи. Сбой → ''."""
+    try:
+        from ads.client import build_client_async
+
+        return await bm._read_currency(await build_client_async(customer_id), customer_id)
+    except Exception:  # noqa: BLE001 — валюту не определить → без подписи, дефолт по fallback
+        return ""
+
+
+async def _present_search_proposal(
+    m: bm.Message,
+    chat_id: int,
+    *,
+    name: str,
+    url: str,
+    budget_units: float,
+    headlines: list,
+    descriptions: list,
+    keywords: list,
+    cpc_micros: int,
+    currency: str,
+    customer_id: str,
+) -> None:
+    """A7: собрать params create_search_campaign + сводку (С видимой CPC-ставкой) и показать
+    черновик с кнопкой «✏️ Изменить ставку». Используется и первичным показом, и после правки
+    ставки (тогда cpc_micros новый). Исполнение — только после ✅ (тот же confirm-гейт)."""
+    params = {
+        "campaign_name": name,
+        "final_url": url,
+        "headlines": headlines,
+        "descriptions": descriptions,
+        "budget_daily_micros": int(round(budget_units * 1_000_000)),
+        "keywords": keywords,
+        "match_type": "phrase",
+        "cpc_bid_micros": int(cpc_micros),
+    }
+    validated: dict = bm.SCHEMAS["create_search_campaign"](**params).model_dump()
+    cpc_units = int(validated["cpc_bid_micros"]) / 1_000_000
+    summary = bm.texts.fmt_search_proposal_summary(
+        name,
+        url,
+        budget_units,
+        validated["headlines"],
+        validated["descriptions"],
+        validated["keywords"],
+        validated["match_type"],
+        cpc_units=cpc_units,
+        currency=currency,
+    )
+    p = bm.Proposal(
+        operation="create_search_campaign", summary=summary, params=validated, chat_id=chat_id
+    )
+    # Контекст правки ставки: токен = cid этой карточки; параметры для пере-сборки нового черновика.
+    _BID_EDIT[chat_id] = {
+        "token": p.confirmation_id,
+        "name": name,
+        "url": url,
+        "budget_units": budget_units,
+        "headlines": list(headlines),
+        "descriptions": list(descriptions),
+        "keywords": list(keywords),
+        "cpc_micros": int(validated["cpc_bid_micros"]),
+        "currency": currency,
+        "customer_id": customer_id,
+    }
+    await bm._present_proposal(
+        m,
+        chat_id=chat_id,
+        operation="create_search_campaign",
+        params=validated,
+        summary=summary,
+        cid=p.confirmation_id,
+        customer_id=customer_id,
+        extra_confirm_top=(
+            bm.i18n.t("search_edit_bid_btn"),
+            bm.SearchBidCB(token=p.confirmation_id),
+        ),
+    )
+
 
 @bm.dp.message(bm.Command("newsearch"))
 async def newsearch_cmd(m: bm.Message, state: bm.FSMContext) -> None:
@@ -47,45 +132,93 @@ async def search_brief(m: bm.Message, state: bm.FSMContext) -> None:
         await state.clear()
         await m.answer(bm.i18n.t("search_gen_empty"))
         return
-    params = {
-        "campaign_name": name,
-        "final_url": url,
-        "headlines": headlines,
-        "descriptions": descriptions,
-        "budget_daily_micros": int(round(budget_units * 1_000_000)),
-        "keywords": keywords,
-        "match_type": "phrase",
-        "cpc_bid_micros": 500_000,
-    }
+    # A7: max CPC-ставка — валютно-верный дефолт (не хардкод 0.5, абсурдный для UGX/JPY), из
+    # core.limits по валюте АКТИВНОГО аккаунта; ставка ВИДНА на карточке и правится кнопкой.
+    from core.limits import wizard_default_money_units
+
+    customer_id = await bm._active_read_account(m.chat.id)  # §8: создаём на активном аккаунте
+    currency = await _account_currency_safe(customer_id)
+    _, cpc_units = wizard_default_money_units(currency)
+    cpc_micros = int(round(cpc_units * 1_000_000))
     try:  # defense-in-depth: схема ещё раз проверит длины/составы/URL/бюджет + нормализует ключи
-        validated: dict = bm.SCHEMAS["create_search_campaign"](**params).model_dump()
+        await _present_search_proposal(
+            m,
+            m.chat.id,
+            name=name,
+            url=url,
+            budget_units=budget_units,
+            headlines=headlines,
+            descriptions=descriptions,
+            keywords=keywords,
+            cpc_micros=cpc_micros,
+            currency=currency,
+            customer_id=customer_id,
+        )
     except Exception as e:
         await state.clear()
         await m.answer(bm.i18n.t("err_validate", err=bm.ux.humanize_validation(e)))
         return
-    params = validated
-    summary = bm.texts.fmt_search_proposal_summary(
-        name,
-        url,
-        budget_units,
-        validated["headlines"],
-        validated["descriptions"],
-        validated["keywords"],
-        validated["match_type"],
-    )
-    p = bm.Proposal(
-        operation="create_search_campaign", summary=summary, params=params, chat_id=m.chat.id
-    )
     await state.clear()
-    await bm._present_proposal(
-        m,
-        chat_id=m.chat.id,
-        operation="create_search_campaign",
-        params=params,
-        summary=summary,
-        cid=p.confirmation_id,
-        customer_id=await bm._active_read_account(m.chat.id),  # §8: создаём на активном аккаунте
+
+
+@bm.dp.callback_query(bm.SearchBidCB.filter())
+async def search_edit_bid(
+    cq: bm.CallbackQuery, callback_data: bm.SearchBidCB, state: bm.FSMContext
+) -> None:
+    """A7: «✏️ Изменить ставку» → спросить новое значение CPC. Не исполняет; правка минтит НОВЫЙ
+    черновик за тем же confirm-гейтом. Токен одноразово сверяется с активным контекстом чата."""
+    chat_id = bm._cq_chat_id(cq)
+    ctx = _BID_EDIT.get(chat_id)
+    if not ctx or ctx.get("token") != callback_data.token:
+        await cq.answer(bm.i18n.t("search_bid_stale"), show_alert=True)
+        return
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        await cq.answer(bm.i18n.t("search_bid_stale"), show_alert=True)
+        return
+    await cq.answer()
+    await state.set_state(bm.SearchWizard.awaiting_bid)
+    sfx = f" {ctx['currency']}" if ctx.get("currency") else ""
+    await msg.answer(
+        bm.i18n.t("search_ask_new_bid", cur=int(ctx["cpc_micros"]) / 1_000_000, sfx=sfx),
+        reply_markup=bm.nav_kb(),
+        parse_mode=bm.ParseMode.HTML,
     )
+
+
+@bm.dp.message(bm.SearchWizard.awaiting_bid)
+async def search_new_bid(m: bm.Message, state: bm.FSMContext) -> None:
+    """Новое значение CPC → пере-собрать черновик /newsearch с этой ставкой (новый confirm-гейт)."""
+    ctx = _BID_EDIT.get(m.chat.id)
+    if not ctx:
+        await state.clear()
+        await m.answer(bm.i18n.t("search_bid_stale"))
+        return
+    raw = (m.text or "").strip().replace(",", ".")
+    try:
+        value = float(raw)
+    except ValueError:
+        value = -1.0
+    if value <= 0:
+        await m.answer(bm.i18n.t("search_bid_bad"), reply_markup=bm.nav_kb())
+        return  # остаёмся в состоянии — пользователь пришлёт число ещё раз (или «✖ Отмена»)
+    await state.clear()
+    try:
+        await _present_search_proposal(
+            m,
+            m.chat.id,
+            name=ctx["name"],
+            url=ctx["url"],
+            budget_units=ctx["budget_units"],
+            headlines=ctx["headlines"],
+            descriptions=ctx["descriptions"],
+            keywords=ctx["keywords"],
+            cpc_micros=int(round(value * 1_000_000)),
+            currency=ctx["currency"],
+            customer_id=ctx["customer_id"],
+        )
+    except Exception as e:  # новая ставка вне диапазона схемы (gt=0, le потолок)
+        await m.answer(bm.i18n.t("err_validate", err=bm.ux.humanize_validation(e)))
 
 
 @bm.dp.message(bm.F.photo)

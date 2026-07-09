@@ -102,6 +102,7 @@ from bot.callbacks import (
     RollbackCB,
     RsaCB,
     RsaPickCB,
+    SearchBidCB,
     SlashMutCB,
     TemplateCB,
     ThrTuneCB,
@@ -1447,6 +1448,7 @@ async def _present_proposal(
     cid: str,
     external_context: bool = False,
     customer_id: str | None = None,
+    extra_confirm_top: tuple[str, object] | None = None,
 ) -> None:
     """Сохранить черновик и показать с кнопками ✅/❌. user_initiated=True ставит ДОВЕРЕННЫЙ слой
     (входящее действие whitelisted-человека), НЕ агент про себя (golden rule #3, fail-closed).
@@ -1552,7 +1554,9 @@ async def _present_proposal(
     # сообщении; в самой сводке список усечён до KW_INLINE_MAX с пометкой «…ещё N во вложении».
     # P1-6: необратимые удаления → двойное подтверждение (первый шаг), остальное — обычная ✅/❌.
     confirm_markup = (
-        confirm_destructive_kb(cid) if operation in _DESTRUCTIVE_OPS else confirm_kb(cid)
+        confirm_destructive_kb(cid)
+        if operation in _DESTRUCTIVE_OPS
+        else confirm_kb(cid, extra_top=extra_confirm_top)  # A7: опц. «✏️ Изменить ставку»
     )
     kws = params.get("keywords") if isinstance(params, dict) else None
     # C4 (аудит 2026-07): create_search_campaign тоже несёт список ключей — раньше на финальном
