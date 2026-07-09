@@ -796,6 +796,12 @@ async def on_diag_cb(cq: bm.CallbackQuery, callback_data: bm.DiagCB) -> None:
     БД/Ads не трогаем — только чтение error_events."""
     action = callback_data.action
     if action == "export":
+        # A12: экспорт отдаёт .txt-дамп по 200 инцидентам — ПОЛНЫЕ (пусть редактированные) трейсбеки
+        # и чужие customer_id. Тот же гейт, что у detail (traceback — операционная деталь админа):
+        # раньше export был открыт всем whitelisted и обходил админ-гейт кнопки detail.
+        if not await _is_admin(cq.from_user.id):
+            await cq.answer(bm.i18n.t("admin_only"), show_alert=True)
+            return
         # 1.2: журнал ошибок файлом (.txt) — читать удобнее длинной ленты в чате. Read-only.
         try:
             rows = await bm._load_error_events(today=False, limit=200)

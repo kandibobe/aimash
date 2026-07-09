@@ -530,10 +530,13 @@ def diag_kb(rows, *, today: bool, is_admin: bool, lang: str | None = None) -> In
         kb.button(text="🗂 All" if en else "🗂 Все", callback_data=DiagCB(action="all"))
     else:
         kb.button(text="⚠️ Today" if en else "⚠️ За сегодня", callback_data=DiagCB(action="today"))
-    # 1.2: экспорт журнала ошибок файлом (.txt) — вложением, читать удобнее длинной ленты в чате.
-    kb.button(text="📎 Export" if en else "📎 Экспорт", callback_data=DiagCB(action="export"))
-    counts = [3]
+    # A12: экспорт (.txt-дамп с трейсбеками+чужими customer_id) — только админу (как detail).
+    # Не-админ кнопку не видит; на прямой callback on_diag_cb всё равно отдаст admin_only.
+    counts = [2]
     if is_admin:
+        # 1.2: экспорт журнала ошибок файлом (.txt) — вложением, читать удобнее длинной ленты в чате.
+        kb.button(text="📎 Export" if en else "📎 Экспорт", callback_data=DiagCB(action="export"))
+        counts = [3]
         # detail только админу (traceback — операционная деталь; /diag открыт всем whitelisted).
         seen: set[str] = set()
         n = 0
