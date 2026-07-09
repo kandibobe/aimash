@@ -284,3 +284,67 @@ def test_accepts_rsa_false_when_type_unknown():
         id="1", resource_name="rn", name="g", status="ENABLED", cpc_bid_micros=0, campaign_id="2"
     )
     assert ref.accepts_rsa() is False
+
+
+# ── A3: гард класса «резолвер по имени не адресует REMOVED сущность» ───────────────
+def _resolver_name_calls():
+    """Все резолверы по ИМЕНИ кампании, что читают денежно-мутируемую сущность → (fn, kwargs).
+    Новый резолвер этого класса обязан попасть сюда, иначе гард ниже его не покроет."""
+    from ads.resolve import (
+        campaign_bidding_strategy,
+        campaign_network_settings,
+    )
+
+    common = {"customer_id": DRAFT_ACCOUNT_ID, "name": "Бренд"}
+    return [
+        (find_campaign_by_name, common),
+        (campaign_network_settings, common),
+        (campaign_bidding_strategy, common),
+        (find_ad_groups, {"customer_id": DRAFT_ACCOUNT_ID, "campaign_name": "Бренд"}),
+    ]
+
+
+def test_name_resolvers_exclude_removed_in_query():
+    """Каждый резолвер по имени фильтрует campaign.status != 'REMOVED' в самом GAQL — Google
+    переиспользует освобождённое имя удалённой кампании, и денежная команда «увеличь бюджет X»
+    без фильтра ушла бы в мёртвую тёзку (обычно СТАРШУЮ строку без ORDER BY)."""
+    for fn, kwargs in _resolver_name_calls():
+        client = _FakeClient([])
+        with allowed_ids(DRAFT_ACCOUNT_ID):
+            fn(client, **kwargs)
+        q = client._ga.last_query or ""
+        assert "campaign.status != 'REMOVED'" in q, f"{fn.__name__}: нет фильтра REMOVED в query"
+
+
+def test_find_ad_groups_also_excludes_removed_ad_groups():
+    """find_ad_groups адресует уровень группы (bid/add_keywords) — фильтруем И удалённые группы."""
+    client = _FakeClient([])
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        find_ad_groups(client, DRAFT_ACCOUNT_ID, "Бренд")
+    q = client._ga.last_query or ""
+    assert "ad_group.status != 'REMOVED'" in q
+
+
+class _StatusAwareGA(_FakeGA):
+    """Фейк, уважающий фильтр статуса в query: если запрос содержит `status != 'REMOVED'`,
+    строки со status.name == 'REMOVED' отсеиваются — как реальный сервер Google Ads."""
+
+    def search(self, *, customer_id, query):
+        self.last_customer_id = customer_id
+        self.last_query = query
+        rows = list(self._rows)
+        if "campaign.status != 'REMOVED'" in query:
+            rows = [r for r in rows if getattr(r.campaign.status, "name", "") != "REMOVED"]
+        return rows
+
+
+def test_find_campaign_picks_live_over_removed_namesake():
+    """Функциональный: две кампании-тёзки (REMOVED и ENABLED) → резолвер возвращает живую."""
+    removed = _campaign_row(cid="111", name="Sale", status="REMOVED", budget_micros=1_000_000)
+    live = _campaign_row(cid="222", name="Sale", status="ENABLED", budget_micros=5_000_000)
+    client = _FakeClient([removed, live])
+    client._ga = _StatusAwareGA([removed, live])  # подменяем на status-aware фейк
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        ref = find_campaign_by_name(client, DRAFT_ACCOUNT_ID, "Sale")
+    assert ref is not None
+    assert ref.id == "222" and ref.status == "ENABLED"  # взяли живую, не удалённую тёзку

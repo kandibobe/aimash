@@ -401,7 +401,7 @@ def read_campaign_config(
         "SELECT campaign.id, campaign.name, campaign.status, "
         "campaign.advertising_channel_type, campaign.campaign_budget, "
         "campaign_budget.amount_micros FROM campaign "
-        f"WHERE campaign.name = '{safe}' LIMIT 1"
+        f"WHERE campaign.name = '{safe}' AND campaign.status != 'REMOVED' LIMIT 1"
     )
     for row in ga.search(customer_id=cid, query=q1):
         base = row

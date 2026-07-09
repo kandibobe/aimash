@@ -63,10 +63,13 @@ def find_campaign_by_name(
     ensure_allowed(customer_id)
     ga = client.get_service("GoogleAdsService")
     safe = gaql_escape(name)
+    # status != REMOVED (A3): Google освобождает имя удалённой кампании — при тёзке-дубле
+    # (удалили «Sale», создали новую «Sale») запрос без фильтра и без ORDER BY обычно вернул бы
+    # СТАРШУЮ (удалённую) строку, и денежная команда «увеличь бюджет Sale» ушла бы в мёртвую сущность.
     q = (
         "SELECT campaign.id, campaign.name, campaign.status, campaign.campaign_budget, "
         "campaign_budget.amount_micros FROM campaign "
-        f"WHERE campaign.name = '{safe}' LIMIT 1"
+        f"WHERE campaign.name = '{safe}' AND campaign.status != 'REMOVED' LIMIT 1"
     )
     for row in ga.search(customer_id=str(customer_id), query=q):
         return CampaignRef(
@@ -88,7 +91,7 @@ def campaign_network_settings(client: GoogleAdsClient, customer_id: str, name: s
     safe = gaql_escape(name)
     q = (
         "SELECT campaign.id, campaign.network_settings.target_search_network FROM campaign "
-        f"WHERE campaign.name = '{safe}' LIMIT 1"
+        f"WHERE campaign.name = '{safe}' AND campaign.status != 'REMOVED' LIMIT 1"
     )
     for row in ga.search(customer_id=str(customer_id), query=q):
         return {
@@ -106,7 +109,7 @@ def campaign_bidding_strategy(client: GoogleAdsClient, customer_id: str, name: s
     safe = gaql_escape(name)
     q = (
         "SELECT campaign.id, campaign.bidding_strategy_type FROM campaign "
-        f"WHERE campaign.name = '{safe}' LIMIT 1"
+        f"WHERE campaign.name = '{safe}' AND campaign.status != 'REMOVED' LIMIT 1"
     )
     for row in ga.search(customer_id=str(customer_id), query=q):
         bst = getattr(row.campaign, "bidding_strategy_type", None)
@@ -123,11 +126,14 @@ def find_ad_groups(
     ensure_allowed(customer_id)
     ga = client.get_service("GoogleAdsService")
     safe = gaql_escape(campaign_name)
+    # status != REMOVED (A3): исключаем и удалённую кампанию-тёзку, и удалённые группы — иначе
+    # bid/add_keywords могли бы адресовать мёртвую сущность (имена Google переиспользует).
     q = (
         "SELECT ad_group.id, ad_group.name, ad_group.status, ad_group.cpc_bid_micros, "
         "ad_group.resource_name, ad_group.type, campaign.id, "
         "campaign.advertising_channel_type FROM ad_group "
-        f"WHERE campaign.name = '{safe}' ORDER BY ad_group.id"
+        f"WHERE campaign.name = '{safe}' AND campaign.status != 'REMOVED' "
+        "AND ad_group.status != 'REMOVED' ORDER BY ad_group.id"
     )
     out: list[AdGroupRef] = []
     for row in ga.search(customer_id=str(customer_id), query=q):
