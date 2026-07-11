@@ -566,6 +566,62 @@ def test_wasteful_search_term_mining():
     assert f.at_risk == 90.0
 
 
+def test_search_term_inherits_parent_keyword_segment_no_double_count():
+    """D5: расход поискового запроса ⊂ расход его ключа. Раньше сегменты были разные
+    («kw::…» и «st::…») ⇒ _dedup_at_risk СКЛАДЫВАЛ их и «Под риском» задваивалось
+    (200 ключа + 90 его запроса = 290 при реальных 200). Теперь запрос наследует сегмент ключа."""
+    totals = Metrics(impressions=2000, clicks=200, cost_micros=500_000000, conversions=5)
+    camp_rows = [
+        (
+            ("Search", "ENABLED"),
+            Metrics(impressions=2000, clicks=200, cost_micros=500_000000, conversions=5),
+        )
+    ]
+    kw_rows = [
+        (
+            ("Search", "grp", "скачать", "BROAD"),
+            Metrics(impressions=1000, clicks=150, cost_micros=200_000000, conversions=0),
+        )
+    ]
+    st = SimpleNamespace(
+        search_term="бесплатно скачать",
+        campaign="Search",
+        ad_group="grp",
+        keyword="Скачать",  # регистр из другого GAQL-ресурса — сегмент нормализуется
+        match_type="BROAD",
+        metrics=Metrics(impressions=300, clicks=120, cost_micros=90_000000, conversions=0),
+    )
+    res = build_audit(_report(totals, camp_rows, keyword_rows=kw_rows), search_terms=[st])
+    kw_f = next(f for f in res.findings if f.check_id == "wasteful_keyword")
+    st_f = next(f for f in res.findings if f.check_id == "wasteful_search_term")
+    assert kw_f.spend_segment == st_f.spend_segment  # один сегмент денег
+    assert res.at_risk == 200.0  # МАКСИМУМ по сегменту (расход ключа), а не 200 + 90
+
+
+def test_search_term_without_parent_keyword_keeps_own_segment():
+    """Ключ неизвестен (DSA/PMax — segments.keyword.info.text пуст) → прежний сегмент «st::…»:
+    родителя нет, поглощать нечего, деньги запроса считаются самостоятельно."""
+    totals = Metrics(impressions=2000, clicks=200, cost_micros=500_000000, conversions=5)
+    camp_rows = [
+        (
+            ("Search", "ENABLED"),
+            Metrics(impressions=2000, clicks=200, cost_micros=500_000000, conversions=5),
+        )
+    ]
+    st = SimpleNamespace(
+        search_term="что-то",
+        campaign="Search",
+        ad_group="grp",
+        keyword="",
+        match_type="",
+        metrics=Metrics(impressions=300, clicks=120, cost_micros=90_000000, conversions=0),
+    )
+    res = build_audit(_report(totals, camp_rows), search_terms=[st])
+    f = next(f for f in res.findings if f.check_id == "wasteful_search_term")
+    assert f.spend_segment == "st::Search::что-то"
+    assert f.at_risk == 90.0
+
+
 def test_money_findings_never_one_tap():
     """Денежные находки (high_cpa / budget_imbalance / IS) — НЕ one-tap: apply-кнопка им не положена
     (golden rule #3, бюджет/ставка только прямой командой). Только pause/минус-слова — one-tap."""

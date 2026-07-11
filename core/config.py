@@ -20,6 +20,10 @@ def normalize_customer_id(customer_id: str) -> str:
 # Любое иное значение в .env → BadRequestError 400 «provider.sort: Invalid input».
 _VALID_PROVIDER_SORTS: frozenset[str] = frozenset({"", "price", "throughput", "latency"})
 
+# D3: пароли БД, которые лежали в git (docker-compose.yml, db/init/*.sql) до ротации. В prod
+# такой пароль = публичный ⇒ старт с ним запрещён (_reject_leaked_db_password_in_prod).
+_LEAKED_DB_PASSWORDS: frozenset[str] = frozenset({"aimash", "aimash_ro"})
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -368,7 +372,11 @@ class Settings(BaseSettings):
                 f"ENV={self.env!r} недопустимо — ожидается dev|test|prod. Опечатка (напр. "
                 "'production') молча отключила бы все prod-гейты безопасности (fail-fast)."
             )
-        self.env = raw
+        # Присваиваем ТОЛЬКО если нормализация что-то изменила: любое `self.env = ...` заносит поле
+        # в model_fields_set, а по нему require_dev_env() отличает «ENV задан явно» от «сработал
+        # дефолт "dev"» (D3, fail-closed). Безусловное присваивание делало дефолт неотличимым.
+        if raw != self.env:
+            self.env = raw
         return self
 
     @model_validator(mode="after")
@@ -469,6 +477,31 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _reject_leaked_db_password_in_prod(self) -> "Settings":
+        """D3: пароли `aimash` / `aimash_ro` лежали ЛИТЕРАЛАМИ в tracked docker-compose.yml и
+        db/init/*.sql — то есть утекли в git (и в каждый клон/форк). Параметризация compose
+        (`${POSTGRES_PASSWORD:?}`) сама по себе не мешает подставить туда же «aimash» и оставить
+        всё как было. Поэтому в prod известный утёкший пароль = fail-fast на старте: ротируй
+        (ALTER ROLE на VPS — том уже проинициализирован, см. docs/DEPLOYMENT.md).
+        В dev/тестах не требуем (локальная БД в контуре разработчика)."""
+        if self.env != "prod":
+            return self
+        from urllib.parse import urlsplit
+
+        try:  # URL может быть sqlite/кривым — тогда пароля просто нет, проверять нечего
+            pw = urlsplit(self.database_url.get_secret_value()).password
+        except ValueError:
+            pw = None
+        if pw in _LEAKED_DB_PASSWORDS:
+            raise ValueError(
+                "DATABASE_URL в prod использует пароль, утёкший в git (дефолт репозитория). "
+                "Задай POSTGRES_PASSWORD в .env и смени пароль роли на сервере: "
+                "ALTER ROLE aimash WITH PASSWORD '…'; — иначе доступ к БД (audit_log, "
+                "шифрованные refresh-токены) есть у любого, кто видел репозиторий."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _normalize_provider_sort(self) -> "Settings":
         """OpenRouter `provider.sort` принимает только price|throughput|latency (или пусто = ВЫКЛ).
         Кривое значение из .env раньше улетало в API как есть → BadRequestError 400
@@ -493,9 +526,21 @@ settings = Settings()
 
 
 def require_dev_env() -> None:
-    """Гард dev-скриптов прямой записи (минуют confirm-гейт): разрешено ТОЛЬКО при ENV=dev
+    """Гард dev-скриптов прямой записи (минуют confirm-гейт): разрешено ТОЛЬКО при ЯВНОМ ENV=dev
     (golden rule #10). Иначе SystemExit — скрипт не стартует вне dev. Единый источник, чтобы гард
-    нельзя было забыть в новом demo-скрипте (вызывать первой строкой main())."""
+    нельзя было забыть в новом demo-скрипте (вызывать первой строкой main()).
+
+    D3: раньше проверялось только `settings.env != "dev"`, а дефолт поля — "dev". На проде, где
+    ENV в .env не задан (легко: ни один валидатор его не требует), дефолт молча делал хост
+    «dev» ⇒ demo-скрипт с прямой записью в Google Ads стартовал бы на боевых кредах. Теперь
+    отсутствие ENV = ОТКАЗ (fail-closed, правило #10): «не знаю окружение» ≠ «это dev».
+    `model_fields_set` содержит поле, только если оно пришло из окружения/.env/явного присвоения.
+    """
+    if "env" not in settings.model_fields_set:
+        raise SystemExit(
+            "ENV не задан явно — прямая запись мимо confirm-гейта запрещена (fail-closed: "
+            "неизвестное окружение НЕ считается dev). Поставь ENV=dev в .env — golden rule #10."
+        )
     if settings.env != "dev":
         raise SystemExit(
             f"Прямая запись мимо confirm-гейта запрещена вне ENV=dev (сейчас ENV={settings.env!r}) "

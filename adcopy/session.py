@@ -48,6 +48,13 @@ class CurationSession:
     brief: dict
     headlines: list[dict]
     descriptions: list[dict]
+    # §8: аккаунт-ЯКОРЬ сессии — на нём резолвилась кампания/группа, на нём же создаётся RSA.
+    # Значение уже лежит в строке proposals (SessionStore.create), но раньше не поднималось в
+    # снимок → bot.main._present_proposal(customer_id=getattr(session, "customer_id", None))
+    # всегда получал None и уводил мутацию на Draft: create_rsa на живом аккаунте падал
+    # (ad_group чужого аккаунта под Draft-клиентом). В КОНЦЕ dataclass со значением по умолчанию —
+    # позиционные конструкторы (тесты) не ломаются.
+    customer_id: str = ""
 
     def items(self, kind: str) -> list[dict]:
         return self.headlines if kind == "h" else self.descriptions
@@ -88,6 +95,7 @@ def _from_row(p: Proposal) -> CurationSession:
         brief=d.get("brief", {}),
         headlines=list(d.get("headlines", [])),
         descriptions=list(d.get("descriptions", [])),
+        customer_id=p.customer_id or "",  # §8: аккаунт-якорь сессии (см. CurationSession)
     )
 
 

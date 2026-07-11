@@ -2234,6 +2234,18 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "Черновик кампании не найден или устарел — начните заново: «➕ Создание кампании».",
         "en": "The campaign draft was not found or expired — start over: “➕ Create campaign”.",
     },
+    # §19.2: аккаунт выбран, но мутации на нём запрещены замком — честно предупреждаем СРАЗУ,
+    # а не на финале (черновик собрать можно, создание будет отклонено).
+    "cc_account_readonly": {
+        "ru": (
+            "⚠️ На этом аккаунте изменения запрещены (только чтение). Черновик собрать можно, "
+            "но «Создать» будет отклонён — включите аккаунт в список мутаций или выберите другой."
+        ),
+        "en": (
+            "⚠️ Changes are not allowed on this account (read-only). You can still build the draft, "
+            "but “Create” will be rejected — enable the account for mutations or pick another one."
+        ),
+    },
     "cc_resume_prompt": {
         "ru": "У вас есть незавершённый черновик кампании (этап {step}/7). Продолжить или начать заново?",
         "en": "You have an unfinished campaign draft (step {step}/7). Resume or start over?",
@@ -2413,6 +2425,13 @@ CATALOG: dict[str, dict[str, str]] = {
     "kw_params_seeds_added": {
         "ru": "Добавил в подбор: {n} сид-слов(а){url}. Проверь параметры и жми «🚀 Подобрать».",
         "en": "Added to the search: {n} seed(s){url}. Check the parameters and tap “🚀 Search ideas”.",
+    },
+    # C1: Google принимает не больше MAX_SEEDS=20 сид-ключей за запрос (лишние отбрасываем ЧЕСТНО —
+    # молчаливое усечение выглядело бы как «подобрал по всему списку»). Раньше 21-й сид ронял весь
+    # запрос в InvalidArgument.
+    "kw_seeds_capped": {
+        "ru": "Взял первые {n} сид-слов из {total} — Google принимает максимум {n} за один подбор.",
+        "en": "Kept the first {n} seeds out of {total} — Google accepts at most {n} per search.",
     },
     "kw_params_need_seeds": {
         "ru": "Сначала пришли сид-слова или ссылку (текстом на этом экране), затем «🚀 Подобрать».",

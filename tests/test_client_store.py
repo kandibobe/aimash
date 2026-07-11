@@ -265,6 +265,54 @@ async def test_clear_deletes_profile_but_history_survives():
     assert hist >= 2  # save + clear записали историю (переживает clear — ключ customer_id, не FK)
 
 
+def _overlong_patch() -> dict:
+    """Скаляры длиннее своих колонок: LLM пишет в geo/language фразу, а не список (живой кейс —
+    «Based in Kobe, Japan; serves buyers in 100+ countries…»)."""
+    return {
+        "brand": "Б" * 400,
+        "geo": "Г" * 300,
+        "language": "English, Japanese, Russian, Swahili and Arabic depending on the market",
+        "website": "https://example.com/" + "a" * 3000,
+        "business_desc": "О" * 5000,  # Text-колонка — НЕ режется
+    }
+
+
+def test_scalar_max_mirrors_columns():
+    """Дрейф-гард: _SCALAR_MAX обязан совпадать с длинами VARCHAR-колонок ClientProfile. Правка
+    модели/миграции без правки карты лимитов ⇒ Postgres снова роняет upsert (SQLite смолчит)."""
+    from clients.store import _SCALAR_MAX
+
+    cols = ClientProfile.__table__.columns
+    for field, limit in _SCALAR_MAX.items():
+        assert cols[field].type.length == limit, f"{field}: колонка разошлась с _SCALAR_MAX"
+
+
+def test_preview_merge_caps_scalars_to_column_limits():
+    """Скаляры режутся ДО вставки (иначе Postgres: StringDataRightTruncation). Text-поля — нет."""
+    from clients.store import _SCALAR_MAX, preview_merge
+
+    out = preview_merge(None, _overlong_patch())
+    for field, limit in _SCALAR_MAX.items():
+        assert len(out[field]) == limit, f"{field} не обрезан под лимит колонки"
+    assert len(out["business_desc"]) == 5000  # Text — обрезать нечего
+
+
+@pytest.mark.asyncio
+async def test_overlong_scalars_write_and_match_preview():
+    """Инвариант «diff = запись» держится и на переполнении: что показали в «станет», то и в БД."""
+    from clients.store import _SCALAR_MAX, preview_merge
+
+    await init_db()
+    CID = "1000000017"
+    store = ClientProfileStore()
+    patch = _overlong_patch()
+    predicted = preview_merge(None, patch)
+    await store.apply_upsert(CID, patch, operation="profile_save")  # не должен падать
+    actual = await store.get_by_account(CID)
+    for field in _SCALAR_MAX:
+        assert actual[field] == predicted[field]
+
+
 @pytest.mark.asyncio
 async def test_top_site_pages_orders_by_usefulness():
     """§20.6: страницы краула для sitelinks — services/catalog/price раньше, home последней."""

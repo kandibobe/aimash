@@ -23,6 +23,15 @@ def test_country_iso_names_and_codes():
     assert geo.country_iso(None) is None
 
 
+def test_country_iso_uk_is_gb():
+    """D4: 'UK' — не ISO-код (ISO = GB). Раньше короткое замыкание на 2 буквах стояло ВЫШЕ
+    таблицы алиасов ⇒ алиас 'uk': 'GB' был мёртв, и Британия не резолвилась в geo-id."""
+    assert geo.country_iso("UK") == "GB"
+    assert geo.country_iso("uk") == "GB"
+    assert geo.country_iso("Великобритания") == "GB"
+    assert geo.country_iso("GB") == "GB"  # настоящий ISO-код проходит как есть
+
+
 def test_geo_id_follows_2000_plus_iso_numeric():
     # Google geoTargetConstant страны = 2000 + ISO-3166 numeric.
     assert geo.geo_id_for_country("KE") == 2404  # Кения (404)

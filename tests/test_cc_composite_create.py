@@ -66,6 +66,112 @@ def test_resolve_language_ids():
     assert mut._resolve_language_ids([]) == []
 
 
+def test_resolve_language_ids_covers_full_google_table():
+    """B1: резолв идёт через geo.lang_iso + keyword_plan.LANGUAGE_IDS (полная таблица Google), а не
+    через собственную табличку на ru/uk/en — иначе кампания на Германию/Польшу молча оставалась без
+    языкового критерия (показы на всех языках)."""
+    assert mut._resolve_language_ids(["Немецкий"]) == [1001]
+    assert mut._resolve_language_ids(["de"]) == [1001]
+    assert mut._resolve_language_ids(["th", "Polish"]) == [1044, 1030]
+
+
+def test_split_language_ids_reports_unresolved():
+    """B1: нераспознанный язык возвращается ОТДЕЛЬНО (не проглатывается) — на нём строится warning."""
+    ids, unresolved = mut._split_language_ids(["English", "Swahili", " "])
+    assert ids == [1000]
+    assert unresolved == ["Swahili"]
+    # Дубли (код + имя одного языка) НЕ дают ложного «потеряли язык».
+    ids, unresolved = mut._split_language_ids(["en", "English"])
+    assert (ids, unresolved) == ([1000], [])
+
+
+class _CritClient:
+    """Мини-фейк SDK: все mutate_* возвращают по результату на операцию (успех)."""
+
+    def __init__(self):
+        self.enums = SimpleNamespace(
+            AdvertisingChannelTypeEnum=SimpleNamespace(SEARCH="SEARCH"),
+            CampaignStatusEnum=SimpleNamespace(PAUSED="PAUSED"),
+            AdGroupStatusEnum=SimpleNamespace(PAUSED="PAUSED"),
+            AdGroupAdStatusEnum=SimpleNamespace(PAUSED="PAUSED"),
+            AdGroupTypeEnum=SimpleNamespace(SEARCH_STANDARD="SEARCH_STANDARD"),
+            BudgetDeliveryMethodEnum=SimpleNamespace(STANDARD="STANDARD"),
+            KeywordMatchTypeEnum=SimpleNamespace(PHRASE="PHRASE", EXACT="EXACT", BROAD="BROAD"),
+            DayOfWeekEnum=SimpleNamespace(MONDAY="MONDAY"),
+            MinuteOfHourEnum=SimpleNamespace(ZERO="ZERO"),
+        )
+
+    def get_type(self, name):
+        from unittest.mock import MagicMock
+
+        return MagicMock()
+
+    def get_service(self, name):
+        return _CritService()
+
+
+class _CritService:
+    def _ok(self, operations):
+        return SimpleNamespace(
+            results=[SimpleNamespace(resource_name=f"rn/{i}") for i in range(len(operations))],
+            partial_failure_error=None,
+        )
+
+    def __getattr__(self, method):
+        def _call(*, customer_id, operations, **kw):
+            return self._ok(operations)
+
+        return _call
+
+
+def test_create_warns_when_language_not_resolved():
+    """B1 (деньги/показы): язык, который Google не таргетит, обязан попасть в warnings. Раньше
+    «запрошено» считалось от ПОСТ-резолвового списка → карточка обещала «English, Swahili», кампания
+    создавалась только с English, и менеджер не видел НИ строчки об этом."""
+    with (
+        patched(mut, "_downgrade_bidding_if_no_conversions", lambda c, cid, b: (b, None)),
+        patched(mut, "_apply_bidding_on_create", lambda c, camp, b: None),
+    ):
+        res = mut._create_search_campaign_via_sdk(
+            _CritClient(),
+            DRAFT_ACCOUNT_ID,
+            campaign_name="T",
+            final_url="https://x/",
+            headlines=["a", "b", "c"],
+            descriptions=["d", "e"],
+            budget_micros=40_000_000,
+            keywords=[],
+            match_type="phrase",
+            cpc_bid_micros=120_000,
+            languages=["English", "Swahili"],
+        )
+    assert res["languages"] == 1
+    assert {"part": "languages", "requested": 2, "applied": 1} in res["warnings"]
+
+
+def test_create_no_language_warning_when_all_resolved():
+    """Обратная сторона: полностью резолвнутый список НЕ порождает ложный warning."""
+    with (
+        patched(mut, "_downgrade_bidding_if_no_conversions", lambda c, cid, b: (b, None)),
+        patched(mut, "_apply_bidding_on_create", lambda c, camp, b: None),
+    ):
+        res = mut._create_search_campaign_via_sdk(
+            _CritClient(),
+            DRAFT_ACCOUNT_ID,
+            campaign_name="T",
+            final_url="https://x/",
+            headlines=["a", "b", "c"],
+            descriptions=["d", "e"],
+            budget_micros=40_000_000,
+            keywords=[],
+            match_type="phrase",
+            cpc_bid_micros=120_000,
+            languages=["Немецкий", "English"],
+        )
+    assert res["languages"] == 2
+    assert not [w for w in res.get("warnings", []) if w["part"] == "languages"]
+
+
 # ── _validate_url_options: §19.8 ─────────────────────────────────────────────────
 def test_url_options_validation():
     mut._validate_url_options(None)  # ok
@@ -329,3 +435,43 @@ async def test_apply_create_attaches_assets_after_campaign():
     assert res["assets_added"] == ["callouts"]
     assert res["assets_skipped"][0]["family"] == "lead_form"
     assert store.finalized is True
+
+
+@pytest.mark.asyncio
+async def test_apply_create_survives_asset_step_failure():
+    """B4: кампания УЖЕ создана — сбой пост-шага ассетов (таймаут/квота/гейт самого вызова, а не
+    одного ассета) не должен ронять операцию: иначе confirm.store.record_failure пишет в audit_log
+    `status='failed'` на реально созданной кампании, а повтор упирается в DUPLICATE_CAMPAIGN_NAME.
+    Потеря показывается честно — в assets_skipped/assets_reused."""
+
+    def fake_sdk(client, customer_id, **kw):
+        return {"applied": True, "status": "PAUSED", "campaign": "customers/x/campaigns/77"}
+
+    def boom(*a, **k):
+        raise TimeoutError("ads call timed out")
+
+    store = FakeStore()
+    with (
+        patched(mut, "_create_search_campaign_via_sdk", fake_sdk),
+        patched(mut, "_attach_asset_specs_via_sdk", boom),
+        patched(mut, "_link_existing_assets_via_sdk", boom),
+        allowed_ids(DRAFT_ACCOUNT_ID),
+    ):
+        res = await mut.apply_create_search_campaign(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_name="Кения Авто",
+            final_url="https://shop.example/",
+            headlines=["Поддержанные авто", "Проверенные б/у", "Авто с гарантией"],
+            descriptions=["Большой выбор авто с пробегом.", "Гарантия и проверка."],
+            budget_daily_micros=40_000_000,
+            asset_specs=[{"family": "callouts", "params": {"callouts": ["Гарантия"]}}],
+            existing_asset_links=[{"asset_resource_name": "customers/x/assets/1"}],
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+        )
+    assert res["applied"] is True  # кампания создана — операция НЕ провалена
+    assert store.finalized is True  # audit_log: applied, а не failed
+    assert res["assets_added"] == []
+    assert res["assets_skipped"] == [{"family": "callouts", "reason": "TimeoutError"}]
+    assert res["assets_reused"] == 0

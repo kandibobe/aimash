@@ -83,6 +83,11 @@ LANGUAGE_IDS: dict[str, int] = {
 DEFAULT_LANGUAGE = ""
 DEFAULT_GEO_IDS: tuple[int, ...] = ()  # без гео-биаса; переопределяемо вызывающей стороной
 MAX_IDEAS = 200  # сколько идей ВОЗВРАЩАЕМ (топ по объёму, для Telegram/таблицы)
+# Жёсткий лимит Google (proto v24, KeywordSeed / KeywordAndUrlSeed): «Requires at least one keyword
+# and no more than 20 keywords». Больше 20 сидов ⇒ InvalidArgument на ВЕСЬ запрос (у менеджера это
+# выглядело как «подбор не работает»). Кап держим здесь, на границе SDK, — это последний рубеж;
+# честное сообщение об усечении даёт UI (bot.handlers.keywords_flow), схема тула — не выше лимита.
+MAX_SEEDS = 20
 _FETCH_CEILING = 500  # сколько максимум тянем из API ДО сортировки (бюджет ~1 запроса)
 _RETRIES = 3  # попыток при rate-limit (~1 QPS), экспоненциальный backoff
 
@@ -243,6 +248,11 @@ def generate_keyword_ideas(
     url = (url or "").strip() or None
     if not seeds and not url:
         raise ValueError("нужен хотя бы один сид-ключ или URL")
+    if (
+        len(seeds) > MAX_SEEDS
+    ):  # см. MAX_SEEDS: >20 сидов Google отвергает целиком (InvalidArgument)
+        log.warning("keyword seeds capped: %d → %d (Google limit)", len(seeds), MAX_SEEDS)
+        seeds = seeds[:MAX_SEEDS]
     # K: убрать необслуживаемые страны (RU/BY) — иначе Google отвечает «The input has an invalid
     # value». Подбор идёт по остальным гео (или без гео, если это была единственная страна). Пометку
     # для пользователя формирует вызывающий (он знает исходный запрос) — тут только страховка.

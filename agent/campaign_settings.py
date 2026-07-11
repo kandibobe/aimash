@@ -281,6 +281,17 @@ _REL_IN_N_DAYS_RE = re.compile(
 )
 # Явная дата с ТОЧКАМИ (DD.MM или DD.MM.YYYY) — точки, чтобы не путать с расписанием «9-18»/«9:00».
 _DATE_DOTS_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?\b")
+# D2: «цена за клик 1.5» — это ДРОБЬ, а не 1 мая. Раньше такой текст ставил кампании start_date
+# через 10 месяцев (год подтягивался вперёд, т.к. 1 мая уже прошло). Два фильтра для даты БЕЗ года:
+#   1) месяц обязан быть 2-значным («1.08», «01.08»); «1.5»/«2.75» — дробь;
+#   2) денежный контекст рядом («ставка 1.05», «1.05 грн») — не дата ни при каком написании.
+_MONEY_BEFORE_RE = re.compile(
+    r"(?:ставк\w*|цен\w*|бюджет\w*|стоимост\w*|за\s+клик|cpc|bid|budget|price|cost)\W{0,12}$",
+    re.IGNORECASE,
+)
+_MONEY_AFTER_RE = re.compile(
+    r"^\s*(?:грн|uah|usd|eur|руб|₴|\$|€|за\s+клик|per\s+click)", re.IGNORECASE
+)
 # Предлог «конца» рядом с единственным якорем ⇒ это дата ОКОНЧАНИЯ, а не старта.
 _END_PREP_RE = re.compile(r"\b(до|по|until|till|end|конц\w*)\b", re.IGNORECASE)
 
@@ -309,6 +320,11 @@ def parse_relative_dates(text: str | None, today=None) -> tuple[str | None, str 
         anchors.append((m.start(), today + _td(days=min(n, 3650))))
     for m in _DATE_DOTS_RE.finditer(t):
         dd, mm, yy = int(m.group(1)), int(m.group(2)), m.group(3)
+        if not yy:  # D2: без года — отсекаем десятичные дроби (цена/ставка), см. _MONEY_*_RE
+            if len(m.group(2)) != 2:
+                continue
+            if _MONEY_BEFORE_RE.search(t[: m.start()]) or _MONEY_AFTER_RE.match(t[m.end() :]):
+                continue
         try:
             if yy:
                 year = int(yy) if len(yy) == 4 else 2000 + int(yy)

@@ -661,21 +661,38 @@ _LANG_NAME_TO_ISO: dict[str, str] = {
     "армянский": "hy",
 }
 
-# ISO языка → человекочитаемое имя, понятное ads.mutations._LANG_NAME_IDS (крит. языка кампании).
-_LANG_ISO_TO_NAME: dict[str, str] = {"en": "English", "ru": "Russian", "uk": "Ukrainian"}
+# Реверс: ISO языка → человекочитаемое имя (для критерия языка кампании и карточки «было→станет»).
+# Строится из _LANG_NAME_TO_ISO; ключ, равный самому ISO, пропускаем — первым НЕ-кодовым синонимом
+# у каждого языка идёт английское имя ("en" → "english" → "English"). Раньше здесь лежала табличка
+# на три языка (en/ru/uk), из-за чего авто-язык для Германии/Кении/любого другого рынка молча
+# не подставлялся вовсе (campaign_settings.language_name → None → languages=[] → показы на всех).
+_LANG_ISO_TO_NAME: dict[str, str] = {}
+for _lname, _liso in _LANG_NAME_TO_ISO.items():
+    if _lname != _liso:
+        _LANG_ISO_TO_NAME.setdefault(_liso, _lname.title())
 
 # Языки Keyword Planner — единый источник keyword_plan.LANGUAGE_IDS (см. keyword_ideas_lang);
 # отдельный зажим-frozenset убран (§7: любой язык из таблицы Google, не только ru/uk/en).
 
 
 def country_iso(name_or_code: str | None) -> str | None:
-    """Название страны или ISO-код → ISO alpha-2 (upper). Неизвестное → None."""
+    """Название страны или ISO-код → ISO alpha-2 (upper). Неизвестное → None.
+
+    D4: таблица алиасов проверяется ПЕРВОЙ. Раньше короткое замыкание на любом 2-буквенном
+    значении стояло выше и делало мёртвым алиас `"uk": "GB"`: `country_iso("UK")` возвращало
+    "UK" — код, которого нет в ISO 3166-1 ⇒ гео-таргет Британии не резолвился (ни geo-id, ни
+    валюта/локаль). Двухбуквенное значение, которого нет в алиасах, по-прежнему принимается как
+    ISO-код как есть.
+    """
     if not name_or_code:
         return None
     s = str(name_or_code).strip()
+    hit = _COUNTRY_ALIASES.get(s.casefold())
+    if hit:
+        return hit
     if len(s) == 2 and s.isalpha():
         return s.upper()
-    return _COUNTRY_ALIASES.get(s.casefold())
+    return None
 
 
 def lang_iso(name_or_code: str | None) -> str | None:
@@ -727,8 +744,17 @@ def country_name(iso: str | None) -> str | None:
 
 
 def language_name(iso: str | None) -> str | None:
-    """ISO языка → имя для критерия языка кампании (ads.mutations). Неподдержанное → None."""
-    return _LANG_ISO_TO_NAME.get((iso or "").lower()) if iso else None
+    """ISO языка → имя для критерия языка кампании (ads.mutations). Только языки, которые Google
+    РЕАЛЬНО умеет таргетить (keyword_plan.LANGUAGE_IDS): авто-дефолт не должен обещать на карточке
+    язык, которого в кампании не будет (суахили Google не таргетит). Неподдержанное → None."""
+    code = (iso or "").strip().casefold()
+    if not code:
+        return None
+    from ads.keyword_plan import LANGUAGE_IDS
+
+    if code not in LANGUAGE_IDS:
+        return None
+    return _LANG_ISO_TO_NAME.get(code) or code.upper()
 
 
 def keyword_ideas_lang(lang: str | None) -> str:

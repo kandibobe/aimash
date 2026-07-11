@@ -1,7 +1,7 @@
 {
   "//": "Скопируй в .claude/settings.local.json (gitignored) и заполни. Эти env подставляются в ${VAR} в .mcp.json. Секреты НИКОГДА не коммить.",
   "env": {
-    "AIMASH_DEV_DB_URI": "postgresql://aimash_ro:aimash_ro@localhost:5433/aimash",
+    "AIMASH_DEV_DB_URI": "postgresql://aimash_ro:<POSTGRES_RO_PASSWORD>@localhost:5433/aimash",
     "MCP_GOOGLE_ADS_PYTHON": "C:/tools/mcp-google-ads/.venv/Scripts/python.exe",
     "MCP_GOOGLE_ADS_PATH": "C:/tools/mcp-google-ads/google_ads_server.py",
     "GOOGLE_ADS_OAUTH_JSON": "C:/tools/mcp-google-ads/google-ads-oauth.json",

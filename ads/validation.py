@@ -42,3 +42,35 @@ def normalize_keywords(keywords: list[str]) -> list[str]:
     if not out:
         raise ValueError("список ключевых слов пуст после нормализации")
     return out
+
+
+def dedup_keyword_pairs(keywords: list[str], match_types: list[str]) -> tuple[list[str], list[str]]:
+    """§19.4.1 (смешанный список): нормализует ключи и дедуплицирует по ПАРЕ (текст, тип).
+
+    Google Ads допускает один и тот же текст с РАЗНЫМИ типами соответствия в одной группе — это
+    разные критерии. `normalize_keywords` дедупит только тексты: на смешанном списке она молча
+    теряла бы второй критерий и рвала склейку 1:1 с `keyword_match_types` (в схеме это выливалось
+    в ValueError «не совпадает по длине» — кнопка «Создать черновик» не работала вовсе).
+
+    Единый источник истины для трёх call-site: схема тула, ads.mutations, визард §19.
+    Возвращает списки равной длины; ValueError на рассинхроне длин или пустом результате.
+    """
+    if len(match_types) != len(keywords):
+        raise ValueError(
+            f"keyword_match_types ({len(match_types)}) не совпадает по длине с "
+            f"keywords ({len(keywords)}) — типы соответствия должны идти 1:1 к ключам"
+        )
+    out_kw: list[str] = []
+    out_mt: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for k, mt in zip(keywords, match_types):
+        t = assert_keyword_ok(k)
+        m = str(mt)
+        pair = (t, m.strip().lower())  # тип регистронезависим: 'exact' и 'EXACT' — один критерий
+        if pair not in seen:
+            seen.add(pair)
+            out_kw.append(t)
+            out_mt.append(m)
+    if not out_kw:
+        raise ValueError("список ключевых слов пуст после нормализации")
+    return out_kw, out_mt

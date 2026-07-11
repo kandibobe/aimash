@@ -256,6 +256,14 @@ def check_kill_rule(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     return out
 
 
+def keyword_spend_segment(campaign: str, keyword: str) -> str:
+    """Сегмент денег ключа. ОДИН источник для wasteful_keyword и wasteful_search_term: расход
+    поискового запроса ⊂ расход его ключа, поэтому обе находки обязаны попасть в ОДИН сегмент
+    (иначе _dedup_at_risk сложит их и задвоит «Под риском» — D5). Нормализуем регистр/пробелы:
+    keyword_view и segments.keyword.info.text приходят из разных ресурсов GAQL."""
+    return f"kw::{campaign}::{(keyword or '').strip().casefold()}"
+
+
 def check_wasteful_keyword(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     """Ключ с расходом ≥ порога и кликами, но 0 конверсий → кандидат в минус-слова (семья keywords).
     Топ-N по расходу (анти-спам). one-tap add_negative_keywords (по умолчанию exact — решает bot-слой)."""
@@ -270,7 +278,7 @@ def check_wasteful_keyword(report, thr: dict, ctx: _Ctx) -> list[Finding]:
                     family="keywords",
                     severity="warning",
                     at_risk=round(m.cost, 2),
-                    spend_segment=f"kw::{campaign}::{kw_text}",
+                    spend_segment=keyword_spend_segment(campaign, kw_text),
                     target_campaign=campaign,
                     suggested_operation="add_negative_keywords",
                     facts={
@@ -291,8 +299,17 @@ def check_wasteful_keyword(report, thr: dict, ctx: _Ctx) -> list[Finding]:
 
 def check_wasteful_search_term(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     """Поисковый запрос (search_term_view) с расходом ≥ порога и кликами, но 0 конверсий → кандидат
-    в МИНУС-СЛОВА (семья keywords). ОТДЕЛЬНЫЙ kind от wasteful_keyword (запрос vs существующий ключ) —
-    дедуп по сегменту «st::». Минус по умолчанию EXACT (режет только этот запрос, не шире). Топ-N."""
+    в МИНУС-СЛОВА (семья keywords). ОТДЕЛЬНЫЙ check_id от wasteful_keyword (запрос vs существующий ключ),
+    но сегмент денег — РОДИТЕЛЬСКОГО ключа. Минус по умолчанию EXACT (режет только этот запрос).
+
+    D5: раньше сегмент был «st::{кампания}::{запрос}» — свой, отдельный от «kw::{кампания}::{ключ}».
+    Но расход запроса ⊂ расход его ключа (запрос показался ПО этому ключу), поэтому находки
+    «дорогой ключ» и «дорогой запрос того же ключа» СУММИРОВАЛИСЬ в headline «Под риском» — деньги
+    считались дважды (80 из 1000 вместо 40; outward-facing денежное утверждение). Наследуя сегмент
+    ключа (`segments.keyword.info.text` уже есть в SearchTermRow.keyword), _dedup_at_risk берёт по
+    сегменту МАКСИМУМ ⇒ расход ключа поглощает расход своего запроса. Ключ неизвестен (пусто —
+    напр. DSA/Performance Max) → сегмент прежний, «st::…»: там родителя нет, двойного счёта тоже.
+    """
     rows = ctx.search_terms or []
     cur = getattr(report, "currency", "")
     out: list[Finding] = []
@@ -303,13 +320,19 @@ def check_wasteful_search_term(report, thr: dict, ctx: _Ctx) -> list[Finding]:
         if m.cost >= thr["kw_min_spend"] and m.clicks > 0 and m.conversions == 0:
             term = getattr(st, "search_term", "")
             campaign = getattr(st, "campaign", "")
+            parent_kw = (getattr(st, "keyword", "") or "").strip()
+            segment = (
+                keyword_spend_segment(campaign, parent_kw)
+                if parent_kw
+                else f"st::{campaign}::{term}"
+            )
             out.append(
                 Finding(
                     check_id="wasteful_search_term",
                     family="keywords",
                     severity="warning",
                     at_risk=round(m.cost, 2),
-                    spend_segment=f"st::{campaign}::{term}",
+                    spend_segment=segment,
                     target_campaign=campaign,
                     suggested_operation="add_negative_keywords",
                     facts={

@@ -19,10 +19,17 @@ class ConfirmCB(CallbackData, prefix="cfm"):
 
 
 class CampCB(CallbackData, prefix="camp"):
-    """Действия в меню /campaigns. idx — позиция в последнем списке кампаний (по chat_id)."""
+    """Действия в меню /campaigns. idx — позиция в последнем списке кампаний (по chat_id).
+
+    gen — ПОКОЛЕНИЕ списка, из которого нарисована кнопка (как у KwAddCB/SlashMutCB). Кэш
+    `_CAMP_CACHE[chat_id]` перезаписывается при каждом /campaigns, в том числе на ДРУГОМ
+    аккаунте: без gen старая клавиатура аккаунта A резолвила idx в список аккаунта B, и
+    «🗑 Удалить» уезжало на чужую кампанию. Хендлер сверяет gen со своим снимком → «список устарел».
+    """
 
     action: str  # "menu" | "pause" | "resume" | "delete" | "audience" | "geo" | "ext" | "back"
     idx: int
+    gen: int = 0
 
 
 class AudienceCB(CallbackData, prefix="aud"):

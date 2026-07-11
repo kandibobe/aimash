@@ -9,6 +9,23 @@ bot.main продолжает влиять на эти хендлеры, а ре
 from __future__ import annotations
 
 import bot.main as bm
+from ads.keyword_plan import MAX_SEEDS
+
+
+async def _kw_cap_seeds(m: bm.Message, seeds: list[str]) -> list[str]:
+    """C1: Google берёт не больше MAX_SEEDS=20 сид-ключей за запрос (лишний сид ⇒ InvalidArgument
+    на ВЕСЬ подбор). Режем на входе и говорим об этом вслух — молчаливое усечение читалось бы как
+    «подобрал по всему списку»."""
+    if len(seeds) <= MAX_SEEDS:
+        return seeds
+    await m.answer(bm.i18n.t("kw_seeds_capped", n=MAX_SEEDS, total=len(seeds)))
+    return seeds[:MAX_SEEDS]
+
+
+async def _kw_take_seeds(m: bm.Message, raw: str) -> tuple[list[str], str | None]:
+    """Разбор ввода пользователя (сиды/URL) + честный кап сидов до лимита Google."""
+    seeds, url = bm._parse_kw_input(raw)
+    return await _kw_cap_seeds(m, seeds), url
 
 
 async def _kw_present_params(m: bm.Message, state: bm.FSMContext) -> None:
@@ -34,7 +51,7 @@ async def keywords_(m: bm.Message, state: bm.FSMContext, command: bm.CommandObje
     """Подбор ключевых слов (read-only, advisory). С аргументами — сразу к параметрам
     (сиды предзаполнены); иначе спросить сиды."""
     await state.clear()
-    seeds, url = bm._parse_kw_input(command.args or "")
+    seeds, url = await _kw_take_seeds(m, command.args or "")
     if seeds or url:
         await state.update_data(kw_seeds=seeds, kw_url=url)
         await _kw_present_params(m, state)
@@ -53,7 +70,7 @@ async def btn_keywords(m: bm.Message, state: bm.FSMContext) -> None:
 
 @bm.dp.message(bm.KwWizard.awaiting_seeds)
 async def kw_seeds(m: bm.Message, state: bm.FSMContext) -> None:
-    seeds, url = bm._parse_kw_input(m.text or "")
+    seeds, url = await _kw_take_seeds(m, m.text or "")
     if not seeds and not url:
         await m.answer(
             bm.i18n.t("kw_bad_input"), reply_markup=bm.nav_kb(), parse_mode=bm.ParseMode.HTML
@@ -119,9 +136,10 @@ async def kw_params_text(m: bm.Message, state: bm.FSMContext) -> None:
         if s.casefold() not in seen:
             seen.add(s.casefold())
             merged.append(s)
-    await state.update_data(kw_seeds=merged[:50], kw_url=url or data.get("kw_url"))
+    merged = await _kw_cap_seeds(m, merged)  # C1: суммарно тоже не больше лимита Google
+    await state.update_data(kw_seeds=merged, kw_url=url or data.get("kw_url"))
     url_note = "" if not (url or data.get("kw_url")) else " + URL"
-    await m.answer(bm.i18n.t("kw_params_seeds_added", n=len(merged[:50]), url=url_note))
+    await m.answer(bm.i18n.t("kw_params_seeds_added", n=len(merged), url=url_note))
     await _kw_present_params(m, state)
 
 

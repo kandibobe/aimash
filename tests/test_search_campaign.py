@@ -525,3 +525,48 @@ def test_search_schema_validates_and_rejects():
             descriptions=["Опис один", "Опис два"],
             budget_daily_micros=1,
         )
+
+
+def _schema_mixed(keywords: list[str], mts: list[str]):
+    from agent.tools.schemas import CreateSearchCampaign
+
+    return CreateSearchCampaign(
+        campaign_name="Цветы",
+        final_url="https://example.com/",
+        headlines=["Доставка цветов", "Букеты от 299", "Свежие розы"],
+        descriptions=["Большой выбор букетов.", "Доставка за час."],
+        budget_daily_micros=50_000_000,
+        keywords=keywords,
+        keyword_match_types=mts,
+    )
+
+
+def test_schema_mixed_match_types_dedups_by_pair_not_by_text():
+    """C2: один текст с РАЗНЫМИ типами — законные разные критерии Google, оба остаются. Раньше
+    field-валидатор дедупил ключи ПО ТЕКСТУ (2→1), а типы не трогал → ValueError «не совпадает по
+    длине» → кнопка «Создать черновик» не работала НИКОГДА при смешанных типах."""
+    m = _schema_mixed(
+        ["used cars", " used cars ", "used cars", "cheap cars"],
+        ["exact", "broad", "exact", "phrase"],  # 3-й — точный дубль пары (схлопнется)
+    )
+    assert m.keywords == ["used cars", "used cars", "cheap cars"]
+    assert m.keyword_match_types == ["exact", "broad", "phrase"]
+
+
+def test_schema_mixed_match_types_still_rejects_length_mismatch():
+    with pytest.raises(Exception, match="1:1|длине"):
+        _schema_mixed(["a", "b"], ["exact"])
+
+
+def test_schema_without_match_types_dedups_by_text():
+    from agent.tools.schemas import CreateSearchCampaign
+
+    m = CreateSearchCampaign(
+        campaign_name="Цветы",
+        final_url="https://example.com/",
+        headlines=["Доставка цветов", "Букеты от 299", "Свежие розы"],
+        descriptions=["Большой выбор букетов.", "Доставка за час."],
+        budget_daily_micros=50_000_000,
+        keywords=["розы", " розы ", "тюльпаны"],  # прежнее поведение: дедуп по тексту
+    )
+    assert m.keywords == ["розы", "тюльпаны"]

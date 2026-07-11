@@ -107,9 +107,28 @@ def test_deep_workbook_sheets_and_titles():
 
 
 def test_sheet_title_sanitize_and_cap():
+    # D1: в хвосте — ПОЛНЫЙ customer_id (был last4): id уникален ⇒ коллизий имён листов нет
     t = _sheet_title("Очень длинное имя аккаунта клиента", "5437782039")
-    assert len(t) <= 31 and t.endswith("_2039")
-    assert _sheet_title("A/B:C", "1234567890") == "A_B_C_7890"
+    assert len(t) <= 31 and t.endswith("_5437782039")
+    assert _sheet_title("A/B:C", "1234567890") == "A_B_C_1234567890"
+
+
+def test_sheet_titles_unique_for_similar_names():
+    """D1: раньше «имя[:24]_last4» совпадали у похожих имён, а дедуп-цикл
+    `while title in used: title = (title[:29] + "_x")[:31]` для 31-символьного имени был
+    ТОЖДЕСТВОМ → бесконечный цикл в потоке пула (вызов шёл без таймаута)."""
+    long_name = "Клиент с очень длинным названием компании"
+    a = _sheet_title(long_name, "1111112039")
+    b = _sheet_title(long_name, "2222222039")  # тот же префикс имени И те же last4
+    assert a != b and len(a) <= 31 and len(b) <= 31
+
+
+def test_unique_sheet_title_terminates_on_collision():
+    from reports.xlsx import _unique_sheet_title
+
+    used = {"X" * 31}
+    got = _unique_sheet_title("X" * 31, used)  # раньше здесь был вечный цикл
+    assert got not in used and len(got) <= 31
 
 
 def test_picker_has_mcc_button_only_for_report_flows():

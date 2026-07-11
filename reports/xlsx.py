@@ -215,10 +215,34 @@ _SHEET_BAD_CHARS = set("\\/*?:[]")
 
 
 def _sheet_title(name: str, cid: str) -> str:
-    """Имя листа openpyxl: «Имя_last4», санитизация запрещённых символов, ≤31 симв."""
-    base = (name or cid or "acct").strip() or "acct"
+    """Имя листа openpyxl: «Имя_<customer_id>», санитизация запрещённых символов, ≤31 симв.
+
+    ПОЛНЫЙ id (а не last4): id уникален ⇒ два аккаунта не могут дать одно имя листа. Раньше
+    «имя[:24]_last4» совпадали у аккаунтов с похожими именами, а дедуп-цикл при этом зависал.
+    """
+    tail = "".join(ch for ch in str(cid or "") if ch.isdigit())[:20] or "acct"
+    base = (name or "").strip()
     base = "".join(("_" if ch in _SHEET_BAD_CHARS else ch) for ch in base)
-    return f"{base[:24]}_{str(cid)[-4:]}"[:31]
+    head = base[: 30 - len(tail)]
+    return f"{head}_{tail}"[:31] if head else tail[:31]
+
+
+def _unique_sheet_title(title: str, used: set[str]) -> str:
+    """Уникализация имени листа с ОГРАНИЧЕННЫМ счётчиком.
+
+    Раньше стояло `while title in used: title = (title[:29] + "_x")[:31]` — для 31-символьного
+    title это тождество (фиксированная точка) ⇒ бесконечный цикл в потоке пула (вызов шёл без
+    таймаута → поток занят навсегда). Сейчас коллизия невозможна по построению (полный id),
+    но уникализатор оставляем как гард — с гарантией завершения.
+    """
+    if title not in used:
+        return title
+    for i in range(2, 100):
+        suffix = f"~{i}"
+        cand = f"{title[: 31 - len(suffix)]}{suffix}"
+        if cand not in used:
+            return cand
+    raise ValueError(f"не удалось подобрать уникальное имя листа для {title!r}")
 
 
 def build_mcc_deep_workbook(deep) -> Workbook:
@@ -256,9 +280,7 @@ def build_mcc_deep_workbook(deep) -> Workbook:
 
     used_titles = {ws.title}
     for ch, report in deep.items:
-        title = _sheet_title(getattr(ch, "name", "") or "", ch.id)
-        while title in used_titles:  # коллизия имён (обрезка) — дособираем суффикс
-            title = (title[:29] + "_x")[:31]
+        title = _unique_sheet_title(_sheet_title(getattr(ch, "name", "") or "", ch.id), used_titles)
         used_titles.add(title)
         acc_ws = wb.create_sheet(title=title)
         _write_summary(acc_ws, report)

@@ -192,7 +192,7 @@ async def on_page_nav(cq: bm.CallbackQuery, callback_data: bm.PageCB) -> None:
         if not camps:
             await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
             return
-        markup = bm.campaigns_kb(camps, page=page)
+        markup = bm.campaigns_kb(camps, page=page, gen=bm._camp_gen(chat_id))
     elif kind == "rsac":  # C8: пикер кампаний визарда /rsa
         camps = bm._RSA_CAMP_CACHE.get(chat_id)
         if not camps:
@@ -240,7 +240,9 @@ async def on_picker_search_start(
     await bm._safe_edit(
         cq,
         bm.i18n.t("picker_search_prompt"),
-        reply_markup=bm.picker_search_kb(callback_data.kind, callback_data.target, camps, []),
+        reply_markup=bm.picker_search_kb(
+            callback_data.kind, callback_data.target, camps, [], gen=bm._camp_gen(chat_id)
+        ),
     )
 
 
@@ -259,7 +261,9 @@ async def on_picker_search_all(
     await bm._safe_edit(
         cq,
         bm.i18n.t("picker_pick_campaign"),
-        reply_markup=bm._picker_full_kb(callback_data.kind, callback_data.target, camps),
+        reply_markup=bm._picker_full_kb(
+            callback_data.kind, callback_data.target, camps, gen=bm._camp_gen(chat_id)
+        ),
     )
 
 
@@ -270,7 +274,8 @@ async def on_picker_search_query(m: bm.Message, state: bm.FSMContext) -> None:
     data = await state.get_data()
     kind = data.get("psrch_kind", "campaigns")
     target = data.get("psrch_target", "")
-    camps = bm._picker_camps(kind, m.chat.id)
+    chat_id = m.chat.id
+    camps = bm._picker_camps(kind, chat_id)
     await state.set_state(bm._picker_rest_state(kind))  # одноразовость поиска
     if not camps:
         await m.answer(bm.i18n.t("camp_list_stale"))
@@ -280,13 +285,13 @@ async def on_picker_search_query(m: bm.Message, state: bm.FSMContext) -> None:
     if not indices:
         await m.answer(
             bm.i18n.t("picker_search_empty", q=bm.texts.esc(q[:40])),
-            reply_markup=bm._picker_full_kb(kind, target, camps),
+            reply_markup=bm._picker_full_kb(kind, target, camps, gen=bm._camp_gen(chat_id)),
             parse_mode=bm.ParseMode.HTML,
         )
         return
     await m.answer(
         bm.i18n.t("picker_search_results", n=len(indices), shown=min(len(indices), bm._CAMP_PAGE)),
-        reply_markup=bm.picker_search_kb(kind, target, camps, indices),
+        reply_markup=bm.picker_search_kb(kind, target, camps, indices, gen=bm._camp_gen(chat_id)),
         parse_mode=bm.ParseMode.HTML,
     )
 

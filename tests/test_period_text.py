@@ -62,6 +62,38 @@ def test_day_range_within_named_month():
     assert _iso(parse_period_text("с 1 по 15 июня", today=T)) == ("2026-06-01", "2026-06-15")
 
 
+def test_single_day_within_named_month():
+    """D6: «за 3 августа» — ОДИН день, а не весь август (раньше число дня молча отбрасывалось,
+    и дневной отчёт подменялся месячным — расход в 30 раз больше, чем просил менеджер)."""
+    assert _iso(parse_period_text("за 3 июня", today=T)) == ("2026-06-03", "2026-06-03")
+    assert _iso(parse_period_text("отчёт за 3-го июня", today=T)) == ("2026-06-03", "2026-06-03")
+    # будущий месяц без года → прошлый год, день внутри него
+    assert _iso(parse_period_text("за 3 августа", today=T)) == ("2025-08-03", "2025-08-03")
+    assert _iso(parse_period_text("august 3", today=T)) == ("2025-08-03", "2025-08-03")
+    # явный год уважается и здесь
+    assert _iso(parse_period_text("15 июня 2025", today=T)) == ("2025-06-15", "2025-06-15")
+
+
+def test_stray_number_is_not_a_day():
+    """Число НЕ рядом с месяцем днём не считается — «5 кампаний за июнь» остаётся месяцем."""
+    assert _iso(parse_period_text("топ 5 кампаний за июнь", today=T)) == (
+        "2026-06-01",
+        "2026-06-30",
+    )
+
+
+def test_impossible_or_future_day_returns_none():
+    assert parse_period_text("за 31 февраля", today=T) is None  # такой даты нет
+    assert parse_period_text("за 10 июля", today=T) is None  # день ещё не наступил (today=7-е)
+
+
+def test_future_month_returns_none_not_raises():
+    """D6: «за август 2027» раньше падал ValueError (date_to < date_from) при контракте
+    «не распознали → None»; bot исключение не ловит → пользователь видел «ошибка»."""
+    assert parse_period_text("за август 2027", today=T) is None
+    assert parse_period_text("с 1 по 15 августа 2027", today=T) is None
+
+
 def test_explicit_date_pairs_dots_and_iso():
     assert _iso(parse_period_text("с 01.06 по 15.06", today=T)) == ("2026-06-01", "2026-06-15")
     assert _iso(parse_period_text("2026-06-01 2026-06-15", today=T)) == (

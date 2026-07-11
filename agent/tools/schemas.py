@@ -20,7 +20,8 @@ from adcopy.validate import (
     assert_asset_len,
 )
 from adcopy.validate import validate as _rsa_validate
-from ads.validation import normalize_keywords
+from ads.keyword_plan import MAX_SEEDS  # жёсткий лимит Google на число сид-ключей
+from ads.validation import assert_keyword_ok, dedup_keyword_pairs, normalize_keywords
 from core.limits import MONEY_MAX_MICROS, MONEY_MAX_UNITS
 
 
@@ -498,8 +499,9 @@ class KeywordResearch(BaseModel):
     network (Search / Search+Partners), months (историческое окно метрик 1..48) — раньше были
     доступны только в визарде /keywords, теперь и через NL («ключи для X по Кении, Search+партнёры»)."""
 
-    # P1-7: до 25 сид-фраз (было 10) — пользователь может перечислить/вставить свои ключи прозой.
-    seeds: list[str] = Field(default_factory=list, max_length=25)
+    # Потолок = жёсткий лимит Google (KeywordSeed/KeywordAndUrlSeed: «no more than 20 keywords»).
+    # Раньше схема допускала 25 → модель могла собрать батч, который API отвергает ЦЕЛИКОМ.
+    seeds: list[str] = Field(default_factory=list, max_length=MAX_SEEDS)
     url: str | None = None
     # §7: ЛЮБОЙ язык (ISO 639-1 или название: 'de'/'немецкий'/'japanese'). КОД резолвит downstream
     # (ads.geo.keyword_ideas_lang → keyword_plan.LANGUAGE_IDS); неизвестный/пусто → язык не задаётся.
@@ -836,7 +838,9 @@ class CreateSearchCampaign(BaseModel):
     @field_validator("keywords")
     @classmethod
     def _kw(cls, v):
-        return normalize_keywords(v) if v else []
+        # Только форма каждого ключа. Дедуп — в _kw_mts_match: при смешанном списке он идёт ПАРАМИ
+        # (текст, тип), а дедуп по тексту здесь порвал бы склейку 1:1 с keyword_match_types.
+        return [assert_keyword_ok(k) for k in v] if v else []
 
     @field_validator("path1", "path2")
     @classmethod
@@ -849,13 +853,19 @@ class CreateSearchCampaign(BaseModel):
     def _kw_mts_match(self) -> "CreateSearchCampaign":
         """§19.4.1: per-keyword типы соответствия либо пусты (все = match_type), либо строго 1:1 к
         keywords. Считает КОД — рассинхрон длин не должен доехать до SDK (склейка по индексу).
-        ⚠️ normalize_keywords может ДЕДУПЛИЦИРОВАТЬ keywords — тогда 1:1 к исходному списку рвётся;
-        вызывающий (бот) обязан строить оба списка из УЖЕ нормализованного набора."""
-        if self.keyword_match_types and len(self.keyword_match_types) != len(self.keywords):
-            raise ValueError(
-                f"keyword_match_types ({len(self.keyword_match_types)}) не совпадает по длине с "
-                f"keywords ({len(self.keywords)}) — типы соответствия должны идти 1:1 к ключам"
+
+        C2: дедуп смешанного списка — ПАРАМИ (`dedup_keyword_pairs`). Раньше keywords дедуплицировались
+        по тексту в field-валидаторе, а keyword_match_types — нет: «ремонт»[exact] + «ремонт» broad
+        (законные РАЗНЫЕ критерии Google) давали 1 ключ против 2 типов → ValueError → кнопка
+        «Создать черновик» не срабатывала НИКОГДА при смешанных типах."""
+        if not self.keywords:
+            return self
+        if self.keyword_match_types:
+            self.keywords, self.keyword_match_types = dedup_keyword_pairs(
+                self.keywords, self.keyword_match_types
             )
+        else:
+            self.keywords = normalize_keywords(self.keywords)
         return self
 
 

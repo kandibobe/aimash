@@ -69,11 +69,15 @@ def _tokens(text: str) -> list[str]:
 
 
 def parse_keywords_text(text: str, *, default_match_type: str | None = None) -> list[KeywordInput]:
-    """Текст → список KeywordInput с типом соответствия. Глобальная инструкция (если есть в тексте)
-    и default перекрываются per-keyword маркерами. Невалидные ключи (через assert_keyword_ok)
-    отбрасываются. Дедуп по (text, match_type)."""
+    """Текст → список KeywordInput с типом соответствия. Приоритет (§19.4.1, C3):
+    per-keyword маркер `[exact]`/`"phrase"` > глобальная инструкция в самом тексте
+    («используй широкое соответствие для всего списка») > default экрана > DEFAULT_MATCH_TYPE.
+
+    Раньше default перекрывал глобальную инструкцию — а default в визарде задан ВСЕГДА
+    (`_cc_default_match_type`), так что инструкция §19.4.1 не работала ровно в том флоу, для
+    которого написана. Невалидные ключи (assert_keyword_ok) отбрасываются; дедуп по (text, mt)."""
     global_mt = parse_match_type_instruction(text)
-    base_mt = default_match_type or global_mt or DEFAULT_MATCH_TYPE
+    base_mt = global_mt or default_match_type or DEFAULT_MATCH_TYPE
     if base_mt not in MATCH_TYPES:
         base_mt = DEFAULT_MATCH_TYPE
     # Строки-инструкции о типе соответствия — НЕ ключи: выкидываем их перед токенизацией, иначе

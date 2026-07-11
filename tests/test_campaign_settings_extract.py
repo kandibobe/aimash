@@ -127,6 +127,26 @@ def test_parse_relative_dates_offline():
     assert parse_relative_dates("доставка цветов украина", t) == (None, None)
 
 
+def test_parse_relative_dates_does_not_take_price_for_a_date():
+    """D2: «цена за клик 1.5» раньше давала start_date=2027-05-01 (1 мая уже прошло → следующий
+    год) — кампания стартовала через 10 месяцев. Дробь ≠ дата."""
+    from datetime import date
+
+    from agent.campaign_settings import parse_relative_dates
+
+    t = date(2026, 7, 4)
+    assert parse_relative_dates("цена за клик 1.5", t) == (None, None)
+    assert parse_relative_dates("бюджет 50, ставка 2.75", t) == (None, None)
+    assert parse_relative_dates("ставка 1.05 usd", t) == (
+        None,
+        None,
+    )  # 2-значный «месяц», но деньги
+    assert parse_relative_dates("1.5 грн за клик", t) == (None, None)
+    # даты не сломались: 2-значный месяц и явный год работают
+    assert parse_relative_dates("старт 1.08", t) == ("2026-08-01", None)
+    assert parse_relative_dates("с 1.5.2027", t) == ("2027-05-01", None)
+
+
 # ── P0-5: язык по умолчанию выводится из ГЕО (Украина → uk), а не «русский» ───────
 def test_assemble_language_derived_from_geo_when_not_named():
     # модель НЕ вернула язык (пустой список) → код берёт язык страны (UA → uk → Ukrainian)

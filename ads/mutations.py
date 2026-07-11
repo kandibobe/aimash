@@ -26,15 +26,19 @@ from adcopy.validate import (
     find_duplicates,
 )
 from adcopy.validate import validate as _rsa_validate
-from ads import extensions
+from ads import extensions, geo
 from ads.client import ensure_allowed
+from ads.keyword_plan import LANGUAGE_IDS  # ISO → languageConstant id (полная таблица Google)
 from ads.resolve import gaql_escape  # единый GAQL-эскейп для literal-WHERE (defense-in-depth)
-from ads.validation import assert_keyword_ok, normalize_keywords
+from ads.validation import assert_keyword_ok, dedup_keyword_pairs, normalize_keywords
 from core.ads_errors import (  # единый источник имён кодов ошибок Google Ads
     error_code_names,
     partial_failure_errors,
 )
-from core.logging import redact_text  # причины отказов partial_failure — без секретов (правило #5)
+from core.logging import (  # причины отказов partial_failure — без секретов (правило #5)
+    log,
+    redact_text,
+)
 from core.limits import (
     BILLING_UNIT_MICROS,
     MAX_RADIUS_KM,
@@ -2100,24 +2104,7 @@ async def apply_create_search_campaign(
     clean_mts: list[str] | None = None
     if keywords:
         if keyword_match_types:
-            if len(keyword_match_types) != len(keywords):
-                raise ValueError(
-                    f"keyword_match_types ({len(keyword_match_types)}) не совпадает по длине с "
-                    f"keywords ({len(keywords)})"
-                )
-            # B11: дедуп по ПАРЕ (текст, тип). Google Ads допускает один текст с разными типами
-            # соответствия в одной группе — дедуп только по тексту молча терял бы второй тип.
-            seen: set[tuple[str, str]] = set()
-            clean_mts = []
-            for k, kmt in zip(keywords, keyword_match_types):
-                t = assert_keyword_ok(k)
-                pair = (t, str(kmt))
-                if pair not in seen:
-                    seen.add(pair)
-                    clean_kw.append(t)
-                    clean_mts.append(str(kmt))
-            if not clean_kw:
-                raise ValueError("список ключевых слов пуст после нормализации")
+            clean_kw, clean_mts = dedup_keyword_pairs(keywords, keyword_match_types)
         else:
             clean_kw = normalize_keywords(keywords)
     proposal = await _require_confirmation(confirm_store, confirmation_id, "create_search_campaign")
@@ -2163,32 +2150,50 @@ async def apply_create_search_campaign(
         end_date=end_date,
     )
     # Ассеты + изображения — ПОСЛЕ кампании (PAUSED/$0): сбой одного не роняет кампанию.
+    #
+    # Каждый пост-шаг обёрнут в try/except: кампания на этой строке УЖЕ создана, и исключение здесь
+    # улетело бы в вызывающего → confirm.store.record_failure → в audit_log `status='failed'` на
+    # реально созданной кампании, а повтор менеджера упёрся бы в DUPLICATE_CAMPAIGN_NAME. Внутренний
+    # per-asset try/except (_attach_asset_specs_via_sdk) от этого НЕ спасает: падают квота/таймаут/
+    # гейт самого run_ads_create_call. Потерю показываем честно — в assets_skipped/assets_reused.
     campaign_id = (result.get("campaign") or "").rsplit("/", 1)[-1]
     if asset_specs and campaign_id:
-        added, skipped = await run_ads_create_call(
-            _attach_asset_specs_via_sdk,
-            ads_client,
-            customer_id,
-            campaign_id,
-            list(asset_specs),
-            label="attach_asset_specs",
-            account=customer_id,
-            op_count=2 * max(1, len(asset_specs)),  # ассет + линк на каждый спек
-        )
+        try:
+            added, skipped = await run_ads_create_call(
+                _attach_asset_specs_via_sdk,
+                ads_client,
+                customer_id,
+                campaign_id,
+                list(asset_specs),
+                label="attach_asset_specs",
+                account=customer_id,
+                op_count=2 * max(1, len(asset_specs)),  # ассет + линк на каждый спек
+            )
+        except Exception as e:  # noqa: BLE001 — см. блок выше: кампания создана, шаг ассетов — нет
+            reason = type(e).__name__
+            log.warning("assets step failed after campaign create: %s", reason)
+            added = []
+            skipped = [
+                {"family": str(s.get("family") or "?"), "reason": reason} for s in asset_specs
+            ]
         result["assets_added"] = added
         result["assets_skipped"] = skipped
     # §19.7: переиспользование СУЩЕСТВУЮЩИХ ассетов аккаунта — линк к новой кампании по field_type.
     if existing_asset_links and campaign_id:
-        result["assets_reused"] = await run_ads_create_call(
-            _link_existing_assets_via_sdk,
-            ads_client,
-            customer_id,
-            campaign_id,
-            list(existing_asset_links),
-            label="link_existing_assets",
-            account=customer_id,
-            op_count=max(1, len(existing_asset_links)),  # по линку на ассет
-        )
+        try:
+            result["assets_reused"] = await run_ads_create_call(
+                _link_existing_assets_via_sdk,
+                ads_client,
+                customer_id,
+                campaign_id,
+                list(existing_asset_links),
+                label="link_existing_assets",
+                account=customer_id,
+                op_count=max(1, len(existing_asset_links)),  # по линку на ассет
+            )
+        except Exception as e:  # noqa: BLE001 — кампания создана: линковка не роняет операцию
+            log.warning("asset relink step failed after campaign create: %s", type(e).__name__)
+            result["assets_reused"] = 0
     if image_specs and campaign_id:
         imgs = 0
         for img_bytes, name in image_specs:
@@ -2254,28 +2259,50 @@ def _attach_asset_specs_via_sdk(client, customer_id, campaign_id, specs: list[di
     return added, skipped
 
 
-# §19: имя языка/код → languageConstant id (best-effort; неизвестные языки пропускаем — таргетинг
-# языка необязателен, по умолчанию все). Совмещён с keyword_plan.LANGUAGE_IDS (ru/uk/en).
-_LANG_NAME_IDS: dict[str, int] = {
-    "ru": 1031,
-    "russian": 1031,
-    "русский": 1031,
-    "uk": 1036,
-    "ukrainian": 1036,
-    "украинский": 1036,
-    "українська": 1036,
-    "en": 1000,
-    "english": 1000,
-    "английский": 1000,
-}
+def _split_language_ids(languages: list[str] | None) -> tuple[list[int], list[str]]:
+    """§19: имена/коды языков → (languageConstant ids, НЕраспознанные имена).
+
+    Резолв — общей парой `geo.lang_iso()` (имя/код → ISO) + `keyword_plan.LANGUAGE_IDS` (ISO → id):
+    ~50 языков Google вместо собственной таблички на ru/uk/en (кампания на Германию с языком `de`
+    молча оставалась без языкового критерия). Своей таблицы больше нет — один источник истины.
+
+    Нераспознанные возвращаются ОТДЕЛЬНО, а не проглатываются: язык не попадёт в кампанию, и
+    менеджер обязан увидеть это в warnings (см. _warn — «запрошено» считается от ИСХОДНОГО списка).
+    """
+    ids: list[int] = []
+    unresolved: list[str] = []
+    for lang in languages or []:
+        name = str(lang).strip()
+        if not name:
+            continue
+        iso = geo.lang_iso(name)
+        lid = LANGUAGE_IDS.get(iso) if iso else None
+        if lid is None:
+            if name not in unresolved:
+                unresolved.append(name)
+        elif lid not in ids:
+            ids.append(lid)
+    return ids, unresolved
 
 
 def _resolve_language_ids(languages: list[str] | None) -> list[int]:
-    out: list[int] = []
-    for lang in languages or []:
-        lid = _LANG_NAME_IDS.get(str(lang).strip().casefold())
-        if lid and lid not in out:
-            out.append(lid)
+    """Только id (best-effort call-sites, которым нечего делать с нераспознанными)."""
+    return _split_language_ids(languages)[0]
+
+
+def _geo_result(geo_locations: list[str] | None, applied: int) -> dict:
+    """§11: гео composite-медиа-кампаний (GDN/Demand Gen/Video) в result.
+
+    Ключ — `geo`: именно его читает `bot.texts.fmt_mutation_result`. Прежний `geo_count` не читал
+    НИКТО → гео не показывалось ни на одной карточке этих трёх операций. Плюс явный warning
+    частичного успеха: «кампания на Кению» без гео = глобальный показ при запуске, и менеджер обязан
+    это увидеть (у create_search_campaign такой warning есть с 3C, у медиа-кампаний не было вовсе).
+    """
+    applied = int(applied)
+    out: dict = {"geo": applied}
+    requested = len(geo_locations or [])
+    if requested and applied < requested:
+        out["warnings"] = [{"part": "geo", "requested": requested, "applied": applied}]
     return out
 
 
@@ -2454,7 +2481,13 @@ def _create_search_campaign_via_sdk(
     # 5) Опциональные ключевые слова в группу. Best-effort, как гео/язык ниже: сбой добавления
     # ключей (квота/битый ключ) НЕ роняет уже созданную PAUSED-кампанию ($0), иначе остались бы
     # осиротевшие бюджет+кампания+группа. kw_created=0 в результате сигналит о недобавленных ключах.
+    #
+    # partial_failure=True (как в /addkeys, _add_keywords_via_sdk): БЕЗ него один битый ключ
+    # («скидка 50%» → KEYWORD_HAS_INVALID_CHARS) валил ВЕСЬ батч → Search-кампания создавалась с
+    # НУЛЁМ ключей, а причина глоталась `except Exception` (менеджер видел «ключей: 0» без объяснения).
+    # Теперь валидные создаются, отклонённые едут в result['rejected'] с причиной (редактированной).
     kw_created = 0
+    kw_rejected: list[dict] = []
     if keywords:
         try:
             crit_svc = client.get_service("AdGroupCriterionService")
@@ -2462,6 +2495,7 @@ def _create_search_campaign_via_sdk(
             # §19.4.1: per-keyword типы (смешанный список) — 1:1 к keywords; иначе единый match_type.
             per_kw = keyword_match_types if keyword_match_types else [match_type] * len(keywords)
             kops = []
+            kmeta: list[tuple[str, str]] = []  # атрибуция отказов partial_failure к тексту ключа
             for text, kmt in zip(keywords, per_kw):
                 kop = client.get_type("AdGroupCriterionOperation")
                 kop.create.ad_group = ad_group_rn
@@ -2471,13 +2505,18 @@ def _create_search_campaign_via_sdk(
                     client.enums.KeywordMatchTypeEnum, str(kmt).upper()
                 )
                 kops.append(kop)
-            kw_created = len(
-                crit_svc.mutate_ad_group_criteria(customer_id=cid, operations=kops).results
-            )
+                kmeta.append(("", str(text)))
+            kreq = client.get_type("MutateAdGroupCriteriaRequest")
+            kreq.customer_id = cid
+            kreq.operations.extend(kops)
+            kreq.partial_failure = True
+            kresp = crit_svc.mutate_ad_group_criteria(request=kreq)
+            # При partial_failure отклонённые позиции приходят с ПУСТЫМ resource_name.
+            kw_created = len([r for r in kresp.results if getattr(r, "resource_name", "")])
+            kw_rejected = _rejected_from_partial_failure(client, kresp, kmeta, key="keyword")
         except Exception:  # noqa: BLE001 — ключи не добавились: PAUSED-кампания остаётся ($0)
-            kw_created = (
-                0  # результат вернёт keywords=0 — сигнал недобавленных ключей (как гео/язык)
-            )
+            kw_created = 0  # keywords=0 в результате — сигнал недобавленных ключей (как гео/язык)
+            kw_rejected = []
 
     # 6) Опц. гео (резолв названий → geoTargetConstant; reuse builder, remove-before-create на свежей).
     geo_count = 0
@@ -2492,7 +2531,7 @@ def _create_search_campaign_via_sdk(
 
     # 7) Опц. язык таргетинга (languageConstant id).
     lang_count = 0
-    lang_ids = _resolve_language_ids(languages)
+    lang_ids, lang_unresolved = _split_language_ids(languages)
     if lang_ids:
         try:
             cc_svc = client.get_service("CampaignCriterionService")
@@ -2547,6 +2586,9 @@ def _create_search_campaign_via_sdk(
         "status": "PAUSED",
         "applied": True,
     }
+    if kw_rejected:  # B3: какие именно ключи отверг Google и почему (как в /addkeys)
+        result["rejected"] = kw_rejected
+        result["rejected_count"] = len(kw_rejected)
     # 3C: частичный успех best-effort-шагов 5–8 — ЯВНЫЕ warnings, а не молчаливый 0 в result
     # («кампания на Кению» без гео при запуске = глобальный показ; менеджер обязан это увидеть).
     # НЕ откатываем: кампания PAUSED/$0 — безопасна, недостающее добавляется отдельными командами.
@@ -2558,7 +2600,10 @@ def _create_search_campaign_via_sdk(
 
     _warn("keywords", len(keywords or []), kw_created)
     _warn("geo", len(geo_locations or []), geo_count)
-    _warn("languages", len(lang_ids or []), lang_count)
+    # «Запрошено» по языкам — от ИСХОДНОГО списка (ids + нераспознанные), а не от пост-резолвового:
+    # иначе нераспознанный язык («Swahili») исчезал бесследно — ни критерия в кампании, ни warning,
+    # а карточка обещала его менеджеру → показы на всех языках вместо целевого.
+    _warn("languages", len(lang_ids) + len(lang_unresolved), lang_count)
     _warn("ad_schedule", len(ad_schedule_blocks or []), sched_count)
     if warnings:
         result["warnings"] = warnings
@@ -2915,7 +2960,7 @@ def _create_gdn_campaign_via_sdk(
         "image_assets": [land_rn, sq_rn],
         "headlines": len(headlines),
         "descriptions": len(descriptions),
-        "geo_count": geo_count,  # §11: сколько локаций привязано (0 = без гео)
+        **_geo_result(geo_locations, geo_count),  # §11: гео + warning частичного успеха
         "status": "PAUSED",
         "applied": True,
     }
@@ -3233,7 +3278,7 @@ def _create_demand_gen_campaign_via_sdk(
         "video_asset": video_rn,
         "logo_asset": logo_rn,
         "goal": goal,
-        "geo_count": geo_count,
+        **_geo_result(geo_locations, geo_count),  # §11: гео + warning частичного успеха
         "headlines": len(headlines),
         "descriptions": len(descriptions),
         "status": "PAUSED",
@@ -3469,7 +3514,7 @@ def _create_video_campaign_via_sdk(
         "ad_group": ad_group_rn,
         "ad": ad_rn,
         "video_asset": video_rn,
-        "geo_count": geo_count,
+        **_geo_result(geo_locations, geo_count),  # §11: гео + warning частичного успеха
         "headlines": len(headlines),
         "descriptions": len(descriptions),
         "status": "PAUSED",

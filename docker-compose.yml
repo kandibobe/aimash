@@ -1,14 +1,22 @@
 # Локальная dev-БД. Запуск: `docker compose up -d postgres` (или `make db-up`).
 # Создаёт две роли: aimash (read-write для приложения/Alembic) и aimash_ro (read-only,
 # для Postgres MCP — defense-in-depth поверх --access-mode=restricted).
+#
+# 🔒 D3: пароли БД НЕ лежат в git. POSTGRES_PASSWORD / POSTGRES_RO_PASSWORD берутся из .env
+# (untracked) через `${VAR:?}` — при отсутствии `docker compose` ОТКАЗЫВАЕТ подниматься
+# (fail-closed, правило #10), а не поднимается со всем известным паролем «aimash».
+# ⚠️ На уже проинициализированном томе смена пароля требует ручного `ALTER ROLE aimash WITH
+#    PASSWORD '…';` — иначе бот не подключится (docs/DEPLOYMENT.md).
 services:
   postgres:
     image: postgres:16
     container_name: aimash-pg
     environment:
       POSTGRES_USER: aimash
-      POSTGRES_PASSWORD: aimash
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD обязателен — задай в .env}
       POSTGRES_DB: aimash
+      # Пароль read-only роли для init-скрипта (db/init/01-readonly-role.sh).
+      AIMASH_RO_PASSWORD: ${POSTGRES_RO_PASSWORD:?POSTGRES_RO_PASSWORD обязателен — задай в .env}
     ports:
       # 5433 ТОЛЬКО на loopback (localhost): dev/alembic с хоста работают, но наружу (0.0.0.0) НЕ
       # светим — иначе Docker пробивает host-firewall через iptables. Внутри контейнера — 5432.
@@ -50,7 +58,9 @@ services:
       - .env
     environment:
       # ВНУТРИ сети compose — имя сервиса + порт 5432 (НЕ хостовый 5433!).
-      DATABASE_URL: postgresql+asyncpg://aimash:aimash@postgres:5432/aimash
+      # ⚠️ `environment:` БЬЁТ `env_file:` — DATABASE_URL из .env тут не действует, поэтому пароль
+      # подставляем той же переменной, что и сам postgres (иначе бот молча уходил бы со старым).
+      DATABASE_URL: postgresql+asyncpg://aimash:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD обязателен — задай в .env}@postgres:5432/aimash
       # Фиксируем UTC: APScheduler берёт локальную TZ контейнера, а код трактует naive datetime как
       # UTC. Явный TZ=UTC делает cron детерминированным независимо от хоста: REPORT_SCHEDULE
       # '0 1 * * *' = 01:00 UTC = 10:00 JST (10 утра по Японии).
@@ -84,7 +94,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      PGPASSWORD: aimash
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD обязателен — задай в .env}
       BACKUP_RETAIN: "14"
       TZ: UTC
     volumes:

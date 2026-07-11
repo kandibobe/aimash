@@ -36,12 +36,22 @@ from db.session import Session
 # Скалярные поля профиля, которые модель извлекает/мерджит (client_profiles columns).
 _SCALAR_FIELDS = ("brand", "business_desc", "geo", "language", "website", "notes")
 
+# Длины VARCHAR-колонок client_profiles (db.models.ClientProfile) — код обрезает ДО вставки: LLM
+# свободно пишет в geo/language фразу вместо списка, а Postgres роняет upsert
+# StringDataRightTruncation (SQLite в тестах длину не enforce'ит → на тестах баг невидим).
+# Text-поля (business_desc) не капаются; notes — свой потолок в merge_notes.
+# Дрейф колонки без правки этой карты ловит tests/test_client_store.py::test_scalar_max_mirrors_columns.
+_SCALAR_MAX = {"brand": 255, "geo": 255, "language": 64, "website": 2048}
 
-def _clean_str(v: Any) -> str | None:
-    """Непустая строка или None (пустое/пробелы → None, чтобы мердж не затирал поле пустотой)."""
+
+def _clean_str(v: Any, max_chars: int | None = None) -> str | None:
+    """Непустая строка или None (пустое/пробелы → None, чтобы мердж не затирал поле пустотой).
+    max_chars — обрезка под лимит колонки (_SCALAR_MAX); None ⇒ без обрезки (Text-поля/детали)."""
     if v is None:
         return None
     s = str(v).strip()
+    if max_chars is not None:
+        s = s[:max_chars]
     return s or None
 
 
@@ -199,7 +209,7 @@ def preview_merge(before: dict | None, patch: dict) -> dict:
     for f in _SCALAR_FIELDS:
         if f == "notes":
             continue  # notes — append-семантика ниже
-        val = _clean_str(patch.get(f))
+        val = _clean_str(patch.get(f), _SCALAR_MAX.get(f))
         if val is not None:
             out[f] = val
     out["notes"] = merge_notes(base.get("notes"), _clean_str(patch.get("notes")))
@@ -397,7 +407,7 @@ class ClientProfileStore:
             for f in _SCALAR_FIELDS:
                 if f == "notes":
                     continue  # notes — append-семантика ниже (catch-all не затирается)
-                val = _clean_str(patch.get(f))
+                val = _clean_str(patch.get(f), _SCALAR_MAX.get(f))
                 if val is not None and getattr(p, f) != val:
                     setattr(p, f, val)
                     changed.append(f)
@@ -413,7 +423,7 @@ class ClientProfileStore:
             # краул-специфика: сайт, дата краула, карта страниц
             if crawl_extra:
                 if crawl_extra.get("website"):
-                    p.website = str(crawl_extra["website"])[:2048]
+                    p.website = _clean_str(crawl_extra["website"], _SCALAR_MAX["website"])
                     changed.append("website")
                 if crawl_extra.get("last_crawled_at_now"):
                     p.last_crawled_at = func.now()

@@ -146,12 +146,34 @@ def _month_num(word: str) -> int | None:
     return None
 
 
-def _month_period(mnum: int, year_hint: int | None, today: date) -> Period:
-    """Полный месяц; без года: будущий месяц ⇒ прошлый год, текущий ⇒ 1-е…вчера (месяц не полон)."""
+def _adjacent_day(t: str, mon: "_re.Match") -> int | None:
+    """Число дня, ПРИМЫКАЮЩЕЕ к названию месяца: «3 августа», «3-го августа», «august 3». Число в
+    другом месте фразы («5 кампаний за июнь») днём не считаем — иначе месячный отчёт молча
+    превратился бы в дневной. Нет примыкающего числа → None."""
+    for mm in _DAY_MONTH_RE.finditer(t):
+        if mm.end() == mon.start():  # lookahead уже съел пробел → конец матча = начало месяца
+            d = int(mm.group(1))
+            return d if 1 <= d <= 31 else None
+    after = _re.match(r"[\s,]*(\d{1,2})\b", t[mon.end() :])
+    if after:
+        d = int(after.group(1))
+        return d if 1 <= d <= 31 else None
+    return None
+
+
+def _month_period(mnum: int, year_hint: int | None, today: date) -> Period | None:
+    """Полный месяц; без года: будущий месяц ⇒ прошлый год, текущий ⇒ 1-е…вчера (месяц не полон).
+
+    D6: месяц ЦЕЛИКОМ в будущем (только с явным годом: «за август 2027») → None, а не Period.
+    Раньше `custom(start, min(end, today))` получал date_to < date_from и БРОСАЛ ValueError —
+    хотя резолвер по контракту «не распознали → None» и вызывающий (bot) исключение не ловит.
+    """
     year = year_hint or today.year
     if year_hint is None and mnum > today.month:
         year = today.year - 1
     start = date(year, mnum, 1)
+    if start > today:  # данных за будущий месяц не существует
+        return None
     end = (date(year + 1, 1, 1) if mnum == 12 else date(year, mnum + 1, 1)) - timedelta(days=1)
     if start <= today <= end:  # текущий месяц — до вчера (как MTD; без неполного сегодня)
         end = max(start, today - timedelta(days=1))
@@ -220,12 +242,28 @@ def parse_period_text(text: str | None, *, today: date | None = None) -> Period 
             ]
             if len(days_nums) >= 2:
                 base = _month_period(mnum, year_hint, today)
+                if base is None:
+                    return None
                 try:
                     a = base.date_from.replace(day=min(days_nums[0], 31))
                     b = base.date_from.replace(day=min(days_nums[1], 31))
                     return custom(min(a, b), max(a, b))
                 except ValueError:
                     return None
+            # D6: «за 3 августа» / «august 3» — ОДИН день, а не весь август. Раньше единственное
+            # число дня просто отбрасывалось (возвращался месяц целиком), хотя _DAY_MONTH_RE написан
+            # ровно под эту форму и нигде не использовался: отчёт за день молча подменялся месяцем.
+            # Число обязано ПРИМЫКАТЬ к названию месяца (до или после) — иначе это не день.
+            single_day = _adjacent_day(t, mon) if len(days_nums) == 1 else None
+            if single_day is not None:
+                base = _month_period(mnum, year_hint, today)
+                if base is None:
+                    return None
+                try:
+                    d = date(base.date_from.year, mnum, single_day)
+                except ValueError:  # 31 февраля и т.п.
+                    return None
+                return custom(d, d) if d <= today else None
             return _month_period(mnum, year_hint, today)
     if len(anchors) == 1:  # одна явная дата = отчёт за день
         return custom(anchors[0], anchors[0])

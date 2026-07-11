@@ -42,9 +42,15 @@ def test_prod_with_valid_key_ok():
         telegram_whitelist_chat_ids="123",
         google_ads_developer_token="dev-token",
         google_ads_allowed_customer_ids="7753643025",
+        database_url=_PROD_DB_URL,
         _env_file=None,
     )
     assert s.is_prod is True
+
+
+# D3: дефолт database_url несёт пароль «aimash» — утёкший в git ⇒ в prod он ОТВЕРГАЕТСЯ.
+# Валидные prod-наборы обязаны нести свой пароль.
+_PROD_DB_URL = "postgresql+asyncpg://aimash:S3cret-Rotated@postgres:5432/aimash"
 
 
 def _prod_kwargs(**extra):
@@ -55,6 +61,7 @@ def _prod_kwargs(**extra):
         "telegram_whitelist_chat_ids": "123",
         "google_ads_developer_token": "dev-token",
         "google_ads_allowed_customer_ids": "7753643025",
+        "database_url": _PROD_DB_URL,
         "_env_file": None,
     }
     base.update(extra)
@@ -166,3 +173,48 @@ def test_require_dev_env_blocks_outside_dev(monkeypatch):
         cfg.require_dev_env()
     monkeypatch.setattr(cfg.settings, "env", "dev")
     cfg.require_dev_env()  # в dev не падает
+
+
+def test_require_dev_env_blocks_when_env_not_set_explicitly(monkeypatch):
+    """D3 (fail-closed): ENV не задан ⇒ значение поля = дефолт "dev", но окружение НЕИЗВЕСТНО.
+    Раньше это открывало прямую запись мимо confirm-гейта на любом хосте без ENV в .env —
+    включая прод. Теперь «не знаю окружение» = отказ."""
+    import core.config as cfg
+
+    monkeypatch.delenv("ENV", raising=False)
+    s = Settings(_env_file=None)  # ENV нигде не задан
+    assert s.env == "dev" and "env" not in s.model_fields_set
+    monkeypatch.setattr(cfg, "settings", s)
+    with pytest.raises(SystemExit, match="ENV"):
+        cfg.require_dev_env()
+
+
+def test_settings_from_env_marks_env_as_explicit(monkeypatch):
+    """Контракт, на котором стоит гард выше: ENV из окружения/.env попадает в model_fields_set
+    (иначе require_dev_env отказывал бы и в честном dev — тихая поломка dev-скриптов)."""
+    monkeypatch.setenv("ENV", "dev")
+    s = Settings(_env_file=None)
+    assert "env" in s.model_fields_set
+
+
+def test_prod_rejects_leaked_db_password():
+    """D3: пароль 'aimash' лежал в git (docker-compose.yml, db/init/*.sql) ⇒ он публичный.
+    В prod старт с ним запрещён — иначе параметризация compose осталась бы косметикой."""
+    with pytest.raises(ValidationError, match="git"):
+        Settings(**_prod_kwargs(database_url="postgresql+asyncpg://aimash:aimash@pg:5432/aimash"))
+    with pytest.raises(ValidationError):
+        Settings(
+            **_prod_kwargs(database_url="postgresql+asyncpg://aimash_ro:aimash_ro@pg:5432/aimash")
+        )
+
+
+def test_prod_accepts_rotated_db_password():
+    s = Settings(**_prod_kwargs())
+    assert s.is_prod is True
+
+
+def test_dev_keeps_default_db_password():
+    """В dev дефолтный пароль допустим (локальная БД в контуре разработчика) — гард только prod."""
+    leaked = "postgresql+asyncpg://aimash:aimash@localhost:5433/aimash"
+    s = Settings(**_prod_kwargs(env="dev", database_url=leaked))
+    assert s.database_url.get_secret_value() == leaked

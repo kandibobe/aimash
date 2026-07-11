@@ -39,7 +39,9 @@ cp .env.example .env
 | `TWO_FACTOR_ENABLED` | нет | §12 2FA-гейт опасных операций. `false` (дефолт) = выкл. `true` = перед исполнением опасной мутации бот просит PIN. **Fail-closed**: `true` без `TWO_FACTOR_PIN` ⇒ опасные операции блокируются (не пропускаются). См. §2.2 |
 | `TWO_FACTOR_PIN` | **да** | PIN для 2FA (маскируется в логах/repr). Сверяется в коде constant-time (`core/twofa.py`) |
 | `TWO_FACTOR_OPS_CSV` | нет | какие операции требуют кода (CSV). Дефолт `remove_campaign,remove_ad_group,update_budget,update_bid,set_bidding_strategy`. Пусто ⇒ при включённом 2FA ничего не гейтится |
-| `DATABASE_URL` | нет | строка подключения (в compose задаётся на `postgres:5432`) |
+| `DATABASE_URL` | нет | строка подключения (в compose СОБИРАЕТСЯ из `POSTGRES_PASSWORD` на `postgres:5432` — значение из `.env` там не действует, `environment:` бьёт `env_file:`) |
+| `POSTGRES_PASSWORD` | **да** (docker) | D3: пароль роли `aimash`. Читает compose (postgres + `DATABASE_URL` бота + бэкап-сайдкар). Пусто ⇒ `docker compose up` ОТКАЗЫВАЕТ. В prod пароль `aimash` (утёк в git) отвергается на старте бота. Ротация — §4.0 |
+| `POSTGRES_RO_PASSWORD` | **да** (docker) | D3: пароль read-only роли `aimash_ro` (Postgres MCP). Задаётся при ПЕРВОЙ инициализации тома (`db/init/01-readonly-role.sh`) |
 | `LOG_LEVEL` / `LOG_FORMAT` | нет | `INFO` / `text` (в prod рекомендуется `json`) |
 | `GOOGLE_ADS_READ_CUSTOMER_IDS` | нет | доп. аккаунты для ЧТЕНИЯ (§8), CSV. Чтение НЕ открывает мутации (нужен ещё ALLOWED_CUSTOMER_IDS, §2.1) |
 | `ACCOUNT_ACCESS_MODE` | нет | `auto`/`enforced`/`legacy` — пер-юзер изоляция аккаунтов; админ (`ADMIN_CHAT_IDS`) видит всё на чтение |
@@ -149,6 +151,32 @@ read-only и покрыта тестами офлайн.
 docker compose up -d postgres        # поднять только БД (хост-порт 5433)
 alembic upgrade head                 # применить миграции (Postgres)
 ```
+
+### 4.0 Пароли БД: только из `.env` (D3, аудит 2026-07-13)
+Раньше пароли ролей лежали ЛИТЕРАЛАМИ в tracked-файлах (`docker-compose.yml`: `POSTGRES_PASSWORD:
+aimash` и `DATABASE_URL: …aimash:aimash@…`; `db/init/01-readonly-role.sql`: `aimash_ro`) — то есть
+были публичны для всех, кто видел репозиторий, а `environment:` в compose ещё и **перебивал**
+`env_file:`, поэтому сильный пароль из серверного `.env` молча игнорировался.
+
+Теперь compose подставляет пароли из `.env` через `${POSTGRES_PASSWORD:?}` / `${POSTGRES_RO_PASSWORD:?}`
+— **без них `docker compose up` отказывается стартовать** (fail-closed, правило #10), а в `prod`
+старт с утёкшим паролем (`aimash` / `aimash_ro`) отвергает и сам бот (`core.config`).
+
+**Ротация на уже работающем VPS (том проинициализирован — новый пароль сам не применится!):**
+```bash
+# 1) старым паролем сменить пароли ролей ВНУТРИ БД
+docker compose exec postgres psql -U aimash -d aimash \
+  -c "ALTER ROLE aimash    WITH PASSWORD '<новый>';" \
+  -c "ALTER ROLE aimash_ro WITH PASSWORD '<новый-ro>';"
+# 2) записать те же значения в .env на сервере
+#    POSTGRES_PASSWORD=<новый>
+#    POSTGRES_RO_PASSWORD=<новый-ro>
+# 3) пересоздать контейнеры (бот подхватит новый DATABASE_URL из compose)
+docker compose up -d --force-recreate bot backup
+```
+Порядок важен: сначала `ALTER ROLE`, потом `.env` — иначе бот/бэкап получат пароль, которого БД
+ещё не знает, и уйдут в крэш-луп. На **чистом** томе шаги 1 и 3 не нужны: init создаст роли уже с
+паролями из `.env`.
 На Postgres схему ведёт Alembic. `db.session.init_db()` (create_all) используется только для
 dev/SQLite и тестов. В dev (SQLite) `init_db()` дополнительно зовёт `heal_sqlite_schema` —
 аддитивно дотягивает недостающие NULLABLE-колонки (на SQLite `create_all` НЕ альтерит уже

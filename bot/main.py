@@ -250,6 +250,11 @@ _CAMP_CACHE: dict[int, list[dict]] = {}  # chat_id → последний спи
 # меню /campaigns (читаю и мутирую ОДИН аккаунт, без mismatch). Дефолт (нет записи) = Draft.
 # Замок мутаций (ensure_allowed) держится в _present_proposal: не-Draft вне allow-list → отказ.
 _CAMP_ACCT: dict[int, str] = {}
+# Поколение списка /campaigns (как _KW_ADD_CAMP_GEN/_SLASH_MUT_GEN): каждый новый _CAMP_CACHE
+# (в т.ч. по ДРУГОМУ аккаунту) бампает счётчик, кнопки несут gen своего снимка. Старая клавиатура
+# аккаунта A после переключения на B резолвила бы idx в чужой список — теперь честное «список
+# устарел» вместо мутации не той кампании.
+_CAMP_GEN: dict[int, int] = {}
 _LAST_PENDING: dict[int, str] = {}  # chat_id → confirmation_id последнего черновика (для /cancel)
 # §2B: params последнего черновика create_search_campaign на чат — материал для /savetemplate
 # «сохранить как шаблон». В памяти (как _LAST_PENDING); секретов нет.
@@ -1134,6 +1139,31 @@ def _camp_account(chat_id: int) -> str:
     return _CAMP_ACCT.get(chat_id, DRAFT_ACCOUNT_ID)
 
 
+def _camp_store(chat_id: int, camps: list[dict], acct: str) -> int:
+    """Записать список /campaigns с НОВЫМ поколением (см. _CAMP_GEN). Возвращает gen — его несут
+    кнопки CampCB, и хендлер сверяет его перед резолвом idx (иначе кнопка старого аккаунта уедет
+    в список нового)."""
+    gen = _CAMP_GEN.get(chat_id, 0) + 1
+    _CAMP_GEN[chat_id] = gen
+    _CAMP_CACHE[chat_id] = camps
+    _CAMP_ACCT[chat_id] = acct
+    return gen
+
+
+def _camp_gen(chat_id: int) -> int:
+    """Текущее поколение списка /campaigns этого чата (0 — списка ещё не было)."""
+    return _CAMP_GEN.get(chat_id, 0)
+
+
+def _camp_rows(chat_id: int, gen: int) -> list[dict] | None:
+    """Список кампаний чата, ЕСЛИ кнопка нарисована из актуального снимка (gen совпал). Иначе None
+    — вызывающий показывает «список устарел» и НЕ резолвит idx (защита от мутации чужой кампании
+    после переключения аккаунта)."""
+    if int(gen) != _CAMP_GEN.get(chat_id, 0):
+        return None
+    return _CAMP_CACHE.get(chat_id)
+
+
 async def _send_campaigns(message: Message, chat_id: int) -> None:
     """Список кампаний АКТИВНОГО аккаунта чтения + inline-кнопки. Активный резолвится через
     read-замок × грант (дефолт Draft); при НЕвыбранном аккаунте и нескольких живых — пикер
@@ -1163,11 +1193,10 @@ async def _send_campaigns_for(message: Message, chat_id: int, acct: str) -> None
     if not camps:
         await message.answer(i18n.t("no_campaigns"))
         return
-    _CAMP_CACHE[chat_id] = camps
-    _CAMP_ACCT[chat_id] = acct
+    gen = _camp_store(chat_id, camps, acct)
     await message.answer(
         texts.campaigns_title(acct, name=_account_name(acct)),  # 2.1: «Башня · …2039»
-        reply_markup=campaigns_kb(camps),
+        reply_markup=campaigns_kb(camps, gen=gen),
         parse_mode=ParseMode.HTML,
     )
 
@@ -1185,13 +1214,14 @@ def _picker_camps(kind: str, chat_id: int) -> list[dict] | None:
     return cache.get(chat_id) if cache is not None else None
 
 
-def _picker_full_kb(kind: str, target: str, camps: list[dict]):
-    """Полный (постраничный) пикер нужного вида — для «↩︎ Показать все» и пустого результата."""
+def _picker_full_kb(kind: str, target: str, camps: list[dict], gen: int = 0):
+    """Полный (постраничный) пикер нужного вида — для «↩︎ Показать все» и пустого результата.
+    gen — поколение списка /campaigns (для kind='campaigns'); остальные пикеры его не несут."""
     if kind == "report":
         return report_campaigns_kb(camps, target)
     if kind == "rsa":
         return rsa_pick_campaigns_kb(camps)
-    return campaigns_kb(camps)
+    return campaigns_kb(camps, gen=gen)
 
 
 def _picker_match_indices(camps: list[dict], query: str) -> list[int]:
@@ -2971,7 +3001,13 @@ async def _run_mcc_deep_export(m: Message, period, arg_code: str | None) -> None
                     continue  # пустой MCC — нет смысла слать пустую книгу
                 fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_mcc_deep_")
                 os.close(fd)
-                await asyncio.to_thread(write_mcc_deep_xlsx, deep, path)
+                # D1: запись книги — тоже под таймаутом (openpyxl на ~7 акк. укладывается в секунды;
+                # 120 с — щедрый потолок). Раньше вызов шёл без таймаута, и зависший дедуп имён
+                # листов занимал поток пула НАВСЕГДА. to_thread неотменяем — таймаут возвращает
+                # управление боту, поток дожмёт/умрёт сам.
+                await asyncio.wait_for(
+                    asyncio.to_thread(write_mcc_deep_xlsx, deep, path), timeout=120
+                )
                 fname = f"aimash_mcc_deep_{manager_id}_{period.date_from}_{period.date_to}.xlsx"
                 await m.answer_document(FSInputFile(path, filename=fname))
                 sent_any = True
@@ -3565,11 +3601,17 @@ async def _kw_start_from_intent(m: Message, brief: dict, state: FSMContext) -> N
 
 
 # ── §3: гео-таргетинг кампании из меню (локации/радиус → текст → черновик set_geo_* → «да») ──
-async def _geo_nav_kb(state: FSMContext):
+async def _geo_nav_kb(state: FSMContext, chat_id: int = 0):
     """nav_kb для retry-шага гео: «‹ Назад» → меню кампании (idx из state-data geo_idx,
-    положен в on_geo_mode), иначе только «✖ Отмена». Держит кнопки и после невалидного ввода."""
+    положен в on_geo_mode), иначе только «✖ Отмена». Держит кнопки и после невалидного ввода.
+    gen — АКТУАЛЬНОЕ поколение списка чата (экран живой, список тот же); без него кнопка «Назад»
+    пришла бы с gen=0 и упёрлась бы в гард «список устарел»."""
     idx = (await state.get_data()).get("geo_idx", -1)
-    back = CampCB(action="menu", idx=idx) if isinstance(idx, int) and idx >= 0 else None
+    back = (
+        CampCB(action="menu", idx=idx, gen=_camp_gen(chat_id))
+        if isinstance(idx, int) and idx >= 0
+        else None
+    )
     return nav_kb(back)
 
 
@@ -4838,10 +4880,15 @@ def _parse_csv_lines(text: str) -> list[str]:
     return [p.strip() for p in (text or "").replace("\n", ",").split(",") if p.strip()]
 
 
-async def _ext_nav_kb(state: FSMContext):
-    """nav_kb для шага мастера расширений: «‹ Назад» → меню расширений кампании (idx из state)."""
+async def _ext_nav_kb(state: FSMContext, chat_id: int = 0):
+    """nav_kb для шага мастера расширений: «‹ Назад» → меню расширений кампании (idx из state).
+    gen — актуальное поколение списка чата (см. _geo_nav_kb)."""
     idx = (await state.get_data()).get("ext_idx", -1)
-    back = CampCB(action="ext", idx=idx) if isinstance(idx, int) and idx >= 0 else None
+    back = (
+        CampCB(action="ext", idx=idx, gen=_camp_gen(chat_id))
+        if isinstance(idx, int) and idx >= 0
+        else None
+    )
     return nav_kb(back)
 
 
@@ -4979,14 +5026,28 @@ async def _search_params_from_cfg(
         headlines = headlines[:RSA_MAX_HEADLINES]
         descriptions = descriptions[:RSA_MAX_DESCRIPTIONS]
 
+    # C4: раньше ключи резались [:50] при потолке схемы MAX_CAMPAIGN_KEYWORDS=2000 — молча, без лога
+    # и без строки в сводке; шаблон персистил усечение. Режем по РЕАЛЬНОМУ потолку и не молчим
+    # (правило «no silent caps»). Типы соответствия переносим 1:1 (у источника они per-keyword —
+    # раньше всем ключам клона ставился тип ПЕРВОГО ключа).
+    kw_kept = list(ag.keywords)[:MAX_CAMPAIGN_KEYWORDS]
+    kw_dropped = len(ag.keywords) - len(kw_kept)
+    if kw_dropped:
+        log.warning(
+            "clone/template: ключей %d > потолка %d — обрезано %d",
+            len(ag.keywords),
+            MAX_CAMPAIGN_KEYWORDS,
+            kw_dropped,
+        )
     params = {
         "campaign_name": campaign_name,
         "final_url": url,
         "headlines": headlines,
         "descriptions": descriptions,
         "budget_daily_micros": int(round(budget * 1_000_000)),
-        "keywords": [k.text for k in ag.keywords][:50],
-        "match_type": ag.keywords[0].match_type if ag.keywords else "phrase",
+        "keywords": [k.text for k in kw_kept],
+        "match_type": kw_kept[0].match_type if kw_kept else "phrase",
+        "keyword_match_types": [k.match_type for k in kw_kept],
         "cpc_bid_micros": ag.cpc_bid_micros or 500_000,
     }
     try:  # defense-in-depth: схема ещё раз проверит длины/составы/URL/бюджет + нормализует ключи
@@ -5051,6 +5112,9 @@ async def _clone_from_intent(m: Message, brief: dict) -> None:
         await m.answer(i18n.t(e.key, **e.kw))
         return
     params = validated
+    kw_total = len(cfg.ad_groups[0].keywords) if cfg.ad_groups else 0
+    if kw_total > MAX_CAMPAIGN_KEYWORDS:  # C4: усечение не молчим — оно уедет и в шаблон
+        await m.answer(i18n.t("cc_keywords_truncated", total=kw_total, kept=MAX_CAMPAIGN_KEYWORDS))
     summary = texts.fmt_clone_proposal_summary(
         new_name, source, budget_units, validated, dropped, regenerated
     )
@@ -5645,12 +5709,18 @@ def _actor(event: object) -> tuple[int | None, str | None]:
     return getattr(fu, "id", None), getattr(fu, "username", None)
 
 
-async def _camp_mutate(cq: CallbackQuery, idx: int, operation: str, **extra) -> None:
-    """Кнопка пауза/возобновление/сети: СОЗДАЁТ черновик (как текстовая команда) → confirm-гейт.
-    НЕ исполняет мутацию напрямую — только после ✅ через ту же ветку, что и on_text.
-    extra — доп. параметры схемы операции (напр. search_partners для set_campaign_network)."""
+async def _camp_mutate(
+    cq: CallbackQuery, idx: int, operation: str, *, gen: int = 0, **extra
+) -> None:
+    """Кнопка пауза/возобновление/удаление/сети: СОЗДАЁТ черновик (как текстовая команда) →
+    confirm-гейт. НЕ исполняет мутацию напрямую — только после ✅ через ту же ветку, что и on_text.
+    extra — доп. параметры схемы операции (напр. search_partners для set_campaign_network).
+
+    gen — поколение списка, из которого нарисована кнопка: idx резолвим ТОЛЬКО в свой снимок
+    (_camp_rows). Иначе кнопка со старой клавиатуры аккаунта A после /campaigns на аккаунте B
+    указывала бы на чужую кампанию (карточка ✅ показала бы уже её — деньги ушли бы не туда)."""
     chat_id = _cq_chat_id(cq)
-    camps = _CAMP_CACHE.get(chat_id)
+    camps = _camp_rows(chat_id, gen)
     if not _valid_idx(camps, idx):
         await cq.answer(i18n.t("camp_list_stale"), show_alert=True)
         return
@@ -5825,10 +5895,13 @@ async def _do_confirm(
         )
         msg = _cq_msg(cq)
         if msg is not None:
+            # «Сколько ОК» лежит в `count` у /addkeys и в `keywords` у composite-создания кампании
+            # (§19): без второго ключа сводка врала бы «0 добавлено» на успешно созданных ключах.
+            ok_n = result.get("count")
+            if not isinstance(ok_n, int):
+                ok_n = int(result.get("keywords") or 0)
             await msg.answer(
-                i18n.t("kw_partial_rejected", ok=result.get("count", 0), bad=len(rej))
-                + "\n"
-                + reasons,
+                i18n.t("kw_partial_rejected", ok=ok_n, bad=len(rej)) + "\n" + reasons,
                 parse_mode=ParseMode.HTML,
             )
     # §20.2: профиль сохранён/обновлён → кнопка «📋 Карточка клиента» в 1 тап (кроме clear —

@@ -21,7 +21,9 @@ from core.config import Settings  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 
 # env-ключи в .env.example, читаемые НЕ через Settings (os.getenv напрямую) — легитимно не-поля.
-_NON_SETTINGS_KEYS = {"LOG_LEVEL", "LOG_FORMAT"}
+# POSTGRES_*_PASSWORD читает docker-compose.yml (подставляет в postgres/DATABASE_URL/бэкап) —
+# в Python они не приходят, приложение видит уже собранный DATABASE_URL.
+_NON_SETTINGS_KEYS = {"LOG_LEVEL", "LOG_FORMAT", "POSTGRES_PASSWORD", "POSTGRES_RO_PASSWORD"}
 
 
 # ── B5: валидация имени ENV ────────────────────────────────────────────────────────
@@ -43,6 +45,8 @@ def test_valid_env_name_normalized(good, norm):
             telegram_whitelist_chat_ids="1",
             google_ads_developer_token="t",
             google_ads_allowed_customer_ids="7753643025",
+            # D3: дефолтный DATABASE_URL несёт утёкший в git пароль — в prod он отвергается
+            database_url="postgresql+asyncpg://aimash:S3cret@db:5432/aimash",
             _env_file=None,
         )
     else:

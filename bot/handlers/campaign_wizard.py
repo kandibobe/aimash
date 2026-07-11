@@ -46,10 +46,29 @@ async def cc_new(cq: bm.CallbackQuery, state: bm.FSMContext) -> None:
     await bm._cc_begin(msg, chat_id, state)
 
 
+async def _cc_warn_if_readonly(msg, customer_id: str) -> None:
+    """Честное предупреждение на Этапе 0, если на выбранном аккаунте мутации запрещены (замок
+    `ensure_allowed`): черновик собрать можно, но «Создать» будет отклонён. НЕ блокирует визард —
+    сбор черновика read-only, а решение о доступе принимает замок (fail-closed) на исполнении."""
+    if msg is None:
+        return
+    try:
+        bm.ensure_allowed(customer_id)
+    except PermissionError:
+        await msg.answer(bm.i18n.t("cc_account_readonly"))
+    except Exception:  # noqa: BLE001 — предупреждение best-effort, визард из-за него не падает
+        return
+
+
 @bm.dp.callback_query(bm.CcCB.filter(bm.F.action == "acct"))
 async def cc_account_cb(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.FSMContext) -> None:
-    """Этап 0: аккаунт выбран (read-only превью) → фиксируем preview_customer_id, переходим к
-    Этапу 1 (описание). Аккаунт МУТАЦИИ остаётся Draft (замок не трогаем)."""
+    """Этап 0: аккаунт выбран → фиксируем его как контекст ВСЕЙ сессии (§19.2): и превью
+    (медианы/ассеты), и аккаунт МУТАЦИИ. Переходим к Этапу 1 (описание).
+
+    Замок не ослабляется: `ensure_allowed` проверяется в `_present_proposal` и заново на
+    исполнении. Здесь — лишь ЧЕСТНОЕ предупреждение, если на выбранном аккаунте мутации
+    запрещены: собрать черновик можно, но создание будет отклонено (раньше менеджер узнавал
+    об этом только на финале — и не тем аккаунтом, что видел)."""
     chat_id = bm._cq_chat_id(cq)
     rows = bm._CC_ACCT_CACHE.get(chat_id)
     if rows is None:  # кэш пуст (рестарт процесса) — само-хил: перерисовать пикер, не тупик-alert
@@ -70,9 +89,11 @@ async def cc_account_cb(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.
         return
     chosen = rows[callback_data.idx]
     preview_id = getattr(chosen, "id", bm.DRAFT_ACCOUNT_ID)
-    await bm.CDRAFTS.set_preview(session_id, preview_id, expected_chat_id=chat_id)
+    # §19.2: выбранный аккаунт — контекст ВСЕЙ сессии (превью И мутация), а не только превью.
+    await bm.CDRAFTS.set_account(session_id, preview_id, expected_chat_id=chat_id)
     snap = await bm.CDRAFTS.set_step(session_id, 1, expected_chat_id=chat_id)
     await cq.answer()
+    await _cc_warn_if_readonly(bm._cq_msg(cq), preview_id)
     # W4: настройки уже собраны (возврат «Назад» на Этап 0 и повторный выбор аккаунта) →
     # НЕ входить заново в settings_desc: свободный текст там пересобрал бы настройки с нуля
     # (дефолты перетёрли бы правки — data-loss). Показываем сохранённую сводку (settings_confirm).

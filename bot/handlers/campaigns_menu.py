@@ -42,7 +42,7 @@ async def camp_geo(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
     2E) и выбор способа изменения (локации/радиус). READ-ONLY: ничего не меняем — адрес/локации
     вводятся следующим шагом, черновик собирается после (confirm-гейт). Сбой чтения текущего гео
     НЕ блокирует изменение (fail-safe: меню показывается с пометкой)."""
-    camps = bm._CAMP_CACHE.get(bm._cq_chat_id(cq))
+    camps = bm._camp_rows(bm._cq_chat_id(cq), callback_data.gen)
     if not bm._valid_idx(camps, callback_data.idx):
         await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
         return
@@ -74,7 +74,7 @@ async def camp_geo(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
     await bm._safe_edit(
         cq,
         text,
-        reply_markup=bm.geo_mode_kb(callback_data.idx),
+        reply_markup=bm.geo_mode_kb(callback_data.idx, gen=callback_data.gen),
         parse_mode=bm.ParseMode.HTML,
     )
 
@@ -109,7 +109,9 @@ async def on_geo_mode(cq: bm.CallbackQuery, callback_data: bm.GeoCB, state: bm.F
     # Back → меню кампании (та же цель, что у «‹ Назад» в geo_mode_kb): переиспользуем camp_menu.
     await msg.answer(
         bm.i18n.t(prompt),
-        reply_markup=bm.nav_kb(bm.CampCB(action="menu", idx=callback_data.idx)),
+        reply_markup=bm.nav_kb(
+            bm.CampCB(action="menu", idx=callback_data.idx, gen=bm._camp_gen(chat_id))
+        ),
         parse_mode=bm.ParseMode.HTML,
     )
 
@@ -122,7 +124,7 @@ async def geo_locations(m: bm.Message, state: bm.FSMContext) -> None:
     if not locations:
         await m.answer(
             bm.i18n.t("geo_empty_locations"),
-            reply_markup=await bm._geo_nav_kb(state),
+            reply_markup=await bm._geo_nav_kb(state, m.chat.id),
             parse_mode=bm.ParseMode.HTML,
         )
         return  # остаёмся в состоянии — пользователь пришлёт локации ещё раз
@@ -160,7 +162,7 @@ async def geo_proximity(m: bm.Message, state: bm.FSMContext) -> None:
     if parsed is None:
         await m.answer(
             bm.i18n.t("geo_bad_proximity"),
-            reply_markup=await bm._geo_nav_kb(state),
+            reply_markup=await bm._geo_nav_kb(state, m.chat.id),
             parse_mode=bm.ParseMode.HTML,
         )
         return  # остаёмся в состоянии — пользователь пришлёт «город, радиус» ещё раз
@@ -194,7 +196,7 @@ async def geo_proximity(m: bm.Message, state: bm.FSMContext) -> None:
 @bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "ext"))
 async def camp_ext(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
     """Меню кампании → «🧩 Расширения»: показать выбор типа. READ-ONLY (ввод/черновик — дальше)."""
-    camps = bm._CAMP_CACHE.get(bm._cq_chat_id(cq))
+    camps = bm._camp_rows(bm._cq_chat_id(cq), callback_data.gen)
     if not bm._valid_idx(camps, callback_data.idx):
         await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
         return
@@ -203,7 +205,7 @@ async def camp_ext(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
     await bm._safe_edit(
         cq,
         bm.i18n.t("ext_menu_pick", camp=bm.texts.esc(name)),
-        reply_markup=bm.ext_menu_kb(callback_data.idx),
+        reply_markup=bm.ext_menu_kb(callback_data.idx, gen=callback_data.gen),
         parse_mode=bm.ParseMode.HTML,
     )
 
@@ -247,7 +249,9 @@ async def on_ext_type(cq: bm.CallbackQuery, callback_data: bm.ExtCB, state: bm.F
         prompt = "ext_ask_callouts"
     await msg.answer(
         bm.i18n.t(prompt),
-        reply_markup=bm.nav_kb(bm.CampCB(action="ext", idx=callback_data.idx)),
+        reply_markup=bm.nav_kb(
+            bm.CampCB(action="ext", idx=callback_data.idx, gen=bm._camp_gen(chat_id))
+        ),
         parse_mode=bm.ParseMode.HTML,
     )
 
@@ -278,7 +282,9 @@ async def on_ext_snippet_header(
     await cq.answer()
     await msg.answer(
         bm.i18n.t("ext_ask_snippet_values", header=bm.texts.esc(callback_data.sub)),
-        reply_markup=bm.nav_kb(bm.CampCB(action="ext", idx=callback_data.idx)),
+        reply_markup=bm.nav_kb(
+            bm.CampCB(action="ext", idx=callback_data.idx, gen=bm._camp_gen(chat_id))
+        ),
         parse_mode=bm.ParseMode.HTML,
     )
 
@@ -289,7 +295,7 @@ async def ext_sitelinks(m: bm.Message, state: bm.FSMContext) -> None:
     if not sitelinks:
         await m.answer(
             bm.i18n.t("ext_bad_sitelinks"),
-            reply_markup=await bm._ext_nav_kb(state),
+            reply_markup=await bm._ext_nav_kb(state, m.chat.id),
             parse_mode=bm.ParseMode.HTML,
         )
         return  # остаёмся в состоянии (retry с навигацией)
@@ -325,7 +331,7 @@ async def ext_callouts(m: bm.Message, state: bm.FSMContext) -> None:
     if not callouts:
         await m.answer(
             bm.i18n.t("ext_bad_callouts"),
-            reply_markup=await bm._ext_nav_kb(state),
+            reply_markup=await bm._ext_nav_kb(state, m.chat.id),
             parse_mode=bm.ParseMode.HTML,
         )
         return
@@ -364,7 +370,7 @@ async def ext_snippet_values(m: bm.Message, state: bm.FSMContext) -> None:
     if len(values) < 3:
         await m.answer(
             bm.i18n.t("ext_bad_snippet_values"),
-            reply_markup=await bm._ext_nav_kb(state),
+            reply_markup=await bm._ext_nav_kb(state, m.chat.id),
             parse_mode=bm.ParseMode.HTML,
         )
         return
@@ -467,7 +473,7 @@ async def on_ext_remove(cq: bm.CallbackQuery, callback_data: bm.ExtCB) -> None:
 
 @bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "menu"))
 async def camp_menu(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
-    camps = bm._CAMP_CACHE.get(bm._cq_chat_id(cq))
+    camps = bm._camp_rows(bm._cq_chat_id(cq), callback_data.gen)
     if not bm._valid_idx(camps, callback_data.idx):
         await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
         return
@@ -476,41 +482,44 @@ async def camp_menu(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
     await bm._safe_edit(
         cq,
         bm.texts.fmt_campaign_header(c),
-        reply_markup=bm.campaign_actions_kb(callback_data.idx, c.get("status", "")),
+        reply_markup=bm.campaign_actions_kb(
+            callback_data.idx, c.get("status", ""), gen=callback_data.gen
+        ),
         parse_mode=bm.ParseMode.HTML,
     )
 
 
 @bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "back"))
 async def camp_back(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
-    camps = bm._CAMP_CACHE.get(bm._cq_chat_id(cq))
+    chat_id = bm._cq_chat_id(cq)
+    camps = bm._camp_rows(chat_id, callback_data.gen)
     if not camps:
         await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
         return
     await cq.answer()
     await bm._safe_edit(
         cq,
-        bm.texts.campaigns_title(bm._camp_account(bm._cq_chat_id(cq))),
-        reply_markup=bm.campaigns_kb(camps),
+        bm.texts.campaigns_title(bm._camp_account(chat_id)),
+        reply_markup=bm.campaigns_kb(camps, gen=callback_data.gen),
         parse_mode=bm.ParseMode.HTML,
     )
 
 
 @bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "pause"))
 async def camp_pause(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
-    await bm._camp_mutate(cq, callback_data.idx, "pause_campaign")
+    await bm._camp_mutate(cq, callback_data.idx, "pause_campaign", gen=callback_data.gen)
 
 
 @bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "resume"))
 async def camp_resume(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
-    await bm._camp_mutate(cq, callback_data.idx, "resume_campaign")
+    await bm._camp_mutate(cq, callback_data.idx, "resume_campaign", gen=callback_data.gen)
 
 
 @bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "delete"))
 async def camp_delete(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
     """🗑 Удалить кампанию → черновик remove_campaign за confirm-гейтом. Необратимо, поэтому
     _present_proposal покажет ДВОЙНОЕ подтверждение (P1-6). Замок аккаунта держит ensure_allowed."""
-    await bm._camp_mutate(cq, callback_data.idx, "remove_campaign")
+    await bm._camp_mutate(cq, callback_data.idx, "remove_campaign", gen=callback_data.gen)
 
 
 # ── §19.3 Сети: тумблер поисковых партнёров существующей кампании ────────────────
@@ -518,7 +527,7 @@ async def camp_delete(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
 async def camp_network(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
     """Подменю сетей кампании. READ-ONLY: только выбор; изменение — черновиком
     set_campaign_network за confirm-гейтом («было→станет» подтянет read_before)."""
-    camps = bm._CAMP_CACHE.get(bm._cq_chat_id(cq))
+    camps = bm._camp_rows(bm._cq_chat_id(cq), callback_data.gen)
     if not bm._valid_idx(camps, callback_data.idx):
         await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
         return
@@ -526,18 +535,22 @@ async def camp_network(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
     await bm._safe_edit(
         cq,
         bm.i18n.t("camp_network_title", camp=camps[callback_data.idx]["name"]),
-        reply_markup=bm.campaign_network_kb(callback_data.idx),
+        reply_markup=bm.campaign_network_kb(callback_data.idx, gen=callback_data.gen),
     )
 
 
 @bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "net_off"))
 async def camp_net_off(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
-    await bm._camp_mutate(cq, callback_data.idx, "set_campaign_network", search_partners=False)
+    await bm._camp_mutate(
+        cq, callback_data.idx, "set_campaign_network", gen=callback_data.gen, search_partners=False
+    )
 
 
 @bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "net_on"))
 async def camp_net_on(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
-    await bm._camp_mutate(cq, callback_data.idx, "set_campaign_network", search_partners=True)
+    await bm._camp_mutate(
+        cq, callback_data.idx, "set_campaign_network", gen=callback_data.gen, search_partners=True
+    )
 
 
 # ── §3 Аудитории: меню кампании → список аудиторий → черновик attach_audience ───────
@@ -546,7 +559,7 @@ async def camp_audience(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
     """Показать доступные аудитории (user_list) для прикрепления к выбранной кампании.
     READ-ONLY: только список; прикрепление — отдельным черновиком после выбора (confirm-гейт)."""
     chat_id = bm._cq_chat_id(cq)
-    camps = bm._CAMP_CACHE.get(chat_id)
+    camps = bm._camp_rows(chat_id, callback_data.gen)
     if not bm._valid_idx(camps, callback_data.idx):
         await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
         return
@@ -579,7 +592,9 @@ async def camp_audience(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
     await bm._safe_edit(
         cq,
         bm.texts.audiences_title(camps[callback_data.idx]["name"]),
-        reply_markup=bm.audiences_kb(auds, callback_data.idx, attached=attached),
+        reply_markup=bm.audiences_kb(
+            auds, callback_data.idx, attached=attached, gen=callback_data.gen
+        ),
         parse_mode=bm.ParseMode.HTML,
     )
 

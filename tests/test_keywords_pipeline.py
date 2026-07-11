@@ -106,6 +106,32 @@ def test_parse_keywords_global_instruction_applies():
     assert len(out) == 2  # ровно 2 ключа, без мусорной инструкции
 
 
+def test_global_instruction_beats_screen_default():
+    """C3 (§19.4.1): «используй широкое соответствие для всего списка» побеждает default экрана.
+    Раньше default (в визарде он задан ВСЕГДА) перекрывал инструкцию → §19.4.1 не работал в визарде."""
+    out = parse_keywords_text(
+        "используй широкое соответствие для всего списка\nused cars\ncheap cars",
+        default_match_type="exact",  # дефолт визарда с Этапа 1
+    )
+    assert {k.match_type for k in out} == {"broad"}
+
+
+def test_per_keyword_marker_still_beats_global_instruction():
+    out = parse_keywords_text(
+        'используй широкое соответствие\n[used cars]\n"second hand"\ncheap cars',
+        default_match_type="exact",
+    )
+    by = {k.text: k.match_type for k in out}
+    assert by["used cars"] == "exact"  # маркер сильнее инструкции
+    assert by["second hand"] == "phrase"
+    assert by["cheap cars"] == "broad"  # инструкция сильнее default экрана
+
+
+def test_screen_default_used_when_no_instruction():
+    out = parse_keywords_text("used cars\ncheap cars", default_match_type="exact")
+    assert {k.match_type for k in out} == {"exact"}  # прежнее поведение сохранено
+
+
 def test_filter_coerce_string_false():
     import keywords.filter as _KF
 

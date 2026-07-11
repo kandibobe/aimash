@@ -153,6 +153,94 @@ def test_add_negative_keywords_partial_failure_mirror():
     assert captured["request"].partial_failure is True
 
 
+# ── B3: ключи визарда §19 идут тем же контрактом, что /addkeys ───────────────────
+def _composite_client(kw_resp, captured: dict):
+    """Дакт-фейк SDK для _create_search_campaign_via_sdk: бюджет/кампания/группа/RSA — успех,
+    батч ключей отвечает переданным kw_resp (в т.ч. с partial_failure_error)."""
+
+    class _Svc:
+        def mutate_campaign_budgets(self, *, customer_id, operations):
+            return SimpleNamespace(results=_results("customers/x/campaignBudgets/1"))
+
+        def mutate_campaigns(self, *, customer_id, operations):
+            return SimpleNamespace(results=_results("customers/x/campaigns/2"))
+
+        def mutate_ad_groups(self, *, customer_id, operations):
+            return SimpleNamespace(results=_results("customers/x/adGroups/3"))
+
+        def mutate_ad_group_ads(self, *, customer_id, operations):
+            return SimpleNamespace(results=_results("customers/x/adGroupAds/3~4"))
+
+        def mutate_ad_group_criteria(self, request):
+            captured["request"] = request
+            return kw_resp
+
+    class _Proto(list):
+        """Рекурсивный proto-подобный фейк: любой атрибут — снова _Proto (и это list → .append)."""
+
+        def __getattr__(self, k):
+            v = _Proto()
+            object.__setattr__(self, k, v)
+            return v
+
+    class _Client:
+        enums = _Proto()
+
+        def get_service(self, name):
+            return _Svc()
+
+        def get_type(self, name):
+            return _Req() if name.startswith("Mutate") else _Proto()
+
+    return _Client()
+
+
+def _run_composite(client, keywords):
+    return mut._create_search_campaign_via_sdk(
+        client,
+        DRAFT,
+        campaign_name="T",
+        final_url="https://x/",
+        headlines=["a", "b", "c"],
+        descriptions=["d", "e"],
+        budget_micros=40_000_000,
+        keywords=keywords,
+        match_type="phrase",
+        cpc_bid_micros=120_000,
+    )
+
+
+def test_wizard_keywords_partial_failure_does_not_zero_the_campaign(monkeypatch):
+    """B3: раньше ключи визарда шли БЕЗ partial_failure → один битый ключ («скидка 50%» →
+    KEYWORD_HAS_INVALID_CHARS) валил весь батч, `except Exception` глотал причину, и Search-кампания
+    создавалась с НУЛЁМ ключей. Теперь валидные создаются, отклонённые — в result['rejected']."""
+    monkeypatch.setattr(mut, "_downgrade_bidding_if_no_conversions", lambda c, cid, b: (b, None))
+    monkeypatch.setattr(mut, "_apply_bidding_on_create", lambda c, camp, b: None)
+    captured: dict = {}
+    kw_resp = SimpleNamespace(
+        results=_results("crit0", "", "crit2"),
+        partial_failure_error=_pfe((1, "KEYWORD_HAS_INVALID_CHARS", "invalid chars")),
+    )
+    res = _run_composite(_composite_client(kw_resp, captured), ["ok1", "скидка 50%", "ok2"])
+
+    assert captured["request"].partial_failure is True  # флаг реально выставлен
+    assert res["keywords"] == 2  # НЕ 0 — кампания уехала с валидными ключами
+    assert res["rejected_count"] == 1
+    assert res["rejected"][0]["keyword"] == "скидка 50%"
+    assert "KEYWORD_HAS_INVALID_CHARS" in res["rejected"][0]["reason"]
+    # частичный успех виден и в warnings (3C-контракт)
+    assert {"part": "keywords", "requested": 3, "applied": 2} in res["warnings"]
+
+
+def test_wizard_keywords_clean_batch_has_no_rejected(monkeypatch):
+    monkeypatch.setattr(mut, "_downgrade_bidding_if_no_conversions", lambda c, cid, b: (b, None))
+    monkeypatch.setattr(mut, "_apply_bidding_on_create", lambda c, camp, b: None)
+    kw_resp = SimpleNamespace(results=_results("crit0", "crit1"))  # атрибута pfe вовсе нет
+    res = _run_composite(_composite_client(kw_resp, {}), ["a", "b"])
+    assert res["keywords"] == 2 and "rejected" not in res
+    assert not [w for w in res.get("warnings", []) if w["part"] == "keywords"]
+
+
 def test_partial_failure_errors_parser_duck():
     resp = SimpleNamespace(partial_failure_error=_pfe((0, "A_CODE", "msg0"), (2, "B_CODE", "msg2")))
     out = partial_failure_errors(object(), resp)  # client не нужен дакт-фейку (detail.errors)

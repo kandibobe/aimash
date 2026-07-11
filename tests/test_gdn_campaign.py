@@ -120,7 +120,7 @@ async def test_apply_create_gdn_passes_geo_to_sdk():
         return {
             "applied": True,
             "status": "PAUSED",
-            "geo_count": len(kw.get("geo_locations") or []),
+            "geo": len(kw.get("geo_locations") or []),
         }
 
     store = FakeStore(FakeProposal("create_gdn_campaign", "confirmed", user_initiated=True))
@@ -137,7 +137,18 @@ async def test_apply_create_gdn_passes_geo_to_sdk():
         )
     assert called["geo_locations"] == ["Кения", "Найроби"]
     assert called["geo_country_code"] == "KE" and called["geo_locale"] == "en"
-    assert res["geo_count"] == 2
+    assert res["geo"] == 2
+
+
+def test_geo_result_warns_on_partial_geo():
+    """B2: гео медиа-кампаний ложилось в `geo_count`, которого не читает НИКТО → «кампания на Кению»
+    без гео (глобальный показ при запуске) выглядела на карточке как полный успех. Теперь ключ `geo`
+    + явный warning частичного успеха (контракт тот же, что у create_search_campaign)."""
+    assert mut._geo_result(["Кения", "Найроби"], 2) == {"geo": 2}
+    assert mut._geo_result(None, 0) == {"geo": 0}
+    partial = mut._geo_result(["Кения", "Найроби"], 0)
+    assert partial["geo"] == 0
+    assert partial["warnings"] == [{"part": "geo", "requested": 2, "applied": 0}]
 
 
 def test_create_gdn_via_sdk_invokes_geo_helper_when_provided():
@@ -212,7 +223,10 @@ def test_create_gdn_via_sdk_invokes_geo_helper_when_provided():
         )
     assert geo_calls["campaign_id"] == "55"  # из campaign resource_name
     assert geo_calls["locations"] == ["Кения"]
-    assert res["geo_count"] == 1
+    # B2: ключ `geo` (его читает bot.texts), а не мёртвый `geo_count` — гео обязано быть на карточке.
+    assert res["geo"] == 1
+    assert "geo_count" not in res
+    assert not res.get("warnings")  # всё гео применено → warning не порождаем
 
 
 async def test_apply_create_gdn_blocked_when_not_user_initiated():

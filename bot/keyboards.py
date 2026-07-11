@@ -1381,9 +1381,10 @@ def cc_resume_kb(lang: str | None = None) -> InlineKeyboardMarkup:
 
 
 # ── Inline: /campaigns — список с быстрыми действиями ────────────────────────────
-def campaigns_kb(camps: list[dict], page: int = 0) -> InlineKeyboardMarkup:
+def campaigns_kb(camps: list[dict], page: int = 0, gen: int = 0) -> InlineKeyboardMarkup:
     """По кнопке на кампанию (раскрывает меню действий), ПОСТРАНИЧНО (3E: >100 кампаний давали
-    REPLY_MARKUP_TOO_LONG → «код инцидента» вместо списка). idx = ГЛОБАЛЬНАЯ позиция в списке."""
+    REPLY_MARKUP_TOO_LONG → «код инцидента» вместо списка). idx = ГЛОБАЛЬНАЯ позиция в списке.
+    gen — поколение снимка списка (bot.main._camp_store): хендлер сверяет его перед резолвом idx."""
     kb = InlineKeyboardBuilder()
     total = len(camps)
     pages = max(1, (total + _CAMP_PAGE - 1) // _CAMP_PAGE)
@@ -1394,7 +1395,8 @@ def campaigns_kb(camps: list[dict], page: int = 0) -> InlineKeyboardMarkup:
         c = camps[i]
         mark = {"ENABLED": "▶️", "PAUSED": "⏸"}.get(c.get("status", ""), "•")
         kb.button(
-            text=f"{mark} {_ellipsize(c['name'])}", callback_data=CampCB(action="menu", idx=i)
+            text=f"{mark} {_ellipsize(c['name'])}",
+            callback_data=CampCB(action="menu", idx=i, gen=gen),
         )
         shown += 1
     nav_n = _page_nav_row(kb, "camp", "", page, pages)
@@ -1408,71 +1410,73 @@ def campaigns_kb(camps: list[dict], page: int = 0) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def campaign_actions_kb(idx: int, status: str, lang: str | None = None) -> InlineKeyboardMarkup:
+def campaign_actions_kb(
+    idx: int, status: str, lang: str | None = None, gen: int = 0
+) -> InlineKeyboardMarkup:
     """Действия для одной кампании. pause/resume зависят от статуса; мутации идут через
-    confirm-гейт (кнопка лишь создаёт черновик, не исполняет)."""
+    confirm-гейт (кнопка лишь создаёт черновик, не исполняет). gen — поколение списка (см. CampCB)."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     if status == "ENABLED":
         kb.button(
             text="⏸ Pause" if en else "⏸ Поставить на паузу",
-            callback_data=CampCB(action="pause", idx=idx),
+            callback_data=CampCB(action="pause", idx=idx, gen=gen),
         )
     elif status == "PAUSED":
         kb.button(
             text="▶️ Resume" if en else "▶️ Возобновить",
-            callback_data=CampCB(action="resume", idx=idx),
+            callback_data=CampCB(action="resume", idx=idx, gen=gen),
         )
     kb.button(
         text="🎯 Audiences" if en else "🎯 Аудитории",
-        callback_data=CampCB(action="audience", idx=idx),
+        callback_data=CampCB(action="audience", idx=idx, gen=gen),
     )
     kb.button(
         text="📍 Geo targeting" if en else "📍 Гео-таргетинг",
-        callback_data=CampCB(action="geo", idx=idx),
+        callback_data=CampCB(action="geo", idx=idx, gen=gen),
     )
     kb.button(
         text="🧩 Extensions" if en else "🧩 Расширения",
-        callback_data=CampCB(action="ext", idx=idx),
+        callback_data=CampCB(action="ext", idx=idx, gen=gen),
     )
     kb.button(
         text="🌐 Networks" if en else "🌐 Сети",
-        callback_data=CampCB(action="network", idx=idx),
+        callback_data=CampCB(action="network", idx=idx, gen=gen),
     )
     kb.button(
         text="🗑 Delete campaign" if en else "🗑 Удалить кампанию",
-        callback_data=CampCB(action="delete", idx=idx),
+        callback_data=CampCB(action="delete", idx=idx, gen=gen),
     )
     kb.button(
         text="‹ Back to list" if en else "‹ Назад к списку",
-        callback_data=CampCB(action="back", idx=idx),
+        callback_data=CampCB(action="back", idx=idx, gen=gen),
     )
     kb.adjust(1)
     return kb.as_markup()
 
 
-def campaign_network_kb(idx: int, lang: str | None = None) -> InlineKeyboardMarkup:
+def campaign_network_kb(idx: int, lang: str | None = None, gen: int = 0) -> InlineKeyboardMarkup:
     """§19.3: тумблер поисковых партнёров кампании. Кнопка лишь СОЗДАЁТ черновик
     set_campaign_network (confirm-гейт); КМС/ограниченную партнёрскую сеть не трогаем."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     kb.button(
         text="🚫 Partners OFF (recommended)" if en else "🚫 Партнёры ВЫКЛ (рекомендуется)",
-        callback_data=CampCB(action="net_off", idx=idx),
+        callback_data=CampCB(action="net_off", idx=idx, gen=gen),
     )
     kb.button(
         text="✅ Partners ON" if en else "✅ Партнёры ВКЛ",
-        callback_data=CampCB(action="net_on", idx=idx),
+        callback_data=CampCB(action="net_on", idx=idx, gen=gen),
     )
     kb.button(
         text="‹ Back" if en else "‹ Назад",
-        callback_data=CampCB(action="menu", idx=idx),
+        callback_data=CampCB(action="menu", idx=idx, gen=gen),
     )
     kb.adjust(1)
     return kb.as_markup()
 
 
-def ext_menu_kb(idx: int, lang: str | None = None) -> InlineKeyboardMarkup:
+def ext_menu_kb(idx: int, lang: str | None = None, gen: int = 0) -> InlineKeyboardMarkup:
     """§3-assets: меню расширений кампании (sitelinks/callouts/structured snippets/показать) +
     «‹ Назад» в меню кампании (breadcrumb через CampCB menu). Выбор типа → ввод текста → черновик."""
     en = _lang(lang) == "en"
@@ -1497,7 +1501,9 @@ def ext_menu_kb(idx: int, lang: str | None = None) -> InlineKeyboardMarkup:
         text="👁 Show current" if en else "👁 Показать текущие",
         callback_data=ExtCB(action="show", idx=idx),
     )
-    kb.button(text="‹ Back" if en else "‹ Назад", callback_data=CampCB(action="menu", idx=idx))
+    kb.button(
+        text="‹ Back" if en else "‹ Назад", callback_data=CampCB(action="menu", idx=idx, gen=gen)
+    )
     kb.adjust(1)
     return kb.as_markup()
 
@@ -1516,7 +1522,9 @@ def ext_snippet_header_kb(idx: int, lang: str | None = None) -> InlineKeyboardMa
     return kb.as_markup()
 
 
-def ext_assets_list_kb(rows: list, camp_idx: int, lang: str | None = None) -> InlineKeyboardMarkup:
+def ext_assets_list_kb(
+    rows: list, camp_idx: int, lang: str | None = None, gen: int = 0
+) -> InlineKeyboardMarkup:
     """§3-assets: текущие расширения кампании с кнопками удаления (🗑 idx). idx — строка в
     _EXT_CACHE[chat_id]; «‹ Назад» — к меню расширений кампании (camp_idx в _CAMP_CACHE)."""
     en = _lang(lang) == "en"
@@ -1526,12 +1534,15 @@ def ext_assets_list_kb(rows: list, camp_idx: int, lang: str | None = None) -> In
             text=f"🗑 {_ellipsize(getattr(r, 'label', '') or getattr(r, 'field_type', ''))}",
             callback_data=ExtCB(action="remove", idx=i),
         )
-    kb.button(text="‹ Back" if en else "‹ Назад", callback_data=CampCB(action="ext", idx=camp_idx))
+    kb.button(
+        text="‹ Back" if en else "‹ Назад",
+        callback_data=CampCB(action="ext", idx=camp_idx, gen=gen),
+    )
     kb.adjust(1)
     return kb.as_markup()
 
 
-def geo_mode_kb(idx: int, lang: str | None = None) -> InlineKeyboardMarkup:
+def geo_mode_kb(idx: int, lang: str | None = None, gen: int = 0) -> InlineKeyboardMarkup:
     """§3: выбор способа гео-таргетинга кампании. «По локации» (страна/город/регион через
     geoTargetConstants) или «Радиус вокруг точки» (proximity). Кнопка лишь выбирает способ —
     адрес/локации вводятся текстом, черновик собирается после ввода (confirm-гейт). idx — кампания
@@ -1546,7 +1557,9 @@ def geo_mode_kb(idx: int, lang: str | None = None) -> InlineKeyboardMarkup:
         text="📍 Radius around a point" if en else "📍 Радиус вокруг точки",
         callback_data=GeoCB(action="prox", idx=idx),
     )
-    kb.button(text="‹ Back" if en else "‹ Назад", callback_data=CampCB(action="menu", idx=idx))
+    kb.button(
+        text="‹ Back" if en else "‹ Назад", callback_data=CampCB(action="menu", idx=idx, gen=gen)
+    )
     kb.adjust(1)
     return kb.as_markup()
 
@@ -1557,6 +1570,7 @@ def audiences_kb(
     lang: str | None = None,
     attached: list | None = None,
     page: int = 0,
+    gen: int = 0,
 ) -> InlineKeyboardMarkup:
     """Выбор аудитории для прикрепления к кампании (§3). idx — ГЛОБАЛЬНАЯ позиция в _AUD_CACHE;
     camp_idx ведёт прикрепление к конкретной кампании и кнопку «назад» — к её меню.
@@ -1592,7 +1606,10 @@ def audiences_kb(
     if nav_n:
         sizes.append(nav_n)
     sizes.append(1)  # «‹ Назад»
-    kb.button(text="‹ Back" if en else "‹ Назад", callback_data=CampCB(action="menu", idx=camp_idx))
+    kb.button(
+        text="‹ Back" if en else "‹ Назад",
+        callback_data=CampCB(action="menu", idx=camp_idx, gen=gen),
+    )
     kb.adjust(*sizes)
     return kb.as_markup()
 
@@ -1779,7 +1796,12 @@ def _search_btn(kb: InlineKeyboardBuilder, kind: str, target: str, total: int, e
 
 
 def picker_search_kb(
-    kind: str, target: str, camps: list[dict], indices: list[int], lang: str | None = None
+    kind: str,
+    target: str,
+    camps: list[dict],
+    indices: list[int],
+    lang: str | None = None,
+    gen: int = 0,
 ) -> InlineKeyboardMarkup:
     """D1: результаты поиска кампании по названию. indices — ГЛОБАЛЬНЫЕ позиции совпадений в
     кэше (_CAMP_CACHE/_REPORT_CAMP_CACHE/_RSA_CAMP_CACHE) → callback выбора работает без изменений.
@@ -1797,7 +1819,7 @@ def picker_search_kb(
         elif kind == "rsa":
             cb = RsaPickCB(what="camp", idx=i)
         else:  # campaigns
-            cb = CampCB(action="menu", idx=i)
+            cb = CampCB(action="menu", idx=i, gen=gen)
         kb.button(text=text, callback_data=cb)
     kb.button(
         text="↩︎ Show all" if en else "↩︎ Показать все",

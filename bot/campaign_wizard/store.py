@@ -196,14 +196,37 @@ class CampaignDraftStore:
         *,
         expected_chat_id: int | None = None,
     ) -> DraftSnapshot | None:
-        """Зафиксировать выбранный на Этапе-0 дочерний аккаунт (read-only превью). Аккаунт МУТАЦИИ
-        (customer_id) здесь НЕ трогаем — он зафиксирован при создании визарда (create, активный
-        аккаунт Этапа-0); мутация всё равно проходит ensure_allowed + confirm-гейт."""
+        """Зафиксировать аккаунт ЧТЕНИЯ (превью: медианы/ассеты/ключи) БЕЗ смены аккаунта мутации.
+        Точка входа Этапа-0 — `set_account` (она фиксирует ОБА); этот сеттер остаётся для узких
+        случаев, где меняется только источник превью."""
         async with Session() as s:
             p = await self._load(s, session_id, expected_chat_id, active_only=True, for_update=True)
             if p is None:
                 return None
             p.preview_customer_id = preview_customer_id
+            await s.commit()
+            return _snap(p)
+
+    async def set_account(
+        self,
+        session_id: str,
+        customer_id: str,
+        *,
+        expected_chat_id: int | None = None,
+    ) -> DraftSnapshot | None:
+        """§19.2: аккаунт, выбранный менеджером на Этапе 0, — контекст ВСЕЙ сессии: и превью
+        (медианы/ассеты), и МУТАЦИИ (создание кампании).
+
+        Раньше выбор писался только в `preview_customer_id`, а мутация уходила на аккаунт,
+        зафиксированный при СТАРТЕ визарда (активный аккаунт чтения, дефолт Draft) — кампания
+        создавалась не в том аккаунте, который менеджер видел на карточке. Замок не ослабляется:
+        `ensure_allowed` по-прежнему проверяется в `_present_proposal` и ЗАНОВО на исполнении."""
+        async with Session() as s:
+            p = await self._load(s, session_id, expected_chat_id, active_only=True, for_update=True)
+            if p is None:
+                return None
+            p.customer_id = customer_id
+            p.preview_customer_id = customer_id
             await s.commit()
             return _snap(p)
 
