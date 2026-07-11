@@ -1,6 +1,8 @@
 {
   "env": {
-    "ENV": "dev"
+    "ENV": "dev",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "200000",
+    "BASH_MAX_OUTPUT_LENGTH": "20000"
   },
   "permissions": {
     "allow": [
