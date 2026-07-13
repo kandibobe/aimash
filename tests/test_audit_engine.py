@@ -913,6 +913,7 @@ def test_weight_vector_snapshot_pins_full_model():
         "schedule_min_spend": 20.0,
         "bid_gap_min": 0.10,
         "kw_rank_lost_top_min": 0.30,
+        "sim_min_conv_gain": 0.5,
     }
 
 

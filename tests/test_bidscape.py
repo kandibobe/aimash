@@ -23,7 +23,14 @@ from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
 from core.config import settings  # noqa: E402
 from reports import period as P  # noqa: E402
 from reports import queries as Q  # noqa: E402
-from reports.queries import Breakdown, BidLandscapeRow, Metrics  # noqa: E402
+from reports.queries import (  # noqa: E402
+    Breakdown,
+    BidLandscapeRow,
+    BidSimulation,
+    BudgetSimulation,
+    Metrics,
+    SimPoint,
+)
 
 from audit.engine import ONE_TAP_OPS, build_audit  # noqa: E402
 from audit.render import finding_text  # noqa: E402
@@ -271,6 +278,194 @@ def test_fetch_bid_landscape_reads_bids_estimates_and_top_is():
     q = client.seen[0]
     assert "FROM keyword_view" in q and "ad_group_criterion.position_estimates" in q
     assert "ad_group_criterion.status = 'ENABLED'" in q and "ORDER BY metrics.cost_micros DESC" in q
+
+
+def _sim(amount, clicks, cost, conv, imps=1000, top=100) -> SimPoint:
+    return SimPoint(
+        amount=amount,
+        clicks=clicks,
+        cost=cost,
+        impressions=imps,
+        conversions=conv,
+        top_slot_impressions=top,
+    )
+
+
+# Точки симулятора Google для ключа (11,22) при текущей ставке 0.5. Шаг 0.5→1.0 окупается
+# (Δ40 / Δ2 конв = предельный CPA 20 ≤ 30 = средний по аккаунту), шаг 1.0→1.5 — нет (Δ50 / Δ1 = 50).
+_BID_POINTS = [
+    _sim(0.5, 20, 50.0, 2.0),
+    _sim(1.0, 35, 90.0, 4.0),
+    _sim(1.5, 45, 140.0, 5.0),
+]
+
+
+def test_sim_bid_upside_walks_marginal_steps_not_to_the_ceiling():
+    """Главное свойство: идём по точкам, пока КАЖДЫЙ шаг окупается, и останавливаемся на первом
+    неокупаемом. Совет «до 1.5» протащил бы вместе с прибыльным куском убыточный (предельный CPA 50
+    при среднем 30) — движок обязан остановиться на 1.0."""
+    sims = [BidSimulation(ad_group_id="11", criterion_id="22", points=_BID_POINTS)]
+    res = build_audit(_report(), bid_landscape=[_bl(bid=0.5)], bid_simulations=sims)
+    f = next(f for f in res.findings if f.check_id == "sim_bid_upside")
+    assert f.facts["target_bid"] == 1.0 and f.facts["uplift_pct"] == 100
+    assert f.facts["add_conversions"] == 2.0 and f.facts["add_cost"] == 40.0
+    assert f.facts["marginal_cpa"] == 20.0
+    assert f.family == "bidding" and f.severity == "info"
+    assert f.at_risk == 0.0 and f.suggested_operation is None and not f.one_tap
+    assert f.advice_operation == "update_keyword_bid" and f.advice_operation not in ONE_TAP_OPS
+
+
+def test_sim_bid_upside_silent_without_cpa_ceiling():
+    """Конверсий в аккаунте нет и цели нет → потолка окупаемости нет. «Поднимай» без потолка — это
+    про чужие деньги: молчим (fail-closed), хотя точки симулятора и обещают рост."""
+    sims = [BidSimulation(ad_group_id="11", criterion_id="22", points=_BID_POINTS)]
+    res = build_audit(_report(conv=0.0), bid_landscape=[_bl(bid=0.5)], bid_simulations=sims)
+    assert "sim_bid_upside" not in _ids(res)
+
+
+def test_sim_bid_upside_silent_on_smart_bidding_and_without_landscape():
+    """Симулятор есть, но ставкой ключа управляет не рекламодатель (tCPA) → тишина. И наоборот: без
+    строки bid_landscape склеить симулятор не с чем (нет ни ставки, ни стратегии) → тоже тишина."""
+    sims = [BidSimulation(ad_group_id="11", criterion_id="22", points=_BID_POINTS)]
+    smart = build_audit(
+        _report(), bid_landscape=[_bl(strategy="TARGET_CPA", bid=0.5)], bid_simulations=sims
+    )
+    assert "sim_bid_upside" not in _ids(smart)
+    assert "sim_bid_upside" not in _ids(build_audit(_report(), bid_simulations=sims))
+
+
+def test_sim_gain_below_threshold_is_noise():
+    """Прирост < sim_min_conv_gain (0.5 конв) — шум прогноза, не совет."""
+    tiny = [_sim(0.5, 20, 50.0, 2.0), _sim(1.0, 22, 55.0, 2.3)]
+    sims = [BidSimulation(ad_group_id="11", criterion_id="22", points=tiny)]
+    res = build_audit(_report(), bid_landscape=[_bl(bid=0.5)], bid_simulations=sims)
+    assert "sim_bid_upside" not in _ids(res)
+
+
+def test_sim_budget_upside_uses_google_numbers_and_stays_advice_only():
+    """Бюджет: шаг 10→20 окупается (Δ90 / Δ3 конв = 30 = потолок), шаг 20→30 — нет (Δ90 / Δ0.5 = 180).
+    Бюджет — деньги ⇒ ни at_risk, ни кнопки: только прозой и по прямой команде (rule #3)."""
+    pts = [
+        _sim(10.0, 200, 280.0, 8.0),
+        _sim(20.0, 300, 370.0, 11.0),
+        _sim(30.0, 340, 460.0, 11.5),
+    ]
+    sims = [BudgetSimulation(campaign_id="7", campaign="Search", current_budget=10.0, points=pts)]
+    res = build_audit(_report(), budget_simulations=sims)
+    f = next(f for f in res.findings if f.check_id == "sim_budget_upside")
+    assert f.family == "budget" and f.facts["target_budget"] == 20.0
+    assert f.facts["add_conversions"] == 3.0 and f.facts["marginal_cpa"] == 30.0
+    assert f.at_risk == 0.0 and f.suggested_operation is None and not f.one_tap
+    assert f.advice_operation == "update_budget" and f.advice_operation not in ONE_TAP_OPS
+    ru = finding_text(f, "ru", "USD")
+    assert "20.00 USD" in ru and "+3.0 конв" in ru and "команде" in ru
+    assert "+3.0 conversions" in finding_text(f, "en", "USD")
+
+
+def test_sim_absence_is_not_a_data_gap():
+    """Симулятора нет — это НОРМА (Google строит его только при достаточных данных), а не пробел
+    чтения: аудит не должен объявлять семьи bidding/budget «непрочитанными»."""
+    res = build_audit(_report(), bid_landscape=[_bl(bid=0.5)], bid_simulations=[])
+    assert not (_ids(res) & {"sim_bid_upside", "sim_budget_upside"})
+    assert "bid_below_first_page" in _ids(res)  # остальной слой работает как ни в чём не бывало
+
+
+class _Routed:
+    """Фейковый клиент с маршрутизацией по ресурсу в FROM (симулятор + справочник кампаний)."""
+
+    def __init__(self, by_resource: dict):
+        self.seen: list[str] = []
+        self._map = by_resource
+
+    def get_service(self, name):
+        assert name == "GoogleAdsService"
+        return self
+
+    def search(self, *, customer_id, query):
+        self.seen.append(query)
+        for res, rows in self._map.items():
+            if f"FROM {res}" in query:
+                return list(rows)
+        return []
+
+
+def test_fetch_bid_simulations_contract():
+    """CPC_BID + UNIFORM: только так точки несут АБСОЛЮТНУЮ ставку, из SCALING конкретной ставки
+    не назовёшь. Точки приходят отсортированными по ставке (движок идёт по ним снизу вверх)."""
+    row = SimpleNamespace(
+        ad_group_criterion_simulation=SimpleNamespace(
+            ad_group_id=11,
+            criterion_id=22,
+            cpc_bid_point_list=SimpleNamespace(
+                points=[
+                    SimpleNamespace(
+                        cpc_bid_micros=1_000_000,
+                        clicks=35,
+                        cost_micros=90_000_000,
+                        impressions=2000,
+                        biddable_conversions=4.0,
+                        top_slot_impressions=500,
+                    ),
+                    SimpleNamespace(
+                        cpc_bid_micros=500_000,
+                        clicks=20,
+                        cost_micros=50_000_000,
+                        impressions=1000,
+                        biddable_conversions=2.0,
+                        top_slot_impressions=100,
+                    ),
+                ]
+            ),
+        )
+    )
+    client = _Routed({"ad_group_criterion_simulation": [row]})
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        sims = Q.fetch_bid_simulations(client, DRAFT_ACCOUNT_ID)
+    q = client.seen[0]
+    assert "FROM ad_group_criterion_simulation" in q
+    assert "type = 'CPC_BID'" in q and "modification_method = 'UNIFORM'" in q
+    assert [p.amount for p in sims[0].points] == [0.5, 1.0]  # отсортированы
+    assert sims[0].points[0].cost == 50.0 and sims[0].points[1].conversions == 4.0
+
+
+def test_fetch_budget_simulations_joins_current_budget_and_name():
+    """Симулятор бюджета знает только campaign_id и точки — без «где мы сейчас» прирост считать не
+    от чего. Фетчер вторым запросом добирает имя кампании и её ТЕКУЩИЙ дневной бюджет."""
+    sim_row = SimpleNamespace(
+        campaign_simulation=SimpleNamespace(
+            campaign_id=7,
+            budget_point_list=SimpleNamespace(
+                points=[
+                    SimpleNamespace(
+                        budget_amount_micros=10_000_000,
+                        clicks=200,
+                        cost_micros=280_000_000,
+                        impressions=9000,
+                        biddable_conversions=8.0,
+                        top_slot_impressions=3000,
+                    )
+                ]
+            ),
+        )
+    )
+    camp_row = SimpleNamespace(
+        campaign=SimpleNamespace(id=7, name="Search"),
+        campaign_budget=SimpleNamespace(amount_micros=10_000_000),
+    )
+    client = _Routed({"campaign_simulation": [sim_row], "campaign ": [camp_row]})
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        sims = Q.fetch_budget_simulations(client, DRAFT_ACCOUNT_ID)
+    assert len(client.seen) == 2 and "campaign_budget.amount_micros" in client.seen[1]
+    assert sims[0].campaign == "Search" and sims[0].current_budget == 10.0
+    assert sims[0].points[0].amount == 10.0
+
+
+def test_fetch_budget_simulations_skips_second_query_when_no_sims():
+    """Симуляторов нет → справочник кампаний не читаем вовсе (лишний запрос к API — тоже цена)."""
+    client = _Routed({"campaign_simulation": []})
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        assert Q.fetch_budget_simulations(client, DRAFT_ACCOUNT_ID) == []
+    assert len(client.seen) == 1
 
 
 def test_fetch_bid_landscape_degrades_without_keyword_top_is():

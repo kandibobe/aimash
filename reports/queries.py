@@ -883,3 +883,126 @@ def fetch_bid_landscape(
             )
         )
     return out
+
+
+@dataclass
+class SimPoint:
+    """Одна точка симулятора Google: «если ставка/бюджет = amount, то будет столько-то». Прогноз
+    САМОГО Google (не наша модель) на его недавних данных — деньги в валюте аккаунта."""
+
+    amount: float  # cpc_bid (CPC_BID) или дневной бюджет (BUDGET)
+    clicks: float
+    cost: float
+    impressions: float
+    conversions: float  # biddable_conversions
+    top_slot_impressions: float
+
+
+@dataclass
+class BidSimulation:
+    """CPC_BID-симулятор КЛЮЧА. Google отдаёт его только там, где данных хватило, — пустой список
+    это НОРМА (мало трафика), а не сбой чтения: в data_gaps не кладём."""
+
+    ad_group_id: str
+    criterion_id: str
+    points: list[SimPoint]
+
+
+@dataclass
+class BudgetSimulation:
+    """BUDGET-симулятор КАМПАНИИ + её текущий дневной бюджет (нужен как точка отсчёта: без него
+    неизвестно, какая из точек «сейчас»)."""
+
+    campaign_id: str
+    campaign: str
+    current_budget: float
+    points: list[SimPoint]
+
+
+def _sim_points(point_list, amount_field: str) -> list[SimPoint]:
+    """Точки симулятора → SimPoint, отсортированные по amount. micros делит КОД (gr4)."""
+    out = [
+        SimPoint(
+            amount=int(getattr(p, amount_field, 0) or 0) / 1_000_000,
+            clicks=float(getattr(p, "clicks", 0) or 0),
+            cost=int(getattr(p, "cost_micros", 0) or 0) / 1_000_000,
+            impressions=float(getattr(p, "impressions", 0) or 0),
+            conversions=float(getattr(p, "biddable_conversions", 0.0) or 0.0),
+            top_slot_impressions=float(getattr(p, "top_slot_impressions", 0) or 0),
+        )
+        for p in getattr(point_list, "points", []) or []
+    ]
+    return sorted(out, key=lambda p: p.amount)
+
+
+def fetch_bid_simulations(client, customer_id: str, limit: int = 200) -> list[BidSimulation]:
+    """Ф1: CPC_BID-симуляторы на уровне КЛЮЧА — «+X% ставки → +N конверсий» цифрами Google. READ-ONLY.
+
+    `modification_method = UNIFORM` → точки несут АБСОЛЮТНУЮ ставку (`cpc_bid_micros`); SCALING дал бы
+    только множитель, из которого конкретную ставку не назовёшь. Симулятор ключа Google строит лишь
+    для ручных стратегий и при достаточных данных — пустой ответ ожидаем (на TEST MCC он будет пуст).
+
+    Периода тут нет by design: у ресурса своё окно (`start_date`/`end_date`, обычно последние 7 дней),
+    сегментации по датам он не поддерживает."""
+    ensure_read_allowed(customer_id)
+    q = (
+        "SELECT ad_group_criterion_simulation.ad_group_id, "
+        "ad_group_criterion_simulation.criterion_id, "
+        "ad_group_criterion_simulation.cpc_bid_point_list.points "
+        "FROM ad_group_criterion_simulation "
+        "WHERE ad_group_criterion_simulation.type = 'CPC_BID' "
+        f"AND ad_group_criterion_simulation.modification_method = 'UNIFORM' LIMIT {int(limit)}"
+    )
+    out: list[BidSimulation] = []
+    for r in _search(client, customer_id, q):
+        s = r.ad_group_criterion_simulation
+        points = _sim_points(s.cpc_bid_point_list, "cpc_bid_micros")
+        if points:
+            out.append(
+                BidSimulation(
+                    ad_group_id=str(s.ad_group_id),
+                    criterion_id=str(s.criterion_id),
+                    points=points,
+                )
+            )
+    return out
+
+
+def fetch_budget_simulations(client, customer_id: str, limit: int = 50) -> list[BudgetSimulation]:
+    """Ф1: BUDGET-симуляторы кампаний — «+$B бюджета → +M конверсий» цифрами Google. READ-ONLY.
+
+    Вторым запросом читаем ТЕКУЩИЙ дневной бюджет и имя кампании: в самом симуляторе есть только
+    campaign_id и точки, а без «где мы сейчас» прирост считать не от чего. `modification_method`
+    не фильтруем — точка бюджета несёт абсолютную сумму при любом методе."""
+    ensure_read_allowed(customer_id)
+    q = (
+        "SELECT campaign_simulation.campaign_id, campaign_simulation.budget_point_list.points "
+        f"FROM campaign_simulation WHERE campaign_simulation.type = 'BUDGET' LIMIT {int(limit)}"
+    )
+    sims: dict[str, list[SimPoint]] = {}
+    for r in _search(client, customer_id, q):
+        s = r.campaign_simulation
+        points = _sim_points(s.budget_point_list, "budget_amount_micros")
+        if points:
+            sims[str(s.campaign_id)] = points
+    if not sims:
+        return []
+    meta_q = (
+        "SELECT campaign.id, campaign.name, campaign_budget.amount_micros "
+        "FROM campaign WHERE campaign.status = 'ENABLED'"
+    )
+    out: list[BudgetSimulation] = []
+    for r in _search(client, customer_id, meta_q):
+        cid = str(r.campaign.id)
+        points = sims.get(cid)
+        if not points:
+            continue
+        out.append(
+            BudgetSimulation(
+                campaign_id=cid,
+                campaign=r.campaign.name,
+                current_budget=int(getattr(r.campaign_budget, "amount_micros", 0) or 0) / 1_000_000,
+                points=points,
+            )
+        )
+    return out

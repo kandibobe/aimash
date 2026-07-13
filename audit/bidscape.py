@@ -132,6 +132,69 @@ def opportunities(
     return out
 
 
+@dataclass
+class SimUpside:
+    """Прирост по симулятору Google от текущей точки до рекомендуемой. Все числа — Google-прогноз."""
+
+    target: float  # рекомендуемая ставка (CPC_BID) или дневной бюджет (BUDGET)
+    current: float  # точка отсчёта — фактическая ставка/бюджет
+    add_conversions: float
+    add_cost: float
+    add_clicks: float
+    marginal_cpa: float  # Δрасход / Δконверсии на всём пути — цена этого прироста
+
+    @property
+    def uplift_pct(self) -> int:
+        if self.current <= 0 or self.target <= self.current:
+            return 0
+        return round((self.target / self.current - 1) * 100)
+
+
+def sim_upside(points, current: float, *, cap_cpa: float, min_conv_gain: float = 0.5):
+    """Куда двигать ставку/бюджет по точкам симулятора — МАРЖИНАЛЬНЫМ шагом, не «в максимум».
+
+    Идём вверх от текущей точки, пока КАЖДЫЙ следующий шаг окупается: Δрасход/Δконверсии ≤ cap_cpa
+    (цель кампании, иначе средний CPA аккаунта). Первый неокупаемый шаг обрывает путь — иначе совет
+    «поднимай до потолка» протащил бы вместе с прибыльным куском заведомо убыточный.
+
+    cap_cpa ≤ 0 (цели нет, конверсий нет) → None: не с чем сравнивать «дорого/дёшево», а совет
+    «поднимай» без потолка окупаемости — это про чужие деньги. Молчим (fail-closed, gr10).
+    Прирост < min_conv_gain конверсий → None: не совет, а шум прогноза."""
+    pts = [p for p in (points or []) if float(getattr(p, "amount", 0.0) or 0.0) > 0]
+    if len(pts) < 2 or current <= 0 or cap_cpa <= 0:
+        return None
+    pts.sort(key=lambda p: float(p.amount))
+
+    # Точка отсчёта — ближайшая СНИЗУ к фактической ставке/бюджету (симулятор считает от неё).
+    base_i = 0
+    for i, p in enumerate(pts):
+        if float(p.amount) <= current:
+            base_i = i
+    base, cur_i = pts[base_i], base_i
+    for i in range(base_i + 1, len(pts)):
+        d_conv = float(pts[i].conversions) - float(pts[cur_i].conversions)
+        d_cost = float(pts[i].cost) - float(pts[cur_i].cost)
+        if d_conv <= 0 or d_cost / d_conv > cap_cpa:
+            break
+        cur_i = i
+    if cur_i == base_i:
+        return None
+
+    tgt = pts[cur_i]
+    add_conv = float(tgt.conversions) - float(base.conversions)
+    add_cost = float(tgt.cost) - float(base.cost)
+    if add_conv < min_conv_gain:
+        return None
+    return SimUpside(
+        target=round(float(tgt.amount), 2),
+        current=round(current, 2),
+        add_conversions=round(add_conv, 1),
+        add_cost=round(add_cost, 2),
+        add_clicks=round(float(tgt.clicks) - float(base.clicks)),
+        marginal_cpa=round(add_cost / add_conv, 2) if add_conv > 0 else 0.0,
+    )
+
+
 def _gap(bid: float, target: float) -> float:
     """Относительный разрыв (target − bid)/target; ≤0 → ставка уже не ниже оценки."""
     if target <= 0:

@@ -18,7 +18,13 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 
-from audit.bidscape import FIRST_PAGE, TOP_OF_PAGE, opportunities
+from audit.bidscape import (
+    FIRST_PAGE,
+    MANUAL_BID_STRATEGIES,
+    TOP_OF_PAGE,
+    opportunities,
+    sim_upside,
+)
 from audit.thresholds import (
     DEFAULT_AUDIT_THRESHOLDS,
     FAMILY_WEIGHT,
@@ -134,6 +140,10 @@ class _Ctx:
     bid_landscape: list | None = (
         None  # Ф1: ставка ключа + оценки позиций Google + доли верха, None → нет данных
     )
+    # Ф1: симуляторы Google (ключ CPC_BID / кампания BUDGET). Пусто — это НОРМА (Google строит их
+    # только при достаточных данных), поэтому в data_gaps они не идут: «нет симулятора» ≠ «не прочитано».
+    bid_simulations: list | None = None
+    budget_simulations: list | None = None
 
     def target_for(self, campaign_name: str) -> float | None:
         """Цель CPA для кампании: пер-кампанийная стратегия (tCPA) побеждает глобальный /target."""
@@ -1321,6 +1331,128 @@ def check_top_is_rank_lost(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     ]
 
 
+def check_sim_bid_upside(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф1: симулятор Google по КЛЮЧУ — «подними ставку до X → +N конверсий за +$C». Цифры даёт сам
+    Google (ad_group_criterion_simulation, CPC_BID/UNIFORM), мы лишь идём по его точкам маржинальным
+    шагом, пока Δрасход/Δконверсии ≤ цель CPA (иначе средний по аккаунту): см. bidscape.sim_upside.
+
+    Симулятора нет (мало трафика / Smart Bidding) → тишина, это НОРМА, а не пробел в данных. Ставку
+    берём из bid_landscape: там же и стратегия — на Smart Bidding cpc_bid ключа аукционом не правит.
+    Неденежная info: это упущенная выгода, а не потраченное (at_risk=0). Кнопки нет (rule #3)."""
+    sims, rows = ctx.bid_simulations, ctx.bid_landscape
+    if not sims or not rows:
+        return []
+    by_key = {(str(s.ad_group_id), str(s.criterion_id)): s for s in sims}
+    acct_cpa = float(getattr(report.totals, "cpa", 0.0) or 0.0)
+    cur = getattr(report, "currency", "")
+    gain = float(thr.get("sim_min_conv_gain", 0.5))
+    hits: list[tuple] = []
+    for r in rows:
+        if str(getattr(r, "strategy_type", "")) not in MANUAL_BID_STRATEGIES:
+            continue
+        s = by_key.get((str(getattr(r, "ad_group_id", "")), str(getattr(r, "criterion_id", ""))))
+        if s is None:
+            continue
+        target = ctx.target_for(getattr(r, "campaign", "")) or acct_cpa
+        up = sim_upside(
+            s.points,
+            float(getattr(r, "bid", 0.0) or 0.0),
+            cap_cpa=float(target),
+            min_conv_gain=gain,
+        )
+        if up is not None:
+            hits.append((up, r, s))
+    if not hits:
+        return []
+    hits.sort(key=lambda t: -t[0].add_conversions)
+    return [
+        Finding(
+            check_id="sim_bid_upside",
+            family="bidding",
+            severity="info",
+            at_risk=0.0,
+            spend_segment=None,
+            target_campaign=getattr(r, "campaign", None),
+            suggested_operation=None,
+            advice_operation="update_keyword_bid",
+            facts={
+                "campaign": getattr(r, "campaign", ""),
+                "ad_group": getattr(r, "ad_group", ""),
+                "keyword": getattr(r, "keyword", ""),
+                "bid": up.current,
+                "target_bid": up.target,
+                "uplift_pct": up.uplift_pct,
+                "add_conversions": up.add_conversions,
+                "add_cost": up.add_cost,
+                "marginal_cpa": up.marginal_cpa,
+                "currency": cur,
+            },
+            evidence={
+                "criterion_id": str(getattr(r, "criterion_id", "") or ""),
+                "ad_group_id": str(getattr(r, "ad_group_id", "") or ""),
+                "sim_points": len(s.points),
+                "add_clicks": up.add_clicks,
+            },
+        )
+        for up, r, s in hits[: int(thr.get("kw_top_n", 5))]
+    ]
+
+
+def check_sim_budget_upside(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф1: симулятор Google по КАМПАНИИ (BUDGET) — «подними дневной бюджет до X → +N конверсий».
+    Тот же маржинальный шаг с потолком окупаемости. Дополняет is_budget_constrained (та говорит
+    «теряешь показы по бюджету», эта — сколько это стоит и сколько даст, цифрами Google).
+
+    Бюджет — деньги ⇒ кнопки нет, только прозой и по прямой команде (golden rule #3)."""
+    sims = ctx.budget_simulations
+    if not sims:
+        return []
+    acct_cpa = float(getattr(report.totals, "cpa", 0.0) or 0.0)
+    cur = getattr(report, "currency", "")
+    gain = float(thr.get("sim_min_conv_gain", 0.5))
+    hits: list[tuple] = []
+    for s in sims:
+        target = ctx.target_for(getattr(s, "campaign", "")) or acct_cpa
+        up = sim_upside(
+            s.points,
+            float(getattr(s, "current_budget", 0.0) or 0.0),
+            cap_cpa=float(target),
+            min_conv_gain=gain,
+        )
+        if up is not None:
+            hits.append((up, s))
+    if not hits:
+        return []
+    hits.sort(key=lambda t: -t[0].add_conversions)
+    return [
+        Finding(
+            check_id="sim_budget_upside",
+            family="budget",
+            severity="info",
+            at_risk=0.0,
+            spend_segment=None,
+            target_campaign=getattr(s, "campaign", None),
+            suggested_operation=None,
+            advice_operation="update_budget",
+            facts={
+                "campaign": getattr(s, "campaign", ""),
+                "budget": up.current,
+                "target_budget": up.target,
+                "uplift_pct": up.uplift_pct,
+                "add_conversions": up.add_conversions,
+                "add_cost": up.add_cost,
+                "marginal_cpa": up.marginal_cpa,
+                "currency": cur,
+            },
+            evidence={
+                "campaign_id": str(getattr(s, "campaign_id", "") or ""),
+                "sim_points": len(s.points),
+            },
+        )
+        for up, s in hits[:3]
+    ]
+
+
 # Порядок проверок = порядок запуска (на рендер не влияет — там сортировка по важности).
 _CHECKS = (
     check_no_conversion_tracking,
@@ -1345,6 +1477,8 @@ _CHECKS = (
     check_bid_below_first_page,
     check_bid_below_top_of_page,
     check_top_is_rank_lost,
+    check_sim_bid_upside,
+    check_sim_budget_upside,
     check_geo_no_conv,
     check_schedule_waste,
 )
@@ -1381,6 +1515,8 @@ CHECK_REGISTRY: dict[str, tuple[str, str]] = {
     "bid_below_first_page": ("bidding", "warning"),
     "bid_below_top_of_page": ("bidding", "info"),
     "top_is_rank_lost": ("bidding", "info"),
+    "sim_bid_upside": ("bidding", "info"),
+    "sim_budget_upside": ("budget", "info"),
     "geo_no_conv": ("geo", "warning"),
     "schedule_waste": ("geo", "info"),
 }
@@ -1481,6 +1617,8 @@ def build_audit(
     geo_waste: list | None = None,
     schedule: list | None = None,
     bid_landscape: list | None = None,
+    bid_simulations: list | None = None,
+    budget_simulations: list | None = None,
 ) -> AuditResult:
     """Собрать аудит по УЖЕ прочитанным данным. Чистая функция (без сети/SDK). Опц. живые данные
     (is_rows / conversion_actions / bidding / optimization_score / recommendations) — duck-typed,
@@ -1546,6 +1684,8 @@ def build_audit(
         geo_waste=geo_waste,
         schedule=schedule,
         bid_landscape=bid_landscape,
+        bid_simulations=bid_simulations,
+        budget_simulations=budget_simulations,
     )
 
     # N1.3 (ревью): IS-строки прочитаны, но НИ ОДНА не прошла tolerance-гейт (proto3-нули) —

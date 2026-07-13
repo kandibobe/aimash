@@ -250,6 +250,26 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
         if lang == "en":
             return f"{fa.get('count', 0)} paying keyword(s) lose top slots to RANK (worst «{fa.get('worst_kw', '')}»: {fa.get('worst_share', 0)}%, {_money(fa.get('cost', 0), cur)} spent) — rank = bid × quality: raise the bid or fix Quality Score."
         return f"{fa.get('count', 0)} платящих ключей теряют верхние позиции из-за РАНГА (худший «{fa.get('worst_kw', '')}»: {fa.get('worst_share', 0)}%, расход {_money(fa.get('cost', 0), cur)}) — ранг = ставка × качество: подними ставку или почини Quality Score."
+    if f.check_id == "sim_bid_upside":
+        # Цифры прироста — прогноз САМОГО Google (симулятор), не наша модель. Так и говорим.
+        kw = fa.get("keyword", "")
+        bid = _money(fa.get("bid", 0), cur)
+        target = _money(fa.get("target_bid", 0), cur)
+        add_conv = fa.get("add_conversions", 0)
+        add_cost = _money(fa.get("add_cost", 0), cur)
+        mcpa = _money(fa.get("marginal_cpa", 0), cur)
+        if lang == "en":
+            return f"Keyword «{kw}» in «{camp}»: Google's simulator estimates that raising the bid {bid} → {target} (+{fa.get('uplift_pct', 0)}%) yields +{add_conv} conversions for +{add_cost} (marginal CPA {mcpa}). Only on your direct command."
+        return f"Ключ «{kw}» в «{camp}»: по симулятору Google ставка {bid} → {target} (+{fa.get('uplift_pct', 0)}%) даёт +{add_conv} конв. за +{add_cost} (предельный CPA {mcpa}). Только по твоей прямой команде."
+    if f.check_id == "sim_budget_upside":
+        bud = _money(fa.get("budget", 0), cur)
+        target = _money(fa.get("target_budget", 0), cur)
+        add_conv = fa.get("add_conversions", 0)
+        add_cost = _money(fa.get("add_cost", 0), cur)
+        mcpa = _money(fa.get("marginal_cpa", 0), cur)
+        if lang == "en":
+            return f"«{camp}»: Google's simulator estimates that raising the daily budget {bud} → {target} (+{fa.get('uplift_pct', 0)}%) yields +{add_conv} conversions for +{add_cost} (marginal CPA {mcpa}). Only on your direct command."
+        return f"«{camp}»: по симулятору Google дневной бюджет {bud} → {target} (+{fa.get('uplift_pct', 0)}%) даёт +{add_conv} конв. за +{add_cost} (предельный CPA {mcpa}). Только по твоей прямой команде."
     if f.check_id == "geo_no_conv":
         reg = fa.get("region", "")
         if lang == "en":
