@@ -48,6 +48,13 @@ class Finding:
     suggested_operation: str | None = None
     facts: dict = field(default_factory=dict)
     evidence: dict = field(default_factory=dict)
+    # МЕТКА операции, к которой находка ведёт содержательно, но которую бот НЕ исполняет одним тапом
+    # (update_bid / update_budget / create_rsa). Нужна, чтобы advisor.outcome смог связать «совет →
+    # применённая руками мутация → замер эффекта»: раньше эту роль играл suggested_operation у
+    # advisor-детекторов, а у аудита он обязан быть None (деньги = только прямая команда, rule #3).
+    # ⚠️ Это НЕ путь исполнения: advice_operation НИКОГДА не попадает в ONE_TAP_OPS и не рисует кнопку
+    # (инвариант tests/test_audit_engine.test_advice_operation_never_one_tap).
+    advice_operation: str | None = None
     # Экспертное расширение (2026-07-09): вклад в score для находок, где деньги — это УПУЩЕННАЯ выгода
     # (не потраченное), которую нельзя класть в at_risk (сломает инвариант at_risk ≤ total_spend и
     # дедуп). Пример: is_lost_revenue ставит score_intensity = clamp(lost_revenue/total_spend), at_risk=0.
@@ -199,6 +206,7 @@ def check_high_cpa(report, thr: dict, ctx: _Ctx) -> list[Finding]:
                     spend_segment=name,
                     target_campaign=name,
                     suggested_operation=None,  # ставка/бюджет — прозой (rule #3), без кнопки
+                    advice_operation="update_bid",  # метка для outcome-линковки, НЕ кнопка
                     facts={
                         "campaign": name,
                         "cpa": round(m.cpa, 2),
@@ -206,10 +214,13 @@ def check_high_cpa(report, thr: dict, ctx: _Ctx) -> list[Finding]:
                         "factor": round(m.cpa / acct_cpa, 1),
                         "currency": cur,
                     },
+                    # conversions — не косметика: advisor.outcome._baseline_from_evidence снимает по
+                    # ним «до» и сравнивает с «после» (без них вердикт всегда neutral).
                     evidence={
                         "cpa": round(m.cpa, 2),
                         "acct_cpa": round(acct_cpa, 2),
                         "cost": round(m.cost, 2),
+                        "conversions": m.conversions,
                     },
                 )
             )
@@ -256,6 +267,19 @@ def check_kill_rule(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     return out
 
 
+# Типы соответствия, которые принимает мутация add_negative_keywords (agent.tools.schemas.MatchType —
+# НИЖНИЙ регистр). GAQL отдаёт ENUM-имя ('BROAD'), поэтому нормализуем ЗДЕСЬ, а не в bot-слое: сырой
+# 'BROAD' в evidence уронил бы валидацию схемы на one-tap «➖ В минус-слова» — кнопка молча стала бы
+# «совет устарел». Незнакомое значение → None (bot подставит свой дефолт), а не мусор в мутацию.
+# Дрейф со схемой ловит tests/test_audit_engine.test_evidence_match_type_matches_mutation_schema.
+_MATCH_TYPES = frozenset({"broad", "phrase", "exact"})
+
+
+def _norm_match_type(v: object) -> str | None:
+    mt = str(v or "").strip().casefold()
+    return mt if mt in _MATCH_TYPES else None
+
+
 def keyword_spend_segment(campaign: str, keyword: str) -> str:
     """Сегмент денег ключа. ОДИН источник для wasteful_keyword и wasteful_search_term: расход
     поискового запроса ⊂ расход его ключа, поэтому обе находки обязаны попасть в ОДИН сегмент
@@ -272,6 +296,13 @@ def check_wasteful_keyword(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     for dims, m in _breakdown_rows(report, "keyword"):
         campaign, ad_group, kw_text, match_type = (list(dims) + ["", "", "", ""])[:4]
         if m.cost >= thr["kw_min_spend"] and m.clicks > 0 and m.conversions == 0:
+            # Минус ЗЕРКАЛИТ тип соответствия самого ключа (exact-ключ → exact-минус), а не режет
+            # шире дефолтным broad: находка про ЭТОТ ключ, а broad-минус выбил бы и его точных
+            # соседей в других группах. Тип неизвестен/не из схемы → ключа в evidence нет,
+            # bot._advise_apply_params подставит прежний дефолт.
+            ev = {"cost": round(m.cost, 2), "clicks": m.clicks, "keyword": kw_text}
+            if mt := _norm_match_type(match_type):
+                ev["match_type"] = mt
             out.append(
                 Finding(
                     check_id="wasteful_keyword",
@@ -290,7 +321,7 @@ def check_wasteful_keyword(report, thr: dict, ctx: _Ctx) -> list[Finding]:
                         "clicks": m.clicks,
                         "currency": cur,
                     },
-                    evidence={"cost": round(m.cost, 2), "clicks": m.clicks, "keyword": kw_text},
+                    evidence=ev,
                 )
             )
     out.sort(key=lambda f: -float(f.evidence.get("cost", 0) or 0))
@@ -375,6 +406,7 @@ def check_low_ctr_ad(report, thr: dict, ctx: _Ctx) -> list[Finding]:
                     spend_segment=None,
                     target_campaign=campaign,
                     suggested_operation=None,  # create_rsa — не one-tap (нужна курация)
+                    advice_operation="create_rsa",  # метка для outcome-линковки, НЕ кнопка
                     facts={
                         "campaign": campaign,
                         "ad_group": ad_group,
@@ -382,10 +414,14 @@ def check_low_ctr_ad(report, thr: dict, ctx: _Ctx) -> list[Finding]:
                         "acct_ctr": round(acct_ctr * 100, 2),
                         "currency": cur,
                     },
+                    # cost при at_risk=0 — не «деньги под риском» (штраф остаётся неденежным), а
+                    # СИЛА СИГНАЛА для ранжирования: advisor._magnitude падает на evidence['cost'],
+                    # иначе слабый RSA в кампании на 900 и на 9 стоял бы в очереди одинаково.
                     evidence={
                         "ctr": round(m.ctr, 4),
                         "acct_ctr": round(acct_ctr, 4),
                         "impressions": m.impressions,
+                        "cost": round(m.cost, 2),
                     },
                 )
             )
@@ -416,6 +452,7 @@ def check_budget_imbalance(report, thr: dict, ctx: _Ctx) -> list[Finding]:
                     spend_segment=name,
                     target_campaign=name,
                     suggested_operation=None,
+                    advice_operation="update_budget",  # метка для outcome-линковки, НЕ кнопка
                     facts={
                         "campaign": name,
                         "share": round(share),
@@ -425,7 +462,9 @@ def check_budget_imbalance(report, thr: dict, ctx: _Ctx) -> list[Finding]:
                     evidence={
                         "share": round(share, 1),
                         "cpa": round(m.cpa, 2),
+                        "acct_cpa": round(acct_cpa, 2),
                         "cost": round(m.cost, 2),
+                        "conversions": m.conversions,
                     },
                 )
             )

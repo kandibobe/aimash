@@ -745,42 +745,8 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "💡 Возможные минус-слова (советую, сам НЕ добавляю): {words}",
         "en": "💡 Possible negative keywords (advice, I do NOT add them myself): {words}",
     },
-    "advise_rec_spend_no_conv": {
-        "ru": "• «{campaign}»: расход {cost} при {clicks} кликах и 0 конверсиях — стоит проверить "
-        "ключи/посадочную или поставить на паузу.",
-        "en": "• “{campaign}”: spent {cost} over {clicks} clicks with 0 conversions — review "
-        "keywords/landing page or consider pausing.",
-    },
-    "advise_rec_high_cpa": {
-        "ru": "• «{campaign}»: CPA {cpa} — в {factor}× выше среднего по аккаунту ({acct_cpa}). "
-        "Проверь ставки и ключи.",
-        "en": "• “{campaign}”: CPA {cpa} — {factor}× the account average ({acct_cpa}). "
-        "Review bids and keywords.",
-    },
-    "advise_rec_budget_imbalance": {
-        "ru": "• «{campaign}» съедает {share}% расхода при CPA {cpa} хуже среднего — стоит "
-        "пересмотреть распределение бюджета (бюджет меняю только по твоей прямой команде).",
-        "en": "• “{campaign}” takes {share}% of spend at a worse-than-average CPA {cpa} — "
-        "consider reviewing budget allocation (I change budgets only on your direct command).",
-    },
-    "advise_rec_wasteful_keyword": {
-        "ru": "• Ключ «{keyword}» ({match_type}) в «{campaign}»: расход {cost} при {clicks} кликах "
-        "и 0 конверсиях — кандидат в минус-слова.",
-        "en": "• Keyword “{keyword}” ({match_type}) in “{campaign}”: spent {cost} over {clicks} "
-        "clicks with 0 conversions — a negative-keyword candidate.",
-    },
-    "advise_rec_low_ctr_ad": {
-        "ru": "• Объявление в «{campaign}» / {ad_group}: CTR {ctr}% ниже среднего по аккаунту "
-        "({acct_ctr}%) — стоит освежить заголовки/описания (RSA).",
-        "en": "• An ad in “{campaign}” / {ad_group}: CTR {ctr}% below the account average "
-        "({acct_ctr}%) — consider refreshing headlines/descriptions (RSA).",
-    },
-    "advise_rec_single_campaign": {
-        "ru": "• Весь трафик в одной кампании «{campaign}» ({cost}) — рассмотри разделение по "
-        "темам/гео для контроля ставок и бюджета.",
-        "en": "• All traffic in a single campaign “{campaign}” ({cost}) — consider splitting by "
-        "themes/geo for finer bid and budget control.",
-    },
+    # advise_rec_* (6 ключей) удалены 2026-07-13 вместе с детекторами advisor: текст рекомендации
+    # теперь ОДИН — audit.render.finding_text (RU/EN живут в audit/render.py), см. advisor/from_findings.py.
     # — 3H (M10): /alerts — пороги аномалий —
     "alerts_saved": {"ru": "✅ Порог сохранён.", "en": "✅ Threshold saved."},
     "alerts_reset_done": {"ru": "↩️ Пороги сброшены к дефолтам.", "en": "↩️ Thresholds reset."},

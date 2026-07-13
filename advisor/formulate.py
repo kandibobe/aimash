@@ -2,9 +2,12 @@
 
 Образец keywords/cluster.py: модель получает ТОЛЬКО готовые факт-строки (без порогов, без выбора
 действий) и лишь переписывает их живее, СОХРАНЯЯ смысл/числа/названия. Она НЕ решает, что
-рекомендовать (это сделал advisor.rules), и не может предложить авто-действие. При любом сбое/
-рассинхроне длины — детерминированный fallback на render (fail-closed на формулировку, fed-open —
+рекомендовать (это сделал движок аудита), и не может предложить авто-действие. При любом сбое/
+рассинхроне длины — откат на детерминированный текст (fail-closed на формулировку, fail-open —
 фича не падает, но и не выдумывает).
+
+База — rec.body, уже отрендеренный КОДОМ (audit.render.finding_text через advisor.from_findings):
+модель правит только форму, факты остаются кодовыми.
 """
 
 from __future__ import annotations
@@ -12,7 +15,6 @@ from __future__ import annotations
 import json
 import re
 
-from advisor import render
 from agent.router import chat
 
 _DIGITS_RE = re.compile(r"\d+")
@@ -21,7 +23,7 @@ _DIGITS_RE = re.compile(r"\d+")
 def _facts_preserved(base_line: str, llm_line: str, rec) -> bool:
     """КОД проверяет (golden rule #4, домен = «чужие деньги»), что LLM-перепись НЕ исказила факты:
     имя кампании и ВСЕ числовые токены из детерминированной строки должны присутствовать в переписи.
-    Иначе строку откатываем на render (не показываем выдуманные модели суммы/имена)."""
+    Иначе строку откатываем на кодовый текст (не показываем выдуманные моделью суммы/имена)."""
     campaign = (getattr(rec, "facts", None) or {}).get("campaign")
     if campaign and str(campaign) not in llm_line:
         return False
@@ -56,13 +58,14 @@ def _parse(content: str, n: int) -> list[str] | None:
 
 
 async def phrase(recs, lang: str = "ru", *, client_context: str = "") -> list[str]:
-    """Вернуть список текстов рекомендаций (в порядке recs). База — детерминированный render; LLM
-    лишь переписывает. Пустой список / сбой LLM / рассинхрон → база (fallback).
+    """Вернуть список текстов рекомендаций (в порядке recs). База — rec.body (детерминированный
+    audit.render.finding_text, проставлен маппером); LLM лишь переписывает. Пустой список / сбой LLM /
+    рассинхрон → база (fallback).
 
     client_context (2.11, §20.6) — компактный профиль клиента (бренд/услуги/гео) ТОЛЬКО для тона
     и терминологии ниши: модель НЕ получает права добавлять советы или менять числа — fact-guard
-    _facts_preserved по-прежнему откатывает любое искажение на render (решения остаются в rules)."""
-    base = [render.render_recommendation(r, lang) for r in recs]
+    _facts_preserved по-прежнему откатывает любое искажение на кодовый текст (решения — в КОДЕ)."""
+    base = [(getattr(r, "body", "") or "") for r in recs]
     if not base:
         return base
     system = _SYSTEM.format(n=len(base))

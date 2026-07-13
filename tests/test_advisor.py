@@ -20,7 +20,9 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from advisor import render, rules  # noqa: E402
+from advisor import rules  # noqa: E402
+from advisor.from_findings import to_recommendations  # noqa: E402
+from audit.engine import build_audit  # noqa: E402
 from reports.queries import Breakdown, Metrics  # noqa: E402
 
 
@@ -89,55 +91,40 @@ def test_advisor_never_imports_mutations():
                 assert not name.startswith(("apply_", "mutate_")), f"{py.name}: вызов {name}"
 
 
-# ── Чистое ядро: детекторы Темы optimize ───────────────────────────────────────────
-def test_rule_spend_no_conv():
+# ── Маппер: единственный мост находка → рекомендация ───────────────────────────────
+def _candidates(report, topics=None):
+    """Кандидаты /advise: находки движка аудита, спроецированные маппером (детекторов у advisor нет)."""
+    res = build_audit(report)
+    return to_recommendations(res.findings, "ru", res.currency, topics=topics)
+
+
+def test_kind_is_bare_check_id_and_topic_is_family():
+    """КЛЮЧ ОБУЧЕНИЯ. До слияния /audit писал kind='audit_high_cpa', а experience.load_experience
+    искала 'high_cpa' — 👍/👎 под карточками аудита копились в бакете, который никто не читал.
+    Любой префикс здесь снова расщепит опыт надвое (миграция 0024 чинила ровно это)."""
+    from audit.engine import CHECK_REGISTRY
+
     rows = [(("Camp A", "ENABLED"), _m(100, clicks=50, conv=0))]
-    rep = _report(rows, _m(100, clicks=50, conv=0))
-    recs = rules.rec_spend_no_conv(rep, rules.DEFAULT_ADVISOR_THRESHOLDS)
-    assert len(recs) == 1
-    r = recs[0]
-    assert r.kind == "spend_no_conv" and r.topic == "optimize"
-    assert r.target_campaign == "Camp A"
-    assert r.suggested_operation == "pause_campaign"  # advisory-метка, не путь исполнения
-    assert r.evidence["cost"] == 100
+    cands = _candidates(_report(rows, _m(100, clicks=50, conv=0)))
+    assert cands, "ожидались рекомендации"
+    for c in cands:
+        assert not c.kind.startswith("audit_"), f"префикс в kind: {c.kind}"
+        assert c.kind in CHECK_REGISTRY, f"kind ≠ check_id: {c.kind}"
+        assert c.topic == CHECK_REGISTRY[c.kind][0]  # topic == семья чека (одна таксономия)
+    waste = next(c for c in cands if c.kind == "spend_no_conv")
+    assert waste.target_campaign == "Camp A"
+    assert waste.suggested_operation == "pause_campaign"  # advisory-метка, не путь исполнения
+    assert waste.evidence["cost"] == 100
+    assert waste.body  # текст — детерминированный audit.render.finding_text
 
 
-def test_rule_spend_no_conv_ignores_paused_and_low_spend():
-    rows = [
-        (("Paused", "PAUSED"), _m(100, clicks=50, conv=0)),  # не ENABLED
-        (("Tiny", "ENABLED"), _m(1, clicks=2, conv=0)),  # ниже pause_min_spend
-        (("NoClicks", "ENABLED"), _m(50, clicks=0, conv=0)),  # нет кликов
-    ]
-    rep = _report(rows, _m(151, clicks=52, conv=0))
-    assert rules.rec_spend_no_conv(rep, rules.DEFAULT_ADVISOR_THRESHOLDS) == []
-
-
-def test_rule_high_cpa():
+def test_high_cpa_carries_money_and_bid_label():
     rows = [(("Pricey", "ENABLED"), _m(90, clicks=30, conv=1))]  # cpa 90
-    totals = _m(200, clicks=100, conv=10)  # acct cpa 20; порог 2× = 40
-    recs = rules.rec_high_cpa(_report(rows, totals), rules.DEFAULT_ADVISOR_THRESHOLDS)
-    assert len(recs) == 1 and recs[0].kind == "high_cpa"
-    assert recs[0].suggested_operation == "update_bid"
-
-
-def test_rule_high_cpa_silent_on_empty_account():
-    rows = [(("X", "ENABLED"), _m(90, clicks=30, conv=1))]
-    totals = _m(0, clicks=0, conv=0)  # acct cpa 0 → правило молчит (нет опоры)
-    assert rules.rec_high_cpa(_report(rows, totals), rules.DEFAULT_ADVISOR_THRESHOLDS) == []
-
-
-def test_rule_budget_imbalance():
-    rows = [
-        (("Whale", "ENABLED"), _m(150, clicks=50, conv=0)),  # 75% расхода, 0 конв.
-        (("Small", "ENABLED"), _m(50, clicks=20, conv=2)),
-    ]
-    totals = _m(200, clicks=70, conv=2)
-    recs = rules.rec_budget_imbalance(_report(rows, totals), rules.DEFAULT_ADVISOR_THRESHOLDS)
-    kinds = {(r.kind, r.target_campaign) for r in recs}
-    assert ("budget_imbalance", "Whale") in kinds
-    assert ("budget_imbalance", "Small") not in kinds  # 25% < порога
-    whale = next(r for r in recs if r.target_campaign == "Whale")
-    assert whale.suggested_operation == "update_budget"  # МЕТКА — бюджет меняется только командой
+    totals = _m(200, clicks=100, conv=10)  # acct cpa 20
+    r = next(c for c in _candidates(_report(rows, totals)) if c.kind == "high_cpa")
+    # update_bid — advice_operation: МЕТКА для замера эффекта; кнопки не даёт (rule #3).
+    assert r.suggested_operation == "update_bid"
+    assert r.at_risk and r.at_risk > 0  # деньги-под-риском → ранжирование по деньгам работает
 
 
 # ── Ранжирование: детерминизм + опыт (Слой B) ──────────────────────────────────────
@@ -146,14 +133,14 @@ def _multi_issue_report():
         (("Waste", "ENABLED"), _m(120, clicks=60, conv=0)),  # spend_no_conv
         (("Pricey", "ENABLED"), _m(80, clicks=20, conv=1)),  # high_cpa
     ]
-    totals = _m(200, clicks=80, conv=5)  # acct cpa 40; Pricey cpa 80 ≥ 80
+    totals = _m(200, clicks=80, conv=5)  # acct cpa 40; Pricey cpa 80 ≥ 2×40
     return _report(rows, totals)
 
 
 def test_rank_is_deterministic():
     rep = _multi_issue_report()
-    a = rules.rank_recommendations(rules.build_candidates(rep))
-    b = rules.rank_recommendations(rules.build_candidates(rep))
+    a = rules.rank_recommendations(_candidates(rep))
+    b = rules.rank_recommendations(_candidates(rep))
 
     def key(recs):
         return [(r.kind, r.target_campaign, r.priority) for r in recs]
@@ -167,7 +154,7 @@ def test_rank_is_deterministic():
 def test_rank_experience_suppress_hides_small_money():
     # мелкие деньги (< SUPPRESS_MONEY_FLOOR=50): замьюченный вид скрывается
     rep = _report([(("Waste", "ENABLED"), _m(10, clicks=6, conv=0))], _m(10, clicks=6, conv=0))
-    cands = rules.build_candidates(rep)
+    cands = _candidates(rep)
     assert any(c.kind == "spend_no_conv" for c in cands)
     ranked = rules.rank_recommendations(cands, experience={"spend_no_conv": {"suppress": True}})
     assert all(r.kind != "spend_no_conv" for r in ranked)
@@ -177,34 +164,79 @@ def test_rank_suppress_never_hides_big_money():
     # крупные деньги-под-риском (≥ SUPPRESS_MONEY_FLOOR): совет показываем ДАЖЕ при suppress —
     # 3 👎 по одной кампании не должны прятать крупный слив по другой (фикс ревью).
     rep = _report([(("BigWaste", "ENABLED"), _m(500, clicks=200, conv=0))], _m(500, conv=0))
-    cands = rules.build_candidates(rep)
+    cands = _candidates(rep)
     ranked = rules.rank_recommendations(cands, experience={"spend_no_conv": {"suppress": True}})
     assert any(r.kind == "spend_no_conv" for r in ranked)
 
 
 def test_rank_experience_weight_scales_priority():
     rep = _report([(("Waste", "ENABLED"), _m(120, clicks=60, conv=0))], _m(120, clicks=60, conv=0))
-    base = rules.rank_recommendations(rules.build_candidates(rep))[0].priority
-    up = rules.rank_recommendations(
-        rules.build_candidates(rep), experience={"spend_no_conv": {"weight": 2.0}}
-    )[0].priority
+    spend = [c for c in _candidates(rep) if c.kind == "spend_no_conv"]
+    base = rules.rank_recommendations(list(spend))[0].priority
+    up = rules.rank_recommendations(list(spend), experience={"spend_no_conv": {"weight": 2.0}})[
+        0
+    ].priority
     assert up == round(base * 2, 2)
 
 
-# ── Рендер: детерминированный, с анти-мутационной формулировкой у бюджета ───────────
-def test_render_budget_flags_user_command_only():
+def test_magnitude_falls_back_to_entity_cost_when_at_risk_is_zero():
+    """budget_imbalance / low_ctr_ad / single_campaign имеют at_risk = 0 ПО ПОСТРОЕНИЮ (их деньги
+    уже посчитаны в другом сегменте — иначе «Под риском» задвоилось бы). Если бы _magnitude был
+    равен at_risk, эти три получали бы priority = 0.5 и никогда не проходили срез (MAX_RECS=5,
+    дайджест top_n=5) — перекос бюджета, сегодня обычно первый в дайджесте, просто исчез бы."""
     rec = rules.Recommendation(
         kind="budget_imbalance",
-        topic="optimize",
+        topic="budget",
         severity="info",
         target_campaign="Whale",
         suggested_operation="update_budget",
-        facts={"campaign": "Whale", "share": 75, "cpa": 100, "currency": "USD"},
-        evidence={"cost": 150},
+        facts={},
+        evidence={"cost": 150.0},
+        at_risk=0.0,
     )
-    text = render.render_recommendation(rec, "ru")
-    assert "Whale" in text and "команд" in text.lower()  # «только по твоей прямой команде»
-    assert rec.suggested_operation == "update_budget"  # метка, не путь исполнения
+    assert rules._magnitude(rec) == 150.0
+    assert rules.rank_recommendations([rec])[0].priority > 0.5
+
+
+def test_audit_does_not_rank_or_suppress():
+    """/audit — ДИАГНОСТИКА, а не советы: он показывает находки в порядке движка (деньги-под-риском)
+    и НЕ зовёт rank_recommendations. Иначе suppress (много 👎/🙈) спрятал бы строку, которая всё
+    равно штрафует score — клиент увидел бы «score 62, waste −18» без единого объяснения откуда −18
+    (money-floor не спасает: у ~18 из 27 чеков at_risk = 0 по построению).
+
+    AST-гард по bot/main.py: ни импорта, ни вызова rank_recommendations в файле нет."""
+    src = pathlib.Path(__file__).resolve().parents[1] / "bot" / "main.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"), filename="main.py")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("advisor"):
+            for a in node.names:
+                assert a.name != "rank_recommendations", (
+                    "bot/main.py импортирует rank_recommendations"
+                )
+        elif isinstance(node, ast.Call):
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+            assert name != "rank_recommendations", "bot/main.py вызывает rank_recommendations"
+
+
+def test_advise_findings_are_subset_of_audit():
+    """ГАРД КЛАССА. /advise строит аудит БЕЗ ctx-сигналов (только отчёт — лишних чтений API не
+    делаем), /audit — с ними. Значит совет может лишь МОЛЧАТЬ там, где аудит говорит; сказать ДРУГОЕ
+    он не вправе — иначе две команды бота дают клиенту два ответа про один аккаунт (ровно то, что
+    слияние и убирало). Ловит любой будущий чек с эвристическим фолбэком «нет ctx → всё равно выдам
+    находку»: сегодня такой один — check_no_conversion_tracking (без ctx кричит «отслеживания нет»
+    аккаунту, где оно есть, а конверсий 0; at_risk = весь расход ⇒ №1 в ранге и в дайджесте)."""
+    rows = [(("Camp A", "ENABLED"), _m(100, clicks=50, conv=0))]
+    rep = _report(rows, _m(100, clicks=50, conv=0))
+    live = build_audit(rep, conversion_actions=[SimpleNamespace(status="ENABLED")])
+    audit_ids = {f.check_id for f in live.findings}
+    assert "zero_conversions" in audit_ids  # с ctx: отслеживание есть, конверсий нет
+
+    advise = to_recommendations(build_audit(rep).findings, "ru", rep.currency, report_only=True)
+    kinds = {c.kind for c in advise}
+    assert kinds, "ожидались рекомендации"
+    assert "no_conversion_tracking" not in kinds  # без ctx — молчим, а не врём
+    assert kinds <= audit_ids, f"/advise сказал то, чего /audit не говорит: {kinds - audit_ids}"
 
 
 # ── analyze_account — read-only tool + loop → advise_intent ─────────────────────────

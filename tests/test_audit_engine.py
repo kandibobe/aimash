@@ -658,6 +658,124 @@ def test_money_findings_never_one_tap():
     assert any(f.check_id == "is_lost_revenue" for f in res.findings)
 
 
+def test_advice_operation_never_one_tap():
+    """advice_operation — МЕТКА для замера эффекта (advisor.outcome), а НЕ путь исполнения.
+    Гард против тихого расширения денежного пути: положил бы кто-то сюда 'pause_campaign', и
+    bot._audit_run (f.suggested_operation ∈ _ADVISE_APPLY_OPS) остался бы чист, а вот маппер в
+    Recommendation.suggested_operation — уже нет, и у ставки/бюджета появилась бы кнопка (rule #3).
+
+    Два инварианта: (1) ни одна метка не пересекается с ONE_TAP_OPS; (2) одна находка не несёт
+    обе операции сразу — иначе непонятно, что исполняется."""
+    from audit.engine import ONE_TAP_OPS
+
+    # Богатый отчёт: dead-кампания (waste), дорогая (high_cpa + перекос бюджета), слабый RSA, ключ-мот.
+    totals = Metrics(impressions=5000, clicks=300, cost_micros=1_000_000000, conversions=10)
+    rows = [
+        (
+            ("Expensive", "ENABLED"),
+            Metrics(impressions=3000, clicks=100, cost_micros=700_000000, conversions=1),
+        ),
+        (
+            ("Dead", "ENABLED"),
+            Metrics(impressions=2000, clicks=200, cost_micros=300_000000, conversions=0),
+        ),
+    ]
+    kw_rows = [
+        (
+            ("Dead", "AG", "мот", "BROAD"),
+            Metrics(impressions=500, clicks=50, cost_micros=80_000000, conversions=0),
+        )
+    ]
+    ad_rows = [
+        (
+            ("Expensive", "AG", "1", "RSA"),
+            Metrics(impressions=2000, clicks=5, cost_micros=100_000000, conversions=0),
+        )
+    ]
+    findings = build_audit(_report(totals, rows, kw_rows, ad_rows)).findings
+    got = {f.check_id for f in findings}
+    assert {"high_cpa", "budget_imbalance", "low_ctr_ad", "wasteful_keyword"} <= got, (
+        f"сценарий выродился — не сработали чеки с advice_operation, получено {sorted(got)}"
+    )
+    for f in findings:
+        assert f.advice_operation not in ONE_TAP_OPS, (
+            f"{f.check_id}: advice_operation={f.advice_operation!r} попал в ONE_TAP_OPS — "
+            "это метка для outcome, а не кнопка «применить»"
+        )
+        assert not (f.suggested_operation and f.advice_operation), (
+            f"{f.check_id}: обе операции сразу (suggested={f.suggested_operation!r}, "
+            f"advice={f.advice_operation!r}) — непонятно, что исполнять"
+        )
+
+
+def test_evidence_match_type_matches_mutation_schema():
+    """evidence['match_type'] уходит в bot._advise_apply_params → AddNegativeKeywords(**params).
+    GAQL отдаёт ENUM-имя ('BROAD'), схема ждёт Literal['broad','phrase','exact'] — сырое значение
+    уронило бы валидацию, и one-tap «➖ В минус-слова» молча превращался бы в «совет устарел».
+    Гард на дрейф: _MATCH_TYPES в движке обязан совпадать со схемой мутации."""
+    from typing import get_args
+
+    from agent.tools.schemas import MatchType
+    from audit.engine import _MATCH_TYPES, _norm_match_type
+
+    assert _MATCH_TYPES == set(get_args(MatchType))
+    assert _norm_match_type("BROAD") == "broad"  # ← ровно то, что приходит из keyword_view
+    assert _norm_match_type("Exact") == "exact"
+    assert _norm_match_type("BROAD_MATCH_MODIFIER") is None  # незнакомое → не тащим в мутацию
+    assert _norm_match_type("") is None and _norm_match_type(None) is None
+
+    totals = Metrics(impressions=1000, clicks=100, cost_micros=100_000000, conversions=5)
+    rep = _report(
+        totals,
+        [
+            (
+                ("C", "ENABLED"),
+                Metrics(impressions=1000, clicks=100, cost_micros=100_000000, conversions=5),
+            )
+        ],
+        keyword_rows=[
+            (
+                ("C", "AG", "дорогой ключ", "EXACT"),
+                Metrics(impressions=200, clicks=20, cost_micros=50_000000, conversions=0),
+            )
+        ],
+    )
+    kw = [f for f in build_audit(rep).findings if f.check_id == "wasteful_keyword"]
+    assert kw and kw[0].evidence["match_type"] == "exact", (
+        "минус обязан зеркалить тип соответствия ключа (exact-ключ → exact-минус), "
+        "а не резать шире дефолтным broad"
+    )
+
+
+def test_finding_text_parity_with_legacy_advisor_lines():
+    """audit.render.finding_text — ЕДИНСТВЕННЫЙ текст рекомендации (advisor.render.render_recommendation
+    удалён вместе с детекторами). Гард: смысловые куски старых advise_rec_* не потерялись при переезде.
+
+    budget_imbalance — не косметика, а правило #3: строка зовёт тронуть бюджет ⇒ бот обязан тут же
+    сказать, что САМ его не тронет (раньше это жило только в advise_rec_budget_imbalance)."""
+    from audit.render import finding_text
+
+    def line(check_id, facts, lang="ru"):
+        return finding_text(Finding(check_id, "x", "info", facts=facts), lang, "USD")
+
+    budget = line("budget_imbalance", {"campaign": "Whale", "share": 75, "cpa": 100})
+    assert "Whale" in budget and "75" in budget
+    assert "команд" in budget.lower(), "оговорка правила #3 («только по твоей команде») потерялась"
+    assert "100" in budget, "CPA в строке перекоса бюджета потерялся — совет без числа неубедителен"
+    assert "command" in line("budget_imbalance", {"campaign": "W", "share": 75, "cpa": 100}, "en")
+
+    kw = line(
+        "wasteful_keyword", {"campaign": "C", "keyword": "мот", "match_type": "EXACT", "cost": 9}
+    )
+    assert "мот" in kw and "exact" in kw, "тип соответствия ключа потерялся"
+
+    ad = line("low_ctr_ad", {"campaign": "C", "ad_group": "AG", "ctr": 0.4, "acct_ctr": 2.0})
+    assert "AG" in ad, "группа потерялась — RSA чинится на уровне ГРУППЫ, кампании мало"
+
+    one = line("single_campaign", {"campaign": "Only", "cost": 500})
+    assert "Only" in one and "500" in one
+
+
 # ── N1.0b: golden-МАТРИЦА по всем grade-бэндам + снапшот полного вектора весов ────────
 def _campaign(name: str, cost: float, clicks: int, conv: float, imps: int = 1000):
     return (

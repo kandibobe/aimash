@@ -28,7 +28,7 @@ Alembic-миграцией (см. колонку «Миграция»). Коло
 | `client_profile_history` | версии профиля «до» для отката/аудита (§20.5); переживают clear | `customer_id`, `snapshot` (JSON), `operation`, `confirmation_id` | `0013` | ACTIVE |
 | `account_health_snapshot` | агрегаты health-score `/audit` на дату в TZ аккаунта (субстрат трендов, N1.1); без PII/имён кампаний | `customer_id` + `snapshot_date` + `period_days` (unique тройка), `score`, `grade`, `at_risk`, `family_penalty` (JSON), `score_model_version` | `0022` | ACTIVE |
 
-> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0023`
+> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0024`
 > (`op.create_table(...)`). Инициалка `0001` создаёт базовые таблицы
 > (`whitelist`, `user_settings`, `proposals`, `audit_log`, `oauth_tokens`;
 > [`migrations/versions/0001_initial.py:22-92`](../migrations/versions/0001_initial.py)), остальные —
@@ -110,7 +110,9 @@ alembic history                          # список ревизий
 `0017` (возврат whitelist рантайм-активной: `added_by`/`note`) → `0018` (recommendations) →
 `0019` (bug_reports) → `0020` (индекс chat_id в audit_log) → `0021` (admins рантайм) →
 `0022` (account_health_snapshot: снапшоты health-score `/audit`, волна N1.1) →
-`0023` (recommendation.topic VARCHAR(16)→(32): семьи чеков `/audit` длиннее тем `/advise`) — **head**.
+`0023` (recommendation.topic VARCHAR(16)→(32): семьи чеков `/audit` длиннее тем `/advise`) →
+`0024` (recommendation.kind: снять префикс `audit_` — слияние бакетов обучения 👍/👎 после того, как
+источником рекомендаций стал один движок аудита) — **head**.
 
 ### Добавить миграцию
 ```bash

@@ -15,8 +15,10 @@ from sqlalchemy import select
 from db.models import Proposal
 from db.session import Session
 
-# Ключи, инертные для повтора (служебные снимки/резолвы) — не показываем и не повторяем.
-_INERT_KEYS = frozenset({"_before", "_audience_names"})
+# Ключи, инертные для повтора (служебные снимки/резолвы/метки) — не показываем и не повторяем.
+# _rec_uid кладёт bot._advise_apply (привязка замера эффекта к рекомендации) — повтору он не нужен и,
+# если схемы когда-нибудь ужесточат до extra="forbid", лишний ключ уронил бы повтор из /recent.
+_INERT_KEYS = frozenset({"_before", "_audience_names", "_rec_uid"})
 
 
 @dataclass

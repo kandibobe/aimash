@@ -61,12 +61,19 @@ async def load_experience(chat_id: int, customer_id) -> dict:
         ).all()
         outs = (
             await s.execute(
-                select(RecommendationOutcome.rec_uid, RecommendationOutcome.verdict).where(
+                select(RecommendationOutcome.rec_uid, RecommendationOutcome.verdict)
+                .where(
                     RecommendationOutcome.rec_uid.in_(uids),
                     RecommendationOutcome.verdict.isnot(None),
                 )
+                .order_by(RecommendationOutcome.id)
             )
         ).all()
+        # ОДИН вердикт на рекомендацию (первый замеренный): один и тот же совет можно применить
+        # дважды (две мутации → два confirmation_id → две outcome-строки), и без дедупа один совет
+        # тянул бы вес вида в 2 раза сильнее остальных — обучение перекашивается на повторные апплаи.
+        seen_uids: set[str] = set()
+        outs = [(u, v) for u, v in outs if not (u in seen_uids or seen_uids.add(u))]
 
     agg: dict[ExpKey, dict] = {}
 

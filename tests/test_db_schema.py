@@ -56,13 +56,13 @@ def test_every_migration_has_real_downgrade():
     assert not bad, f"миграции без реального downgrade: {bad}"
 
 
-def test_single_alembic_head_is_0023():
+def test_single_alembic_head_is_0024():
     revs = _revisions()
     assert revs, "не найдено ни одной миграции — сломан парс migrations/versions"
     downs = {d for d in revs.values() if d}
     heads = [r for r in revs if r not in downs]
-    assert heads == ["0023_recommendation_topic_width"], (
-        f"ожидался ровно один head=0023_recommendation_topic_width, получено {heads} — "
+    assert heads == ["0024_unify_recommendation_kind"], (
+        f"ожидался ровно один head=0024_unify_recommendation_kind, получено {heads} — "
         "ветвление/забытый down_revision в migrations/versions"
     )
 

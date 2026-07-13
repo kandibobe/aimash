@@ -111,10 +111,15 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
             return f"«{camp}»: CPA {_money(fa.get('cpa', 0), cur)} — {fa.get('factor', 0)}× the account average ({_money(fa.get('acct_cpa', 0), cur)}). Check bids and keywords."
         return f"«{camp}»: CPA {_money(fa.get('cpa', 0), cur)} — в {fa.get('factor', 0)}× выше среднего ({_money(fa.get('acct_cpa', 0), cur)}). Проверь ставки и ключи."
     if f.check_id == "wasteful_keyword":
+        # КЛЮЧ (не поисковый запрос — тот у wasteful_search_term) + его тип соответствия: без типа
+        # «ключ „ремонт“» неоднозначен (broad и exact «ремонт» — разные строки с разной ценой), а
+        # минус one-tap зеркалит именно тип (см. audit.engine.check_wasteful_keyword).
         kw = fa.get("keyword", "")
+        mt = str(fa.get("match_type", "") or "").lower()
+        mt_s = f" ({mt})" if mt else ""
         if lang == "en":
-            return f"Query «{kw}» in «{camp}»: {_money(fa.get('cost', 0), cur)}, {fa.get('clicks', 0)} clicks, 0 conversions — negative-keyword candidate."
-        return f"Запрос «{kw}» в «{camp}»: {_money(fa.get('cost', 0), cur)}, {fa.get('clicks', 0)} кликов, 0 конверсий — кандидат в минус-слова."
+            return f"Keyword «{kw}»{mt_s} in «{camp}»: {_money(fa.get('cost', 0), cur)}, {fa.get('clicks', 0)} clicks, 0 conversions — negative-keyword candidate."
+        return f"Ключ «{kw}»{mt_s} в «{camp}»: {_money(fa.get('cost', 0), cur)}, {fa.get('clicks', 0)} кликов, 0 конверсий — кандидат в минус-слова."
     if f.check_id == "wasteful_search_term":
         term = fa.get("search_term", "")
         if lang == "en":
@@ -141,17 +146,25 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
             return f"«{camp}»: losing {fa.get('rank_lost', 0)}% of impressions to rank — improve ad relevance/quality."
         return f"«{camp}»: теряешь {fa.get('rank_lost', 0)}% показов из-за ранга — подними релевантность/качество объявлений."
     if f.check_id == "low_ctr_ad":
+        # Группа обязательна: без неё «CTR ниже среднего в кампании X» некуда применить — в кампании
+        # десятки групп, а чинить надо ОДНУ (RSA живёт на уровне группы).
+        ag = fa.get("ad_group", "")
+        where = f"«{camp}» / {ag}" if ag else f"«{camp}»"
         if lang == "en":
-            return f"«{camp}»: CTR {fa.get('ctr', 0)}% below account average ({fa.get('acct_ctr', 0)}%) — refresh the ad copy."
-        return f"«{camp}»: CTR {fa.get('ctr', 0)}% ниже среднего ({fa.get('acct_ctr', 0)}%) — освежи тексты объявлений."
+            return f"An ad in {where}: CTR {fa.get('ctr', 0)}% below account average ({fa.get('acct_ctr', 0)}%) — refresh the ad copy."
+        return f"Объявление в {where}: CTR {fa.get('ctr', 0)}% ниже среднего ({fa.get('acct_ctr', 0)}%) — освежи тексты объявлений."
     if f.check_id == "budget_imbalance":
+        # CPA + оговорка правила #3 — НЕ косметика: строка предлагает тронуть бюджет, и бот обязан
+        # сказать, что сам он его не тронет (гард test_audit_engine.test_finding_text_parity_*).
+        cpa = _money(fa.get("cpa", 0), cur)
         if lang == "en":
-            return f"«{camp}» takes {fa.get('share', 0)}% of spend without better efficiency — review budget split."
-        return f"«{camp}» забирает {fa.get('share', 0)}% расхода без лучшей отдачи — пересмотри распределение бюджета."
+            return f"«{camp}» takes {fa.get('share', 0)}% of spend at a worse-than-average CPA {cpa} — review budget split (I change budgets only on your direct command)."
+        return f"«{camp}» забирает {fa.get('share', 0)}% расхода при CPA {cpa} хуже среднего — пересмотри распределение бюджета (бюджет меняю только по твоей прямой команде)."
     if f.check_id == "single_campaign":
+        cost = _money(fa.get("cost", 0), cur)
         if lang == "en":
-            return f"All traffic in one campaign «{camp}» — consider splitting by theme/geo/match type."
-        return f"Весь трафик в одной кампании «{camp}» — рассмотри разделение по темам/гео/типам соответствия."
+            return f"All traffic in one campaign «{camp}» ({cost}) — consider splitting by theme/geo/match type."
+        return f"Весь трафик в одной кампании «{camp}» ({cost}) — рассмотри разделение по темам/гео/типам соответствия."
     if f.check_id == "broad_unmanaged":
         n = fa.get("kw_count", 0)
         strat = fa.get("strategy_type", "")

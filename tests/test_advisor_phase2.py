@@ -109,21 +109,23 @@ async def test_formulate_reverts_distorted_line():
     from advisor import formulate
     from advisor.rules import Recommendation
 
+    # base = rec.body: текст проставляет маппер (audit.render.finding_text), advisor.render удалён.
+    base_line = "• Весь трафик в одной кампании «Solo» (120.00 USD) — рассмотри разделение."
     rec = Recommendation(
         kind="single_campaign",
         topic="structure",
         severity="info",
         target_campaign="Solo",
         facts={"campaign": "Solo", "cost": 120, "currency": "USD"},
+        body=base_line,
     )
-    base_line = formulate.render.render_recommendation(rec, "ru")
 
     async def _distort(messages, **kwargs):
         return SimpleNamespace(content='["Solo — перепиши без чисел вообще"]')
 
     with patched(formulate, "chat", _distort):
         out = await formulate.phrase([rec], "ru")
-    assert out == [base_line]  # искажённая (без суммы) строка откачена на детерминированный render
+    assert out == [base_line]  # искажённая (без суммы) строка откачена на кодовый текст
 
 
 # ── link_applied_mutation — детерминированный матч, только локальная БД ──────────────
@@ -229,6 +231,122 @@ async def test_link_no_match_and_dedup():
             )
         ).scalar()
     assert n == 1
+
+
+async def test_link_prefers_rec_uid_over_operation_match():
+    """Одну и ту же операцию предлагают РАЗНЫЕ чеки (pause_campaign — spend_no_conv и kill_rule;
+    add_negative_keywords — wasteful_keyword и wasteful_search_term). Матч только по
+    (operation, campaign) взял бы самую свежую строку и записал бы замер в ЧУЖОЙ бакет опыта —
+    вредный совет учился бы на чужом успехе. bot._advise_apply кладёт '_rec_uid' в params черновика;
+    линковка обязана предпочесть его."""
+    from sqlalchemy import select
+
+    from db.models import RecommendationOutcome
+    from db.session import Session, init_db
+
+    await init_db()
+    chat, customer = 5004, "7753643025"
+    old_uid = await _persist_rec(chat, customer, kind="spend_no_conv", camp="Camp Q")
+    new_uid = await _persist_rec(chat, customer, kind="kill_rule", camp="Camp Q")  # свежее
+    assert old_uid != new_uid
+
+    ok = await outcome.link_applied_mutation(
+        chat,
+        "pause_campaign",
+        {"campaign": "Camp Q", "_rec_uid": old_uid},  # применили СТАРЫЙ совет (кнопка под ним)
+        customer,
+        "cid-uid",
+    )
+    assert ok is True
+
+    async with Session() as s:
+        row = (
+            await s.execute(
+                select(RecommendationOutcome).where(
+                    RecommendationOutcome.confirmation_id == "cid-uid"
+                )
+            )
+        ).scalar_one()
+    assert row.rec_uid == old_uid, (
+        "замер привязан к самой свежей строке, а не к применённому совету"
+    )
+
+    # Без _rec_uid — прежний фолбэк (мутация вручную командой): самая свежая по (op, campaign).
+    ok2 = await outcome.link_applied_mutation(
+        chat, "pause_campaign", {"campaign": "Camp Q"}, customer, "cid-fallback"
+    )
+    assert ok2 is True
+    async with Session() as s:
+        row2 = (
+            await s.execute(
+                select(RecommendationOutcome).where(
+                    RecommendationOutcome.confirmation_id == "cid-fallback"
+                )
+            )
+        ).scalar_one()
+    assert row2.rec_uid == new_uid
+
+
+async def test_link_fallback_ignores_money_operations():
+    """Фолбэк по (operation, campaign) — только для ONE_TAP_OPS. У находок аудита
+    update_bid/update_budget/create_rsa — это advice_operation, МЕТКА для замера, а не кнопка (rule
+    #3: деньги — только прямой командой). Пользователь мог поднять бюджет ВОПРЕКИ совету
+    «перераспредели»; матч слеп к направлению и завёл бы замер чужого действия на бакет опыта —
+    вплоть до suppress живого совета по шуму. Денежные операции связываются только по rec_uid."""
+    from db.session import init_db
+
+    await init_db()
+    chat, customer = 5006, "7753643025"
+    uid = await _persist_rec(
+        chat, customer, kind="budget_imbalance", op="update_budget", camp="Camp Z"
+    )
+
+    # своя команда «подними бюджет Camp Z» (кнопки нет ⇒ нет и _rec_uid) → замер НЕ заводится
+    assert (
+        await outcome.link_applied_mutation(
+            chat, "update_budget", {"campaign": "Camp Z"}, customer, "cid-money-manual"
+        )
+        is False
+    )
+    # с явной привязкой (будущий путь /bids: черновик несёт _rec_uid) — заводится
+    assert (
+        await outcome.link_applied_mutation(
+            chat,
+            "update_budget",
+            {"campaign": "Camp Z", "_rec_uid": uid},
+            customer,
+            "cid-money-uid",
+        )
+        is True
+    )
+
+
+async def test_experience_counts_one_verdict_per_recommendation():
+    """Один совет можно применить дважды (две мутации → два confirmation_id → две outcome-строки).
+    Без дедупа этот совет тянул бы вес своего вида вдвое сильнее остальных — обучение перекошено
+    повторными апплаями, а не реальной пользой."""
+    from advisor.experience import load_experience
+    from db.models import RecommendationOutcome
+    from db.session import Session, init_db
+
+    await init_db()
+    chat, customer = 5005, "7753643025"
+    uid = await _persist_rec(chat, customer, kind="spend_no_conv", camp="Camp Twice")
+    async with Session() as s:
+        for cid in ("cid-t1", "cid-t2"):
+            s.add(
+                RecommendationOutcome(
+                    rec_uid=uid,
+                    confirmation_id=cid,
+                    customer_id=customer,
+                    target_campaign="Camp Twice",
+                    verdict="improved",
+                )
+            )
+        await s.commit()
+
+    exp = await load_experience(chat, customer)
+    assert exp["spend_no_conv"]["improved"] == 1  # два замера одного совета → один голос
 
 
 # ── measure_outcome — read-only чтение ДО/ПОСЛЕ → verdict в БД ───────────────────────

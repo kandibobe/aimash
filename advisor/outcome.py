@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from audit.engine import ONE_TAP_OPS
 from db.models import Recommendation as RecRow
 from db.models import RecommendationOutcome
 from db.session import Session
@@ -43,12 +44,26 @@ async def link_applied_mutation(
 ) -> bool:
     """Найти открытую рекомендацию, к которой относится applied-мутация, и завести outcome.
 
-    Матч ДЕТЕРМИНИРОВАННЫЙ: chat_id + customer_id + suggested_operation == operation +
-    target_campaign == params['campaign'], самая свежая. Дубль по confirmation_id не создаём.
-    Ничего не найдено → False (тихо). Только локальная БД — Google Ads не трогаем."""
+    Матч ДЕТЕРМИНИРОВАННЫЙ, два уровня:
+      1. params['_rec_uid'] — служебный ключ, который bot._advise_apply кладёт в черновик при one-tap
+         «применить». ТОЧНАЯ привязка: одну и ту же операцию предлагают РАЗНЫЕ чеки (pause_campaign —
+         spend_no_conv и kill_rule; add_negative_keywords — wasteful_keyword и wasteful_search_term),
+         поэтому матч только по (operation, campaign) отнёс бы замер в чужой бакет опыта.
+      2. Фолбэк (мутация применена вручную командой, а не кнопкой) — ТОЛЬКО для операций из
+         ONE_TAP_OPS: chat_id + customer_id + suggested_operation == operation + target_campaign ==
+         params['campaign'], самая свежая.
+    Почему фолбэк НЕ работает для денежных операций (update_bid/update_budget/create_rsa): у находок
+    аудита это advice_operation — МЕТКА, а не совет нажать кнопку (её и нет, rule #3). Пользователь,
+    который своей командой поднял бюджет кампании, мог сделать это ВОПРЕКИ совету («перераспредели») —
+    матч по (operation, campaign) слеп к направлению и завёл бы замер чужого действия на бакет опыта,
+    вплоть до suppress живого совета по шуму. Такие операции связываются ИСКЛЮЧИТЕЛЬНО по rec_uid.
+    Найденная строка обязана принадлежать ТОМУ ЖЕ чату и аккаунту (иначе чужой rec_uid из подложенных
+    params завёл бы outcome на чужую рекомендацию). Дубль по confirmation_id не создаём. Ничего не
+    найдено → False (тихо). Только локальная БД — Google Ads не трогаем."""
     campaign = (params or {}).get("campaign")
     if not campaign or not operation:
         return False
+    rec_uid = (params or {}).get("_rec_uid")
     now = now or datetime.now(timezone.utc)
     async with Session() as s:
         dup = (
@@ -60,19 +75,20 @@ async def link_applied_mutation(
         ).scalar_one_or_none()
         if dup is not None:
             return False
-        rec = (
-            await s.execute(
-                select(RecRow)
-                .where(
-                    RecRow.chat_id == int(chat_id),
-                    RecRow.customer_id == str(customer_id),
-                    RecRow.suggested_operation == operation,
-                    RecRow.target_campaign == campaign,
-                )
-                .order_by(RecRow.id.desc())
-                .limit(1)
+        q = select(RecRow).where(
+            RecRow.chat_id == int(chat_id),
+            RecRow.customer_id == str(customer_id),
+        )
+        if rec_uid:
+            q = q.where(RecRow.rec_uid == str(rec_uid))
+        elif operation in ONE_TAP_OPS:
+            q = q.where(
+                RecRow.suggested_operation == operation,
+                RecRow.target_campaign == campaign,
             )
-        ).scalar_one_or_none()
+        else:
+            return False
+        rec = (await s.execute(q.order_by(RecRow.id.desc()).limit(1))).scalar_one_or_none()
         if rec is None:
             return False
         s.add(
