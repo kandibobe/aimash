@@ -838,7 +838,9 @@ async def cc_kw_verify(m: bm.Message, state: bm.FSMContext) -> None:
         )
         return
     try:
-        kws_raw = await bm.asyncio.to_thread(read_keyword_column, sid)
+        # own_file: это ТА САМАЯ таблица, что бот создал (sid сверен выше) → читаем кредами
+        # аккаунта-хранилища (drive.file). Ads-токен её не увидит, если публичные ссылки выключены.
+        kws_raw = await bm.asyncio.to_thread(read_keyword_column, sid, own_file=bool(expected_sid))
     except Exception as e:  # noqa: BLE001
         await m.answer(
             bm.i18n.t("cc_kw_read_failed", err=bm.ux.err_text(e)), reply_markup=bm.nav_kb()

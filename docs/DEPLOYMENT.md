@@ -164,13 +164,24 @@ refresh-токеном ходит Sheets, — он владелец файла, 
 
 Чтобы таблицы копились на ОТДЕЛЬНОМ gmail (напр. `myhalads@gmail.com`), а Ads-доступ остался прежним:
 ```bash
-python scripts/get_refresh_token.py --sheets   # войти НУЖНЫМ gmail-ом; scopes drive.file + spreadsheets.readonly, БЕЗ adwords
+python scripts/get_refresh_token.py --sheets   # войти НУЖНЫМ gmail-ом; scope РОВНО ОДИН: drive.file
 # → пишет SHEETS_REFRESH_TOKEN в .env; GOOGLE_ADS_REFRESH_TOKEN не трогается
 SHEETS_OWNER_EMAIL=myhalads@gmail.com          # сверка (не гейт)
 ```
 Именно так, а не перевыпуск общего токена: у аккаунта-хранилища может не быть доступа к MCC — общий
 токен под ним уронил бы весь Google Ads. Аккаунт должен быть в **Test users** OAuth consent screen
 (если приложение не Published), иначе «Access blocked».
+
+⛔ **У аккаунта-хранилища просим ТОЛЬКО `drive.file`** (`SHEETS_SCOPES`, `reports/sheets.py` +
+`scripts/get_refresh_token.py`; синхрон дублей — `tests/test_keyword_sheets.py`). Он у Google
+**non-sensitive** ⇒ верификация приложения не нужна. Добавишь туда `spreadsheets.readonly`
+(sensitive) — Google покажет владельцу аккаунта **«This app is blocked. This app tried to access
+sensitive info in your Google Account»**, и согласие он выдать не сможет вообще (напоролись 2026-07 на
+аккаунте заказчика). Кто тогда читает **чужие** таблицы (§19.4.1 «Ссылка на Google Sheets», `/kw add`):
+**Ads-токен** — sensitive-scope есть у него (наш аккаунт, consent выдан),
+`_oauth_credentials(external_read=True)`. Следствие: чужая таблица должна быть доступна **Ads**-аккаунту
+(«всем, у кого есть ссылка» либо расшарена на него); иначе 403 → бот попросит прислать ключи текстом.
+СВОЮ таблицу (round-trip §19.4.2) читаем кредами аккаунта-хранилища (`own_file=True`).
 
 ##### Если аккаунт-хранилище у ЗАКАЗЧИКА (пароль он не отдаёт) — `--remote`
 `run_local_server()` ждёт редиректа на **свой** localhost, т.е. браузер обязан быть на машине скрипта;
@@ -179,8 +190,8 @@ OOB-поток («код на экране Google») Google отключил в 
 python scripts/get_refresh_token.py --sheets --remote
 ```
 Скрипт печатает **ссылку согласия** и готовый текст для владельца аккаунта. Он: открывает ссылку у себя
-(войдя нужным gmail-ом) → «Google hasn't verified this app» → Advanced → Go to … → разрешает **оба**
-доступа → браузер уходит на `http://localhost:8765/?code=…` и показывает «Не удалось открыть страницу»
+(войдя нужным gmail-ом) → «Google hasn't verified this app» → Advanced → Go to … → разрешает
+**единственный** доступ (`drive.file`) → браузер уходит на `http://localhost:8765/?code=…` и показывает «Не удалось открыть страницу»
 (**так и должно быть**) → копирует **всю строку из адресной строки** и присылает её. Строку вставляем в
 ожидающий ввод скрипта — он обменивает код на `SHEETS_REFRESH_TOKEN` и пишет его в `.env` (токен на
 экран не печатается). Код **одноразовый** и живёт ~10 минут; протух → перезапустить скрипт и прислать

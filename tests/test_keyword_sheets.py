@@ -8,6 +8,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -58,12 +61,25 @@ def test_build_rows_shows_dash_for_missing_metrics():
     assert rows[1] == ["no metrics kw", "—", "—", "—", "✅ Релевантно"]
 
 
-def test_sheets_scopes_include_readonly_for_arbitrary_sheets():
-    # §19.4.1: список CONSENT (get_refresh_token) должен включать readonly для чтения чужих таблиц.
-    from reports.sheets import SHEETS_SCOPES
+def test_sheets_consent_asks_only_non_sensitive_scope():
+    """РЕГРЕССИЯ: consent аккаунта-ХРАНИЛИЩА = ровно [drive.file] (non-sensitive).
 
-    assert "https://www.googleapis.com/auth/drive.file" in SHEETS_SCOPES  # создание
-    assert "https://www.googleapis.com/auth/spreadsheets.readonly" in SHEETS_SCOPES  # чтение чужих
+    spreadsheets.readonly у Google SENSITIVE: неверифицированному приложению Google отвечает «This app
+    is blocked… tried to access sensitive info» — владелец аккаунта не может выдать согласие вовсе
+    (2026-07, заказчик). Sensitive-scope несёт ТОЛЬКО Ads-токен (наш аккаунт, consent уже выдан).
+    """
+    from reports.sheets import SHEETS_READONLY_SCOPE, SHEETS_SCOPE, SHEETS_SCOPES
+
+    assert SHEETS_SCOPES == [SHEETS_SCOPE]  # создание таблиц — и ничего сверх
+    assert SHEETS_READONLY_SCOPE not in SHEETS_SCOPES  # вернёшь → снова «This app is blocked»
+
+
+def test_consent_scopes_match_between_script_and_reports():
+    """Списки scope продублированы руками (скрипт не тянет reports) — расхождение ловим здесь."""
+    import reports.sheets as rs
+
+    grt = pytest.importorskip("scripts.get_refresh_token")
+    assert grt.SHEETS_SCOPES == rs.SHEETS_SCOPES
 
 
 def test_build_service_does_not_over_request_scopes_on_refresh(monkeypatch):
@@ -94,7 +110,7 @@ def test_build_service_does_not_over_request_scopes_on_refresh(monkeypatch):
     assert captured.get("scopes") is None  # scope на refresh не запрашиваем
 
 
-def _capture_creds(monkeypatch) -> dict:
+def _capture_creds(monkeypatch, service: Any = None) -> dict:
     """Подменяет google-libs и возвращает dict с kwargs, ушедшими в Credentials(...)."""
     captured: dict = {}
 
@@ -111,7 +127,9 @@ def _capture_creds(monkeypatch) -> dict:
     monkeypatch.setitem(
         sys.modules,
         "googleapiclient.discovery",
-        SimpleNamespace(build=lambda *a, **k: SimpleNamespace()),
+        SimpleNamespace(
+            build=lambda *a, **k: service if service is not None else SimpleNamespace()
+        ),
     )
     return captured
 
@@ -153,6 +171,54 @@ def test_sheets_token_overrides_ads_and_inherits_oauth_client(monkeypatch):
     assert captured["refresh_token"] == "SHEETS-RT"  # НЕ Ads-токен
     assert captured["client_id"] == "ads-cid" and captured["client_secret"] == "ads-secret"
     assert captured["scopes"] is None  # scope на refresh по-прежнему не запрашиваем
+
+
+class _FakeSheetsService:
+    """Минимальный сервис Sheets API: spreadsheets().values().get(...).execute()."""
+
+    def spreadsheets(self):
+        return self
+
+    def values(self):
+        return self
+
+    def get(self, **kw):
+        return self
+
+    def execute(self):
+        return {"values": [["Keyword"], ["used cars nairobi"]]}
+
+
+def _both_tokens(monkeypatch) -> dict:
+    """Оба токена заданы (прод-расклад): Ads — наш аккаунт, sheets — аккаунт-хранилище."""
+    from pydantic import SecretStr
+
+    from core.config import settings
+
+    captured = _capture_creds(monkeypatch, service=_FakeSheetsService())
+    monkeypatch.setattr(settings, "sheets_refresh_token", SecretStr("SHEETS-RT"))
+    monkeypatch.setattr(settings, "sheets_client_id", "")
+    monkeypatch.setattr(settings, "sheets_client_secret", SecretStr(""))
+    monkeypatch.setattr(settings, "google_ads_refresh_token", SecretStr("ADS-RT"))
+    monkeypatch.setattr(settings, "google_ads_client_id", "ads-cid")
+    monkeypatch.setattr(settings, "google_ads_client_secret", SecretStr("ads-secret"))
+    return captured
+
+
+def test_foreign_sheet_is_read_with_ads_token(monkeypatch):
+    """§19.4.1 / `/kw add`: ЧУЖУЮ таблицу читаем Ads-токеном — sensitive-scope spreadsheets.readonly
+    есть только у него (у аккаунта-хранилища мы его не просим: consent бы заблокировали)."""
+    captured = _both_tokens(monkeypatch)
+    assert read_keyword_column("SID") == ["used cars nairobi"]  # own_file=False по умолчанию
+    assert captured["refresh_token"] == "ADS-RT"
+
+
+def test_own_sheet_is_read_with_storage_token(monkeypatch):
+    """§19.4.2 round-trip: таблицу, СОЗДАННУЮ ботом, читаем кредами аккаунта-хранилища — Ads-токен её
+    не увидит (drive.file видит только своё), если публичные ссылки выключены."""
+    captured = _both_tokens(monkeypatch)
+    assert read_keyword_column("SID", own_file=True) == ["used cars nairobi"]
+    assert captured["refresh_token"] == "SHEETS-RT"
 
 
 def test_parse_spreadsheet_id():

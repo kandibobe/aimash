@@ -23,14 +23,18 @@ from reports.queries import metric_headers
 from reports.service import ReportData
 
 # drive.file — минимально достаточный scope для СОЗДАНИЯ таблиц (доступ к файлам, созданным нами).
+# У Google он NON-SENSITIVE: верификация приложения для него не нужна.
 SHEETS_SCOPE = "https://www.googleapis.com/auth/drive.file"
 # spreadsheets.readonly — чтобы ЧИТАТЬ произвольную таблицу менеджера (§19.4.1 ввод «Ссылка на
 # Google Sheets»): drive.file видит только созданное нами, readonly — любую доступную пользователю.
-# Требует повторного OAuth-consent с этим scope (см. scripts/get_refresh_token.py).
+# У Google это SENSITIVE-scope: неверифицированное приложение с ним Google БЛОКИРУЕТ («This app is
+# blocked… tried to access sensitive info»). Поэтому его несёт только Ads-токен (наш аккаунт, consent
+# выдан), а НЕ токен аккаунта-хранилища (может быть чужим — заказчика).
 SHEETS_READONLY_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
-# Список для OAuth-CONSENT (scripts/get_refresh_token.py), НЕ для refresh: на refresh scope НЕ шлём
-# (см. _build_service — иначе invalid_scope, если токен выдан без readonly).
-SHEETS_SCOPES = [SHEETS_SCOPE, SHEETS_READONLY_SCOPE]
+# Список для OAuth-CONSENT аккаунта-ХРАНИЛИЩА (scripts/get_refresh_token.py --sheets), НЕ для refresh:
+# на refresh scope НЕ шлём (см. _oauth_credentials — иначе invalid_scope). Ровно [drive.file]:
+# добавишь сюда sensitive-scope — вернёшь «This app is blocked» (гард — tests/test_keyword_sheets.py).
+SHEETS_SCOPES = [SHEETS_SCOPE]
 _TOKEN_URI = "https://oauth2.googleapis.com/token"
 _TITLE_MAXLEN = 100  # лимит длины имени листа в Google Sheets
 _FORBIDDEN = set("[]:*?/\\")  # символы, недопустимые в имени листа
@@ -104,7 +108,7 @@ def _default_title(report: ReportData) -> str:
     return f"Aimash {report.customer_id} {p.date_from.isoformat()}—{p.date_to.isoformat()}"
 
 
-def _oauth_credentials() -> Any:
+def _oauth_credentials(*, external_read: bool = False) -> Any:
     """OAuth-креды (.env) для Google API. Ленивый импорт google-libs.
 
     ЧЕЙ АККАУНТ. Таблица создаётся в «Моём диске» того Google-аккаунта, чьим refresh-токеном мы
@@ -115,26 +119,38 @@ def _oauth_credentials() -> Any:
     client_id/secret Sheets-а пустые ⇒ Ads-овские (один и тот же OAuth-клиент Google Cloud —
     именно им выдавался токен, чужой клиент refresh не примет).
 
+    external_read=True — чтение ЧУЖОЙ (не созданной ботом) таблицы: нужен sensitive-scope
+    spreadsheets.readonly, а его несёт только Ads-токен. У аккаунта-хранилища мы его НЕ просим:
+    неверифицированному приложению Google на sensitive-scope отвечает «This app is blocked», и
+    заказчик просто не сможет выдать согласие. Ads-токена нет ⇒ падаем назад на sheets-креды
+    (хуже не будет: без readonly чтение и так даст 403, который наверху ловится).
+
     scopes=None НАМЕРЕННО: при refresh-гранте нельзя запрашивать scope ШИРЕ выданного токену —
     иначе Google вернёт invalid_scope (Bad Request) и упадёт ВЕСЬ Sheets-экспорт (не только чтение
     чужих таблиц). None ⇒ scope в запросе не шлём, токен обновляется с тем набором, что был выдан
-    на consent: drive.file → создание работает; spreadsheets.readonly появится после re-OAuth и
-    чтение чужой таблицы (§19.4.1) заработает само. SHEETS_SCOPES — это список для CONSENT
-    (scripts/get_refresh_token.py), НЕ для refresh. Без re-OAuth чтение чужой таблицы даст 403
-    (не invalid_scope) — ловим и просим прислать ключи текстом."""
+    на consent. SHEETS_SCOPES — это список для CONSENT (scripts/get_refresh_token.py), НЕ для
+    refresh. Чтение чужой таблицы токеном без readonly даёт 403 (не invalid_scope) — ловим и просим
+    прислать ключи текстом."""
     from google.oauth2.credentials import Credentials
 
     from core.config import settings
 
-    refresh = settings.sheets_refresh_token.get_secret_value()
-    if refresh:  # отдельный аккаунт-хранилище таблиц
+    ads_refresh = settings.google_ads_refresh_token.get_secret_value()
+    sheets_refresh = settings.sheets_refresh_token.get_secret_value()
+
+    if external_read and ads_refresh:  # sensitive-scope есть только у Ads-токена
+        refresh = ads_refresh
+        client_id = settings.google_ads_client_id
+        secret = settings.google_ads_client_secret.get_secret_value()
+    elif sheets_refresh:  # отдельный аккаунт-хранилище таблиц
+        refresh = sheets_refresh
         client_id = settings.sheets_client_id or settings.google_ads_client_id
         secret = (
             settings.sheets_client_secret.get_secret_value()
             or settings.google_ads_client_secret.get_secret_value()
         )
     else:  # прежнее поведение: Sheets ходит под Ads-токеном
-        refresh = settings.google_ads_refresh_token.get_secret_value()
+        refresh = ads_refresh
         client_id = settings.google_ads_client_id
         secret = settings.google_ads_client_secret.get_secret_value()
 
@@ -148,11 +164,16 @@ def _oauth_credentials() -> Any:
     )
 
 
-def _build_service() -> Any:
-    """Sheets v4 service из OAuth-кредов (.env)."""
+def _build_service(*, external_read: bool = False) -> Any:
+    """Sheets v4 service из OAuth-кредов (.env). external_read — см. _oauth_credentials."""
     from googleapiclient.discovery import build
 
-    return build("sheets", "v4", credentials=_oauth_credentials(), cache_discovery=False)
+    return build(
+        "sheets",
+        "v4",
+        credentials=_oauth_credentials(external_read=external_read),
+        cache_discovery=False,
+    )
 
 
 def _build_drive_service() -> Any:
@@ -392,15 +413,17 @@ def parse_spreadsheet_id(url_or_id: str) -> str | None:
 
 
 def read_keyword_column(
-    spreadsheet_id: str, *, service: Any = None, sheet_range: str = "A:E"
+    spreadsheet_id: str, *, service: Any = None, sheet_range: str = "A:E", own_file: bool = False
 ) -> list[str]:
     """Прочитать верифицированный список ключей из колонки A таблицы (после правок менеджера).
     Пропускаем строку-шапку; берём непустые значения колонки Keyword. service — для тестов (мок).
 
-    §19.4.1: со scope spreadsheets.readonly читаем ЛЮБУЮ доступную пользователю таблицу (не только
-    созданную ботом) — менеджер может прислать ссылку на свою таблицу с ключами. Таблица должна быть
-    доступна аккаунту OAuth (свой файл или расшаренный)."""
-    svc = service or _build_service()
+    own_file=True — таблица СОЗДАНА ботом (§19.4.2 round-trip): читаем кредами аккаунта-хранилища,
+    хватает drive.file. По умолчанию (§19.4.1 «Ссылка на Google Sheets», /kw add) таблица ЧУЖАЯ:
+    drive.file её не видит, нужен sensitive-scope spreadsheets.readonly ⇒ идём Ads-токеном
+    (external_read=True). Значит чужая таблица должна быть доступна ИМЕННО Ads-аккаунту: «всем, у
+    кого есть ссылка» либо расшарена на него; иначе 403 — наверху ловим и просим ключи текстом."""
+    svc = service or _build_service(external_read=not own_file)
     start = time.monotonic()
     try:
         resp = (
