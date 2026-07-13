@@ -144,6 +144,8 @@ class _Ctx:
     # только при достаточных данных), поэтому в data_gaps они не идут: «нет симулятора» ≠ «не прочитано».
     bid_simulations: list | None = None
     budget_simulations: list | None = None
+    # Ф2: активные Google-рекомендации с ИХ оценкой эффекта (recommendation.impact). None → не читано.
+    recommendations: list | None = None
 
     def target_for(self, campaign_name: str) -> float | None:
         """Цель CPA для кампании: пер-кампанийная стратегия (tCPA) побеждает глобальный /target."""
@@ -1453,6 +1455,67 @@ def check_sim_budget_upside(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     ]
 
 
+def check_google_recommendations(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф2: активные рекомендации Google — «второе мнение» с ЕГО ЖЕ цифрами эффекта
+    (recommendation.impact.potential_metrics − base_metrics). Одна сводная находка: сколько
+    рекомендаций ждёт, сколько конверсий Google обещает и во сколько это ему видится по расходу.
+
+    🔒 На НАШ score не влияет by design: балл считает наш код по нашим правилам, а Google-балл и его
+    рекомендации живут рядом как второе мнение (score_intensity=0.0 + семья вне FAMILY_WEIGHT).
+    Иначе мы бы штрафовали клиента за чужую модель, которую не можем ни объяснить, ни проверить.
+
+    Прирост показываем только там, где potential > base: нули impact — «Google эффект не оценил»
+    (заполнен не для всех типов), а не «эффекта нет» (gr8). Применение — отдельной мутацией через
+    confirm-гейт, не отсюда (часть рекомендаций меняет бюджет/ставки ⇒ только прямая команда)."""
+    recs = [
+        r
+        for r in (ctx.recommendations or [])
+        if not getattr(r, "dismissed", False)
+        and str(getattr(r, "type", "") or "") not in ("", "UNSPECIFIED", "UNKNOWN")
+    ]
+    if not recs:
+        return []
+    cur = getattr(report, "currency", "")
+
+    def _add_conv(r) -> float:
+        return max(0.0, float(getattr(r, "add_conversions", 0.0) or 0.0))
+
+    scored = sorted(recs, key=lambda r: -_add_conv(r))
+    add_conv = round(sum(_add_conv(r) for r in recs), 1)
+    # Расход считаем только по тем, где Google обещает конверсии: иначе «+$0» рекомендаций без
+    # оценённого impact размывало бы цену прироста.
+    add_cost = round(
+        sum(float(getattr(r, "add_cost", 0.0) or 0.0) for r in recs if _add_conv(r) > 0), 2
+    )
+    top = [
+        {
+            "type": str(getattr(r, "type", "")),
+            "campaign": str(getattr(r, "campaign", "") or ""),
+            "add_conversions": round(_add_conv(r), 1),
+        }
+        for r in scored[:3]
+    ]
+    return [
+        Finding(
+            check_id="google_recommendations_pending",
+            family="recommendations",
+            severity="info",
+            at_risk=0.0,
+            spend_segment=None,
+            suggested_operation=None,  # применяет ЧЕЛОВЕК через confirm-гейт, не кнопка аудита
+            score_intensity=0.0,  # второе мнение Google не двигает наш балл
+            facts={
+                "count": len(recs),
+                "add_conversions": add_conv,
+                "add_cost": add_cost,
+                "currency": cur,
+                "top": top,
+            },
+            evidence={"types": sorted({str(getattr(r, "type", "")) for r in recs})},
+        )
+    ]
+
+
 # Порядок проверок = порядок запуска (на рендер не влияет — там сортировка по важности).
 _CHECKS = (
     check_no_conversion_tracking,
@@ -1479,6 +1542,7 @@ _CHECKS = (
     check_top_is_rank_lost,
     check_sim_bid_upside,
     check_sim_budget_upside,
+    check_google_recommendations,
     check_geo_no_conv,
     check_schedule_waste,
 )
@@ -1517,6 +1581,9 @@ CHECK_REGISTRY: dict[str, tuple[str, str]] = {
     "top_is_rank_lost": ("bidding", "info"),
     "sim_bid_upside": ("bidding", "info"),
     "sim_budget_upside": ("budget", "info"),
+    # Ф2: семья «recommendations» НАМЕРЕННО отсутствует в FAMILY_WEIGHT (вес 0) — мнение Google
+    # показываем, но нашим баллом не штрафуем (см. check_google_recommendations).
+    "google_recommendations_pending": ("recommendations", "info"),
     "geo_no_conv": ("geo", "warning"),
     "schedule_waste": ("geo", "info"),
 }
@@ -1686,6 +1753,7 @@ def build_audit(
         bid_landscape=bid_landscape,
         bid_simulations=bid_simulations,
         budget_simulations=budget_simulations,
+        recommendations=recommendations,
     )
 
     # N1.3 (ревью): IS-строки прочитаны, но НИ ОДНА не прошла tolerance-гейт (proto3-нули) —

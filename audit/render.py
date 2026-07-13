@@ -270,6 +270,20 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
         if lang == "en":
             return f"«{camp}»: Google's simulator estimates that raising the daily budget {bud} → {target} (+{fa.get('uplift_pct', 0)}%) yields +{add_conv} conversions for +{add_cost} (marginal CPA {mcpa}). Only on your direct command."
         return f"«{camp}»: по симулятору Google дневной бюджет {bud} → {target} (+{fa.get('uplift_pct', 0)}%) даёт +{add_conv} конв. за +{add_cost} (предельный CPA {mcpa}). Только по твоей прямой команде."
+    if f.check_id == "google_recommendations_pending":
+        # Ф2: цифры — оценка САМОГО Google (recommendation.impact), не наша. Так и говорим; и говорим,
+        # что применение идёт через подтверждение (часть рекомендаций трогает бюджет/ставки).
+        n = fa.get("count", 0)
+        add_conv = fa.get("add_conversions", 0)
+        names = ", ".join(_rec_type_human(t["type"]) for t in fa.get("top", []) if t.get("type"))
+        if add_conv > 0:
+            add_cost = _money(fa.get("add_cost", 0), cur)
+            if lang == "en":
+                return f"{n} pending Google recommendation(s): Google estimates +{add_conv} conversions for +{add_cost} ({names}). Review them — applying anything goes through confirmation."
+            return f"{n} рекомендаций Google ждут: Google оценивает их в +{add_conv} конв. за +{add_cost} ({names}). Разбери — применение только через подтверждение."
+        if lang == "en":
+            return f"{n} pending Google recommendation(s): {names}. Google didn't estimate the conversion impact — check them manually."
+        return f"{n} рекомендаций Google ждут: {names}. Эффект в конверсиях Google не оценил — посмотри вручную."
     if f.check_id == "geo_no_conv":
         reg = fa.get("region", "")
         if lang == "en":
@@ -280,6 +294,13 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
             return f"{fa.get('count', 0)} time slot(s) spend {_money(fa.get('cost', 0), cur)} with 0 conversions (worst {fa.get('worst_day', '')} @ {fa.get('worst_hour', 0)}h) — adjust ad schedule/bids by time."
         return f"{fa.get('count', 0)} временных ячеек тратят {_money(fa.get('cost', 0), cur)} при 0 конверсий (худшая {fa.get('worst_day', '')} в {fa.get('worst_hour', 0)}ч) — настрой расписание/ставки по времени."
     return camp or f.check_id
+
+
+def _rec_type_human(t: str) -> str:
+    """KEYWORD_RECOMMENDATION → «Keyword». Тип рекомендации — enum Google; суффикс «recommendation»
+    в названии избыточен, он и так в контексте."""
+    t = str(t or "").removesuffix("_RECOMMENDATION")
+    return t.replace("_", " ").title()
 
 
 def finding_text(f: Finding, lang: str, cur: str) -> str:
@@ -373,11 +394,23 @@ def render_audit(
             )
     if result.google_recommendations:
         top = sorted(result.google_recommendations.items(), key=lambda kv: -kv[1])[:3]
-        names = ", ".join(t.replace("_", " ").title() for t, _ in top)
-        # Только показ: применять Google-рекомендации — вне объёма (при надобности через confirm-гейт).
-        lines.append(
-            f"🔵 Google recommends: {names}" if lang == "en" else f"🔵 Google советует: {names}"
+        names = ", ".join(_rec_type_human(t) for t, _ in top)
+        # Ф2: рядом с типами — ЦИФРА эффекта, которую даёт сам Google (recommendation.impact):
+        # «3 типа» ни о чём не говорит, «+12 конверсий» — говорит. 0 → Google эффект не оценил, молчим
+        # про прирост (нет данных ≠ «эффекта нет»). Только показ: применение — через confirm-гейт.
+        grec_f = next(
+            (f for f in result.findings if f.check_id == "google_recommendations_pending"), None
         )
+        gain = float((grec_f.facts or {}).get("add_conversions", 0.0)) if grec_f else 0.0
+        if lang == "en":
+            s = f"🔵 Google recommends: {names}"
+            if gain > 0:
+                s += f" — Google estimates +{gain:g} conversions"
+        else:
+            s = f"🔵 Google советует: {names}"
+            if gain > 0:
+                s += f" — Google оценивает это в +{gain:g} конв."
+        lines.append(s)
     if result.at_risk > 0:
         if lang == "en":
             lines.append(

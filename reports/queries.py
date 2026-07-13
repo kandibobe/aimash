@@ -373,20 +373,86 @@ def fetch_optimization_score(client, customer_id: str) -> "OptimizationScore | N
 
 @dataclass
 class RecommendationRow:
+    """Рекомендация Google + ЕЁ СОБСТВЕННАЯ оценка эффекта (`recommendation.impact`): что будет с
+    метриками, если применить. Числа — прогноз Google, не наш; деньги уже поделены на micros (gr4).
+
+    Нули в base/potential — «Google эффект не оценил» (impact заполнен не для всех типов), а не
+    «эффекта нет»: показывать прирост можно только там, где potential > base."""
+
     type: str
     dismissed: bool
+    campaign: str = ""  # имя кампании (пусто — рекомендация уровня аккаунта)
+    resource_name: str = ""  # адрес для будущего ApplyRecommendation (через confirm-гейт)
+    base_conversions: float = 0.0
+    potential_conversions: float = 0.0
+    base_cost: float = 0.0
+    potential_cost: float = 0.0
+    base_clicks: float = 0.0
+    potential_clicks: float = 0.0
+
+    @property
+    def add_conversions(self) -> float:
+        """Прогнозный прирост конверсий по оценке Google (≤0 → эффект не оценён / не в конверсиях)."""
+        return round(self.potential_conversions - self.base_conversions, 1)
+
+    @property
+    def add_cost(self) -> float:
+        """Во сколько Google оценивает прирост расхода (может быть 0 и отрицательным)."""
+        return round(self.potential_cost - self.base_cost, 2)
+
+    @property
+    def add_clicks(self) -> float:
+        return round(self.potential_clicks - self.base_clicks, 1)
+
+
+def _recs_query(limit: int, with_impact: bool) -> str:
+    fields = ["recommendation.type", "recommendation.dismissed", "recommendation.campaign"]
+    if with_impact:
+        fields += [
+            "recommendation.impact.base_metrics.conversions",
+            "recommendation.impact.base_metrics.cost_micros",
+            "recommendation.impact.base_metrics.clicks",
+            "recommendation.impact.potential_metrics.conversions",
+            "recommendation.impact.potential_metrics.cost_micros",
+            "recommendation.impact.potential_metrics.clicks",
+            "campaign.name",
+        ]
+    return f"SELECT {', '.join(fields)} FROM recommendation LIMIT {int(limit)}"
 
 
 def fetch_recommendations(client, customer_id: str, limit: int = 50) -> list[RecommendationRow]:
-    """Активные Google-рекомендации (тип + dismissed). READ-ONLY — только показ; применение вне объёма
-    (при надобности ApplyRecommendation через confirm-гейт). Per-rec impact-метрики недоступны нест.
-    путём в v24 (P0) — берём типы + агрегатный uplift из fetch_optimization_score."""
+    """Ф2: активные Google-рекомендации ВМЕСТЕ с их impact-метриками. READ-ONLY — только показ;
+    применение (ApplyRecommendation) — отдельной мутацией через confirm-гейт, не отсюда.
+
+    `recommendation.impact.{base,potential}_metrics` в v24 существуют (проверено по протобуфу
+    RecommendationImpact/RecommendationMetrics) — это готовый ответ Google на «что оптимизировать»
+    с цифрами. Деградация: если сервер отвергнет impact/джойн кампании, повторяем БЕЗ них — типы
+    рекомендаций важнее и не должны падать заодно (прирост тогда 0.0 = «не оценено», gr8)."""
     ensure_read_allowed(customer_id)
-    q = f"SELECT recommendation.type, recommendation.dismissed FROM recommendation LIMIT {int(limit)}"
-    return [
-        RecommendationRow(_enum_name(r.recommendation.type), bool(r.recommendation.dismissed))
-        for r in _search(client, customer_id, q)
-    ]
+    try:
+        rows = list(_search(client, customer_id, _recs_query(limit, True)))
+    except Exception:  # noqa: BLE001 — impact необязателен; типы рекомендаций читаем всё равно
+        rows = list(_search(client, customer_id, _recs_query(limit, False)))
+    out: list[RecommendationRow] = []
+    for r in rows:
+        rec = r.recommendation
+        base = getattr(getattr(rec, "impact", None), "base_metrics", None)
+        pot = getattr(getattr(rec, "impact", None), "potential_metrics", None)
+        out.append(
+            RecommendationRow(
+                type=_enum_name(rec.type),
+                dismissed=bool(rec.dismissed),
+                campaign=getattr(getattr(r, "campaign", None), "name", "") or "",
+                resource_name=str(getattr(rec, "resource_name", "") or ""),
+                base_conversions=float(getattr(base, "conversions", 0.0) or 0.0),
+                potential_conversions=float(getattr(pot, "conversions", 0.0) or 0.0),
+                base_cost=int(getattr(base, "cost_micros", 0) or 0) / 1_000_000,
+                potential_cost=int(getattr(pot, "cost_micros", 0) or 0) / 1_000_000,
+                base_clicks=float(getattr(base, "clicks", 0) or 0),
+                potential_clicks=float(getattr(pot, "clicks", 0) or 0),
+            )
+        )
+    return out
 
 
 @dataclass
