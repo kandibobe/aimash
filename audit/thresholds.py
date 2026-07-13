@@ -74,6 +74,8 @@ DEFAULT_AUDIT_THRESHOLDS: dict[str, float] = {
     "smart_bid_min_conv": 30,  # bidding: ручная стратегия при > N конв/период → Smart Bidding лучше (G40)
     "geo_min_spend": 20.0,  # A: регион с расходом ≥ N и 0 конверсий → слив гео (North Country)
     "schedule_min_spend": 20.0,  # A: час×день с расходом ≥ N и 0 конверсий → слив по расписанию
+    "bid_gap_min": 0.10,  # Ф1: разрыв ставка↔оценка Google < N → шум оценки, не совет
+    "kw_rank_lost_top_min": 0.30,  # Ф1: ключ теряет ≥ N верхних показов по РАНГУ → ставка/качество
 }
 
 

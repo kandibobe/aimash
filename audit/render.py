@@ -47,6 +47,7 @@ _SIGNAL_LABEL = {
         "optimization_score": "оценка Google",
         "recommendations": "рекомендации Google",
         "ad_policy": "модерация объявлений",
+        "bid_landscape": "ставки и оценки позиций",
     },
     "en": {
         "impression_share": "impression share",
@@ -56,6 +57,7 @@ _SIGNAL_LABEL = {
         "optimization_score": "Google optimization score",
         "recommendations": "Google recommendations",
         "ad_policy": "ad policy status",
+        "bid_landscape": "bids & position estimates",
     },
 }
 
@@ -66,7 +68,9 @@ _FAMILY_SIGNALS = {
     "budget": ("impression_share",),
     "rsa": ("impression_share", "adgroup_structure", "keyword_quality"),
     "conversion_tracking": ("conversion_actions",),
-    "bidding": ("bidding",),
+    # Ф1: без слоя ставок/позиций (bid_landscape) «ставки в норме» утверждать нечестно — именно там
+    # живут «ставка ниже оценки Google» и «верх потерян по рангу».
+    "bidding": ("bidding", "bid_landscape"),
     "delivery": (
         "ad_policy",
     ),  # упал ad_policy → delivery не «в норме» (zero_impressions — из отчёта)
@@ -225,6 +229,27 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
         if lang == "en":
             return f"«{camp}»: {fa.get('conversions', 0)} conversions on manual bidding ({fa.get('strategy_type', '')}) — Smart Bidding would optimize better at this volume."
         return f"«{camp}»: {fa.get('conversions', 0)} конверсий на ручной стратегии ({fa.get('strategy_type', '')}) — при таком объёме Smart Bidding отработает лучше."
+    if f.check_id in ("bid_below_first_page", "bid_below_top_of_page"):
+        # Ставка/цель/на сколько поднять + оговорка правила #3 (бот сам ставку не тронет).
+        kw = fa.get("keyword", "")
+        mt = str(fa.get("match_type", "") or "").lower()
+        mt_s = f" ({mt})" if mt else ""
+        bid = _money(fa.get("bid", 0), cur)
+        target = _money(fa.get("target_bid", 0), cur)
+        up = fa.get("uplift_pct", 0)
+        if f.check_id == "bid_below_first_page":
+            if lang == "en":
+                return f"Keyword «{kw}»{mt_s} in «{camp}»: bid {bid} is below Google's first-page estimate {target} (+{up}%) — it barely reaches page 1. Raise the bid (only on your direct command)."
+            return f"Ключ «{kw}»{mt_s} в «{camp}»: ставка {bid} ниже оценки первой страницы {target} (+{up}%) — он почти не выходит на первую страницу. Подними ставку (только по твоей прямой команде)."
+        conv = fa.get("conversions", 0)
+        cpa = _money(fa.get("cpa", 0), cur)
+        if lang == "en":
+            return f"Keyword «{kw}»{mt_s} in «{camp}»: {conv} conversions at CPA {cpa}, but bid {bid} is below the top-of-page estimate {target} (+{up}%) — proven value without top slots. Raise the bid (only on your direct command)."
+        return f"Ключ «{kw}»{mt_s} в «{camp}»: {conv} конв. при CPA {cpa}, но ставка {bid} ниже оценки верха страницы {target} (+{up}%) — доказанная ценность без верхних позиций. Подними ставку (только по твоей прямой команде)."
+    if f.check_id == "top_is_rank_lost":
+        if lang == "en":
+            return f"{fa.get('count', 0)} paying keyword(s) lose top slots to RANK (worst «{fa.get('worst_kw', '')}»: {fa.get('worst_share', 0)}%, {_money(fa.get('cost', 0), cur)} spent) — rank = bid × quality: raise the bid or fix Quality Score."
+        return f"{fa.get('count', 0)} платящих ключей теряют верхние позиции из-за РАНГА (худший «{fa.get('worst_kw', '')}»: {fa.get('worst_share', 0)}%, расход {_money(fa.get('cost', 0), cur)}) — ранг = ставка × качество: подними ставку или почини Quality Score."
     if f.check_id == "geo_no_conv":
         reg = fa.get("region", "")
         if lang == "en":

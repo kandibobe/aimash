@@ -18,6 +18,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 
+from audit.bidscape import FIRST_PAGE, TOP_OF_PAGE, opportunities
 from audit.thresholds import (
     DEFAULT_AUDIT_THRESHOLDS,
     FAMILY_WEIGHT,
@@ -129,6 +130,9 @@ class _Ctx:
     )
     schedule: list | None = (
         None  # A: ячейки час×день (кампания/день/час/метрики), None → нет данных
+    )
+    bid_landscape: list | None = (
+        None  # Ф1: ставка ключа + оценки позиций Google + доли верха, None → нет данных
     )
 
     def target_for(self, campaign_name: str) -> float | None:
@@ -1181,6 +1185,142 @@ def check_manual_bid_high_vol(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     return out
 
 
+def bid_opportunities(report, thr: dict, ctx: _Ctx) -> list:
+    """Ф1: возможности по ставкам (audit.bidscape) из прочитанного слоя ставок/позиций. ОДИН источник
+    и для чеков ниже, и для команды /bids — пороги/формулы не разъедутся. Нет данных → []."""
+    rows = ctx.bid_landscape
+    if not rows:
+        return []
+    return opportunities(
+        rows,
+        acct_cpa=float(getattr(report.totals, "cpa", 0.0) or 0.0),
+        target_for=ctx.target_for,
+        gap_min=float(thr.get("bid_gap_min", 0.10)),
+        min_cost=float(thr.get("min_spend", 1.0)),
+    )
+
+
+def _bid_facts(o, cur: str) -> dict:
+    return {
+        "campaign": o.campaign,
+        "ad_group": o.ad_group,
+        "keyword": o.keyword,
+        "match_type": o.match_type,
+        "bid": o.bid,
+        "target_bid": o.target_bid,
+        "uplift_pct": o.uplift_pct,
+        "conversions": o.conversions,
+        "cpa": o.cpa,
+        "currency": cur,
+    }
+
+
+def _bid_evidence(o) -> dict:
+    """criterion_id/ad_group_id — адрес ключа для будущей мутации ставки (её исполняет КОД после «да»,
+    не модель): без них совет «подними до X» некуда применить."""
+    return {
+        "bid": o.bid,
+        "target_bid": o.target_bid,
+        "cost": o.cost,
+        "conversions": o.conversions,
+        "criterion_id": o.criterion_id,
+        "ad_group_id": o.ad_group_id,
+    }
+
+
+def check_bid_below_first_page(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф1 (ядро запроса «какие слова поднять»): ставка ключа НИЖЕ ОЦЕНКИ GOOGLE для первой страницы
+    (position_estimates.first_page_cpc) при живых показах — ключ почти не выходит на первую страницу.
+
+    at_risk = 0.0: это УПУЩЕННАЯ выгода, а не потраченное — класть такое в «Под риском» нельзя (сломает
+    инвариант at_risk ≤ расход и дедуп). Ставку считает КОД по цифрам Google; поднять её можно ТОЛЬКО
+    прямой командой через confirm-гейт (rule #3) ⇒ suggested_operation=None (кнопки нет), метка для
+    замера эффекта — update_keyword_bid. Smart Bidding отсекает audit.bidscape (там ставка ключа ничего
+    не решает). Нет данных → молчим."""
+    cur = getattr(report, "currency", "")
+    ops = [o for o in bid_opportunities(report, thr, ctx) if o.kind == FIRST_PAGE]
+    return [
+        Finding(
+            check_id="bid_below_first_page",
+            family="bidding",
+            severity="warning",
+            at_risk=0.0,  # апсайд, не потраченное
+            spend_segment=None,
+            target_campaign=o.campaign,
+            suggested_operation=None,  # ставка — только прямой командой (rule #3)
+            advice_operation="update_keyword_bid",  # метка для outcome-линковки, НЕ кнопка
+            facts=_bid_facts(o, cur),
+            evidence=_bid_evidence(o),
+        )
+        for o in ops[: int(thr.get("kw_top_n", 5))]
+    ]
+
+
+def check_bid_below_top_of_page(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф1: ключ КОНВЕРТИТ по приемлемому CPA (≤ цель кампании, иначе ≤ средний по аккаунту), но ставка
+    ниже оценки верха страницы (top_of_page_cpc) — доказанная ценность без верхних позиций. info: это
+    апсайд, а не слив. at_risk=0.0 и никаких кнопок — как у bid_below_first_page (rule #3)."""
+    cur = getattr(report, "currency", "")
+    ops = [o for o in bid_opportunities(report, thr, ctx) if o.kind == TOP_OF_PAGE]
+    return [
+        Finding(
+            check_id="bid_below_top_of_page",
+            family="bidding",
+            severity="info",
+            at_risk=0.0,
+            spend_segment=None,
+            target_campaign=o.campaign,
+            suggested_operation=None,
+            advice_operation="update_keyword_bid",  # метка для outcome-линковки, НЕ кнопка
+            facts=_bid_facts(o, cur),
+            evidence=_bid_evidence(o),
+        )
+        for o in ops[: int(thr.get("kw_top_n", 5))]
+    ]
+
+
+def check_top_is_rank_lost(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф1: платящие ключи теряют ВЕРХНИЕ позиции из-за РАНГА (не бюджета) — search_rank_lost_top_
+    impression_share ≥ порога. Ранг = ставка × качество, поэтому диагноз общий: поднять ставку ИЛИ
+    починить Quality Score (какой именно компонент — скажут qs_*). Один агрегат (сколько ключей +
+    худший), неденежная info (семья bidding), прозой. Доля 0.0 = «не прочитано» (proto3-zero или
+    деградация фетчера) — такие строки не считаем: нет данных ≠ «в норме»."""
+    rows = ctx.bid_landscape
+    if not rows:
+        return []
+    floor = float(thr.get("kw_min_spend", 3.0))
+    rank_min = float(thr.get("kw_rank_lost_top_min", 0.30))
+    hit = [
+        r
+        for r in rows
+        if float(getattr(r, "rank_lost_top_is", 0.0) or 0.0) >= rank_min
+        and float(getattr(getattr(r, "metrics", None), "cost", 0.0) or 0.0) >= floor
+    ]
+    if not hit:
+        return []
+    worst = max(hit, key=lambda r: float(getattr(r, "rank_lost_top_is", 0.0) or 0.0))
+    cost = round(sum(float(getattr(r.metrics, "cost", 0.0) or 0.0) for r in hit), 2)
+    return [
+        Finding(
+            check_id="top_is_rank_lost",
+            family="bidding",
+            severity="info",
+            at_risk=0.0,
+            spend_segment=None,
+            target_campaign=getattr(worst, "campaign", None),
+            suggested_operation=None,
+            facts={
+                "count": len(hit),
+                "cost": cost,
+                "worst_kw": getattr(worst, "keyword", ""),
+                "worst_share": round(float(getattr(worst, "rank_lost_top_is", 0.0)) * 100),
+                "currency": getattr(report, "currency", ""),
+            },
+            evidence={"rank_lost_keywords": len(hit), "cost": cost},
+        )
+    ]
+
+
 # Порядок проверок = порядок запуска (на рендер не влияет — там сортировка по важности).
 _CHECKS = (
     check_no_conversion_tracking,
@@ -1202,6 +1342,9 @@ _CHECKS = (
     check_no_negative_list,
     check_quality_score,
     check_manual_bid_high_vol,
+    check_bid_below_first_page,
+    check_bid_below_top_of_page,
+    check_top_is_rank_lost,
     check_geo_no_conv,
     check_schedule_waste,
 )
@@ -1235,6 +1378,9 @@ CHECK_REGISTRY: dict[str, tuple[str, str]] = {
     "qs_relevance_below": ("rsa", "info"),
     "qs_landing_below": ("rsa", "info"),
     "manual_bid_high_vol": ("bidding", "info"),
+    "bid_below_first_page": ("bidding", "warning"),
+    "bid_below_top_of_page": ("bidding", "info"),
+    "top_is_rank_lost": ("bidding", "info"),
     "geo_no_conv": ("geo", "warning"),
     "schedule_waste": ("geo", "info"),
 }
@@ -1334,6 +1480,7 @@ def build_audit(
     keyword_quality: list | None = None,
     geo_waste: list | None = None,
     schedule: list | None = None,
+    bid_landscape: list | None = None,
 ) -> AuditResult:
     """Собрать аудит по УЖЕ прочитанным данным. Чистая функция (без сети/SDK). Опц. живые данные
     (is_rows / conversion_actions / bidding / optimization_score / recommendations) — duck-typed,
@@ -1398,6 +1545,7 @@ def build_audit(
         keyword_quality=keyword_quality,
         geo_waste=geo_waste,
         schedule=schedule,
+        bid_landscape=bid_landscape,
     )
 
     # N1.3 (ревью): IS-строки прочитаны, но НИ ОДНА не прошла tolerance-гейт (proto3-нули) —

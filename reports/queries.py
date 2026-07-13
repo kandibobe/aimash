@@ -786,3 +786,100 @@ def fetch_schedule(client, customer_id: str, period, limit: int = 500) -> list[S
         )
         for r in _search(client, customer_id, q)
     ]
+
+
+@dataclass
+class BidLandscapeRow:
+    """Ставка ключа + оценки позиций Google + доли ВЕРХНИХ позиций. Все деньги — в валюте аккаунта
+    (micros делит КОД). 0.0 в любом поле = «нет данных» (proto3-zero неотличим от истинного нуля) —
+    разбирают проверки движка, здесь не выдумываем."""
+
+    campaign: str
+    ad_group: str
+    ad_group_id: str
+    criterion_id: str
+    keyword: str
+    match_type: str
+    strategy_type: (
+        str  # campaign.bidding_strategy_type — «поднять ставку» осмысленно только на ручных
+    )
+    bid: float  # ad_group_criterion.effective_cpc_bid (фактическая ставка ключа: своя или группы)
+    first_page_cpc: float  # оценка Google: ставка для попадания на первую страницу
+    top_of_page_cpc: float  # …для верха страницы (над органикой)
+    first_position_cpc: float  # …для первой позиции
+    top_is: float  # 0..1 metrics.search_top_impression_share — доля показов НА ВЕРХУ
+    abs_top_is: float  # 0..1 metrics.search_absolute_top_impression_share
+    rank_lost_top_is: (
+        float  # 0..1 metrics.search_rank_lost_top_impression_share — верх потерян по РАНГУ
+    )
+    metrics: Metrics
+
+
+# Доли ВЕРХНИХ позиций на уровне ключа. Отдельной константой — фетчер деградирует без них (см. ниже).
+_KW_TOP_IS_SELECT = (
+    "metrics.search_top_impression_share, metrics.search_absolute_top_impression_share, "
+    "metrics.search_rank_lost_top_impression_share"
+)
+
+
+def _bid_landscape_query(period, limit: int, with_top_is: bool) -> str:
+    is_part = f"{_KW_TOP_IS_SELECT}, " if with_top_is else ""
+    return (
+        "SELECT campaign.name, campaign.bidding_strategy_type, ad_group.id, ad_group.name, "
+        "ad_group_criterion.criterion_id, ad_group_criterion.keyword.text, "
+        "ad_group_criterion.keyword.match_type, ad_group_criterion.effective_cpc_bid_micros, "
+        "ad_group_criterion.position_estimates.first_page_cpc_micros, "
+        "ad_group_criterion.position_estimates.top_of_page_cpc_micros, "
+        "ad_group_criterion.position_estimates.first_position_cpc_micros, "
+        f"{is_part}{_METRICS_SELECT} FROM keyword_view WHERE {_where(period, None)} "
+        "AND ad_group_criterion.status = 'ENABLED' AND ad_group.status = 'ENABLED' "
+        f"AND campaign.status = 'ENABLED' ORDER BY metrics.cost_micros DESC LIMIT {int(limit)}"
+    )
+
+
+def fetch_bid_landscape(
+    client, customer_id: str, period, limit: int = 200
+) -> list[BidLandscapeRow]:
+    """Ф1: ставка ключа + оценки позиций Google (`position_estimates`) + доли верхних позиций —
+    основа ответа «какие слова поднять». READ-ONLY.
+
+    Топ по расходу (анти-хвост): ключи с НУЛЕВЫМ расходом сюда не попадают by design — «ключ без
+    показов» (G-KW1) требует отдельного запроса без ORDER BY cost (Ф4), не смешиваем.
+
+    Деградация: доли верхних позиций на уровне ключа поддерживаются не всеми аккаунтами/каналами —
+    если сервер отвергнет их, повторяем запрос БЕЗ них (ставки/оценки позиций важнее и не должны
+    падать заодно). Доли тогда 0.0 → проверки по рангу молчат (нет данных ≠ «в норме», gr8)."""
+    ensure_read_allowed(customer_id)
+    try:
+        rows = list(_search(client, customer_id, _bid_landscape_query(period, limit, True)))
+    except Exception:  # noqa: BLE001 — top-IS необязателен; ставки/оценки позиций читаем всё равно
+        rows = list(_search(client, customer_id, _bid_landscape_query(period, limit, False)))
+    out: list[BidLandscapeRow] = []
+    for r in rows:
+        agc = r.ad_group_criterion
+        pe = agc.position_estimates
+        out.append(
+            BidLandscapeRow(
+                campaign=r.campaign.name,
+                ad_group=r.ad_group.name,
+                ad_group_id=str(r.ad_group.id),
+                criterion_id=str(agc.criterion_id),
+                keyword=agc.keyword.text,
+                match_type=_enum_name(agc.keyword.match_type),
+                strategy_type=_enum_name(r.campaign.bidding_strategy_type),
+                bid=int(getattr(agc, "effective_cpc_bid_micros", 0) or 0) / 1_000_000,
+                first_page_cpc=int(getattr(pe, "first_page_cpc_micros", 0) or 0) / 1_000_000,
+                top_of_page_cpc=int(getattr(pe, "top_of_page_cpc_micros", 0) or 0) / 1_000_000,
+                first_position_cpc=int(getattr(pe, "first_position_cpc_micros", 0) or 0)
+                / 1_000_000,
+                top_is=float(getattr(r.metrics, "search_top_impression_share", 0.0) or 0.0),
+                abs_top_is=float(
+                    getattr(r.metrics, "search_absolute_top_impression_share", 0.0) or 0.0
+                ),
+                rank_lost_top_is=float(
+                    getattr(r.metrics, "search_rank_lost_top_impression_share", 0.0) or 0.0
+                ),
+                metrics=_metrics(r.metrics),
+            )
+        )
+    return out
