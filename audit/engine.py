@@ -610,11 +610,29 @@ _NON_SMART_BIDDING = frozenset(
 )
 
 
+def _is_legacy_bmm(kw_text: str) -> bool:
+    """Legacy Broad Match Modified: тип соответствия свёрнут Google в 2021, но САМИ КЛЮЧИ остались
+    и опознаются по «+» перед словами («+купить +обувь»). Ведут себя как ФРАЗОВЫЕ, а API отдаёт им
+    match_type=BROAD — то есть это не «неуправляемое широкое», флажить их нельзя (ложный позитив).
+
+    ⚠️ Приписка claude-ads к G17 утверждает обратное: будто Google срезал «+» при миграции, BMM стал
+    неотличим от BROAD, и потому не надо флажить ВЕСЬ «BROAD + Manual CPC». Посылка неверна — «+» в
+    тексте ключа сохраняется. Поэтому BMM отсекаем ТОЧНО, по тексту, а настоящий BROAD без Smart
+    Bidding продолжаем флажить: слепо следуя приписке, мы бы молча погасили реальный слив."""
+    return any(t.startswith("+") for t in kw_text.split())
+
+
 def check_broad_unmanaged(report, thr: dict, ctx: _Ctx) -> list[Finding]:
-    """BROAD-ключи в ENABLED-кампании со стратегией БЕЗ Smart Bidding (семья bidding, N1.2):
-    широкое соответствие без конверсионного сигнала льёт нецелевой трафик. ТОЛЬКО прозой —
-    сужение соответствия/минус-слова требуют курации, не one-tap (rule #3/#6). Нет данных о
-    стратегии (ctx.bidding_by_name пуст / кампания не найдена) → молчим (fail-safe).
+    """Широкое соответствие БЕЗ управления (семья bidding, N1.2 / claude-ads G17). Два случая:
+      • BROAD в кампании со стратегией из `_NON_SMART_BIDDING` — конверсионного сигнала нет, ставку
+        ведёт человек ⇒ широкий трафик ничем не отсекается;
+      • BROAD в кампании СО Smart Bidding, но у кампании НЕТ НИ ОДНОГО минус-слова (ни списка, ни
+        прямых) — алгоритму нечем ограничить выборку. Вторая половина G17: раньше не ловилась вовсе.
+    Legacy BMM (текст с «+», см. `_is_legacy_bmm`) НЕ считаем — это фразовое поведение, не широкое.
+
+    ТОЛЬКО прозой — сужение соответствия/минус-слова требуют курации, не one-tap (rule #3/#6).
+    Fail-safe: нет данных о стратегии (ctx.bidding_by_name пуст / кампания не найдена) → молчим
+    совсем; нет карты минусов (ctx.negative_lists=None или стаб без поля) → молчит ТОЛЬКО smart-ветка.
     НЕДЕНЕЖНАЯ (ревью 2026-07-08): это риск КОНФИГУРАЦИИ, а не измеренный слив — BROAD-расход
     может конвертить; деньги-под-риском считают проверки слива (wasteful_keyword/spend_no_conv),
     иначе headline задваивал бы тот же ключ и инфлировался конвертящим расходом. Полный
@@ -623,17 +641,30 @@ def check_broad_unmanaged(report, thr: dict, ctx: _Ctx) -> list[Finding]:
         return []
     status_by_name = {name: status for (name, status), _m in _campaign_rows(report)}
     cur = getattr(report, "currency", "")
+    # None → карты покрытия нет (сигнал не прочитан / duck-стаб без поля) ⇒ smart-ветка молчит.
+    covered = (
+        getattr(ctx.negative_lists, "campaigns_with_negatives", None)
+        if ctx.negative_lists is not None
+        else None
+    )
     agg: dict[str, dict] = {}
     for dims, m in _breakdown_rows(report, "keyword"):
-        campaign, _ad_group, _kw, match_type = (list(dims) + ["", "", "", ""])[:4]
+        campaign, _ad_group, kw_text, match_type = (list(dims) + ["", "", "", ""])[:4]
         if match_type != "BROAD" or status_by_name.get(campaign) != "ENABLED":
             continue
-        b = ctx.bidding_by_name.get(campaign)
-        if b is None or getattr(b, "strategy_type", "") not in _NON_SMART_BIDDING:
+        if _is_legacy_bmm(kw_text):  # BMM ≠ широкое соответствие (см. _is_legacy_bmm)
             continue
-        a = agg.setdefault(
-            campaign, {"cost": 0.0, "n": 0, "strategy": getattr(b, "strategy_type", "")}
-        )
+        b = ctx.bidding_by_name.get(campaign)
+        if b is None:
+            continue
+        strategy = getattr(b, "strategy_type", "")
+        if strategy in _NON_SMART_BIDDING:
+            reason = "no_smart_bidding"
+        elif covered is not None and campaign not in covered:
+            reason = "no_negatives"  # Smart Bidding есть, а отсекать мусор нечем
+        else:
+            continue
+        a = agg.setdefault(campaign, {"cost": 0.0, "n": 0, "strategy": strategy, "reason": reason})
         a["cost"] += float(m.cost)
         a["n"] += 1
     out: list[Finding] = []
@@ -651,6 +682,7 @@ def check_broad_unmanaged(report, thr: dict, ctx: _Ctx) -> list[Finding]:
                 suggested_operation=None,  # курация соответствий/минусов — НЕ one-tap
                 facts={
                     "campaign": campaign,
+                    "reason": a["reason"],
                     "strategy_type": a["strategy"],
                     "cost": round(a["cost"], 2),
                     "kw_count": a["n"],
@@ -660,6 +692,7 @@ def check_broad_unmanaged(report, thr: dict, ctx: _Ctx) -> list[Finding]:
                     "cost": round(a["cost"], 2),
                     "kw_count": a["n"],
                     "strategy_type": a["strategy"],
+                    "reason": a["reason"],
                 },
             )
         )
@@ -776,7 +809,12 @@ def check_zero_impressions(report, thr: dict, ctx: _Ctx) -> list[Finding]:
 def check_adgroup_bloat(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     """D (claude-ads G03): активные группы с >N ключей — «свалка» тем размывает релевантность и Quality
     Score. Один агрегат (сколько групп + худшая), не спам per-группа. Неденежная (структура), прозой,
-    не one-tap. Нет данных структуры (ctx.adgroup_structure=None) → молчим (fail-safe)."""
+    не one-tap. Нет данных структуры (ctx.adgroup_structure=None) → молчим (fail-safe).
+
+    G03 accuracy note (Ф0, 2026-07-13): что именно считать ключом — решает фетчер
+    (`reports.queries.fetch_adgroup_structure`): только ENABLED-группы, только ключи С ПОКАЗАМИ за
+    период, дедуп по тексту (BROAD+PHRASE одного ключа = один). Спящий хвост и три типа соответствия
+    одного ключа раздували счётчик → ложные «свалки»."""
     rows = ctx.adgroup_structure
     if not rows:
         return []
@@ -837,13 +875,21 @@ def check_rsa_thin(report, thr: dict, ctx: _Ctx) -> list[Finding]:
 
 
 def check_no_negative_list(report, thr: dict, ctx: _Ctx) -> list[Finding]:
-    """D (claude-ads G14): в аккаунте с реальным трафиком НЕТ ни одного списка минус-слов (shared_set
-    NEGATIVE_KEYWORDS) — базовая гигиена не настроена, нецелевые запросы не отсекаются. Неденежная
-    (keywords), прозой. Нет данных (ctx.negative_lists=None) или списки есть → молчим."""
+    """D (claude-ads G14+G15): в аккаунте с реальным трафиком НЕТ минус-слов ВООБЩЕ — ни shared-списка
+    (NEGATIVE_KEYWORDS), ни минусов прямо на кампаниях. Базовая гигиена не настроена, нецелевые
+    запросы не отсекаются. Неденежная (keywords), прозой. Нет данных (ctx.negative_lists=None) →
+    молчим (fail-safe).
+
+    G14/G15 accuracy note (Ф0, 2026-07-13): раньше смотрели ТОЛЬКО shared_set — аккаунт с минусами
+    на уровне кампаний (нормальная практика, когда кампания одна) получал ложное «гигиены нет»."""
     nl = ctx.negative_lists
-    if nl is None or int(getattr(nl, "count", 0) or 0) > 0:
+    if nl is None:
         return []
-    if float(getattr(report.totals, "clicks", 0) or 0) <= 0:  # нет трафика → списки и не нужны
+    lists = int(getattr(nl, "count", 0) or 0)
+    direct = int(getattr(nl, "campaign_level_count", 0) or 0)
+    if lists > 0 or direct > 0:
+        return []
+    if float(getattr(report.totals, "clicks", 0) or 0) <= 0:  # нет трафика → минусы и не нужны
         return []
     return [
         Finding(
@@ -854,8 +900,8 @@ def check_no_negative_list(report, thr: dict, ctx: _Ctx) -> list[Finding]:
             spend_segment=None,
             target_campaign=None,
             suggested_operation=None,
-            facts={"lists": 0},
-            evidence={"negative_lists": 0},
+            facts={"lists": 0, "campaign_level": 0},
+            evidence={"negative_lists": 0, "campaign_level_negatives": 0},
         )
     ]
 

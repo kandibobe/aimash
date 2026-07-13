@@ -545,22 +545,39 @@ class AdGroupStructureRow:
     rsa_count: int  # активных Responsive Search Ad в группе (≥2 норма, <2 — тонкое покрытие)
 
 
-def fetch_adgroup_structure(client, customer_id: str) -> list[AdGroupStructureRow]:
+def normalize_keyword_text(text: str) -> str:
+    """Ключ к дедупу текста ключевого слова (claude-ads G03 accuracy note): BROAD/PHRASE/EXACT одного
+    и того же ключа — ОДИН ключ, а не три. Снимаем регистр и модификатор «+» legacy BMM, схлопываем
+    пробелы: «+Купить  Обувь» == «купить обувь». НЕ путать с `_is_legacy_bmm` в audit/engine.py —
+    там «+» как раз значимый сигнал, здесь он шум."""
+    return " ".join(text.replace("+", " ").lower().split())
+
+
+def fetch_adgroup_structure(client, customer_id: str, period) -> list[AdGroupStructureRow]:
     """Структура ENABLED ad group: число активных ключей + RSA (D, эвристики claude-ads G03/copilot).
     GAQL НЕ умеет COUNT/GROUP BY → тянем строки и считаем в КОДЕ по ad_group.id (два запроса:
-    ad_group_criterion для ключей, ad_group_ad для RSA). Поля публичны (сверить на TEST MCC). READ-ONLY."""
+    keyword_view для ключей, ad_group_ad для RSA). Поля публичны (сверить на TEST MCC). READ-ONLY.
+
+    G03 accuracy note (Ф0, 2026-07-13): «свалку» считаем по ключам, которые РЕАЛЬНО КРУТИЛИСЬ —
+    `metrics.impressions > 0` за период (потому и нужен period: у ad_group_criterion метрик нет,
+    берём keyword_view) — и ДЕДУПИМ по тексту. Иначе спящий хвост и один ключ в трёх типах
+    соответствия раздували счётчик → ложные срабатывания adgroup_bloat."""
     ensure_read_allowed(customer_id)
     names: dict[str, tuple[str, str]] = {}  # ad_group_id → (campaign, ad_group)
-    kw: dict[str, int] = {}
+    kw_texts: dict[str, set[str]] = {}  # ad_group_id → уникальные нормализованные тексты ключей
     q_kw = (
-        "SELECT ad_group.id, ad_group.name, campaign.name FROM ad_group_criterion "
-        "WHERE ad_group_criterion.type = 'KEYWORD' AND ad_group_criterion.status != 'REMOVED' "
-        "AND ad_group.status = 'ENABLED' AND campaign.status = 'ENABLED'"
+        "SELECT ad_group.id, ad_group.name, campaign.name, ad_group_criterion.keyword.text "
+        f"FROM keyword_view WHERE {period.gaql_between()} "
+        "AND ad_group_criterion.status != 'REMOVED' AND ad_group.status = 'ENABLED' "
+        "AND campaign.status = 'ENABLED' AND metrics.impressions > 0"
     )
     for r in _search(client, customer_id, q_kw):
         agid = str(r.ad_group.id)
         names.setdefault(agid, (r.campaign.name, r.ad_group.name))
-        kw[agid] = kw.get(agid, 0) + 1
+        kw_texts.setdefault(agid, set()).add(
+            normalize_keyword_text(r.ad_group_criterion.keyword.text)
+        )
+    kw = {agid: len(texts) for agid, texts in kw_texts.items()}
     rsa: dict[str, int] = {}
     q_ad = (
         "SELECT ad_group.id, ad_group.name, campaign.name, ad_group_ad.ad.type "
@@ -588,25 +605,54 @@ def fetch_adgroup_structure(client, customer_id: str) -> list[AdGroupStructureRo
 @dataclass
 class NegativeListsInfo:
     count: int  # число ENABLED shared_set типа NEGATIVE_KEYWORDS в аккаунте
-    attached_campaigns: int  # сколько кампаний имеют привязанный негатив-список
+    attached_campaigns: int  # сколько кампаний имеют привязанный негатив-СПИСОК
+    campaign_level_count: int = 0  # G15: число минус-ключей, заданных ПРЯМО на кампании
+    # Имена кампаний с ЛЮБЫМИ минусами (список ИЛИ прямые минус-ключи). Пустой frozenset ≠ None:
+    # пустой = «прочитали, минусов нет»; None-поля тут не бывает (гейт на уровне ctx.negative_lists).
+    campaigns_with_negatives: frozenset[str] = frozenset()
 
 
 def fetch_negative_lists(client, customer_id: str) -> NegativeListsInfo:
-    """Списки минус-слов аккаунта (shared_set NEGATIVE_KEYWORDS) + их привязка к кампаниям (D, G14).
-    Нет списков вообще при активном keyword-трафике → красный флаг гигиены (движок аудита). member_count
-    НЕ селектим (в v24 сверить отдельно) — для сигнала достаточно факта наличия/привязки. READ-ONLY."""
+    """Минус-слова аккаунта: shared-списки (G14) + минусы ПРЯМО на кампании (G15) + карта покрытия
+    по кампаниям. Нет НИ ОДНОГО из двух при активном keyword-трафике → красный флаг гигиены.
+    member_count НЕ селектим (в v24 сверить отдельно) — для сигнала достаточно факта наличия.
+
+    G14/G15 accuracy note (Ф0, 2026-07-13): раньше смотрели ТОЛЬКО shared_set → аккаунт с минусами
+    на уровне кампаний (нормальная практика для одиночных кампаний) получал ложное «гигиены нет».
+    Карта `campaigns_with_negatives` нужна ещё и G17 (BROAD под Smart Bidding без минусов). READ-ONLY."""
     ensure_read_allowed(customer_id)
     q_sets = (
         "SELECT shared_set.id FROM shared_set "
         "WHERE shared_set.type = 'NEGATIVE_KEYWORDS' AND shared_set.status = 'ENABLED'"
     )
     count = sum(1 for _ in _search(client, customer_id, q_sets))
+    # Привязка списков к кампаниям. Тип фильтруем В КОДЕ (не в WHERE): у campaign_shared_set
+    # к кампании могут висеть и PLACEMENT_EXCLUSION-сеты — они минус-СЛОВАМИ не являются.
     q_att = (
-        "SELECT campaign_shared_set.campaign FROM campaign_shared_set "
+        "SELECT campaign.name, shared_set.type FROM campaign_shared_set "
         "WHERE campaign_shared_set.status = 'ENABLED'"
     )
-    attached = {str(r.campaign_shared_set.campaign) for r in _search(client, customer_id, q_att)}
-    return NegativeListsInfo(count=count, attached_campaigns=len(attached))
+    attached = {
+        r.campaign.name
+        for r in _search(client, customer_id, q_att)
+        if _enum_name(r.shared_set.type_) == "NEGATIVE_KEYWORDS"
+    }
+    # G15: минус-ключи прямо на кампании. `campaign_criterion.negative` фильтруем в КОДЕ — поле
+    # селектится всегда, а его фильтруемость в WHERE зависит от ресурса (не гадаем, читаем и считаем).
+    q_neg = (
+        "SELECT campaign.name, campaign_criterion.negative FROM campaign_criterion "
+        "WHERE campaign_criterion.type = 'KEYWORD' AND campaign_criterion.status != 'REMOVED'"
+    )
+    direct: dict[str, int] = {}
+    for r in _search(client, customer_id, q_neg):
+        if r.campaign_criterion.negative:
+            direct[r.campaign.name] = direct.get(r.campaign.name, 0) + 1
+    return NegativeListsInfo(
+        count=count,
+        attached_campaigns=len(attached),
+        campaign_level_count=sum(direct.values()),
+        campaigns_with_negatives=frozenset(attached | set(direct)),
+    )
 
 
 @dataclass

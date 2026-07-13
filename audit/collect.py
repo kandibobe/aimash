@@ -81,7 +81,7 @@ async def gather_audit(
         _safe(fetch_search_terms, client, cid, period, label="audit_search_terms"),
         _safe(fetch_ad_policy_health, client, cid, label="audit_ad_policy"),
         _safe(fetch_account_status, client, cid, label="audit_account_status"),
-        _safe(fetch_adgroup_structure, client, cid, label="audit_adgroup_structure"),
+        _safe(fetch_adgroup_structure, client, cid, period, label="audit_adgroup_structure"),
         _safe(fetch_negative_lists, client, cid, label="audit_negative_lists"),
         _safe(fetch_keyword_quality, client, cid, period, label="audit_keyword_quality"),
         _safe(fetch_geo_waste, client, cid, period, label="audit_geo_waste"),

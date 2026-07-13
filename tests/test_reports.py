@@ -186,6 +186,131 @@ def test_build_report_without_comparison():
     assert report.prev_totals is None
 
 
+# ── Ф0: анти-ложноположительные фетчеры аудита (claude-ads accuracy notes) ───────
+class _RoutedGA:
+    """search() отдаёт разные строки по ресурсу в FROM — фетчеры аудита делают 2-3 запроса.
+    Все запросы пишутся в `seen` (клиент), чтобы тест мог пинуть сам GAQL."""
+
+    def __init__(self, by_resource: dict, seen: list):
+        self._by = by_resource
+        self._seen = seen
+
+    def search(self, *, customer_id, query):
+        self._seen.append(query)
+        for resource, rows in self._by.items():
+            if (
+                f"FROM {resource}" in query
+            ):  # «FROM shared_set» НЕ матчит «FROM campaign_shared_set»
+                return list(rows)
+        return []
+
+
+class _RoutedClient:
+    def __init__(self, by_resource: dict):
+        self._by = by_resource
+        self.seen: list[str] = []
+
+    def get_service(self, name):
+        assert name == "GoogleAdsService"
+        return _RoutedGA(self._by, self.seen)
+
+
+def test_normalize_keyword_text_dedups_match_types_and_bmm():
+    """G03: один ключ в разных типах соответствия (и legacy BMM с «+») — ОДИН ключ, не три."""
+    variants = ("купить обувь", "+купить +обувь", "Купить  Обувь")
+    assert len({Q.normalize_keyword_text(t) for t in variants}) == 1
+    assert Q.normalize_keyword_text("кроссовки") != Q.normalize_keyword_text("купить обувь")
+
+
+def test_adgroup_structure_counts_unique_keyword_texts():
+    """G03 accuracy note: счётчик «свалки» = УНИКАЛЬНЫЕ тексты ключей, а не строки keyword_view.
+    Ключи БЕЗ показов отсекает сам GAQL (metrics.impressions > 0) — здесь пинуем дедуп."""
+    p = P.last_n_days(7, today=date(2026, 6, 25))
+
+    def kw(text):
+        return SimpleNamespace(
+            ad_group=SimpleNamespace(id=1, name="AG"),
+            campaign=SimpleNamespace(name="Main"),
+            ad_group_criterion=SimpleNamespace(keyword=SimpleNamespace(text=text)),
+        )
+
+    client = _RoutedClient(
+        {
+            "keyword_view": [
+                kw("купить обувь"),
+                kw("+купить +обувь"),
+                kw("Купить Обувь"),
+                kw("кроссовки"),
+            ],
+            "ad_group_ad": [
+                SimpleNamespace(
+                    ad_group=SimpleNamespace(id=1, name="AG"),
+                    campaign=SimpleNamespace(name="Main"),
+                    ad_group_ad=SimpleNamespace(
+                        ad=SimpleNamespace(type_=SimpleNamespace(name="RESPONSIVE_SEARCH_AD"))
+                    ),
+                )
+            ],
+        }
+    )
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        rows = Q.fetch_adgroup_structure(client, DRAFT_ACCOUNT_ID, p)
+    assert len(rows) == 1
+    assert rows[0].kw_count == 2  # не 4: три варианта одного ключа схлопнулись
+    assert rows[0].rsa_count == 1
+    # Спящий хвост отсекает сам GAQL: ключи берём из keyword_view (у ad_group_criterion метрик нет)
+    kw_q = next(q for q in client.seen if "FROM keyword_view" in q)
+    assert "metrics.impressions > 0" in kw_q and "ad_group.status = 'ENABLED'" in kw_q
+
+
+def test_negative_lists_sees_campaign_level_negatives():
+    """G14/G15: минусы ПРЯМО на кампании считаются наравне со shared-списком. Аккаунт без списков,
+    но с минусами на кампании → `campaign_level_count > 0` и кампания в карте покрытия."""
+    neg = SimpleNamespace(
+        campaign=SimpleNamespace(name="Main"),
+        campaign_criterion=SimpleNamespace(negative=True),
+    )
+    positive = SimpleNamespace(  # НЕ минус (обычный критерий) → в счёт не идёт
+        campaign=SimpleNamespace(name="Other"),
+        campaign_criterion=SimpleNamespace(negative=False),
+    )
+    client = _RoutedClient(
+        {
+            "shared_set": [],  # shared-списков нет вовсе
+            "campaign_shared_set": [],
+            "campaign_criterion": [neg, neg, positive],
+        }
+    )
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        info = Q.fetch_negative_lists(client, DRAFT_ACCOUNT_ID)
+    assert info.count == 0 and info.campaign_level_count == 2
+    assert info.campaigns_with_negatives == frozenset({"Main"})  # «Other» — не минус
+
+
+def test_negative_lists_ignores_non_keyword_shared_sets():
+    """Привязанный к кампании PLACEMENT_EXCLUSION-сет — НЕ минус-слова: в покрытие не идёт."""
+    client = _RoutedClient(
+        {
+            "shared_set": [SimpleNamespace(shared_set=SimpleNamespace(id=1))],
+            "campaign_shared_set": [
+                SimpleNamespace(
+                    campaign=SimpleNamespace(name="Main"),
+                    shared_set=SimpleNamespace(type_=SimpleNamespace(name="NEGATIVE_KEYWORDS")),
+                ),
+                SimpleNamespace(
+                    campaign=SimpleNamespace(name="Display"),
+                    shared_set=SimpleNamespace(type_=SimpleNamespace(name="PLACEMENT_EXCLUSION")),
+                ),
+            ],
+            "campaign_criterion": [],
+        }
+    )
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        info = Q.fetch_negative_lists(client, DRAFT_ACCOUNT_ID)
+    assert info.count == 1 and info.attached_campaigns == 1
+    assert info.campaigns_with_negatives == frozenset({"Main"})
+
+
 # ── .xlsx: структура и формат ────────────────────────────────────────────────────
 def test_xlsx_workbook_structure():
     from openpyxl import load_workbook

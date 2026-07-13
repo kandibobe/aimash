@@ -788,7 +788,13 @@ def test_check_registry_matches_engine_source():
 
 
 # ── N1.2: BROAD-ключи без Smart Bidding (семья bidding, прозой) ───────────────────────
-def _broad_fixture(strategy: str = "MANUAL_CPC", status: str = "ENABLED", cost: float = 100.0):
+def _broad_fixture(
+    strategy: str = "MANUAL_CPC",
+    status: str = "ENABLED",
+    cost: float = 100.0,
+    kw_text: str = "купить",
+    negative_lists=None,
+):
     totals = Metrics(impressions=3000, clicks=300, cost_micros=1_000_000_000, conversions=5)
     rows = [
         (
@@ -799,7 +805,7 @@ def _broad_fixture(strategy: str = "MANUAL_CPC", status: str = "ENABLED", cost: 
     ]
     kw = [
         (
-            ("Brand", "grp", "купить", "BROAD"),
+            ("Brand", "grp", kw_text, "BROAD"),
             Metrics(impressions=100, clicks=10, cost_micros=int(cost * 1_000_000), conversions=1),
         ),
         (
@@ -808,7 +814,19 @@ def _broad_fixture(strategy: str = "MANUAL_CPC", status: str = "ENABLED", cost: 
         ),
     ]
     bidding = [SimpleNamespace(name="Brand", strategy_type=strategy, target_cpa=None)]
-    return build_audit(_report(totals, rows, keyword_rows=kw), bidding=bidding)
+    return build_audit(
+        _report(totals, rows, keyword_rows=kw), bidding=bidding, negative_lists=negative_lists
+    )
+
+
+def _neg(*campaigns: str):
+    """Стаб NegativeListsInfo с картой покрытия (пустой = минусов нет ни у кого)."""
+    return SimpleNamespace(
+        count=1 if campaigns else 0,
+        attached_campaigns=len(campaigns),
+        campaign_level_count=0,
+        campaigns_with_negatives=frozenset(campaigns),
+    )
 
 
 def test_broad_unmanaged_fires_on_manual_bidding_only_prose():
@@ -826,7 +844,7 @@ def test_broad_unmanaged_fires_on_manual_bidding_only_prose():
 
 
 def test_broad_unmanaged_silent_without_data_or_smart_or_paused():
-    # Smart Bidding → молчит (broad под конверсионным сигналом легитимен)
+    # Smart Bidding + нет данных о минусах → молчит (fail-safe; см. smart-ветку ниже по файлу)
     assert not any(
         f.check_id == "broad_unmanaged" for f in _broad_fixture("MAXIMIZE_CONVERSIONS").findings
     )
@@ -846,6 +864,75 @@ def test_broad_unmanaged_silent_without_data_or_smart_or_paused():
     ]
     res = build_audit(_report(totals, [_campaign("Brand", 500, 100, 3)], keyword_rows=kw))
     assert not any(f.check_id == "broad_unmanaged" for f in res.findings)
+
+
+# ── Ф0 / G17 accuracy note: legacy BMM + вторая половина правила ──────────────────────
+def test_broad_unmanaged_skips_legacy_bmm():
+    """Legacy BMM («+купить +обувь») API отдаёт как match_type=BROAD, но ведёт себя ФРАЗОВО — это
+    не «неуправляемое широкое», флажить нельзя даже при Manual CPC (ложный позитив)."""
+    assert not any(
+        f.check_id == "broad_unmanaged"
+        for f in _broad_fixture("MANUAL_CPC", kw_text="+купить +обувь").findings
+    )
+    # …а настоящий BROAD в той же конфигурации — флажим. Приписку claude-ads «не флажить ВЕСЬ
+    # BROAD+Manual CPC» не берём: её посылка («Google срезал +») неверна — «+» в тексте остался,
+    # BMM отличим точно. Слепо следуя приписке, мы бы молча погасили реальный слив.
+    assert any(f.check_id == "broad_unmanaged" for f in _broad_fixture("MANUAL_CPC").findings)
+
+
+def test_broad_unmanaged_fires_on_smart_bidding_without_any_negatives():
+    """Вторая половина G17: BROAD под Smart Bidding легитимен ТОЛЬКО если есть чем отсекать мусор.
+    Ни одного минус-слова у кампании → флаг reason=no_negatives (раньше не ловилось вовсе)."""
+    res = _broad_fixture("MAXIMIZE_CONVERSIONS", negative_lists=_neg())
+    f = next(f for f in res.findings if f.check_id == "broad_unmanaged")
+    assert (
+        f.facts["reason"] == "no_negatives" and f.facts["strategy_type"] == "MAXIMIZE_CONVERSIONS"
+    )
+    assert f.at_risk == 0.0 and f.one_tap is False  # риск конфигурации; курация — не one-tap
+
+
+def test_broad_unmanaged_smart_silent_when_negatives_exist_or_unknown():
+    # минусы у кампании есть → BROAD под Smart Bidding легитимен, молчим
+    assert not any(
+        f.check_id == "broad_unmanaged"
+        for f in _broad_fixture("MAXIMIZE_CONVERSIONS", negative_lists=_neg("Brand")).findings
+    )
+    # карта минусов не прочитана (стаб без поля) → smart-ветка молчит (fail-safe, не гадаем)
+    stub = SimpleNamespace(count=0, attached_campaigns=0)
+    assert not any(
+        f.check_id == "broad_unmanaged"
+        for f in _broad_fixture("MAXIMIZE_CONVERSIONS", negative_lists=stub).findings
+    )
+    # ручная стратегия при этом флажится и без данных о минусах (ветка от них не зависит)
+    assert any(
+        f.check_id == "broad_unmanaged"
+        for f in _broad_fixture("MANUAL_CPC", negative_lists=stub).findings
+    )
+
+
+def test_no_negative_list_silent_with_campaign_level_negatives():
+    """G14/G15: минусы ПРЯМО на кампании — тоже гигиена. Аккаунт без shared-списков, но с прямыми
+    минусами → молчим (раньше выдавали ложное «в аккаунте нет минус-слов»)."""
+    totals = Metrics(impressions=3000, clicks=300, cost_micros=1_000_000_000, conversions=5)
+    rows = [_campaign("Main", 1000, 300, 5)]
+    direct = SimpleNamespace(
+        count=0,
+        attached_campaigns=0,
+        campaign_level_count=7,
+        campaigns_with_negatives=frozenset({"Main"}),
+    )
+    assert not any(
+        f.check_id == "no_negative_list"
+        for f in build_audit(_report(totals, rows), negative_lists=direct).findings
+    )
+    # ни списков, ни прямых минусов → флаг остаётся
+    empty = SimpleNamespace(
+        count=0, attached_campaigns=0, campaign_level_count=0, campaigns_with_negatives=frozenset()
+    )
+    assert any(
+        f.check_id == "no_negative_list"
+        for f in build_audit(_report(totals, rows), negative_lists=empty).findings
+    )
 
 
 def test_is_rows_all_proto3_zero_marked_as_data_gap():

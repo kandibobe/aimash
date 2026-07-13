@@ -155,6 +155,10 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
     if f.check_id == "broad_unmanaged":
         n = fa.get("kw_count", 0)
         strat = fa.get("strategy_type", "")
+        if fa.get("reason") == "no_negatives":  # Smart Bidding есть, минус-слов нет ни одного
+            if lang == "en":
+                return f"«{camp}»: {n} broad-match keywords spent {_money(fa.get('cost', 0), cur)} under Smart Bidding ({strat}) with no negative keywords at all — the algorithm has nothing to cut junk with; add a negative list."
+            return f"«{camp}»: {n} BROAD-ключей на {_money(fa.get('cost', 0), cur)} под Smart Bidding ({strat}), но у кампании нет ни одного минус-слова — алгоритму нечем отсекать мусор; заведи список минус-слов."
         if lang == "en":
             return f"«{camp}»: {n} broad-match keywords spent {_money(fa.get('cost', 0), cur)} on {strat} without Smart Bidding — tighten match types or add negatives (needs curation)."
         return f"«{camp}»: {n} BROAD-ключей на {_money(fa.get('cost', 0), cur)} при стратегии {strat} без Smart Bidding — сузь типы соответствия или добавь минус-слова (нужна курация)."
@@ -186,8 +190,8 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
         return f"{n} групп с числом активных RSA меньше {fa.get('need', 2)} (худшая «{fa.get('worst_group', '')}»: {fa.get('worst_rsa', 0)}) — добавь адаптивные поисковые объявления."
     if f.check_id == "no_negative_list":
         if lang == "en":
-            return "No shared negative-keyword lists in the account — basic hygiene missing; add themed lists (competitor/jobs/free/irrelevant) to cut wasted traffic."
-        return "В аккаунте нет ни одного списка минус-слов — базовая гигиена не настроена; заведи тематические списки (конкуренты/работа/бесплатно/нерелевантное), чтобы отсечь мусорный трафик."
+            return "No negative keywords in the account at all — neither shared lists nor campaign-level ones; basic hygiene missing. Add themed lists (competitor/jobs/free/irrelevant) to cut wasted traffic."
+        return "В аккаунте нет минус-слов вообще — ни списков, ни заданных прямо на кампаниях; базовая гигиена не настроена. Заведи тематические списки (конкуренты/работа/бесплатно/нерелевантное), чтобы отсечь мусорный трафик."
     if f.check_id == "qs_low":
         if lang == "en":
             return f"{fa.get('count', 0)} paying keyword(s) with Quality Score ≤ {fa.get('qs_fail', 4)} (worst «{fa.get('worst_kw', '')}»: {fa.get('worst_qs', 0)}) — fix relevance/CTR/landing page or drop them."
