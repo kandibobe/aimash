@@ -5418,12 +5418,19 @@ async def _audit_run(
             )
             for f in findings
         ]
-        await advisor_store.record_recommendations(chat_id, acct, recs, source="audit")
+        # Персист — best-effort: сбой ЛОКАЛЬНОЙ БД не должен съедать находки (диагноз важнее кнопок).
+        # Без rec_uid нет 👍/👎/«применить» — показываем находки голым текстом, а не роняем /audit.
+        try:
+            await advisor_store.record_recommendations(chat_id, acct, recs, source="audit")
+        except Exception as e:  # noqa: BLE001
+            log.warning("персист находок /audit не удался: %s", type(e).__name__)
         for f, r in zip(findings, recs):
             apply_op = f.suggested_operation if f.suggested_operation in _ADVISE_APPLY_OPS else None
             await target.answer(
                 r.body,
-                reply_markup=advise_feedback_kb(r.rec_uid, lang, apply_op=apply_op),
+                reply_markup=(
+                    advise_feedback_kb(r.rec_uid, lang, apply_op=apply_op) if r.rec_uid else None
+                ),
                 parse_mode=None,
             )
     # C10 onboarding: есть дорогая кампания (high_cpa), но цель не задана → 3×-Kill молчит и бот НЕ

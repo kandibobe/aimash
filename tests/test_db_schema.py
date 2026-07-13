@@ -56,12 +56,42 @@ def test_every_migration_has_real_downgrade():
     assert not bad, f"миграции без реального downgrade: {bad}"
 
 
-def test_single_alembic_head_is_0022():
+def test_single_alembic_head_is_0023():
     revs = _revisions()
     assert revs, "не найдено ни одной миграции — сломан парс migrations/versions"
     downs = {d for d in revs.values() if d}
     heads = [r for r in revs if r not in downs]
-    assert heads == ["0022_account_health_snapshot"], (
-        f"ожидался ровно один head=0022_account_health_snapshot, получено {heads} — "
+    assert heads == ["0023_recommendation_topic_width"], (
+        f"ожидался ровно один head=0023_recommendation_topic_width, получено {heads} — "
         "ветвление/забытый down_revision в migrations/versions"
+    )
+
+
+def test_recommendation_columns_fit_audit_taxonomy():
+    """/audit персистит находки в recommendation: topic=СЕМЬЯ чека, kind=check_id, severity.
+    На Postgres VARCHAR — ЖЁСТКОЕ ограничение (22001 StringDataRightTruncation), на dev-SQLite
+    длина не проверяется вовсе ⇒ переполнение всплывает только в проде. Этот гард ловит его в CI.
+
+    Класс бага, который он закрывает (0023): семья 'conversion_tracking' (19) не влезала в
+    topic VARCHAR(16) → /audit падал после карточки score на аккаунтах без трекинга конверсий.
+    Добавишь семью/чек длиннее колонки — тест упадёт здесь, а не у клиента."""
+    from audit.engine import CHECK_REGISTRY
+    from audit.thresholds import FAMILY_WEIGHT
+
+    cols = Base.metadata.tables["recommendation"].c
+    limits = {name: cols[name].type.length for name in ("topic", "kind", "severity")}
+
+    too_long = [
+        (col, value, len(value), limits[col])
+        for col, values in (
+            ("topic", set(FAMILY_WEIGHT) | {f for f, _s in CHECK_REGISTRY.values()}),
+            ("kind", set(CHECK_REGISTRY)),
+            ("severity", {s for _f, s in CHECK_REGISTRY.values()}),
+        )
+        for value in values
+        if len(value) > limits[col]
+    ]
+    assert not too_long, (
+        "значения таксономии аудита не влезают в колонки recommendation "
+        f"(col, value, len, limit): {sorted(too_long)} — на Postgres это уронит /audit"
     )

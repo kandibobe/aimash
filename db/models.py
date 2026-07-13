@@ -415,10 +415,11 @@ class Recommendation(Base):
     rec_uid: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
     chat_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
     customer_id: Mapped[str] = mapped_column(String(20), nullable=False)
-    topic: Mapped[str] = mapped_column(
-        String(16), nullable=False
-    )  # optimize|keywords|rsa|structure
-    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    # /advise: optimize|keywords|rsa|structure; /audit: СЕМЬЯ чека (audit.thresholds.FAMILY_WEIGHT,
+    # самая длинная — 'conversion_tracking', 19). Ширина 16 роняла /audit на Postgres (тихо на SQLite);
+    # гард — tests/test_db_schema.test_recommendation_columns_fit_audit_taxonomy.
+    topic: Mapped[str] = mapped_column(String(32), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)  # /audit: audit.engine check_id
     severity: Mapped[str] = mapped_column(String(16), nullable=False)  # warning|info
     target_campaign: Mapped[str | None] = mapped_column(String(255))
     # advisory-метка (для outcome-связывания), НЕ путь исполнения — мутация только через confirm-гейт.
