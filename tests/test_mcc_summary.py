@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ads.read import ChildAccount  # noqa: E402
 from core.config import settings  # noqa: E402
-from reports.mcc import ChildReport, aggregate_by_currency, build_mcc_summary  # noqa: E402
+from reports.mcc import ChildReport, aggregate_by_currency, build_mcc_summary_async  # noqa: E402
 from reports.queries import Metrics  # noqa: E402
 
 
@@ -73,7 +73,7 @@ def test_currencies_never_summed_across():
     assert all(s.accounts == 1 for s in subs)
 
 
-def test_build_mcc_summary_skips_managers_and_non_read_allowed():
+async def test_build_mcc_summary_skips_managers_and_non_read_allowed():
     DRAFT = "7753643025"
     CHILD_OK = "1112223334"
     CHILD_BLOCKED = "9998887776"
@@ -92,7 +92,7 @@ def test_build_mcc_summary_skips_managers_and_non_read_allowed():
         return _m(cost_micros=1_000_000, clicks=10)
 
     with _ids(allowed=DRAFT, read=CHILD_OK):
-        summary = build_mcc_summary(
+        summary = await build_mcc_summary_async(
             object(), MGR, object(), list_children=fake_list, fetch=fake_fetch
         )
 
@@ -104,14 +104,14 @@ def test_build_mcc_summary_skips_managers_and_non_read_allowed():
     assert by_cur["EUR"].accounts == 1  # CHILD_OK
 
 
-def test_build_mcc_summary_empty_read_list_includes_only_mutation_account():
+async def test_build_mcc_summary_empty_read_list_includes_only_mutation_account():
     # read-list пуст → читаем ТОЛЬКО мутационный аккаунт (поведение по умолчанию, fail-closed).
     DRAFT = "7753643025"
     CHILD = "1112223334"
     children = [_child(DRAFT, "USD"), _child(CHILD, "EUR")]
 
     with _ids(allowed=DRAFT, read=""):
-        summary = build_mcc_summary(
+        summary = await build_mcc_summary_async(
             object(),
             "5556667778",
             object(),

@@ -117,7 +117,13 @@ class Proposal(Base):
     # (scheduler.cleanup_stale_proposals: WHERE status='pending', возраст по created_at). Создаётся
     # миграцией 0003; объявлен и здесь, чтобы create_all (dev/SQLite) и Alembic autogenerate
     # (env.py compare_type=True) НЕ дрейфовали — иначе autogenerate предложил бы DROP этого индекса.
-    __table_args__ = (Index("ix_proposals_status_created_at", "status", "created_at"),)
+    # Композитный индекс (chat_id, status) — история чата (db.history.list_recent_applied:
+    # WHERE chat_id=? AND status='applied' ORDER BY id DESC). По (status, created_at) Postgres
+    # сканировал ВСЕ applied-строки всех чатов; таблица растёт с каждой мутацией. Миграция 0027.
+    __table_args__ = (
+        Index("ix_proposals_status_created_at", "status", "created_at"),
+        Index("ix_proposals_chat_status", "chat_id", "status"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     confirmation_id: Mapped[str] = mapped_column(

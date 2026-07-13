@@ -83,42 +83,6 @@ def aggregate_by_currency(children: list[ChildReport]) -> list[CurrencySubtotal]
     return sorted(by_cur.values(), key=lambda s: s.totals.cost_micros, reverse=True)
 
 
-def build_mcc_summary(
-    client,
-    manager_id: str,
-    period: Period,
-    *,
-    list_children=list_child_accounts,
-    fetch=fetch_totals,
-) -> MccSummary:
-    """Сводка по дочерним MCC. READ-ONLY. `list_children`/`fetch` инъектируются для тестов
-    (по умолчанию — реальные `list_child_accounts`/`fetch_totals`).
-
-    Поток: `list_children` держит замок обхода MCC (`ensure_manager_allowed`). Каждый лист-аккаунт
-    проходит `ensure_read_allowed` — НЕ в read-list ⇒ пропуск (fail-closed, в `skipped`), а не падение
-    всей сводки. Менеджерские строки (свой MCC/суб-MCC) пропускаем — у них нет собственных метрик.
-
-    Замечание по производительности: дочерние читаются ПОСЛЕДОВАТЕЛЬНО (N round-trip). Для большого
-    MCC можно распараллелить через `core.resilience.run_ads_read_call` под семафором — отдельный шаг.
-    """
-    summary = MccSummary(manager_id=str(manager_id), period=period)
-    for ch in list_children(client, manager_id):
-        if ch.manager:
-            summary.managers.append(ch.id)
-            continue
-        try:
-            ensure_read_allowed(ch.id)
-        except PermissionError:
-            summary.skipped.append(ch.id)  # вне read-list — честно отмечаем, не читаем
-            continue
-        if not _is_active(ch):
-            summary.inactive.append(ch)  # CANCELED/SUSPENDED/… — не метрику, не «ошибка»
-            continue
-        summary.children.append(ChildReport(account=ch, totals=fetch(client, ch.id, period)))
-    summary.subtotals = aggregate_by_currency(summary.children)
-    return summary
-
-
 @dataclass
 class MccDeep:
     """2.2 (аудит 2026-07-06): ГЛУБОКИЙ отчёт по всем дочерним MCC — ReportData (§9-разбивки)
@@ -207,9 +171,10 @@ async def build_mcc_summary_async(
     tz_of=None,
     period_for=None,
 ) -> MccSummary:
-    """Async-сводка по дочерним MCC — ИДЕНТИЧНА build_mcc_summary по данным, но дочерние читаются
-    ПАРАЛЛЕЛЬНО (а не N round-trip подряд). Для ~10 аккаунтов: ceil(N/ADS_MAX_CONCURRENCY) волн
-    вместо N последовательных. READ-ONLY; `list_children`/`fetch` инъектируются для тестов.
+    """Сводка по дочерним MCC (ЕДИНСТВЕННАЯ; синхронный близнец удалён — он не вызывался ниоткуда,
+    а инварианты пропусков тестировались ТОЛЬКО на нём). Дочерние читаются ПАРАЛЛЕЛЬНО (а не N
+    round-trip подряд): для ~10 аккаунтов — ceil(N/ADS_MAX_CONCURRENCY) волн вместо N
+    последовательных. READ-ONLY; `list_children`/`fetch` инъектируются для тестов.
 
     §8-нормализация таймзон (опц.): если переданы `tz_of(client, cid) -> tz` и
     `period_for(tz) -> Period`, окно каждого дочернего строится в ЕГО таймзоне (чтобы не смешивать
@@ -220,7 +185,7 @@ async def build_mcc_summary_async(
     (сеть/SDK/таймаут) НЕ роняет всю сводку, а попадает в `summary.errors` (редактированно, без
     секретов; §5). Замок обхода (ensure_manager_allowed) держит list_children; per-account замок
     чтения — ensure_read_allowed (не в read-list ⇒ skipped, fail-closed). Менеджерские строки
-    пропускаем (нет собственных метрик). Синхронный build_mcc_summary оставлен для тестов/не-async."""
+    пропускаем (нет собственных метрик)."""
     summary = MccSummary(manager_id=str(manager_id), period=period)
     children = await run_ads_read_call(list_children, client, manager_id, label="mcc_children")
     eligible: list[ChildAccount] = []

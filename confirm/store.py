@@ -23,7 +23,7 @@ from sqlalchemy import CursorResult, func, select, update
 
 from core.logging import log, redact_text
 from db.models import AuditLog, Proposal
-from db.session import Session
+from db.session import Session, db_dt
 
 # Потолок размера JSON результата в audit_log.result (защита от раздувания: некоторые мутации
 # возвращают длинные списки resource_name'ов — add_keywords во многих группах и т.п.). Зеркалит
@@ -440,24 +440,27 @@ async def list_recent_audit(limit: int = 15) -> list[AuditEvent]:
 async def audit_activity_since(days: int) -> dict:
     """Сводка активности за последние `days` дней (для еженедельного дайджеста, §6/§15): счётчики
     строк audit_log по статусам + число созданных кампаний (applied create_*_campaign). Read-only,
-    секретов нет. Фильтр по created_at — в Python (наивный/tz-aware на SQLite), как _load_error_events."""
+    секретов нет.
+
+    Окно режется в SQL (db.db_dt приводит границу к диалекту: наивный UTC на SQLite, tz-aware на
+    Postgres). Раньше фильтр был в Python — и дайджест тянул в память ВЕСЬ audit_log, который растёт
+    с каждой мутацией: на живом аккаунте это единственный запрос без границы."""
     from datetime import timedelta, timezone
 
     start = datetime.now(timezone.utc) - timedelta(days=int(days))
     async with Session() as s:
         rows = list(
             (
-                await s.execute(select(AuditLog.status, AuditLog.operation, AuditLog.created_at))
+                await s.execute(
+                    select(AuditLog.status, AuditLog.operation).where(
+                        AuditLog.created_at >= db_dt(start)
+                    )
+                )
             ).all()
         )
     statuses: dict[str, int] = {}
     created_campaigns = 0
-    for status, operation, created_at in rows:
-        dt = created_at
-        if dt is not None and dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        if dt is None or dt < start:
-            continue
+    for status, operation in rows:
         statuses[status] = statuses.get(status, 0) + 1
         if (
             status == "applied"

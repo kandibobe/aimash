@@ -56,15 +56,23 @@ def test_every_migration_has_real_downgrade():
     assert not bad, f"миграции без реального downgrade: {bad}"
 
 
-def test_single_alembic_head_is_0025():
+def test_single_alembic_head():
+    """Ровно ОДИН head — иначе `alembic upgrade head` на старте прода падает («multiple heads»).
+
+    Номер head'а НЕ пиннится: раньше здесь стояло `heads == ["0025_sheet_exports"]`, и тест краснел
+    от каждой новой миграции (0026 приехала — CI лёг), хотя ветвления не было. Пин версии — не
+    инвариант, а напоминание правкой файла; инвариант — единственность головы и связность цепочки."""
     revs = _revisions()
     assert revs, "не найдено ни одной миграции — сломан парс migrations/versions"
     downs = {d for d in revs.values() if d}
     heads = [r for r in revs if r not in downs]
-    assert heads == ["0025_sheet_exports"], (
-        f"ожидался ровно один head=0025_sheet_exports, получено {heads} — "
+    assert len(heads) == 1, (
+        f"ожидался ровно один head, получено {sorted(heads)} — "
         "ветвление/забытый down_revision в migrations/versions"
     )
+    # цепочка связна: down_revision каждой миграции существует (кроме корня с None)
+    missing = sorted(d for d in downs if d not in revs)
+    assert not missing, f"down_revision указывает на несуществующие ревизии: {missing}"
 
 
 def test_recommendation_columns_fit_audit_taxonomy():

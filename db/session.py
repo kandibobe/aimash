@@ -6,6 +6,8 @@ DATABASE_URL берётся из .env (dev: sqlite+aiosqlite:///aimash.db). init
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from sqlalchemy import inspect as sa_inspect, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -38,6 +40,20 @@ else:
 
 engine = create_async_engine(_db_url, **_engine_kwargs)
 Session = async_sessionmaker(engine, expire_on_commit=False)
+
+
+def db_dt(dt: datetime) -> datetime:
+    """Привести момент времени к тому виду, в каком created_at ЛЕЖИТ в этой БД, — чтобы окно можно
+    было отфильтровать в SQL, а не тянуть таблицу в Python.
+
+    SQLite (dev/test) кладёт наивный UTC (server_default=CURRENT_TIMESTAMP), Postgres — tz-aware
+    (timestamptz). Сравнение naive-колонки с tz-aware границей на SQLite молча даёт мусор, поэтому
+    исторически весь фильтр делался в Python — ценой полного скана (audit_activity_since тянул ВЕСЬ
+    audit_log на каждый недельный дайджест). Здесь граница окна приводится к диалекту — один вызов
+    вместо скана."""
+    if engine.dialect.name == "sqlite":
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 async def dispose_engine() -> None:

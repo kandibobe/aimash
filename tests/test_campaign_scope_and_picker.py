@@ -13,7 +13,7 @@ from ads.read import ChildAccount  # noqa: E402
 from core.config import settings  # noqa: E402
 from reports import period as P  # noqa: E402
 from reports import queries as Q  # noqa: E402
-from reports.mcc import build_mcc_summary  # noqa: E402
+from reports.mcc import build_mcc_summary_async  # noqa: E402
 from reports.queries import Metrics  # noqa: E402
 
 
@@ -94,7 +94,7 @@ def _child(cid: str, status: str = "ENABLED", manager: bool = False) -> ChildAcc
     )
 
 
-def test_inactive_child_goes_to_inactive_bucket_not_errors():
+async def test_inactive_child_goes_to_inactive_bucket_not_errors():
     active, canceled = "1112223334", "2223334445"
     children = [_child(active, "ENABLED"), _child(canceled, "CANCELED")]
     fetched: list[str] = []
@@ -104,7 +104,7 @@ def test_inactive_child_goes_to_inactive_bucket_not_errors():
         return Metrics(cost_micros=1_000_000, clicks=10)
 
     with _ids(allowed=DRAFT, read=f"{active},{canceled}"):
-        summary = build_mcc_summary(
+        summary = await build_mcc_summary_async(
             object(),
             "5556667778",
             P.last_n_days(7),
