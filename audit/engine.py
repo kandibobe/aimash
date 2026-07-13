@@ -1785,6 +1785,114 @@ def check_top_is_rank_lost(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     ]
 
 
+def check_competitive_pressure(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф5а: КОНКУРЕНЦИЯ — суррогат по данным аукциона. Имён конкурентов Google через API не отдаёт
+    (ресурса auction_insight нет, программа доступа закрыта), поэтому имена — только импортом CSV
+    (/competitors). Зато САМО давление аукциона видно и без имён, и это цифра, а не мнение:
+
+      «ты берёшь 18% показов, 47% отдаёшь из-за РАНГА и 12% из-за БЮДЖЕТА; наверху страницы — 22%;
+       по 9 из 14 платящих ключей твоя ставка ниже оценки верха от Google.»
+
+    Считаем ПО АККАУНТУ, взвешивая доли по показам кампании (кампания на 100 показов не должна тянуть
+    картину так же, как кампания на 100 000). Берём только кампании с ПОЛНЫМИ данными (Σ долей ≈ 1.0):
+    proto3-zero неотличим от истинного нуля, и «не прочитано» тут стало бы «конкурентов нет» (GR8).
+
+    🔒 Балл не трогаем (score_intensity=0, семья competition ВНЕ FAMILY_WEIGHT): конкретные дефекты —
+    потерю по рангу и по бюджету — уже штрафуют is_rank_constrained / is_budget_constrained / is_lost_
+    revenue. Штрафовать ещё и агрегатом = посчитать одну и ту же болезнь дважды. Это карточка-диагноз.
+
+    Молчим, пока показов меньше порога (аукцион на сотне показов — не рынок) и пока давление не
+    доказано: доля показов ниже потолка И потеря по рангу выше порога. Иначе здоровый аккаунт получал
+    бы находку просто за то, что он в аукционе не один."""
+    rows = ctx.is_rows or []
+    if not rows:
+        return []
+    tol = float(thr.get("is_data_tolerance", 0.02))
+    m_by_name = {name: m for (name, _st), m in _campaign_rows(report)}
+    pts: list[tuple[float, float, float, float]] = []  # (search_is, budget_lost, rank_lost, показы)
+    for r in rows:
+        if getattr(r, "channel_type", "SEARCH") not in ("SEARCH", "SHOPPING"):
+            continue
+        s = float(getattr(r, "search_is", 0.0) or 0.0)
+        b = float(getattr(r, "budget_lost_is", 0.0) or 0.0)
+        rk = float(getattr(r, "rank_lost_is", 0.0) or 0.0)
+        if not (1.0 - tol <= s + b + rk <= 1.0 + tol):
+            continue  # доли не сходятся → данных нет, не выдумываем
+        m = m_by_name.get(getattr(r, "campaign_name", ""))
+        imp = float(getattr(m, "impressions", 0) or 0) if m else 0.0
+        if imp > 0:
+            pts.append((s, b, rk, imp))
+    total_imp = sum(p[3] for p in pts)
+    if total_imp < float(thr.get("comp_min_impressions", 500.0)):
+        return []
+    share = sum(p[0] * p[3] for p in pts) / total_imp
+    budget_lost = sum(p[1] * p[3] for p in pts) / total_imp
+    rank_lost = sum(p[2] * p[3] for p in pts) / total_imp
+    if not (
+        share < float(thr.get("comp_is_max", 0.60))
+        and rank_lost >= float(thr.get("comp_rank_min", 0.20))
+    ):
+        return []  # давление не доказано: либо забираешь своё, либо теряешь не в аукционе, а по бюджету
+
+    facts: dict = {
+        "share": round(share * 100),
+        "rank_lost": round(rank_lost * 100),
+        "budget_lost": round(budget_lost * 100),
+        "campaigns": len(pts),
+        "currency": getattr(report, "currency", ""),
+        # Кто виноват в потере: ранг (ставка × качество) или бюджет. Совет из этого разный.
+        "verdict": "rank" if rank_lost >= budget_lost else "budget",
+    }
+    # Верх страницы + «рынок просит больше, чем ты ставишь» — по НАШИМ же ключам (bid_landscape).
+    # Оценка top_of_page_cpc от Google уже в правильном гео/языке аккаунта — в отличие от коридора
+    # Keyword Planner, где гео пришлось бы угадывать (угаданный «рынок» = уверенно неверное число).
+    kws = [
+        r
+        for r in (ctx.bid_landscape or [])
+        if float(getattr(getattr(r, "metrics", None), "impressions", 0) or 0) > 0
+    ]
+    tops = [
+        (float(getattr(r, "top_is", 0.0) or 0.0), float(getattr(r.metrics, "impressions", 0) or 0))
+        for r in kws
+    ]
+    if any(
+        v > 0 for v, _ in tops
+    ):  # все нули = доли верха не прочитаны (деградация фетчера), молчим
+        w = sum(imp for _, imp in tops)
+        facts["top_is"] = round(sum(v * imp for v, imp in tops) / w * 100) if w > 0 else 0
+    floor = float(thr.get("kw_min_spend", 3.0))
+    paying = [r for r in kws if float(getattr(r.metrics, "cost", 0.0) or 0.0) >= floor]
+    under = [
+        r
+        for r in paying
+        if 0.0
+        < float(getattr(r, "bid", 0.0) or 0.0)
+        < float(getattr(r, "top_of_page_cpc", 0.0) or 0.0)
+    ]
+    if paying:
+        facts["underbid"] = len(under)
+        facts["paying"] = len(paying)
+    return [
+        Finding(
+            check_id="competitive_pressure",
+            family="competition",
+            severity="info",
+            at_risk=0.0,
+            spend_segment=None,
+            target_campaign=None,
+            suggested_operation=None,
+            facts=facts,
+            evidence={
+                "search_is": round(share, 4),
+                "rank_lost_is": round(rank_lost, 4),
+                "budget_lost_is": round(budget_lost, 4),
+                "impressions": int(total_imp),
+            },
+            score_intensity=0.0,  # диагноз, не дефект: рангом/бюджетом уже штрафуют другие чеки
+        )
+    ]
+
+
 def check_sim_bid_upside(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     """Ф1: симулятор Google по КЛЮЧУ — «подними ставку до X → +N конверсий за +$C». Цифры даёт сам
     Google (ad_group_criterion_simulation, CPC_BID/UNIFORM), мы лишь идём по его точкам маржинальным
@@ -2001,6 +2109,7 @@ _CHECKS = (
     check_bid_below_first_page,
     check_bid_below_top_of_page,
     check_top_is_rank_lost,
+    check_competitive_pressure,
     check_sim_bid_upside,
     check_sim_budget_upside,
     check_google_recommendations,
@@ -2055,6 +2164,9 @@ CHECK_REGISTRY: dict[str, tuple[str, str]] = {
     "bid_below_first_page": ("bidding", "warning"),
     "bid_below_top_of_page": ("bidding", "info"),
     "top_is_rank_lost": ("bidding", "info"),
+    # Ф5а: семья «competition» НАМЕРЕННО вне FAMILY_WEIGHT (вес 0) — потерю по рангу/бюджету уже
+    # штрафуют is_rank_constrained/is_budget_constrained/is_lost_revenue. Агрегат — карточка-диагноз.
+    "competitive_pressure": ("competition", "info"),
     "sim_bid_upside": ("bidding", "info"),
     "sim_budget_upside": ("budget", "info"),
     # Ф2: семья «recommendations» НАМЕРЕННО отсутствует в FAMILY_WEIGHT (вес 0) — мнение Google

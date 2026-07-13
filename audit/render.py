@@ -330,6 +330,38 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
         if lang == "en":
             return f"{fa.get('count', 0)} paying keyword(s) lose top slots to RANK (worst «{fa.get('worst_kw', '')}»: {fa.get('worst_share', 0)}%, {_money(fa.get('cost', 0), cur)} spent) — rank = bid × quality: raise the bid or fix Quality Score."
         return f"{fa.get('count', 0)} платящих ключей теряют верхние позиции из-за РАНГА (худший «{fa.get('worst_kw', '')}»: {fa.get('worst_share', 0)}%, расход {_money(fa.get('cost', 0), cur)}) — ранг = ставка × качество: подними ставку или почини Quality Score."
+    if f.check_id == "competitive_pressure":
+        # Имён конкурентов тут нет и быть не может (Google не отдаёт их через API) — только цифры
+        # аукциона. Имена даёт импорт CSV Auction Insights (/competitors), и мы честно об этом говорим.
+        parts_ru = [
+            f"Аукцион: ты берёшь {fa.get('share', 0)}% показов, {fa.get('rank_lost', 0)}% отдаёшь из-за РАНГА и {fa.get('budget_lost', 0)}% из-за БЮДЖЕТА (по {fa.get('campaigns', 0)} кампаниям)."
+        ]
+        parts_en = [
+            f"Auction: you take {fa.get('share', 0)}% of impressions, lose {fa.get('rank_lost', 0)}% to RANK and {fa.get('budget_lost', 0)}% to BUDGET (across {fa.get('campaigns', 0)} campaigns)."
+        ]
+        if "top_is" in fa:
+            parts_ru.append(f"Наверху страницы — {fa['top_is']}% показов.")
+            parts_en.append(f"Top of page: {fa['top_is']}% of impressions.")
+        if fa.get("paying"):
+            parts_ru.append(
+                f"По {fa.get('underbid', 0)} из {fa['paying']} платящих ключей твоя ставка ниже оценки верха страницы от Google."
+            )
+            parts_en.append(
+                f"On {fa.get('underbid', 0)} of {fa['paying']} paying keywords your bid is below Google's top-of-page estimate."
+            )
+        if fa.get("verdict") == "rank":
+            parts_ru.append(
+                "Проигрываешь в РАНГЕ (ставка × качество) — это ставки и Quality Score, а не бюджет."
+            )
+            parts_en.append(
+                "You are losing on RANK (bid × quality) — that's bids and Quality Score, not budget."
+            )
+        else:
+            parts_ru.append(
+                "Ограничение — БЮДЖЕТ: конкуренты тут ни при чём, показов не хватает своих денег."
+            )
+            parts_en.append("The limit is BUDGET: competitors aside, your own money runs out.")
+        return " ".join(parts_en if lang == "en" else parts_ru)
     if f.check_id == "sim_bid_upside":
         # Цифры прироста — прогноз САМОГО Google (симулятор), не наша модель. Так и говорим.
         kw = fa.get("keyword", "")

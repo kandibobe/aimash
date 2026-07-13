@@ -926,6 +926,9 @@ def test_weight_vector_snapshot_pins_full_model():
         "ngram_top_n": 5,
         "zero_impr_share": 0.5,
         "zero_impr_min_count": 20,
+        "comp_min_impressions": 500.0,  # Ф5а: конкурентное давление
+        "comp_is_max": 0.60,
+        "comp_rank_min": 0.20,
     }
     # Ф3: порог релевантности НЕ отдельное число аудита — он ОДИН с генератором текстов.
     assert DEFAULT_AUDIT_THRESHOLDS["rsa_kw_coverage_min"] == MIN_KEYWORD_COVERAGE
