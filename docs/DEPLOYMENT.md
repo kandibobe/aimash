@@ -172,6 +172,25 @@ SHEETS_OWNER_EMAIL=myhalads@gmail.com          # сверка (не гейт)
 токен под ним уронил бы весь Google Ads. Аккаунт должен быть в **Test users** OAuth consent screen
 (если приложение не Published), иначе «Access blocked».
 
+##### Если аккаунт-хранилище у ЗАКАЗЧИКА (пароль он не отдаёт) — `--remote`
+`run_local_server()` ждёт редиректа на **свой** localhost, т.е. браузер обязан быть на машине скрипта;
+OOB-поток («код на экране Google») Google отключил в 2023. Остаётся loopback + ручная передача кода:
+```bash
+python scripts/get_refresh_token.py --sheets --remote
+```
+Скрипт печатает **ссылку согласия** и готовый текст для владельца аккаунта. Он: открывает ссылку у себя
+(войдя нужным gmail-ом) → «Google hasn't verified this app» → Advanced → Go to … → разрешает **оба**
+доступа → браузер уходит на `http://localhost:8765/?code=…` и показывает «Не удалось открыть страницу»
+(**так и должно быть**) → копирует **всю строку из адресной строки** и присылает её. Строку вставляем в
+ожидающий ввод скрипта — он обменивает код на `SHEETS_REFRESH_TOKEN` и пишет его в `.env` (токен на
+экран не печатается). Код **одноразовый** и живёт ~10 минут; протух → перезапустить скрипт и прислать
+новую ссылку.
+
+⚠️ **OAuth consent screen обязан быть `In production`** (APIs & Services → OAuth consent screen →
+Publish app). В статусе `Testing` Google выдаёт refresh-токен со сроком жизни **7 дней** — через неделю
+`/sheets` начнёт падать `invalid_grant`. Неверифицированное приложение — это нормально, экран-
+предупреждение проходится через Advanced.
+
 Проверка живьём (создаёт временную таблицу, печатает владельца и права, затем удаляет её):
 ```bash
 PYTHONIOENCODING=utf-8 python scripts/check_sheets_share.py [--keep]
@@ -235,7 +254,8 @@ docker compose run --rm bot alembic upgrade head
 DATABASE_URL=postgresql+asyncpg://aimash:***@localhost:5432/aimash python scripts/verify_postgres.py
 ```
 Скрипт: проверяет, что DSN — Postgres (иначе отказ) → `alembic upgrade head` → сверяет `current` == head
-(`0019_bug_reports`) → `init_db()` (детектор дрейфа модель⟂миграции; на Postgres это no-op `create_all`)
+(head берётся из дерева миграций, сейчас `0025_sheet_exports` — в доке не хардкодим, он растёт)
+→ `init_db()` (детектор дрейфа модель⟂миграции; на Postgres это no-op `create_all`)
 → смоук-чтение ключевых таблиц. `exit 0` — чисто, `exit 1` — сбой. Пароль БД в выводе маскируется.
 
 ## 5. Запуск
