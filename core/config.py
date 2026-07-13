@@ -171,6 +171,20 @@ class Settings(BaseSettings):
     # получатель запрашивает доступ). При True бот предупреждает «доступно всем по ссылке».
     sheets_public_link: bool = True
 
+    # Чей Google Drive хранит созданные ботом таблицы. По умолчанию — тот же OAuth, что у Google Ads
+    # (файлы падают в «Мой диск» аккаунта GOOGLE_ADS_REFRESH_TOKEN и едят его квоту). Задав
+    # SHEETS_REFRESH_TOKEN (выдан ОТДЕЛЬНЫМ прогоном scripts/get_refresh_token.py --sheets под нужным
+    # gmail, scopes drive.file + spreadsheets.readonly, БЕЗ adwords), Sheets/Drive уходят на этот
+    # аккаунт, а Ads-токен остаётся нетронутым. Так и надо: аккаунт-владелец таблиц ≠ аккаунт с
+    # доступом к MCC. client_id/secret пустые ⇒ берём Ads-овские (тот же OAuth-клиент Google Cloud).
+    sheets_refresh_token: SecretStr = SecretStr("")
+    sheets_client_id: str = ""  # OAuth client id — не секрет
+    sheets_client_secret: SecretStr = SecretStr("")
+    # Ожидаемый владелец таблиц (например myhalads@gmail.com). Не гейт (файл уже создан), а СВЕРКА:
+    # scripts/check_sheets_share.py читает owners у созданного файла и падает при расхождении —
+    # иначе «не тот Drive» тихо обнаруживается месяцами позже, когда в чужой квоте кончится место.
+    sheets_owner_email: str = ""
+
     # Наблюдаемость / мониторинг ошибок (Sentry, опционально). Пусто => ВЫКЛ (core.observability):
     # ноль накладных расходов и сети. SecretStr — DSN считается чувствительным. Перф-трейсинг по
     # умолчанию 0.0 (без оверхеда на запросах); ошибки сэмплируются 100%.

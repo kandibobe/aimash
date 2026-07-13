@@ -11,7 +11,12 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from reports.queries import METRIC_HEADERS  # noqa: E402
-from reports.sheets import build_sheets_data, publish_report_to_sheets  # noqa: E402
+from reports.sheets import (  # noqa: E402
+    SHARE_FAILED,
+    build_sheets_data,
+    is_shared,
+    publish_report_to_sheets,
+)
 
 _ROW = [100, 10, 0.1, 0.5, 5.0, 2.0, 50.0, 2.5, 10.0]  # как Metrics.as_row()
 
@@ -149,9 +154,9 @@ class FakeDrive:
 
 def test_publish_creates_spreadsheet_and_writes_values():
     svc, drive = FakeService(), FakeDrive()
-    url, shared = publish_report_to_sheets(_report(), service=svc, drive_service=drive)
+    url, share = publish_report_to_sheets(_report(), service=svc, drive_service=drive)
     assert url == "https://docs.google.com/spreadsheets/d/SID123"
-    assert shared is True
+    assert share == "reader"  # статус = выданная роль (не bool)
     kinds = [e[0] for e in svc.log]
     assert "create" in kinds and "values.batchUpdate" in kinds
     create = next(e for e in svc.log if e[0] == "create")
@@ -166,12 +171,12 @@ def test_publish_creates_spreadsheet_and_writes_values():
 
 
 def test_publish_share_failure_degrades_without_raising():
-    """P1: сбой Drive-шаринга НЕ роняет экспорт — ссылка возвращается, shared=False."""
-    url, shared = publish_report_to_sheets(
+    """P1: сбой Drive-шаринга НЕ роняет экспорт — ссылка возвращается, статус = SHARE_FAILED."""
+    url, share = publish_report_to_sheets(
         _report(), service=FakeService(), drive_service=FakeDrive(boom=True)
     )
     assert url == "https://docs.google.com/spreadsheets/d/SID123"
-    assert shared is False
+    assert share == SHARE_FAILED and not is_shared(share)
 
 
 def test_publish_logs_success(caplog):

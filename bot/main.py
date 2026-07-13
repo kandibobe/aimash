@@ -2780,7 +2780,7 @@ async def _run_sheets(
                 client, acct, period, campaign_id=campaign_id, account_name=_account_name(acct)
             )
             report.currency = await _read_currency(client, acct)  # §9: валюта денежных метрик
-            url, shared = await asyncio.to_thread(publish_report_to_sheets, report)
+            url, share = await asyncio.to_thread(publish_report_to_sheets, report)
     except Exception as e:  # сеть/доступ/SDK/нет OAuth-scope Sheets
         # A4: если корень — деактивированный/недоступный аккаунт (ошибка Ads, НЕ Sheets-scope),
         # не показываем сбивающую подсказку про drive.file — даём честную причину.
@@ -2788,10 +2788,25 @@ async def _run_sheets(
         key = "err_account_inactive" if is_account_access_error(e) else "err_sheets"
         await m.answer(i18n.t(key, err=ux.err_text(e)))
         return
-    # B3: shared=True ⇒ таблица публична (anyone-with-link) → предупреждаем; иначе (сбой шаринга
-    # ИЛИ владелец выключил SHEETS_PUBLIC_LINK) — подсказка «запросите доступ».
-    note = "\n" + i18n.t("sheets_public_warn" if shared else "sheets_share_failed_note")
-    await m.answer(i18n.t("sheets_ready", url=url) + note)
+    # B3: таблица публична (anyone-with-link) → предупреждаем. Отказ РАЗЛИЧАЕМ: 'off' — владелец сам
+    # выключил SHEETS_PUBLIC_LINK (не «сбой»), 'failed' — Drive отказал (причина в логе).
+    from db import sheets_registry
+    from reports.sheets import SHARE_OFF, is_shared, parse_spreadsheet_id
+
+    if is_shared(share):
+        key = "sheets_public_warn"
+    else:
+        key = "sheets_share_off_note" if share == SHARE_OFF else "sheets_share_failed_note"
+    await m.answer(i18n.t("sheets_ready", url=url) + "\n" + i18n.t(key))
+    await sheets_registry.record(
+        chat_id=m.chat.id,
+        kind="report",
+        spreadsheet_id=parse_spreadsheet_id(url) or "",
+        url=url,
+        title=_account_name(acct) or acct,
+        share=share,
+        customer_id=acct,
+    )
 
 
 def _mcc_period_factory(arg: str | None):

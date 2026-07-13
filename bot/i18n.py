@@ -229,6 +229,7 @@ CATALOG: dict[str, dict[str, str]] = {
             "/status — quick stats (30 days)\n"
             "/report [7|30|90|MTD | YYYY-MM-DD [YYYY-MM-DD]] — period summary (default 30 days)\n"
             "/export [period] — deep report .xlsx · /sheets [period] — in Google Sheets (link)\n"
+            "/mysheets — my Google Sheets: links to the reports and keyword sheets I created\n"
             "/mcc [period] — summary across all MCC child accounts (per-currency subtotals)\n"
             "/quota — daily Google Ads API operation quota\n"
             "/advise [optimize|keywords|rsa|structure] — 💡 recommendations from LIVE metrics "
@@ -1613,6 +1614,18 @@ CATALOG: dict[str, dict[str, str]] = {
     "sheets_public_warn": {
         "ru": "⚠️ Таблица доступна ВСЕМ по ссылке. Не пересылайте её посторонним.",
         "en": "⚠️ The sheet is accessible to ANYONE with the link. Don't share it with outsiders.",
+    },
+    # Владелец САМ выключил публичные ссылки (SHEETS_PUBLIC_LINK=false) — это не сбой, и писать
+    # «не удалось открыть доступ» было бы враньём: доступ выдаётся вручную владельцем таблицы.
+    "sheets_share_off_note": {
+        "ru": (
+            "🔒 Публичные ссылки выключены — таблица приватна. Доступ выдаёт владелец "
+            "Google-аккаунта бота вручную (или включите SHEETS_PUBLIC_LINK)."
+        ),
+        "en": (
+            "🔒 Public links are disabled — the sheet is private. The owner of the bot's Google "
+            "account grants access manually (or enable SHEETS_PUBLIC_LINK)."
+        ),
     },
     # P1 (живой тест 2026-07-06): не удалось открыть anyone-with-link — таблица осталась приватной.
     "sheets_share_failed_note": {

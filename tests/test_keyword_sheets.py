@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import reports.sheets as sheets_mod  # noqa: E402
 from reports.sheets import (  # noqa: E402
     build_keyword_sheet_rows,
     parse_spreadsheet_id,
@@ -93,6 +94,67 @@ def test_build_service_does_not_over_request_scopes_on_refresh(monkeypatch):
     assert captured.get("scopes") is None  # scope на refresh не запрашиваем
 
 
+def _capture_creds(monkeypatch) -> dict:
+    """Подменяет google-libs и возвращает dict с kwargs, ушедшими в Credentials(...)."""
+    captured: dict = {}
+
+    class _FakeCreds:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+    fake_google = SimpleNamespace(oauth2=SimpleNamespace(credentials=SimpleNamespace()))
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+    monkeypatch.setitem(sys.modules, "google.oauth2", fake_google.oauth2)
+    monkeypatch.setitem(
+        sys.modules, "google.oauth2.credentials", SimpleNamespace(Credentials=_FakeCreds)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "googleapiclient.discovery",
+        SimpleNamespace(build=lambda *a, **k: SimpleNamespace()),
+    )
+    return captured
+
+
+def test_sheets_credentials_fall_back_to_ads_token(monkeypatch):
+    """SHEETS_REFRESH_TOKEN не задан ⇒ прежнее поведение: Sheets ходит под Ads-токеном (таблицы
+    лежат на Google-аккаунте Ads-токена)."""
+    from pydantic import SecretStr
+
+    import reports.sheets as rs
+    from core.config import settings
+
+    captured = _capture_creds(monkeypatch)
+    monkeypatch.setattr(settings, "sheets_refresh_token", SecretStr(""))
+    monkeypatch.setattr(settings, "google_ads_refresh_token", SecretStr("ADS-RT"))
+    monkeypatch.setattr(settings, "google_ads_client_id", "ads-cid")
+    monkeypatch.setattr(settings, "google_ads_client_secret", SecretStr("ads-secret"))
+    rs._oauth_credentials()
+    assert captured["refresh_token"] == "ADS-RT" and captured["client_id"] == "ads-cid"
+
+
+def test_sheets_token_overrides_ads_and_inherits_oauth_client(monkeypatch):
+    """SHEETS_REFRESH_TOKEN задан ⇒ таблицы создаются на ЕГО Google-аккаунте (аккаунт-хранилище),
+    Ads-токен не используется. client_id/secret пустые ⇒ наследуются от Ads (тот же OAuth-клиент
+    Google Cloud — чужой клиент refresh не примет)."""
+    from pydantic import SecretStr
+
+    import reports.sheets as rs
+    from core.config import settings
+
+    captured = _capture_creds(monkeypatch)
+    monkeypatch.setattr(settings, "sheets_refresh_token", SecretStr("SHEETS-RT"))
+    monkeypatch.setattr(settings, "sheets_client_id", "")
+    monkeypatch.setattr(settings, "sheets_client_secret", SecretStr(""))
+    monkeypatch.setattr(settings, "google_ads_refresh_token", SecretStr("ADS-RT"))
+    monkeypatch.setattr(settings, "google_ads_client_id", "ads-cid")
+    monkeypatch.setattr(settings, "google_ads_client_secret", SecretStr("ads-secret"))
+    rs._oauth_credentials()
+    assert captured["refresh_token"] == "SHEETS-RT"  # НЕ Ads-токен
+    assert captured["client_id"] == "ads-cid" and captured["client_secret"] == "ads-secret"
+    assert captured["scopes"] is None  # scope на refresh по-прежнему не запрашиваем
+
+
 def test_parse_spreadsheet_id():
     assert (
         parse_spreadsheet_id("https://docs.google.com/spreadsheets/d/ABC123_xyz-9/edit#gid=0")
@@ -165,7 +227,7 @@ class _FakeDrive:
 def test_publish_keywords_returns_url_id_and_shares_writer():
     ideas = [_idea("used cars", avg_monthly_searches=100)]
     drive = _FakeDrive()
-    url, sid, shared = publish_keywords_to_sheets(
+    url, sid, share = publish_keywords_to_sheets(
         ideas,
         {"used cars": True},
         title="kw-test",
@@ -175,13 +237,13 @@ def test_publish_keywords_returns_url_id_and_shares_writer():
     assert sid == "XYZ"
     assert "XYZ" in url
     # P1 (живой тест 2026-07-06): таблица ключей — anyone-with-link РЕДАКТОР (флоу просит её править)
-    assert shared is True
+    assert share == "writer"  # статус = выданная роль
     assert drive.log == [("XYZ", {"type": "anyone", "role": "writer"})]
 
 
 def test_publish_keywords_share_failure_degrades_without_raising():
     ideas = [_idea("used cars", avg_monthly_searches=100)]
-    url, sid, shared = publish_keywords_to_sheets(
+    url, sid, share = publish_keywords_to_sheets(
         ideas,
         {"used cars": True},
         title="kw-test",
@@ -189,7 +251,8 @@ def test_publish_keywords_share_failure_degrades_without_raising():
         drive_service=_FakeDrive(boom=True),
     )
     assert sid == "XYZ" and "XYZ" in url
-    assert shared is False  # ссылка всё равно уходит, бот добавит подсказку «запросите доступ»
+    # ссылка всё равно уходит, бот добавит подсказку «запросите доступ»
+    assert share == sheets_mod.SHARE_FAILED
 
 
 def test_read_keyword_column_skips_header_and_dedups():

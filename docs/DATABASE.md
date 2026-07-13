@@ -27,8 +27,9 @@ Alembic-миграцией (см. колонку «Миграция»). Коло
 | `crawl_jobs` | журнал задач краулинга сайта (§20.4): статус/страницы/ошибка | `job_id` (unique), `customer_id`, `chat_id`, `domain`, `mode`, `status`, `pages_crawled`, `error` | `0013` | ACTIVE |
 | `client_profile_history` | версии профиля «до» для отката/аудита (§20.5); переживают clear | `customer_id`, `snapshot` (JSON), `operation`, `confirmation_id` | `0013` | ACTIVE |
 | `account_health_snapshot` | агрегаты health-score `/audit` на дату в TZ аккаунта (субстрат трендов, N1.1); без PII/имён кампаний | `customer_id` + `snapshot_date` + `period_days` (unique тройка), `score`, `grade`, `at_risk`, `family_penalty` (JSON), `score_model_version` | `0022` | ACTIVE |
+| `sheet_exports` | реестр созданных ботом Google-таблиц (`/sheets`, ключи визарда §19.4.2) → выдача в `/mysheets`; секретов нет (url уже уходил в чат) | `chat_id` (+ индекс `chat_id, id`), `customer_id`, `kind` (keywords\|report), `spreadsheet_id`, `url`, `title`, `share` (роль\|off\|failed) | `0025` | ACTIVE |
 
-> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0024`
+> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0025`
 > (`op.create_table(...)`). Инициалка `0001` создаёт базовые таблицы
 > (`whitelist`, `user_settings`, `proposals`, `audit_log`, `oauth_tokens`;
 > [`migrations/versions/0001_initial.py:22-92`](../migrations/versions/0001_initial.py)), остальные —
@@ -112,7 +113,9 @@ alembic history                          # список ревизий
 `0022` (account_health_snapshot: снапшоты health-score `/audit`, волна N1.1) →
 `0023` (recommendation.topic VARCHAR(16)→(32): семьи чеков `/audit` длиннее тем `/advise`) →
 `0024` (recommendation.kind: снять префикс `audit_` — слияние бакетов обучения 👍/👎 после того, как
-источником рекомендаций стал один движок аудита) — **head**.
+источником рекомендаций стал один движок аудита) →
+`0025` (sheet_exports: реестр созданных ботом Google-таблиц — `/sheets` и таблицы ключей визарда;
+ссылка переживает закрытие визарда и рестарт, выдаётся в `/mysheets`) — **head**.
 
 ### Добавить миграцию
 ```bash

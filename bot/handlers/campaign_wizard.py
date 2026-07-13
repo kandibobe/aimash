@@ -743,10 +743,11 @@ async def cc_kw_generate_run(
         pass
     # Пытаемся выгрузить в Google Sheets для ручной верификации; при сбое — fallback без round-trip.
     try:
-        from reports.sheets import publish_keywords_to_sheets
+        from db import sheets_registry
+        from reports.sheets import SHARE_OFF, is_shared, publish_keywords_to_sheets
 
         title = f"kw-{(topic or 'campaign')[:40]}"
-        url, sid, shared = await bm.asyncio.to_thread(
+        url, sid, share = await bm.asyncio.to_thread(
             publish_keywords_to_sheets, ideas, relevance, title=title
         )
     except Exception as e:  # noqa: BLE001 — нет drive.file scope/сети → fallback
@@ -783,9 +784,25 @@ async def cc_kw_generate_run(
         ),
         expected_chat_id=chat_id,
     )
+    # Реестр (/mysheets): черновик визарда умрёт по TTL 72ч, а ссылка должна находиться и потом.
+    await sheets_registry.record(
+        chat_id=chat_id,
+        kind="keywords",
+        spreadsheet_id=sid,
+        url=url,
+        title=title,
+        share=share,
+        customer_id=draft.preview_customer_id or draft.customer_id,
+    )
     await state.set_state(bm.CreateCampaignWizard.kw_verify)
     await state.update_data(cc_session=session_id)
-    share_note = "" if shared else "\n" + bm.i18n.t("sheets_share_failed_note")
+    # Таблицу ключей менеджер должен ПРАВИТЬ → нужен writer. Отказ различаем: 'off' — владелец
+    # выключил публичные ссылки (доступ выдаётся вручную), 'failed' — Drive отказал.
+    if is_shared(share):
+        share_note = ""
+    else:
+        key = "sheets_share_off_note" if share == SHARE_OFF else "sheets_share_failed_note"
+        share_note = "\n" + bm.i18n.t(key)
     await msg.answer(bm.i18n.t("cc_kw_sheet_ready", url=url) + share_note)
     await msg.answer(
         bm.i18n.t("cc_kw_verify_prompt_v2", n=len(relevant)),

@@ -35,6 +35,17 @@ _TOKEN_URI = "https://oauth2.googleapis.com/token"
 _TITLE_MAXLEN = 100  # лимит длины имени листа в Google Sheets
 _FORBIDDEN = set("[]:*?/\\")  # символы, недопустимые в имени листа
 
+# Исход шаринга (_share_anyone → publish_* → хендлер). Успех = ВЫДАННАЯ роль ("reader"/"writer"),
+# отказ различаем по причине: раньше и «выключено владельцем», и «Drive отказал» давали False, и бот
+# в обоих случаях писал «не удалось открыть доступ» — во втором случае это враньё.
+SHARE_OFF = "off"  # публичные ссылки выключены владельцем (SHEETS_PUBLIC_LINK=false)
+SHARE_FAILED = "failed"  # Drive отказал (типично: политика домена запрещает внешние ссылки)
+
+
+def is_shared(status: str) -> bool:
+    """True — таблица открыта anyone-with-link (status = выданная роль)."""
+    return status not in (SHARE_OFF, SHARE_FAILED)
+
 
 @dataclass
 class SheetTab:
@@ -96,6 +107,14 @@ def _default_title(report: ReportData) -> str:
 def _oauth_credentials() -> Any:
     """OAuth-креды (.env) для Google API. Ленивый импорт google-libs.
 
+    ЧЕЙ АККАУНТ. Таблица создаётся в «Моём диске» того Google-аккаунта, чьим refresh-токеном мы
+    ходим (он же владелец файла, его квота). SHEETS_REFRESH_TOKEN задан ⇒ Sheets/Drive идут под
+    ним (аккаунт-хранилище таблиц, напр. myhalads@gmail.com); пусто ⇒ прежнее поведение — тот же
+    токен, что у Google Ads. Ads-токен при этом НЕ трогаем: у аккаунта-хранилища доступа к MCC
+    может не быть, перевыпуск общего токена под него уронил бы весь Ads (scope adwords).
+    client_id/secret Sheets-а пустые ⇒ Ads-овские (один и тот же OAuth-клиент Google Cloud —
+    именно им выдавался токен, чужой клиент refresh не примет).
+
     scopes=None НАМЕРЕННО: при refresh-гранте нельзя запрашивать scope ШИРЕ выданного токену —
     иначе Google вернёт invalid_scope (Bad Request) и упадёт ВЕСЬ Sheets-экспорт (не только чтение
     чужих таблиц). None ⇒ scope в запросе не шлём, токен обновляется с тем набором, что был выдан
@@ -107,12 +126,24 @@ def _oauth_credentials() -> Any:
 
     from core.config import settings
 
+    refresh = settings.sheets_refresh_token.get_secret_value()
+    if refresh:  # отдельный аккаунт-хранилище таблиц
+        client_id = settings.sheets_client_id or settings.google_ads_client_id
+        secret = (
+            settings.sheets_client_secret.get_secret_value()
+            or settings.google_ads_client_secret.get_secret_value()
+        )
+    else:  # прежнее поведение: Sheets ходит под Ads-токеном
+        refresh = settings.google_ads_refresh_token.get_secret_value()
+        client_id = settings.google_ads_client_id
+        secret = settings.google_ads_client_secret.get_secret_value()
+
     return Credentials(
         token=None,
-        refresh_token=settings.google_ads_refresh_token.get_secret_value(),
+        refresh_token=refresh,
         token_uri=_TOKEN_URI,
-        client_id=settings.google_ads_client_id,
-        client_secret=settings.google_ads_client_secret.get_secret_value(),
+        client_id=client_id,
+        client_secret=secret,
         scopes=None,
     )
 
@@ -132,12 +163,25 @@ def _build_drive_service() -> Any:
     return build("drive", "v3", credentials=_oauth_credentials(), cache_discovery=False)
 
 
-def _share_anyone(spreadsheet_id: str, *, role: str, drive_service: Any = None) -> bool:
+def _share_failure_reason(e: Exception) -> str:
+    """Причина отказа Drive для лога: класс + HTTP-статус + тело ответа Google, ОТРЕДАКТИРОВАННОЕ
+    (правило 5 — исключение google-api может нести токен). Без этого диагноз невозможен: по одному
+    type(e).__name__ не отличить «нет scope» (403 insufficientPermissions) от «политика домена
+    запрещает внешние ссылки» (403 sharingRateLimitExceeded / forbidden)."""
+    from core.logging import redact_text
+
+    status = getattr(getattr(e, "resp", None), "status", None)
+    return f"{type(e).__name__} status={status}: {redact_text(str(e))[:300]}"
+
+
+def _share_anyone(spreadsheet_id: str, *, role: str, drive_service: Any = None) -> str:
     """Живой тест 2026-07-06: созданная таблица была приватной для OAuth-аккаунта бота —
     заказчик не мог открыть ссылку. Открываем anyone-with-link (role: writer — таблицы ключей,
     флоу просит их править; reader — отчёты). НИКОГДА не raise: сбой шаринга не должен ронять
     экспорт — ссылка всё равно уходит, вызыватель добавит подсказку «запросите доступ».
-    Возвращает True при успехе.
+
+    Возвращает СТАТУС: выданную роль при успехе, SHARE_OFF (владелец выключил публичные ссылки) или
+    SHARE_FAILED (Drive отказал) — вызыватель показывает РАЗНЫЕ подсказки, а не одну на оба случая.
 
     B3: под флагом settings.sheets_public_link (дефолт True — прежнее поведение). False ⇒ НЕ шарим
     публично (финансовые данные клиента не за периметром): таблица остаётся приватной, получатель
@@ -145,16 +189,16 @@ def _share_anyone(spreadsheet_id: str, *, role: str, drive_service: Any = None) 
     from core.config import settings
 
     if not settings.sheets_public_link:
-        return False  # приватная таблица (владелец отключил публичную ссылку)
+        return SHARE_OFF  # приватная таблица (владелец отключил публичную ссылку)
     try:
         svc = drive_service or _build_drive_service()
         svc.permissions().create(
             fileId=spreadsheet_id, body={"type": "anyone", "role": role}, fields="id"
         ).execute()
-        return True
+        return role
     except Exception as e:  # noqa: BLE001 — деградация: таблица останется приватной
-        log.warning("sheets-share: %s — таблица останется приватной", type(e).__name__)
-        return False
+        log.warning("sheets-share: %s — таблица останется приватной", _share_failure_reason(e))
+        return SHARE_FAILED
 
 
 def _format_headers(svc: Any, spreadsheet_id: str, n_tabs: int) -> None:
@@ -194,11 +238,11 @@ def publish_report_to_sheets(
     title: str | None = None,
     service: Any = None,
     drive_service: Any = None,
-) -> tuple[str, bool]:
-    """Создать новую таблицу с вкладками отчёта и вернуть (ссылка, расшарена_ли). `service`/
-    `drive_service` — для тестов (моки). Отчёт открывается anyone-with-link ЧИТАТЕЛЕМ (финансовый
-    артефакт — писать в него никому не нужно). Логирует вызовы Sheets API (создание + запись
-    значений, длительность, исход — БЕЗ секретов; §15)."""
+) -> tuple[str, str]:
+    """Создать новую таблицу с вкладками отчёта и вернуть (ссылка, статус_шаринга: роль|off|failed).
+    `service`/`drive_service` — для тестов (моки). Отчёт открывается anyone-with-link ЧИТАТЕЛЕМ
+    (финансовый артефакт — писать в него никому не нужно). Логирует вызовы Sheets API (создание +
+    запись значений, длительность, исход — БЕЗ секретов; §15)."""
     tabs = build_sheets_data(report)
     svc = service or _build_service()
     start = time.monotonic()
@@ -236,14 +280,14 @@ def publish_report_to_sheets(
             len(tabs),
         )
         raise
-    shared = _share_anyone(sid, role="reader", drive_service=drive_service)
+    share = _share_anyone(sid, role="reader", drive_service=drive_service)
     log.info(
-        "sheets-publish: ok за %dмс (вкладок=%d, shared=%s)",
+        "sheets-publish: ok за %dмс (вкладок=%d, share=%s)",
         int((time.monotonic() - start) * 1000),
         len(tabs),
-        shared,
+        share,
     )
-    return url, shared
+    return url, share
 
 
 # ── §19.4.2: выгрузка ключей с пометкой релевантности + чтение верифицированного списка ─────
@@ -286,11 +330,12 @@ def publish_keywords_to_sheets(
     title: str,
     service: Any = None,
     drive_service: Any = None,
-) -> tuple[str, str, bool]:
+) -> tuple[str, str, str]:
     """Создать таблицу ключей с колонкой «Релевантность» и вернуть (url, spreadsheet_id,
-    расшарена_ли). service/drive_service — для тестов (моки). spreadsheet_id нужен на возврате
-    для сверки присланной менеджером ссылки. Таблица открывается anyone-with-link РЕДАКТОРОМ:
-    флоу просит менеджера/заказчика править её («удалите лишние строки») с любого Google-аккаунта."""
+    статус_шаринга: роль|off|failed). service/drive_service — для тестов (моки). spreadsheet_id нужен
+    на возврате для сверки присланной менеджером ссылки. Таблица открывается anyone-with-link
+    РЕДАКТОРОМ: флоу просит менеджера/заказчика править её («удалите лишние строки») с любого
+    Google-аккаунта."""
     rows = build_keyword_sheet_rows(ideas, relevance)
     svc = service or _build_service()
     start = time.monotonic()
@@ -323,14 +368,14 @@ def publish_keywords_to_sheets(
             len(rows),
         )
         raise
-    shared = _share_anyone(sid, role="writer", drive_service=drive_service)
+    share = _share_anyone(sid, role="writer", drive_service=drive_service)
     log.info(
-        "sheets-kw-publish: ok за %dмс (строк=%d, shared=%s)",
+        "sheets-kw-publish: ok за %dмс (строк=%d, share=%s)",
         int((time.monotonic() - start) * 1000),
         len(rows),
-        shared,
+        share,
     )
-    return url, sid, shared
+    return url, sid, share
 
 
 def parse_spreadsheet_id(url_or_id: str) -> str | None:

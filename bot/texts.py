@@ -122,6 +122,7 @@ HELP = (
     "/status — быстрая статистика (30 дн.)\n"
     "/report [7|30|90|MTD | ГГГГ-ММ-ДД [ГГГГ-ММ-ДД]] — сводка за период (по умолч. 30 дн.)\n"
     "/export [период] — глубокий отчёт .xlsx · /sheets [период] — в Google Sheets (ссылка)\n"
+    "/mysheets — мои Google-таблицы: ссылки на созданные отчёты и таблицы ключей\n"
     "/mcc [период] — сводка по всем дочерним аккаунтам MCC (подытоги по валютам)\n"
     "/quota — дневная квота операций Google Ads API\n"
     "/advise [optimize|keywords|rsa|structure] — 💡 рекомендации по ЖИВЫМ метрикам "
@@ -2055,6 +2056,31 @@ def fmt_errors(rows, lang: str | None = None) -> str:
         )
         if msg:
             L.append(f"    ↳ {esc(msg)}")
+    return "\n".join(L)
+
+
+def fmt_my_sheets(rows, lang: str | None = None) -> str:
+    """/mysheets: последние созданные ботом Google-таблицы чата (db.sheets_registry.SheetExportRow,
+    reverse-chron). Помечаем ТОЛЬКО не-публичные (share = off/failed) — иначе получатель решит, что
+    ссылку можно слать дальше, а она откроется лишь владельцу. Секретов в строках нет (url уже был
+    отправлен в этот же чат)."""
+    en = _lang(lang) == "en"
+    if not rows:
+        return "📊 No sheets yet." if en else "📊 Таблиц пока нет."
+    head = "📊 <b>My Google Sheets</b>" if en else "📊 <b>Мои Google-таблицы</b>"
+    kinds = {
+        "keywords": "keywords" if en else "ключи",
+        "report": "report" if en else "отчёт",
+    }
+    private = " · 🔒 " + ("access on request" if en else "доступ по запросу")
+    L = [head, ""]
+    for r in rows:
+        when = r.created_at.strftime("%d.%m %H:%M") if getattr(r, "created_at", None) else "—"
+        kind = kinds.get(r.kind, r.kind)
+        acct = f" · {esc(r.customer_id)}" if r.customer_id else ""
+        mark = "" if r.share not in ("off", "failed") else private
+        title = esc(r.title or r.url)
+        L.append(f'{when} · {esc(kind)}{acct} · <a href="{esc(r.url)}">{title}</a>{mark}')
     return "\n".join(L)
 
 

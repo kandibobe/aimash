@@ -19,6 +19,7 @@
 - recommendation_outcome — сшивка рекомендация→applied-мутация→delta метрик (Слой B: замер результата)
 - bug_reports       — пользовательские баг-репорты (/reportbug, §6): текст РЕДАКТ., статус триажа
 - account_health_snapshot — агрегаты health-score /audit на дату (субстрат трендов, N1.1; без PII)
+- sheet_exports    — реестр созданных ботом Google-таблиц (отчёты/ключи): ссылка + исход шаринга
 
 ⚠️ Секреты (refresh-токены) хранятся ТОЛЬКО зашифрованными (oauth_tokens.refresh_token_enc).
 В audit_log/proposals секретов нет. PII клиента (§20) — не секрет проекта, но в логи сырьём не
@@ -547,4 +548,34 @@ class BugReport(Base):
         String(16), default="new", nullable=False
     )  # new|triaged|closed
     triaged_by: Mapped[int | None] = mapped_column(BigInteger)  # chat_id админа, сменившего статус
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SheetExport(Base):
+    """Реестр созданных ботом Google-таблиц (отчёты /sheets и таблицы ключей визарда §19.4.2).
+
+    Зачем: раньше ссылка жила только в сообщении Telegram и (для ключей) в CampaignDraft.wizard_state
+    — черновик умирает по TTL 72ч, и ссылку было не найти. Здесь она переживает и рестарт, и визард
+    (команда /mysheets отдаёт последние таблицы ЧАТА).
+
+    Владелец файлов — Google-аккаунт OAuth-токена бота (GOOGLE_ADS_REFRESH_TOKEN): таблицы лежат на
+    ЕГО Диске, scope drive.file. share — исход anyone-with-link на момент создания (reports.sheets:
+    роль | 'off' | 'failed'), нужен чтобы /mysheets честно помечал приватные таблицы.
+
+    Секретов нет: url — публичная ссылка, уже отправленная в чат. Ширины полей с запасом (урок
+    0023_recommendation_topic_width: узкий VARCHAR ронял вставку на Postgres)."""
+
+    __tablename__ = "sheet_exports"
+    __table_args__ = (Index("ix_sheet_exports_chat_id_id", "chat_id", "id"),)  # выборка последних
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    customer_id: Mapped[str | None] = mapped_column(
+        String(32)
+    )  # аккаунт Google Ads (если известен)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)  # keywords|report
+    spreadsheet_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    url: Mapped[str] = mapped_column(String(512), nullable=False)
+    title: Mapped[str | None] = mapped_column(String(255))
+    share: Mapped[str] = mapped_column(String(16), nullable=False)  # роль|off|failed
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

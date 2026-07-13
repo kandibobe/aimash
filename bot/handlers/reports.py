@@ -79,6 +79,21 @@ async def sheets_(m: bm.Message, command: bm.CommandObject) -> None:
     await bm._run_sheets(m, period, acct)
 
 
+@bm.dp.message(bm.Command("mysheets"))
+async def mysheets_(m: bm.Message) -> None:
+    """Последние Google-таблицы, созданные ботом для ЭТОГО чата (отчёты /sheets и таблицы ключей
+    визарда). Реестр db.sheets_registry: ссылка переживает и рестарт, и TTL черновика визарда.
+    Только свой chat_id — ссылка anyone-with-link фактически является ключом доступа. Read-only."""
+    from db import sheets_registry
+
+    rows = await sheets_registry.list_recent(m.chat.id, limit=10)
+    await m.answer(
+        bm.texts.fmt_my_sheets(rows),  # язык — из contextvar (i18n.current_lang), как у fmt_errors
+        parse_mode=bm.ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
+
+
 @bm.dp.message(bm.Command("mcc"))
 async def mcc_(m: bm.Message, command: bm.CommandObject) -> None:
     """ТЗ §8: сводка по всем дочерним аккаунтам MCC за период (7/30/90/MTD). Read-only."""

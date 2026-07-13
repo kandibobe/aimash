@@ -137,14 +137,51 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 1. **Включить Google Sheets API** в том же Google Cloud-проекте, что и OAuth-клиент:
    `https://console.developers.google.com/apis/api/sheets.googleapis.com/overview?project=<PROJECT>`
    (без этого — `HttpError 403 SERVICE_DISABLED`; после включения подождать 1–2 мин на пропагацию).
-2. Перевыпустить refresh-токен тем же OAuth-клиентом (`GOOGLE_ADS_CLIENT_ID`/`SECRET`), указав при
+2. **Включить Google Drive API** — ОТДЕЛЬНЫЙ API, тот же проект:
+   `https://console.developers.google.com/apis/api/drive.googleapis.com/overview?project=<PROJECT>`
+   Без него таблицы создаются (это Sheets API), но `permissions.create` падает
+   `403 accessNotConfigured` ⇒ ссылка **никогда** не открывается «всем по ссылке» и получатель видит
+   «Запросить доступ». Ровно это и было в проде до 2026-07-13 (Sheets включён, Drive — нет): шаринг
+   молча деградировал, потому что `_share_anyone` не raise. Проверка — `scripts/check_sheets_share.py`.
+3. Перевыпустить refresh-токен тем же OAuth-клиентом (`GOOGLE_ADS_CLIENT_ID`/`SECRET`), указав при
    согласии оба scope: `adwords` **и** `drive.file` (`make refresh-token` / `scripts/get_refresh_token.py`
    уже просит оба) → обновить `GOOGLE_ADS_REFRESH_TOKEN` → перезапустить бота.
 
-Типичные ошибки: `invalid_scope` → токен без `drive.file` (шаг 2); `SERVICE_DISABLED` → API не
-включён (шаг 1). `.xlsx` через `/export` работает всегда, без этой настройки. Реализация —
+Типичные ошибки: `invalid_scope` → токен без `drive.file` (шаг 3); `SERVICE_DISABLED` → Sheets API не
+включён (шаг 1); `accessNotConfigured` при шаринге → Drive API не включён (шаг 2). `.xlsx` через `/export` работает всегда, без этой настройки. Реализация —
 `reports/sheets.py` (`spreadsheets.create` + `values.batchUpdate`, ТЗ §16); сборка вкладок —
 read-only и покрыта тестами офлайн.
+
+#### На чьём Google Drive лежат таблицы
+Сервисного аккаунта в проекте **нет**. Таблица создаётся в «Моём диске» того Google-аккаунта, чьим
+refresh-токеном ходит Sheets, — он владелец файла, файл ест его квоту (15 ГБ), и только он может
+сменить владельца/удалить его окончательно. Scope `drive.file` означает, что бот видит **только
+созданные им самим** файлы — чужой Диск ему недоступен.
+
+Какой это аккаунт:
+- `SHEETS_REFRESH_TOKEN` **задан** → он (аккаунт-хранилище таблиц);
+- пусто → тот же, что у Google Ads (`GOOGLE_ADS_REFRESH_TOKEN`).
+
+Чтобы таблицы копились на ОТДЕЛЬНОМ gmail (напр. `myhalads@gmail.com`), а Ads-доступ остался прежним:
+```bash
+python scripts/get_refresh_token.py --sheets   # войти НУЖНЫМ gmail-ом; scopes drive.file + spreadsheets.readonly, БЕЗ adwords
+# → пишет SHEETS_REFRESH_TOKEN в .env; GOOGLE_ADS_REFRESH_TOKEN не трогается
+SHEETS_OWNER_EMAIL=myhalads@gmail.com          # сверка (не гейт)
+```
+Именно так, а не перевыпуск общего токена: у аккаунта-хранилища может не быть доступа к MCC — общий
+токен под ним уронил бы весь Google Ads. Аккаунт должен быть в **Test users** OAuth consent screen
+(если приложение не Published), иначе «Access blocked».
+
+Проверка живьём (создаёт временную таблицу, печатает владельца и права, затем удаляет её):
+```bash
+PYTHONIOENCODING=utf-8 python scripts/check_sheets_share.py [--keep]
+```
+Ждём `Владелец файла: <нужный gmail>` и `✅ ДОСТУПНО ВСЕМ ПО ССЫЛКЕ: role=writer`. Ненулевой
+exit-код = либо не тот Drive, либо `anyone`-доступ не выдан (типично — политика Google Workspace
+запрещает внешние ссылки; лечится только на стороне Google).
+
+Все выданные ботом таблицы пишутся в реестр `sheet_exports` и доступны оператору командой
+`/mysheets` (последние 10 таблиц ЭТОГО чата: дата · вид · аккаунт · ссылка).
 
 ## 4. База и миграции
 ```bash
