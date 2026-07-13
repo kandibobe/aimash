@@ -932,18 +932,82 @@ async def cc_use_assets(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.
     reuse = [
         {"asset_resource_name": r.asset_resource_name, "field_type": r.field_type} for r in rows
     ]
-    await bm.CDRAFTS.patch(
-        session_id,
-        lambda st: st["assets"].__setitem__("reuse_links", reuse),
-        expected_chat_id=chat_id,
+
+    def _init(st: dict) -> None:
+        a = st["assets"]
+        a["reuse_candidates"] = reuse
+        a["reuse_excluded"] = []
+        a["reuse_links"] = list(reuse)  # по умолчанию — все (прежнее поведение)
+
+    await bm.CDRAFTS.patch(session_id, _init, expected_chat_id=chat_id)
+    # 2.5 (§19.7): ТЗ требует ВЫБРАТЬ, какие ассеты переиспользовать. Раньше линковались все найденные
+    # без спроса (уточнения и телефон чужой услуги молча уезжали в новую кампанию). Теперь — тумблер
+    # на каждый тип; по умолчанию включены все, «Готово» без правок = прежнее поведение.
+    await msg.answer(
+        bm.i18n.t("cc_assets_reuse_pick", n=len(reuse)),
+        reply_markup=bm.cc_assets_reuse_kb(_reuse_counts(reuse), set()),
     )
-    # 2.10 (§19.7): разбивка по типам — менеджер видит СОСТАВ («SITELINK×4, CALLOUT×6, CALL×1»),
-    # а не безликое «N ассетов». Выбор подмножества по типам — backlog (пока переиспользуем всё).
+
+
+def _reuse_counts(candidates: list[dict]) -> dict[str, int]:
+    """Сколько ассетов каждого field_type нашлось на аккаунте (для тумблеров §19.7)."""
     from collections import Counter
 
-    by_type = Counter(str(r.get("field_type") or "?") for r in reuse)
-    types_s = ", ".join(
-        f"{t}×{n}" for t, n in sorted(by_type.items(), key=lambda kv: (-kv[1], kv[0]))
+    return dict(Counter(str(r.get("field_type") or "?") for r in candidates))
+
+
+@bm.dp.callback_query(bm.CcCB.filter(bm.F.action == "reuse_type"))
+async def cc_reuse_type(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.FSMContext) -> None:
+    """Этап 5 (§19.7): вкл/выкл тип переиспользуемых ассетов. reuse_links пересчитываются из
+    reuse_candidates — в мутацию уедет ровно выбранное подмножество."""
+    chat_id = bm._cq_chat_id(cq)
+    data = await state.get_data()
+    session_id = data.get("cc_session")
+    draft = await bm.CDRAFTS.get(session_id, expected_chat_id=chat_id) if session_id else None
+    if draft is None:
+        await cq.answer(bm.i18n.t("cc_draft_stale"), show_alert=True)
+        return
+    ft = callback_data.sub
+
+    def _toggle(st: dict) -> None:
+        a = st["assets"]
+        cands = a.get("reuse_candidates") or []
+        excl = set(a.get("reuse_excluded") or [])
+        excl.symmetric_difference_update({ft})
+        a["reuse_excluded"] = sorted(excl)
+        a["reuse_links"] = [c for c in cands if str(c.get("field_type") or "?") not in excl]
+
+    snap = await bm.CDRAFTS.patch(session_id, _toggle, expected_chat_id=chat_id)
+    await cq.answer()
+    assets = (snap.wizard_state if snap else draft.wizard_state).get("assets") or {}
+    cands = assets.get("reuse_candidates") or []
+    excl = set(assets.get("reuse_excluded") or [])
+    await bm._safe_edit(
+        cq,
+        bm.i18n.t("cc_assets_reuse_pick", n=len(assets.get("reuse_links") or [])),
+        reply_markup=bm.cc_assets_reuse_kb(_reuse_counts(cands), excl),
+    )
+
+
+@bm.dp.callback_query(bm.CcCB.filter(bm.F.action == "reuse_done"))
+async def cc_reuse_done(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.FSMContext) -> None:
+    """Этап 5 (§19.7): подмножество выбрано → показываем состав и возвращаемся в меню ассетов."""
+    chat_id = bm._cq_chat_id(cq)
+    data = await state.get_data()
+    session_id = data.get("cc_session")
+    draft = await bm.CDRAFTS.get(session_id, expected_chat_id=chat_id) if session_id else None
+    msg = bm._cq_msg(cq)
+    if draft is None or msg is None:
+        await cq.answer(bm.i18n.t("cc_draft_stale"), show_alert=True)
+        return
+    await cq.answer()
+    reuse = (draft.wizard_state.get("assets") or {}).get("reuse_links") or []
+    types_s = (
+        ", ".join(
+            f"{t}×{n}"
+            for t, n in sorted(_reuse_counts(reuse).items(), key=lambda kv: (-kv[1], kv[0]))
+        )
+        or "—"
     )
     await msg.answer(bm.i18n.t("cc_assets_reused", n=len(reuse), types=types_s))
     await msg.answer(
@@ -1328,6 +1392,14 @@ async def cc_create(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.FSMC
         ad_schedule=_cc_settings.get("ad_schedule"),
         start_date=validated.get("start_date"),
         end_date=validated.get("end_date"),
+        # 2.5 (§19.8): ассеты создаются ТОЙ ЖЕ операцией — их состав обязан быть на карточке ✅
+        # (телефон, скидка, доп. ссылки, аккаунтные бренд-ассеты). Берём из validated: там уже
+        # прошедшие схему asset_specs/existing_asset_links/image_media_ids.
+        assets={
+            "new": validated.get("asset_specs") or [],
+            "reuse_links": validated.get("existing_asset_links") or [],
+        },
+        images=len(validated.get("image_media_ids") or []),
     )
     await cq.answer()
     # B10: список ключей мог быть обрезан до потолка схемы — не молчим, сообщаем менеджеру в чат

@@ -2313,8 +2313,11 @@ async def apply_create_search_campaign(
         result["assets_skipped"] = skipped
     # §19.7: переиспользование СУЩЕСТВУЮЩИХ ассетов аккаунта — линк к новой кампании по field_type.
     if existing_asset_links and campaign_id:
+        # Как у изображений: и ЗАПРОШЕНО, и привязано — иначе потеря группы (несовместимый тип,
+        # квота) была видна только как «переиспользовано 3» вместо 7, и никто не замечал.
+        result["assets_reuse_requested"] = len(existing_asset_links)
         try:
-            result["assets_reused"] = await run_ads_create_call(
+            reused, reuse_skipped = await run_ads_create_call(
                 _link_existing_assets_via_sdk,
                 ads_client,
                 customer_id,
@@ -2325,8 +2328,12 @@ async def apply_create_search_campaign(
                 op_count=max(1, len(existing_asset_links)),  # по линку на ассет
             )
         except Exception as e:  # noqa: BLE001 — кампания создана: линковка не роняет операцию
-            log.warning("asset relink step failed after campaign create: %s", type(e).__name__)
-            result["assets_reused"] = 0
+            reason = type(e).__name__
+            log.warning("asset relink step failed after campaign create: %s", reason)
+            reused, reuse_skipped = 0, [{"field_type": "*", "reason": reason}]
+        result["assets_reused"] = reused
+        if reuse_skipped:
+            result["assets_reuse_skipped"] = reuse_skipped
     if image_specs and campaign_id:
         imgs = 0
         for img_bytes, name in image_specs:
@@ -2353,10 +2360,15 @@ async def apply_create_search_campaign(
     return result
 
 
-def _link_existing_assets_via_sdk(client, customer_id, campaign_id, links: list[dict]) -> int:
+def _link_existing_assets_via_sdk(
+    client, customer_id, campaign_id, links: list[dict]
+) -> tuple[int, list[dict]]:
     """Привязать СУЩЕСТВУЮЩИЕ ассеты аккаунта (по asset_resource_name + field_type) к новой кампании.
     Группируем по field_type; каждый field_type линкуем через extensions._link_campaign_assets. Сбой
-    одной группы не роняет остальное ($0/PAUSED). Возвращает число привязанных ассетов."""
+    одной группы не роняет остальное ($0/PAUSED).
+
+    Возвращает (привязано, пропущено) — пропуск ЧЕСТНО, а не молча: раньше упавшая группа просто
+    исчезала из счётчика, и менеджер видел «переиспользовано 3» без объяснения, куда делись 4."""
     campaign_rn = extensions._campaign_rn(client, str(customer_id), str(campaign_id))
     by_ft: dict[str, list[str]] = {}
     for ln in links:
@@ -2365,14 +2377,15 @@ def _link_existing_assets_via_sdk(client, customer_id, campaign_id, links: list[
         if rn and ft:
             by_ft.setdefault(ft, []).append(rn)
     linked = 0
+    skipped: list[dict] = []
     for ft_name, rns in by_ft.items():
         try:
             ft = getattr(client.enums.AssetFieldTypeEnum, ft_name)
             extensions._link_campaign_assets(client, str(customer_id), campaign_rn, rns, ft)
             linked += len(rns)
-        except Exception:  # noqa: BLE001 — недоступный/несовместимый ассет пропускаем
-            pass
-    return linked
+        except Exception as e:  # noqa: BLE001 — недоступный/несовместимый ассет пропускаем
+            skipped.append({"field_type": ft_name, "n": len(rns), "reason": type(e).__name__})
+    return linked, skipped
 
 
 def _attach_asset_specs_via_sdk(client, customer_id, campaign_id, specs: list[dict]):

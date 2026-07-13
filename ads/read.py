@@ -642,12 +642,20 @@ class ReusableAsset:
     label: str  # человекочитаемая подпись
 
 
+# Ассеты УРОВНЯ АККАУНТА: у Google они живут как CustomerAsset и действуют на ВСЕ кампании клиента
+# сразу. Переиспользовать их в новой кампании нечего — они там уже есть; попытка привязать такой
+# ассет как CampaignAsset падает и молча теряется в `_link_existing_assets_via_sdk`. Раньше они
+# попадали в reuse-список из источника `customer_asset` и раздували счётчик «переиспользовано N».
+ACCOUNT_LEVEL_FIELD_TYPES = frozenset({"BUSINESS_NAME", "BUSINESS_LOGO", "LOGO", "LANDSCAPE_LOGO"})
+
+
 def list_account_assets(client: GoogleAdsClient, customer_id: str) -> list[ReusableAsset]:
     """Существующие ассеты аккаунта, пригодные к переиспользованию в новой кампании (§19.7). READ-ONLY.
 
     Объединяем campaign_asset + customer_asset (поиск показывает на уровне кампаний и аккаунта),
     дедуп по (asset, field_type). Тянем поля популярных типов для подписи. Сбой одного источника не
-    роняет другой (best-effort)."""
+    роняет другой (best-effort). Аккаунтные типы (`ACCOUNT_LEVEL_FIELD_TYPES`) отбрасываем — они
+    действуют на все кампании и к кампании не линкуются."""
     ensure_read_allowed(customer_id)
     cid = str(customer_id)
     ga = client.get_service("GoogleAdsService")
@@ -664,7 +672,7 @@ def list_account_assets(client: GoogleAdsClient, customer_id: str) -> list[Reusa
         for row in rows:
             a = row.asset
             ft = ft_getter(row)
-            if ft in ("UNSPECIFIED", "UNKNOWN", ""):
+            if ft in ("UNSPECIFIED", "UNKNOWN", "") or ft in ACCOUNT_LEVEL_FIELD_TYPES:
                 continue
             key = (a.resource_name, ft)
             if key in seen:

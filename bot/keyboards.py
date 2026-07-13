@@ -1126,6 +1126,28 @@ def cc_assets_kb(lang: str | None = None, *, can_forward: bool = False) -> Inlin
     return kb.as_markup()
 
 
+def cc_assets_reuse_kb(
+    counts: dict[str, int], excluded: set[str] | None = None, lang: str | None = None
+) -> InlineKeyboardMarkup:
+    """§19.7: ВЫБОР ПОДМНОЖЕСТВА переиспользуемых ассетов — тумблер на каждый тип (SITELINK×4 …).
+
+    ТЗ требует выбрать, какие ассеты аккаунта переиспользовать; раньше бот линковал ВСЕ найденные
+    без спроса (чужие уточнения и телефон другой услуги уезжали в новую кампанию молча). По
+    умолчанию включены все — прежнее поведение сохраняется, если менеджер сразу жмёт «Готово»."""
+    en = _lang(lang) == "en"
+    off = excluded or set()
+    kb = InlineKeyboardBuilder()
+    for ft, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        mark = "⬜" if ft in off else "✅"
+        kb.button(text=f"{mark} {ft} ×{n}", callback_data=CcCB(action="reuse_type", sub=ft))
+    kb.button(
+        text="✅ Done" if en else "✅ Готово",
+        callback_data=CcCB(action="reuse_done"),
+    )
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 # Семейства ассетов с автогенерацией текста (§19.7.2) — подписи для пикера типов.
 _CC_ASSET_TYPE_LABELS = {
     "ru": {

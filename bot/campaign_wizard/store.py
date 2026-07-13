@@ -69,7 +69,15 @@ def empty_wizard_state() -> dict:
             "descriptions": [],
         },
         "images": {"media_ids": [], "skipped": False, "eligible": None},
-        "assets": {"reuse_links": [], "new": []},  # new: [{"family":..., "params":{...}}]
+        # reuse_candidates — ВСЁ, что нашлось на аккаунте (§19.7 пикер подмножества); reuse_links —
+        # ВЫБРАННОЕ подмножество (оно и уедет в мутацию). Раньше поля candidates не было, и
+        # переиспользовались все ассеты подряд, без спроса.
+        "assets": {
+            "reuse_links": [],
+            "reuse_candidates": [],
+            "reuse_excluded": [],
+            "new": [],
+        },  # new: [{"family":..., "params":{...}}]
         "url_options": {
             "tracking_url_template": None,
             "final_url_suffix": None,

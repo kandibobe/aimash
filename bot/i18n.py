@@ -2547,6 +2547,16 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "✅ Переиспользую {n} ассет(ов) аккаунта: {types}.",
         "en": "✅ Reusing {n} account asset(s): {types}.",
     },
+    # §19.7: выбор ПОДМНОЖЕСТВА (раньше линковались все найденные ассеты аккаунта без спроса).
+    "cc_assets_reuse_pick": {
+        "ru": (
+            "♻️ Какие ассеты аккаунта переиспользовать? Нажми на тип, чтобы включить/выключить.\n"
+            "Сейчас выбрано: {n}."
+        ),
+        "en": (
+            "♻️ Which account assets to reuse? Tap a type to toggle it.\nCurrently selected: {n}."
+        ),
+    },
     "cc_assets_pick_type": {
         "ru": "Какой ассет добавить? Сгенерирую наполнение по теме и сайту, вы сможете подтвердить.",
         "en": "Which asset to add? I'll generate the content from the topic and site for you to confirm.",

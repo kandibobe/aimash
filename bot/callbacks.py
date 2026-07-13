@@ -231,7 +231,7 @@ class CcCB(CallbackData, prefix="cc"):
     кэше (Этап 0) или под-индекс; sub — тег стадии/под-действие."""
 
     action: str  # "acct"|"page"|"accept"|"skip"|"edit"|"kw_generate"|"kw_confirm"|"use_assets"|
-    # "add_assets"|"asset_type"|"assets_back"|"create"|"launch"|"resume"|"new"
+    # "add_assets"|"asset_type"|"assets_back"|"reuse_type"|"reuse_done"|"create"|"launch"|"resume"|"new"
     idx: int = -1
     sub: str = ""
 

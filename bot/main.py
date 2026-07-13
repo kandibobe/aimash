@@ -154,6 +154,7 @@ from bot.keyboards import (
     clients_accounts_kb,
     cc_asset_types_kb,
     cc_assets_kb,
+    cc_assets_reuse_kb,
     cc_exit_kb,
     cc_final_kb,
     cc_kw_confirm_kb,

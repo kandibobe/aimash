@@ -542,12 +542,16 @@ def fmt_search_proposal_summary(
     ad_schedule: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    assets: dict | None = None,
+    images: int = 0,
 ) -> str:
     """Плейн-текст сводка create_search_campaign для confirm-гейта (esc применяется при показе).
     P1-A: опц. таргетинг-поля (гео/язык/сети/расписание/даты) выводятся блоком, если переданы —
     полное «было→станет» в точке ✅ (§5/§19.8). /clone их НЕ передаёт (там гео не переносится).
     A7: cpc_units — max CPC-ставка (в валюте аккаунта), печатается строкой на карточке; раньше
-    ставка была скрыта (валютно-слепой хардкод 0.5) и менеджер жал ✅ на невидимом значении."""
+    ставка была скрыта (валютно-слепой хардкод 0.5) и менеджер жал ✅ на невидимом значении.
+    2.5 (§19.8): assets/images — состав ассетов; до этого карточка ✅ про ассеты МОЛЧАЛА, хотя они
+    создаются той же операцией (телефон, скидка, доп. ссылки уходили в кампанию невидимо)."""
     lng = _lang(lang)
     cur_sfx = f" {currency}" if currency else ""
     cpc_line_ru = f"\nMax CPC-ставка: {cpc_units:g}{cur_sfx}" if cpc_units is not None else ""
@@ -566,6 +570,10 @@ def fmt_search_proposal_summary(
         start_date=start_date,
         end_date=end_date,
     )
+    # Ассеты создаются ТОЙ ЖЕ операцией — значит, обязаны быть на карточке ✅ (plain text: esc здесь
+    # не применяем, его накладывает показ).
+    a_block = fmt_assets_block(assets, lng, images=images, html=False)
+    a_block = f"\n\n{a_block}" if a_block else ""
     if lng == "en":
         kw_block = ""
         if keywords:
@@ -588,7 +596,7 @@ def fmt_search_proposal_summary(
             f"{tgt_block}\n\n"
             f"Headlines ({len(headlines)}):\n{h_lines}\n\n"
             f"Descriptions ({len(descriptions)}):\n{d_lines}"
-            f"{kw_block}"
+            f"{kw_block}{a_block}"
         )
     kw_block = ""
     if keywords:
@@ -607,7 +615,7 @@ def fmt_search_proposal_summary(
         f"{tgt_block}\n\n"
         f"Заголовки ({len(headlines)}):\n{h_lines}\n\n"
         f"Описания ({len(descriptions)}):\n{d_lines}"
-        f"{kw_block}"
+        f"{kw_block}{a_block}"
     )
 
 
@@ -1953,6 +1961,23 @@ def fmt_mutation_result(operation: str, result: object, lang: str | None = None)
                 if en
                 else f"♻️ Переиспользовано ассетов: {reused}"
             )
+        # Потеря группы переиспользуемых ассетов (несовместимый тип/квота) — раньше была видна лишь
+        # как «переиспользовано 3» вместо 7 и никем не замечалась.
+        reuse_req = result.get("assets_reuse_requested")
+        reuse_skip = result.get("assets_reuse_skipped")
+        if isinstance(reuse_skip, list) and reuse_skip:
+            fts = esc(
+                ", ".join(
+                    str(s.get("field_type") if isinstance(s, dict) else s) for s in reuse_skip
+                )
+            )
+            req = int(reuse_req or 0)
+            got = int(reused or 0)
+            L.append(
+                f"⚠️ Reused assets: {got}/{req} linked — skipped: {fts}."
+                if en
+                else f"⚠️ Переиспользование: {got}/{req} привязано — не привязаны: {fts}."
+            )
         skipped = result.get("assets_skipped")
         if isinstance(skipped, list) and skipped:
             fams = esc(
@@ -2511,6 +2536,108 @@ def fmt_asset_spec_label(spec: dict, lang: str | None = None) -> str:
     return fam_h
 
 
+# Семейства ассетов уровня АККАУНТА (Google CustomerAsset): действуют на ВСЕ кампании клиента, а не
+# только на создаваемую. Менеджер должен знать это ДО ✅ — иначе «логотип для новой кампании»
+# незаметно меняет бренд-ассеты всего аккаунта. См. ads/extensions.py::_link_customer_assets.
+ACCOUNT_LEVEL_ASSET_FAMILIES = ("business_name", "business_logo")
+
+
+def _asset_spec_lines(spec: dict, en: bool, esc) -> list[str]:
+    """Содержимое одного нового ассета — построчно (§19.8 «полный набор», не счётчик)."""
+    family = str(spec.get("family") or "")
+    p = spec.get("params") or {}
+    head = esc(fmt_asset_spec_label(spec, "en" if en else "ru"))
+    if family == "sitelinks":
+        out = [f"  • {head}"]
+        for s in (p.get("sitelinks") or [])[:8]:
+            txt = esc(str(s.get("link_text") or ""))
+            url = esc(str(s.get("final_url") or ""))
+            out.append(f"     – {txt} → {url}" if url else f"     – {txt}")
+        return out
+    if family == "callouts":
+        items = ", ".join(esc(str(c)) for c in (p.get("callouts") or []))
+        label = "Callouts" if en else "Уточнения"
+        return [f"  • {label}: {items}"] if items else []
+    if family == "price":
+        out = [f"  • {head}"]
+        cur = esc(str(p.get("currency") or ""))
+        for o in (p.get("offerings") or [])[:8]:
+            hdr = esc(str(o.get("header") or ""))
+            price = o.get("price_units")
+            out.append(f"     – {hdr} — {_thou(float(price or 0), 2)} {cur}".rstrip())
+        return out
+    if family == "promotion":
+        target = esc(str(p.get("promotion_target") or ""))
+        pct = p.get("percent_off")
+        lbl = "Promotion" if en else "Акция"
+        disc = f"-{int(pct)}%" if pct else esc(str(p.get("money_off_units") or ""))
+        return [f"  • {lbl}: {disc} · {target}"]
+    if family == "structured_snippets":
+        vals = ", ".join(esc(str(v)) for v in (p.get("values") or []))
+        hdr = esc(str(p.get("header") or ""))
+        lbl = "Structured snippet" if en else "Структурное описание"
+        return [f"  • {lbl} «{hdr}»: {vals}"]
+    if family == "call":
+        lbl = "Phone" if en else "Телефон"
+        cc = esc(str(p.get("country_code") or ""))
+        return [f"  • {lbl}: {esc(str(p.get('phone_number') or ''))} ({cc})".replace(" ()", "")]
+    return [f"  • {head}"]
+
+
+def fmt_assets_block(
+    assets: dict | None, lang: str | None = None, *, images: int = 0, html: bool = True
+) -> str:
+    """§19.8: СОДЕРЖИМОЕ ассетов — и в сводке Этапа 7, и на карточке ✅ confirm-гейта.
+
+    Раньше оба места печатали только счётчики («ассеты: 2 переисп., 3 новых»): какой телефон уйдёт в
+    объявление, какие доп. ссылки, какая скидка — менеджер не видел НИГДЕ и подтверждал вслепую.
+    Плюс явное предупреждение про аккаунтные семейства (название/логотип).
+
+    html=False — plain text для сводки confirm-гейта (там esc применяется при показе; экранировать
+    здесь = двойное экранирование `&amp;amp;`)."""
+    a = assets or {}
+    new = [s for s in (a.get("new") or []) if isinstance(s, dict)]
+    reuse = [r for r in (a.get("reuse_links") or []) if isinstance(r, dict)]
+    if not new and not reuse and not images:
+        return ""
+    en = _lang(lang) == "en"
+    e = esc if html else (lambda s: s)
+    head = (
+        ("📎 <b>Assets</b>" if en else "📎 <b>Ассеты</b>")
+        if html
+        else ("Assets:" if en else "Ассеты:")
+    )
+    lines = [head]
+    for spec in new:
+        lines.extend(_asset_spec_lines(spec, en, e))
+    if reuse:
+        from collections import Counter
+
+        by_type = Counter(str(r.get("field_type") or "?") for r in reuse)
+        types_s = e(
+            ", ".join(
+                f"{t}×{n}" for t, n in sorted(by_type.items(), key=lambda kv: (-kv[1], kv[0]))
+            )
+        )
+        lines.append(
+            f"  ♻️ Reused ({len(reuse)}): {types_s}"
+            if en
+            else f"  ♻️ Переиспользуются ({len(reuse)}): {types_s}"
+        )
+    if images:
+        lines.append(f"  🖼 Images: {images}" if en else f"  🖼 Изображения: {images}")
+    acct = [s for s in new if str(s.get("family") or "") in ACCOUNT_LEVEL_ASSET_FAMILIES]
+    if acct:
+        lines.append(
+            "  ⚠️ Business name / logo are linked at the ACCOUNT level — they will appear in every "
+            "campaign of this client, not only the new one."
+            if en
+            else "  ⚠️ Название бизнеса и логотип привязываются к АККАУНТУ — они появятся во всех "
+            "кампаниях этого клиента, не только в новой."
+        )
+    return "\n".join(lines)
+
+
 def fmt_cc_final_summary(state: dict, lang: str | None = None) -> str:
     """Этап 7: финальная сводка всего черновика кампании перед созданием (§19.8). HTML, esc внутри."""
     lng = _lang(lang)
@@ -2532,8 +2659,8 @@ def fmt_cc_final_summary(state: dict, lang: str | None = None) -> str:
     n_h = len(ad.get("headlines") or [])
     n_d = len(ad.get("descriptions") or [])
     n_img = len(imgs.get("media_ids") or [])
-    n_reuse = len(assets.get("reuse_links") or [])
-    n_new = len(assets.get("new") or [])
+    # §19.8 «полный набор ассетов»: содержимое, а не «2 переисп., 3 новых» — см. fmt_assets_block.
+    assets_block = fmt_assets_block(assets, lng, images=n_img)
     url_bits = [
         b
         for b in (
@@ -2566,8 +2693,8 @@ def fmt_cc_final_summary(state: dict, lang: str | None = None) -> str:
             + ad_block
             + f"\nKeywords: {n_kw} "
             f"({match_type_human(kw.get('match_type') or 'phrase', lng)})\n"
-            f"Images: {n_img} · assets: {n_reuse} reused, {n_new} new\n"
-            f"URL options: {', '.join(url_bits) or '—'}\n\n"
+            + (f"{assets_block}\n" if assets_block else "")
+            + f"URL options: {', '.join(url_bits) or '—'}\n\n"
             "Edit by command (e.g. <i>set budget 60</i>), or create the draft."
         )
     else:
@@ -2584,8 +2711,8 @@ def fmt_cc_final_summary(state: dict, lang: str | None = None) -> str:
             + ad_block
             + f"\nКлючей: {n_kw} "
             f"({match_type_human(kw.get('match_type') or 'phrase', lng)})\n"
-            f"Изображения: {n_img} · ассеты: {n_reuse} переисп., {n_new} новых\n"
-            f"URL-опции: {', '.join(url_bits) or '—'}\n\n"
+            + (f"{assets_block}\n" if assets_block else "")
+            + f"URL-опции: {', '.join(url_bits) or '—'}\n\n"
             "Поправьте командой (напр. <i>поставь бюджет 60</i>) или создайте черновик."
         )
     return f"{head}\n{body}"
