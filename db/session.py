@@ -128,10 +128,33 @@ def heal_sqlite_schema(sync_conn) -> list[str]:
     return actions
 
 
+def _missing_tables(sync_conn) -> list[str]:
+    """Таблицы моделей, которых нет в БД (Postgres: признак ненакатанных миграций)."""
+    existing = set(sa_inspect(sync_conn).get_table_names())
+    return [t.name for t in Base.metadata.sorted_tables if t.name not in existing]
+
+
 async def init_db() -> None:
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        # create_all не альтерит существующие таблицы → аддитивный self-heal схемы (только dev SQLite;
-        # на Postgres истина — Alembic). Закрывает дрейф «модель ⟂ БД» после новой колонки в модели.
-        if _db_url.startswith("sqlite"):
+    """SQLite (dev/test): схему создаёт и лечит сам процесс. Postgres (prod): истина — Alembic.
+
+    На Postgres `create_all` НЕЛЬЗЯ: он молча создаёт недостающие таблицы в обход миграций, версия
+    в alembic_version при этом не двигается → дрейф «модель ⟂ миграции» невидим, а следующая
+    миграция с `op.create_table` падает DuplicateTable уже на старте контейнера (крэш-луп прода:
+    docker-entrypoint.sh гоняет `alembic upgrade head` до бота и не поднимает его на ошибке).
+    Поэтому здесь только ПРОВЕРКА: схемы нет → падаем громко с указанием, что делать.
+    """
+    if _db_url.startswith("sqlite"):
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            # create_all не альтерит существующие таблицы → аддитивный self-heal схемы.
             await conn.run_sync(heal_sqlite_schema)
+        return
+
+    async with engine.begin() as conn:
+        missing = await conn.run_sync(_missing_tables)
+    if missing:
+        raise RuntimeError(
+            "схема БД не накатана — нет таблиц: "
+            + ", ".join(sorted(missing))
+            + ". Выполните `alembic upgrade head` (на проде это делает docker-entrypoint.sh)."
+        )

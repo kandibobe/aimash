@@ -36,6 +36,15 @@ ANOMALY_WINDOW_DAYS = int(settings.anomaly_window_days)  # окно сравне
 PROPOSAL_TTL_HOURS = int(settings.proposal_ttl_hours)
 _DIGEST_MAX = 3800  # потолок длины дайджеста для Telegram (лимит 4096, оставляем запас)
 
+# Анти-спам аномалий. Джоба крутится каждые anomaly_interval_hours (дефолт 6), а окно сравнения —
+# anomaly_window_days (дефолт 7): ОДНА и та же аномалия («расход +60% к прошлой неделе») попадала в
+# рассылку на КАЖДОМ прогоне ≈ 4 раза в сутки всю неделю (~28 одинаковых сообщений). Оператор
+# перестаёт читать алерты — и пропускает настоящий. Кулдаун: повтор того же (аккаунт, kind) не
+# раньше чем через N часов. Состояние — в ui_prefs получателя (механика _ui_pref_blob, как у
+# thr-tune): ключ "acct:kind" → ISO-время последней ДОСТАВКИ.
+_ANOMALY_SEEN_KEY = "anomaly_seen"
+_ANOMALY_SEEN_TTL_D = 30  # старше — выбрасываем из блоба, чтобы не рос вечно
+
 
 async def _recipients() -> set[int]:
     """Кому слать: доверенные операторы бота = env-whitelist (бутстрап) ∪ рантайм-таблица whitelist
@@ -255,6 +264,47 @@ def _format_alerts_multi(account_alerts: list[tuple[str, list]], lang: str = "ru
     return "\n".join(parts)
 
 
+def _iso_ts(raw: object) -> datetime | None:
+    """ISO-строка → aware datetime (UTC). Мусор/пусто → None (кулдауна нет)."""
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
+
+
+def _anomaly_fresh(
+    blob: dict | None, acct: str, alerts: list, now: datetime, cooldown_h: float
+) -> list:
+    """Отфильтровать алерты, уже доставленные по этому (аккаунт, kind) внутри окна кулдауна.
+    Чистая функция (тестируема без БД). Пустой блоб ⇒ шлём всё (первый раз)."""
+    fresh = []
+    for a in alerts:
+        ts = _iso_ts((blob or {}).get(f"{acct}:{a.kind}"))
+        if ts is not None and (now - ts).total_seconds() < cooldown_h * 3600:
+            continue
+        fresh.append(a)
+    return fresh
+
+
+def _anomaly_seen_updated(
+    blob: dict | None, delivered: list[tuple[str, list]], now: datetime
+) -> dict:
+    """Новый блоб «что доставлено»: отметки now по доставленным (acct, kind) + чистка старше TTL."""
+    out = {
+        k: v
+        for k, v in (blob or {}).items()
+        if (ts := _iso_ts(v)) is not None and (now - ts).days < _ANOMALY_SEEN_TTL_D
+    }
+    stamp = now.isoformat()
+    for acct, alerts in delivered:
+        for a in alerts:
+            out[f"{acct}:{a.kind}"] = stamp
+    return out
+
+
 async def run_anomaly_check(bot) -> None:
     """Сравнение последних N дн. с предыдущими ПО ВСЕМ разрешённым аккаунтам (§8); алерт при росте
     расхода/падении конверсий. Пороги — per-chat из UserSettings.alert_thresholds (иначе дефолтные).
@@ -311,10 +361,13 @@ async def run_anomaly_check(bot) -> None:
         from core.access import accessible_accounts_for_user
 
         # Пороги per-chat → для каждого получателя собираем алерты по ЕГО аккаунтам в ОДНО сообщение.
+        now = datetime.now(timezone.utc)
+        cooldown_h = float(settings.anomaly_cooldown_hours)
         for chat_id in recipients:
             thr = thresholds.get(chat_id)
             # C2: метрики аккаунта не уходят оператору без доступа к нему (enforced-режим).
             allowed = set(await accessible_accounts_for_user(chat_id, list(metrics)))
+            seen = await _ui_pref_blob(chat_id, _ANOMALY_SEEN_KEY)  # анти-спам: что уже слали
             acct_alerts: list[tuple[str, list]] = []
             for acct, (cur, prev, currency) in metrics.items():
                 if acct not in allowed:
@@ -323,6 +376,9 @@ async def run_anomaly_check(bot) -> None:
                 alerts = detect_anomalies(
                     cur, prev, _effective_thresholds(thr, acct), currency=currency
                 )
+                # Кулдаун: тот же (аккаунт, kind) не повторяем каждые anomaly_interval_hours всю
+                # неделю окна — иначе оператор перестаёт читать алерты (см. _ANOMALY_SEEN_KEY).
+                alerts = _anomaly_fresh(seen, acct, alerts, now, cooldown_h)
                 if alerts:
                     acct_alerts.append((acct, alerts))
             if not acct_alerts:
@@ -337,6 +393,13 @@ async def run_anomaly_check(bot) -> None:
                 log.warning(
                     "scheduler: алерт не доставлен в %s: %s: %s", chat_id, type(e).__name__, e
                 )
+                continue  # не доставили → не отмечаем как показанное (иначе алерт потеряется)
+            try:
+                await _save_ui_pref_blob(
+                    chat_id, _ANOMALY_SEEN_KEY, _anomaly_seen_updated(seen, acct_alerts, now)
+                )
+            except Exception as e:  # noqa: BLE001 — БД-сбой не роняет рассылку (в худшем случае повтор)
+                log.warning("scheduler: анти-спам аномалий не сохранён (%s)", type(e).__name__)
 
 
 # A1 (§15): чек-поинт проактивных алертов — id последней уже разосланной error_events. Модульный
@@ -458,18 +521,29 @@ async def run_weekly_digest(bot) -> int:
         served = 0
         for chat_id in admins:
             lang = i18n.get_lang(chat_id)
-            text = texts.fmt_weekly_digest(
-                errors, bug_rows, activity, days=WEEKLY_DIGEST_DAYS, lang=lang
-            )[:_DIGEST_MAX]
+            # Обрезаем ПО СТРОКАМ, а не сырым слайсом: `[:3800]` рвал HTML посреди тега/сущности →
+            # Telegram отбивал сообщение ("can't parse entities"), исключение глоталось except ниже
+            # → дайджест молча не доставлялся ВМЕСТЕ с файлом. Детали всё равно уходят вложением.
+            text = ux.split_by_lines(
+                texts.fmt_weekly_digest(
+                    errors, bug_rows, activity, days=WEEKLY_DIGEST_DAYS, lang=lang
+                ),
+                _DIGEST_MAX,
+            )[0]
             try:
                 await bot.send_message(chat_id, text, parse_mode="HTML")
+            except Exception as e:  # noqa: BLE001 — недоступный админ не роняет; НЕ capture (петля!)
+                log.warning(
+                    "scheduler: недельный дайджест не доставлен в %s: %s", chat_id, type(e).__name__
+                )
+            try:  # файл с деталями — отдельно: сбой текста не должен отменять вложение (и наоборот)
                 await ux.send_bot_document(
                     bot, chat_id, text=file_text, filename="weekly_digest.txt"
                 )
                 served += 1
-            except Exception as e:  # noqa: BLE001 — недоступный админ не роняет; НЕ capture (петля!)
+            except Exception as e:  # noqa: BLE001
                 log.warning(
-                    "scheduler: недельный дайджест не доставлен в %s: %s", chat_id, type(e).__name__
+                    "scheduler: файл дайджеста не доставлен в %s: %s", chat_id, type(e).__name__
                 )
         log.info("scheduler: недельный дайджест разослан (админов %d)", served)
         return served

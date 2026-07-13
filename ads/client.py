@@ -325,6 +325,67 @@ def _env_cfg() -> dict:
     return cfg
 
 
+# Дедлайн gRPC на ЧТЕНИЯХ. google-ads v24 по умолчанию НЕ ставит дедлайн (`timeout` у search =
+# _MethodDefault) → зависший RPC живёт вечно. `asyncio.timeout` в core.resilience отменяет только
+# КОРУТИНУ ожидания: поток `asyncio.to_thread` с висящим gRPC продолжает жить, а run_ads_read_call
+# ретраит до ADS_MAX_ATTEMPTS раз → до 4 мёртвых потоков на один /report; пул потоков забивается,
+# бот перестаёт читать вообще. Поэтому дедлайн ставим в САМ SDK-вызов, в единственной точке сборки
+# клиента (call-site'ов ga.search ~40 — их не обойти).
+# МУТАЦИИ НЕ ТРОГАЕМ ОСОЗНАННО: DEADLINE_EXCEEDED на mutate не означает, что операция не
+# применилась (запрос мог доехать) → дедлайн там превратил бы висящий поток в риск задвоения.
+_READ_DEADLINE_METHODS: dict[str, tuple[str, ...]] = {
+    "GoogleAdsService": ("search", "search_stream"),
+    "KeywordPlanIdeaService": ("generate_keyword_ideas",),
+}
+
+
+def _read_deadline_s() -> float:
+    """Чуть РАНЬШЕ asyncio-таймаута (core.resilience.ADS_TIMEOUT_S = settings.ads_timeout_s): хотим
+    DeadlineExceeded ОТ SDK (поток освободится сам), а не отмену корутины поверх живого RPC."""
+    return max(5.0, float(settings.ads_timeout_s) - 5.0)
+
+
+class _DeadlineService:
+    """Прокси read-сервиса SDK: подставляет `timeout=` в чтения, если call-site не задал свой.
+    Остальные методы (включая mutate) проксируются без изменений."""
+
+    __slots__ = ("_svc", "_methods", "_timeout")
+
+    def __init__(self, svc: object, methods: tuple[str, ...], timeout: float) -> None:
+        self._svc = svc
+        self._methods = methods
+        self._timeout = timeout
+
+    def __getattr__(self, name: str):
+        attr = getattr(self._svc, name)
+        if name not in self._methods:
+            return attr
+
+        def _with_deadline(*args, **kwargs):
+            kwargs.setdefault("timeout", self._timeout)
+            return attr(*args, **kwargs)
+
+        return _with_deadline
+
+
+class _DeadlineClient:
+    """Прокси GoogleAdsClient: get_service отдаёт read-сервисы обёрнутыми (см. _READ_DEADLINE_METHODS).
+    Всё прочее (get_type, enums, copy_from, мутационные сервисы) — как у настоящего клиента."""
+
+    __slots__ = ("_client",)
+
+    def __init__(self, client: object) -> None:
+        self._client = client
+
+    def get_service(self, name: str, **kwargs):
+        svc = self._client.get_service(name, **kwargs)  # type: ignore[attr-defined]
+        methods = _READ_DEADLINE_METHODS.get(name)
+        return _DeadlineService(svc, methods, _read_deadline_s()) if methods else svc
+
+    def __getattr__(self, name: str):
+        return getattr(self._client, name)
+
+
 def build_client(customer_id: str | None = None) -> "GoogleAdsClient":
     """SDK-клиент для аккаунта. Без аргумента (или Draft) — из .env; кэш по нормализованному id.
     Импорт SDK ленивый: ensure_allowed/константы доступны без google-ads.
@@ -343,7 +404,10 @@ def build_client(customer_id: str | None = None) -> "GoogleAdsClient":
     # дефолт — сейчас совпадает с пином google-ads>=31.1,<32=v24, но не гарантированно при апгрейде
     # библиотеки). Рассинхрон версии теперь = явный отказ get_service, а не тихий дрейф. Пин lib и
     # эту строку перепроверять скилом gads-version (v24 сансет ~май 2027).
-    client = GoogleAdsClient.load_from_dict(_cfg_for(cid), version=settings.google_ads_api_version)
+    raw = GoogleAdsClient.load_from_dict(_cfg_for(cid), version=settings.google_ads_api_version)
+    # Прокси с gRPC-дедлайном на чтениях (см. _DeadlineClient): без него зависший RPC держит поток
+    # to_thread вечно, а ретраи read-пути множат такие потоки. Мутационные сервисы не затронуты.
+    client: GoogleAdsClient = _DeadlineClient(raw)  # type: ignore[assignment]
     _CLIENT_CACHE[cid] = client
     return client
 
