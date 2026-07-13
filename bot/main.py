@@ -6126,18 +6126,21 @@ async def _rsa_edit_overview(cq: CallbackQuery, session) -> None:
 # Позднее связывание: модули читают имена main через bm.<name> — сохранено. ──
 def _reexport_handlers(mods: list) -> None:
     """Ре-экспорт публичных функций хендлер-модулей в globals() bot.main: тесты/скрипты зовут
-    их как bot.main.<handler> (прежняя семантика `from ... import *`). setdefault — имя main
-    всегда побеждает при конфликте (и логируем: тень хендлера — почти наверняка ошибка)."""
+    их как bot.main.<handler> (прежняя семантика `from ... import *`).
+
+    Коллизия имён = ОШИБКА, а не повод для warning: bm.<name> отдал бы объект main, а не хендлер —
+    значит monkeypatch тестов бьёт мимо, а сам хендлер недостижим по имени (ровно тот класс тихих
+    багов, что уже ловили инвариантами порядка). Падаем на импорте: CI/старт увидят сразу."""
     g = globals()
     for mod in mods:
         for name, obj in vars(mod).items():
             if name.startswith("_") or getattr(obj, "__module__", None) != mod.__name__:
                 continue
             if name in g and g[name] is not obj:
-                log.warning(
-                    "реэкспорт хендлеров: имя %s из %s затенено — пропущено", name, mod.__name__
+                raise RuntimeError(
+                    f"реэкспорт хендлеров: имя {name} из {mod.__name__} затеняет bot.main.{name} — "
+                    "переименуй (bm.<name> вернул бы объект main, а не хендлер)"
                 )
-                continue
             g[name] = obj
 
 

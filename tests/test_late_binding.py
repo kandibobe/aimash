@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import ast
 import sys
+import types
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -66,3 +69,35 @@ def test_all_bm_references_resolve_on_main():
         "Обращение bm.<name> не резолвится на bot.main (забыт импорт/ре-экспорт в bot/main.py):\n  "
         + "\n  ".join(missing)
     )
+
+
+def _fake_module(name: str, attr: str) -> types.ModuleType:
+    mod = types.ModuleType(name)
+
+    def handler():  # публичное имя хендлера, «определённое» в этом модуле
+        return name
+
+    handler.__module__ = name
+    setattr(mod, attr, handler)
+    return mod
+
+
+def test_reexport_raises_on_shadowed_name():
+    """Волна 3: тень имени при ре-экспорте — ОШИБКА, а не warning.
+
+    Раньше коллизия логировалась и имя пропускалось: bm.<name> отдавал объект bot.main, а не
+    хендлер, — monkeypatch тестов бил мимо, сам хендлер оставался недостижим по имени. Молча.
+    Теперь падаем на импорте: CI/старт бота видят конфликт сразу."""
+    assert hasattr(bm, "settings")  # любое существующее публичное имя main
+    with pytest.raises(RuntimeError, match="затеняет"):
+        bm._reexport_handlers([_fake_module("fake_handlers_shadow", "settings")])
+
+
+def test_reexport_binds_new_name():
+    """Позитивная ветка: неконфликтующее имя действительно появляется на bot.main."""
+    mod = _fake_module("fake_handlers_ok", "aimash_probe_handler")
+    try:
+        bm._reexport_handlers([mod])
+        assert bm.aimash_probe_handler() == "fake_handlers_ok"
+    finally:
+        vars(bm).pop("aimash_probe_handler", None)

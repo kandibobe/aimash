@@ -17,6 +17,7 @@ from google.ads.googleads.errors import GoogleAdsException
 from google.api_core import protobuf_helpers
 
 from adcopy.validate import (
+    ASSET_LIMITS,
     RSA_MAX_DESCRIPTIONS,
     RSA_MAX_HEADLINES,
     RSA_MIN_DESCRIPTIONS,
@@ -2853,7 +2854,10 @@ def _apply_url_options_on_create(client, c, url_options: dict | None) -> None:
 # ── Создание GDN-кампании из фото (§11): фото→Asset→Display→группа→RDA, всё PAUSED ─
 GDN_MAX_HEADLINES = 5
 GDN_MAX_DESCRIPTIONS = 5
-GDN_BUSINESS_NAME_MAX = 25
+# Единый реестр лимитов ассетов — adcopy.validate.ASSET_LIMITS (не второе число здесь): раньше
+# business_name мерился тут голым len(), а в adcopy — ШИРИНОЙ (CJK=2), и CJK-бренд проходил
+# валидацию, чтобы упасть в SDK уже ПОСЛЕ claim (подтверждение сожжено, статус failed).
+GDN_BUSINESS_NAME_MAX = ASSET_LIMITS["business_name"]
 
 
 def _validate_gdn_inputs(
@@ -2884,8 +2888,11 @@ def _validate_gdn_inputs(
         ok, n = _rsa_validate(d, "description")  # ≤90
         if not ok:
             raise ValueError(f"описание превышает лимит ({n}/90): «{d}»")
-    if not business_name or len(business_name) > GDN_BUSINESS_NAME_MAX:
+    if not business_name:
         raise ValueError(f"название бизнеса 1–{GDN_BUSINESS_NAME_MAX} символов")
+    assert_asset_len(
+        business_name, "business_name"
+    )  # ШИРИНА (кириллица=1, CJK=2), как считает Google
     if not final_url or not str(final_url).startswith(("http://", "https://")):
         raise ValueError("нужен валидный final_url (http/https)")
     if budget_daily_micros <= 0:
@@ -3161,8 +3168,11 @@ def _validate_video_campaign_inputs(
         ok, n = _rsa_validate(d, "description")  # ≤90 базово
         if not ok or n > description_max:
             raise ValueError(f"описание превышает лимит ({max(n, 0)}/{description_max}): «{d}»")
-    if not business_name or len(business_name) > GDN_BUSINESS_NAME_MAX:
+    if not business_name:
         raise ValueError(f"название бизнеса 1–{GDN_BUSINESS_NAME_MAX} символов")
+    assert_asset_len(
+        business_name, "business_name"
+    )  # ШИРИНА (кириллица=1, CJK=2), как считает Google
     if not final_url or not str(final_url).startswith(("http://", "https://")):
         raise ValueError("нужен валидный final_url (http/https)")
     if budget_daily_micros <= 0:

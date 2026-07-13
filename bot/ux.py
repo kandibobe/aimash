@@ -372,7 +372,7 @@ async def send_text_document(message: object, *, text: str, filename: str) -> No
 async def send_bot_document(bot: object, chat_id: int, *, text: str, filename: str) -> None:
     """Отправить ТЕКСТ .txt-вложением из SCHEDULER-контекста (нет message, только bot). Аналог
     send_text_document для плановых джоб (еженедельный дайджест). Временный файл — в finally.
-    Вызывающий сам ловит исключения per-recipient (как _broadcast)."""
+    Вызывающий сам ловит исключения per-recipient (один недоступный чат не валит рассылку)."""
     fd, path = tempfile.mkstemp(suffix=".txt", prefix="aimash_digest_")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:

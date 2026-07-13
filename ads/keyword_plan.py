@@ -89,7 +89,6 @@ MAX_IDEAS = 200  # сколько идей ВОЗВРАЩАЕМ (топ по о�
 # честное сообщение об усечении даёт UI (bot.handlers.keywords_flow), схема тула — не выше лимита.
 MAX_SEEDS = 20
 _FETCH_CEILING = 500  # сколько максимум тянем из API ДО сортировки (бюджет ~1 запроса)
-_RETRIES = 3  # попыток при rate-limit (~1 QPS), экспоненциальный backoff
 
 
 # Месяцы (v24 MonthOfYearEnum) → краткое RU для пика сезона.
@@ -296,7 +295,7 @@ def generate_keyword_ideas(
 
     # 2.9: внутреннего retry-loop (time.sleep 2**attempt) больше НЕТ — обе точки вызова оборачивают
     # функцию в core.resilience.run_ads_read_call (таймаут + backoff на транзиентных), и внутренний
-    # цикл давал ДВОЙНОЙ backoff (до _RETRIES × ADS_MAX_ATTEMPTS попыток), а его time.sleep не
+    # цикл давал ДВОЙНОЙ backoff (локальные попытки × ADS_MAX_ATTEMPTS), а его time.sleep не
     # отменялся внешним asyncio.timeout (to_thread-поток спал дальше). Единый ретрай — снаружи.
     ideas: list[KeywordIdea] = []
     for r in svc.generate_keyword_ideas(request=_build_request()):

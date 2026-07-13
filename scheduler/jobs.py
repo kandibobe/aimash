@@ -96,14 +96,6 @@ async def _account_period(client, acct: str, n_days: int):
     return await account_period(client, acct, last_n_days(n_days), label=f"sched_tz_{acct}")
 
 
-async def _broadcast(bot, text: str, **kw) -> None:
-    for chat_id in await _recipients():
-        try:
-            await bot.send_message(chat_id, text, **kw)
-        except Exception as e:  # один недоступный чат не должен ронять рассылку
-            log.warning("scheduler: не доставлено в %s: %s: %s", chat_id, type(e).__name__, e)
-
-
 async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
     """Плановый отчёт (последние N дн.) по ВСЕМ разрешённым на чтение аккаунтам (§8) — ОДИН дайджест
     на оператора (анти-спам, не N сообщений). READ-ONLY. Сбой одного аккаунта не валит остальные

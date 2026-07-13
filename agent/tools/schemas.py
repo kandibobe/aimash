@@ -12,6 +12,7 @@ from typing import Annotated, Literal
 from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
 
 from adcopy.validate import (
+    ASSET_LIMITS,
     RSA_MAX_DESCRIPTIONS,
     RSA_MAX_HEADLINES,
     RSA_MIN_DESCRIPTIONS,
@@ -680,7 +681,7 @@ class CreateGdnCampaign(BaseModel):
     headlines: list[str] = Field(min_length=1, max_length=5)  # каждый ≤30
     long_headline: str = Field(min_length=1)  # ≤90
     descriptions: list[str] = Field(min_length=1, max_length=5)  # каждый ≤90
-    business_name: str = Field(min_length=1, max_length=25)
+    business_name: str = Field(min_length=1, max_length=ASSET_LIMITS["business_name"])
     final_url: str
     budget_daily_micros: int = Field(
         gt=0, le=MONEY_MAX_MICROS
@@ -713,6 +714,11 @@ class CreateGdnCampaign(BaseModel):
             _assert_rsa_len([t], "description")
         return v
 
+    @field_validator("business_name")
+    @classmethod
+    def _bn(cls, v):
+        return assert_asset_len(v, "business_name")  # ШИРИНА (CJK=2) — как считает Google
+
     @field_validator("final_url")
     @classmethod
     def _url(cls, v):
@@ -738,7 +744,7 @@ class _MediaVideoCampaignBase(BaseModel):
     headlines: list[str] = Field(min_length=1, max_length=5)  # каждый ≤30
     long_headline: str = Field(min_length=1)  # ≤90
     descriptions: list[str] = Field(min_length=1, max_length=5)  # ≤90 (Video: КОД сузит до ≤70)
-    business_name: str = Field(min_length=1, max_length=25)
+    business_name: str = Field(min_length=1, max_length=ASSET_LIMITS["business_name"])
     final_url: str
     budget_daily_micros: int = Field(gt=0, le=MONEY_MAX_MICROS)  # потолок из core.limits
     geo_locations: list[str] = Field(default_factory=list, max_length=50)
@@ -753,6 +759,11 @@ class _MediaVideoCampaignBase(BaseModel):
         if not parse_youtube_video_id(v):
             raise ValueError("нужна ссылка на YouTube-видео или его 11-символьный id")
         return v
+
+    @field_validator("business_name")
+    @classmethod
+    def _bn(cls, v):
+        return assert_asset_len(v, "business_name")  # ШИРИНА (CJK=2) — как считает Google
 
     @field_validator("headlines")
     @classmethod
