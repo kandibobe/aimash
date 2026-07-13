@@ -132,6 +132,8 @@ HELP = (
     "что чинить первым (безопасно, одним «да»). Рядом — родная оценка Google\n"
     "/bids [период] — 📈 возможности по ставкам: какие ключи поднять и до скольки "
     "(оценки позиций и симулятор Google), сверху — наибольший прогнозный прирост конверсий\n"
+    "/competitors — 🥊 кто рядом в аукционе: пришли CSV «Статистика аукционов» из Google Ads "
+    "(имена конкурентов API не отдаёт — только файл), сравню с прошлым импортом\n"
     "/target &lt;CPA&gt; — целевой CPA аккаунта (разблокирует в /audit паузу дорогих: CPA ≥ 3× цели)\n"
     "/alerts — пороги алертов аномалий (всплеск расхода / падение конверсий)\n\n"
     "<b>ℹ️ Клиенты</b>\n"
@@ -3019,3 +3021,86 @@ def _profile_field_changes(before: dict, after: dict, lng: str) -> list[str]:
     )
     _named("contacts", "контакты", "contacts", contact_key, lambda it: it.get("value") or "")
     return out
+
+
+def fmt_competitors(
+    snap,
+    prev=None,
+    *,
+    customer_id: str = "",
+    top_n: int = 8,
+    lang: str | None = None,
+) -> str:
+    """Ф5б: карточка «Статистики аукционов» из импортированного CSV (db.competitors.Snapshot).
+
+    Показывает РОВНО то, что было в файле: «--» (нет данных) остаётся прочерком, а не превращается
+    в 0% — иначе клиент прочитает «конкурент нигде не показывался» там, где Google просто промолчал.
+    prev — предыдущий импорт: дельта доли показов в ПУНКТАХ (п.п.), новые/ушедшие домены. Дельта
+    честна только при одинаковом окне выгрузки, поэтому окно каждого среза печатается рядом."""
+    lng = _lang(lang)
+
+    def pct(v: float | None) -> str:
+        return "—" if v is None else f"{round(v * 100)}%"
+
+    head = "🥊 <b>Auction insights</b>" if lng == "en" else "🥊 <b>Статистика аукционов</b>"
+    if customer_id:
+        head += f" · {esc(str(customer_id))}"
+    window = f" ({esc(snap.period_label)})" if snap.period_label else ""
+    imported = "imported" if lng == "en" else "импорт от"
+    lines = [f"{head}\n{imported} {esc(snap.snapshot_date)}{window}"]
+
+    if snap.you:
+        y = snap.you
+        lines.append(
+            (
+                f"\n<b>You:</b> impressions {pct(y.impression_share)} · "
+                f"top of page {pct(y.top_of_page_rate)} · abs. top {pct(y.abs_top_of_page_rate)}"
+            )
+            if lng == "en"
+            else (
+                f"\n<b>Ты:</b> доля показов {pct(y.impression_share)} · "
+                f"верх страницы {pct(y.top_of_page_rate)} · самый верх {pct(y.abs_top_of_page_rate)}"
+            )
+        )
+
+    prev_by_domain = {c.domain: c for c in (prev.competitors if prev else ())}
+    lines.append("")
+    for i, c in enumerate(snap.competitors[:top_n], 1):
+        delta = ""
+        old = prev_by_domain.get(c.domain)
+        if old is None and prev is not None:
+            delta = " · 🆕" if lng == "en" else " · 🆕 новый"
+        elif (
+            old is not None and old.impression_share is not None and c.impression_share is not None
+        ):
+            d = round((c.impression_share - old.impression_share) * 100)
+            if d:  # ±0 п.п. не пишем — это шум округления, а не движение
+                delta = f" · {'▲' if d > 0 else '▼'}{abs(d)} " + ("pp" if lng == "en" else "п.п.")
+        if lng == "en":
+            lines.append(
+                f"{i}. <b>{esc(c.domain)}</b> — impressions {pct(c.impression_share)}{delta}\n"
+                f"   overlap {pct(c.overlap_rate)} · above you {pct(c.position_above_rate)} · "
+                f"outranks {pct(c.outranking_share)}"
+            )
+        else:
+            lines.append(
+                f"{i}. <b>{esc(c.domain)}</b> — доля показов {pct(c.impression_share)}{delta}\n"
+                f"   пересечение {pct(c.overlap_rate)} · выше тебя {pct(c.position_above_rate)} · "
+                f"опережает {pct(c.outranking_share)}"
+            )
+
+    if prev is not None:
+        gone = [d for d in prev_by_domain if d not in {c.domain for c in snap.competitors}]
+        if gone:
+            label = "Left the auction" if lng == "en" else "Ушли из аукциона"
+            lines.append(f"\n{label}: " + ", ".join(esc(d) for d in gone[:5]))
+        win = f" ({esc(prev.period_label)})" if prev.period_label else ""
+        cmp_ = "compared to import" if lng == "en" else "сравнение с импортом от"
+        lines.append(f"<i>{cmp_} {esc(prev.snapshot_date)}{win}</i>")
+
+    lines.append(
+        "<i>Competitor names come only from this report — Google's API doesn't return them.</i>"
+        if lng == "en"
+        else "<i>Имена конкурентов даёт только этот отчёт — через API Google их не отдаёт.</i>"
+    )
+    return "\n".join(lines)

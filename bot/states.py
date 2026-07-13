@@ -139,3 +139,10 @@ class CreateCampaignWizard(StatesGroup):
     asset_lead_form = State()  # Этап 5: выбрана лид-форма — ждём URL политики конфиденциальности
     url_options = State()  # Этап 6: ждём «tracking | suffix» или «Пропустить»
     final = State()  # Этап 7: сводка; ждём правку-текст или ✅ Создать / 🚀 Запустить
+
+
+class CompetitorsWizard(StatesGroup):
+    """Ф5б: приём CSV «Статистика аукционов» (/competitors). Файл разбирает КОД, в ИИ он не идёт —
+    состояние нужно, чтобы перехватить документ РАНЬШЕ catch-all on_document (тот шлёт файл агенту)."""
+
+    awaiting_file = State()  # ждём .csv-выгрузку отчёта из интерфейса Google Ads

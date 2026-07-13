@@ -579,3 +579,45 @@ class SheetExport(Base):
     title: Mapped[str | None] = mapped_column(String(255))
     share: Mapped[str] = mapped_column(String(16), nullable=False)  # роль|off|failed
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AuctionInsightRow(Base):
+    """Ф5б: строка импортированного отчёта «Статистика аукционов» (CSV из интерфейса Google Ads).
+
+    ЕДИНСТВЕННЫЙ легальный источник ИМЁН конкурентов: через API Google их не отдаёт (ресурса
+    `auction_insight` в GAQL нет). Отсюда — таблица, а не фетчер: данные приносит человек файлом.
+
+    Хранится ровно то, что было в файле (доли 0..1, None = «--» в отчёте, а НЕ ноль). Идемпотентно
+    per (customer_id, snapshot_date, domain): повторный импорт за ту же дату перезаписывает срез
+    (домены между выгрузками появляются и исчезают ⇒ срез перезаписывается целиком, не мержится).
+    Сравнение во времени — между РАЗНЫМИ snapshot_date; period_label (диапазон дат из преамбулы
+    файла) показывается рядом, чтобы клиент сам увидел, если сравнивает разные окна.
+
+    Домен конкурента — публичный факт из отчёта Google, не PII и не секрет. На SQLite (dev) таблицу
+    создаёт create_all; на Postgres (prod) — Alembic (0026)."""
+
+    __tablename__ = "auction_insight_row"
+    __table_args__ = (
+        Index(
+            "ux_auction_insight_cid_date_domain",
+            "customer_id",
+            "snapshot_date",
+            "domain",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    customer_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    snapshot_date: Mapped[str] = mapped_column(String(10), nullable=False)  # ISO, TZ аккаунта
+    domain: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_you: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Доли 0..1. NULL = «--» в файле («не показывалось»), это НЕ 0.0 (GR8: нет данных ≠ ноль).
+    impression_share: Mapped[float | None] = mapped_column(Float)
+    overlap_rate: Mapped[float | None] = mapped_column(Float)
+    position_above_rate: Mapped[float | None] = mapped_column(Float)
+    top_of_page_rate: Mapped[float | None] = mapped_column(Float)
+    abs_top_of_page_rate: Mapped[float | None] = mapped_column(Float)
+    outranking_share: Mapped[float | None] = mapped_column(Float)
+    period_label: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

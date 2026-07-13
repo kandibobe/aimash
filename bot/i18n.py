@@ -239,6 +239,9 @@ CATALOG: dict[str, dict[str, str]] = {
             "fix first (safely, with one «yes»). Next to it — Google's own optimization score\n"
             "/bids [period] — 📈 bid opportunities: which keywords to raise and how far "
             "(Google position estimates + bid simulator), biggest forecast conversion gain first\n"
+            "/competitors — 🥊 who stands next to you in the auction: send the Auction insights CSV "
+            "from Google Ads (the API doesn't return competitor names — only the file), and I'll "
+            "compare it with the previous import\n"
             "/target &lt;CPA&gt; — account target CPA (unlocks pausing pricey campaigns in /audit: CPA ≥ 3× target)\n"
             "/alerts — anomaly alert thresholds (spend spike / conversions drop)\n\n"
             "<b>ℹ️ Clients</b>\n"
@@ -562,6 +565,55 @@ CATALOG: dict[str, dict[str, str]] = {
     "err_bids": {
         "ru": "⚠️ Не удалось посчитать возможности по ставкам: {err}",
         "en": "⚠️ Couldn't compute bid opportunities: {err}",
+    },
+    # — Ф5б: /competitors — импорт CSV «Статистика аукционов» (имён конкурентов API не отдаёт) —
+    "competitors_ask_file": {
+        "ru": (
+            "🥊 <b>Статистика аукционов</b> — кто стоит рядом в аукционе.\n\n"
+            "Имена конкурентов Google отдаёт <b>только файлом</b> — через API их нет вовсе. "
+            "Выгрузи отчёт и пришли его сюда:\n"
+            "1. Google Ads → <b>Кампании</b> → <b>Статистика</b> → <b>Статистика аукционов</b>\n"
+            "2. Кнопка выгрузки (↓) → <b>.csv</b>\n"
+            "3. Пришли файл в этот чат\n\n"
+            "Разбираю его <b>кодом</b>, в ИИ не отдаю."
+        ),
+        "en": (
+            "🥊 <b>Auction insights</b> — who stands next to you in the auction.\n\n"
+            "Google gives competitor names <b>only as a file</b> — the API doesn't return them at "
+            "all. Export the report and send it here:\n"
+            "1. Google Ads → <b>Campaigns</b> → <b>Insights</b> → <b>Auction insights</b>\n"
+            "2. Download (↓) → <b>.csv</b>\n"
+            "3. Send the file to this chat\n\n"
+            "It's parsed by <b>code</b>, never sent to the AI."
+        ),
+    },
+    "competitors_bad_file": {  # схему не узнали — говорим ЧТО прислать, а не «ошибка формата»
+        "ru": (
+            "⚠️ Это не похоже на выгрузку «Статистика аукционов»: не нашёл колонок "
+            "«Домен отображаемого URL» и «Процент полученных показов».\n\n"
+            "Нужен .csv именно из раздела <b>Статистика аукционов</b> (не отчёт по кампаниям)."
+        ),
+        "en": (
+            "⚠️ This doesn't look like an Auction insights export: couldn't find the "
+            "«Display URL domain» and «Impr. share» columns.\n\n"
+            "A .csv from the <b>Auction insights</b> section is required (not a campaign report)."
+        ),
+    },
+    "competitors_not_saved": {  # карточка показана, но БД не приняла — молчать об этом нельзя
+        "ru": "⚠️ Показал, но сохранить срез не удалось — сравнить со следующим импортом не смогу.",
+        "en": "⚠️ Shown, but the snapshot wasn't saved — I won't be able to compare it next time.",
+    },
+    "competitors_wait_file": {
+        "ru": "Жду <b>файл</b> .csv со статистикой аукционов (или «✖ Отмена»).",
+        "en": "Waiting for the auction insights <b>.csv file</b> (or «✖ Cancel»).",
+    },
+    "competitors_empty": {
+        "ru": "Импортов ещё не было — пришли первый файл, и я запомню срез для сравнения.",
+        "en": "No imports yet — send the first file and I'll remember it for comparison.",
+    },
+    "err_competitors": {
+        "ru": "⚠️ Не удалось разобрать файл: {err}",
+        "en": "⚠️ Couldn't parse the file: {err}",
     },
     # — advisor: /advise — рекомендации (advisory, read-only) —
     "advise_header": {
