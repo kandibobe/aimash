@@ -79,12 +79,14 @@ def _bl(
     conv: float = 0.0,
     top_is: float = 0.0,
     rank_lost_top: float = 0.0,
+    ag: str = "11",
+    crit: str = "22",
 ) -> BidLandscapeRow:
     return BidLandscapeRow(
         campaign="Search",
         ad_group="AG",
-        ad_group_id="11",
-        criterion_id="22",
+        ad_group_id=ag,
+        criterion_id=crit,
         keyword=keyword,
         match_type="EXACT",
         strategy_type=strategy,
@@ -480,3 +482,63 @@ def test_fetch_bid_landscape_degrades_without_keyword_top_is():
     assert rows[0].bid == 0.5 and rows[0].first_page_cpc == 1.0
     assert rows[0].rank_lost_top_is == 0.0  # нет данных → 0.0, чек по рангу молчит
     assert "top_is_rank_lost" not in _ids(build_audit(_report(), bid_landscape=rows))
+
+
+# ── Доска /bids (bidscape.board): один источник с чеками, ранг — по прогнозу конверсий ───
+def _board(rows, sims=None, **kw):
+    from audit.bidscape import board
+
+    kw.setdefault("acct_cpa", 30.0)  # средний CPA аккаунта из _report()
+    kw.setdefault("min_cost", 1.0)
+    return board(rows, sims, **kw)
+
+
+def test_board_ranks_sim_forecast_above_position_gap():
+    """Ставку поднимают ради КОНВЕРСИЙ: ключ, которому симулятор Google обещает прирост, обязан быть
+    выше ключа, у которого есть только разрыв до оценки позиции (прироста Google там не обещал)."""
+    gap_only = _bl("двери", bid=0.5, fpc=1.0, cost=90.0, ag="11", crit="99")
+    with_sim = _bl("окна", bid=0.5, fpc=1.0, cost=10.0, ag="11", crit="22")
+    items = _board([gap_only, with_sim], [BidSimulation("11", "22", _BID_POINTS)])
+    assert [i.keyword for i in items] == ["окна", "двери"]
+    top = items[0]
+    assert top.source == "sim" and top.add_conversions == 2.0 and top.target_bid == 1.0
+    assert items[1].source == "first_page" and items[1].add_conversions == 0.0  # 0.0 = «неизвестно»
+
+
+def test_board_takes_simulator_bid_over_position_estimate():
+    """Есть оба сигнала → рекомендуем ставку СИМУЛЯТОРА (она ограничена окупаемостью), а не оценку
+    позиции: иначе совет «подними до 1.0 (первая страница)» протащил бы неокупаемый шаг."""
+    row = _bl("окна", bid=0.5, fpc=1.4, cost=50.0)
+    items = _board([row], [BidSimulation("11", "22", _BID_POINTS)])
+    assert len(items) == 1 and items[0].source == "sim"
+    assert items[0].target_bid == 1.0 and items[0].uplift_pct == 100  # 0.5 → 1.0, а не → 1.4
+
+
+def test_board_silent_on_smart_bidding_and_without_signals():
+    """Smart Bidding: cpc_bid ключа аукционом не управляет → в доску не попадает даже с симулятором.
+    Нет ни разрыва, ни окупаемого прогноза → строки нет вовсе (молчание честнее выдуманного совета)."""
+    smart = _bl("окна", strategy="TARGET_CPA", bid=0.5, fpc=1.0)
+    assert _board([smart], [BidSimulation("11", "22", _BID_POINTS)]) == []
+    no_gap = _bl("окна", bid=2.0, fpc=1.0, top=1.5, cost=50.0, ag="11", crit="77")
+    assert _board([no_gap]) == []
+
+
+def test_board_caps_top_n():
+    rows = [_bl(f"kw{i}", bid=0.5, fpc=1.0, cost=10.0 + i, crit=str(100 + i)) for i in range(5)]
+    assert len(_board(rows, top_n=3)) == 3
+
+
+def test_bids_card_shows_google_numbers_and_no_button_hint():
+    """Карточка /bids: цифры Google + ГОТОВАЯ ФРАЗА команды вместо кнопки — ставка меняется только
+    прямой командой через подтверждение (golden rule #3)."""
+    from bot import texts
+
+    items = _board(
+        [_bl("окна", bid=0.5, fpc=1.0, cost=10.0)], [BidSimulation("11", "22", _BID_POINTS)]
+    )
+    s = texts.fmt_bids(items, currency="USD", period_label="30 дн.")
+    assert "окна" in s and "0.50 → <b>1.00</b> USD (+100%)" in s
+    assert "Прогноз Google: <b>+2</b> конв." in s and "симулятор Google" in s
+    assert "подними ставку ключа" in s and "подтверждения" in s  # вместо кнопки — фраза команды
+    en = texts.fmt_bids(items, currency="USD", lang="en")
+    assert "Google simulator" in en and "Every change goes through confirmation" in en

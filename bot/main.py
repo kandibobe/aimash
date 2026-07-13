@@ -2498,6 +2498,44 @@ def _searchterms_store(chat_id: int, items: list[dict]) -> int:
     return gen
 
 
+async def _bids_run(m: Message, period) -> None:
+    """Ф1 /bids: доска возможностей по ставкам активного аккаунта ЧТЕНИЯ — какие ключи поднять и до
+    скольки. Цифры дают оценки позиций и симулятор Google, ранжирует КОД (audit.bidscape) — тот же
+    источник, что у чеков /audit, чтобы советы не разошлись.
+
+    READ-ONLY и БЕЗ кнопок: ставка — деньги, поэтому меняет её только прямая команда пользователя
+    (user_initiated) через confirm-гейт (golden rule #3). Карточка даёт готовую фразу, не кнопку."""
+    acct = await _require_read_account(m, "bids")
+    if acct is None:
+        return  # показан пикер аккаунта — оператор выберет и повторит
+    from ads.client import build_client_async
+    from audit.collect import gather_bids
+    from reports.period import label_i18n
+
+    lang = i18n.get_lang(m.chat.id)
+    target_cpa = await _load_target_cpa(m.chat.id, acct)  # /target: потолок окупаемости прироста
+    await m.answer(i18n.t("bids_loading"))
+    async with ux.typing_action(m):
+        try:
+            client = await build_client_async(acct)
+            res = await gather_bids(client, acct, period, target_cpa=target_cpa)
+        except Exception as e:  # сеть/доступ/SDK
+            await m.answer(i18n.t("err_bids", err=ux.err_text(e)))
+            return
+    if not res.has_landscape:  # чтение не удалось — это НЕ «поднимать нечего» (GR8)
+        await m.answer(i18n.t("bids_no_data"))
+        return
+    if not res.items:
+        await m.answer(i18n.t("bids_none"))
+        return
+    await m.answer(
+        texts.fmt_bids(
+            res.items, currency=res.currency, lang=lang, period_label=label_i18n(period, lang)
+        ),
+        parse_mode=ParseMode.HTML,
+    )
+
+
 async def _searchterms_run(m: Message, period) -> None:
     """§7 search-terms → минус-слова: читаем отчёт по поисковым запросам активного аккаунта ЧТЕНИЯ,
     КОД отбирает «мусорные» (есть клики, 0 конверсий), показываем топ по расходу с кнопками «🚫 в

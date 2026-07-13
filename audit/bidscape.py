@@ -24,6 +24,7 @@ MANUAL_BID_STRATEGIES = frozenset({"MANUAL_CPC", "ENHANCED_CPC"})
 
 FIRST_PAGE = "first_page"
 TOP_OF_PAGE = "top_of_page"
+SIM = "sim"  # источник целевой ставки — симулятор Google (сильнее оценки позиции: он про конверсии)
 
 
 @dataclass
@@ -193,6 +194,112 @@ def sim_upside(points, current: float, *, cap_cpa: float, min_conv_gain: float =
         add_clicks=round(float(tgt.clicks) - float(base.clicks)),
         marginal_cpa=round(add_cost / add_conv, 2) if add_conv > 0 else 0.0,
     )
+
+
+@dataclass
+class BidBoardItem:
+    """Строка «доски ставок» (/bids): один ключ + рекомендуемая ставка + чем она обоснована.
+
+    source=SIM — прогноз симулятора Google (есть add_conversions); FIRST_PAGE/TOP_OF_PAGE — разрыв до
+    оценки позиции (симулятора нет ⇒ прироста конверсий Google не обещал, и мы его НЕ придумываем:
+    add_conversions=0.0 значит «неизвестно», а не «ноль»)."""
+
+    campaign: str
+    ad_group: str
+    ad_group_id: str
+    criterion_id: str
+    keyword: str
+    match_type: str
+    bid: float
+    target_bid: float
+    source: str  # SIM | FIRST_PAGE | TOP_OF_PAGE (константы модуля: sim/first_page/top_of_page)
+    add_conversions: float  # прогноз Google; 0.0 = симулятора нет (не «нулевой прирост»)
+    add_cost: float
+    marginal_cpa: float
+    conversions: float  # факт за период
+    cost: float
+    cpa: float
+    top_is: float
+
+    @property
+    def uplift_pct(self) -> int:
+        if self.bid <= 0 or self.target_bid <= self.bid:
+            return 0
+        return round((self.target_bid / self.bid - 1) * 100)
+
+
+def board(
+    rows,
+    sims=None,
+    *,
+    acct_cpa: float = 0.0,
+    target_for=None,
+    gap_min: float = 0.10,
+    min_cost: float = 0.0,
+    min_conv_gain: float = 0.5,
+    top_n: int = 10,
+) -> list[BidBoardItem]:
+    """Доска возможностей по ставкам для /bids: объединяет ДВА сигнала по одному ключу — разрыв до
+    оценки позиции (opportunities) и прогноз симулятора (sim_upside). Формулы и пороги — те же, что
+    у чеков аудита: разъехаться им нельзя, источник один.
+
+    Сортировка — по ПРОГНОЗНОМУ приросту конверсий (то, ради чего ставку и поднимают); ключи без
+    симулятора идут ниже и ранжируются деньгами (факт. конверсии → расход → меньший разрыв).
+    Есть оба сигнала ⇒ рекомендуем ставку СИМУЛЯТОРА: она ограничена окупаемостью (cap_cpa), а
+    оценка позиции — нет."""
+    opps = {
+        (o.ad_group_id, o.criterion_id): o
+        for o in opportunities(
+            rows, acct_cpa=acct_cpa, target_for=target_for, gap_min=gap_min, min_cost=min_cost
+        )
+    }
+    by_key = {(str(s.ad_group_id), str(s.criterion_id)): s for s in (sims or [])}
+    out: list[BidBoardItem] = []
+    for r in rows or []:
+        key = (
+            str(getattr(r, "ad_group_id", "") or ""),
+            str(getattr(r, "criterion_id", "") or ""),
+        )
+        o = opps.get(key)
+        bid = float(getattr(r, "bid", 0.0) or 0.0)
+        up = None
+        s = by_key.get(key)
+        if s is not None and _enum(getattr(r, "strategy_type", "")) in MANUAL_BID_STRATEGIES:
+            target = target_for(getattr(r, "campaign", "")) if target_for is not None else None
+            up = sim_upside(
+                s.points,
+                bid,
+                cap_cpa=float(target or acct_cpa),
+                min_conv_gain=min_conv_gain,
+            )
+        if o is None and up is None:
+            continue  # ни разрыва, ни окупаемого прогноза — поднимать нечего
+
+        m = getattr(r, "metrics", None)
+        out.append(
+            BidBoardItem(
+                campaign=o.campaign if o else getattr(r, "campaign", ""),
+                ad_group=o.ad_group if o else getattr(r, "ad_group", ""),
+                ad_group_id=key[0],
+                criterion_id=key[1],
+                keyword=o.keyword if o else getattr(r, "keyword", ""),
+                match_type=o.match_type if o else str(getattr(r, "match_type", "") or ""),
+                bid=round(bid, 2),
+                target_bid=up.target if up else o.target_bid,
+                source=SIM if up else o.kind,
+                add_conversions=up.add_conversions if up else 0.0,
+                add_cost=up.add_cost if up else 0.0,
+                marginal_cpa=up.marginal_cpa if up else 0.0,
+                conversions=o.conversions
+                if o
+                else round(float(getattr(m, "conversions", 0.0) or 0.0), 1),
+                cost=o.cost if o else round(float(getattr(m, "cost", 0.0) or 0.0), 2),
+                cpa=o.cpa if o else round(float(getattr(m, "cpa", 0.0) or 0.0), 2),
+                top_is=o.top_is if o else float(getattr(r, "top_is", 0.0) or 0.0),
+            )
+        )
+    out.sort(key=lambda i: (-i.add_conversions, -i.conversions, -i.cost, i.uplift_pct))
+    return out[: max(1, int(top_n))]
 
 
 def _gap(bid: float, target: float) -> float:

@@ -925,6 +925,19 @@ async def audit_cmd(m: bm.Message) -> None:
     await bm._start_audit_picker(m, period=period)
 
 
+@bm.dp.message(bm.Command("bids"))
+async def bids_cmd(m: bm.Message, command: bm.CommandObject) -> None:
+    """Ф1 /bids [период] — возможности по ставкам: какие ключи поднять и до скольки (оценки позиций +
+    симулятор Google), сверху — наибольший прогнозный прирост конверсий. READ-ONLY и БЕЗ кнопок:
+    ставка — деньги, её меняет только прямая команда пользователя через confirm-гейт (правило #3)."""
+    try:
+        period = bm._period_from_arg(command.args)
+    except ValueError:
+        await m.answer(bm.i18n.t("err_period"))
+        return
+    await bm._bids_run(m, period)
+
+
 @bm.dp.message(bm.Command("target"))
 async def target_cmd(m: bm.Message) -> None:
     """/target [CPA] — целевой CPA активного аккаунта (разблокирует правило 3× Kill в /audit). Без

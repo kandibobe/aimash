@@ -10,6 +10,7 @@ read-слой (reports/ads.read) + core.resilience.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import Any
 
 from audit.engine import AuditResult, build_audit
@@ -145,4 +146,80 @@ async def gather_audit(
         bid_landscape=bid_landscape,
         bid_simulations=bid_sims,
         budget_simulations=budget_sims,
+    )
+
+
+@dataclass
+class BidsResult:
+    """/bids: доска возможностей по ставкам. has_landscape=False → слой ставок НЕ прочитан (сбой/нет
+    доступа) — это «нет данных», а не «поднимать нечего»: рендер обязан сказать разное (GR8/GR10)."""
+
+    items: list
+    currency: str
+    has_landscape: bool
+    has_sims: bool
+
+
+async def gather_bids(
+    client: Any,
+    customer_id: str,
+    period,
+    *,
+    thresholds: dict | None = None,
+    target_cpa: float | None = None,
+    top_n: int = 10,
+) -> BidsResult:
+    """Ф1: сбор под /bids — ЛЁГКИЙ путь (5 чтений), не весь аудит-контур: слой ставок/позиций +
+    симуляторы + totals (средний CPA как потолок окупаемости) + стратегии кампаний (цель tCPA).
+    Формулы и пороги — те же, что у чеков аудита (audit.bidscape), иначе /bids и /audit разошлись бы
+    в советах. READ-ONLY: доска ничего не создаёт, ставку меняет ОТДЕЛЬНАЯ команда через confirm-гейт."""
+    from ads.read import account_currency
+    from audit.bidscape import board
+    from audit.engine import _Ctx
+    from audit.thresholds import DEFAULT_AUDIT_THRESHOLDS
+    from core.resilience import run_ads_read_call
+    from reports.queries import (
+        fetch_bid_landscape,
+        fetch_bid_simulations,
+        fetch_totals,
+        read_campaign_bidding,
+    )
+
+    cid = str(customer_id)
+
+    async def _safe(fn, *args, label: str):
+        try:
+            return await run_ads_read_call(fn, *args, label=label)
+        except Exception:  # noqa: BLE001 — доп-сигнал не должен ронять доску
+            return None
+
+    currency, totals, rows, sims, bidding = await asyncio.gather(
+        _safe(account_currency, client, cid, label="bids_currency"),
+        _safe(fetch_totals, client, cid, period, label="bids_totals"),
+        _safe(fetch_bid_landscape, client, cid, period, label="bids_landscape"),
+        _safe(fetch_bid_simulations, client, cid, label="bids_sims"),
+        _safe(read_campaign_bidding, client, cid, label="bids_bidding"),
+    )
+
+    thr = {**DEFAULT_AUDIT_THRESHOLDS, **(thresholds or {})}
+    # Цель CPA: пер-кампанийная (tCPA) побеждает глобальный /target — ровно как в чеках (_Ctx.target_for).
+    ctx = _Ctx(
+        target_cpa=target_cpa,
+        bidding_by_name={b.name: b for b in (bidding or [])},
+    )
+    items = board(
+        rows,
+        sims,
+        acct_cpa=float(getattr(totals, "cpa", 0.0) or 0.0),
+        target_for=ctx.target_for,
+        gap_min=float(thr["bid_gap_min"]),
+        min_cost=float(thr["min_spend"]),
+        min_conv_gain=float(thr["sim_min_conv_gain"]),
+        top_n=top_n,
+    )
+    return BidsResult(
+        items=items,
+        currency=currency or "",
+        has_landscape=rows is not None,
+        has_sims=sims is not None,
     )

@@ -237,6 +237,8 @@ CATALOG: dict[str, dict[str, str]] = {
             "advice (pick a working one: /account). Suggestions only — I change nothing myself\n"
             "/audit [period] — 🩺 account health audit: score 0-100 + where money leaks + what to "
             "fix first (safely, with one «yes»). Next to it — Google's own optimization score\n"
+            "/bids [period] — 📈 bid opportunities: which keywords to raise and how far "
+            "(Google position estimates + bid simulator), biggest forecast conversion gain first\n"
             "/target &lt;CPA&gt; — account target CPA (unlocks pausing pricey campaigns in /audit: CPA ≥ 3× target)\n"
             "/alerts — anomaly alert thresholds (spend spike / conversions drop)\n\n"
             "<b>ℹ️ Clients</b>\n"
@@ -535,6 +537,31 @@ CATALOG: dict[str, dict[str, str]] = {
         "<code>ja</code>, <code>pt</code>…).",
         "en": "Couldn't recognize the language. Try a name (“German”) or ISO code (<code>de</code>, "
         "<code>ja</code>, <code>pt</code>…).",
+    },
+    # — Ф1: /bids — возможности по ставкам (read-only; ставку меняет ОТДЕЛЬНАЯ команда через гейт) —
+    "bids_loading": {
+        "ru": "📈 Считаю возможности по ставкам (оценки позиций + симулятор Google)…",
+        "en": "📈 Computing bid opportunities (position estimates + Google simulator)…",
+    },
+    "bids_none": {
+        "ru": (
+            "✅ Возможностей по ставкам не нашёл: ставки не ниже оценок Google, а окупаемого "
+            "прироста симулятор не обещает.\n\nСовет «подними ставку» осмыслен только на ручной "
+            "стратегии (MANUAL_CPC/ECPC) — на Smart Bidding ставку ключа решает Google."
+        ),
+        "en": (
+            "✅ No bid opportunities: bids aren't below Google's estimates and the simulator "
+            "promises no profitable gain.\n\nRaising a keyword bid only makes sense on manual "
+            "bidding (MANUAL_CPC/ECPC) — under Smart Bidding Google sets the bid."
+        ),
+    },
+    "bids_no_data": {  # ЧТЕНИЕ не удалось — это не «всё хорошо» (GR8: нет данных ≠ здорово)
+        "ru": "⚠️ Слой ставок и позиций прочитать не удалось — данных для совета нет.",
+        "en": "⚠️ Couldn't read the bid/position layer — no data to advise on.",
+    },
+    "err_bids": {
+        "ru": "⚠️ Не удалось посчитать возможности по ставкам: {err}",
+        "en": "⚠️ Couldn't compute bid opportunities: {err}",
     },
     # — advisor: /advise — рекомендации (advisory, read-only) —
     "advise_header": {

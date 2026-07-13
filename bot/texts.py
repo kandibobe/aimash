@@ -130,6 +130,8 @@ HELP = (
     "аккаунте советов нет (нужен рабочий: /account). Только подсказки — ничего не меняю сам\n"
     "/audit [период] — 🩺 аудит здоровья аккаунта: оценка 0-100 + где утекают деньги + "
     "что чинить первым (безопасно, одним «да»). Рядом — родная оценка Google\n"
+    "/bids [период] — 📈 возможности по ставкам: какие ключи поднять и до скольки "
+    "(оценки позиций и симулятор Google), сверху — наибольший прогнозный прирост конверсий\n"
     "/target &lt;CPA&gt; — целевой CPA аккаунта (разблокирует в /audit паузу дорогих: CPA ≥ 3× цели)\n"
     "/alerts — пороги алертов аномалий (всплеск расхода / падение конверсий)\n\n"
     "<b>ℹ️ Клиенты</b>\n"
@@ -1526,6 +1528,59 @@ def fmt_searchterms(items: list[dict], *, currency: str = "", lang: str | None =
             f"{round(float(it['cost']), 2)}{cur} · {esc(it['campaign'])}"
         )
     lines.append("\n<i>Нажми 🚫, чтобы добавить запрос в минус-слова (нужно подтверждение).</i>")
+    return "\n".join(lines)
+
+
+_BID_WHY = {  # чем обоснована рекомендуемая ставка (источник — Google, не наша выдумка)
+    "sim": ("симулятор Google", "Google simulator"),
+    "first_page": ("ставка ниже оценки 1-й страницы", "bid below first-page estimate"),
+    "top_of_page": ("ставка ниже оценки верха страницы", "bid below top-of-page estimate"),
+}
+
+
+def fmt_bids(
+    items: list, *, currency: str = "", lang: str | None = None, period_label: str = ""
+) -> str:
+    """Ф1 /bids: доска возможностей по ставкам (audit.bidscape.BidBoardItem), сверху — наибольший
+    ПРОГНОЗНЫЙ прирост конверсий. Кнопок нет by design: ставка — деньги, её меняет только прямая
+    команда пользователя через confirm-гейт (golden rule #3), поэтому вместо кнопки даём точную
+    фразу команды. Прирост показываем ТОЛЬКО там, где его дал симулятор Google — иначе молчим,
+    а не выдумываем."""
+    en = _lang(lang) == "en"
+    cur = f" {currency}" if currency else ""
+    per = f" · {esc(period_label)}" if period_label else ""
+    head = "📈 <b>Bid opportunities</b>" if en else "📈 <b>Возможности по ставкам</b>"
+    lines = [f"{head}{per}", ""]
+    for i, it in enumerate(items, 1):
+        why = _BID_WHY.get(it.source, ("", ""))[1 if en else 0]
+        mt = match_type_human(it.match_type, lang)
+        place = f"{esc(it.campaign)} → {esc(it.ad_group)}"
+        lines.append(f"{i}. <b>{esc(it.keyword)}</b> [{esc(mt)}] · {place}")
+        arrow = f"{it.bid:.2f} → <b>{it.target_bid:.2f}</b>{cur} (+{it.uplift_pct}%)"
+        lines.append(f"   {'Bid' if en else 'Ставка'} {arrow} — {why}")
+        if it.add_conversions > 0:
+            gain = (
+                f"   Google: <b>+{it.add_conversions:g}</b> conv. for +{it.add_cost:.2f}{cur}"
+                f" (CPA {it.marginal_cpa:.2f}{cur})"
+                if en
+                else f"   Прогноз Google: <b>+{it.add_conversions:g}</b> конв. за +{it.add_cost:.2f}{cur}"
+                f" (CPA прироста {it.marginal_cpa:.2f}{cur})"
+            )
+            lines.append(gain)
+        elif it.conversions > 0:
+            lines.append(
+                f"   {'Fact' if en else 'Факт'}: {it.conversions:g}"
+                f" {'conv.' if en else 'конв.'}, CPA {it.cpa:.2f}{cur}"
+            )
+    tip = (
+        '<i>To raise a bid, type it: «raise the bid for keyword "…" to 0.75». '
+        "Every change goes through confirmation.</i>"
+        if en
+        else "<i>Чтобы поднять ставку, напишите командой: «подними ставку ключа «…» до 0.75». "
+        "Любое изменение — только после подтверждения.</i>"
+    )
+    lines.append("")
+    lines.append(tip)
     return "\n".join(lines)
 
 
