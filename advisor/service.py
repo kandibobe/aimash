@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from advisor import formulate, store
 from advisor.from_findings import to_recommendations
 from advisor.rules import Recommendation, rank_recommendations
+from core.config import settings
 
 MAX_RECS = 5  # сколько рекомендаций показываем (топ по приоритету), анти-спам
 
@@ -79,7 +80,9 @@ async def _negative_keywords_extra(
         negs = await suggest_negative_keywords(
             client_context[:400],
             kws,
-            language=(lang if lang in ("ru", "uk", "en") else "ru"),
+            # D7: language уходит в промпт строкой («Язык: de») — зажим в ru/uk/en молча
+            # переводил минус-слова на русский для немецкой/угандийской кампании.
+            language=(lang or settings.geo_default_locale or "ru"),
             limit=12,
         )
         if not negs:

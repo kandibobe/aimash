@@ -379,9 +379,10 @@ class SetGeoProximity(BaseModel):
 
 class SetGeoLocation(BaseModel):
     """Гео-таргетинг кампании по стране/городу/региону через geoTargetConstants (§3). Модель даёт
-    НАЗВАНИЯ локаций (напр. ['Украина', 'Киев']); КОД резолвит их в geoTargetConstant и заменяет
-    весь географический таргетинг кампании (remove-before-create). country_code сужает поиск
-    названий (из запроса, НЕ захардкожен; пусто = без биаса), locale — язык названий."""
+    НАЗВАНИЯ локаций РОВНО ИЗ ЗАПРОСА пользователя (напр. ['Германия', 'Берлин']) — своих стран не
+    добавляет; КОД резолвит их в geoTargetConstant и заменяет весь географический таргетинг кампании
+    (remove-before-create). country_code сужает поиск названий (из запроса, НЕ захардкожен; пусто =
+    без биаса), locale — язык названий."""
 
     campaign: str  # обязателен: гео-таргетинг привязывается к кампании
     locations: list[str] = Field(min_length=1, max_length=20)
@@ -528,7 +529,9 @@ class KeywordResearch(BaseModel):
     # (ads.geo.keyword_ideas_lang → keyword_plan.LANGUAGE_IDS); неизвестный/пусто → язык не задаётся.
     # Пусто → выведем из гео (_kw_run). Раньше было Literal ru/uk/en (зажим).
     language: str | None = None
-    geo: str | None = None  # страна (ISO-2 или название); None → дефолт (_kw_run подставит Украину)
+    # страна (ISO-2 или название) ИЗ ЗАПРОСА; None → дефолт деплоя, а при пустом env — глобальный
+    # подбор без страны-биаса (bot.main._default_kw_geo). Свою страну не подставляй.
+    geo: str | None = None
     network: Literal["search", "search_partners"] = "search"
     months: int | None = Field(default=None, ge=1, le=48)
 
@@ -1017,19 +1020,29 @@ class RemoveAssetLink(BaseModel):
 
 # ── §3-assets семейство 3: Call / Promotion / Price (LLM-заполняемые, за confirm-гейтом) ──
 class AddCallAsset(BaseModel):
-    """Телефон-расширение (CallAsset). country_code — ISO alpha-2; phone_number — сырой номер.
-    Конверс-трекинг звонков в MVP не подключаем (по умолчанию аккаунтное)."""
+    """Телефон-расширение (CallAsset). country_code — ISO alpha-2 страны НОМЕРА; phone_number —
+    сырой номер. Конверс-трекинг звонков в MVP не подключаем (по умолчанию аккаунтное)."""
 
     campaign: str
     phone_number: str = Field(min_length=3, max_length=30)
-    country_code: str = "UA"
+    # D7: дефолт — из конфига деплоя, НЕ «UA» литералом. Литерал материализовался в model_dump()
+    # и делал мёртвым env-фолбэк в ads/service.py: украинский код улетал в CallAsset любой страны.
+    # validate_default: дефолт тоже проходит _cc — пустой env ⇒ честный отказ, а не пустая страна.
+    country_code: str = Field(default_factory=_default_geo_country, validate_default=True)
 
     @field_validator("country_code")
     @classmethod
     def _cc(cls, v):
-        v = (v or "UA").strip().upper()
+        # Google требует страну у CallAsset — пусто здесь (в отличие от гео-таргетинга) НЕЛЬЗЯ.
+        # Fail-closed: не подставляем «какую-нибудь», а честно просим назвать страну номера.
+        v = str(v or "").strip().upper()
+        if not v:
+            raise ValueError(
+                "укажи страну номера (ISO alpha-2, напр. UG) — телефон-расширение без страны "
+                "Google не принимает; дефолт можно задать в env DEFAULT_GEO_COUNTRY_CODE"
+            )
         if len(v) != 2 or not v.isalpha():
-            raise ValueError("country_code — двухбуквенный ISO-код (напр. UA, US)")
+            raise ValueError("country_code — двухбуквенный ISO-код (напр. UG, US)")
         return v
 
     @field_validator("phone_number")
@@ -1121,8 +1134,22 @@ class AddPriceAsset(BaseModel):
         "service_tiers",
     ] = "services"
     currency: MoneyCurrency
-    language_code: str = "uk"
+    # D7: язык оферов — из конфига деплоя (env DEFAULT_GEO_LOCALE / выводится из страны), НЕ «uk»
+    # литералом: литерал материализовался в model_dump() и уезжал в PriceAsset любой страны.
+    language_code: str = Field(default_factory=_default_geo_locale, validate_default=True)
     offerings: list[PriceOfferingItem] = Field(min_length=3, max_length=8)
+
+    @field_validator("language_code")
+    @classmethod
+    def _lang(cls, v):
+        v = str(v or "").strip().lower()
+        if (
+            not v
+        ):  # geo_default_locale всегда даёт хотя бы «ru», но схема не должна на это полагаться
+            raise ValueError(
+                "укажи язык прайс-расширения (напр. en) — Google требует language_code"
+            )
+        return v
 
 
 SCHEMAS: dict[str, type[BaseModel]] = {
@@ -1279,15 +1306,16 @@ TOOLS: list[dict] = [
     ),
     _tool(
         "set_geo_proximity",
-        "Радиус-таргетинг (км) вокруг города для кампании. Укажи campaign, city_name, "
-        "country_code (ISO alpha-2, по умолчанию UA) и radius_km.",
+        "Радиус-таргетинг (км) вокруг города для кампании. Укажи campaign, city_name и radius_km. "
+        "country_code (ISO alpha-2) — ТОЛЬКО если страну назвал пользователь; не подставляй свою "
+        "(дефолт подставит код из конфига деплоя).",
         SetGeoProximity,
     ),
     _tool(
         "set_geo_location",
         "Гео-таргетинг кампании по СТРАНЕ/ГОРОДУ/региону (не радиус). Укажи campaign и список "
-        "locations (названия, напр. ['Украина','Киев']); country_code (ISO alpha-2, по умолчанию "
-        "UA) сужает поиск. Заменяет прежний географический таргетинг кампании.",
+        "locations — НАЗВАНИЯ из запроса пользователя, свои страны не добавляй. country_code "
+        "(ISO alpha-2) сужает поиск названий — указывай, только если страна названа явно.",
         SetGeoLocation,
     ),
     _tool(
@@ -1358,8 +1386,9 @@ TOOLS: list[dict] = [
     ),
     _tool(
         "add_call_asset",
-        "Добавить телефон-расширение (звонок) в кампанию: phone_number и country_code "
-        "(ISO alpha-2, по умолчанию UA). Укажи campaign. Применяется после подтверждения.",
+        "Добавить телефон-расширение (звонок) в кампанию: phone_number и country_code — страна "
+        "НОМЕРА (ISO alpha-2) из запроса пользователя или из его профиля; свою не выдумывай. "
+        "Укажи campaign. Применяется после подтверждения.",
         AddCallAsset,
     ),
     _tool(

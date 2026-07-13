@@ -826,7 +826,9 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             campaign_id=ref.id,
             price_type=params.get("price_type", "services"),
             currency=params["currency"],
-            language_code=params.get("language_code", "uk"),
+            # D7: пусто → язык из конфига деплоя, не «uk» литералом (схема уже кладёт дефолт, но
+            # старые черновики в БД могли сохраниться без поля).
+            language_code=params.get("language_code") or settings.geo_default_locale,
             offerings=params["offerings"],
             confirmation_id=confirmation_id,
             confirm_store=store,

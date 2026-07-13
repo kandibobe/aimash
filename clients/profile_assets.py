@@ -91,14 +91,19 @@ def _parse_price(raw: Any) -> tuple[float | None, str | None]:
     return (val if val > 0 else None), cur
 
 
-def build_call_asset(profile: dict, *, country_code: str = "UA") -> dict:
-    """Call-ассет из телефона профиля. Нет телефона → ValueError (не выдумываем номер)."""
+def build_call_asset(profile: dict, *, country_code: str | None = None) -> dict:
+    """Call-ассет из телефона профиля. Нет телефона → ValueError (не выдумываем номер).
+    country_code=None → страна из конфига деплоя (D7), а не «UA» литералом."""
     from agent.tools.schemas import AddCallAsset
 
     phone = _first_phone(profile)
     if not phone:
         raise ValueError("в профиле клиента нет телефона (§20) — call-ассет не создаём")
-    v = AddCallAsset(campaign="_", phone_number=phone, country_code=country_code)
+    v = AddCallAsset(
+        campaign="_",
+        phone_number=phone,
+        **({"country_code": country_code} if country_code else {}),  # пусто → default_factory схемы
+    )
     return {
         "family": "call",
         "params": {"phone_number": v.phone_number, "country_code": v.country_code},
@@ -109,16 +114,20 @@ def build_price_asset(
     profile: dict,
     *,
     final_url: str,
-    language_code: str = "uk",
+    language_code: str | None = None,
     currency_hint: str | None = None,
 ) -> dict:
     """Price-ассет из услуг профиля с ЧИСЛОВОЙ ценой (≥3, единая валюта). Меньше 3 распарсенных
-    оферов → ValueError (не добираем выдуманными ценами)."""
+    оферов → ValueError (не добираем выдуманными ценами). language_code=None → язык из конфига
+    деплоя (D7), а не «uk» литералом."""
     from agent.tools.schemas import AddPriceAsset, PriceOfferingItem
 
     if not final_url:
         raise ValueError("нет final_url — прайс-ассет требует посадочную у каждого офера")
-    hint = currency_hint if currency_hint in ("USD", "UAH", "EUR") else None
+    # Подсказка валюты — ЛЮБОЙ ISO-код (валюта аккаунта): прежний список ("USD","UAH","EUR") молча
+    # ронял подсказку на AUD/UGX-аккаунте → цены без символа валюты отбрасывались → «<3 услуг».
+    hint = (currency_hint or "").strip().upper()
+    hint = hint if re.fullmatch(r"[A-Z]{3}", hint) else None
     offers: list[PriceOfferingItem] = []
     currency: str | None = None
     for svc in profile.get("services") or []:
@@ -145,7 +154,10 @@ def build_price_asset(
     if len(offers) < 3:
         raise ValueError("в профиле <3 услуг с числовой ценой — прайс-ассет не создаём")
     v = AddPriceAsset(
-        campaign="_", currency=currency, language_code=language_code, offerings=offers[:8]
+        campaign="_",
+        currency=currency,
+        offerings=offers[:8],
+        **({"language_code": language_code} if language_code else {}),  # пусто → default_factory
     )
     return {
         "family": "price",
@@ -217,8 +229,8 @@ def build_profile_asset(
     profile: dict,
     *,
     final_url: str | None = None,
-    country_code: str = "UA",
-    language_code: str = "uk",
+    country_code: str | None = None,  # None → страна из конфига деплоя (D7), не «UA»
+    language_code: str | None = None,  # None → язык из конфига деплоя (D7), не «uk»
     currency_hint: str | None = None,
 ) -> dict:
     """Диспетчер §19.7.2: family (call|price|promotion) + структурированный профиль → asset_spec.

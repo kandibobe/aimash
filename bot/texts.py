@@ -1127,8 +1127,10 @@ def fmt_mutation_summary(operation: str, params: dict, lang: str | None = None) 
         return f"Кампания «{c}» — добавить изображение-ассет (обрезано до 1.91:1)."
     if operation == "add_call_asset":
         return (
+            # D7: печатаем страну КАК ЕСТЬ (схема её заполняет из запроса/конфига). Прежний
+            # фолбэк «UA» на карточке ВРАЛ: показывал Украину для номера любой страны.
             f"Кампания «{c}» — телефон-расширение: {params.get('phone_number', '')} "
-            f"({params.get('country_code', 'UA')})."
+            f"({params.get('country_code') or '—'})."
         )
     if operation == "add_promotion":
         if params.get("percent_off") is not None:
@@ -1300,7 +1302,7 @@ def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
     if operation == "add_call_asset":
         return (
             f"Campaign “{c}” — call extension: {params.get('phone_number', '')} "
-            f"({params.get('country_code', 'UA')})."
+            f"({params.get('country_code') or '—'})."
         )
     if operation == "add_promotion":
         if params.get("percent_off") is not None:

@@ -994,8 +994,9 @@ async def cc_asset_type(cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.
                 family,
                 profile,
                 final_url=ad.get("final_url"),
-                country_code=(s.get("geo_country_code") or "UA"),
-                language_code=(s.get("target_language") or "uk"),
+                # D7: пусто → дефолт из конфига деплоя (схема), а НЕ «UA»/«uk» литералом.
+                country_code=s.get("geo_country_code") or None,
+                language_code=s.get("target_language") or None,
                 currency_hint=s.get("currency"),
             )
         else:
