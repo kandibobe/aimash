@@ -55,9 +55,12 @@ async def _client_profile_context(customer_id) -> str:
     «не минусуй бренд»). Best-effort: нет профиля/сбой БД → '' (advisor работает как раньше).
     Решения по-прежнему принимает КОД (rules) — профиль в детекторы НЕ подаётся."""
     try:
-        from clients.store import ClientStore
+        # Класс называется ClientProfileStore. Раньше импортировался несуществующий `ClientStore`
+        # → ImportError глотался except ниже → профиль клиента НЕ подавался в advisor НИКОГДА,
+        # молча (mypy это видел, но в CI он continue-on-error). Тот же дефект был в _protected_terms.
+        from clients.store import ClientProfileStore
 
-        return await ClientStore().profile_context_text(str(customer_id), max_chars=600)
+        return await ClientProfileStore().profile_context_text(str(customer_id), max_chars=600)
     except Exception:  # noqa: BLE001 — контекст-косметика
         return ""
 
@@ -67,9 +70,9 @@ async def _protected_terms(customer_id) -> set[str]:
     Докстринг ниже обещал это с самого начала, но `protected=` в вызов не передавался (2 из 3
     call-site) — бот мог посоветовать заминусовать бренд самого клиента. Сбой/нет профиля → set()."""
     try:
-        from clients.store import ClientStore
+        from clients.store import ClientProfileStore  # НЕ ClientStore — см. _client_profile_context
 
-        return await ClientStore().protected_negative_terms(str(customer_id))
+        return await ClientProfileStore().protected_negative_terms(str(customer_id))
     except Exception:  # noqa: BLE001 — защита опциональна, /advise не роняем
         return set()
 

@@ -300,3 +300,90 @@ async def test_confirm_card_shows_account_banner_for_child(monkeypatch):
     """Боевой аккаунт несёт баннер с его id (менеджер видит, на чьи деньги правка, до ✅)."""
     summary = await _capture_present_summary(monkeypatch, "5437782039")
     assert "5437782039" in summary
+
+
+# ── AD.3 (волна 2.8): пошаговые мут-флоу — /newsearch и GDN — единственные были без пикера ─
+def _patch_pending(monkeypatch, pending: bool):
+    import core.access as ca
+
+    async def _fake_active(_chat):
+        return bm.DRAFT_ACCOUNT_ID
+
+    async def _fake_pending(_chat):
+        return pending
+
+    async def _fake_rows(_chat):
+        return [
+            SimpleNamespace(id=bm.DRAFT_ACCOUNT_ID, name="Draft", currency="", status="ENABLED"),
+            SimpleNamespace(id="5437782039", name="Башня", currency="UAH", status="ENABLED"),
+        ]
+
+    async def _fake_last(_chat):
+        return None
+
+    async def _fake_freq(_chat, *a, **kw):
+        return []
+
+    monkeypatch.setattr(bm, "_active_read_account", _fake_active)
+    monkeypatch.setattr(ca, "account_choice_pending", _fake_pending)
+    monkeypatch.setattr(bm, "_read_account_rows", _fake_rows)
+    monkeypatch.setattr(bm, "_last_account", _fake_last)
+    monkeypatch.setattr(bm, "_frequent_accounts", _fake_freq)
+
+
+async def test_prompt_account_if_ambiguous_shows_setacct_picker(monkeypatch):
+    """Не закреплён + живых >1 → пикер с target='setacct' (тап ПИНИТ аккаунт: следующий шаг флоу
+    резолвит уже выбранный). Черновика ещё нет — стэшить, в отличие от AD.3-мяты, нечего."""
+    _patch_pending(monkeypatch, True)
+    msg = _FakeMsg(779010)
+    assert await bm.prompt_account_if_ambiguous(msg, 779010) is True
+    assert len(msg.answers) == 1
+    _text, kw = msg.answers[0]
+    assert "setacct" in str(kw.get("reply_markup"))
+
+
+async def test_prompt_account_if_ambiguous_silent_when_not_pending(monkeypatch):
+    """Пин Draft / один живой / ноль живых → молчим (прежнее поведение, лишний вопрос не задаём)."""
+    _patch_pending(monkeypatch, False)
+    msg = _FakeMsg(779011)
+    assert await bm.prompt_account_if_ambiguous(msg, 779011) is False
+    assert msg.answers == []
+
+
+async def test_newsearch_cmd_asks_account_before_brief(monkeypatch):
+    """/newsearch: пикер уходит ДО брифа, состояние визарда при этом ставится (бриф ждём следом)."""
+    asked: list = []
+
+    async def _fake_prompt(_m, chat_id):
+        asked.append(chat_id)
+        return True
+
+    monkeypatch.setattr(bm, "prompt_account_if_ambiguous", _fake_prompt)
+
+    class _State:
+        def __init__(self):
+            self._s = None
+
+        async def clear(self):
+            self._s = None
+
+        async def set_state(self, s):
+            self._s = s
+
+    st = _State()
+    msg = _FakeMsg(779012)
+    await bm.newsearch_cmd(msg, st)
+    assert asked == [779012]
+    assert st._s == bm.SearchWizard.awaiting_brief.state
+    assert msg.answers, "бриф всё равно спрашиваем (пикер не отменяет флоу)"
+
+
+def test_gdn_entry_points_ask_account():
+    """Оба входа в GDN-визард (фото и изображение-ДОКУМЕНТОМ) обязаны звать пикер: иначе бриф
+    соберётся, а черновик уедет на Draft. Гард источника — офлайн-вызовы хендлеров это не ловят."""
+    import inspect
+
+    for fn in (bm.on_photo, bm.on_document):
+        assert "prompt_account_if_ambiguous" in inspect.getsource(fn), (
+            f"{fn.__name__}: GDN-ветка стартует визард без пикера аккаунта (AD.3)"
+        )

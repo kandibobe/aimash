@@ -46,6 +46,7 @@ async def on_document(m: bm.Message, state: bm.FSMContext, bot: bm.Bot) -> None:
         await bm.asyncio.to_thread(bm.save_pending_media, media_id, landscape, square)
         await state.update_data(gdn_media_id=media_id)
         await state.set_state(bm.GdnWizard.awaiting_brief)
+        await bm.prompt_account_if_ambiguous(m, m.chat.id)  # AD.3: пикер аккаунта ДО брифа
         await m.answer(
             bm.i18n.t("gdn_ask_brief"), reply_markup=bm.nav_kb(), parse_mode=bm.ParseMode.HTML
         )

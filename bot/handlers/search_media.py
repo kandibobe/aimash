@@ -100,6 +100,10 @@ async def _present_search_proposal(
 async def newsearch_cmd(m: bm.Message, state: bm.FSMContext) -> None:
     await state.clear()
     await state.set_state(bm.SearchWizard.awaiting_brief)
+    # AD.3: активный аккаунт не закреплён + живых несколько → пикер ДО брифа (тап пинит аккаунт,
+    # состояние не трогаем — бриф придёт следующим сообщением уже на выбранный аккаунт). Раньше
+    # /newsearch и GDN были единственными мут-флоу без пикера: черновик молча уходил на Draft.
+    await bm.prompt_account_if_ambiguous(m, m.chat.id)
     await m.answer(
         bm.i18n.t("search_ask_brief"), reply_markup=bm.nav_kb(), parse_mode=bm.ParseMode.HTML
     )
@@ -279,6 +283,7 @@ async def on_photo(m: bm.Message, state: bm.FSMContext, bot: bm.Bot) -> None:
     await bm.asyncio.to_thread(bm.save_pending_media, media_id, landscape, square)
     await state.update_data(gdn_media_id=media_id)
     await state.set_state(bm.GdnWizard.awaiting_brief)
+    await bm.prompt_account_if_ambiguous(m, m.chat.id)  # AD.3: пикер аккаунта ДО брифа (см. §11)
     # «✖ Отмена» при выходе чистит pending-media (on_nav_cancel читает gdn_media_id из state).
     await m.answer(
         bm.i18n.t("gdn_ask_brief"), reply_markup=bm.nav_kb(), parse_mode=bm.ParseMode.HTML
@@ -286,11 +291,25 @@ async def on_photo(m: bm.Message, state: bm.FSMContext, bot: bm.Bot) -> None:
 
 
 # ── §11: кампании из видео (Demand Gen / Video) — YouTube-ссылка → тип → бриф → гейт ─
-@bm.dp.message(bm.F.video)
+_VIDEO_EXT = (".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v")
+
+
+def _is_video_document(doc) -> bool:
+    """Видео, присланное ФАЙЛОМ («отправить как файл», .mov с iPhone), приходит как document, а не
+    video → раньше уезжало в txt/csv-ingest (fallback.on_document) и получало «пришли txt/csv».
+    Тот же приём, что для изображения-документа в fallback: mime ИЛИ расширение имени."""
+    if doc is None:
+        return False
+    mime = (getattr(doc, "mime_type", None) or "").lower()
+    name = (getattr(doc, "file_name", None) or "").lower()
+    return mime.startswith("video/") or name.endswith(_VIDEO_EXT)
+
+
+@bm.dp.message(bm.F.video | bm.F.document.func(_is_video_document))
 async def on_video(m: bm.Message, state: bm.FSMContext) -> None:
-    """§11: приём видео → визард кампании из видео. Загрузить файл в Google Ads напрямую нельзя —
-    видео живёт на YouTube (примечание §11), поэтому просим ссылку. 3I (инверсный гард, как
-    on_photo): видео в ЛЮБОМ активном флоу — подсказка, а не молчаливый state.clear()."""
+    """§11: приём видео (в т.ч. файлом) → визард кампании из видео. Загрузить файл в Google Ads
+    напрямую нельзя — видео живёт на YouTube (примечание §11), поэтому просим ссылку. 3I (инверсный
+    гард, как on_photo): видео в ЛЮБОМ активном флоу — подсказка, а не молчаливый state.clear()."""
     cur_state = await state.get_state()
     if cur_state is not None and cur_state != bm.VideoWizard.awaiting_link.state:
         await m.answer(bm.i18n.t("photo_in_flow_hint"))

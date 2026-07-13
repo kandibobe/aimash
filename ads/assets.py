@@ -14,7 +14,7 @@ import re
 import tempfile
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from ads.client import ensure_allowed
 
@@ -48,9 +48,20 @@ def _crop_resize(img: Image.Image, tw: int, th: int) -> Image.Image:
     )  # Resampling — стабильный путь (Pillow≥9.1)
 
 
+def _flatten(img: Image.Image) -> Image.Image:
+    """Убрать альфу на БЕЛЫЙ фон. Голый `convert("RGB")` кладёт прозрачные пиксели на ЧЁРНЫЙ:
+    логотип/креатив с прозрачностью (обычный PNG от дизайнера) уезжал в объявление на чёрном
+    прямоугольнике. Белый — нейтральный фон объявления."""
+    if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+        rgba = img.convert("RGBA")
+        bg = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        return Image.alpha_composite(bg, rgba).convert("RGB")
+    return img.convert("RGB")
+
+
 def _to_jpeg(img: Image.Image) -> bytes:
     buf = io.BytesIO()
-    img.convert("RGB").save(buf, format="JPEG", quality=88)
+    _flatten(img).save(buf, format="JPEG", quality=88)
     return buf.getvalue()
 
 
@@ -65,6 +76,10 @@ def prepare_display_images(photo_bytes: bytes) -> tuple[bytes, bytes]:
     try:
         img = Image.open(io.BytesIO(photo_bytes))
         img.load()
+        # EXIF Orientation: камера телефона пишет кадр «как снято» + флаг поворота. Без transpose
+        # мы резали и грузили ПОВЁРНУТУЮ картинку — портретный креатив уезжал в объявление боком
+        # (Google EXIF не читает). Просмотрщики флаг учитывают → в Telegram выглядело нормально.
+        img = ImageOps.exif_transpose(img) or img
     except Exception as e:  # noqa: BLE001 — любое не-изображение → понятная ошибка пользователю
         raise ValueError(f"не удалось прочитать изображение: {type(e).__name__}") from e
     land, sq = _to_jpeg(_crop_resize(img, *_LANDSCAPE)), _to_jpeg(_crop_resize(img, *_SQUARE))

@@ -1733,6 +1733,35 @@ async def _present_proposal_active(
     )
 
 
+async def prompt_account_if_ambiguous(message: Message, chat_id: int) -> bool:
+    """AD.3 для ПОШАГОВЫХ мут-флоу (/newsearch, GDN из фото) — единственных, где пикера не было:
+    активный аккаунт НЕ закреплён, а живых несколько → показать пикер (target='setacct': тап пинит
+    аккаунт активным) и вернуть True. Стэшить нечего — черновика ещё нет: флоу остаётся в своём
+    состоянии, и следующий шаг (бриф) уже резолвит ЗАКРЕПЛЁННЫЙ аккаунт. Раньше такой чат молча
+    минтил черновик на Draft — и валюта/CPC-дефолт и §20-профиль тоже брались от Draft.
+
+    Мут-флоу с готовым черновиком идут через _present_proposal_active (стэш + target='mutate')."""
+    if await _active_read_account(chat_id) != DRAFT_ACCOUNT_ID:
+        return False  # аккаунт закреплён (или единственный живой) — спрашивать нечего
+    from core.access import account_choice_pending
+
+    if not await account_choice_pending(chat_id):  # внутри fail-closed к False (Draft, как раньше)
+        return False
+    rows = await _read_account_rows(chat_id)
+    _REPORT_ACCT_CACHE[chat_id] = rows
+    await message.answer(
+        i18n.t("pick_account_before_mutation"),
+        reply_markup=report_accounts_kb(
+            rows,
+            "setacct",
+            last=await _last_account(chat_id),
+            frequent=await _frequent_accounts(chat_id),
+        ),
+        parse_mode=ParseMode.HTML,
+    )
+    return True
+
+
 async def _abandon_active_flow(chat_id: int, state: FSMContext) -> bool:
     """§19/§20: свернуть активный визард/сбор ввода (Создание кампании / Клиенты / KW / RSA):
     abandon черновика §19 + чистка его временных image-медиа, сброс GDN/ассет-медиа, буфера текста
