@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from urllib.parse import urldefrag, urljoin, urlparse
@@ -29,6 +30,8 @@ from core.ingest import (
 # B13: типы контента, которые краулер парсит как текст (кроме них — всё text/*). Прочее
 # (application/pdf, image/*, application/zip…) отвергаем ДО чтения тела — бинарь не в LLM-профиль.
 _ALLOWED_CONTENT_TYPES = frozenset({"text/html", "text/plain", "application/xhtml+xml"})
+# sitemap.xml сайты отдают как application/xml — для СТРАНИЦ эти типы по-прежнему запрещены.
+_XML_CONTENT_TYPES = frozenset({"application/xml", "application/rss+xml", "application/gzip"})
 
 _PHONE_RE = re.compile(r"\+?\d[\d\s()\-]{7,}\d")
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
@@ -68,6 +71,12 @@ _PAGE_TYPE_HINTS = (
 
 Fetcher = Callable[[str], Awaitable[str]]
 
+# Порядок важности типов страниц для LLM-сведе́ния профиля (§20.4: «услуги, цены, контакты»).
+# Раньше combined_text резал первые 8000 символов ПОДРЯД — это главная + половина второй страницы:
+# /price и /catalog в промпт не попадали никогда, сколько бы страниц ни обошли.
+_LLM_PAGE_PRIORITY = ("home", "services", "catalog", "price", "about", "contacts", "blog", "other")
+_LLM_PRIO = {t: i for i, t in enumerate(_LLM_PAGE_PRIORITY)}
+
 
 def _content_hash(title: str, text: str) -> str:
     """Стабильная сигнатура контента страницы (§20.5 инкрементальный краул): меняется ⇒ страница
@@ -93,23 +102,44 @@ class CrawlResult:
     socials: dict[str, str] = field(default_factory=dict)
     phones: list[str] = field(default_factory=list)
     emails: list[str] = field(default_factory=list)
+    partial: bool = False  # обход прерван бюджетом времени — страницы собраны НЕ все
 
     @property
     def pages_count(self) -> int:
         return len(self.pages)
 
-    def combined_text(self, max_chars: int = 8000) -> str:
+    def combined_text(self, max_chars: int = 24000, per_page_chars: int = 1500) -> str:
         """Единый текст для LLM-сведе́ния: заголовки+текст страниц + соцсети.
+
+        Бюджет делится МЕЖДУ страницами (квота per_page_chars на страницу, порядок — по важности
+        типа: home → services → catalog → price → …), а не съедается первой же длинной страницей.
+        Раньше был сплошной срез `[:8000]` при 50 обойденных страницах по 5000 символов — в промпт
+        уезжали главная и половина следующей, а /price и /catalog не попадали НИКОГДА (§20.4
+        «цены со страницы каталога» не выполнялся).
 
         PII-egress (golden rule #5 расширительно): телефоны/e-mail НЕ включаются — они уже
         извлечены детерминированно регексами краулера (self.phones/self.emails) и попадают в патч
         профиля КОДОМ (_crawl_patch_from_result), LLM для них не нужен. Соцсети — публичные хэндлы
         бренда, не PII. Residual: контакт может встретиться в самом тексте страницы — это
         задокументировано (docs/CLIENTS_KB.md, «Egress в LLM»)."""
+        order = sorted(
+            enumerate(self.pages),
+            key=lambda it: (_LLM_PRIO.get(it[1].page_type, len(_LLM_PAGE_PRIORITY)), it[0]),
+        )
         parts: list[str] = []
-        for p in self.pages:
+        budget = max_chars
+        if self.socials:  # соцсети коротки и полезны — резервируем место под них
+            budget -= 200
+        for _i, p in order:
+            if budget <= 0:
+                break
             head = f"# {p.title or p.url} ({p.page_type})"
-            parts.append(f"{head}\n{p.text}".strip())
+            body = (p.text or "")[: max(0, per_page_chars)]
+            chunk = f"{head}\n{body}".strip()[:budget]
+            if not chunk:
+                continue
+            parts.append(chunk)
+            budget -= len(chunk) + 2  # + разделитель
         if self.socials:
             parts.append("Соцсети: " + ", ".join(f"{k}: {v}" for k, v in self.socials.items()))
         return "\n\n".join(parts).strip()[:max_chars]
@@ -212,12 +242,32 @@ def _extract(html: str, base_url: str, domain: str) -> tuple:
     return title, text, links, socials, phones, emails
 
 
+def _is_sitemap_url(u: str) -> bool:
+    """Ссылка на сам sitemap (в т.ч. вложенный из <sitemapindex>), а не на страницу сайта."""
+    path = (urlparse(u).path or "").lower()
+    return path.endswith((".xml", ".xml.gz", ".gz"))
+
+
 def _parse_sitemap(xml: str, domain: str) -> list[str]:
-    """URL из sitemap.xml (<loc>) в пределах домена. Терпимо к битому XML (regex, не парсер)."""
+    """URL СТРАНИЦ из sitemap.xml (<loc>) в пределах домена. Терпимо к битому XML (regex, не парсер).
+
+    Ссылки на сами карты (sitemapindex → sitemap-1.xml) отсеиваются: раньше они уезжали во фронтир
+    и тратили сиды на XML-файлы (fetch отвергал их по content-type — обход шёл вхолостую), а сама
+    вложенная карта не разворачивалась, т.е. у sitemap-index-сайтов sitemap не работал вовсе."""
     out: list[str] = []
     for m in re.finditer(r"<loc>\s*([^<\s]+)\s*</loc>", xml or "", re.IGNORECASE):
         u = _norm(m.group(1))
-        if _same_domain(u, domain) and u not in out:
+        if _same_domain(u, domain) and not _is_sitemap_url(u) and u not in out:
+            out.append(u)
+    return out
+
+
+def _parse_sitemap_children(xml: str, domain: str) -> list[str]:
+    """<sitemapindex> → адреса вложенных карт (в пределах домена)."""
+    out: list[str] = []
+    for m in re.finditer(r"<loc>\s*([^<\s]+)\s*</loc>", xml or "", re.IGNORECASE):
+        u = _norm(m.group(1))
+        if _same_domain(u, domain) and _is_sitemap_url(u) and u not in out:
             out.append(u)
     return out
 
@@ -232,10 +282,16 @@ async def crawl_site(
     max_depth: int = 3,
     delay_s: float = 0.0,
     max_text_chars: int = 5000,
+    time_budget_s: float | None = None,
 ) -> CrawlResult:
     """BFS-обход одного домена. fetcher(url)->HTML (бросает при отказе/блокировке); can_fetch(url)
     — robots-гейт (None ⇒ всё разрешено). sitemap_xml — опц. предзагруженный sitemap для сидов.
-    Внешние ссылки НЕ обходятся (фиксируются как соцсети). Лимиты жёсткие (страницы/глубина/пауза)."""
+    Внешние ссылки НЕ обходятся (фиксируются как соцсети). Лимиты жёсткие (страницы/глубина/пауза).
+
+    time_budget_s — ВНУТРЕННИЙ дедлайн: вышло время ⇒ выходим из BFS и отдаём собранное
+    (`result.partial=True`). Снаружи обход по-прежнему прикрыт `asyncio.wait_for`, но тот при
+    срабатывании выбрасывал ВЕСЬ результат — 49 честно обойденных страниц пропадали из-за одной
+    медленной 50-й, и краул падал в `failed`."""
     p = urlparse(start_url)
     domain = (p.netloc or "").lower()
     if domain.startswith("www."):
@@ -252,7 +308,13 @@ async def crawl_site(
             seen.add(u)
             queue.append((u, 1))
 
+    deadline = (time.monotonic() + time_budget_s) if time_budget_s else None
+
     while queue and len(result.pages) < max_pages:
+        # дедлайн проверяем ПОСЛЕ первой страницы: обход без единой страницы бесполезен
+        if deadline is not None and result.pages and time.monotonic() >= deadline:
+            result.partial = True
+            break
         url, depth = queue.pop(0)
         if can_fetch is not None and not can_fetch(url):
             continue
@@ -294,9 +356,44 @@ async def crawl_site(
 
 
 # ── реальная сеть (переиспользует SSRF-гард core.ingest; в тестах подменяется fetcher'ом) ──
-async def fetch_url_html(url: str) -> str:
+_META_CHARSET_RE = re.compile(
+    rb"""<meta[^>]+charset\s*=\s*["']?\s*([A-Za-z0-9_\-]+)""", re.IGNORECASE
+)
+
+
+def _charset_from_ctype(content_type: str | None) -> str | None:
+    """charset из заголовка Content-Type ('text/html; charset=windows-1251' → 'windows-1251')."""
+    m = re.search(r"charset\s*=\s*\"?([A-Za-z0-9_\-]+)", content_type or "", re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _decode_html(raw: bytes, header_charset: str | None) -> str:
+    """Декодировать тело страницы. Кодировку берём: из HTTP-заголовка → из <meta charset> → utf-8.
+
+    Раньше брали `r.encoding`, а httpx при ОТСУТСТВИИ charset в заголовке молча отдаёт
+    default_encoding='utf-8' — сайт в windows-1251 (их немало) декодировался с errors='replace' и
+    приезжал в профиль клиента как «???»."""
+    enc = (header_charset or "").strip()
+    if not enc:
+        m = _META_CHARSET_RE.search(raw[:4096])
+        if m:
+            enc = m.group(1).decode("ascii", errors="ignore")
+    for candidate in (enc, "utf-8"):
+        if not candidate:
+            continue
+        try:
+            return raw.decode(candidate, errors="replace")
+        except (LookupError, TypeError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+async def fetch_url_html(url: str, *, allow_xml: bool = False) -> str:
     """Прочитать URL → сырой HTML (для разбора ссылок). SSRF-гард на исходный URL и КАЖДЫЙ редирект
-    (event hook, как core.ingest.fetch_url_text); таймаут; потолок размера. Бросает при отказе."""
+    (event hook, как core.ingest.fetch_url_text); таймаут; потолок размера. Бросает при отказе.
+
+    allow_xml — только для sitemap: сайты отдают карту как application/xml, и B13-гард по
+    content-type (для страниц он остаётся) резал её целиком → sitemap-сиды не работали."""
     import httpx
 
     p = urlparse(url)
@@ -316,10 +413,12 @@ async def fetch_url_html(url: str) -> str:
     ) as client:
         async with client.stream("GET", url) as r:
             r.raise_for_status()
+            raw_ctype = r.headers.get("content-type") or ""
             # B13: не тянем и не декодируем НЕ-HTML (PDF/картинки/архивы) — иначе бинарь уходил в
             # LLM-сведение профиля как мусорный «текст». Content-Type проверяем ДО чтения тела.
-            ctype = (r.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
-            if ctype and not (ctype in _ALLOWED_CONTENT_TYPES or ctype.startswith("text/")):
+            ctype = raw_ctype.split(";", 1)[0].strip().lower()
+            allowed = _ALLOWED_CONTENT_TYPES | (_XML_CONTENT_TYPES if allow_xml else frozenset())
+            if ctype and not (ctype in allowed or ctype.startswith("text/")):
                 raise ValueError(f"неподдерживаемый тип контента: {ctype} ({url})")
             chunks: list[bytes] = []
             total = 0
@@ -328,12 +427,10 @@ async def fetch_url_html(url: str) -> str:
                 total += len(chunk)
                 if total > MAX_FETCH_BYTES:
                     break
-            encoding = r.encoding or "utf-8"
         raw = b"".join(chunks)
-    try:
-        return raw.decode(encoding, errors="replace")
-    except (LookupError, TypeError):
-        return raw.decode("utf-8", errors="replace")
+    # charset берём из самого заголовка (а не из httpx r.encoding: он при отсутствии charset молча
+    # подставляет utf-8, и windows-1251 сайт превращался в «???»).
+    return _decode_html(raw, _charset_from_ctype(raw_ctype))
 
 
 async def load_robots(start_url: str) -> Callable[[str], bool]:
@@ -352,10 +449,26 @@ async def load_robots(start_url: str) -> Callable[[str], bool]:
     return lambda u: rp.can_fetch(_UA, u)
 
 
-async def fetch_sitemap(start_url: str) -> str | None:
-    """Опц. sitemap.xml домена (через SSRF-гард). Сбой/нет → None (обход всё равно пойдёт от главной)."""
+async def fetch_sitemap(start_url: str, *, max_children: int = 5) -> str | None:
+    """Опц. sitemap.xml домена (через SSRF-гард). Сбой/нет → None (обход всё равно пойдёт от главной).
+
+    <sitemapindex> разворачивается: докачиваем до max_children вложенных карт и склеиваем — иначе у
+    крупных сайтов (а индекс как раз у них) sitemap не давал НИ ОДНОГО сида страниц."""
     p = urlparse(start_url)
+    domain = (p.netloc or "").lower()
+    if domain.startswith("www."):
+        domain = domain[4:]
     try:
-        return await fetch_url_html(f"{p.scheme}://{p.netloc}/sitemap.xml")
+        root = await fetch_url_html(f"{p.scheme}://{p.netloc}/sitemap.xml", allow_xml=True)
     except Exception:  # noqa: BLE001
         return None
+    children = _parse_sitemap_children(root, domain)[:max_children]
+    if not children:
+        return root
+    parts = [root]
+    for child in children:
+        try:
+            parts.append(await fetch_url_html(child, allow_xml=True))
+        except Exception:  # noqa: BLE001 — недоступная вложенная карта не валит остальные
+            continue
+    return "\n".join(parts)

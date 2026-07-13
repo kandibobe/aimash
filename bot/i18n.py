@@ -2073,6 +2073,16 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "🆕 Новых страниц: {new} · ✏️ изменённых: {changed}",
         "en": "🆕 New pages: {new} · ✏️ changed: {changed}",
     },
+    "cli_crawl_partial": {
+        "ru": (
+            "⏳ Обход прерван по времени: успел {pages} стр. Профиль собран по ЧАСТИ сайта — "
+            "запусти обход ещё раз, чтобы добрать остальное."
+        ),
+        "en": (
+            "⏳ Crawl hit the time budget: {pages} pages done. The profile covers PART of the site — "
+            "run the crawl again to pick up the rest."
+        ),
+    },
     "cli_crawl_profile_updated": {
         "ru": "Профиль клиента обновлён. Готов использовать в кампаниях и объявлениях.",
         "en": "Client profile updated. Ready to use in campaigns and ads.",

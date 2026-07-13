@@ -385,7 +385,9 @@ class ClientProfileStore:
         скаляры — непустое перекрывает; notes — append; services/contacts — мердж по ключу; полная
         замена категории — только по явным флагам replace_services/replace_contacts (пустой список
         при replace игнорируется — fail-safe). source — text|crawl (для аудита). crawl_extra —
-        {'website','site_pages','last_crawled_at_now'}. Возвращает result-словарь (агрегаты, без PII)."""
+        {'website','site_pages','site_pages_merge','last_crawled_at_now'}; site_pages_merge=True
+        (инкрементальный перекраул) сливает карту страниц по url вместо замены целиком.
+        Возвращает result-словарь (агрегаты, без PII)."""
         async with Session() as s:
             p = await self._load(s, customer_id)
             before = await self._to_dict(s, p) if p is not None else None
@@ -463,11 +465,35 @@ class ClientProfileStore:
                         )
                     )
 
-            # карта страниц сайта (только краулинг) — заменяем целиком
+            # Карта страниц сайта (только краулинг). full-краул — замена целиком; инкрементальный
+            # (site_pages_merge) — СЛИЯНИЕ по url: §20.5 «только новое» не должен стирать страницы,
+            # до которых обход не дошёл (упёрся в лимит страниц/бюджет времени) — иначе карта
+            # sitelinks (top_site_pages) усыхала с каждым перекраулом.
             pages = (crawl_extra or {}).get("site_pages") or []
             if pages:
+                merge = bool((crawl_extra or {}).get("site_pages_merge"))
+                fresh = {str(pg.get("url", ""))[:2048]: pg for pg in pages if pg.get("url")}
+                kept: list[dict] = []
+                if merge:
+                    old = (
+                        await s.execute(
+                            select(ClientSitePage).where(ClientSitePage.profile_id == p.id)
+                        )
+                    ).scalars()
+                    for row in old:
+                        if row.url in fresh:
+                            continue  # свежая версия страницы вытеснит старую
+                        kept.append(
+                            {
+                                "url": row.url,
+                                "title": row.title,
+                                "page_type": row.page_type,
+                                "key_links": row.key_links,
+                                "content_hash": row.content_hash,
+                            }
+                        )
                 await s.execute(delete(ClientSitePage).where(ClientSitePage.profile_id == p.id))
-                for pg in pages[:200]:
+                for pg in (list(fresh.values()) + kept)[:200]:  # свежие приоритетнее при потолке
                     s.add(
                         ClientSitePage(
                             profile_id=p.id,

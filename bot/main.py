@@ -4245,6 +4245,8 @@ async def _run_client_crawl(
         try:
             can_fetch = await crawler.load_robots(url)
             sitemap = await crawler.fetch_sitemap(url)
+            # Дедлайн живёт ВНУТРИ обхода (отдаёт собранное, partial=True); внешний wait_for —
+            # только страховка от зависшего сокета, с запасом, чтобы не съесть результат целиком.
             result = await asyncio.wait_for(
                 crawler.crawl_site(
                     url,
@@ -4255,21 +4257,30 @@ async def _run_client_crawl(
                     max_depth=settings.crawl_max_depth,
                     delay_s=settings.crawl_delay_s,
                     max_text_chars=settings.crawl_max_text_chars,
+                    time_budget_s=settings.crawl_time_budget_s,
                 ),
-                timeout=settings.crawl_time_budget_s,
+                timeout=settings.crawl_time_budget_s + 30.0,
             )
             if not result.pages:
                 await crawl_jobs.mark_failed(job_id, error="no pages")
                 await bot.send_message(chat_id, i18n.t("cli_crawl_empty", domain=texts.esc(domain)))
                 return
             extract = await structure_crawl(
-                pages_text=result.combined_text(), website=url, language=i18n.current_lang()
+                pages_text=result.combined_text(
+                    max_chars=settings.crawl_llm_text_chars,
+                    per_page_chars=settings.crawl_llm_per_page_chars,
+                ),
+                website=url,
+                language=i18n.current_lang(),
             )
             patch = _crawl_patch_from_result(extract, result)
             crawl_extra = {
                 "website": url,
                 "last_crawled_at_now": True,
                 "site_pages": result.site_pages_payload(),
+                # §20.5: перекраул ДОПОЛНЯЕТ карту страниц, а не стирает не обойденное в этот раз
+                # (лимит страниц/бюджет времени — и половина сайта пропадала из карты sitelinks).
+                "site_pages_merge": mode == "incremental",
             }
             before = await CLIENTS.get_by_account(customer_id)
             # §20.5: инкрементальный перекраул — сравнить с прошлым краулом по content_hash.
@@ -4294,6 +4305,9 @@ async def _run_client_crawl(
                     i18n.t("cli_crawl_diff", new=len(new_urls), changed=len(changed_urls)) + "\n\n"
                 )
             await crawl_jobs.mark_done(job_id, pages_crawled=result.pages_count)
+            # Обход упёрся в бюджет времени — говорим об этом честно: профиль собран по ЧАСТИ сайта.
+            if result.partial:
+                diff_prefix += i18n.t("cli_crawl_partial", pages=result.pages_count) + "\n\n"
             # §20.4: богатая сводка «что нашли» (разделы/услуги/цены/контакты/соцсети).
             crawl_msg = diff_prefix + texts.fmt_crawl_summary(
                 domain, pages=result.pages_count, **_crawl_findings(result, patch)
