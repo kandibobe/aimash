@@ -250,6 +250,45 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
         if lang == "en":
             return "No negative keywords in the account at all — neither shared lists nor campaign-level ones; basic hygiene missing. Add themed lists (competitor/jobs/free/irrelevant) to cut wasted traffic."
         return "В аккаунте нет минус-слов вообще — ни списков, ни заданных прямо на кампаниях; базовая гигиена не настроена. Заведи тематические списки (конкуренты/работа/бесплатно/нерелевантное), чтобы отсечь мусорный трафик."
+    if f.check_id == "keyword_harvest":
+        terms = fa.get("terms") or []
+        cur_ = fa.get("currency") or cur
+        top = "; ".join(
+            f"«{t.get('term', '')}» — {t.get('conversions', 0)} конв., {_money(t.get('cost', 0), cur_)}"
+            for t in terms[:3]
+        )
+        top_en = "; ".join(
+            f"«{t.get('term', '')}» — {t.get('conversions', 0)} conv., {_money(t.get('cost', 0), cur_)}"
+            for t in terms[:3]
+        )
+        if lang == "en":
+            return f"{fa.get('count', 0)} search term(s) already convert but have NO keyword of their own: {top_en}. Add them as exact keywords (own bid, own ad copy) instead of paying for them blind via broad match."
+        return f"{fa.get('count', 0)} поисковых запросов уже конвертят, но ключа под них НЕТ: {top}. Добавь точным соответствием (своя ставка, свой текст) — сейчас ты платишь за них вслепую через широкое."
+    if f.check_id == "ngram_waste":
+        words = fa.get("words") or []
+        cur_ = fa.get("currency") or cur
+        lst = ", ".join(
+            f"«{w.get('text', '')}» ({_money(w.get('cost', 0), cur_)}, {w.get('terms', 0)} запр.)"
+            for w in words[:5]
+        )
+        lst_en = ", ".join(
+            f"«{w.get('text', '')}» ({_money(w.get('cost', 0), cur_)}, {w.get('terms', 0)} terms)"
+            for w in words[:5]
+        )
+        if lang == "en":
+            return f"{fa.get('count', 0)} word(s) systematically burn budget across many search terms with ZERO conversions: {lst_en}. Total {_money(fa.get('cost', 0), cur_)} — add them as phrase negatives (none of them appears in your own keywords)."
+        return f"{fa.get('count', 0)} слов системно жгут бюджет в разных запросах и не дали НИ ОДНОЙ конверсии: {lst}. Итого {_money(fa.get('cost', 0), cur_)} — в минус фразовым соответствием (ни одно из них не входит в твои ключи)."
+    if f.check_id == "keyword_cannibalization":
+        places = ", ".join(fa.get("places") or [])
+        cur_ = fa.get("currency") or cur
+        if lang == "en":
+            return f"{fa.get('count', 0)} keyword(s) duplicated across ad groups with the same match type — they compete with each other. Worst: «{fa.get('keyword', '')}» ({fa.get('match_type', '')}) in {places}, {_money(fa.get('cost', 0), cur_)} spent. Keep one, remove the rest."
+        return f"{fa.get('count', 0)} ключей дублируются в разных группах с одним типом соответствия — конкурируют сами с собой. Худший: «{fa.get('keyword', '')}» ({fa.get('match_type', '')}) в {places}, расход {_money(fa.get('cost', 0), cur_)}. Оставь один, остальные убери."
+    if f.check_id == "zero_impression_keywords":
+        ex = ", ".join(f"«{k}»" for k in (fa.get("examples") or [])[:3])
+        if lang == "en":
+            return f"{fa.get('count', 0)} of {fa.get('total', 0)} active keywords ({fa.get('pct', 0)}%) got zero impressions — too narrow, out-ranked or duplicated ({ex}). They cost nothing but hide the real structure: clean them up or broaden."
+        return f"{fa.get('count', 0)} из {fa.get('total', 0)} активных ключей ({fa.get('pct', 0)}%) не показались НИ РАЗУ — слишком узкие, задавлены рангом или дублируют друг друга ({ex}). Денег не стоят, но врут про структуру: почисти или расширь."
     if f.check_id == "qs_low":
         if lang == "en":
             return f"{fa.get('count', 0)} paying keyword(s) with Quality Score ≤ {fa.get('qs_fail', 4)} (worst «{fa.get('worst_kw', '')}»: {fa.get('worst_qs', 0)}) — fix relevance/CTR/landing page or drop them."

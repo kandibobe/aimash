@@ -919,6 +919,13 @@ def test_weight_vector_snapshot_pins_full_model():
         "rsa_min_headlines": 8,
         "rsa_min_descriptions": 3,
         "rsa_stale_days": 90,
+        "harvest_min_conv": 1.0,  # Ф4: майнинг запросов
+        "harvest_top_n": 5,
+        "ngram_min_cost": 10.0,
+        "ngram_min_terms": 2,
+        "ngram_top_n": 5,
+        "zero_impr_share": 0.5,
+        "zero_impr_min_count": 20,
     }
     # Ф3: порог релевантности НЕ отдельное число аудита — он ОДИН с генератором текстов.
     assert DEFAULT_AUDIT_THRESHOLDS["rsa_kw_coverage_min"] == MIN_KEYWORD_COVERAGE

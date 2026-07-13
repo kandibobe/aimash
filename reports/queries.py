@@ -770,6 +770,47 @@ def fetch_keyword_quality(
 
 
 @dataclass
+class KeywordInventoryRow:
+    """Ф4: активный ключ КАК ОН ЕСТЬ — вместе с нулями. Именно ради нулей отдельный фетчер:
+    `fetch_keyword_quality` берёт топ по расходу, а ключ с 0 показов расхода не имеет by design —
+    из такой выборки он выпадает первым, хотя он и есть предмет чека `zero_impression_keywords`."""
+
+    campaign: str
+    ad_group: str
+    keyword: str
+    match_type: str
+    metrics: Metrics
+
+
+def fetch_keyword_inventory(
+    client, customer_id: str, period, limit: int = 10000
+) -> list[KeywordInventoryRow]:
+    """Полный список ENABLED-ключей за период — БЕЗ `ORDER BY cost` (иначе нули отсекаются) и без
+    метрик-фильтров. Нужен трём чекам: нулевые показы, каннибализация (один ключ в разных группах),
+    и как «список своих ключей» для майнинга запросов (что уже есть — не собирать, что своё — не
+    минусовать). Усечение по LIMIT возможно на огромных аккаунтах: чек тогда НЕДОсчитает, но не
+    придумает лишнего. READ-ONLY."""
+    ensure_read_allowed(customer_id)
+    q = (
+        "SELECT campaign.name, ad_group.name, ad_group_criterion.keyword.text, "
+        "ad_group_criterion.keyword.match_type, "
+        f"{_METRICS_SELECT} FROM keyword_view WHERE {_where(period, None)} "
+        "AND ad_group_criterion.status = 'ENABLED' AND ad_group.status = 'ENABLED' "
+        f"AND campaign.status = 'ENABLED' LIMIT {int(limit)}"
+    )
+    return [
+        KeywordInventoryRow(
+            campaign=r.campaign.name,
+            ad_group=r.ad_group.name,
+            keyword=r.ad_group_criterion.keyword.text,
+            match_type=_enum_name(r.ad_group_criterion.keyword.match_type),
+            metrics=_metrics(r.metrics),
+        )
+        for r in _search(client, customer_id, q)
+    ]
+
+
+@dataclass
 class GeoWasteRow:
     campaign: str
     region: str  # человекочитаемое имя локации (canonical) или id (fallback)

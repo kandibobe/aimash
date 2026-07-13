@@ -26,6 +26,8 @@ from audit.bidscape import (
     opportunities,
     sim_upside,
 )
+from audit.terms import harvest, waste_ngrams
+from audit.terms import norm as t_norm
 from audit.thresholds import (
     DEFAULT_AUDIT_THRESHOLDS,
     FAMILY_WEIGHT,
@@ -149,6 +151,9 @@ class _Ctx:
     recommendations: list | None = None
     # Ф3: работающие RSA целиком (тексты/пины/ad_strength/возраст) + ключи их групп. None → не читано.
     rsa_ads: list | None = None
+    # Ф4: ПОЛНЫЙ список активных ключей — вместе с нулевыми (топ-по-расходу выборка их теряет).
+    # Он же «что уже покрыто» для майнинга запросов. None → не читано (майнинг молчит, а не врёт).
+    keyword_inventory: list | None = None
 
     def target_for(self, campaign_name: str) -> float | None:
         """Цель CPA для кампании: пер-кампанийная стратегия (tCPA) побеждает глобальный /target."""
@@ -1232,6 +1237,205 @@ def check_no_negative_list(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     ]
 
 
+def _kw_texts(ctx: _Ctx) -> list[str]:
+    return [getattr(k, "keyword", "") or "" for k in (ctx.keyword_inventory or [])]
+
+
+def check_keyword_harvest(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф4 (claude-ads G-KW3, «сбор урожая»): запросы, которые ПРИНЕСЛИ КОНВЕРСИИ, но ключа под них
+    нет — деньги уже заработаны вслепую, через широкое соответствие. Добавить их точным ключом =
+    управляемая ставка и свой текст объявления. Обратный ход к /searchterms («в минус»), которого
+    в боте не было вовсе.
+
+    🔒 На балл НЕ влияет (score_intensity=0.0): это невыбранная возможность, а не дефект аккаунта —
+    штрафовать за неё значило бы ругать клиента за то, чего у него нет. Нужны ОБА сигнала (запросы
+    и список ключей): без ключей мы не знаем, что уже покрыто, и предложили бы дубли."""
+    if not ctx.search_terms or ctx.keyword_inventory is None:
+        return []
+    items = harvest(
+        ctx.search_terms,
+        _kw_texts(ctx),
+        min_conv=float(thr.get("harvest_min_conv", 1.0)),
+        top_n=int(thr.get("harvest_top_n", 5)),
+    )
+    if not items:
+        return []
+    best = items[0]
+    return [
+        Finding(
+            check_id="keyword_harvest",
+            family="keywords",
+            severity="info",
+            at_risk=0.0,
+            spend_segment=None,
+            target_campaign=best.campaign,
+            suggested_operation=None,  # ключ ставят в конкретную группу со ставкой → не один тап
+            advice_operation="add_keywords",
+            score_intensity=0.0,  # возможность, не дефект — балл не трогаем
+            facts={
+                "count": len(items),
+                "campaign": best.campaign,
+                "ad_group": best.ad_group,
+                "terms": [
+                    {"term": i.term, "conversions": i.conversions, "cost": i.cost} for i in items
+                ],
+                "conversions": round(sum(i.conversions for i in items), 2),
+                "currency": getattr(report, "currency", ""),
+            },
+            evidence={
+                "cost": round(sum(i.cost for i in items), 2),
+                "keywords": [i.term for i in items],
+                "match_type": "exact",
+            },
+        )
+    ]
+
+
+def check_ngram_waste(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф4 (claude-ads G16, системный слой): не один дорогой запрос, а СЛОВО, которое стабильно жжёт
+    бюджет во многих запросах и не конвертит нигде («бесплатно», «вакансии», «своими руками»).
+    Считает КОД (audit.terms.waste_ngrams), не модель; свои ключи неприкосновенны (гард в terms).
+
+    at_risk=0 НАМЕРЕННО: этот расход уже посчитан в wasteful_search_term/wasteful_keyword — положив
+    его сюда, мы бы задвоили «Под риском» (та же ошибка, что чинила эпоха 4). Деньги показываем в
+    фактах, а в балл идём как неденежный warning.
+
+    Не one-tap (в отличие от точного минуса на один запрос): n-грамма пересекает кампании, а
+    add_negative_keywords бьёт по ОДНОЙ — кнопка применила бы половину, а выглядело бы как «готово»."""
+    if not ctx.search_terms or ctx.keyword_inventory is None:
+        return []
+    grams = waste_ngrams(
+        ctx.search_terms,
+        _kw_texts(ctx),
+        min_cost=float(thr.get("ngram_min_cost", 10.0)),
+        min_terms=int(thr.get("ngram_min_terms", 2)),
+        top_n=int(thr.get("ngram_top_n", 5)),
+    )
+    if not grams:
+        return []
+    return [
+        Finding(
+            check_id="ngram_waste",
+            family="keywords",
+            severity="warning",
+            at_risk=0.0,  # расход уже учтён денежными чеками запросов/ключей — не задваиваем
+            spend_segment=None,
+            target_campaign=None,
+            suggested_operation=None,  # минус-слово по n-грамме — прозой, см. докстринг
+            advice_operation="add_negative_keywords",
+            facts={
+                "count": len(grams),
+                "cost": round(sum(g.cost for g in grams), 2),
+                "words": [{"text": g.text, "cost": g.cost, "terms": g.terms} for g in grams],
+                "currency": getattr(report, "currency", ""),
+            },
+            evidence={
+                "cost": round(sum(g.cost for g in grams), 2),
+                "clicks": sum(g.clicks for g in grams),
+                "ngrams": [g.text for g in grams],
+            },
+        )
+    ]
+
+
+def check_keyword_cannibalization(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф4: ОДИН И ТОТ ЖЕ ключ с ОДНИМ типом соответствия живёт в разных группах — они конкурируют
+    друг с другом на одном аукционе: Google выберет одну, вторая копит историю впустую, а ставки
+    и тексты у них разные.
+
+    Анти-ложные: судим только по РЕАЛЬНО показывавшимся дублям (impressions > 0 минимум в двух
+    группах) — дубль-«спящий» никому не мешает; разные типы соответствия (broad + exact одного
+    текста) — НОРМАЛЬНАЯ структура, не каннибализация."""
+    inv = ctx.keyword_inventory
+    if not inv:
+        return []
+    groups: dict[tuple[str, str], list] = {}
+    for k in inv:
+        if int(getattr(getattr(k, "metrics", None), "impressions", 0) or 0) <= 0:
+            continue
+        key = (t_norm(getattr(k, "keyword", "") or ""), getattr(k, "match_type", "") or "")
+        if not key[0]:
+            continue
+        groups.setdefault(key, []).append(k)
+    dupes = {
+        key: rows
+        for key, rows in groups.items()
+        if len({(getattr(r, "campaign", ""), getattr(r, "ad_group", "")) for r in rows}) > 1
+    }
+    if not dupes:
+        return []
+
+    def _cost_of(rows) -> float:
+        return sum(float(getattr(getattr(r, "metrics", None), "cost", 0.0) or 0.0) for r in rows)
+
+    worst_key = max(dupes, key=lambda k: _cost_of(dupes[k]))
+    worst = dupes[worst_key]
+    places = sorted({f"{getattr(r, 'campaign', '')} / {getattr(r, 'ad_group', '')}" for r in worst})
+    return [
+        Finding(
+            check_id="keyword_cannibalization",
+            family="keywords",
+            severity="info",
+            at_risk=0.0,
+            spend_segment=None,
+            target_campaign=getattr(worst[0], "campaign", "") or None,
+            suggested_operation=None,
+            advice_operation="remove_keywords",  # лишний дубль убирают руками — какой именно, решает человек
+            facts={
+                "count": len(dupes),
+                "keyword": worst_key[0],
+                "match_type": worst_key[1],
+                "places": places[:4],
+                "cost": round(_cost_of(worst), 2),
+                "currency": getattr(report, "currency", ""),
+            },
+            evidence={
+                "cost": round(sum(_cost_of(r) for r in dupes.values()), 2),
+                "groups": len(worst),
+            },
+        )
+    ]
+
+
+def check_zero_impression_keywords(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф4 (claude-ads G-KW1): большая часть активных ключей за период не показалась НИ РАЗУ — они
+    слишком узкие, задавлены рангом или дублируют друг друга. Такой ключ не стоит денег, но врёт
+    про структуру: аккаунт выглядит проработанным, а работают полтора ключа.
+
+    Порог двойной (доля И количество): на маленьком аккаунте 5 из 8 нулевых — не сигнал, а норма
+    молодой кампании. Фетчер тут ОТДЕЛЬНЫЙ (fetch_keyword_inventory) именно потому, что топ-по-
+    расходу выборка нулевые ключи выбрасывает первыми."""
+    inv = ctx.keyword_inventory
+    if not inv:
+        return []
+    total = len(inv)
+    zero = [k for k in inv if int(getattr(getattr(k, "metrics", None), "impressions", 0) or 0) <= 0]
+    share = len(zero) / total if total else 0.0
+    if len(zero) < int(thr.get("zero_impr_min_count", 20)) or share < float(
+        thr.get("zero_impr_share", 0.5)
+    ):
+        return []
+    return [
+        Finding(
+            check_id="zero_impression_keywords",
+            family="keywords",
+            severity="info",
+            at_risk=0.0,
+            spend_segment=None,
+            target_campaign=None,
+            suggested_operation=None,
+            advice_operation="remove_keywords",
+            facts={
+                "count": len(zero),
+                "total": total,
+                "pct": int(share * 100),
+                "examples": [getattr(k, "keyword", "") for k in zero[:3]],
+            },
+            evidence={"zero": len(zero), "total": total},
+        )
+    ]
+
+
 def check_quality_score(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     """B (claude-ads G20-G24 + Hassanelsisi): Quality Score дорогих ключей + разложение на 3 компонента
     (Expected CTR / Ad Relevance / Landing Page). qs_low — есть ключи с QS ≤ порога; qs_ctr_below /
@@ -1788,6 +1992,10 @@ _CHECKS = (
     check_rsa_overpinned,
     check_rsa_stale,
     check_no_negative_list,
+    check_keyword_harvest,
+    check_ngram_waste,
+    check_keyword_cannibalization,
+    check_zero_impression_keywords,
     check_quality_score,
     check_manual_bid_high_vol,
     check_bid_below_first_page,
@@ -1832,6 +2040,13 @@ CHECK_REGISTRY: dict[str, tuple[str, str]] = {
     "rsa_overpinned": ("rsa", "info"),
     "rsa_stale": ("rsa", "info"),
     "no_negative_list": ("keywords", "info"),
+    # Ф4 (майнинг запросов). ngram_waste — warning: слово, жгущее бюджет во МНОГИХ запросах, это
+    # система, а не случай. keyword_harvest — info и БЕЗ штрафа (score_intensity=0): возможность,
+    # не дефект. Каннибализация/нули — info: структура, деньгами напрямую не измеряется.
+    "keyword_harvest": ("keywords", "info"),
+    "ngram_waste": ("keywords", "warning"),
+    "keyword_cannibalization": ("keywords", "info"),
+    "zero_impression_keywords": ("keywords", "info"),
     "qs_low": ("rsa", "info"),
     "qs_ctr_below": ("rsa", "info"),
     "qs_relevance_below": ("rsa", "info"),
@@ -1948,6 +2163,7 @@ def build_audit(
     bid_simulations: list | None = None,
     budget_simulations: list | None = None,
     rsa_ads: list | None = None,
+    keyword_inventory: list | None = None,
 ) -> AuditResult:
     """Собрать аудит по УЖЕ прочитанным данным. Чистая функция (без сети/SDK). Опц. живые данные
     (is_rows / conversion_actions / bidding / optimization_score / recommendations) — duck-typed,
@@ -2017,6 +2233,7 @@ def build_audit(
         budget_simulations=budget_simulations,
         recommendations=recommendations,
         rsa_ads=rsa_ads,
+        keyword_inventory=keyword_inventory,
     )
 
     # N1.3 (ревью): IS-строки прочитаны, но НИ ОДНА не прошла tolerance-гейт (proto3-нули) —
