@@ -18,6 +18,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 
+from adcopy.validate import MIN_KEYWORD_COVERAGE, keyword_coverage
 from audit.bidscape import (
     FIRST_PAGE,
     MANUAL_BID_STRATEGIES,
@@ -146,6 +147,8 @@ class _Ctx:
     budget_simulations: list | None = None
     # Ф2: активные Google-рекомендации с ИХ оценкой эффекта (recommendation.impact). None → не читано.
     recommendations: list | None = None
+    # Ф3: работающие RSA целиком (тексты/пины/ad_strength/возраст) + ключи их групп. None → не читано.
+    rsa_ads: list | None = None
 
     def target_for(self, campaign_name: str) -> float | None:
         """Цель CPA для кампании: пер-кампанийная стратегия (tCPA) побеждает глобальный /target."""
@@ -952,6 +955,251 @@ def check_rsa_thin(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     ]
 
 
+# ── Ф3: тексты объявлений (RSA) ──────────────────────────────────────────────────────
+def _serving_rsa(ctx: _Ctx) -> list:
+    """RSA, которые РЕАЛЬНО показывались за период. Объявление без показов судить не за что —
+    флажить его значило бы шуметь на черновиках и свежих группах (правило анти-ложных, Ф0)."""
+    return [
+        a
+        for a in (ctx.rsa_ads or [])
+        if int(getattr(getattr(a, "metrics", None), "impressions", 0) or 0) > 0
+    ]
+
+
+def _rsa_cost(ad) -> float:
+    return float(getattr(getattr(ad, "metrics", None), "cost", 0.0) or 0.0)
+
+
+def _rsa_where(ad) -> tuple[str, str]:
+    return getattr(ad, "campaign", "") or "", getattr(ad, "ad_group", "") or ""
+
+
+def check_rsa_keyword_coverage(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф3 (claude-ads G35/G-KW2 — ПРЯМОЙ запрос заказчика «используются ли ключи в объявлениях»):
+    слова, за которые платим, не встречаются в заголовках объявления. Бьёт по релевантности → QS →
+    цене клика. Покрытие считает КОД (`adcopy.validate.keyword_coverage`) — ТОТ ЖЕ, что гейт
+    генерации: аудит не может требовать одного, а генератор выдавать другое.
+
+    Судим только показывавшиеся объявления с известными ключами группы. Один агрегат + худшее
+    (по расходу) объявление; деньги в evidence (сила сигнала для ранжирования). Нет данных → молчим."""
+    ads = [
+        a
+        for a in _serving_rsa(ctx)
+        if getattr(a, "keywords", None) and getattr(a, "headlines", None)
+    ]
+    if not ads:
+        return []
+    floor = float(thr.get("rsa_kw_coverage_min", MIN_KEYWORD_COVERAGE))
+    low = [
+        (a, keyword_coverage(list(a.headlines), list(a.keywords)))
+        for a in ads
+        if keyword_coverage(list(a.headlines), list(a.keywords)) < floor
+    ]
+    if not low:
+        return []
+    worst_ad, worst_cov = max(low, key=lambda p: (_rsa_cost(p[0]), -p[1]))
+    campaign, ad_group = _rsa_where(worst_ad)
+    # Ключи, которых нет НИ В ОДНОМ заголовке, — их и подставлять в новые тексты (3 примера).
+    missing = [
+        kw
+        for kw in list(worst_ad.keywords)[:20]
+        if keyword_coverage(list(worst_ad.headlines), [kw]) <= 0.0
+    ][:3]
+    return [
+        Finding(
+            check_id="rsa_keyword_coverage_low",
+            family="rsa",
+            severity="warning",
+            at_risk=0.0,
+            spend_segment=None,
+            target_campaign=campaign,
+            suggested_operation=None,  # тексты пишет генератор → курация, не одна кнопка
+            advice_operation="create_rsa",
+            facts={
+                "count": len(low),
+                "min_pct": int(floor * 100),
+                "campaign": campaign,
+                "ad_group": ad_group,
+                "worst_pct": int(worst_cov * 100),
+                "missing": missing,
+                "currency": getattr(report, "currency", ""),
+            },
+            evidence={
+                "cost": round(sum(_rsa_cost(a) for a, _ in low), 2),
+                "worst_cost": round(_rsa_cost(worst_ad), 2),
+                "ads": len(ads),
+            },
+        )
+    ]
+
+
+def check_rsa_copy_thin(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф3 (claude-ads G27/G28): в объявлении мало заголовков (<8 при максимуме 15) или описаний
+    (<3 при 4) — Google нечего комбинировать, ротация и ad_strength страдают. Два агрегата."""
+    ads = _serving_rsa(ctx)
+    if not ads:
+        return []
+    out: list[Finding] = []
+    need_h = int(thr.get("rsa_min_headlines", 8))
+    need_d = int(thr.get("rsa_min_descriptions", 3))
+    thin_h = [a for a in ads if len(getattr(a, "headlines", []) or []) < need_h]
+    thin_d = [a for a in ads if len(getattr(a, "descriptions", []) or []) < need_d]
+    if thin_h:
+        worst = max(thin_h, key=_rsa_cost)
+        campaign, ad_group = _rsa_where(worst)
+        out.append(
+            Finding(
+                check_id="rsa_headlines_thin",
+                family="rsa",
+                severity="info",
+                at_risk=0.0,
+                spend_segment=None,
+                target_campaign=campaign,
+                suggested_operation=None,
+                advice_operation="create_rsa",
+                facts={
+                    "count": len(thin_h),
+                    "need": need_h,
+                    "campaign": campaign,
+                    "ad_group": ad_group,
+                    "worst_n": len(getattr(worst, "headlines", []) or []),
+                },
+                evidence={"cost": round(sum(_rsa_cost(a) for a in thin_h), 2)},
+            )
+        )
+    if thin_d:
+        worst = max(thin_d, key=_rsa_cost)
+        campaign, ad_group = _rsa_where(worst)
+        out.append(
+            Finding(
+                check_id="rsa_descriptions_thin",
+                family="rsa",
+                severity="info",
+                at_risk=0.0,
+                spend_segment=None,
+                target_campaign=campaign,
+                suggested_operation=None,
+                advice_operation="create_rsa",
+                facts={
+                    "count": len(thin_d),
+                    "need": need_d,
+                    "campaign": campaign,
+                    "ad_group": ad_group,
+                    "worst_n": len(getattr(worst, "descriptions", []) or []),
+                },
+                evidence={"cost": round(sum(_rsa_cost(a) for a in thin_d), 2)},
+            )
+        )
+    return out
+
+
+def check_rsa_ad_strength(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф3 (claude-ads G29): собственная оценка Google — `ad_strength = POOR`. AVERAGE НЕ флажим:
+    это половина живых объявлений, шум. Пустая строка = поле не прочитано ⇒ молчим (gr8)."""
+    poor = [a for a in _serving_rsa(ctx) if getattr(a, "ad_strength", "") == "POOR"]
+    if not poor:
+        return []
+    worst = max(poor, key=_rsa_cost)
+    campaign, ad_group = _rsa_where(worst)
+    return [
+        Finding(
+            check_id="rsa_ad_strength_poor",
+            family="rsa",
+            severity="info",
+            at_risk=0.0,
+            spend_segment=None,
+            target_campaign=campaign,
+            suggested_operation=None,
+            advice_operation="create_rsa",
+            facts={
+                "count": len(poor),
+                "campaign": campaign,
+                "ad_group": ad_group,
+                "currency": getattr(report, "currency", ""),
+            },
+            evidence={"cost": round(sum(_rsa_cost(a) for a in poor), 2)},
+        )
+    ]
+
+
+def check_rsa_overpinned(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф3 (claude-ads G30): закреплены ВСЕ ТРИ позиции заголовка — ротация мертва, Google не может
+    подбирать комбинации под запрос. Флажим только полный пин 1+2+3: пин одной позиции (бренд/
+    юридическая обязаловка) — нормальная практика, флажить её значило бы врать."""
+    over = [
+        a
+        for a in _serving_rsa(ctx)
+        if {"HEADLINE_1", "HEADLINE_2", "HEADLINE_3"}
+        <= set(getattr(a, "pinned_headline_positions", ()) or ())
+    ]
+    if not over:
+        return []
+    worst = max(over, key=_rsa_cost)
+    campaign, ad_group = _rsa_where(worst)
+    return [
+        Finding(
+            check_id="rsa_overpinned",
+            family="rsa",
+            severity="info",
+            at_risk=0.0,
+            spend_segment=None,
+            target_campaign=campaign,
+            suggested_operation=None,
+            advice_operation="create_rsa",
+            facts={
+                "count": len(over),
+                "campaign": campaign,
+                "ad_group": ad_group,
+                "pinned": int(getattr(worst, "pinned_headlines", 0) or 0),
+            },
+            evidence={"cost": round(sum(_rsa_cost(a) for a in over), 2)},
+        )
+    ]
+
+
+def check_rsa_stale(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф3 (claude-ads G-AD1): в группе НЕТ ни одного объявления моложе N дней — тексты не обновляли,
+    выгорание/усталость аудитории. Считаем по САМОМУ СВЕЖЕМУ объявлению группы. age_days=-1 (дата не
+    прочитана — сервер отверг поле) → группа не судится вовсе: нет данных ≠ «старая» (gr8)."""
+    days = int(thr.get("rsa_stale_days", 90))
+    fresh_by_group: dict[str, int] = {}
+    meta: dict[str, tuple[str, str, float]] = {}
+    for a in _serving_rsa(ctx):
+        age = int(getattr(a, "age_days", -1) or -1)
+        if age < 0:
+            continue
+        gid = str(getattr(a, "ad_group_id", "") or getattr(a, "ad_group", ""))
+        fresh_by_group[gid] = min(fresh_by_group.get(gid, age), age)
+        campaign, ad_group = _rsa_where(a)
+        prev_cost = meta.get(gid, ("", "", 0.0))[2]
+        meta[gid] = (campaign, ad_group, prev_cost + _rsa_cost(a))
+    stale = {gid: age for gid, age in fresh_by_group.items() if age >= days}
+    if not stale:
+        return []
+    worst_gid = max(stale, key=lambda g: meta.get(g, ("", "", 0.0))[2])
+    campaign, ad_group, _ = meta.get(worst_gid, ("", "", 0.0))
+    return [
+        Finding(
+            check_id="rsa_stale",
+            family="rsa",
+            severity="info",
+            at_risk=0.0,
+            spend_segment=None,
+            target_campaign=campaign,
+            suggested_operation=None,
+            advice_operation="create_rsa",
+            facts={
+                "count": len(stale),
+                "days": days,
+                "campaign": campaign,
+                "ad_group": ad_group,
+                "worst_days": max(stale.values()),
+            },
+            evidence={"cost": round(sum(meta.get(g, ("", "", 0.0))[2] for g in stale), 2)},
+        )
+    ]
+
+
 def check_no_negative_list(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     """D (claude-ads G14+G15): в аккаунте с реальным трафиком НЕТ минус-слов ВООБЩЕ — ни shared-списка
     (NEGATIVE_KEYWORDS), ни минусов прямо на кампаниях. Базовая гигиена не настроена, нецелевые
@@ -1534,6 +1782,11 @@ _CHECKS = (
     check_single_campaign,
     check_adgroup_bloat,
     check_rsa_thin,
+    check_rsa_keyword_coverage,
+    check_rsa_copy_thin,
+    check_rsa_ad_strength,
+    check_rsa_overpinned,
+    check_rsa_stale,
     check_no_negative_list,
     check_quality_score,
     check_manual_bid_high_vol,
@@ -1570,6 +1823,14 @@ CHECK_REGISTRY: dict[str, tuple[str, str]] = {
     "zero_impressions": ("delivery", "warning"),
     "adgroup_bloat": ("structure", "info"),
     "rsa_thin": ("rsa", "info"),
+    # Ф3 (G35/G27/G28/G29/G30/G-AD1). Покрытие ключей — единственный warning из RSA-семьи: это не
+    # косметика, а релевантность → Quality Score → цена клика. Остальное — info (гигиена текстов).
+    "rsa_keyword_coverage_low": ("rsa", "warning"),
+    "rsa_headlines_thin": ("rsa", "info"),
+    "rsa_descriptions_thin": ("rsa", "info"),
+    "rsa_ad_strength_poor": ("rsa", "info"),
+    "rsa_overpinned": ("rsa", "info"),
+    "rsa_stale": ("rsa", "info"),
     "no_negative_list": ("keywords", "info"),
     "qs_low": ("rsa", "info"),
     "qs_ctr_below": ("rsa", "info"),
@@ -1686,6 +1947,7 @@ def build_audit(
     bid_landscape: list | None = None,
     bid_simulations: list | None = None,
     budget_simulations: list | None = None,
+    rsa_ads: list | None = None,
 ) -> AuditResult:
     """Собрать аудит по УЖЕ прочитанным данным. Чистая функция (без сети/SDK). Опц. живые данные
     (is_rows / conversion_actions / bidding / optimization_score / recommendations) — duck-typed,
@@ -1754,6 +2016,7 @@ def build_audit(
         bid_simulations=bid_simulations,
         budget_simulations=budget_simulations,
         recommendations=recommendations,
+        rsa_ads=rsa_ads,
     )
 
     # N1.3 (ревью): IS-строки прочитаны, но НИ ОДНА не прошла tolerance-гейт (proto3-нули) —

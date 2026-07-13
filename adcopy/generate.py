@@ -9,13 +9,24 @@
 from __future__ import annotations
 
 import json
-import re
+import math
 from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
-from adcopy.validate import LIMITS, rsa_len, validate
+from adcopy.validate import (
+    LIMITS,
+    MIN_KEYWORD_COVERAGE,
+    keyword_coverage,
+    rsa_len,
+    tok_match,
+    validate,
+)
 from agent.router import chat
+
+# Считает КОД (adcopy.validate) — здесь только псевдонимы для обратной совместимости импортов.
+_keyword_coverage = keyword_coverage
+_tok_match = tok_match
 
 DEFAULT_HEADLINES = 15
 DEFAULT_DESCRIPTIONS = 4
@@ -43,35 +54,11 @@ class RsaDraft:
     dropped_headlines: int = 0  # отброшено кодом за превышение лимита
     dropped_descriptions: int = 0
     attempts: int = 0
-    # §10 (advisory): доля заголовков, содержащих хотя бы один токен ключа. 1.0 = все покрывают ИЛИ
-    # ключей не было (нечего мерить). Заголовки НЕ выбрасываем по низкому покрытию — только сигнал.
+    # §10: доля заголовков, содержащих хотя бы один токен ключа. 1.0 = все покрывают ИЛИ ключей не
+    # было (нечего мерить). Ф3: покрытие ниже MIN_KEYWORD_COVERAGE — ГЕЙТ (догенерация заголовков
+    # с ключами), а не только сигнал; ниже порога после ремонта — честно показываем как есть.
     keyword_coverage: float = 1.0
-
-
-def _tok_match(a: str, b: str) -> bool:
-    """Совпадение токенов терпимо к словоформам (RU-инфлексия): точное ИЛИ общий префикс ≥4 симв.
-    (ноутбук/ноутбука/ноутбуки → покрыто). Без этого точный матч часто ложно занижал покрытие."""
-    if a == b:
-        return True
-    return len(a) >= 4 and len(b) >= 4 and (a.startswith(b) or b.startswith(a))
-
-
-def _keyword_coverage(headlines: list[str], keywords: list[str]) -> float:
-    """§10: доля заголовков, покрывающих ХОТЯ БЫ один токен ключевого слова (см. _tok_match — терпит
-    словоформы). Отдельно от длины (её считает validate/rsa_len — golden rule #4). Пустые ключи/
-    заголовки → 1.0 (нечего мерить, не флагаем). Токен ≥3 символов — отсекаем шум/стоп-слова."""
-    kw_tokens = {
-        t for kw in keywords for t in re.split(r"[^0-9a-zа-яё]+", kw.casefold()) if len(t) >= 3
-    }
-    if not kw_tokens or not headlines:
-        return 1.0
-
-    def _covered(h: str) -> bool:
-        htoks = {t for t in re.split(r"[^0-9a-zа-яё]+", h.casefold()) if t}
-        return any(_tok_match(ht, kt) for ht in htoks for kt in kw_tokens)
-
-    hit = sum(1 for h in headlines if _covered(h))
-    return round(hit / len(headlines), 2)
+    coverage_repaired: bool = False  # был ли запущен ремонт релевантности (для диагностики §10)
 
 
 _SYSTEM = (
@@ -253,6 +240,62 @@ def _fill_by_trim(
             out.append(trimmed)
 
 
+_COVERAGE_SYSTEM = (
+    "Ты — копирайтер Google Ads (RSA). Возвращай СТРОГО JSON-объект вида "
+    '{"items": ["…"]} без пояснений и без markdown. КАЖДЫЙ заголовок ОБЯЗАН содержать одно из '
+    "данных ключевых слов (допустима словоформа), быть до 30 видимых символов "
+    "(кириллица считается как 1 символ) и звучать естественно, без КАПСА и без повторов."
+)
+
+
+def _covers_keywords(headline: str, keywords: list[str]) -> bool:
+    """Покрывает ли ОДИН заголовок хоть один ключ. Решает КОД (та же функция, что в аудите)."""
+    return keyword_coverage([headline], keywords) >= 1.0
+
+
+async def _repair_low_coverage(brief: CopyBrief, headlines: list[str], seen: set[str]) -> bool:
+    """Ф3 (гейт релевантности, golden rule #4 распространён с длины на вхождение ключей): покрытие
+    ниже MIN_KEYWORD_COVERAGE ⇒ просим у модели заголовки С КЛЮЧАМИ и ЗАМЕНЯЕМ ими непокрытые.
+
+    Что бы модель ни вернула, проверяет КОД: длину — validate (через _ingest), вхождение ключа —
+    _covers_keywords. Не покрывает ключ → в объявление не попадёт. Best-effort: сбой ремонта не
+    роняет генерацию — вернём как есть, а покрытие честно покажем в диагностике (bot.ux)."""
+    kws = brief.keywords
+    if not kws or not headlines:
+        return False
+    uncovered = [i for i, h in enumerate(headlines) if not _covers_keywords(h, kws)]
+    covered = len(headlines) - len(uncovered)
+    need = math.ceil(MIN_KEYWORD_COVERAGE * len(headlines)) - covered
+    if need <= 0 or not uncovered:
+        return False
+    prompt = (
+        f"Язык: {brief.language}. Тема: {brief.topic}. "
+        f"Дай {need + 2} заголовка(ов) Google Ads, В КАЖДОМ — одно из ключевых слов: "
+        + ", ".join(f"«{k}»" for k in kws[:10])
+    )
+    try:
+        msg = await chat(
+            [
+                {"role": "system", "content": _COVERAGE_SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            role="copy",
+            temperature=0.5,
+        )
+    except Exception:  # noqa: BLE001 — ремонт релевантности опционален, не роняем генератор
+        return False
+    fresh: list[str] = []
+    # Принимаем ВСЕ кандидаты (сколько просили), и только потом отсеиваем по ключу: возьми мы
+    # ровно `need`, заголовок без ключа занял бы слот годного и ремонт ушёл бы вхолостую.
+    _ingest(_parse_items(getattr(msg, "content", "") or ""), "headline", need + 2, fresh, seen)
+    fresh = [h for h in fresh if _covers_keywords(h, kws)]  # модель не спрашивают — проверяет код
+    if not fresh:
+        return False
+    for idx, new_h in zip(uncovered, fresh):  # noqa: B905 — короче из двух, это и нужно
+        headlines[idx] = new_h
+    return True
+
+
 async def generate_rsa(brief: CopyBrief) -> RsaDraft:
     """Сгенерировать валидные RSA-тексты. Догенерирует, пока не наберёт нужное число или
     не исчерпает MAX_ATTEMPTS. Возвращает только уложившиеся в лимит элементы."""
@@ -302,7 +345,17 @@ async def generate_rsa(brief: CopyBrief) -> RsaDraft:
         await _repair_too_long(brief, "headline", too_long_h, headlines, seen_h, brief.n_headlines)
         _fill_by_trim(too_long_h, "headline", headlines, seen_h, brief.n_headlines)
 
-    # §10 (advisory): покрытие ключей в заголовках — сигнал релевантности, не гейт (заголовки не
-    # выбрасываем). Показывается в сводке; менеджер решает, догенерировать/править вручную.
-    cov = _keyword_coverage(headlines, brief.keywords)
-    return RsaDraft(headlines, descriptions, dropped_h, dropped_d, attempts, keyword_coverage=cov)
+    # Ф3: покрытие ключей — ГЕЙТ, а не только сигнал. Ниже порога → догенерируем заголовки с
+    # ключами и заменим ими непокрытые (см. _repair_low_coverage). Итоговое покрытие считает КОД
+    # и показывает как есть: если ремонт не помог, врать «всё хорошо» нельзя.
+    repaired = await _repair_low_coverage(brief, headlines, seen_h)
+    cov = keyword_coverage(headlines, brief.keywords)
+    return RsaDraft(
+        headlines,
+        descriptions,
+        dropped_h,
+        dropped_d,
+        attempts,
+        keyword_coverage=cov,
+        coverage_repaired=repaired,
+    )

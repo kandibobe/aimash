@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from aiogram.enums import ChatAction
 from aiogram.types import FSInputFile
 
-from adcopy.validate import any_cta, count_flagged
+from adcopy.validate import MIN_KEYWORD_COVERAGE, any_cta, count_flagged
 from bot import i18n
 from core.logging import redact_text
 
@@ -222,11 +222,12 @@ def fmt_rsa_diagnostics(
     # §10 best practice: хотя бы ОДИН призыв к действию (CTA) в наборе. Advisory (эвристика по
     # лексикону), не блокирует — просто подсказка «добавьте CTA», если его нигде не нашли.
     no_cta = bool(all_texts) and not any_cta(all_texts)
-    # §10 (П1, advisory): покрытие ключей в заголовках. keyword_coverage=1.0 ⇒ ключей не было ИЛИ
-    # все покрыты — молчим; предупреждаем только при явно низком (<0.5). НЕ блокирует (менеджер
-    # решает догенерировать/править). Длину/КАПС считает КОД отдельно.
+    # §10: покрытие ключей в заголовках. keyword_coverage=1.0 ⇒ ключей не было ИЛИ все покрыты —
+    # молчим. Ф3: ниже порога генератор уже ПЫТАЛСЯ починить (догенерация заголовков с ключами);
+    # если после ремонта всё ещё низко — честно предупреждаем. Порог — MIN_KEYWORD_COVERAGE, один
+    # и тот же у генерации, аудита и этой диагностики (иначе бот советует не то, что делает).
     cov = getattr(draft, "keyword_coverage", 1.0)
-    low_cov = isinstance(cov, (int, float)) and cov < 0.5
+    low_cov = isinstance(cov, (int, float)) and cov < MIN_KEYWORD_COVERAGE
     if lang == "en":
         h = f"{got_h}/{n_headlines} headlines" + (f" ({drop_h} too long)" if drop_h else "")
         d = f"{got_d}/{n_descriptions} descriptions" + (f" ({drop_d} too long)" if drop_d else "")

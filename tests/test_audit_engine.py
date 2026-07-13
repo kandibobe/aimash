@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from adcopy.validate import MIN_KEYWORD_COVERAGE
 from reports.queries import Breakdown, Metrics
 
 from audit.engine import (
@@ -914,7 +915,13 @@ def test_weight_vector_snapshot_pins_full_model():
         "bid_gap_min": 0.10,
         "kw_rank_lost_top_min": 0.30,
         "sim_min_conv_gain": 0.5,
+        "rsa_kw_coverage_min": 0.5,  # Ф3: тот же порог, что гейт генерации (adcopy.validate)
+        "rsa_min_headlines": 8,
+        "rsa_min_descriptions": 3,
+        "rsa_stale_days": 90,
     }
+    # Ф3: порог релевантности НЕ отдельное число аудита — он ОДИН с генератором текстов.
+    assert DEFAULT_AUDIT_THRESHOLDS["rsa_kw_coverage_min"] == MIN_KEYWORD_COVERAGE
 
 
 # ── N1.0a: версия score-модели ────────────────────────────────────────────────────────

@@ -205,6 +205,47 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
         if lang == "en":
             return f"{n} ad group(s) have fewer than {fa.get('need', 2)} enabled RSAs (worst «{fa.get('worst_group', '')}»: {fa.get('worst_rsa', 0)}) — add responsive search ads for more reach/optimization."
         return f"{n} групп с числом активных RSA меньше {fa.get('need', 2)} (худшая «{fa.get('worst_group', '')}»: {fa.get('worst_rsa', 0)}) — добавь адаптивные поисковые объявления."
+    if f.check_id == "rsa_keyword_coverage_low":
+        ag = fa.get("ad_group", "")
+        where = f"«{camp}» / {ag}" if ag else f"«{camp}»"
+        missing = ", ".join(f"«{k}»" for k in (fa.get("missing") or [])[:3])
+        if lang == "en":
+            s = f"{fa.get('count', 0)} serving ad(s) barely use their own keywords in headlines (worst {where}: {fa.get('worst_pct', 0)}% of headlines, target ≥{fa.get('min_pct', 50)}%)"
+            s += f" — missing: {missing}." if missing else "."
+            return s + " Keywords in headlines lift relevance → Quality Score → cheaper clicks."
+        s = f"{fa.get('count', 0)} работающих объявлений почти не используют свои же ключи в заголовках (худшее {where}: {fa.get('worst_pct', 0)}% заголовков при норме ≥{fa.get('min_pct', 50)}%)"
+        s += f" — не хватает: {missing}." if missing else "."
+        return s + " Ключ в заголовке = релевантность → Quality Score → дешевле клик."
+    if f.check_id == "rsa_headlines_thin":
+        ag = fa.get("ad_group", "")
+        where = f"«{camp}» / {ag}" if ag else f"«{camp}»"
+        if lang == "en":
+            return f"{fa.get('count', 0)} ad(s) have fewer than {fa.get('need', 8)} headlines (worst {where}: {fa.get('worst_n', 0)}) — Google has little to combine; aim for 12–15."
+        return f"{fa.get('count', 0)} объявлений с числом заголовков меньше {fa.get('need', 8)} (худшее {where}: {fa.get('worst_n', 0)}) — Google нечего комбинировать; норма 12–15."
+    if f.check_id == "rsa_descriptions_thin":
+        ag = fa.get("ad_group", "")
+        where = f"«{camp}» / {ag}" if ag else f"«{camp}»"
+        if lang == "en":
+            return f"{fa.get('count', 0)} ad(s) have fewer than {fa.get('need', 3)} descriptions (worst {where}: {fa.get('worst_n', 0)}) — add up to 4."
+        return f"{fa.get('count', 0)} объявлений с числом описаний меньше {fa.get('need', 3)} (худшее {where}: {fa.get('worst_n', 0)}) — доведи до 4."
+    if f.check_id == "rsa_ad_strength_poor":
+        ag = fa.get("ad_group", "")
+        where = f"«{camp}» / {ag}" if ag else f"«{camp}»"
+        if lang == "en":
+            return f"{fa.get('count', 0)} serving ad(s) rated POOR by Google's own Ad Strength (worst {where}) — more distinct headlines, keywords in them, fewer pins."
+        return f"{fa.get('count', 0)} работающих объявлений Google сам оценил как POOR (Ad Strength; худшее {where}) — больше разных заголовков, ключи в них, меньше пинов."
+    if f.check_id == "rsa_overpinned":
+        ag = fa.get("ad_group", "")
+        where = f"«{camp}» / {ag}" if ag else f"«{camp}»"
+        if lang == "en":
+            return f"{fa.get('count', 0)} ad(s) pin all three headline positions (worst {where}: {fa.get('pinned', 0)} pinned) — rotation is dead, Google can't match the query. Unpin all but the mandatory one."
+        return f"{fa.get('count', 0)} объявлений с пинами на ВСЕХ трёх позициях заголовка (худшее {where}: {fa.get('pinned', 0)} закреплено) — ротация мертва, Google не подберёт комбинацию под запрос. Оставь пин только там, где он обязателен."
+    if f.check_id == "rsa_stale":
+        ag = fa.get("ad_group", "")
+        where = f"«{camp}» / {ag}" if ag else f"«{camp}»"
+        if lang == "en":
+            return f"{fa.get('count', 0)} ad group(s) haven't had a new ad in over {fa.get('days', 90)} days (worst {where}: {fa.get('worst_days', 0)} days) — copy fatigue; add a fresh RSA to test."
+        return f"{fa.get('count', 0)} групп без новых объявлений дольше {fa.get('days', 90)} дней (худшая {where}: {fa.get('worst_days', 0)} дн.) — тексты выгорают; добавь свежий RSA на тест."
     if f.check_id == "no_negative_list":
         if lang == "en":
             return "No negative keywords in the account at all — neither shared lists nor campaign-level ones; basic hygiene missing. Add themed lists (competitor/jobs/free/irrelevant) to cut wasted traffic."

@@ -12,6 +12,8 @@ FAMILY_WEIGHT суммируются в 100 (полный провал всех 
 
 from __future__ import annotations
 
+from adcopy.validate import MIN_KEYWORD_COVERAGE
+
 # Макс. штраф score НА СЕМЬЮ проверок (Σ = 100). Семьи без реализованных проверок дают 0 штрафа.
 # Heartbeat (2026-07): добавлена семья delivery=8 (дизапрувы + 0-показов — тихая потеря без расхода).
 # Экспертное расширение (2026-07-09): гео стало ДЕНЕЖНОЙ семьёй (geo_no_conv/schedule_waste), rsa/
@@ -77,6 +79,12 @@ DEFAULT_AUDIT_THRESHOLDS: dict[str, float] = {
     "bid_gap_min": 0.10,  # Ф1: разрыв ставка↔оценка Google < N → шум оценки, не совет
     "kw_rank_lost_top_min": 0.30,  # Ф1: ключ теряет ≥ N верхних показов по РАНГУ → ставка/качество
     "sim_min_conv_gain": 0.5,  # Ф1: прирост по симулятору Google < N конверсий → шум прогноза, не совет
+    # Ф3 (тексты объявлений). Порог покрытия ключей — ЕДИНЫЙ с генерацией (adcopy.validate), иначе
+    # аудит требует одного, а генератор выдаёт другое: MIN_KEYWORD_COVERAGE, не своё число.
+    "rsa_kw_coverage_min": MIN_KEYWORD_COVERAGE,  # G35: доля заголовков с ключом < N → релевантность
+    "rsa_min_headlines": 8,  # G27: заголовков < N (из 15 возможных) → Google нечего комбинировать
+    "rsa_min_descriptions": 3,  # G28: описаний < N (из 4)
+    "rsa_stale_days": 90,  # G-AD1: в группе нет объявления моложе N дней → тексты выгорели
 }
 
 

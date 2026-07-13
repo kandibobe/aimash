@@ -49,6 +49,42 @@ def assert_valid(text: str, kind: str) -> str:
     return text
 
 
+# ── Релевантность: вхождение ключей в заголовки (§10 / claude-ads G35) ────────────────
+# Порог покрытия — ЕДИНЫЙ для генерации (гейт: ниже → догенерируем заголовки с ключами) и для
+# аудита существующих объявлений (чек rsa_keyword_coverage_low). Два числа разъехались бы —
+# бот советовал бы одно, а генерировал другое.
+MIN_KEYWORD_COVERAGE = 0.5
+
+
+def tok_match(a: str, b: str) -> bool:
+    """Совпадение токенов терпимо к словоформам (RU-инфлексия): точное ИЛИ общий префикс ≥4 симв.
+    (ноутбук/ноутбука/ноутбуки → покрыто). Без этого точный матч часто ложно занижал покрытие."""
+    if a == b:
+        return True
+    return len(a) >= 4 and len(b) >= 4 and (a.startswith(b) or b.startswith(a))
+
+
+def keyword_coverage(headlines: list[str], keywords: list[str]) -> float:
+    """§10: доля заголовков, покрывающих ХОТЯ БЫ один токен ключевого слова (см. tok_match — терпит
+    словоформы). Отдельно от длины (её считает validate/rsa_len — golden rule #4). Пустые ключи/
+    заголовки → 1.0 (нечего мерить, не флагаем). Токен ≥3 символов — отсекаем шум/стоп-слова.
+
+    Живёт здесь, а не в adcopy.generate: релевантность, как и длину, считает КОД — и аудит
+    (`audit.engine`) обязан считать её ТЕМ ЖЕ кодом, не импортируя генератор с его LLM-клиентом."""
+    kw_tokens = {
+        t for kw in keywords for t in re.split(r"[^0-9a-zа-яё]+", kw.casefold()) if len(t) >= 3
+    }
+    if not kw_tokens or not headlines:
+        return 1.0
+
+    def _covered(h: str) -> bool:
+        htoks = {t for t in re.split(r"[^0-9a-zа-яё]+", h.casefold()) if t}
+        return any(tok_match(ht, kt) for ht in htoks for kt in kw_tokens)
+
+    hit = sum(1 for h in headlines if _covered(h))
+    return round(hit / len(headlines), 2)
+
+
 def find_duplicates(items: list[str]) -> list[tuple[int, str]]:
     """D5: повторяющиеся элементы набора (casefold + strip). Возвращает [(1-based индекс, текст)]
     ВТОРЫХ и последующих вхождений (первое — не дубль). Google Ads отклоняет RSA с одинаковыми

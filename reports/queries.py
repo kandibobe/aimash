@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 
 from ads.client import ensure_read_allowed
 
@@ -1031,6 +1032,117 @@ def fetch_bid_simulations(client, customer_id: str, limit: int = 200) -> list[Bi
                     points=points,
                 )
             )
+    return out
+
+
+@dataclass
+class RsaAdRow:
+    """Ф3: адаптивное поисковое объявление ЦЕЛИКОМ — тексты, пины, оценка Google, возраст — плюс
+    ключи своей группы. Всё, чем «текст объявления» проверяется против «ключей, которые платят».
+
+    Пустые значения означают «не прочитано», а не «ноль» (gr8): `ad_strength=""` — сервер не отдал
+    поле, `age_days=-1` — нет даты старта показа (0 — это «запущено сегодня», совсем другое)."""
+
+    campaign: str
+    ad_group: str
+    ad_group_id: str
+    ad_id: str
+    headlines: list[str]
+    descriptions: list[str]
+    pinned_headline_positions: frozenset[str]  # {"HEADLINE_1", …} — реально закреплённые позиции
+    pinned_headlines: int  # сколько заголовков закреплено (пин убивает ротацию комбинаций)
+    ad_strength: str  # POOR | AVERAGE | GOOD | EXCELLENT | PENDING | ""(не прочитано)
+    age_days: int  # дней с начала показа; -1 = дата не прочитана
+    metrics: Metrics
+    keywords: list[str] = field(default_factory=list)  # ключи ГРУППЫ (второй запрос)
+
+
+def _rsa_query(period, limit: int, with_dates: bool) -> str:
+    dates = "ad_group_ad.start_date_time, " if with_dates else ""
+    return (
+        "SELECT campaign.name, ad_group.id, ad_group.name, ad_group_ad.ad.id, "
+        f"ad_group_ad.ad_strength, {dates}"
+        "ad_group_ad.ad.responsive_search_ad.headlines, "
+        "ad_group_ad.ad.responsive_search_ad.descriptions, "
+        f"{_METRICS_SELECT} FROM ad_group_ad WHERE {_where(period, None)} "
+        "AND ad_group_ad.ad.type = 'RESPONSIVE_SEARCH_AD' AND ad_group_ad.status = 'ENABLED' "
+        "AND ad_group.status = 'ENABLED' AND campaign.status = 'ENABLED' "
+        f"ORDER BY metrics.cost_micros DESC LIMIT {int(limit)}"
+    )
+
+
+def _age_days(started: str) -> int:
+    """Дней с начала показа объявления. Пустая/нечитаемая дата → -1 («не знаем», не «сегодня»).
+    Google отдаёт `start_date_time` как «YYYY-MM-DD HH:MM:SS» в таймзоне аккаунта — берём дату."""
+    head = (started or "")[:10]
+    try:
+        return max(0, (date.today() - date.fromisoformat(head)).days)
+    except ValueError:
+        return -1
+
+
+def _rsa_keywords(client, customer_id: str, ad_group_ids: set[str]) -> dict[str, list[str]]:
+    """Ключи ENABLED-групп (позитивные) → {ad_group_id: [текст, …]}. Нужны, чтобы проверить, ВХОДЯТ
+    ли слова, за которые платим, в заголовки объявления (G35). Метрик тут нет by design: покрытие —
+    свойство текста, а не трафика; отсев «платящих» групп делает движок по метрикам объявления."""
+    out: dict[str, list[str]] = {}
+    if not ad_group_ids:
+        return out
+    q = (
+        "SELECT ad_group.id, ad_group_criterion.keyword.text FROM ad_group_criterion "
+        "WHERE ad_group_criterion.type = 'KEYWORD' AND ad_group_criterion.negative = FALSE "
+        "AND ad_group_criterion.status = 'ENABLED' AND ad_group.status = 'ENABLED' "
+        "AND campaign.status = 'ENABLED' LIMIT 5000"
+    )
+    for r in _search(client, customer_id, q):
+        agid = str(r.ad_group.id)
+        if agid in ad_group_ids:
+            out.setdefault(agid, []).append(r.ad_group_criterion.keyword.text)
+    return out
+
+
+def fetch_rsa_assets(client, customer_id: str, period, limit: int = 200) -> list[RsaAdRow]:
+    """Ф3: тексты работающих RSA + пины + `ad_strength` + возраст + ключи их групп. READ-ONLY.
+
+    Клон-флоу (`ads.read.read_campaign_config`) читает RSA по ИМЕНИ кампании и только первый
+    в группе — для аудита не годится: нужен весь аккаунт, метрики (чтобы не флажить объявления
+    без трафика) и пины. Топ по расходу — судим то, что реально жжёт деньги.
+
+    Деградация: `ad_group_ad.start_date_time` поддерживается не везде — если сервер его отвергнет,
+    повторяем запрос БЕЗ даты (тексты/пины/сила важнее). Тогда `age_days=-1` ⇒ чек «объявления не
+    обновлялись» молчит: нет данных ≠ «в норме» (gr8)."""
+    ensure_read_allowed(customer_id)
+    try:
+        rows = list(_search(client, customer_id, _rsa_query(period, limit, True)))
+    except Exception:  # noqa: BLE001 — дата опциональна; тексты/пины/ad_strength читаем всё равно
+        rows = list(_search(client, customer_id, _rsa_query(period, limit, False)))
+    out: list[RsaAdRow] = []
+    for r in rows:
+        rsa = r.ad_group_ad.ad.responsive_search_ad
+        pins = [
+            _enum_name(getattr(a, "pinned_field", ""))
+            for a in rsa.headlines
+            if _enum_name(getattr(a, "pinned_field", "")).startswith("HEADLINE_")
+        ]
+        strength = _enum_name(getattr(r.ad_group_ad, "ad_strength", ""))
+        out.append(
+            RsaAdRow(
+                campaign=r.campaign.name,
+                ad_group=r.ad_group.name,
+                ad_group_id=str(r.ad_group.id),
+                ad_id=str(r.ad_group_ad.ad.id),
+                headlines=[a.text for a in rsa.headlines if getattr(a, "text", "")],
+                descriptions=[a.text for a in rsa.descriptions if getattr(a, "text", "")],
+                pinned_headline_positions=frozenset(pins),
+                pinned_headlines=len(pins),
+                ad_strength="" if strength in ("UNSPECIFIED", "UNKNOWN") else strength,
+                age_days=_age_days(str(getattr(r.ad_group_ad, "start_date_time", "") or "")),
+                metrics=_metrics(r.metrics),
+            )
+        )
+    kw = _rsa_keywords(client, customer_id, {a.ad_group_id for a in out})
+    for a in out:
+        a.keywords = kw.get(a.ad_group_id, [])
     return out
 
 

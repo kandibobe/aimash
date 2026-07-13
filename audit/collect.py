@@ -44,6 +44,7 @@ async def gather_audit(
         fetch_negative_lists,
         fetch_optimization_score,
         fetch_recommendations,
+        fetch_rsa_assets,
         fetch_schedule,
         fetch_search_terms,
         read_campaign_bidding,
@@ -78,6 +79,7 @@ async def gather_audit(
         bid_landscape,
         bid_sims,
         budget_sims,
+        rsa_ads,
     ) = await asyncio.gather(
         build_account_report_async(client, cid, period, with_comparison=False, currency=currency),
         _safe(fetch_impression_share, client, cid, period, label="audit_is"),
@@ -96,6 +98,7 @@ async def gather_audit(
         _safe(fetch_bid_landscape, client, cid, period, label="audit_bid_landscape"),
         _safe(fetch_bid_simulations, client, cid, label="audit_bid_sims"),
         _safe(fetch_budget_simulations, client, cid, label="audit_budget_sims"),
+        _safe(fetch_rsa_assets, client, cid, period, label="audit_rsa_assets"),
     )
 
     # N1.3: какие best-effort сигналы НЕ получены (сбой → None). Пустой список ([]) — НЕ пробел:
@@ -118,6 +121,7 @@ async def gather_audit(
             ("geo_waste", geo_waste),
             ("schedule", schedule),
             ("bid_landscape", bid_landscape),
+            ("rsa_ads", rsa_ads),
         )
         if val is None
     ]
@@ -146,6 +150,7 @@ async def gather_audit(
         bid_landscape=bid_landscape,
         bid_simulations=bid_sims,
         budget_simulations=budget_sims,
+        rsa_ads=rsa_ads,
     )
 
 
