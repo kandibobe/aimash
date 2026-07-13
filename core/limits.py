@@ -22,9 +22,37 @@ MONEY_MAX_MICROS: int = MONEY_MAX_UNITS * 1_000_000
 # Потолок радиуса proximity-таргетинга (км) — лимит Google Ads. Один источник для схемы и мутации.
 MAX_RADIUS_KM: int = 2000
 
-# Минимальная биллинг-единица Google Ads для бид/бюджета: 10 000 micros = 0.01 валюты.
-# Значения, не кратные единице, API отклоняет — округляем ДО отправки, чтобы превью == созданному.
-BILLING_UNIT_MICROS: int = 10_000
+# Минимальная биллинг-единица Google Ads для бид/бюджета ЗАВИСИТ ОТ ВАЛЮТЫ аккаунта: значения, не
+# кратные ей, API отклоняет (NON_MULTIPLE_OF_MINIMUM_CURRENCY_UNIT) — уже ПОСЛЕ «да» пользователя,
+# то есть claim сожжён, а операция не выполнена.
+#
+# Источник — сам Google: CurrencyConstant.billable_unit_micros (v24). Снято живьём с API 2026-07-13
+# (147 валют, GAQL `SELECT currency_constant.code, currency_constant.billable_unit_micros
+# FROM currency_constant`) — таблица ниже держит только те, где единица ≠ дефолтной.
+#
+# ⚠️ Это НЕ то же, что ZERO_DECIMAL_CURRENCIES (там — про ОТОБРАЖЕНИЕ): TWD и HUF показываются без
+# копеек, но биллинг-единица у них 10 000, а не 1 000 000. Выводить одно из другого нельзя —
+# получилось бы округление в 100 раз грубее, чем нужно.
+BILLING_UNIT_MICROS: int = 10_000  # дефолт (122 валюты: USD, EUR, UAH, PLN, TWD, HUF, …)
+BILLING_UNIT_MICROS_BY_CURRENCY: dict[str, int] = {
+    # 1 единица валюты (нет минорных единиц в биллинге). Ошибка здесь = отказ API после ✅.
+    **dict.fromkeys(
+        ("CLP COP DJF GNF IDR ISK JPY KRW PKR PYG ROL RSD RWF TRL UGX VND VUV XAF XOF XPF").split(),
+        1_000_000,
+    ),
+    # 0.001 единицы — трёхдесятичные валюты Залива (округление до 10 000 их бы не сломало —
+    # оно кратно 1 000, — но огрубило бы ставку в 10 раз).
+    **dict.fromkeys("BHD IQD KWD LYD OMR".split(), 1_000),
+}
+
+
+def billing_unit_micros(currency: str | None) -> int:
+    """Минимальная биллинг-единица (micros) для валюты аккаунта. Неизвестная/пустая → дефолт
+    10 000. UGX (страна деплоя — Уганда) = 1 000 000: валютно-слепое округление отклонялось API."""
+    return BILLING_UNIT_MICROS_BY_CURRENCY.get(
+        (currency or "").strip().upper(), BILLING_UNIT_MICROS
+    )
+
 
 # P1-9: типичный ДНЕВНОЙ минимум бюджета для Demand Gen / Video (валюто-зависимый). Google требует
 # бюджет ≥ порога, иначе BUDGET…per_day_minimum. Точные пороги Google меняет — это КОНСЕРВАТИВНАЯ
@@ -53,7 +81,7 @@ def dg_video_min_daily_units(currency: str | None) -> float:
 
 # Валюты без минорных единиц (копеек) в биллинге Google Ads: показывать «1 500 JPY», а не «0.50 JPY».
 ZERO_DECIMAL_CURRENCIES: frozenset[str] = frozenset(
-    {"JPY", "KRW", "CLP", "VND", "ISK", "TWD", "HUF", "IDR"}
+    {"JPY", "KRW", "CLP", "VND", "ISK", "TWD", "HUF", "IDR", "UGX"}
 )
 
 # Дефолты денежных полей визарда §19 (дневной бюджет, max CPC) В ЕДИНИЦАХ валюты аккаунта.
@@ -68,6 +96,10 @@ WIZARD_DEFAULT_MONEY_UNITS: dict[str, tuple[float, float]] = {
     "PLN": (40.0, 2.0),
     "CZK": (250.0, 12.0),
     "UAH": (400.0, 20.0),
+    "UGX": (
+        40000.0,
+        2000.0,
+    ),  # страна деплоя (Уганда); ~1 USD ≈ 3 700 UGX, единица биллинга = 1 UGX
     "INR": (800.0, 25.0),
     "JPY": (1500.0, 75.0),
     "KRW": (14000.0, 700.0),
@@ -90,14 +122,22 @@ def wizard_default_money_units(currency: str | None) -> tuple[float, float]:
     )
 
 
-def round_micros(value: int) -> int:
-    """Округлить денежную величину (micros) до кратной BILLING_UNIT_MICROS.
+def round_micros(value: int, *, currency: str | None) -> int:
+    """Округлить денежную величину (micros) до кратной биллинг-единице ВАЛЮТЫ АККАУНТА.
 
     Единый источник для всех денежных путей (медианы «по аналогии» в ads.read, SDK-граница в
     ads.mutations, пользовательский ввод в agent.campaign_settings). Положительное значение не
-    обнуляем (минимум — одна единица); 0/отрицательное возвращаем как есть (валидируется выше)."""
+    обнуляем (минимум — одна единица); 0/отрицательное возвращаем как есть (валидируется выше).
+
+    `currency` — ОБЯЗАТЕЛЬНЫЙ kwarg (можно `None`), а не дефолт: валютно-слепое округление до
+    10 000 давало для JPY/KRW/UGX (единица = 1 000 000) значение, которое Google отвергает ПОСЛЕ
+    подтверждения. Требование явного аргумента заставляет новый call-site решить, знает ли он
+    валюту. `None` = «валюта неизвестна» → дефолтная единица; это допустимо только для ЧЕРНОВЫХ
+    значений: авторитетное округление всё равно делается у границы SDK (ads.mutations), где валюта
+    аккаунта известна точно."""
     v = int(value)
     if v <= 0:
         return v
-    r = round(v / BILLING_UNIT_MICROS) * BILLING_UNIT_MICROS
-    return r if r > 0 else BILLING_UNIT_MICROS
+    unit = billing_unit_micros(currency)
+    r = round(v / unit) * unit
+    return r if r > 0 else unit

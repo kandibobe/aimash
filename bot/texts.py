@@ -801,21 +801,29 @@ def keyword_action_label(operation: str, lang: str | None = None) -> str:
     }.get(operation, operation)
 
 
-def _fmt_micros(micros: int) -> str:
-    """micros (1e6 = единица валюты аккаунта) → «12 480.00» (разделитель тысяч, 2 знака)."""
+def _fmt_micros(micros: int, currency: str | None = None) -> str:
+    """micros (1e6 = единица валюты аккаунта) → «12 480.00» (разделитель тысяч, 2 знака).
+
+    Zero-decimal валюта (JPY/UGX/KRW…) — БЕЗ дробной части: «1 500 JPY», а не «1 500.00 JPY»
+    (копеек у неё не бывает, и «0.50» на карточке «было→станет» читалось бы как пол-йены)."""
     try:
-        return _thou(int(micros) / 1_000_000, 2)
+        dec = 0 if (currency or "").strip().upper() in ZERO_DECIMAL_CURRENCIES else 2
+        return _thou(int(micros) / 1_000_000, dec)
     except (TypeError, ValueError):
         return str(micros)
 
 
-def _micros_range(values: list) -> str:
+def _micros_range(values: list, currency: str | None = None) -> str:
     """Диапазон ставок групп: одинаковые → одно число, иначе «min–max»."""
     nums = [int(x) for x in values] if values else []
     if not nums:
         return "—"
     lo, hi = min(nums), max(nums)
-    return _fmt_micros(lo) if lo == hi else f"{_fmt_micros(lo)}–{_fmt_micros(hi)}"
+    return (
+        _fmt_micros(lo, currency)
+        if lo == hi
+        else f"{_fmt_micros(lo, currency)}–{_fmt_micros(hi, currency)}"
+    )
 
 
 def _before(params: dict) -> dict | None:
@@ -870,7 +878,9 @@ def _money_summary(label: str, params: dict, lang: str | None = None) -> str:
     if _lang(lang) == "en":
         # §5: реальное «было → станет», если снимок прочитан (числа — в валюте аккаунта).
         if b and b.get("kind") == "budget" and b.get("before_micros") is not None:
-            before_s, after_s = _fmt_micros(b["before_micros"]), _fmt_micros(b.get("after_micros"))
+            acc = b.get("currency")  # валюта АККАУНТА из снимка (не params: там валюта запроса)
+            before_s = _fmt_micros(b["before_micros"], acc)
+            after_s = _fmt_micros(b.get("after_micros"), acc)
             if mode == "increase_by_percent":
                 tail = f" (+{v}%)"
             elif mode == "increase_by_amount":
@@ -887,7 +897,9 @@ def _money_summary(label: str, params: dict, lang: str | None = None) -> str:
         return f"Campaign “{c}” — {label}: {v} {cur}".rstrip()
     # §5: реальное «было → станет», если снимок прочитан (числа — в валюте аккаунта).
     if b and b.get("kind") == "budget" and b.get("before_micros") is not None:
-        before_s, after_s = _fmt_micros(b["before_micros"]), _fmt_micros(b.get("after_micros"))
+        acc = b.get("currency")
+        before_s = _fmt_micros(b["before_micros"], acc)
+        after_s = _fmt_micros(b.get("after_micros"), acc)
         if mode == "increase_by_percent":
             tail = f" (+{v}%)"
         elif mode == "increase_by_amount":
@@ -916,15 +928,18 @@ def _bid_summary(params: dict, lang: str | None = None) -> str:
     if _lang(lang) == "en":
         if b and b.get("kind") == "bid" and b.get("before_micros"):
             n = b.get("n_groups") or len(b["before_micros"])
-            rng_b = _micros_range(b["before_micros"])
-            rng_a = _micros_range(b.get("after_micros") or [])
+            acc = b.get("currency")
+            rng_b = _micros_range(b["before_micros"], acc)
+            rng_a = _micros_range(b.get("after_micros") or [], acc)
             if mode == "increase_by_percent":
                 return f"Campaign “{c}” — CPC bid: +{v}% (current {rng_b} → {rng_a}; groups: {n})"
             return f"Campaign “{c}” — CPC bid: {rng_b} → {rng_a} (groups: {n})"
         return _money_summary("CPC bid", params, lang)
     if b and b.get("kind") == "bid" and b.get("before_micros"):
         n = b.get("n_groups") or len(b["before_micros"])
-        rng_b, rng_a = _micros_range(b["before_micros"]), _micros_range(b.get("after_micros") or [])
+        acc = b.get("currency")
+        rng_b = _micros_range(b["before_micros"], acc)
+        rng_a = _micros_range(b.get("after_micros") or [], acc)
         if mode == "increase_by_percent":
             return f"Кампания «{c}» — ставка CPC: +{v}% (текущие {rng_b} → {rng_a}; групп: {n})"
         return f"Кампания «{c}» — ставка CPC: {rng_b} → {rng_a} (групп: {n})"

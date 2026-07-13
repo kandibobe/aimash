@@ -13,7 +13,10 @@ import asyncio
 
 from ads import mutations, resolve
 from ads.client import DRAFT_ACCOUNT_ID, build_client_async, ensure_allowed
-from ads.read import read_campaign_targeting  # D6: «было» для гео-мутаций (read-only снимок)
+from ads.read import (  # D6: «было» для гео-мутаций; валюта → биллинг-единица округления денег
+    account_currency,
+    read_campaign_targeting,
+)
 from core.config import normalize_customer_id, settings  # D7: гео-дефолты из env, не хардкод «UA»
 
 # ── Единый источник истины: какие операции РЕАЛЬНО исполняются за confirm-гейтом. ──
@@ -83,6 +86,16 @@ _DIFFABLE_OPS = frozenset(
 )
 
 
+async def _currency(client, customer_id: str) -> str | None:
+    """Валюта аккаунта — от неё зависит биллинг-единица округления (UGX/JPY = 1 000 000, USD = 10 000).
+    Нужна ОБОИМ путям: превью («станет» на карточке) и исполнению — иначе применится не то, что
+    подтвердили. None при сбое чтения → дефолтная единица; авторитетно округляет граница SDK."""
+    try:
+        return (await asyncio.to_thread(account_currency, client, str(customer_id))) or None
+    except Exception:  # noqa: BLE001 — справочное чтение не должно ронять показ/исполнение
+        return None
+
+
 async def read_before(operation: str, params: dict, customer_id: str | None = None) -> dict | None:
     """READ-ONLY снимок ТЕКУЩЕГО значения для показа реального «было→станет» (§5) и как база
     оптимистичной сверки при исполнении (TOCTOU). None — операция без diff (создание/ключи),
@@ -103,11 +116,15 @@ async def read_before(operation: str, params: dict, customer_id: str | None = No
             ref = await asyncio.to_thread(resolve.find_campaign_by_name, client, cid, name)
             if ref is None:
                 return None
-            after = resolve.compute_new_micros(ref.budget_micros, params["mode"], params["value"])
+            cur = await _currency(client, cid)
+            after = resolve.compute_new_micros(
+                ref.budget_micros, params["mode"], params["value"], currency=cur
+            )
             return {
                 "kind": "budget",
                 "before_micros": int(ref.budget_micros),
                 "after_micros": int(after),
+                "currency": cur or "",  # для карточки: zero-decimal валюты показываем без копеек
             }
         if operation in ("pause_campaign", "resume_campaign", "launch_campaign"):
             ref = await asyncio.to_thread(resolve.find_campaign_by_name, client, cid, name)
@@ -151,9 +168,14 @@ async def read_before(operation: str, params: dict, customer_id: str | None = No
             ad_groups = await asyncio.to_thread(resolve.find_ad_groups, client, cid, name)
             if not ad_groups:
                 return None
+            cur = await _currency(client, cid)
             before_list = [int(ag.cpc_bid_micros) for ag in ad_groups]
             after_list = [
-                int(resolve.compute_new_micros(ag.cpc_bid_micros, params["mode"], params["value"]))
+                int(
+                    resolve.compute_new_micros(
+                        ag.cpc_bid_micros, params["mode"], params["value"], currency=cur
+                    )
+                )
                 for ag in ad_groups
             ]
             return {
@@ -161,6 +183,7 @@ async def read_before(operation: str, params: dict, customer_id: str | None = No
                 "before_micros": before_list,
                 "after_micros": after_list,
                 "n_groups": len(ad_groups),
+                "currency": cur or "",
             }
         if operation in ("set_geo_location", "set_geo_proximity"):
             # D6: текущее ГЕО (локации/радиусы) для «было→станет». Резолвим кампанию по имени → id,
@@ -246,7 +269,12 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
         if ref is None:
             raise ValueError(f"кампания '{params['campaign']}' не найдена")
         _assert_no_drift(params, ref.budget_micros)  # §5/TOCTOU: бюджет не изменился с показа
-        new_micros = resolve.compute_new_micros(ref.budget_micros, params["mode"], params["value"])
+        new_micros = resolve.compute_new_micros(
+            ref.budget_micros,
+            params["mode"],
+            params["value"],
+            currency=await _currency(client, customer_id),
+        )
         return await mutations.apply_update_budget(
             customer_id=customer_id,
             campaign_id=ref.id,
@@ -435,8 +463,14 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             )
         # §5/TOCTOU: ставки групп не изменились с момента показа (иначе % считался бы от иной базы)
         _assert_no_drift(params, [ag.cpc_bid_micros for ag in ad_groups])
+        cur = await _currency(client, customer_id)
         bids = [
-            (ag.id, resolve.compute_new_micros(ag.cpc_bid_micros, params["mode"], params["value"]))
+            (
+                ag.id,
+                resolve.compute_new_micros(
+                    ag.cpc_bid_micros, params["mode"], params["value"], currency=cur
+                ),
+            )
             for ag in ad_groups
         ]
         return await mutations.apply_update_bid(
@@ -831,7 +865,7 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
                 keywords=params.get("keywords"),
                 match_type=params.get("match_type", "phrase"),
                 keyword_match_types=params.get("keyword_match_types") or None,  # §19.4.1: mixed
-                cpc_bid_micros=params.get("cpc_bid_micros", 500_000),
+                cpc_bid_micros=params.get("cpc_bid_micros") or None,  # None → дефолт по валюте
                 geo_locations=params.get("geo_locations") or None,
                 geo_country_code=params.get("geo_country_code") or settings.geo_default_country,
                 geo_locale=params.get("geo_locale") or settings.geo_default_locale,

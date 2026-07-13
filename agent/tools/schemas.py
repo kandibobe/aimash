@@ -765,7 +765,9 @@ class CreateSearchCampaign(BaseModel):
     keyword_match_types: list[MatchType] = Field(
         default_factory=list, max_length=MAX_CAMPAIGN_KEYWORDS
     )
-    cpc_bid_micros: int = Field(default=500_000, gt=0, le=MONEY_MAX_MICROS)
+    # None = «ставку не задавали» → код подставит дефолт ПО ВАЛЮТЕ аккаунта у границы SDK
+    # (литерал 500 000 micros = 0.5 единицы: для UGX/JPY это ниже минимальной биллинг-единицы).
+    cpc_bid_micros: int | None = Field(default=None, gt=0, le=MONEY_MAX_MICROS)
     # §19 (composite, опциональные — без них поведение прежнее). Глубокую валидацию дублирует
     # ads.mutations._validate_search_inputs (defense-in-depth); здесь — форма + длины path.
     geo_locations: list[str] = Field(default_factory=list, max_length=50)

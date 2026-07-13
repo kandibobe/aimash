@@ -29,6 +29,7 @@ from adcopy.validate import validate as _rsa_validate
 from ads import extensions, geo
 from ads.client import ensure_allowed
 from ads.keyword_plan import LANGUAGE_IDS  # ISO → languageConstant id (полная таблица Google)
+from ads.read import account_currency  # валюта аккаунта → биллинг-единица округления (кэш, 1 GAQL)
 from ads.resolve import gaql_escape  # единый GAQL-эскейп для literal-WHERE (defense-in-depth)
 from ads.validation import assert_keyword_ok, dedup_keyword_pairs, normalize_keywords
 from core.ads_errors import (  # единый источник имён кодов ошибок Google Ads
@@ -45,6 +46,7 @@ from core.limits import (
     MONEY_MAX_MICROS,
     MONEY_MAX_UNITS,
     round_micros,
+    wizard_default_money_units,
 )  # единый источник порогов (defense-in-depth)
 from core.resilience import (  # таймаут+ретрай на самом SDK-вызове (не на гейтах)
     run_ads_call,
@@ -1204,6 +1206,35 @@ async def apply_create_rsa(
 
 
 # ── Реальные SDK-исполнители (синхронные; зовутся через core.resilience.run_ads_call) ───
+def _round_money(client, customer_id: str, micros: int) -> int:
+    """Округлить деньги до биллинг-единицы ВАЛЮТЫ АККАУНТА — авторитетно, у самой границы SDK.
+
+    Единица зависит от валюты (UGX/JPY = 1 000 000, USD/EUR = 10 000, KWD = 1 000): валютно-слепое
+    округление до 10 000 давало значение, которое Google отвергает (NON_MULTIPLE_OF_MINIMUM_CURRENCY_
+    UNIT) — уже ПОСЛЕ «да» пользователя, то есть claim сожжён, а операция не выполнена.
+
+    Валюта читается кэшированным `account_currency` (1 GAQL на аккаунт за процесс). Сбой чтения →
+    None → дефолтная единица: прежнее поведение, не хуже; последний арбитр всё равно API."""
+    return round_micros(int(micros), currency=_account_billing_currency(client, customer_id))
+
+
+def _account_billing_currency(client, customer_id: str) -> str | None:
+    """Валюта аккаунта или None, если прочитать не удалось (округлим по дефолтной единице)."""
+    try:
+        return account_currency(client, str(customer_id)) or None
+    except Exception:  # noqa: BLE001 — округление не должно ронять мутацию из-за справочного чтения
+        return None
+
+
+def _default_cpc_bid_micros(client, customer_id: str) -> int:
+    """Ставка CPC, когда её не задали (агент/клон/GDN): ВАЛЮТО-ЗАВИСИМЫЙ дефолт из core.limits,
+    а не литерал 500 000 micros. «0.5 единицы» — это 0.5 USD (ок), но 0.5 UGX или 0.5 JPY (абсурд,
+    ниже минимальной биллинг-единицы) — такая ставка либо отвергается API, либо ничего не выигрывает."""
+    cur = _account_billing_currency(client, customer_id)
+    _budget_units, cpc_units = wizard_default_money_units(cur)
+    return round_micros(int(round(cpc_units * 1_000_000)), currency=cur)
+
+
 def _apply_budget_via_sdk(
     client, customer_id: str, campaign_id: str, new_budget_micros: int
 ) -> dict:
@@ -1224,7 +1255,7 @@ def _apply_budget_via_sdk(
     # (компьют идёт через resolve.compute_new_micros, который уже округляет; здесь — страховка того
     # же класса, что для bid ниже и для всех create-путей: иначе API reject
     # NON_MULTIPLE_OF_MINIMUM_CURRENCY_UNIT).
-    applied_micros = _round_micros(int(new_budget_micros))
+    applied_micros = _round_money(client, customer_id, new_budget_micros)
     op.update.amount_micros = applied_micros
     client.copy_from(op.update_mask, protobuf_helpers.field_mask(None, op.update._pb))
     svc.mutate_campaign_budgets(customer_id=str(customer_id), operations=[op])
@@ -1479,12 +1510,15 @@ def _apply_bid_via_sdk(client, customer_id: str, campaign_id: str, bids: list) -
 
     svc = client.get_service("AdGroupService")
     ops = []
-    for ad_group_id, micros in bids:
+    applied = {  # ad_group_id → применённая (округлённая) ставка: считаем ОДИН раз, пишем в SDK и в audit
+        str(ag): _round_money(client, customer_id, m) for ag, m in bids
+    }
+    for ad_group_id, _micros in bids:
         op = client.get_type("AdGroupOperation")
         op.update.resource_name = svc.ad_group_path(str(customer_id), str(ad_group_id))
-        op.update.cpc_bid_micros = _round_micros(
-            micros
-        )  # кратно биллинг-единице (иначе API reject)
+        op.update.cpc_bid_micros = applied[
+            str(ad_group_id)
+        ]  # кратно биллинг-единице валюты аккаунта
         client.copy_from(op.update_mask, protobuf_helpers.field_mask(None, op.update._pb))
         ops.append(op)
     try:
@@ -1504,10 +1538,10 @@ def _apply_bid_via_sdk(client, customer_id: str, campaign_id: str, bids: list) -
     return {
         "customer_id": customer_id,
         "campaign_id": str(campaign_id),
-        # Пишем ПРИМЕНЁННОЕ (округлённое) значение — то же _round_micros, что ушло в SDK выше;
+        # Пишем ПРИМЕНЁННОЕ (округлённое) значение — ровно то, что ушло в SDK выше;
         # иначе audit-строка врёт (заявляет не-кратное, а применилось кратное).
         "ad_groups": [
-            {"ad_group_id": str(ag), "new_cpc_bid_micros": _round_micros(int(m))} for ag, m in bids
+            {"ad_group_id": str(ag), "new_cpc_bid_micros": applied[str(ag)]} for ag, _m in bids
         ],
         "applied": True,
     }
@@ -1895,7 +1929,11 @@ def _set_bidding_strategy_via_sdk(
         mask_path = "manual_cpc.enhanced_cpc_enabled"
     elif strategy == "maximize_conversions":
         if target_cpa_micros:
-            c.maximize_conversions.target_cpa_micros = int(target_cpa_micros)
+            # target_cpa обязан быть >= минимальной биллинг-единицы валюты (proto v24): для UGX
+            # это 1 000 000 micros, и «target_cpa 0.5» ушёл бы ниже порога → отказ ПОСЛЕ «да».
+            c.maximize_conversions.target_cpa_micros = _round_money(
+                client, customer_id, target_cpa_micros
+            )
         else:  # пустая стратегия (без таргета) — присваиваем чистое сообщение
             client.copy_from(c.maximize_conversions, client.get_type("MaximizeConversions"))
         mask_path = "maximize_conversions.target_cpa_micros"
@@ -2057,7 +2095,7 @@ async def apply_create_search_campaign(
     keywords: list[str] | None = None,
     match_type: str = "phrase",
     keyword_match_types: list[str] | None = None,
-    cpc_bid_micros: int = 500_000,
+    cpc_bid_micros: int | None = None,  # None → валюто-зависимый дефолт у границы SDK
     # §19 (необязательные, обратно совместимы — без них поведение прежнее):
     geo_locations: list[str] | None = None,
     geo_country_code: str = "",
@@ -2135,7 +2173,7 @@ async def apply_create_search_campaign(
         keywords=clean_kw,
         match_type=match_type,
         keyword_match_types=clean_mts,
-        cpc_bid_micros=int(cpc_bid_micros),
+        cpc_bid_micros=int(cpc_bid_micros) if cpc_bid_micros else None,
         geo_locations=geo_locations,
         geo_country_code=geo_country_code,
         geo_locale=geo_locale,
@@ -2306,12 +2344,8 @@ def _geo_result(geo_locations: list[str] | None, applied: int) -> dict:
     return out
 
 
-# Минимальная биллинг-единица Google Ads для бид/бюджета — 10 000 micros (0.01 валюты). Значения,
-# не кратные единице (например CPC = cost/clicks из медиан «по аналогии», §19.3), API отклоняет.
-# Единый источник округления — core.limits.round_micros; алиасы сохраняют прежние имена
-# (_MICROS_UNIT/_round_micros) для call-sites и тестов.
+# Дефолтная биллинг-единица (для тестов/справки); реальная — из валюты аккаунта (см. _round_money).
 _MICROS_UNIT = BILLING_UNIT_MICROS
-_round_micros = round_micros
 
 
 def _create_search_campaign_via_sdk(
@@ -2326,7 +2360,7 @@ def _create_search_campaign_via_sdk(
     keywords: list[str],
     match_type: str,
     keyword_match_types: list[str] | None = None,
-    cpc_bid_micros: int,
+    cpc_bid_micros: int | None,
     geo_locations: list[str] | None = None,
     geo_country_code: str = "",
     geo_locale: str = "ru",
@@ -2351,7 +2385,7 @@ def _create_search_campaign_via_sdk(
     budget_svc = client.get_service("CampaignBudgetService")
     bop = client.get_type("CampaignBudgetOperation")
     bop.create.name = f"{campaign_name}_budget_{stamp}"
-    bop.create.amount_micros = _round_micros(budget_micros)  # кратно биллинг-единице (§19.3)
+    bop.create.amount_micros = _round_money(client, cid, budget_micros)  # единица = валюта аккаунта
     bop.create.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
     bop.create.explicitly_shared = False
     budget_rn = (
@@ -2371,6 +2405,11 @@ def _create_search_campaign_via_sdk(
     c.campaign_budget = budget_rn
     # §19.3: конверс-стратегия без отслеживания конверсий → падение create; понижаем до Maximize Clicks.
     bidding, bidding_note = _downgrade_bidding_if_no_conversions(client, cid, bidding)
+    if bidding and bidding.get("target_cpa_micros"):  # >= биллинг-единицы валюты (UGX: 1 000 000)
+        bidding = {
+            **bidding,
+            "target_cpa_micros": _round_money(client, cid, bidding["target_cpa_micros"]),
+        }
     _apply_bidding_on_create(client, c, bidding)  # стратегия из §19.3 (по умолчанию manual CPC)
     c.network_settings.target_google_search = True
     # §19.3: поисковые партнёры — ТОЛЬКО по явному указанию менеджера (networks='search_partners').
@@ -2446,7 +2485,11 @@ def _create_search_campaign_via_sdk(
         ag.campaign = campaign_rn
         ag.status = client.enums.AdGroupStatusEnum.PAUSED
         ag.type_ = client.enums.AdGroupTypeEnum.SEARCH_STANDARD
-        ag.cpc_bid_micros = _round_micros(cpc_bid_micros)  # кратно биллинг-единице (§19.3 CPC)
+        ag.cpc_bid_micros = (  # §19.3 CPC: единица = валюта аккаунта; не задан → дефолт по валюте
+            _round_money(client, cid, cpc_bid_micros)
+            if cpc_bid_micros
+            else _default_cpc_bid_micros(client, cid)
+        )
         ad_group_rn = (
             ag_svc.mutate_ad_groups(customer_id=cid, operations=[agop]).results[0].resource_name
         )
@@ -2755,7 +2798,7 @@ async def apply_create_gdn_campaign(
     business_name: str,
     final_url: str,
     budget_daily_micros: int,
-    cpc_bid_micros: int = 500_000,
+    cpc_bid_micros: int | None = None,  # None → валюто-зависимый дефолт у границы SDK
     geo_locations: list[str] | None = None,
     geo_country_code: str = "",
     geo_locale: str = "ru",
@@ -2798,7 +2841,7 @@ async def apply_create_gdn_campaign(
         business_name=business_name,
         final_url=final_url,
         budget_micros=int(budget_daily_micros),
-        cpc_bid_micros=int(cpc_bid_micros),
+        cpc_bid_micros=int(cpc_bid_micros) if cpc_bid_micros else None,
         geo_locations=list(geo_locations or []),
         geo_country_code=geo_country_code,
         geo_locale=geo_locale,
@@ -2820,7 +2863,7 @@ def _create_gdn_campaign_via_sdk(
     business_name: str,
     final_url: str,
     budget_micros: int,
-    cpc_bid_micros: int,
+    cpc_bid_micros: int | None,
     geo_locations: list[str] | None = None,
     geo_country_code: str = "",
     geo_locale: str = "ru",
@@ -2845,7 +2888,7 @@ def _create_gdn_campaign_via_sdk(
     budget_svc = client.get_service("CampaignBudgetService")
     bop = client.get_type("CampaignBudgetOperation")
     bop.create.name = f"{campaign_name}_budget_{stamp}"
-    bop.create.amount_micros = _round_micros(budget_micros)  # кратно биллинг-единице (§19.3)
+    bop.create.amount_micros = _round_money(client, cid, budget_micros)  # единица = валюта аккаунта
     bop.create.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
     bop.create.explicitly_shared = False
     budget_rn = (
@@ -2914,9 +2957,11 @@ def _create_gdn_campaign_via_sdk(
     ag.campaign = campaign_rn
     ag.status = client.enums.AdGroupStatusEnum.PAUSED
     ag.type_ = client.enums.AdGroupTypeEnum.DISPLAY_STANDARD
-    ag.cpc_bid_micros = _round_micros(
-        cpc_bid_micros
-    )  # кратно биллинг-единице (§19.3 CPC «по аналогии»)
+    ag.cpc_bid_micros = (  # §19.3 CPC «по аналогии»; GDN ставку не передаёт → дефолт по валюте
+        _round_money(client, cid, cpc_bid_micros)
+        if cpc_bid_micros
+        else _default_cpc_bid_micros(client, cid)
+    )
     ad_group_rn = (
         ag_svc.mutate_ad_groups(customer_id=cid, operations=[agop]).results[0].resource_name
     )
@@ -3134,7 +3179,7 @@ def _create_demand_gen_campaign_via_sdk(
     budget_svc = client.get_service("CampaignBudgetService")
     bop = client.get_type("CampaignBudgetOperation")
     bop.create.name = f"{campaign_name}_budget_{stamp}"
-    bop.create.amount_micros = _round_micros(budget_micros)  # кратно биллинг-единице (§19.3)
+    bop.create.amount_micros = _round_money(client, cid, budget_micros)  # единица = валюта аккаунта
     bop.create.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
     bop.create.explicitly_shared = False
     budget_rn = (
@@ -3385,7 +3430,7 @@ def _create_video_campaign_via_sdk(
     budget_svc = client.get_service("CampaignBudgetService")
     bop = client.get_type("CampaignBudgetOperation")
     bop.create.name = f"{campaign_name}_budget_{stamp}"
-    bop.create.amount_micros = _round_micros(budget_micros)  # кратно биллинг-единице (§19.3)
+    bop.create.amount_micros = _round_money(client, cid, budget_micros)  # единица = валюта аккаунта
     bop.create.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
     bop.create.explicitly_shared = False
     budget_rn = (

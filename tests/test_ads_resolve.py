@@ -103,24 +103,28 @@ def _ad_group_row(
 
 # ── compute_new_micros: денежный путь (валюта не конвертируется) ─────────────────
 def test_compute_increase_by_percent():
-    assert compute_new_micros(1_000_000, "increase_by_percent", 20) == 1_200_000
+    assert compute_new_micros(1_000_000, "increase_by_percent", 20, currency=None) == 1_200_000
     assert (
-        compute_new_micros(1_000_000, "increase_by_percent", 0) == 1_000_000
+        compute_new_micros(1_000_000, "increase_by_percent", 0, currency=None) == 1_000_000
     )  # +0% = без изменений
     # A2: результат округляется до кратного BILLING_UNIT_MICROS. 1_125_000 не кратно 10 000
     # (1_125_000/10 000 = 112.5) → округление к чётному → 1_120_000 (иначе API reject).
-    assert compute_new_micros(1_000_000, "increase_by_percent", 12.5) == 1_120_000
+    assert compute_new_micros(1_000_000, "increase_by_percent", 12.5, currency=None) == 1_120_000
 
 
 def test_compute_increase_by_amount():
     # value — в валюте аккаунта; +5.5 единицы = +5_500_000 micros.
-    assert compute_new_micros(1_000_000, "increase_by_amount", 5.5) == 6_500_000
-    assert compute_new_micros(0, "increase_by_amount", 10) == 10_000_000
+    assert compute_new_micros(1_000_000, "increase_by_amount", 5.5, currency=None) == 6_500_000
+    assert compute_new_micros(0, "increase_by_amount", 10, currency=None) == 10_000_000
 
 
 def test_compute_set_to():
-    assert compute_new_micros(999, "set_to", 10) == 10_000_000  # текущий бюджет игнорируется
-    assert compute_new_micros(0, "set_to", 9.99) == 9_990_000  # 9_990_000 уже кратно 10 000
+    assert (
+        compute_new_micros(999, "set_to", 10, currency=None) == 10_000_000
+    )  # текущий бюджет игнорируется
+    assert (
+        compute_new_micros(0, "set_to", 9.99, currency=None) == 9_990_000
+    )  # 9_990_000 уже кратно 10 000
 
 
 def test_compute_result_is_always_billing_unit_multiple():
@@ -142,7 +146,7 @@ def test_compute_result_is_always_billing_unit_multiple():
     bases = [5_550_000, 1_000_000, 333_000, 10_010_000, 7_777_777]
     for base in bases:
         for mode, value in cases:
-            out = compute_new_micros(base, mode, value)
+            out = compute_new_micros(base, mode, value, currency=None)
             assert out % BILLING_UNIT_MICROS == 0, f"{base}/{mode}/{value} → {out} не кратно"
             assert (
                 out > 0
@@ -154,12 +158,12 @@ def test_compute_tiny_positive_floors_to_one_billing_unit():
     # (0 бюджет API отклонит иначе). 3 micros +50% = 4.5 → 4 (sub-unit) → 10 000.
     from core.limits import BILLING_UNIT_MICROS
 
-    assert compute_new_micros(3, "increase_by_percent", 50) == BILLING_UNIT_MICROS
+    assert compute_new_micros(3, "increase_by_percent", 50, currency=None) == BILLING_UNIT_MICROS
 
 
 def test_compute_unknown_mode_raises():
     with pytest.raises(ValueError):
-        compute_new_micros(1_000_000, "multiply_by", 2)
+        compute_new_micros(1_000_000, "multiply_by", 2, currency=None)
 
 
 # ── _gaql_escape: защита от инъекции в строковый литерал GAQL ────────────────────

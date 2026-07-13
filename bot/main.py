@@ -3734,9 +3734,9 @@ def _cc_reseed_currency_defaults(settings_d: dict, currency: str) -> dict | None
     bd = set(s.get("by_default") or [])
     def_budget, def_cpc = wizard_default_money_units(cur)
     if "budget_daily_micros" in bd:
-        s["budget_daily_micros"] = units_to_micros(def_budget)
+        s["budget_daily_micros"] = units_to_micros(def_budget, cur)
     if "cpc_bid_micros" in bd:
-        s["cpc_bid_micros"] = units_to_micros(def_cpc)
+        s["cpc_bid_micros"] = units_to_micros(def_cpc, cur)
     return s
 
 
@@ -3756,14 +3756,17 @@ def _cc_apply_settings_patch(cur: dict, patch) -> dict:
     s = dict(cur)
     by = set(s.get("by_analogy") or [])
     bd = set(s.get("by_default") or [])
+    if patch.currency:  # валюту применяем ПЕРВОЙ: от неё зависит биллинг-единица округления денег
+        s["currency"] = patch.currency
+    money_cur = s.get("currency")
     if patch.budget_daily_units is not None:
-        s["budget_daily_micros"] = units_to_micros(patch.budget_daily_units)
+        s["budget_daily_micros"] = units_to_micros(patch.budget_daily_units, money_cur)
         by.discard("budget_daily_micros")
         bd.discard("budget_daily_micros")
     # «максимальная цена за клик 75» — раньше ветки НЕ было: CPC был нередактируем, правка
     # молча терялась (живой тест 2026-07-06). <=0 игнорируем (не даём занулить бид).
     if patch.max_cpc_units is not None and patch.max_cpc_units > 0:
-        s["cpc_bid_micros"] = units_to_micros(patch.max_cpc_units)
+        s["cpc_bid_micros"] = units_to_micros(patch.max_cpc_units, money_cur)
         by.discard("cpc_bid_micros")
         bd.discard("cpc_bid_micros")
     if patch.geo_locations:
@@ -3774,8 +3777,6 @@ def _cc_apply_settings_patch(cur: dict, patch) -> dict:
         s["languages"] = list(patch.languages)
     if patch.campaign_name:
         s["campaign_name"] = patch.campaign_name
-    if patch.currency:
-        s["currency"] = patch.currency
     # P0-4: даты/сети/расписание правкой РАНЬШЕ терялись (веток не было — только язык/бюджет/гео).
     start = _valid_iso_date(patch.start_date)
     if start:
@@ -3795,7 +3796,10 @@ def _cc_apply_settings_patch(cur: dict, patch) -> dict:
             s["ad_schedule"] = schedule_human(blocks, patch.ad_schedule)
             bd.discard("ad_schedule")
     if patch.bidding_strategy or patch.goal:
-        strat, tcpa, payment = derive_bidding(patch)
+        # валюта аккаунта (из настроек) — для округления target_cpa по её биллинг-единице
+        strat, tcpa, payment = derive_bidding(
+            patch.model_copy(update={"currency": money_cur}) if money_cur else patch
+        )
         s["bidding_strategy"] = strat
         if tcpa is not None:
             s["target_cpa_micros"] = tcpa
@@ -3804,7 +3808,7 @@ def _cc_apply_settings_patch(cur: dict, patch) -> dict:
         by.discard("bidding_strategy")
         bd.discard("bidding_strategy")
     elif patch.target_cpa_units is not None:
-        s["target_cpa_micros"] = units_to_micros(patch.target_cpa_units)
+        s["target_cpa_micros"] = units_to_micros(patch.target_cpa_units, money_cur)
     if patch.payment_model:
         s["payment_model"] = patch.payment_model
     s["by_analogy"] = sorted(by)
@@ -4690,7 +4694,7 @@ def _cc_build_create_params(draft) -> dict:
         "keywords": kw_list,
         "match_type": kw.get("match_type") or "phrase",
         "keyword_match_types": kw_mts,
-        "cpc_bid_micros": int(s.get("cpc_bid_micros") or 500_000),
+        "cpc_bid_micros": int(s["cpc_bid_micros"]) if s.get("cpc_bid_micros") else None,
         "geo_locations": list(s.get("geo_locations") or []),
         "geo_country_code": geo_cc,
         "geo_locale": s.get("geo_locale") or "ru",
@@ -5048,7 +5052,7 @@ async def _search_params_from_cfg(
         "keywords": [k.text for k in kw_kept],
         "match_type": kw_kept[0].match_type if kw_kept else "phrase",
         "keyword_match_types": [k.match_type for k in kw_kept],
-        "cpc_bid_micros": ag.cpc_bid_micros or 500_000,
+        "cpc_bid_micros": int(ag.cpc_bid_micros) or None,  # 0 (автостратегия) → дефолт по валюте
     }
     try:  # defense-in-depth: схема ещё раз проверит длины/составы/URL/бюджет + нормализует ключи
         validated: dict = SCHEMAS["create_search_campaign"](**params).model_dump()
@@ -5466,22 +5470,14 @@ async def _audit_run(
     findings = result.findings[:_AUDIT_MAX_FINDINGS]
     if findings:
         from advisor import store as advisor_store
-        from advisor.rules import Recommendation
-        from audit.render import finding_text
+        from advisor.from_findings import to_recommendations
 
-        recs = [
-            Recommendation(
-                kind=f"audit_{f.check_id}",
-                topic=f.family,
-                severity=f.severity,
-                target_campaign=f.target_campaign,
-                suggested_operation=f.suggested_operation,
-                facts=f.facts,
-                evidence=f.evidence,
-                body=finding_text(f, lang, result.currency),
-            )
-            for f in findings
-        ]
+        # ⚠️ kind = check_id БЕЗ префикса (маппер): до 2026-07-13 здесь стоял kind=f"audit_{check_id}",
+        # и 👍/👎 под находками /audit копились в бакете, который experience.load_experience никогда не
+        # читал (она ищет kind='high_cpa', а лежало 'audit_high_cpa') — обучение молча пропадало.
+        # Порядок — движка (деньги-под-риском): rank_recommendations здесь НЕ зовём осознанно
+        # (suppress спрятал бы находку, которая всё равно штрафует score) — см. advisor.rules.
+        recs = to_recommendations(findings, lang, result.currency)
         # Персист — best-effort: сбой ЛОКАЛЬНОЙ БД не должен съедать находки (диагноз важнее кнопок).
         # Без rec_uid нет 👍/👎/«применить» — показываем находки голым текстом, а не роняем /audit.
         try:
@@ -5489,6 +5485,8 @@ async def _audit_run(
         except Exception as e:  # noqa: BLE001
             log.warning("персист находок /audit не удался: %s", type(e).__name__)
         for f, r in zip(findings, recs):
+            # Кнопку рисует allow-list бота, а НЕ метка в rec: advice_operation (update_bid/…) сюда
+            # не пролезет — деньги только прямой командой (golden rule #3).
             apply_op = f.suggested_operation if f.suggested_operation in _ADVISE_APPLY_OPS else None
             await target.answer(
                 r.body,
@@ -5554,6 +5552,12 @@ async def _advise_apply(cq: CallbackQuery, rec_uid: str) -> None:
     except Exception:  # noqa: BLE001 — кривой ключ/имя → не минтим, просим /advise заново
         await cq.answer(i18n.t("advise_apply_stale"), show_alert=True)
         return
+    # Точная привязка исхода к ИМЕННО ЭТОМУ совету (advisor.outcome.link_applied_mutation): матч по
+    # (operation, campaign) неоднозначен — одну и ту же op предлагают РАЗНЫЕ чеки (pause_campaign:
+    # spend_no_conv и kill_rule; add_negative_keywords: wasteful_keyword и wasteful_search_term), и
+    # замер эффекта попадал бы в чужой бакет опыта. Служебный ключ (как '_before'): params читаются
+    # по именам полей схемы (ads/service.py), лишний '_'-ключ до SDK не доходит.
+    validated["_rec_uid"] = rec_uid
     await cq.answer()
     p = Proposal(operation=op, summary="", params=validated, chat_id=chat_id)
     await _present_proposal(

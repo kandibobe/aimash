@@ -27,6 +27,18 @@ def test_parse_price_variants():
     assert _parse_price(None) == (None, None)
 
 
+def test_parse_price_decimal_comma_is_not_thousands():
+    """Волна 2.1: запятая в «1 250,50 грн» — ДЕСЯТИЧНЫЙ разделитель (ru/uk-локаль сайта клиента).
+    Раньше её выбрасывали как разделитель тысяч → 125 050: цена в price-ассете в 100 раз больше."""
+    assert _parse_price("1 250,50 грн") == (1250.5, "UAH")
+    assert _parse_price("от 999,99 $") == (999.99, "USD")
+    assert _parse_price("1,5 грн") == (1.5, "UAH")
+    # Разделитель тысяч (3 цифры после него) по-прежнему выбрасывается — обе локали.
+    assert _parse_price("$4,000") == (4000.0, "USD")
+    assert _parse_price("1,250.50 USD") == (1250.5, "USD")
+    assert _parse_price("1.234.567 UAH") == (1234567.0, "UAH")
+
+
 def test_call_asset_from_real_phone():
     profile = {"contacts": [{"kind": "phone", "value": "+254 712 345 678"}]}
     spec = build_profile_asset("call", profile, country_code="KE")

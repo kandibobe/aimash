@@ -52,9 +52,32 @@ def _detect_currency(s: str) -> str | None:
     return None
 
 
+def _to_number(raw_num: str) -> float | None:
+    """Число из локале-разной записи цены. «,» и «.» — И десятичный разделитель, И разделитель
+    тысяч (в разных локалях), поэтому решает ФОРМА, а не литерал: последний разделитель считается
+    десятичным, только если за ним 1–2 цифры и он в строке один. Иначе — тысячи (выбрасываем).
+
+    Раньше запятая безусловно считалась разделителем тысяч: «1 250,50 грн» → 125 050 (цена в 100 раз
+    больше), и такой офер уходил в price-ассет — то есть клиенту показывали неверную цену."""
+    t = re.sub(r"\s", "", raw_num).strip(".,")
+    if not t:
+        return None
+    dec = max(t.rfind("."), t.rfind(","))
+    if dec >= 0:
+        sep, tail = t[dec], t[dec + 1 :]
+        if len(tail) in (1, 2) and t.count(sep) == 1:  # «1250,50» / «20.5» → десятичная часть
+            t = f"{re.sub(r'[.,]', '', t[:dec])}.{tail}"
+        else:  # «4,000» / «1.234.567» → разделители тысяч
+            t = re.sub(r"[.,]", "", t)
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
 def _parse_price(raw: Any) -> tuple[float | None, str | None]:
-    """Свободная строка цены → (число, валюта). «от $4000»→(4000,'USD'); «10 000 грн»→(10000,'UAH').
-    Не распарсили число → (None, cur). Пробелы/запятые — разделители тысяч (убираем)."""
+    """Свободная строка цены → (число, валюта). «от $4000»→(4000,'USD'); «10 000 грн»→(10000,'UAH');
+    «1 250,50 грн»→(1250.5,'UAH'). Не распарсили число → (None, cur)."""
     if not raw:
         return None, None
     s = str(raw)
@@ -62,10 +85,8 @@ def _parse_price(raw: Any) -> tuple[float | None, str | None]:
     m = _PRICE_NUM_RE.search(s)
     if not m:
         return None, cur
-    num = re.sub(r"[\s,]", "", m.group(0)).rstrip(".")
-    try:
-        val = float(num)
-    except ValueError:
+    val = _to_number(m.group(0))
+    if val is None:
         return None, cur
     return (val if val > 0 else None), cur
 

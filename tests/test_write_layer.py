@@ -1444,9 +1444,9 @@ def test_gaql_escape():
 def test_compute_new_micros_modes():
     from ads.resolve import compute_new_micros
 
-    assert compute_new_micros(1_000_000, "set_to", 3) == 3_000_000
-    assert compute_new_micros(1_000_000, "increase_by_percent", 20) == 1_200_000
-    assert compute_new_micros(1_000_000, "increase_by_amount", 2) == 3_000_000
+    assert compute_new_micros(1_000_000, "set_to", 3, currency="USD") == 3_000_000
+    assert compute_new_micros(1_000_000, "increase_by_percent", 20, currency="USD") == 1_200_000
+    assert compute_new_micros(1_000_000, "increase_by_amount", 2, currency="USD") == 3_000_000
 
 
 # ── Capability-guard на уровне agent.loop: отказ ДО показа кнопок ────────────────

@@ -282,15 +282,20 @@ def currency_mismatch(operation: str, params: dict, account_currency: str) -> st
     return None
 
 
-def compute_new_micros(current_micros: int, mode: str, value: float) -> int:
+def compute_new_micros(
+    current_micros: int, mode: str, value: float, *, currency: str | None
+) -> int:
     """Пересчёт бюджета/ставки в micros по режиму команды. Валюта не конвертируется (значение в
     валюте аккаунта).
 
-    Результат ОКРУГЛЯЕТСЯ до кратного BILLING_UNIT_MICROS (core.limits.round_micros): суммы, не
-    кратные минимальной биллинг-единице, Google Ads отклоняет (NON_MULTIPLE_OF_MINIMUM_CURRENCY_UNIT),
-    а increase_by_percent почти всегда даёт не-кратное значение. Округление ЗДЕСЬ — единый источник:
-    превью «станет» (ads.service._read_before) считается тем же вызовом, что и применяемое значение
-    (execute_confirmed), поэтому карточка «было→станет» == реально применённому (как в create-путях)."""
+    Результат ОКРУГЛЯЕТСЯ до кратного биллинг-единице ВАЛЮТЫ АККАУНТА (core.limits.round_micros):
+    суммы, не кратные ей, Google Ads отклоняет (NON_MULTIPLE_OF_MINIMUM_CURRENCY_UNIT), а
+    increase_by_percent почти всегда даёт не-кратное значение. Округление ЗДЕСЬ — единый источник:
+    превью «станет» (ads.service.read_before) считается тем же вызовом, что и применяемое значение
+    (execute_confirmed), поэтому карточка «было→станет» == реально применённому (как в create-путях).
+
+    `currency` обязателен (может быть None = «не прочитали»): единица зависит от валюты (UGX/JPY —
+    1 000 000, USD/EUR — 10 000), и валютно-слепое округление отвергалось API уже ПОСЛЕ «да»."""
     if mode == "increase_by_percent":
         raw = int(round(current_micros * (1 + value / 100)))
     elif mode == "increase_by_amount":
@@ -299,4 +304,4 @@ def compute_new_micros(current_micros: int, mode: str, value: float) -> int:
         raw = int(round(value * 1_000_000))
     else:
         raise ValueError(f"неизвестный mode бюджета: {mode}")
-    return round_micros(raw)
+    return round_micros(raw, currency=currency)

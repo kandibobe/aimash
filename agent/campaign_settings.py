@@ -367,7 +367,7 @@ def _derive_bidding(s: CampaignSettings) -> tuple[str, int | None, str | None]:
         payment = payment or "cpc"
     tcpa = None
     if strat == "maximize_conversions" and s.target_cpa_units:
-        tcpa = _units_to_micros(s.target_cpa_units)
+        tcpa = _units_to_micros(s.target_cpa_units, s.currency)
     return strat, tcpa, payment
 
 
@@ -376,17 +376,19 @@ def derive_bidding(s: CampaignSettings) -> tuple[str, int | None, str | None]:
     return _derive_bidding(s)
 
 
-def units_to_micros(units: float) -> int:
+def units_to_micros(units: float, currency: str | None = None) -> int:
     """Единицы валюты → micros, с клампом «границы абсурда» (core.limits). Публично — для бота."""
-    return _units_to_micros(units)
+    return _units_to_micros(units, currency)
 
 
-def _units_to_micros(units: float) -> int:
-    """Единицы валюты → micros: кламп «границы абсурда» (core.limits) + округление до
-    биллинг-единицы 10 000 micros — иначе Google Ads отклонит бид/бюджет с суб-центовой
-    точностью и «превью ≠ созданное». 0 остаётся 0 (валидируется выше)."""
+def _units_to_micros(units: float, currency: str | None = None) -> int:
+    """Единицы валюты → micros: кламп «границы абсурда» (core.limits) + округление до биллинг-
+    единицы ВАЛЮТЫ АККАУНТА — иначе Google Ads отклонит бид/бюджет с суб-единичной точностью
+    и «превью ≠ созданное». Единица валюто-зависима (UGX/JPY = 1 000 000, USD = 10 000): без
+    `currency` берётся дефолтная — это ЧЕРНОВОЕ значение, авторитетно округлит граница SDK.
+    0 остаётся 0 (валидируется выше)."""
     u = max(0.0, min(float(units), float(MONEY_MAX_UNITS)))
-    return round_micros(int(round(u * 1_000_000)))
+    return round_micros(int(round(u * 1_000_000)), currency=currency)
 
 
 def assemble_settings(
@@ -430,22 +432,22 @@ def assemble_settings(
 
     # бюджет: описание → медиана(by_analogy) → дефолт(by_default)
     if extracted.budget_daily_units is not None:
-        budget_micros = _units_to_micros(extracted.budget_daily_units)
+        budget_micros = _units_to_micros(extracted.budget_daily_units, currency)
     elif median_budget_micros:
         budget_micros = int(median_budget_micros)
         by_analogy.append("budget_daily_micros")
     else:
-        budget_micros = _units_to_micros(default_budget_units)
+        budget_micros = _units_to_micros(default_budget_units, currency)
         by_default.append("budget_daily_micros")
 
     # cpc: описание («75 за клик») → медиана(by_analogy) → дефолт(by_default)
     if extracted.max_cpc_units is not None and extracted.max_cpc_units > 0:
-        cpc_micros = _units_to_micros(extracted.max_cpc_units)
+        cpc_micros = _units_to_micros(extracted.max_cpc_units, currency)
     elif avg_cpc_micros:
         cpc_micros = int(avg_cpc_micros)
         by_analogy.append("cpc_bid_micros")
     else:
-        cpc_micros = _units_to_micros(default_cpc_units)
+        cpc_micros = _units_to_micros(default_cpc_units, currency)
         by_default.append("cpc_bid_micros")
 
     # тип соответствия: частый в аккаунте(by_analogy) → дефолт phrase(by_default)
@@ -456,7 +458,10 @@ def assemble_settings(
         match_type = DEFAULT_MATCH_TYPE
         by_default.append("match_type")
 
-    strat, tcpa_micros, payment = _derive_bidding(extracted)
+    # Валюта аккаунта авторитетнее пользовательской: target_cpa округляем по ЕЁ биллинг-единице.
+    strat, tcpa_micros, payment = _derive_bidding(
+        extracted.model_copy(update={"currency": currency}) if currency else extracted
+    )
     if not extracted.bidding_strategy and not extracted.goal:
         by_default.append("bidding_strategy")  # статический дефолт, НЕ история аккаунта
 
