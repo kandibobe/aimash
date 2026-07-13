@@ -3,8 +3,10 @@
 Офлайн (без сети/SDK). Поддерживает:
 - вставку текстом: по строке или через запятую;
 - per-keyword маркеры типа соответствия: [точное] → exact, "фразовое" → phrase, иначе default;
-- глобальную инструкцию о типе («используй фразовое соответствие для всего списка»).
-Файлы (XLSX/CSV/текст) бот превращает в текст через core.ingest и подаёт сюда (одна фраза в строке).
+- глобальную инструкцию о типе («используй фразовое соответствие для всего списка»);
+- ТАБЛИЦУ из XLSX/CSV: «ключ | тип соответствия» (+ служебные колонки объёма/конкуренции) — тип
+  берётся из колонки, заголовки и служебные ячейки в ключи НЕ превращаются (§19.4.1).
+Файлы (XLSX/CSV/текст) бот превращает в текст через core.ingest и подаёт сюда.
 
 Длину/валидность каждого ключа считает КОД (ads.validation.assert_keyword_ok через normalize).
 """
@@ -44,8 +46,10 @@ def parse_match_type_instruction(text: str) -> str | None:
     return None
 
 
-def _strip_markers(token: str) -> tuple[str, str | None]:
-    """Снять per-keyword маркеры: [exact] / "phrase". Возвращает (текст, тип|None)."""
+def strip_match_markers(token: str) -> tuple[str, str | None]:
+    """Снять per-keyword маркеры: [exact] / "phrase". Возвращает (текст, тип|None).
+    Публичная: тем же способом маркеры снимает /addkeys (иначе `[ремонт]` уезжал в Google как есть
+    → KEYWORD_HAS_INVALID_CHARS)."""
     t = token.strip()
     if len(t) >= 2 and t[0] == "[" and t[-1] == "]":
         return t[1:-1].strip(), "exact"
@@ -54,17 +58,93 @@ def _strip_markers(token: str) -> tuple[str, str | None]:
     return t, None
 
 
-def _tokens(text: str) -> list[str]:
-    """Разбить ввод на токены-ключи: по строкам; строку без маркеров — ещё и по запятым."""
-    out: list[str] = []
-    for line in (text or "").splitlines():
-        line = line.strip()
-        if not line:
+_strip_markers = strip_match_markers  # внутреннее имя (совместимость)
+
+# ── §19.4.1: ТАБЛИЧНЫЙ ввод (XLSX/CSV) ────────────────────────────────────────────
+# core.ingest даёт файл текстом: лист → строка «# Имя листа», строка книги → «ячейка, ячейка».
+# Раньше такие строки резались по запятой как список ключей → ВТОРАЯ КОЛОНКА И ЗАГОЛОВКИ
+# становились «ключами»: файл 200×2 давал ~401 ключ, а «exact»/«Match type»/«# Keywords» уезжали
+# в кампанию. Теперь строка с сервисной ячейкой (тип соответствия / число / заголовок) читается
+# как ТАБЛИЧНАЯ: ключ — первая ячейка, тип — из колонки типа.
+_MT_CELLS = {
+    "broad": "broad",
+    "широкое": "broad",
+    "широкий": "broad",
+    "широкое соответствие": "broad",
+    "phrase": "phrase",
+    "фразовое": "phrase",
+    "фразовое соответствие": "phrase",
+    "exact": "exact",
+    "точное": "exact",
+    "точный": "exact",
+    "точное соответствие": "exact",
+}
+# Заголовки колонок (RU/EN) — не ключи. Первая ячейка из этого набора ⇒ строка-заголовок целиком.
+_HEADER_CELLS = {
+    "keyword",
+    "keywords",
+    "key",
+    "match type",
+    "match_type",
+    "matchtype",
+    "type",
+    "volume",
+    "competition",
+    "relevant",
+    "ключ",
+    "ключи",
+    "ключевое слово",
+    "ключевые слова",
+    "запрос",
+    "тип",
+    "тип соответствия",
+    "объём",
+    "объем",
+    "конкуренция",
+    "релевантно",
+    "релевантность",
+}
+
+
+def _is_numeric_cell(cell: str) -> bool:
+    """Ячейка — только число (объём/ставка из экспорта таблицы), а не ключ. «24 часа» — НЕ число."""
+    t = cell.replace(" ", "").replace(" ", "").replace("%", "").replace(",", ".")
+    if not t:
+        return False
+    try:
+        float(t)
+    except ValueError:
+        return False
+    return True
+
+
+def _rows(text: str) -> list[tuple[str, str | None]]:
+    """Ввод → [(ключ, тип|None)]. Три формы: список через запятую («ключ1, ключ2»), таблица
+    («ключ, exact» / «ключ, 1000, HIGH» — из XLSX/CSV) и маркеры («[ключ]» / «"ключ"»).
+    Служебные строки («# Лист1», заголовки колонок) отбрасываются."""
+    out: list[tuple[str, str | None]] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):  # «# Имя листа» из core.ingest._xlsx_to_text
             continue
         if ("[" in line or '"' in line) and "," not in line:
-            out.append(line)  # строка-маркер целиком
-        else:
-            out.extend(p for p in line.split(",") if p.strip())
+            out.append(strip_match_markers(line))  # строка-маркер целиком
+            continue
+        cells = [c.strip() for c in line.split(",") if c.strip()]
+        if not cells:
+            continue
+        if cells[0].casefold() in _HEADER_CELLS:  # строка-заголовок таблицы
+            continue
+        tail = cells[1:]
+        mt = next((_MT_CELLS[c.casefold()] for c in tail if c.casefold() in _MT_CELLS), None)
+        service = mt is not None or any(
+            c.casefold() in _HEADER_CELLS or _is_numeric_cell(c) for c in tail
+        )
+        if service:  # табличная строка: ключ — первая ячейка, остальные ячейки — служебные
+            body, marker = strip_match_markers(cells[0])
+            out.append((body, marker or mt))
+        else:  # обычный список ключей через запятую
+            out.extend(strip_match_markers(c) for c in cells)
     return out
 
 
@@ -87,8 +167,7 @@ def parse_keywords_text(text: str, *, default_match_type: str | None = None) -> 
     )
     out: list[KeywordInput] = []
     seen: set[tuple[str, str]] = set()
-    for tok in _tokens(cleaned):
-        body, marker = _strip_markers(tok)
+    for body, marker in _rows(cleaned):
         if not body:
             continue
         try:

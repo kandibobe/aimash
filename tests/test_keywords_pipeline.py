@@ -64,10 +64,10 @@ async def test_generate_seeds_empty_input():
     assert seeds == []
 
 
-# ── relevance filter ───────────────────────────────────────────────────────────────
+# ── relevance filter (контракт ИНВЕРТИРОВАН 2026-07: модель шлёт только НЕРЕЛЕВАНТНЫЕ) ──
 @pytest.mark.asyncio
 async def test_filter_relevance_marks_and_failopen():
-    content = json.dumps({"used cars nairobi": True, "free car games": False})
+    content = json.dumps(["free car games"])  # ответ = список нерелевантных, не эхо всего батча
     with patched(KF, "chat", _chat(content)):
         verdicts = await KF.filter_relevance(
             texts=["used cars nairobi", "free car games", "car rental"], topic="used cars"
@@ -132,22 +132,22 @@ def test_screen_default_used_when_no_instruction():
     assert {k.match_type for k in out} == {"exact"}  # прежнее поведение сохранено
 
 
-def test_filter_coerce_string_false():
+def test_filter_parse_offtopic_rejects_non_array():
+    """_parse_offtopic отличает «не разобрали» (None) от «нерелевантных нет» ([]): на этом стоит
+    WARNING вместо тихого fail-open. Старый эхо-контракт (JSON-объект) — тоже «не разобрали»."""
     import keywords.filter as _KF
 
-    assert _KF._coerce_bool("false") is False
-    assert _KF._coerce_bool("no") is False
-    assert _KF._coerce_bool("нет") is False
-    assert _KF._coerce_bool("true") is True
-    assert _KF._coerce_bool(True) is True
-    assert _KF._coerce_bool(0) is False
-    assert _KF._coerce_bool("maybe") is None  # неразборчивое → None (fail-open у вызывающего)
+    assert _KF._parse_offtopic('{"k": false}', ["k"]) is None  # объект, а не массив
+    assert _KF._parse_offtopic("не json", ["k"]) is None
+    assert _KF._parse_offtopic('["k1", "k2"', ["k1", "k2"]) is None  # обрыв: нет «]»
+    assert _KF._parse_offtopic("[]", ["k"]) == set()  # честное «все релевантны»
 
 
 @pytest.mark.asyncio
-async def test_filter_relevance_string_false_marks_irrelevant():
-    content = json.dumps({"free car games": "false", "used cars": "yes"})
+async def test_filter_relevance_matches_case_insensitively():
+    content = json.dumps(["Free Car Games", "выдуманный ключ"])  # регистр иной + галлюцинация
     with patched(KF, "chat", _chat(content)):
         v = await KF.filter_relevance(texts=["free car games", "used cars"], topic="cars")
-    assert v["free car games"] is False  # строковый 'false' НЕ стал True
+    assert v["free car games"] is False  # сматчился по casefold, вернулось исходное написание
     assert v["used cars"] is True
+    assert "выдуманный ключ" not in v  # ключ, которого не присылали, в вердикты не попадает

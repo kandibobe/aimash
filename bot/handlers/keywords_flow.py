@@ -451,8 +451,14 @@ async def kw_add_keywords(m: bm.Message, state: bm.FSMContext) -> None:
             await m.answer(bm.i18n.t("cc_kw_dropped", n=dropped))
         await kw_add_accept(m, state, kws)
         return
-    items = [p.strip() for p in text.replace("\n", ",").split(",") if p.strip()]
-    await kw_add_accept(m, state, items)
+    # Разбор — тем же парсером, что файловый путь (§19.4.1): снимает маркеры `[ключ]`/`"ключ"` и
+    # валидирует ключ (assert_keyword_ok). Раньше текст резался по запятым как есть → маркер уезжал
+    # в Google буквально → KEYWORD_HAS_INVALID_CHARS уже ПОСЛЕ ✅ (гейт потрачен, ключи не добавлены).
+    # Тип соответствия здесь выбирается кнопкой ниже, поэтому per-key тип из маркера не используем.
+    from keywords.ingest import parse_keywords_text
+
+    parsed = parse_keywords_text(text)
+    await kw_add_accept(m, state, [k.text for k in parsed])
 
 
 @bm.dp.callback_query(bm.KwAddCB.filter(bm.F.action == "cancel"))

@@ -174,6 +174,13 @@ def _client() -> AsyncOpenAI:
     return _client_cache
 
 
+def finish_reason(msg: Any) -> str:
+    """Почему модель остановилась: 'stop' | 'length' (обрыв по max_tokens) | 'tool_calls' | ''.
+    '' — неизвестно (старый мок в тестах/чужой объект). Вызывающим, у которых НЕПОЛНЫЙ ответ
+    меняет смысл (списочные JSON-ответы keywords), обязаны различать 'length' и 'stop'."""
+    return str(getattr(msg, "finish_reason", "") or "")
+
+
 async def chat(
     messages: list[dict[str, Any]],
     *,
@@ -239,7 +246,18 @@ async def chat(
             record(role, getattr(resp, "usage", None))
         except Exception:  # noqa: BLE001
             pass
-        return resp.choices[0].message
+        choice = resp.choices[0]
+        msg = choice.message
+        # finish_reason нужен вызывающим, чья корректность ЗАВИСИТ от полноты ответа: обрыв по
+        # max_tokens отдаёт валидный, но НЕПОЛНЫЙ текст, и fail-open-парсер молча решает, что
+        # «модель ничего не нашла» (keywords/filter.py: все ключи «релевантны»). Кладём на message
+        # (SDK-модель допускает extra-поля); присвоение под try — контракт chat() не должен падать
+        # из-за наблюдаемости. Читать — через finish_reason(msg).
+        try:
+            msg.finish_reason = getattr(choice, "finish_reason", None) or ""
+        except Exception:  # noqa: BLE001 — не наш путь (чужой объект сообщения)
+            pass
+        return msg
 
     try:
         return await _call(chosen)

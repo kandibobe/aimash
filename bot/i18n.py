@@ -2304,6 +2304,10 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "⏳ Генерирую seed-ключи → Discover → фильтрую релевантность → собираю таблицу…",
         "en": "⏳ Generating seeds → Discover → relevance filter → building the sheet…",
     },
+    "cc_kw_busy": {
+        "ru": "⏳ Подбор ключей уже идёт — дождись таблицы (20–40 с), второй запуск не нужен.",
+        "en": "⏳ Keyword generation is already running — wait for the sheet (20–40 s).",
+    },
     "cc_kw_sheet_ready": {
         "ru": (
             "📊 Таблица ключей готова: {url}\n"

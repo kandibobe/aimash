@@ -113,13 +113,17 @@ async def test_negatives_extra_advisory(monkeypatch):
     import keywords.cluster as kc
     from advisor import service
 
-    async def _fake_neg(topic, ideas, *, language="ru", limit=20):
+    seen: dict = {}
+
+    async def _fake_neg(topic, ideas, *, language="ru", limit=20, protected=frozenset()):
+        seen["protected"] = protected
         return ["бесплатно", "скачать"]
 
     monkeypatch.setattr(kc, "suggest_negative_keywords", _fake_neg)
     rep = _report_with_keywords([(("C", "AG", "kw", "BROAD"), _m(10))])
-    extra = await service._negative_keywords_extra(rep, ["keywords"], "ru")
+    extra = await service._negative_keywords_extra(rep, ["keywords"], "ru", protected={"бренд"})
     assert extra and "бесплатно" in extra[0] and "минус-слова" in extra[0]
+    assert seen["protected"] == {"бренд"}  # брендозащита §20 доходит до подбора минус-слов
     # тема не keywords → пусто
     assert await service._negative_keywords_extra(rep, ["optimize"], "ru") == []
     # нет ключей → пусто

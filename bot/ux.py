@@ -27,6 +27,28 @@ ACTION_REFRESH_SEC = 4.0  # Telegram гасит chat action через ~5с → 
 TG_LIMIT = 4096  # лимит длины сообщения Telegram
 SAFE_LIMIT = 3500  # запас под HTML-обёртку/esc-расширение
 
+# ── single-flight: «этот долгий колбэк уже выполняется» ────────────────────────────
+# Колбэки НЕ троттлятся (bot/throttle.py лимитирует только сообщения — иначе ломался бы confirm-флоу),
+# а конвейер генерации ключей идёт 20–40 с. Двойной тап по кнопке запускал ВТОРОЙ конвейер: две
+# Google-таблицы, и ссылку на первую бот потом отвергал как «чужую» → ручная выверка менеджера
+# терялась. Ключ — (тип операции, id сессии): параллельные сессии друг друга не блокируют.
+# In-memory (бот однопроцессный, как и throttle/кэши); рестарт всё сбрасывает — это ок.
+_INFLIGHT: set[tuple[str, object]] = set()
+
+
+def acquire_flight(kind: str, key: object) -> bool:
+    """True — захватили (можно выполнять); False — эта операция уже идёт (второй тап). Освобождать
+    ОБЯЗАТЕЛЬНО в finally (release_flight), иначе кнопка залипнет до рестарта."""
+    k = (kind, key)
+    if k in _INFLIGHT:
+        return False
+    _INFLIGHT.add(k)
+    return True
+
+
+def release_flight(kind: str, key: object) -> None:
+    _INFLIGHT.discard((kind, key))
+
 
 def _bot_and_chat(event: object) -> tuple[object, int] | None:
     """(bot, chat_id) из Message-подобного или CallbackQuery-подобного события (дакт-тайпинг —

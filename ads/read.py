@@ -604,11 +604,18 @@ def search_campaign_medians(
     try:  # 3) самый частый позитивный тип соответствия (по ЧИСЛУ ключей).
         # ВАЖНО (v24): metrics.* НЕЛЬЗЯ селектить из ad_group_criterion (INCOMPATIBLE) — поэтому
         # без метрик, взвешиваем просто по количеству ключей каждого типа (проверено live на Draft).
+        # УДАЛЁННЫЕ ключи и ключи чужих каналов (GDN/Video) в «медиану Search-кампаний» не входят:
+        # 500 давно удалённых BROAD перевешивали 20 живых PHRASE, и визард §19.3 предлагал
+        # «по аналогии» тип, которым аккаунт уже НЕ пользуется.
         q = (
             "SELECT ad_group_criterion.keyword.match_type "
             "FROM ad_group_criterion "
             "WHERE ad_group_criterion.type = 'KEYWORD' "
-            "AND ad_group_criterion.negative = FALSE"
+            "AND ad_group_criterion.negative = FALSE "
+            "AND ad_group_criterion.status != 'REMOVED' "
+            "AND ad_group.status != 'REMOVED' "
+            "AND campaign.status != 'REMOVED' "
+            "AND campaign.advertising_channel_type = 'SEARCH'"
         )
         weight: dict[str, int] = {}
         for row in ga.search(customer_id=cid, query=q):

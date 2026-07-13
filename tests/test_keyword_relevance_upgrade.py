@@ -38,7 +38,7 @@ async def test_seeds_use_keywords_role(monkeypatch):
 
 async def test_filter_relevance_uses_keywords_role(monkeypatch):
     cap: dict = {}
-    monkeypatch.setattr(F, "chat", _stub_chat(cap, '{"k1": true, "k2": false}'))
+    monkeypatch.setattr(F, "chat", _stub_chat(cap, '["k2"]'))  # контракт: только НЕрелевантные
     rel = await F.filter_relevance(texts=["k1", "k2"], topic="t", profile="бизнес X")
     assert cap["role"] == "keywords"
     assert rel == {"k1": True, "k2": False}

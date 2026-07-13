@@ -62,12 +62,25 @@ async def _client_profile_context(customer_id) -> str:
         return ""
 
 
+async def _protected_terms(customer_id) -> set[str]:
+    """§7 брендозащита: токены бренда/услуг клиента, которые НЕЛЬЗЯ предлагать в минус-слова.
+    Докстринг ниже обещал это с самого начала, но `protected=` в вызов не передавался (2 из 3
+    call-site) — бот мог посоветовать заминусовать бренд самого клиента. Сбой/нет профиля → set()."""
+    try:
+        from clients.store import ClientStore
+
+        return await ClientStore().protected_negative_terms(str(customer_id))
+    except Exception:  # noqa: BLE001 — защита опциональна, /advise не роняем
+        return set()
+
+
 async def _negative_keywords_extra(
-    report, topics, lang: str, client_context: str = ""
+    report, topics, lang: str, client_context: str = "", protected: set[str] = frozenset()
 ) -> list[str]:
     """#3: LLM-предложение минус-слов по ключам аккаунта (advisory, ничего не добавляет — как §7).
     Только для темы keywords и при наличии ключей. Сбой/пусто → [] (не роняем /advise).
-    client_context (2.11) — бренд/услуги клиента: тематика точнее, брендовые слова не минусуются."""
+    client_context (2.11) — бренд/услуги клиента: тематика точнее, брендовые слова не минусуются.
+    protected — те же бренд/услуги ТОКЕНАМИ: пост-фильтр КОДА (модели не доверяем)."""
     if topics and "keywords" not in topics:
         return []
     kws = _keyword_texts(report)
@@ -80,6 +93,7 @@ async def _negative_keywords_extra(
         negs = await suggest_negative_keywords(
             client_context[:400],
             kws,
+            protected=protected,
             # D7: language уходит в промпт строкой («Язык: de») — зажим в ru/uk/en молча
             # переводил минус-слова на русский для немецкой/угандийской кампании.
             language=(lang or settings.geo_default_locale or "ru"),
@@ -190,7 +204,13 @@ async def build_recommendations(
 
     # #3: advisory LLM-минус-слова (тема keywords) — только на интерактивном пути (use_llm).
     extras = (
-        await _negative_keywords_extra(report, topics, lang, client_context=client_ctx)
+        await _negative_keywords_extra(
+            report,
+            topics,
+            lang,
+            client_context=client_ctx,
+            protected=await _protected_terms(customer_id),
+        )
         if use_llm
         else []
     )

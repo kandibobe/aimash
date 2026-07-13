@@ -9,13 +9,22 @@ fallback на одну группу «Все ключи», чтобы фича �
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 
-from agent.router import chat
+from agent.router import chat, finish_reason
 
-MAX_CLUSTER_INPUT = 200  # сколько ключей максимум отдаём модели за раз (остаток → «Прочее»)
+log = logging.getLogger("aimash.keywords")
+
+MAX_CLUSTER_INPUT = 200  # сколько ключей всего берём в кластеризацию (остаток → «Прочее»)
+# Размер ОДНОГО запроса к модели. Ответ кластеризации — ЭХО всех ключей (в группах), т.е. он длиннее
+# запроса; на 200 ключах он не влезал в max_tokens роли (ROLE_MAX_TOKENS['clustering'] = parsing) →
+# обрыв → битый JSON → [] → одна группа «Все ключи», колонка «Интент» пуста. Батч 70 + параллельный
+# gather: ответ каждого батча заведомо в потолке, латентность не растёт (запросы идут разом).
+_CLUSTER_BATCH = 70
 
 
 @dataclass
@@ -119,27 +128,77 @@ def _parse(content: str, valid: list[str]) -> list[Cluster]:
     return clusters
 
 
+async def _cluster_batch(batch: list[str], language: str) -> list[Cluster]:
+    """Один запрос к модели на батч ключей. Сбой/обрыв → [] (вызывающий добьёт «Прочим»), но НЕ
+    молча: обрыв по max_tokens раньше выглядел как «модель ничего не сгруппировала»."""
+    try:
+        msg = await chat(
+            [
+                {"role": "system", "content": _SYSTEM},
+                {"role": "user", "content": _user_prompt(batch, language)},
+            ],
+            role="keywords",
+            temperature=0.3,
+        )
+    except Exception as e:  # noqa: BLE001 — кластеризация не критична, всегда есть fallback
+        log.warning(
+            "кластеризация: сбой модели (%s) на батче %d ключей", type(e).__name__, len(batch)
+        )
+        return []
+    clusters = _parse(getattr(msg, "content", "") or "", batch)
+    if not clusters:
+        log.warning(
+            "кластеризация: ответ не разобран (finish_reason=%r, батч %d ключей)",
+            finish_reason(msg) or "?",
+            len(batch),
+        )
+    return clusters
+
+
+def _merge(batches: list[list[Cluster]], sample: list[str]) -> list[Cluster]:
+    """Склеить кластеры батчей: одинаковые (имя, интент) — в одну группу, порядок первого появления.
+    Ключи, не попавшие никуда (сбой батча/выдумка модели), уходят в «Прочее» — тихой потери ключа
+    из сводки/экспорта быть не должно."""
+    merged: dict[tuple[str, str], Cluster] = {}
+    used: set[str] = set()
+    for clusters in batches:
+        for c in clusters:
+            key = (c.name.casefold(), c.intent)
+            tgt = merged.get(key)
+            if tgt is None:
+                tgt = Cluster(name=c.name, intent=c.intent, keywords=[])
+                merged[key] = tgt
+            for k in c.keywords:
+                if k not in used:
+                    used.add(k)
+                    tgt.keywords.append(k)
+    out = [c for c in merged.values() if c.keywords]
+    leftover = [k for k in sample if k not in used]
+    if leftover:
+        misc = next((c for c in out if c.name == "Прочее"), None)
+        if misc is not None:
+            misc.keywords.extend(k for k in leftover if k not in misc.keywords)
+        else:
+            out.append(Cluster(name="Прочее", intent="", keywords=leftover))
+    return out
+
+
 async def cluster_keywords(keywords: list[str], language: str = "ru") -> list[Cluster]:
     """Сгруппировать ключи по интенту через LLM (роль keywords: env LLM_KEYWORDS, пусто =
-    parsing). Fallback при сбое — одна группа «Все ключи». Вход дедуплицируется,
+    parsing). Батчами по _CLUSTER_BATCH параллельно (ответ модели — эхо ключей, целиком в потолок
+    генерации не влезал). Fallback при полном сбое — одна группа «Все ключи». Вход дедуплицируется,
     порядок сохраняется."""
     uniq = list(dict.fromkeys(k.strip() for k in keywords if k.strip()))  # дедуп + порядок
     if not uniq:
         return []
     sample = uniq[:MAX_CLUSTER_INPUT]
-    try:
-        msg = await chat(
-            [
-                {"role": "system", "content": _SYSTEM},
-                {"role": "user", "content": _user_prompt(sample, language)},
-            ],
-            role="keywords",
-            temperature=0.3,
-        )
-        clusters = _parse(getattr(msg, "content", "") or "", sample)
-    except Exception:  # noqa: BLE001 — кластеризация не критична, всегда есть fallback
-        clusters = []
-    if not clusters:
+    batches = [sample[i : i + _CLUSTER_BATCH] for i in range(0, len(sample), _CLUSTER_BATCH)]
+    results = await asyncio.gather(
+        *(_cluster_batch(b, language) for b in batches), return_exceptions=True
+    )
+    ok = [r for r in results if isinstance(r, list) and r]  # батчи, которые реально разобрались
+    clusters = _merge(ok, sample) if ok else []
+    if not clusters:  # ни один батч не сгруппировал → прежний fallback (фича не падает)
         return [Cluster(name="Все ключи", intent="", keywords=uniq)]
     if len(uniq) > len(sample):  # вход усекали → остаток отдельной группой, без «тихой» потери
         clusters.append(

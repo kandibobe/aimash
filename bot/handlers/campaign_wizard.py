@@ -641,6 +641,24 @@ async def cc_keywords_text(m: bm.Message, state: bm.FSMContext) -> None:
 async def cc_kw_generate(
     cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.FSMContext
 ) -> None:
+    """Гард двойного тапа по «🔎 Генерация ключевых слов»: конвейер идёт 20–40 с, а колбэки НЕ
+    троттлятся → второй тап запускал ВТОРУЮ генерацию и вторую Google-таблицу; ссылку на первую
+    (уже выверенную вручную) бот потом отвергал как «чужую». Работа — в cc_kw_generate_run."""
+    chat_id = bm._cq_chat_id(cq)
+    data = await state.get_data()
+    key = (chat_id, data.get("cc_session") or "")
+    if not bm.ux.acquire_flight("cc_kw_gen", key):
+        await cq.answer(bm.i18n.t("cc_kw_busy"), show_alert=True)
+        return
+    try:
+        await cc_kw_generate_run(cq, callback_data, state)
+    finally:
+        bm.ux.release_flight("cc_kw_gen", key)
+
+
+async def cc_kw_generate_run(
+    cq: bm.CallbackQuery, callback_data: bm.CcCB, state: bm.FSMContext
+) -> None:
     """Этап 2 (ввод B): seed-ключи → Discover → фильтр релевантности → Google Sheets → верификация.
     Если Sheets недоступен (нет scope) — fallback: берём релевантные идеи напрямую, без round-trip."""
     chat_id = bm._cq_chat_id(cq)
@@ -703,8 +721,18 @@ async def cc_kw_generate(
     try:
         from keywords.cluster import suggest_negative_keywords
 
+        # §7 брендозащита: токены бренда/услуг клиента НЕ предлагаем в минус — иначе бот советует
+        # заминусовать бренд самого клиента (в /keywords гард был, в визарде — нет).
+        protected = await bm.CLIENTS.protected_negative_terms(
+            draft.preview_customer_id or draft.customer_id
+        )
         negs = await suggest_negative_keywords(
-            topic, [i.text for i in ideas], language=gen_lang, limit=10, profile=prof
+            topic,
+            [i.text for i in ideas],
+            language=gen_lang,
+            limit=10,
+            profile=prof,
+            protected=protected,
         )
         if negs:
             await msg.answer(
@@ -723,7 +751,7 @@ async def cc_kw_generate(
         )
     except Exception as e:  # noqa: BLE001 — нет drive.file scope/сети → fallback
         await msg.answer(bm.i18n.t("cc_kw_sheet_failed", err=bm.ux.err_text(e)))
-        relevant = [i.text for i in ideas if relevance.get(i.text, True)]
+        relevant = [i.text for i in ideas if relevance.get(i.text, True)] or [i.text for i in ideas]
         # B6: тип соответствия — подтверждённый на Этапе 1, не хардкод phrase
         await bm._cc_save_keywords(
             msg, chat_id, session_id, state, relevant, bm._cc_default_match_type(draft), "generated"
@@ -735,7 +763,10 @@ async def cc_kw_generate(
     # уточнением (вернёт ссылку → перезапишем выверенным списком в cc_kw_verify).
     # B3-resume: sheet_url тоже в черновик — resume после рестарта переоткроет верификацию с той
     # же ссылкой (см. _cc_present_stage2), а не молча вернёт на пустой Этап 2.
-    relevant = [i.text for i in ideas if relevance.get(i.text, True)]
+    # `or [все идеи]` — второй рубеж против промаха фильтра релевантности: если он пометил
+    # нерелевантным ВСЁ, кампания должна получить ключи (первый рубеж — недоверие к такому
+    # вердикту в keywords/filter.py::_DISTRUST_SHARE).
+    relevant = [i.text for i in ideas if relevance.get(i.text, True)] or [i.text for i in ideas]
     default_mt = bm._cc_default_match_type(draft)
     await bm.CDRAFTS.patch(
         session_id,
