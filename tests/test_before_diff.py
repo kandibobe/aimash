@@ -68,6 +68,68 @@ def test_bid_percent_shows_range_transition():
     assert "групп: 2" in s
 
 
+def _kw_bid_params(**over):
+    p = {
+        "campaign": "X",
+        "keyword": "ремонт окон",
+        "match_type": "phrase",
+        "mode": "increase_by_percent",
+        "value": 20,
+        "_before": {
+            "kind": "keyword_bid",
+            "before_micros": [500_000],
+            "after_micros": [600_000],
+            "n_keywords": 1,
+            "keyword": "ремонт окон",
+            "ad_groups": ["Окна"],
+            "currency": "USD",
+        },
+    }
+    p.update(over)
+    return p
+
+
+def test_keyword_bid_card_names_the_keyword_and_group():
+    """Ф1: карточка ставки КЛЮЧА обязана называть сам ключ и группы — пользователь подтверждает
+    подорожание конкретного слова, а не «ставки кампании»."""
+    s = texts.fmt_mutation_summary("update_keyword_bid", _kw_bid_params())
+    assert "ремонт окон" in s and "фразовое" in s
+    assert "+20% (0.50 → 0.60)" in s
+    assert "Окна" in s and "групп" in s
+
+
+def test_keyword_bid_card_en():
+    s = texts.fmt_mutation_summary("update_keyword_bid", _kw_bid_params(), "en")
+    assert "ремонт окон" in s and "CPC bid" in s and "0.50 → 0.60" in s
+
+
+def test_keyword_bid_card_decrease_sign_is_minus():
+    s = texts.fmt_mutation_summary(
+        "update_keyword_bid",
+        _kw_bid_params(
+            mode="decrease_by_percent",
+            value=20,
+            _before={
+                "kind": "keyword_bid",
+                "before_micros": [500_000],
+                "after_micros": [400_000],
+                "n_keywords": 1,
+                "ad_groups": ["Окна"],
+                "currency": "USD",
+            },
+        ),
+    )
+    assert "−20%" in s and "0.50 → 0.40" in s  # U+2212, не дефис
+
+
+def test_keyword_bid_card_fallback_without_before():
+    s = texts.fmt_mutation_summary(
+        "update_keyword_bid",
+        {"campaign": "X", "keyword": "ремонт окон", "mode": "set_to", "value": 1.5},
+    )
+    assert "ремонт окон" in s and "1.5" in s
+
+
 def test_pause_shows_status_transition():
     s = texts.fmt_mutation_summary(
         "pause_campaign",
@@ -114,6 +176,15 @@ def test_drift_bid_list_raises_on_change():
     }
     with pytest.raises(ValueError, match="ставки"):
         _assert_no_drift(params, [1_000_000, 2_500_000])
+
+
+def test_drift_keyword_bid_list_raises_and_names_keywords():
+    params = {
+        "mode": "increase_by_percent",
+        "_before": {"kind": "keyword_bid", "before_micros": [500_000]},
+    }
+    with pytest.raises(ValueError, match="ставки ключей"):
+        _assert_no_drift(params, [700_000])  # кто-то поднял ставку ключа после показа карточки
 
 
 def test_drift_no_snapshot_passes():

@@ -38,7 +38,7 @@ cp .env.example .env
 | `SECRETS_ENCRYPTION_KEY` | **да** | Fernet-ключ шифрования токенов at-rest (обязателен в prod) |
 | `TWO_FACTOR_ENABLED` | нет | §12 2FA-гейт опасных операций. `false` (дефолт) = выкл. `true` = перед исполнением опасной мутации бот просит PIN. **Fail-closed**: `true` без `TWO_FACTOR_PIN` ⇒ опасные операции блокируются (не пропускаются). См. §2.2 |
 | `TWO_FACTOR_PIN` | **да** | PIN для 2FA (маскируется в логах/repr). Сверяется в коде constant-time (`core/twofa.py`) |
-| `TWO_FACTOR_OPS_CSV` | нет | какие операции требуют кода (CSV). Дефолт `remove_campaign,remove_ad_group,update_budget,update_bid,set_bidding_strategy`. Пусто ⇒ при включённом 2FA ничего не гейтится |
+| `TWO_FACTOR_OPS_CSV` | нет | какие операции требуют кода (CSV). Дефолт `remove_campaign,remove_ad_group,update_budget,update_bid,update_keyword_bid,set_bidding_strategy`. Пусто ⇒ при включённом 2FA ничего не гейтится |
 | `DATABASE_URL` | нет | строка подключения (в compose СОБИРАЕТСЯ из `POSTGRES_PASSWORD` на `postgres:5432` — значение из `.env` там не действует, `environment:` бьёт `env_file:`) |
 | `POSTGRES_PASSWORD` | **да** (docker) | D3: пароль роли `aimash`. Читает compose (postgres + `DATABASE_URL` бота + бэкап-сайдкар). Пусто ⇒ `docker compose up` ОТКАЗЫВАЕТ. В prod пароль `aimash` (утёк в git) отвергается на старте бота. Ротация — §4.0 |
 | `POSTGRES_RO_PASSWORD` | **да** (docker) | D3: пароль read-only роли `aimash_ro` (Postgres MCP). Задаётся при ПЕРВОЙ инициализации тома (`db/init/01-readonly-role.sh`) |

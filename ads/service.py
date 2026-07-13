@@ -27,6 +27,7 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
     {
         "update_budget",
         "update_bid",
+        "update_keyword_bid",
         "add_keywords",
         "remove_keywords",
         "add_negative_keywords",
@@ -70,6 +71,7 @@ _DIFFABLE_OPS = frozenset(
     {
         "update_budget",
         "update_bid",
+        "update_keyword_bid",
         "pause_campaign",
         "resume_campaign",
         "launch_campaign",
@@ -185,6 +187,37 @@ async def read_before(operation: str, params: dict, customer_id: str | None = No
                 "n_groups": len(ad_groups),
                 "currency": cur or "",
             }
+        if operation == "update_keyword_bid":
+            # Ф1: ставка на уровне КЛЮЧА. База «было» — effective-ставка критерия (своя или
+            # унаследованная от группы): именно она играет на аукционе, от неё честен процент.
+            kws = await asyncio.to_thread(
+                resolve.find_keywords,
+                client,
+                cid,
+                name,
+                params["keyword"],
+                params.get("ad_group") or None,
+                params.get("match_type") or None,
+            )
+            if not kws:
+                return None
+            cur = await _currency(client, cid)
+            return {
+                "kind": "keyword_bid",
+                "before_micros": [int(k.bid_micros) for k in kws],
+                "after_micros": [
+                    int(
+                        resolve.compute_new_micros(
+                            k.bid_micros, params["mode"], params["value"], currency=cur
+                        )
+                    )
+                    for k in kws
+                ],
+                "n_keywords": len(kws),
+                "keyword": kws[0].text,
+                "ad_groups": [k.ad_group for k in kws],
+                "currency": cur or "",
+            }
         if operation in ("set_geo_location", "set_geo_proximity"):
             # D6: текущее ГЕО (локации/радиусы) для «было→станет». Резолвим кампанию по имени → id,
             # затем read_campaign_targeting. Снимок только для показа (дрейф гео не проверяем).
@@ -226,11 +259,12 @@ def _assert_no_drift(params: dict, current) -> None:
         return
     if isinstance(
         snap, list
-    ):  # bid: список ставок групп (порядок — ORDER BY ad_group.id, детерминирован)
+    ):  # bid: список ставок групп/ключей (порядок — ORDER BY id, детерминирован)
         cur = [int(x) for x in current]
         if [int(x) for x in snap] != cur:
+            what = "ставки ключей" if before.get("kind") == "keyword_bid" else "ставки групп"
             raise ValueError(
-                "ставки групп изменились с момента показа черновика — переподтверди команду "
+                f"{what} изменились с момента показа черновика — переподтверди команду "
                 "(создай черновик заново, чтобы увидеть актуальное «было → станет»)"
             )
         return
@@ -481,6 +515,44 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
         return await mutations.apply_update_bid(
             customer_id=customer_id,
             campaign_id=ad_groups[0].campaign_id,
+            bids=bids,
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
+    if op == "update_keyword_bid":
+        # Ф1: ставка живёт на критерии → резолвим ключ по тексту (+ сужения ad_group/match_type).
+        kws = await asyncio.to_thread(
+            resolve.find_keywords,
+            client,
+            customer_id,
+            params["campaign"],
+            params["keyword"],
+            params.get("ad_group") or None,
+            params.get("match_type") or None,
+        )
+        if not kws:
+            raise ValueError(
+                f"ключевое слово «{params['keyword']}» не найдено в кампании "
+                f"'{params['campaign']}' (проверь текст, группу и тип соответствия)"
+            )
+        # §5/TOCTOU: ставки ключей не изменились с момента показа (иначе % считался бы от иной базы)
+        _assert_no_drift(params, [k.bid_micros for k in kws])
+        cur = await _currency(client, customer_id)
+        bids = [
+            (
+                k.ad_group_id,
+                k.criterion_id,
+                resolve.compute_new_micros(
+                    k.bid_micros, params["mode"], params["value"], currency=cur
+                ),
+            )
+            for k in kws
+        ]
+        return await mutations.apply_update_keyword_bid(
+            customer_id=customer_id,
+            campaign_id=kws[0].campaign_id,
             bids=bids,
             confirmation_id=confirmation_id,
             confirm_store=store,

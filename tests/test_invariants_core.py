@@ -38,6 +38,7 @@ _MONEY_MARKER = "user_initiated"  # золотое правило #3 — ден�
 _EXPECTED_MONEY_OPS = {
     "apply_update_budget",
     "apply_update_bid",
+    "apply_update_keyword_bid",  # Ф1: ставка на уровне ключа — те же деньги, тот же гард
     "apply_set_bidding_strategy",
     "apply_create_search_campaign",
     "apply_create_gdn_campaign",

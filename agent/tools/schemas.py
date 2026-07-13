@@ -114,6 +114,7 @@ MAX_AMOUNT = MONEY_MAX_UNITS
 MUTATION_TOOLS = {
     "update_budget",
     "update_bid",
+    "update_keyword_bid",
     "add_keywords",
     "remove_keywords",
     "add_negative_keywords",
@@ -220,6 +221,39 @@ class UpdateBid(BaseModel):
     mode: Literal["increase_by_percent", "decrease_by_percent", "set_to"]
     value: float = Field(gt=0)
     currency: Currency | None = None
+
+    @field_validator("value")
+    @classmethod
+    def _val(cls, v, info):
+        return _value_sane(v, info.data.get("mode"))
+
+    @model_validator(mode="after")
+    def _mode_currency(self):
+        _assert_mode_currency(self.mode, self.currency)
+        return self
+
+
+class UpdateKeywordBid(BaseModel):
+    """Ставка CPC на уровне КЛЮЧА (ad_group_criterion.cpc_bid_micros), а не всей группы.
+
+    Точечный инструмент под /bids: поднимаем ровно тот ключ, что недобирает позицию, не двигая
+    ставку соседних ключей группы (update_bid двигает ВСЕ группы кампании разом).
+    ad_group/match_type — необязательные СУЖЕНИЯ: без них меняем ключ во всех группах кампании,
+    где он есть (симметрично update_bid, который берёт все группы). Как и бюджет/групповая ставка,
+    исполняется только прямой командой пользователя (golden rule #3)."""
+
+    campaign: str
+    keyword: str
+    ad_group: str | None = None
+    match_type: MatchType | None = None
+    mode: Literal["increase_by_percent", "decrease_by_percent", "set_to"]
+    value: float = Field(gt=0)
+    currency: Currency | None = None
+
+    @field_validator("keyword")
+    @classmethod
+    def _kw(cls, v):  # длину/форму ключа считает КОД (кириллица = 1 символ) — ДО кнопок
+        return normalize_keywords([v])[0]
 
     @field_validator("value")
     @classmethod
@@ -1155,6 +1189,7 @@ class AddPriceAsset(BaseModel):
 SCHEMAS: dict[str, type[BaseModel]] = {
     "update_budget": UpdateBudget,
     "update_bid": UpdateBid,
+    "update_keyword_bid": UpdateKeywordBid,
     "add_keywords": AddKeywords,
     "remove_keywords": RemoveKeywords,
     "add_negative_keywords": AddNegativeKeywords,
@@ -1223,6 +1258,15 @@ TOOLS: list[dict] = [
         "«снизь ставку на 15%» → decrease_by_percent, «поставь ставку 0.5» → set_to. "
         "value ВСЕГДА положительное число.",
         UpdateBid,
+    ),
+    _tool(
+        "update_keyword_bid",
+        "Изменить ставку CPC у КОНКРЕТНОГО ключевого слова (не всей группы) — «подними ставку по "
+        "ключу «ремонт окон» до 1.5», «снизь ставку по ключу X на 20%». Требуется ручная стратегия "
+        "Manual CPC. Всегда указывай campaign и keyword; ad_group и match_type — только если "
+        "пользователь их назвал (иначе ключ меняется во всех группах кампании, где он есть). "
+        "Направление задаёт mode, value ВСЕГДА положительное. Для ставки ВСЕЙ группы — update_bid.",
+        UpdateKeywordBid,
     ),
     _tool(
         "add_keywords",

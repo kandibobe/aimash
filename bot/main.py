@@ -54,6 +54,7 @@ from ads.assets import (
 from ads.client import DRAFT_ACCOUNT_ID, ensure_allowed, ensure_read_allowed
 from ads.mutations import GDN_BUSINESS_NAME_MAX, VIDEO_DESCRIPTION_MAX
 from ads.resolve import (
+    MONEY_OPS,
     DecreaseBelowZero,
     currency_mismatch,
     detect_currency_token,
@@ -1321,6 +1322,7 @@ _MONEY_OPS_UI: frozenset[str] = frozenset(
     {
         "update_budget",
         "update_bid",
+        "update_keyword_bid",
         "set_bidding_strategy",
         "create_search_campaign",
         "create_gdn_campaign",
@@ -1350,6 +1352,7 @@ _ROLLBACKABLE_OPS = frozenset(
     {
         "update_budget",
         "update_bid",
+        "update_keyword_bid",
         "pause_campaign",
         "resume_campaign",
         "launch_campaign",
@@ -1384,6 +1387,19 @@ def _reverse_spec(operation: str, params: dict, before) -> tuple[str, dict] | No
         if len(uniq) != 1:  # разные ставки по группам — одним set_to не вернуть (честно skip)
             return None
         return ("update_bid", {"campaign": camp, "mode": "set_to", "value": next(iter(uniq)) / 1e6})
+    if operation == "update_keyword_bid" and kind == "keyword_bid":
+        kw = params.get("keyword")
+        uniq = {int(x) for x in (before.get("before_micros") or [])}
+        if not kw or len(uniq) != 1:  # ключ в разных группах со РАЗНЫМИ ставками — одним set_to
+            return None  # прежние не вернуть (честно не предлагаем откат)
+        spec = {"campaign": camp, "keyword": kw, "mode": "set_to", "value": next(iter(uniq)) / 1e6}
+        for narrow in (
+            "ad_group",
+            "match_type",
+        ):  # сужения черновика сохраняем: откат адресует ТЕ ЖЕ ключи
+            if params.get(narrow):
+                spec[narrow] = params[narrow]
+        return ("update_keyword_bid", spec)
     if operation == "set_campaign_network" and kind == "network":
         return (
             "set_campaign_network",
@@ -1531,7 +1547,7 @@ async def _present_proposal(
         # P0 (golden rule #4): денежная команда в валюте ≠ валюте аккаунта → отказ с уточнением ДО
         # показа кнопок (FX не делаем; иначе «было→станет» соврал бы про сумму). Валюта — best-effort:
         # неизвестна (нет клиента/сбой read) ⇒ не блокируем (и чужую валюту на показе не печатаем).
-        if operation in ("update_budget", "update_bid"):
+        if operation in MONEY_OPS:
             # P0-1: голая цифра без валютного слова. Модель порой всё равно ставит currency (обычно
             # 'USD') — детерминированно снимаем её, если пользователь валюту НЕ писал, чтобы сумма
             # трактовалась в валюте аккаунта, а не рождала ложный mismatch (петля «переформулируй в

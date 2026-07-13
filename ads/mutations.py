@@ -428,6 +428,95 @@ async def apply_update_bid(
     return result
 
 
+# ── Ставка CPC на уровне КЛЮЧА (ad_group_criterion) ─────────────────────────────
+async def apply_update_keyword_bid(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    bids: list[tuple[str, str, int]],  # [(ad_group_id, criterion_id, new_cpc_bid_micros), ...]
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """Ф1: точечная ставка по ключу (update_bid двигает ставку ВСЕЙ группы — соседние ключи тоже).
+    Гейты те же и в том же порядке: замок аккаунта → валидация диапазонов В КОДЕ → атомарный claim →
+    user_initiated (golden rule #3) → SDK → finalize."""
+    ensure_allowed(customer_id)
+
+    # Валидация диапазонов В КОДЕ (не доверять модели) — ДО claim, чтобы плохие данные не сожгли
+    # одноразовый черновик.
+    if not bids:
+        raise ValueError("нет ключевых слов для изменения ставки")
+    for _ad_group_id, criterion_id, micros in bids:
+        if int(micros) <= 0:
+            raise ValueError(f"ставка должна быть > 0 (ключ {criterion_id})")
+        if int(micros) > MAX_AMOUNT_MICROS:
+            raise ValueError(f"ставка подозрительно большая (ключ {criterion_id})")
+
+    proposal = await _require_confirmation(confirm_store, confirmation_id, "update_keyword_bid")
+
+    # Ставки — деньги: только прямая команда человека. Scheduler/anomaly ставки не двигают
+    # (golden rule #3); флаг по умолчанию False (fail-closed) — ставит его лишь bot.main.on_text.
+    if not proposal.user_initiated:
+        raise PermissionError("изменение ставки должно быть прямой командой пользователя")
+
+    result = await run_ads_call(
+        _apply_keyword_bid_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_id,
+        bids,
+        op_count=max(1, len(bids)),  # квота §3: по операции на каждый критерий
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+def _apply_keyword_bid_via_sdk(client, customer_id: str, campaign_id: str, bids: list) -> dict:
+    """Ставка CPC на критериях-ключах. bids — [(ad_group_id, criterion_id, new_cpc_bid_micros), ...]
+    (все критерии одной кампании). Гард стратегии — общий с групповой ставкой (_assert_manual_cpc)."""
+    _assert_manual_cpc(client, customer_id, campaign_id)
+
+    svc = client.get_service("AdGroupCriterionService")
+    ops = []
+    applied = {  # criterion_id → применённая (округлённая) ставка: считаем ОДИН раз — в SDK и в audit
+        str(crit): _round_money(client, customer_id, m) for _ag, crit, m in bids
+    }
+    for ad_group_id, criterion_id, _micros in bids:
+        op = client.get_type("AdGroupCriterionOperation")
+        op.update.resource_name = svc.ad_group_criterion_path(
+            str(customer_id), str(ad_group_id), str(criterion_id)
+        )
+        op.update.cpc_bid_micros = applied[str(criterion_id)]  # кратно биллинг-единице валюты
+        client.copy_from(op.update_mask, protobuf_helpers.field_mask(None, op.update._pb))
+        ops.append(op)
+    try:
+        svc.mutate_ad_group_criteria(customer_id=str(customer_id), operations=ops)
+    except GoogleAdsException as ex:
+        # Тот же класс отказа, что и у групповой ставки: несовместимость с автостратегией. Гард выше
+        # ловит её заранее, но кампания могла сменить стратегию между чтением и мутацией (TOCTOU).
+        if "BID_TYPE_AND_BIDDING_STRATEGY_MISMATCH" in error_code_names(ex):
+            raise ValueError(
+                "ставка несовместима со стратегией кампании (BID_TYPE_AND_BIDDING_STRATEGY_MISMATCH)"
+            ) from ex
+        raise
+    return {
+        "customer_id": customer_id,
+        "campaign_id": str(campaign_id),
+        # ПРИМЕНЁННОЕ (округлённое) значение — ровно то, что ушло в SDK (иначе audit-строка врёт).
+        "keywords": [
+            {
+                "ad_group_id": str(ag),
+                "criterion_id": str(crit),
+                "new_cpc_bid_micros": applied[str(crit)],
+            }
+            for ag, crit, _m in bids
+        ],
+        "count": len(bids),
+        "applied": True,
+    }
+
+
 # ── Добавление ключевых слов (в группы объявлений кампании) ──────────────────────
 async def apply_add_keywords(
     *,
@@ -1472,11 +1561,11 @@ def _remove_ad_group_via_sdk(client, customer_id: str, ad_group_id: str) -> dict
     }
 
 
-def _apply_bid_via_sdk(client, customer_id: str, campaign_id: str, bids: list) -> dict:
-    """Ставка CPC на группах объявлений. ВАЖНО (v24): cpc_bid_micros действует только при
-    ручной стратегии MANUAL_CPC; при автостратегиях SDK вернёт BID_TYPE_AND_BIDDING_STRATEGY_MISMATCH.
-    Поэтому СНАЧАЛА читаем стратегию кампании и пускаем мутацию только для MANUAL_CPC.
-    bids — [(ad_group_id, new_cpc_bid_micros), ...] (все группы одной кампании)."""
+def _assert_manual_cpc(client, customer_id: str, campaign_id: str) -> None:
+    """ВАЖНО (v24): cpc_bid_micros (и у группы, и у ключа) действует только при ручной стратегии
+    MANUAL_CPC; при автостратегиях SDK вернёт BID_TYPE_AND_BIDDING_STRATEGY_MISMATCH. Поэтому
+    СНАЧАЛА читаем стратегию кампании и пускаем мутацию ставки только для MANUAL_CPC.
+    Единый гард для обоих уровней ставки (группа/ключ) — иначе новый путь тихо остался бы без него."""
     ga = client.get_service("GoogleAdsService")
     bst = None  # campaign.bidding_strategy_type
     portfolio_rn = ""  # непустой => прикреплена портфельная (shared) стратегия
@@ -1507,6 +1596,12 @@ def _apply_bid_via_sdk(client, customer_id: str, campaign_id: str, bids: list) -
             "ставку CPC можно менять только при ручной стратегии MANUAL_CPC; текущая — "
             f"{getattr(bst, 'name', bst)} (автостратегия управляет ставками сама)"
         )
+
+
+def _apply_bid_via_sdk(client, customer_id: str, campaign_id: str, bids: list) -> dict:
+    """Ставка CPC на группах объявлений (все группы одной кампании).
+    bids — [(ad_group_id, new_cpc_bid_micros), ...]."""
+    _assert_manual_cpc(client, customer_id, campaign_id)
 
     svc = client.get_service("AdGroupService")
     ops = []

@@ -962,6 +962,46 @@ def _bid_summary(params: dict, lang: str | None = None) -> str:
     return _money_summary("ставка CPC", params, lang)
 
 
+def _keyword_bid_summary(params: dict, lang: str | None = None) -> str:
+    """Ф1: карточка ставки на уровне КЛЮЧА. В отличие от групповой (_bid_summary) называет сам ключ
+    и группы, в которых он найден: пользователь должен видеть, ЧТО именно подорожает."""
+    c = params.get("campaign", "")
+    kw = params.get("keyword", "")
+    mode = params.get("mode")
+    sign = _mode_sign(mode)
+    pct = str(mode or "").endswith("_by_percent")
+    try:
+        v = f"{float(params.get('value')):g}"
+    except (TypeError, ValueError):
+        v = str(params.get("value"))
+    b = _before(params)
+    en = _lang(lang) == "en"
+    mt = params.get("match_type")
+    mt_s = f" [{match_type_human(mt, lang)}]" if mt else ""
+    if b and b.get("kind") == "keyword_bid" and b.get("before_micros"):
+        acc = b.get("currency")
+        n = b.get("n_keywords") or len(b["before_micros"])
+        rng_b = _micros_range(b["before_micros"], acc)
+        rng_a = _micros_range(b.get("after_micros") or [], acc)
+        groups = [g for g in (b.get("ad_groups") or []) if g]
+        where = ", ".join(groups[:3]) + ("…" if len(groups) > 3 else "")
+        if en:
+            head = f"Keyword “{kw}”{mt_s} — CPC bid: "
+            body = f"{sign}{v}% ({rng_b} → {rng_a})" if pct else f"{rng_b} → {rng_a}"
+            tail = f"\nCampaign “{c}”, ad groups ({n}): {where}" if where else f"\nCampaign “{c}”"
+            return head + body + tail
+        head = f"Ключ «{kw}»{mt_s} — ставка CPC: "
+        body = f"{sign}{v}% ({rng_b} → {rng_a})" if pct else f"{rng_b} → {rng_a}"
+        tail = f"\nКампания «{c}», группы ({n}): {where}" if where else f"\nКампания «{c}»"
+        return head + body + tail
+    # fallback без «было» (чтение не удалось / старый черновик)
+    cur = _CURRENCY_HUMAN.get(params.get("currency") or "", "")
+    change = f"{sign}{v}%" if pct else f"→ {v} {cur}".rstrip()
+    if en:
+        return f"Keyword “{kw}”{mt_s} (campaign “{c}”) — CPC bid: {change}"
+    return f"Ключ «{kw}»{mt_s} (кампания «{c}») — ставка CPC: {change}"
+
+
 def fmt_mutation_summary(operation: str, params: dict, lang: str | None = None) -> str:
     """Человекочитаемая сводка черновика «было → станет»/действия (plain text; esc — при показе).
 
@@ -978,6 +1018,8 @@ def fmt_mutation_summary(operation: str, params: dict, lang: str | None = None) 
         return _money_summary("бюджет", params, lng)
     if operation == "update_bid":
         return _bid_summary(params, lng)
+    if operation == "update_keyword_bid":
+        return _keyword_bid_summary(params, lng)
     if operation in ("pause_campaign", "resume_campaign"):
         # §5: показываем текущий статус → новый, если снимок прочитан.
         b = _before(params)
@@ -1161,6 +1203,8 @@ def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
         return _money_summary("budget", params, "en")
     if operation == "update_bid":
         return _bid_summary(params, "en")
+    if operation == "update_keyword_bid":
+        return _keyword_bid_summary(params, "en")
     if operation in ("pause_campaign", "resume_campaign"):
         b = _before(params)
         new = "paused ⏸" if operation == "pause_campaign" else "enabled ▶️"

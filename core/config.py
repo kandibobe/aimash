@@ -151,7 +151,8 @@ class Settings(BaseSettings):
     # (уже за двойным confirm) + бюджет/ставка/стратегия. Пусто ⇒ при включённом 2FA НИЧЕГО не
     # гейтится (осознанный выбор владельца); операции нормализуются в two_factor_ops (property).
     two_factor_ops_csv: str = (
-        "remove_campaign,remove_ad_group,update_budget,update_bid,set_bidding_strategy"
+        "remove_campaign,remove_ad_group,update_budget,update_bid,update_keyword_bid,"
+        "set_bidding_strategy"
     )
     # A14: базовый кулдаун (мин) после _TWOFA_MAX_ATTEMPTS неверных PIN подряд — вход в 2FA-режим
     # блокируется (fail-closed: опасная op недоступна), при повторных локаутах растёт экспоненциально

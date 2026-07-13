@@ -174,6 +174,80 @@ def find_ad_group_by_name(
 
 
 @dataclass
+class KeywordRef:
+    """Ключевое слово как КРИТЕРИЙ группы (для ставки на уровне ключа, Ф1). bid_micros — та ставка,
+    от которой считается «было→станет»: собственная ставка критерия, если задана, иначе
+    унаследованная от группы (effective_cpc_bid_micros — ровно то, что реально играет на аукционе)."""
+
+    criterion_id: str
+    ad_group_id: str
+    ad_group: str
+    campaign_id: str
+    text: str
+    match_type: str
+    bid_micros: int
+    own_bid: bool  # False = ставка унаследована от группы (у критерия своей нет)
+
+
+def find_keywords(
+    client: GoogleAdsClient,
+    customer_id: str,
+    campaign_name: str,
+    keyword: str,
+    ad_group_name: str | None = None,
+    match_type: str | None = None,
+) -> list[KeywordRef]:
+    """Критерии-ключи кампании по ТЕКСТУ (для update_keyword_bid). READ-ONLY.
+
+    Текст и тип матчим в Python (casefold), а не в GAQL: интерполировать пользовательский текст в
+    WHERE — лишняя поверхность (в _remove_keywords_via_sdk сделано так же). negative = FALSE:
+    минус-слово тоже type=KEYWORD, ставки у него нет — адресовать его ставкой нельзя.
+    Порядок детерминирован (ORDER BY ad_group.id, criterion_id) — от него зависит сверка дрейфа.
+    Пустой список = ключ не найден: вызывающий обязан отказать ДО любой записи."""
+    ensure_allowed(customer_id)
+    ga = client.get_service("GoogleAdsService")
+    safe_c = gaql_escape(campaign_name)
+    q = (
+        "SELECT ad_group_criterion.criterion_id, ad_group_criterion.keyword.text, "
+        "ad_group_criterion.keyword.match_type, ad_group_criterion.cpc_bid_micros, "
+        "ad_group_criterion.effective_cpc_bid_micros, ad_group.id, ad_group.name, campaign.id "
+        "FROM ad_group_criterion "
+        f"WHERE campaign.name = '{safe_c}' AND campaign.status != 'REMOVED' "
+        "AND ad_group.status != 'REMOVED' AND ad_group_criterion.type = KEYWORD "
+        "AND ad_group_criterion.negative = FALSE AND ad_group_criterion.status != 'REMOVED' "
+        "ORDER BY ad_group.id, ad_group_criterion.criterion_id"
+    )
+    want_kw = (keyword or "").strip().casefold()
+    want_ag = (ad_group_name or "").strip().casefold()
+    want_mt = (match_type or "").strip().upper()
+    out: list[KeywordRef] = []
+    for row in ga.search(customer_id=str(customer_id), query=q):
+        crit = row.ad_group_criterion
+        if crit.keyword.text.casefold() != want_kw:
+            continue
+        mt = getattr(crit.keyword.match_type, "name", "") or str(crit.keyword.match_type or "")
+        if want_mt and mt.upper() != want_mt:
+            continue
+        if want_ag and row.ad_group.name.casefold() != want_ag:
+            continue
+        own = int(getattr(crit, "cpc_bid_micros", 0) or 0)
+        eff = int(getattr(crit, "effective_cpc_bid_micros", 0) or 0)
+        out.append(
+            KeywordRef(
+                criterion_id=str(crit.criterion_id),
+                ad_group_id=str(row.ad_group.id),
+                ad_group=row.ad_group.name,
+                campaign_id=str(row.campaign.id),
+                text=crit.keyword.text,
+                match_type=mt,
+                bid_micros=own or eff,
+                own_bid=bool(own),
+            )
+        )
+    return out
+
+
+@dataclass
 class AdRef:
     """Ссылка на отдельное объявление (C6: pause/resume/remove_ad). headline — первый заголовок
     RSA (человекочитаемая метка; у не-RSA пусто)."""
@@ -255,6 +329,11 @@ def detect_currency_token(text: str) -> bool:
 
 PERCENT_MONEY_MODES = ("increase_by_percent", "decrease_by_percent")
 
+# Операции, у которых value — СУММА в валюте (а не процент/штука) ⇒ подлежат валютной сверке.
+# Единый источник: currency_mismatch (ниже) и валютный гард на входе бота (bot.main._present_proposal).
+# Раньше кортеж дублировался литералом в обоих местах — новая денежная операция молча теряла сверку.
+MONEY_OPS = ("update_budget", "update_bid", "update_keyword_bid")
+
 
 class DecreaseBelowZero(ValueError):
     """«Снизь бюджет на 200» при бюджете 100: результат ≤ 0 — не «обнуление», а невыполнимая команда.
@@ -279,11 +358,11 @@ def currency_mismatch(operation: str, params: dict, account_currency: str) -> st
     в валюте аккаунта (golden rule #4: «было→станет» обязан быть правдивым). None — расхождения нет /
     неприменимо.
 
-    - Только update_budget/update_bid; процентные режимы (increase/decrease_by_percent) — без валюты.
+    - Только update_budget/update_bid/update_keyword_bid; процентные режимы — без валюты.
     - currency не указана или 'percent' → трактуем как валюту аккаунта (расхождения нет).
     - валюта аккаунта неизвестна (read не удался, '') → не блокируем (деградация, не показываем чужую).
     """
-    if operation not in ("update_budget", "update_bid"):
+    if operation not in MONEY_OPS:
         return None
     if params.get("mode") in PERCENT_MONEY_MODES:
         return None

@@ -169,6 +169,107 @@ async def test_apply_update_bid_rejected_without_confirmation():
             pass
 
 
+# ── Ф1: apply_update_keyword_bid — ставка на уровне КЛЮЧА (те же гейты, что и у группы) ──
+def _kw_bid_store(user_initiated=True, status="confirmed"):
+    return FakeStore(FakeProposal("update_keyword_bid", status, user_initiated=user_initiated))
+
+
+async def test_apply_update_keyword_bid_happy_path():
+    called = {}
+
+    def fake(client, customer_id, campaign_id, bids):
+        called["args"] = (customer_id, campaign_id, list(bids))
+        return {"customer_id": customer_id, "campaign_id": campaign_id, "applied": True}
+
+    store = _kw_bid_store()
+    with patched(mut, "_apply_keyword_bid_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_update_keyword_bid(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_id="7",
+            bids=[("42", "9001", 1_500_000)],
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+        )
+    assert res["applied"] is True
+    assert called["args"][0] == DRAFT_ACCOUNT_ID and called["args"][1] == "7"
+    assert called["args"][2] == [("42", "9001", 1_500_000)]
+    assert store.finalized is True
+
+
+async def test_apply_update_keyword_bid_blocked_when_not_user_initiated():
+    """Golden rule #3: ставка ключа — те же деньги. Из scheduler/anomaly (user_initiated=False)
+    операция недостижима, SDK не зовём."""
+    called = {"n": 0}
+
+    def fake(*a, **k):
+        called["n"] += 1
+        return {"applied": True}
+
+    store = _kw_bid_store(user_initiated=False)
+    with patched(mut, "_apply_keyword_bid_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        try:
+            await mut.apply_update_keyword_bid(
+                customer_id=DRAFT_ACCOUNT_ID,
+                campaign_id="7",
+                bids=[("42", "9001", 1_500_000)],
+                confirmation_id="x",
+                confirm_store=store,
+                ads_client=object(),
+            )
+            raise AssertionError("ожидался PermissionError (ставка не по команде пользователя)")
+        except PermissionError:
+            pass
+    assert called["n"] == 0 and store.finalized is False
+
+
+async def test_apply_update_keyword_bid_replay_is_one_shot():
+    """Тот же confirmation_id второй раз → PermissionError, SDK вызван РОВНО один раз (claim
+    одноразовый — защита от double-spend)."""
+    calls = {"n": 0}
+
+    def fake(client, customer_id, campaign_id, bids):
+        calls["n"] += 1
+        return {"applied": True}
+
+    store = _kw_bid_store()
+    kw = {
+        "customer_id": DRAFT_ACCOUNT_ID,
+        "campaign_id": "7",
+        "bids": [("42", "9001", 1_500_000)],
+        "confirmation_id": "ok",
+        "ads_client": object(),
+    }
+    with patched(mut, "_apply_keyword_bid_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        await mut.apply_update_keyword_bid(confirm_store=store, **kw)
+        try:
+            await mut.apply_update_keyword_bid(confirm_store=store, **kw)
+            raise AssertionError("replay должен падать PermissionError")
+        except PermissionError:
+            pass
+    assert calls["n"] == 1
+
+
+async def test_apply_update_keyword_bid_validates_range_before_claim():
+    """Диапазон считает КОД и ДО claim: абсурдная ставка не должна сжигать одноразовый черновик."""
+    store = _kw_bid_store()
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        for bad in (0, -1, mut.MAX_AMOUNT_MICROS + 1):
+            try:
+                await mut.apply_update_keyword_bid(
+                    customer_id=DRAFT_ACCOUNT_ID,
+                    campaign_id="7",
+                    bids=[("42", "9001", bad)],
+                    confirmation_id="ok",
+                    confirm_store=store,
+                    ads_client=object(),
+                )
+                raise AssertionError(f"ставка {bad} должна отвергаться ValueError")
+            except ValueError:
+                pass
+    assert store._claimed is False and store.finalized is False
+
+
 # ── apply_add_keywords / negatives: длину считает КОД, оба гейта ─────────────────
 async def test_apply_add_keywords_happy_path():
     called = {}
@@ -1939,6 +2040,12 @@ def _apply_case(op):
         }
     if op == "update_bid":
         return mut.apply_update_bid, {"campaign_id": "7", "bids": [("42", 1_500_000)], **base}
+    if op == "update_keyword_bid":  # Ф1: (ad_group_id, criterion_id, micros)
+        return mut.apply_update_keyword_bid, {
+            "campaign_id": "7",
+            "bids": [("42", "9001", 1_500_000)],
+            **base,
+        }
     if op == "add_keywords":
         return mut.apply_add_keywords, {
             "ad_group_ids": ["1"],
@@ -2200,11 +2307,17 @@ def test_resolvers_reject_foreign_account():
                 raise AssertionError(f"{fn.__name__}: чужой аккаунт должен падать")
             except PermissionError:
                 pass
-        from ads.resolve import find_ads_in_group
+        from ads.resolve import find_ads_in_group, find_keywords
 
         try:  # C6: резолвер объявлений — тот же замок ДО SDK
             find_ads_in_group(object(), "1234567890", "X", "G", "101")
             raise AssertionError("find_ads_in_group: чужой аккаунт должен падать")
+        except PermissionError:
+            pass
+
+        try:  # Ф1: резолвер ключей (ставка на уровне ключа) — тот же замок ДО SDK
+            find_keywords(object(), "1234567890", "X", "ремонт окон")
+            raise AssertionError("find_keywords: чужой аккаунт должен падать")
         except PermissionError:
             pass
 

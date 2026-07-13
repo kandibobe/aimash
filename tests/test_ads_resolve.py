@@ -254,6 +254,85 @@ def test_find_ad_groups_rejects_foreign_account():
             find_ad_groups(client, "1234567890", "Бренд")
 
 
+# ── Ф1: find_keywords — резолв ключа в критерии (база ставки на уровне ключа) ─────
+def _kw_row(
+    *,
+    crit="9001",
+    text="ремонт окон",
+    mt="PHRASE",
+    own=0,
+    eff=500_000,
+    agid="42",
+    ag_name="Группа",
+    camp_id="123",
+):
+    return SimpleNamespace(
+        ad_group_criterion=SimpleNamespace(
+            criterion_id=int(crit),
+            keyword=SimpleNamespace(text=text, match_type=SimpleNamespace(name=mt)),
+            cpc_bid_micros=own,
+            effective_cpc_bid_micros=eff,
+        ),
+        ad_group=SimpleNamespace(id=int(agid), name=ag_name),
+        campaign=SimpleNamespace(id=int(camp_id)),
+    )
+
+
+def test_find_keywords_matches_text_case_insensitively():
+    from ads.resolve import find_keywords
+
+    rows = [_kw_row(text="Ремонт Окон"), _kw_row(crit="9002", text="двери")]
+    client = _FakeClient(rows)
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        got = find_keywords(client, DRAFT_ACCOUNT_ID, "Бренд", "  ремонт окон  ")
+    assert [k.criterion_id for k in got] == ["9001"]
+    # Текст в GAQL НЕ интерполируем (матч в Python) — иначе лишняя поверхность инъекции.
+    assert "ремонт окон" not in client._ga.last_query
+    assert "ad_group_criterion.negative = FALSE" in client._ga.last_query
+
+
+def test_find_keywords_bid_base_falls_back_to_effective():
+    """База «было» — собственная ставка критерия; её нет (0) → унаследованная от группы
+    (effective): именно она играет на аукционе, от неё честен процент."""
+    from ads.resolve import find_keywords
+
+    client = _FakeClient(
+        [_kw_row(own=0, eff=500_000), _kw_row(crit="9002", own=800_000, eff=800_000)]
+    )
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        got = find_keywords(client, DRAFT_ACCOUNT_ID, "Бренд", "ремонт окон")
+    assert (got[0].bid_micros, got[0].own_bid) == (500_000, False)
+    assert (got[1].bid_micros, got[1].own_bid) == (800_000, True)
+
+
+def test_find_keywords_narrowing_by_ad_group_and_match_type():
+    from ads.resolve import find_keywords
+
+    rows = [
+        _kw_row(crit="1", mt="PHRASE", agid="42", ag_name="Окна"),
+        _kw_row(crit="2", mt="EXACT", agid="42", ag_name="Окна"),
+        _kw_row(crit="3", mt="PHRASE", agid="43", ag_name="Двери"),
+    ]
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        # Без сужений — ключ во ВСЕХ группах кампании (симметрично update_bid по группам).
+        assert len(find_keywords(_FakeClient(rows), DRAFT_ACCOUNT_ID, "Бренд", "ремонт окон")) == 3
+        by_group = find_keywords(
+            _FakeClient(rows), DRAFT_ACCOUNT_ID, "Бренд", "ремонт окон", "окна"
+        )
+        assert [k.criterion_id for k in by_group] == ["1", "2"]
+        by_both = find_keywords(
+            _FakeClient(rows), DRAFT_ACCOUNT_ID, "Бренд", "ремонт окон", "Окна", "exact"
+        )
+        assert [k.criterion_id for k in by_both] == ["2"]
+
+
+def test_find_keywords_empty_when_not_found():
+    from ads.resolve import find_keywords
+
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        assert find_keywords(_FakeClient([_kw_row()]), DRAFT_ACCOUNT_ID, "Бренд", "чего нет") == []
+
+
 # ── B2: тип группы/канала для гейта RSA (accepts_rsa) ────────────────────────────
 def test_find_ad_groups_maps_type_and_channel():
     rows = [_ad_group_row(ag_type="SEARCH_STANDARD", channel="SEARCH")]
