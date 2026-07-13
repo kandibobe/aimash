@@ -2540,6 +2540,7 @@ async def _bids_run(m: Message, period) -> None:
     from ads.client import build_client_async
     from audit.collect import gather_bids
     from reports.period import label_i18n
+    from reports.tz import account_period
 
     lang = i18n.get_lang(m.chat.id)
     target_cpa = await _load_target_cpa(m.chat.id, acct)  # /target: потолок окупаемости прироста
@@ -2547,6 +2548,7 @@ async def _bids_run(m: Message, period) -> None:
     async with ux.typing_action(m):
         try:
             client = await build_client_async(acct)
+            period = await account_period(client, acct, period, label="bids_tz")  # §8: TZ аккаунта
             res = await gather_bids(client, acct, period, target_cpa=target_cpa)
         except Exception as e:  # сеть/доступ/SDK
             await m.answer(i18n.t("err_bids", err=ux.err_text(e)))
@@ -2576,10 +2578,12 @@ async def _searchterms_run(m: Message, period) -> None:
         return  # показан пикер аккаунта — оператор выберет и повторит
     from ads.client import build_client_async
     from reports.queries import fetch_search_terms
+    from reports.tz import account_period
 
     await m.answer(i18n.t("searchterms_loading"))
     try:
         client = await build_client_async(acct)
+        period = await account_period(client, acct, period, label="st_tz")  # §8: окно в TZ аккаунта
         rows = await run_ads_read_call(
             fetch_search_terms, client, acct, period, label="fetch_search_terms"
         )
@@ -2815,7 +2819,10 @@ async def _run_export(
             os.close(fd)
             await asyncio.to_thread(write_report_xlsx, report, path)
         scope = f"_{campaign_id}" if campaign_id else ""
-        fname = f"aimash_{acct}{scope}_{period.date_from}_{period.date_to}.xlsx"
+        # даты берём из ОТЧЁТА, а не из локального period: окно пере-якорено в TZ аккаунта (§8) —
+        # иначе имя файла разошлось бы с содержимым на день.
+        p = report.period
+        fname = f"aimash_{acct}{scope}_{p.date_from}_{p.date_to}.xlsx"
         await m.answer_document(FSInputFile(path, filename=fname))
     except Exception as e:  # сеть/доступ/SDK/openpyxl
         # A4: аккаунт деактивирован/нет прав → честная причина (не общее «не удалось сформировать»)
@@ -2880,10 +2887,15 @@ async def _run_sheets(
 def _mcc_period_factory(arg: str | None):
     """§8: фабрика Period в таймзоне дочернего аккаунта — из ТОГО ЖЕ пресета, что запросил оператор
     (7/30/90/MTD), но с локальным «сегодня». Для произвольных ISO-дат TZ-нормализация не применяется
-    (абсолютные даты) → None (build_mcc_summary_async откатится на общий period)."""
+    (абсолютные даты) → None (build_mcc_summary_async откатится на общий period). TZ здесь уже
+    прочитана вызывающим (tz_of), поэтому берём чистый reanchor, а не reports.tz.account_period."""
     from reports.period import from_preset
+    from reports.tz import reanchor
 
-    s = (arg or "30").strip()
+    try:
+        base = from_preset((arg or "30").strip())
+    except ValueError:  # произвольный диапазон / не пресет → без TZ-нормализации
+        return lambda _tz_name: None
 
     def factory(tz_name: str):
         from datetime import datetime
@@ -2891,12 +2903,9 @@ def _mcc_period_factory(arg: str | None):
 
         try:
             today = datetime.now(ZoneInfo(tz_name)).date()
-        except Exception:  # noqa: BLE001 — неизвестная TZ → host-дата (from_preset today=None)
-            today = None
-        try:
-            return from_preset(s, today=today)
-        except ValueError:  # произвольный диапазон / не пресет → без TZ-нормализации
-            return None
+        except Exception:  # noqa: BLE001 — неизвестная TZ → окно по host-дате (как раньше)
+            return base
+        return reanchor(base, today)
 
     return factory
 
@@ -5450,20 +5459,10 @@ def _make_audit_drill(client, acct: str, period):
 
 async def _account_local_date(client, acct: str) -> str:
     """Сегодня в ТАЙМЗОНЕ аккаунта (ISO YYYY-MM-DD) — границы дня снапшота считаем по аккаунту,
-    не по хосту (N1.1, зеркало scheduler._account_period). TZ best-effort: сбой → host-дата."""
-    from datetime import datetime as _dt
+    не по хосту (N1.1). Общая точка §8 — reports.tz. TZ best-effort: сбой → host-дата."""
+    from reports.tz import account_today
 
-    try:
-        from zoneinfo import ZoneInfo
-
-        from ads.read import account_timezone
-
-        tz = await run_ads_read_call(account_timezone, client, acct, label="audit_tz")
-        if tz:
-            return _dt.now(ZoneInfo(tz)).date().isoformat()
-    except Exception:  # noqa: BLE001 — TZ не прочитана → окно по host-дате (как раньше)
-        pass
-    return _dt.now().date().isoformat()
+    return (await account_today(client, acct, label="audit_tz")).isoformat()
 
 
 async def _audit_trend_line(result, client, acct: str, days: int, lang: str) -> str:
@@ -5512,6 +5511,7 @@ async def _audit_run(
     from audit.render import render_audit
     from core.access import resolve_read_account
     from reports.period import label_i18n, last_n_days
+    from reports.tz import account_period
 
     try:  # тот же резолв, что /report и _advise: read-замок × пер-юзер грант (fail-closed)
         acct = await resolve_read_account(chat_id, account)
@@ -5540,6 +5540,11 @@ async def _audit_run(
     async with ux.typing_action(target):
         try:
             client = await build_client_async(acct)
+            # §8: rolling-окно аудита якорим на «сегодня» АККАУНТА (Google режет дни по его TZ) —
+            # иначе в окно попадал неполный день (аккаунт западнее хоста) или терялся последний
+            # полный (восточнее). days/plabel пересчитываем от реального окна — карточка не врёт.
+            period = await account_period(client, acct, period, label="audit_tz")
+            days, plabel = period.days, label_i18n(period, lang)
             result = await gather_audit(client, acct, period, target_cpa=target_cpa)
         except Exception as e:  # сеть/доступ/SDK — не роняем денежный путь, показываем ошибку
             await target.answer(i18n.t("advise_error", err=ux.err_text(e)))

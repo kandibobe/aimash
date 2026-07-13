@@ -17,6 +17,7 @@ from ads.client import ensure_read_allowed
 from core.resilience import run_ads_read_call
 from reports.period import Period, label_i18n
 from reports.queries import BREAKDOWN_FETCHERS, Breakdown, Metrics, fetch_totals
+from reports.tz import account_period
 
 
 @dataclass
@@ -81,6 +82,10 @@ async def build_account_report_async(
     держится и здесь (быстрый fail-closed до фан-аута), и внутри каждого fetch_* (ensure_read_allowed, §8).
     Синхронный build_account_report оставлен дословно — на нём строятся тесты/не-async вызовы."""
     ensure_read_allowed(customer_id)  # fail-closed ДО фан-аута; каждый fetch_* проверит ещё раз
+    # §8: границы дней Google режет по ТАЙМЗОНЕ АККАУНТА → относительное окно («последние 30 дн.»)
+    # пере-якоряем на «сегодня» аккаунта (raw-даты custom не трогаем). Точка одна на всё семейство
+    # отчётов (/report /export /sheets, advisor, аудит, дайджест) — reports.tz.account_period.
+    period = await account_period(client, customer_id, period, label="rpt_tz")
     # Гетерогенный список: fetch_totals → Metrics, разбивки → Breakdown. gather распаковываем
     # позиционно (totals/prev/breakdowns), статически тип элементов тут не отследить → Awaitable[Any].
     # campaign_id идёт 4-м ПОЗИЦИОННЫМ аргументом в каждый fetch_* (run_ads_read_call форвардит *args);

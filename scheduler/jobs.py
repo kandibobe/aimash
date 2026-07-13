@@ -88,23 +88,12 @@ def _scheduled_accounts() -> list[str]:
 
 
 async def _account_period(client, acct: str, n_days: int):
-    """§8 (P1-H): период последних N дней в ТАЙМЗОНЕ аккаунта (а не host-local) — как интерактивный
-    /mcc (_mcc_period_factory). Раньше плановый дайджест/аномалии считали окно по времени хоста, что
-    для аккаунтов далеко от TZ хоста смещало границы дней. TZ best-effort: сбой/неизвестна → host-дата.
-    READ-ONLY. datetime.now — рантайм-код планировщика (не workflow), допустим."""
-    try:
-        from datetime import datetime as _dt
-        from zoneinfo import ZoneInfo
+    """§8 (P1-H): период последних N дней в ТАЙМЗОНЕ аккаунта (а не host-local) — раньше плановый
+    дайджест/аномалии считали окно по времени хоста, что для аккаунтов далеко от TZ хоста смещало
+    границы дней. Логика одна на весь проект — reports.tz (TZ best-effort: сбой → host-дата)."""
+    from reports.tz import account_period
 
-        from ads.read import account_timezone
-
-        tz = await run_ads_read_call(account_timezone, client, acct, label=f"sched_tz_{acct}")
-        if tz:
-            today = _dt.now(ZoneInfo(tz)).date()
-            return last_n_days(n_days, today=today)
-    except Exception:  # noqa: BLE001 — TZ не прочитан/неизвестна → окно по host-дате (как раньше)
-        pass
-    return last_n_days(n_days)
+    return await account_period(client, acct, last_n_days(n_days), label=f"sched_tz_{acct}")
 
 
 async def _broadcast(bot, text: str, **kw) -> None:
