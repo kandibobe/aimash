@@ -28,6 +28,7 @@ from audit.bidscape import (
 )
 from audit.terms import harvest, waste_ngrams
 from audit.terms import norm as t_norm
+from audit.terms import tokens as t_tokens
 from audit.thresholds import (
     DEFAULT_AUDIT_THRESHOLDS,
     FAMILY_WEIGHT,
@@ -154,6 +155,11 @@ class _Ctx:
     # Ф4: ПОЛНЫЙ список активных ключей — вместе с нулевыми (топ-по-расходу выборка их теряет).
     # Он же «что уже покрыто» для майнинга запросов. None → не читано (майнинг молчит, а не врёт).
     keyword_inventory: list | None = None
+    # Ф6: токены бренда из профиля клиента (§20). Пусто → brand_nonbrand_mixed молчит: угадывать
+    # бренд нечем, а ложно назвать брендовым чужой ключ хуже, чем промолчать.
+    brand_terms: set | None = None
+    # Ф6: счётчики расширений по кампаниям (ситилинки/уточнения/структ. описания). None → не читано.
+    campaign_assets: list | None = None
 
     def target_for(self, campaign_name: str) -> float | None:
         """Цель CPA для кампании: пер-кампанийная стратегия (tCPA) побеждает глобальный /target."""
@@ -2076,6 +2082,202 @@ def check_google_recommendations(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     ]
 
 
+def check_target_cpa_too_low(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф6 (claude-ads G37): цель CPA задана в РАЗЫ ниже фактической — Google не находит конверсий по
+    такой цене и режет показы: кампания формально живёт, а трафика почти не получает. Лечится не
+    бюджетом, а честной целью (поднять до факта и снижать шагами).
+
+    Анти-ложные (GR8): нужны ≥ `tcpa_min_conv` конверсий — на одной случайной «фактический CPA» это
+    шум, а не факт; кампания без цели (нет target_cpa) не проверяется вовсе. Деньгами не меряем:
+    это НЕ потраченное впустую, а НЕ потраченное вообще (at_risk=0)."""
+    if not ctx.bidding_by_name:
+        return []
+    factor = float(thr.get("tcpa_gap_factor", 2.0))
+    need_conv = float(thr.get("tcpa_min_conv", 3.0))
+    cur = getattr(report, "currency", "")
+    out: list[Finding] = []
+    for (name, status), m in _campaign_rows(report):
+        if status != "ENABLED":
+            continue
+        b = ctx.bidding_by_name.get(name)
+        target = float(getattr(b, "target_cpa", 0.0) or 0.0) if b is not None else 0.0
+        conv = float(getattr(m, "conversions", 0.0) or 0.0)
+        cost = float(getattr(m, "cost", 0.0) or 0.0)
+        if target <= 0 or conv < need_conv or cost < thr["min_spend"]:
+            continue
+        actual = cost / conv
+        if actual < target * factor:
+            continue
+        out.append(
+            Finding(
+                check_id="target_cpa_too_low",
+                family="bidding",
+                severity="warning",
+                at_risk=0.0,
+                spend_segment=None,
+                target_campaign=name,
+                suggested_operation=None,  # смена цели — решение владельца денег (rule #3), не кнопка
+                facts={
+                    "campaign": name,
+                    "target_cpa": round(target, 2),
+                    "actual_cpa": round(actual, 2),
+                    "conversions": round(conv, 1),
+                    "currency": cur,
+                },
+                evidence={"cost": round(cost, 2), "conversions": round(conv, 2)},
+            )
+        )
+    return out
+
+
+def check_brand_nonbrand_mixed(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф6 (claude-ads G05): брендовые и небрендовые ключи в ОДНОЙ кампании. Бренд — самый дешёвый и
+    самый конвертящий трафик; в общей кампании он задирает средние показатели (небрендовая часть
+    прячется за его CPA) и делит с ней один бюджет и одну стратегию ставок. Разделять.
+
+    Бренд-токены берём из профиля клиента (§20) — только поле `brand`. Профиля нет → чек МОЛЧИТ:
+    угадывать бренд по домену/названию кампании значит рано или поздно назвать брендовым чужой ключ.
+    Считаем только ключи с показами: спящий брендовый ключ ни с кем бюджет не делит."""
+    inv = ctx.keyword_inventory
+    brands = ctx.brand_terms
+    if not inv or not brands:
+        return []
+    need_other = int(thr.get("brand_mix_min_nonbrand", 3))
+    min_spend = float(thr.get("brand_mix_min_spend", 20.0))
+    cur = getattr(report, "currency", "")
+    per: dict[str, dict] = {}
+    for k in inv:
+        m = getattr(k, "metrics", None)
+        if int(getattr(m, "impressions", 0) or 0) <= 0:
+            continue
+        camp = getattr(k, "campaign", "") or ""
+        text = getattr(k, "keyword", "") or ""
+        if not camp or not text:
+            continue
+        side = "brand" if (set(t_tokens(text)) & brands) else "other"
+        d = per.setdefault(camp, {"brand": [], "other": [], "brand_cost": 0.0, "other_cost": 0.0})
+        d[side].append(text)
+        d[f"{side}_cost"] += float(getattr(m, "cost", 0.0) or 0.0)
+
+    out: list[Finding] = []
+    for camp, d in sorted(per.items(), key=lambda kv: -(kv[1]["brand_cost"] + kv[1]["other_cost"])):
+        cost = d["brand_cost"] + d["other_cost"]
+        if not d["brand"] or len(d["other"]) < need_other or cost < min_spend:
+            continue
+        out.append(
+            Finding(
+                check_id="brand_nonbrand_mixed",
+                family="structure",
+                severity="warning",
+                at_risk=0.0,  # структура: деньги не сгорают, но их эффективность не видна
+                spend_segment=None,
+                target_campaign=camp,
+                suggested_operation=None,
+                facts={
+                    "campaign": camp,
+                    "brand_kw": len(d["brand"]),
+                    "other_kw": len(d["other"]),
+                    "brand_cost": round(d["brand_cost"], 2),
+                    "brand_share": round(100.0 * d["brand_cost"] / cost) if cost else 0,
+                    "examples": sorted(set(d["brand"]))[:3],
+                    "currency": cur,
+                },
+                evidence={"cost": round(cost, 2)},
+            )
+        )
+    return out
+
+
+def _asset_gaps(report, thr: dict, ctx: _Ctx, field_name: str, minimum: int) -> list[tuple]:
+    """Ф6 (G50/G51/G52), общий отбор: SEARCH-кампании с расходом ≥ assets_min_spend, у которых
+    расширений типа field_name меньше minimum. Топ-3 по расходу (анти-спам) → [(строка, расход)].
+
+    Считаем ссылки ТРЁХ уровней (кампания+аккаунт+группа, см. fetch_campaign_assets): ситилинк,
+    привязанный на аккаунт, работает во всех кампаниях. Не SEARCH (Display/Video/PMax) не трогаем —
+    там расширения работают иначе. Данных нет (фетчер упал) → пусто, чеки молчат."""
+    rows = ctx.campaign_assets
+    if not rows:
+        return []
+    spend = {
+        name: float(getattr(m, "cost", 0.0) or 0.0) for (name, _st), m in _campaign_rows(report)
+    }
+    min_spend = float(thr.get("assets_min_spend", 20.0))
+    hits = [
+        (r, spend.get(getattr(r, "campaign", ""), 0.0))
+        for r in rows
+        if getattr(r, "channel_type", "") == "SEARCH"
+        and spend.get(getattr(r, "campaign", ""), 0.0) >= min_spend
+        and int(getattr(r, field_name, 0) or 0) < minimum
+    ]
+    hits.sort(key=lambda rs: -rs[1])
+    return hits[:3]
+
+
+def _asset_facts(report, r, field_name: str, need: int, cost: float) -> dict:
+    return {
+        "campaign": r.campaign,
+        "count": int(getattr(r, field_name, 0) or 0),
+        "need": need,
+        "spend": round(cost, 2),
+        "currency": getattr(report, "currency", ""),
+    }
+
+
+def check_assets_sitelinks_thin(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф6 (claude-ads G50): <4 ситилинков на SEARCH-кампании — объявление занимает меньше места в
+    выдаче и собирает меньше кликов при той же ставке. Петля замкнута: читаем → /campaigns генерирует
+    → применяет confirm-гейт (кнопки в аудите нет: тексты сперва должен увидеть человек)."""
+    need = int(thr.get("assets_min_sitelinks", 4))
+    return [
+        Finding(
+            check_id="assets_sitelinks_thin",
+            family="assets",
+            severity="info",
+            at_risk=0.0,
+            target_campaign=r.campaign,
+            advice_operation="add_sitelinks",
+            facts=_asset_facts(report, r, "sitelinks", need, cost),
+            evidence={"sitelinks": r.sitelinks},
+        )
+        for r, cost in _asset_gaps(report, thr, ctx, "sitelinks", need)
+    ]
+
+
+def check_assets_callouts_thin(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф6 (claude-ads G51): <4 уточнений на SEARCH-кампании (Google показывает до 6)."""
+    need = int(thr.get("assets_min_callouts", 4))
+    return [
+        Finding(
+            check_id="assets_callouts_thin",
+            family="assets",
+            severity="info",
+            at_risk=0.0,
+            target_campaign=r.campaign,
+            advice_operation="add_callouts",
+            facts=_asset_facts(report, r, "callouts", need, cost),
+            evidence={"callouts": r.callouts},
+        )
+        for r, cost in _asset_gaps(report, thr, ctx, "callouts", need)
+    ]
+
+
+def check_assets_no_snippets(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф6 (claude-ads G52): у SEARCH-кампании НЕТ структурированных описаний (порога нет: 0 → флаг)."""
+    return [
+        Finding(
+            check_id="assets_no_snippets",
+            family="assets",
+            severity="info",
+            at_risk=0.0,
+            target_campaign=r.campaign,
+            advice_operation="add_structured_snippets",
+            facts=_asset_facts(report, r, "snippets", 1, cost),
+            evidence={"snippets": r.snippets},
+        )
+        for r, cost in _asset_gaps(report, thr, ctx, "snippets", 1)
+    ]
+
+
 # Порядок проверок = порядок запуска (на рендер не влияет — там сортировка по важности).
 _CHECKS = (
     check_no_conversion_tracking,
@@ -2106,6 +2308,11 @@ _CHECKS = (
     check_zero_impression_keywords,
     check_quality_score,
     check_manual_bid_high_vol,
+    check_target_cpa_too_low,
+    check_brand_nonbrand_mixed,
+    check_assets_sitelinks_thin,
+    check_assets_callouts_thin,
+    check_assets_no_snippets,
     check_bid_below_first_page,
     check_bid_below_top_of_page,
     check_top_is_rank_lost,
@@ -2161,6 +2368,14 @@ CHECK_REGISTRY: dict[str, tuple[str, str]] = {
     "qs_relevance_below": ("rsa", "info"),
     "qs_landing_below": ("rsa", "info"),
     "manual_bid_high_vol": ("bidding", "info"),
+    # Ф6 (G37/G05/G50-52). Задушенная цель CPA и смесь бренд/не-бренд — warning: обе тихо ломают
+    # экономику кампании. Семья «assets» пока весит 0 в FAMILY_WEIGHT (ребаланс — в Ф8): чеки уже
+    # РАБОТАЮТ и видны в карточке, но балл не двигают, пока вес не назначен осознанно.
+    "target_cpa_too_low": ("bidding", "warning"),
+    "brand_nonbrand_mixed": ("structure", "warning"),
+    "assets_sitelinks_thin": ("assets", "info"),
+    "assets_callouts_thin": ("assets", "info"),
+    "assets_no_snippets": ("assets", "info"),
     "bid_below_first_page": ("bidding", "warning"),
     "bid_below_top_of_page": ("bidding", "info"),
     "top_is_rank_lost": ("bidding", "info"),
@@ -2276,6 +2491,8 @@ def build_audit(
     budget_simulations: list | None = None,
     rsa_ads: list | None = None,
     keyword_inventory: list | None = None,
+    brand_terms: set | None = None,
+    campaign_assets: list | None = None,
 ) -> AuditResult:
     """Собрать аудит по УЖЕ прочитанным данным. Чистая функция (без сети/SDK). Опц. живые данные
     (is_rows / conversion_actions / bidding / optimization_score / recommendations) — duck-typed,
@@ -2346,6 +2563,8 @@ def build_audit(
         recommendations=recommendations,
         rsa_ads=rsa_ads,
         keyword_inventory=keyword_inventory,
+        brand_terms=brand_terms,
+        campaign_assets=campaign_assets,
     )
 
     # N1.3 (ревью): IS-строки прочитаны, но НИ ОДНА не прошла tolerance-гейт (proto3-нули) —

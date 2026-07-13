@@ -369,6 +369,23 @@ class ClientProfileStore:
                     terms.add(tok)
         return terms
 
+    async def brand_tokens(self, customer_id: str) -> set[str]:
+        """Ф6 (G05): токены ТОЛЬКО бренда — без услуг/товаров. Отдельный метод, а не фильтр поверх
+        protected_negative_terms: там услуги нужны (их тоже нельзя минусовать), а здесь они всё бы
+        сломали — «ремонт» из услуги пометил бы брендовым каждый небрендовый ключ.
+        Нет профиля/сбой/пустой бренд → пустой набор ⇒ чек молчит (нет данных ≠ «всё чисто»)."""
+        try:
+            prof = await self.get_by_account(customer_id)
+        except Exception:  # noqa: BLE001 — сигнал опционален, аудит не роняем
+            return set()
+        if not prof:
+            return set()
+        return {
+            tok
+            for tok in re.split(r"[^0-9a-zа-яё]+", str(prof.get("brand") or "").casefold())
+            if len(tok) >= 3
+        }
+
     # ── писатели (вызываются из clients.execute за confirm-гейтом, и из краулера auto-save) ──
     async def apply_upsert(
         self,

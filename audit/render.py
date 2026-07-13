@@ -309,6 +309,33 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
         if lang == "en":
             return f"«{camp}»: {fa.get('conversions', 0)} conversions on manual bidding ({fa.get('strategy_type', '')}) — Smart Bidding would optimize better at this volume."
         return f"«{camp}»: {fa.get('conversions', 0)} конверсий на ручной стратегии ({fa.get('strategy_type', '')}) — при таком объёме Smart Bidding отработает лучше."
+    if f.check_id == "target_cpa_too_low":
+        cur_ = fa.get("currency") or cur
+        tgt = _money(fa.get("target_cpa", 0), cur_)
+        act = _money(fa.get("actual_cpa", 0), cur_)
+        if lang == "en":
+            return f"«{camp}»: target CPA {tgt} is far below the actual {act} ({fa.get('conversions', 0)} conversions) — Google cannot buy conversions at that price and throttles delivery. Raise the target close to the actual and lower it in steps."
+        return f"«{camp}»: цель CPA {tgt} много ниже фактического {act} ({fa.get('conversions', 0)} конверсий) — по такой цене Google конверсий не находит и режет показы. Подними цель до факта и снижай шагами."
+    if f.check_id == "brand_nonbrand_mixed":
+        ex = ", ".join(f"«{k}»" for k in (fa.get("examples") or [])[:2])
+        if lang == "en":
+            return f"«{camp}»: brand and non-brand keywords share one campaign ({fa.get('brand_kw', 0)} brand: {ex}; {fa.get('other_kw', 0)} non-brand) — brand takes {fa.get('brand_share', 0)}% of the spend and flatters the average CPA, hiding how the non-brand part really performs. Split them into separate campaigns."
+        return f"«{camp}»: бренд и не-бренд в одной кампании ({fa.get('brand_kw', 0)} брендовых: {ex}; {fa.get('other_kw', 0)} остальных) — бренд забирает {fa.get('brand_share', 0)}% расхода и вытягивает средний CPA, за ним не видно, как работает небрендовая часть. Раздели на две кампании."
+    if f.check_id in ("assets_sitelinks_thin", "assets_callouts_thin", "assets_no_snippets"):
+        n, need = fa.get("count", 0), fa.get("need", 0)
+        what_en = {
+            "assets_sitelinks_thin": ("sitelinks", f"{n} of {need}+"),
+            "assets_callouts_thin": ("callouts", f"{n} of {need}+"),
+            "assets_no_snippets": ("structured snippets", "none"),
+        }[f.check_id]
+        what_ru = {
+            "assets_sitelinks_thin": ("ситилинков", f"{n} из {need}+"),
+            "assets_callouts_thin": ("уточнений", f"{n} из {need}+"),
+            "assets_no_snippets": ("структурированных описаний", "нет"),
+        }[f.check_id]
+        if lang == "en":
+            return f"«{camp}»: {what_en[1]} {what_en[0]} — the ad takes less space in the results and gets a lower CTR at the same bid. Add them: /campaigns → the campaign → Extensions."
+        return f"«{camp}»: {what_ru[0]} — {what_ru[1]}. Объявление занимает меньше места в выдаче и собирает меньше кликов при той же ставке. Добавить: /campaigns → карточка кампании → Расширения."
     if f.check_id in ("bid_below_first_page", "bid_below_top_of_page"):
         # Ставка/цель/на сколько поднять + оговорка правила #3 (бот сам ставку не тронет).
         kw = fa.get("keyword", "")

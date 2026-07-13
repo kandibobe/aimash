@@ -929,6 +929,13 @@ def test_weight_vector_snapshot_pins_full_model():
         "comp_min_impressions": 500.0,  # Ф5а: конкурентное давление
         "comp_is_max": 0.60,
         "comp_rank_min": 0.20,
+        "tcpa_gap_factor": 2.0,  # Ф6: G37 — цель CPA вдвое ниже фактической …
+        "tcpa_min_conv": 3.0,  # … и конверсий достаточно, чтобы «факт» был фактом
+        "brand_mix_min_nonbrand": 3,  # G05: бренд + не-бренд в одной кампании
+        "brand_mix_min_spend": 20.0,
+        "assets_min_sitelinks": 4,  # G50/G51/G52: расширения
+        "assets_min_callouts": 4,
+        "assets_min_spend": 20.0,
     }
     # Ф3: порог релевантности НЕ отдельное число аудита — он ОДИН с генератором текстов.
     assert DEFAULT_AUDIT_THRESHOLDS["rsa_kw_coverage_min"] == MIN_KEYWORD_COVERAGE

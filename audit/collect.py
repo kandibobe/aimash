@@ -37,6 +37,7 @@ async def gather_audit(
         fetch_bid_landscape,
         fetch_bid_simulations,
         fetch_budget_simulations,
+        fetch_campaign_assets,
         fetch_conversion_health,
         fetch_geo_waste,
         fetch_impression_share,
@@ -82,6 +83,7 @@ async def gather_audit(
         budget_sims,
         rsa_ads,
         kw_inventory,
+        campaign_assets,
     ) = await asyncio.gather(
         build_account_report_async(client, cid, period, with_comparison=False, currency=currency),
         _safe(fetch_impression_share, client, cid, period, label="audit_is"),
@@ -102,7 +104,17 @@ async def gather_audit(
         _safe(fetch_budget_simulations, client, cid, label="audit_budget_sims"),
         _safe(fetch_rsa_assets, client, cid, period, label="audit_rsa_assets"),
         _safe(fetch_keyword_inventory, client, cid, period, label="audit_keyword_inventory"),
+        _safe(fetch_campaign_assets, client, cid, label="audit_campaign_assets"),
     )
+
+    # Ф6 (G05): бренд-токены из профиля клиента (§20) — локальная БД, не Google Ads (в gather выше
+    # не идут: там семафор Ads-чтений). Нет профиля/сбой → пустой набор ⇒ чек молчит, а не гадает.
+    try:
+        from clients.store import ClientProfileStore
+
+        brand_terms = await ClientProfileStore().brand_tokens(cid)
+    except Exception:  # noqa: BLE001 — профиль опционален, аудит не роняем
+        brand_terms = set()
 
     # N1.3: какие best-effort сигналы НЕ получены (сбой → None). Пустой список ([]) — НЕ пробел:
     # чтение прошло, данных просто нет. Рендер честно покажет «недостаточно данных» вместо
@@ -126,6 +138,7 @@ async def gather_audit(
             ("bid_landscape", bid_landscape),
             ("rsa_ads", rsa_ads),
             ("keyword_inventory", kw_inventory),
+            ("campaign_assets", campaign_assets),
         )
         if val is None
     ]
@@ -156,6 +169,8 @@ async def gather_audit(
         budget_simulations=budget_sims,
         rsa_ads=rsa_ads,
         keyword_inventory=kw_inventory,
+        brand_terms=brand_terms,
+        campaign_assets=campaign_assets,
     )
 
 
