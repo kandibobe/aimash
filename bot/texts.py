@@ -864,9 +864,19 @@ def _bidding_human(value: str, en: bool) -> str:
     return eng if en else ru
 
 
+def _mode_sign(mode: str | None) -> str:
+    """Знак изменения на карточке: направление несёт mode (value всегда >0). «−» (U+2212), не дефис:
+    в «100 → 80 (-20%)» дефис визуально теряется, а перепутать направление на денежной карточке —
+    ровно тот класс ошибки, из-за которого decrease_* и появился."""
+    return "−" if str(mode or "").startswith("decrease") else "+"
+
+
 def _money_summary(label: str, params: dict, lang: str | None = None) -> str:
     c = params.get("campaign", "")
     mode = params.get("mode")
+    sign = _mode_sign(mode)
+    pct = str(mode or "").endswith("_by_percent")  # increase/decrease_by_percent
+    amt = str(mode or "").endswith("_by_amount")  # increase/decrease_by_amount
     # currency=None (не указана → валюта аккаунта) → код валюты не печатаем (числа уже в валюте
     # аккаунта; сверка валюты — на предпросмотре). 'percent' → «%». Неизвестное → без кода.
     cur = _CURRENCY_HUMAN.get(params.get("currency") or "", "")
@@ -881,17 +891,17 @@ def _money_summary(label: str, params: dict, lang: str | None = None) -> str:
             acc = b.get("currency")  # валюта АККАУНТА из снимка (не params: там валюта запроса)
             before_s = _fmt_micros(b["before_micros"], acc)
             after_s = _fmt_micros(b.get("after_micros"), acc)
-            if mode == "increase_by_percent":
-                tail = f" (+{v}%)"
-            elif mode == "increase_by_amount":
-                tail = f" (+{f'{v} {cur}'.strip()})"
+            if pct:
+                tail = f" ({sign}{v}%)"
+            elif amt:
+                tail = f" ({sign}{f'{v} {cur}'.strip()})"
             else:
                 tail = ""
             return f"Campaign “{c}” — {label}: {before_s} → {after_s}{tail}".rstrip()
-        if mode == "increase_by_percent":
-            return f"Campaign “{c}” — {label}: +{v}%"
-        if mode == "increase_by_amount":
-            return f"Campaign “{c}” — {label}: +{v} {cur}".rstrip()
+        if pct:
+            return f"Campaign “{c}” — {label}: {sign}{v}%"
+        if amt:
+            return f"Campaign “{c}” — {label}: {sign}{v} {cur}".rstrip()
         if mode == "set_to":
             return f"Campaign “{c}” — {label} → {v} {cur}".rstrip()
         return f"Campaign “{c}” — {label}: {v} {cur}".rstrip()
@@ -900,18 +910,18 @@ def _money_summary(label: str, params: dict, lang: str | None = None) -> str:
         acc = b.get("currency")
         before_s = _fmt_micros(b["before_micros"], acc)
         after_s = _fmt_micros(b.get("after_micros"), acc)
-        if mode == "increase_by_percent":
-            tail = f" (+{v}%)"
-        elif mode == "increase_by_amount":
-            tail = f" (+{f'{v} {cur}'.strip()})"  # cur='' (валюта аккаунта) → «(+10)», без лишнего пробела
+        if pct:
+            tail = f" ({sign}{v}%)"
+        elif amt:
+            tail = f" ({sign}{f'{v} {cur}'.strip()})"  # cur='' (валюта аккаунта) → «(+10)», без лишнего пробела
         else:
             tail = ""
         return f"Кампания «{c}» — {label}: {before_s} → {after_s}{tail}".rstrip()
     # fallback без «было» (чтение не удалось / старый черновик)
-    if mode == "increase_by_percent":
-        return f"Кампания «{c}» — {label}: +{v}%"
-    if mode == "increase_by_amount":
-        return f"Кампания «{c}» — {label}: +{v} {cur}".rstrip()
+    if pct:
+        return f"Кампания «{c}» — {label}: {sign}{v}%"
+    if amt:
+        return f"Кампания «{c}» — {label}: {sign}{v} {cur}".rstrip()
     if mode == "set_to":
         return f"Кампания «{c}» — {label} → {v} {cur}".rstrip()
     return f"Кампания «{c}» — {label}: {v} {cur}".rstrip()
@@ -920,6 +930,8 @@ def _money_summary(label: str, params: dict, lang: str | None = None) -> str:
 def _bid_summary(params: dict, lang: str | None = None) -> str:
     c = params.get("campaign", "")
     mode = params.get("mode")
+    sign = _mode_sign(mode)
+    pct = str(mode or "").endswith("_by_percent")
     try:
         v = f"{float(params.get('value')):g}"
     except (TypeError, ValueError):
@@ -931,8 +943,10 @@ def _bid_summary(params: dict, lang: str | None = None) -> str:
             acc = b.get("currency")
             rng_b = _micros_range(b["before_micros"], acc)
             rng_a = _micros_range(b.get("after_micros") or [], acc)
-            if mode == "increase_by_percent":
-                return f"Campaign “{c}” — CPC bid: +{v}% (current {rng_b} → {rng_a}; groups: {n})"
+            if pct:
+                return (
+                    f"Campaign “{c}” — CPC bid: {sign}{v}% (current {rng_b} → {rng_a}; groups: {n})"
+                )
             return f"Campaign “{c}” — CPC bid: {rng_b} → {rng_a} (groups: {n})"
         return _money_summary("CPC bid", params, lang)
     if b and b.get("kind") == "bid" and b.get("before_micros"):
@@ -940,8 +954,10 @@ def _bid_summary(params: dict, lang: str | None = None) -> str:
         acc = b.get("currency")
         rng_b = _micros_range(b["before_micros"], acc)
         rng_a = _micros_range(b.get("after_micros") or [], acc)
-        if mode == "increase_by_percent":
-            return f"Кампания «{c}» — ставка CPC: +{v}% (текущие {rng_b} → {rng_a}; групп: {n})"
+        if pct:
+            return (
+                f"Кампания «{c}» — ставка CPC: {sign}{v}% (текущие {rng_b} → {rng_a}; групп: {n})"
+            )
         return f"Кампания «{c}» — ставка CPC: {rng_b} → {rng_a} (групп: {n})"
     return _money_summary("ставка CPC", params, lang)
 

@@ -151,12 +151,16 @@ READ_TOOLS = {"get_stats", "generate_rsa", "keyword_research", "clone_campaign",
 
 
 # ── Pydantic-схемы (валидация в коде, не на доверии к модели) ───────────────────
+ABSOLUTE_MONEY_MODES = ("set_to", "increase_by_amount", "decrease_by_amount")
+
+
 def _assert_mode_currency(mode: str | None, currency: str | None) -> None:
-    """Связка mode↔currency (golden rule #4): абсолютная сумма (set_to/increase_by_amount) НЕ может
-    нести currency='percent' — иначе процент умножился бы на 1e6 как абсолют (галлюцинация модели
-    вида currency='percent' + mode='set_to'). Сверка валюты с валютой аккаунта (без FX) — на пути
-    предпросмотра (ads.resolve.currency_mismatch), т.к. требует чтения аккаунта."""
-    if mode in ("set_to", "increase_by_amount") and currency == "percent":
+    """Связка mode↔currency (golden rule #4): абсолютная сумма (set_to/increase_by_amount/
+    decrease_by_amount) НЕ может нести currency='percent' — иначе процент умножился бы на 1e6 как
+    абсолют (галлюцинация модели вида currency='percent' + mode='set_to'). Сверка валюты с валютой
+    аккаунта (без FX) — на пути предпросмотра (ads.resolve.currency_mismatch), т.к. требует чтения
+    аккаунта."""
+    if mode in ABSOLUTE_MONEY_MODES and currency == "percent":
         raise ValueError(
             "абсолютная сумма не может иметь currency='percent' — укажи валюту аккаунта "
             "или опусти currency (тогда сумма трактуется в валюте аккаунта)"
@@ -165,17 +169,34 @@ def _assert_mode_currency(mode: str | None, currency: str | None) -> None:
 
 def _value_sane(v: float, mode: str | None) -> float:
     """Диапазон суммы считает КОД (golden rule #4): процент ≤1000%, абсолютная сумма ≤MAX_AMOUNT.
-    Без верхней границы set_to/increase_by_amount пропустили бы галлюцинацию вида 999_999_999."""
+    Без верхней границы set_to/increase_by_amount пропустили бы галлюцинацию вида 999_999_999.
+
+    value ВСЕГДА положительное (Field(gt=0)); направление несёт mode. Уменьшение на ≥100% —
+    не «обнуление», а бессмыслица (ноль/минус): бюджет и ставка не могут быть нулевыми, обнулять
+    надо паузой кампании, а задать новое значение — set_to."""
     if mode == "increase_by_percent" and v > 1000:
         raise ValueError("процент изменения подозрительно большой (>1000%)")
-    if mode in ("set_to", "increase_by_amount") and v > MAX_AMOUNT:
+    if mode == "decrease_by_percent" and v >= 100:
+        raise ValueError(
+            "уменьшить на 100% и более нельзя (значение стало бы нулевым): задай новое значение "
+            "(«поставь бюджет N») или поставь кампанию на паузу"
+        )
+    if mode in ABSOLUTE_MONEY_MODES and v > MAX_AMOUNT:
         raise ValueError(f"сумма подозрительно большая (>{MAX_AMOUNT}) — проверь команду")
     return v
 
 
 class UpdateBudget(BaseModel):
     campaign: str
-    mode: Literal["increase_by_percent", "increase_by_amount", "set_to"]
+    # §5: направление несёт mode, а НЕ знак value (value всегда >0). Без decrease_* модель на «снизь
+    # бюджет на 20%» выбирала increase_by_percent → карточка «100 → 120 (+20%)», т.е. ровно наоборот.
+    mode: Literal[
+        "increase_by_percent",
+        "increase_by_amount",
+        "decrease_by_percent",
+        "decrease_by_amount",
+        "set_to",
+    ]
     value: float = Field(gt=0)
     # None = «в валюте аккаунта» (модель указывает валюту ТОЛЬКО если её явно назвал пользователь).
     # Сверка с реальной валютой аккаунта (без FX) — в ads.resolve.currency_mismatch на предпросмотре.
@@ -196,7 +217,7 @@ class UpdateBid(BaseModel):
     # campaign обязателен: ставка живёт на уровне ad group, нужно знать какой кампании.
     # Отсутствие кампании => ValidationError в loop ДО кнопок (а не raise после «да»).
     campaign: str
-    mode: Literal["increase_by_percent", "set_to"]
+    mode: Literal["increase_by_percent", "decrease_by_percent", "set_to"]
     value: float = Field(gt=0)
     currency: Currency | None = None
 
@@ -1160,11 +1181,20 @@ def _tool(name: str, description: str, model: type[BaseModel]) -> dict:
 
 
 TOOLS: list[dict] = [
-    _tool("update_budget", "Изменить дневной бюджет кампании.", UpdateBudget),
+    _tool(
+        "update_budget",
+        "Изменить дневной бюджет кампании. Направление задаёт mode, а не знак value: "
+        "«подними на 20%» → increase_by_percent; «снизь на 20%» → decrease_by_percent; "
+        "«урежь на 50 (сумма)» → decrease_by_amount; «поставь 100» → set_to. "
+        "value ВСЕГДА положительное число.",
+        UpdateBudget,
+    ),
     _tool(
         "update_bid",
         "Изменить ставку CPC на уровне групп объявлений указанной кампании "
-        "(требуется ручная стратегия Manual CPC). Всегда указывай campaign.",
+        "(требуется ручная стратегия Manual CPC). Всегда указывай campaign. Направление задаёт mode: "
+        "«снизь ставку на 15%» → decrease_by_percent, «поставь ставку 0.5» → set_to. "
+        "value ВСЕГДА положительное число.",
         UpdateBid,
     ),
     _tool(

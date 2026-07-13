@@ -202,6 +202,11 @@ async def read_before(operation: str, params: dict, customer_id: str | None = No
             if info is None:
                 return None
             return {"kind": "bidding", "before_strategy": info["strategy"]}
+    except resolve.DecreaseBelowZero:
+        # НЕ сбой чтения, а невыполнимая команда («снизь бюджет на 200» при бюджете 100). Пробрасываем:
+        # вызывающий откажет ДО кнопок ✅. Проглотить её здесь = показать карточку без «было» и упасть
+        # уже ПОСЛЕ подтверждения (claim сожжён, операция не применена).
+        raise
     except Exception:  # сеть/доступ/SDK — не блокируем показ черновика, просто без «было»
         return None
     return None

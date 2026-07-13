@@ -53,7 +53,12 @@ from ads.assets import (
 )
 from ads.client import DRAFT_ACCOUNT_ID, ensure_allowed, ensure_read_allowed
 from ads.mutations import GDN_BUSINESS_NAME_MAX, VIDEO_DESCRIPTION_MAX
-from ads.resolve import currency_mismatch, detect_currency_token, find_ad_groups
+from ads.resolve import (
+    DecreaseBelowZero,
+    currency_mismatch,
+    detect_currency_token,
+    find_ad_groups,
+)
 from ads.service import execute_confirmed, read_before
 from clients import crawl_jobs, crawler
 from clients.execute import MEMORY_OPERATIONS, execute_confirmed_memory
@@ -1516,7 +1521,13 @@ async def _present_proposal(
     # §5: читаем ТЕКУЩЕЕ значение (бюджет/ставку/статус) ДО показа → реальный diff «было → станет»
     # и снимок-база для оптимистичной сверки при исполнении (TOCTOU). read_before fail-safe (None).
     async with ux.typing_action(message):
-        before = await read_before(operation, params, customer_id=customer_id)
+        try:
+            before = await read_before(operation, params, customer_id=customer_id)
+        except DecreaseBelowZero as e:
+            # §5: «снизь бюджет на 200» при бюджете 100 — невыполнимо. Отказ ДО кнопок; текст
+            # сформирован КОДОМ (не SDK/не модель) → редактировать нечего.
+            await message.answer("⚠️ " + str(e))
+            return
         # P0 (golden rule #4): денежная команда в валюте ≠ валюте аккаунта → отказ с уточнением ДО
         # показа кнопок (FX не делаем; иначе «было→станет» соврал бы про сумму). Валюта — best-effort:
         # неизвестна (нет клиента/сбой read) ⇒ не блокируем (и чужую валюту на показе не печатаем).

@@ -253,18 +253,39 @@ def detect_currency_token(text: str) -> bool:
     return bool(_CURRENCY_TOKEN_RE.search(text or ""))
 
 
-def currency_mismatch(operation: str, params: dict, account_currency: str) -> str | None:
-    """Текст-уточнение, если абсолютная денежная команда (set_to/increase_by_amount) задана в валюте,
-    отличной от валюты аккаунта. FX НЕ делаем — суммы считаются в валюте аккаунта (golden rule #4:
-    «было→станет» обязан быть правдивым). None — расхождения нет / неприменимо.
+PERCENT_MONEY_MODES = ("increase_by_percent", "decrease_by_percent")
 
-    - Только update_budget/update_bid; процентный режим — без валюты (None).
+
+class DecreaseBelowZero(ValueError):
+    """«Снизь бюджет на 200» при бюджете 100: результат ≤ 0 — не «обнуление», а невыполнимая команда.
+    Отдельный тип, чтобы путь предпросмотра (ads.service.read_before) отличил её от сбоя чтения и
+    ОТКАЗАЛ пользователю ДО кнопок ✅ (иначе падение случилось бы после подтверждения — claim сожжён,
+    операция не применена). Текст сообщения формирует КОД (golden rule #4), не модель."""
+
+    def __init__(self, mode: str, value: float, current_micros: int) -> None:
+        self.mode, self.value, self.current_micros = mode, float(value), int(current_micros)
+        cur = f"{int(current_micros) / 1_000_000:g}"
+        how = f"на {value:g}%" if mode == "decrease_by_percent" else f"на {value:g}"
+        super().__init__(
+            f"Текущее значение — {cur} (в валюте аккаунта). Уменьшить {how} нельзя: получился бы "
+            "ноль или минус. Уменьши на меньшую величину, задай новое значение («поставь бюджет N») "
+            "или останови кампанию («пауза»)."
+        )
+
+
+def currency_mismatch(operation: str, params: dict, account_currency: str) -> str | None:
+    """Текст-уточнение, если абсолютная денежная команда (set_to/increase_by_amount/
+    decrease_by_amount) задана в валюте, отличной от валюты аккаунта. FX НЕ делаем — суммы считаются
+    в валюте аккаунта (golden rule #4: «было→станет» обязан быть правдивым). None — расхождения нет /
+    неприменимо.
+
+    - Только update_budget/update_bid; процентные режимы (increase/decrease_by_percent) — без валюты.
     - currency не указана или 'percent' → трактуем как валюту аккаунта (расхождения нет).
     - валюта аккаунта неизвестна (read не удался, '') → не блокируем (деградация, не показываем чужую).
     """
     if operation not in ("update_budget", "update_bid"):
         return None
-    if params.get("mode") == "increase_by_percent":
+    if params.get("mode") in PERCENT_MONEY_MODES:
         return None
     claimed = params.get("currency")
     if not claimed or claimed == "percent":
@@ -295,13 +316,22 @@ def compute_new_micros(
     (execute_confirmed), поэтому карточка «было→станет» == реально применённому (как в create-путях).
 
     `currency` обязателен (может быть None = «не прочитали»): единица зависит от валюты (UGX/JPY —
-    1 000 000, USD/EUR — 10 000), и валютно-слепое округление отвергалось API уже ПОСЛЕ «да»."""
+    1 000 000, USD/EUR — 10 000), и валютно-слепое округление отвергалось API уже ПОСЛЕ «да».
+
+    Направление несёт mode, value всегда > 0 (схема). decrease_* с результатом ≤ 0 →
+    DecreaseBelowZero: команду НЕ выполняем и НЕ «клампим к минимуму» — 100 → 0.01 никто не просил."""
     if mode == "increase_by_percent":
         raw = int(round(current_micros * (1 + value / 100)))
+    elif mode == "decrease_by_percent":
+        raw = int(round(current_micros * (1 - value / 100)))
     elif mode == "increase_by_amount":
         raw = int(round(current_micros + value * 1_000_000))
+    elif mode == "decrease_by_amount":
+        raw = int(round(current_micros - value * 1_000_000))
     elif mode == "set_to":
         raw = int(round(value * 1_000_000))
     else:
         raise ValueError(f"неизвестный mode бюджета: {mode}")
+    if raw <= 0:  # только decrease_*: «снизь бюджет на 200» при бюджете 100 — не 0, а бессмыслица
+        raise DecreaseBelowZero(mode, value, int(current_micros))
     return round_micros(raw, currency=currency)

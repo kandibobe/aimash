@@ -24,7 +24,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from openai import AsyncOpenAI  # noqa: E402
+from pydantic import ValidationError  # noqa: E402
 
+from agent.loop import SYSTEM  # noqa: E402 — боевой системный промпт, не копия
+from agent.tools.schemas import SCHEMAS, TOOLS  # noqa: E402 — боевые схемы тулов, не копии
 from core.config import settings  # noqa: E402
 
 # Кандидаты с tool use (Hermes выбыл — нет function calling на OpenRouter). Сравниваем точность
@@ -37,140 +40,32 @@ CANDIDATES = [
     "anthropic/claude-sonnet-4.6",
 ]
 
-SYSTEM = (
-    "Ты — исполнитель команд для Google Ads. По команде пользователя вызови ПОДХОДЯЩУЮ функцию "
-    "с точными аргументами. Различай 'на N%' (изменить НА процент) и 'до N' (установить В значение). "
-    "Если команда неоднозначна (не указана кампания, сумма или направление) — вызови ask_clarification, "
-    "НЕ угадывай. Ничего не выполняй, только предложи вызов функции."
-)
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "update_budget",
-            "description": "Изменить дневной бюджет кампании.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "campaign": {"type": "string"},
-                    "mode": {
-                        "type": "string",
-                        "enum": ["increase_by_percent", "increase_by_amount", "set_to"],
-                    },
-                    "value": {"type": "number"},
-                    "currency": {"type": "string", "enum": ["USD", "UAH", "EUR", "percent"]},
-                },
-                "required": ["campaign", "mode", "value"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "update_bid",
-            "description": "Изменить ставку.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "campaign": {"type": "string"},
-                    "mode": {"type": "string", "enum": ["increase_by_percent", "set_to"]},
-                    "value": {"type": "number"},
-                    "currency": {"type": "string", "enum": ["USD", "UAH", "EUR", "percent"]},
-                },
-                "required": ["mode", "value"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "add_keywords",
-            "description": "Добавить ключевые слова с типом соответствия.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "campaign": {"type": "string"},
-                    "keywords": {"type": "array", "items": {"type": "string"}},
-                    "match_type": {"type": "string", "enum": ["broad", "phrase", "exact"]},
-                },
-                "required": ["keywords", "match_type"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "add_negative_keywords",
-            "description": "Добавить минус-слова.",
-            "parameters": {
-                "type": "object",
-                "properties": {"keywords": {"type": "array", "items": {"type": "string"}}},
-                "required": ["keywords"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "pause_campaign",
-            "description": "Поставить кампанию на паузу.",
-            "parameters": {
-                "type": "object",
-                "properties": {"campaign": {"type": "string"}},
-                "required": ["campaign"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_geo_proximity",
-            "description": "Таргетинг по точке с радиусом.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "campaign": {"type": "string"},
-                    "location": {"type": "string"},
-                    "radius_km": {"type": "number"},
-                },
-                "required": ["location", "radius_km"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_stats",
-            "description": "Прочитать статистику (read-only).",
-            "parameters": {
-                "type": "object",
-                "properties": {"account": {"type": "string"}, "period_days": {"type": "integer"}},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "ask_clarification",
-            "description": "Команда неоднозначна — переспросить пользователя, НЕ угадывать.",
-            "parameters": {
-                "type": "object",
-                "properties": {"question": {"type": "string"}},
-                "required": ["question"],
-            },
-        },
-    },
-]
+# SYSTEM и TOOLS — БОЕВЫЕ (импорт выше), а не копии. Раньше скрипт нёс свои: их enum режимов
+# отстал от `agent/tools/schemas.py` (не знал decrease_*), и A/B мерил контракт, которого нет в
+# проде. Смысл теста — «пройдёт ли модель ДЕНЕЖНЫЙ путь», значит и промпт, и схемы должны быть те же.
 
 # (команда, ожидаемая функция, проверка аргументов, комментарий)
+# Аргументы приходят УЖЕ прогнанные через боевую Pydantic-схему (см. validate_args): проверяем то,
+# что реально увидел бы confirm-гейт, а не сырой JSON модели. Кампания указана везде, где схема её
+# требует, — иначе правильный ответ модели был бы ask_clarification, и сценарий мерил бы не то.
 SCENARIOS = [
     (
         "повысь бюджет кампании Лето на 20%",
         "update_budget",
         lambda a: a.get("mode") == "increase_by_percent" and a.get("value") == 20,
         "на 20% = increase_by_percent, не set_to",
+    ),
+    (
+        "снизь бюджет кампании Лето на 20%",
+        "update_budget",
+        lambda a: a.get("mode") == "decrease_by_percent" and a.get("value") == 20,
+        "§5: «снизь на 20%» = decrease_by_percent, value>0 (не increase, не -20)",
+    ),
+    (
+        "урежь бюджет кампании Зима на 50 в день",
+        "update_budget",
+        lambda a: a.get("mode") == "decrease_by_amount" and a.get("value") == 50,
+        "§5: «урежь на 50» = decrease_by_amount",
     ),
     (
         "смени бюджет кампании X на $50 в день",
@@ -181,19 +76,25 @@ SCENARIOS = [
         "$50 в день, валюта USD",
     ),
     (
-        "подними ставку до 10 грн",
+        "подними ставку до 10 грн в кампании Лето",
         "update_bid",
         lambda a: a.get("mode") == "set_to" and a.get("value") == 10 and a.get("currency") == "UAH",
         "'до 10' = set_to, грн = UAH",
     ),
     (
-        "добавь ключи: купить телефон, цена телефона — фразовое соответствие",
+        "сбрось ставку на 15% в кампании Осень",
+        "update_bid",
+        lambda a: a.get("mode") == "decrease_by_percent" and a.get("value") == 15,
+        "§5: «сбрось на 15%» = decrease_by_percent",
+    ),
+    (
+        "в кампанию Лето добавь ключи: купить телефон, цена телефона — фразовое соответствие",
         "add_keywords",
         lambda a: a.get("match_type") == "phrase" and len(a.get("keywords", [])) == 2,
         "фразовое = phrase, 2 ключа",
     ),
     (
-        "добавь точное соответствие: ремонт обуви киев",
+        "в кампанию Лето добавь точное соответствие: ремонт обуви киев",
         "add_keywords",
         lambda a: a.get("match_type") == "exact",
         "точное = exact",
@@ -205,15 +106,15 @@ SCENARIOS = [
         "пауза кампании",
     ),
     (
-        "добавь минус-слово бесплатно",
+        "добавь минус-слово бесплатно в кампанию Зима",
         "add_negative_keywords",
         lambda a: any("бесплатно" in k for k in a.get("keywords", [])),
         "минус-слово",
     ),
     (
-        "измени ГЕО на Киев + радиус 10 км",
+        "в кампании Лето измени ГЕО на Киев + радиус 10 км",
         "set_geo_proximity",
-        lambda a: a.get("radius_km") == 10 and "иев" in (a.get("location") or "").lower(),
+        lambda a: a.get("radius_km") == 10 and "иев" in (a.get("city_name") or "").lower(),
         "радиус 10 км, Киев",
     ),
     (
@@ -260,7 +161,21 @@ def client() -> AsyncOpenAI:
     return AsyncOpenAI(api_key=key, base_url=settings.openrouter_base_url)
 
 
-async def run_scenario(cli: AsyncOpenAI, model: str, command: str) -> tuple[str, dict]:
+def validate_args(fn: str, args: dict) -> tuple[dict, str | None]:
+    """Прогоняем аргументы через БОЕВУЮ Pydantic-схему — в проде их видит именно она (agent/loop.py).
+    Модель, выдавшая value=-20 или currency='percent' при set_to, до кнопок ✅ не доходит, значит и
+    в A/B это провал сценария, а не «почти правильно». Возвращаем (нормализованные args, ошибка)."""
+    schema = SCHEMAS.get(fn)
+    if schema is None:  # ask_clarification и прочие без Pydantic-схемы
+        return args, None
+    try:
+        return schema(**args).model_dump(), None
+    except ValidationError as e:
+        err = e.errors()[0]
+        return args, f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}"
+
+
+async def run_scenario(cli: AsyncOpenAI, model: str, command: str) -> tuple[str, dict, str | None]:
     resp = await cli.chat.completions.create(
         model=model,
         messages=[{"role": "system", "content": SYSTEM}, {"role": "user", "content": command}],
@@ -269,13 +184,14 @@ async def run_scenario(cli: AsyncOpenAI, model: str, command: str) -> tuple[str,
     )
     msg = resp.choices[0].message
     if not msg.tool_calls:
-        return "(no tool call)", {}
+        return "(no tool call)", {}, None
     call = msg.tool_calls[0]
     try:
         args = json.loads(call.function.arguments or "{}")
     except json.JSONDecodeError:
         args = {}
-    return call.function.name, args
+    args, err = validate_args(call.function.name, args)
+    return call.function.name, args, err
 
 
 async def run_copy(cli: AsyncOpenAI, model: str) -> dict:
@@ -329,14 +245,15 @@ async def test_model(cli: AsyncOpenAI, model: str) -> dict:
     fc_pass = 0
     for command, expected_fn, check, note in SCENARIOS:
         try:
-            fn, args = await run_scenario(cli, model, command)
+            fn, args, err = await run_scenario(cli, model, command)
         except Exception as e:  # модель/сеть
             print(f"  ✗ ERROR  «{command}» → {type(e).__name__}: {e}")
             continue
-        ok = fn == expected_fn and (check(args) if fn == expected_fn else False)
+        ok = fn == expected_fn and err is None and check(args)
         fc_pass += int(ok)
         mark = "✓" if ok else "✗"
-        print(f"  {mark} «{command}» → {fn} {args}  [{note}]")
+        why = f"  ⛔ схема отвергла: {err}" if err else ""
+        print(f"  {mark} «{command}» → {fn} {args}{why}  [{note}]")
 
     # Скорость: TTFT парс-запроса (то, что ждёт пользователь). Отдельная ось от точности/цены.
     ttft = await measure_ttft(cli, model, SCENARIOS[0][0])
