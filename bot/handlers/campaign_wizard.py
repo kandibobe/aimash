@@ -747,8 +747,10 @@ async def cc_kw_generate_run(
         from reports.sheets import SHARE_OFF, is_shared, publish_keywords_to_sheets
 
         title = f"kw-{(topic or 'campaign')[:40]}"
+        # §9: ставка «Top-of-page bid» — в валюте АККАУНТА; без кода валюты её читают как доллары.
+        cur = await bm._cc_account_currency(draft.preview_customer_id or draft.customer_id)
         url, sid, share = await bm.asyncio.to_thread(
-            publish_keywords_to_sheets, ideas, relevance, title=title
+            publish_keywords_to_sheets, ideas, relevance, title=title, currency=cur or ""
         )
     except Exception as e:  # noqa: BLE001 — нет drive.file scope/сети → fallback
         await msg.answer(bm.i18n.t("cc_kw_sheet_failed", err=bm.ux.err_text(e)))

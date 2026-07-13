@@ -14,33 +14,29 @@ from datetime import date
 
 from ads.client import ensure_read_allowed
 
+# Ярлыки (RU/EN) живут в reports.labels — один словарь на все экспорты. Ре-экспорт: внешние
+# импорты `from reports.queries import METRIC_HEADERS, metric_headers` продолжают работать.
+from reports.labels import METRIC_HEADERS, metric_headers, top_note  # noqa: F401
+
 # Топ-N для потенциально огромных разбивок (ключи/объявления): сортируем по расходу.
 TOP_N = 1000
 
-# Колонки метрик (RU) — единый порядок для xlsx и текстовой сводки.
-METRIC_HEADERS = [
-    "Показы",
-    "Клики",
-    "CTR",
-    "Сред. CPC",
-    "Расход",
-    "Конверсии",
-    "Ценность",
-    "CPA",
-    "ROAS",
+# Числовые форматы колонок метрик — ОДИН реестр на все экспорты (порядок = METRIC_HEADERS).
+# Паттерны в синтаксисе Excel/Sheets (он общий): xlsx кладёт их в number_format, Sheets — в
+# userEnteredFormat.numberFormat. Раньше форматы жили только в reports/xlsx.py, и в Sheets CTR
+# уезжал сырой долей (0.0523 вместо 5,23%), а деньги — без разделителей: та же таблица, но в
+# Google Sheets она читалась хуже, чем в Excel.
+METRIC_FORMATS = [
+    "#,##0",  # Показы
+    "#,##0",  # Клики
+    "0.00%",  # CTR (значение — доля: 0.0523)
+    "0.00",  # Сред. CPC
+    "#,##0.00",  # Расход
+    "0.00",  # Конверсии
+    "#,##0.00",  # Ценность
+    "0.00",  # CPA
+    "0.00",  # ROAS
 ]
-
-# Денежные колонки (значения в валюте аккаунта) — к ним добавляем код валюты в заголовок (§9).
-# ROAS — отношение (conv_value/cost), безразмерное → без валюты.
-_MONEY_HEADERS = frozenset({"Сред. CPC", "Расход", "Ценность", "CPA"})
-
-
-def metric_headers(currency: str = "") -> list[str]:
-    """METRIC_HEADERS с кодом валюты на денежных колонках (§9): «Расход» → «Расход, USD».
-    Пустой currency → без суффикса (обратная совместимость: == METRIC_HEADERS)."""
-    if not currency:
-        return list(METRIC_HEADERS)
-    return [f"{h}, {currency}" if h in _MONEY_HEADERS else h for h in METRIC_HEADERS]
 
 
 _METRICS_SELECT = (
@@ -105,7 +101,8 @@ class Breakdown:
     title: str  # человекочитаемый заголовок листа/секции (RU)
     dim_headers: list[str]  # названия колонок-измерений (перед колонками метрик)
     rows: list[tuple[tuple, Metrics]] = field(default_factory=list)  # ((dim values…), Metrics)
-    note: str | None = None  # пометка об усечении и т.п. (без тихих обрезаний)
+    note: str | None = None  # пометка об усечении и т.п., RU (без тихих обрезаний)
+    note_kind: str | None = None  # «чего» усечение ("keyword"/"ad") — экспорт рисует note на lang
 
 
 def _metrics(m) -> Metrics:
@@ -225,14 +222,36 @@ def fetch_by_keyword(client, customer_id: str, period, campaign_id: str | None =
         )
         for r in _search(client, customer_id, q)
     ]
-    note = f"показаны топ-{TOP_N} ключей по расходу" if len(rows) >= TOP_N else None
-    return Breakdown("keyword", "Ключевые слова", ["Кампания", "Группа", "Ключ", "Тип"], rows, note)
+    truncated = len(rows) >= TOP_N
+    return Breakdown(
+        "keyword",
+        "Ключевые слова",
+        ["Кампания", "Группа", "Ключ", "Тип"],
+        rows,
+        top_note("keyword", TOP_N) if truncated else None,
+        note_kind="keyword" if truncated else None,
+    )
+
+
+_AD_PREVIEW_MAXLEN = 120  # достаточно, чтобы узнать креатив, и не раздувает ячейку
+
+
+def _ad_preview(ad) -> str:
+    """§9: «какой креатив слил бюджет» — первые заголовки RSA. Раньше разбивка давала только
+    ID+тип: по ней нельзя было понять, ЧТО именно показывалось. Не-RSA (GDN/видео) заголовков
+    здесь не имеют → пусто (для них смысл несёт ссылка). getattr — фейк-строки в тестах."""
+    rsa = getattr(ad, "responsive_search_ad", None)
+    heads = [
+        (getattr(h, "text", "") or "").strip() for h in (getattr(rsa, "headlines", None) or [])
+    ]
+    return " | ".join(h for h in heads if h)[:_AD_PREVIEW_MAXLEN]
 
 
 def fetch_by_ad(client, customer_id: str, period, campaign_id: str | None = None) -> Breakdown:
     ensure_read_allowed(customer_id)
     q = (
         "SELECT campaign.name, ad_group.name, ad_group_ad.ad.id, ad_group_ad.ad.type, "
+        "ad_group_ad.ad.responsive_search_ad.headlines, ad_group_ad.ad.final_urls, "
         f"{_METRICS_SELECT} FROM ad_group_ad "
         f"WHERE {_where(period, campaign_id)} ORDER BY metrics.cost_micros DESC LIMIT {TOP_N}"
     )
@@ -243,13 +262,22 @@ def fetch_by_ad(client, customer_id: str, period, campaign_id: str | None = None
                 r.ad_group.name,
                 str(r.ad_group_ad.ad.id),
                 _enum_name(r.ad_group_ad.ad.type),
+                _ad_preview(r.ad_group_ad.ad),
+                next(iter(getattr(r.ad_group_ad.ad, "final_urls", None) or []), ""),
             ),
             _metrics(r.metrics),
         )
         for r in _search(client, customer_id, q)
     ]
-    note = f"показаны топ-{TOP_N} объявлений по расходу" if len(rows) >= TOP_N else None
-    return Breakdown("ad", "Объявления", ["Кампания", "Группа", "ID объявления", "Тип"], rows, note)
+    truncated = len(rows) >= TOP_N
+    return Breakdown(
+        "ad",
+        "Объявления",
+        ["Кампания", "Группа", "ID объявления", "Тип", "Заголовки", "Ссылка"],
+        rows,
+        top_note("ad", TOP_N) if truncated else None,
+        note_kind="ad" if truncated else None,
+    )
 
 
 def fetch_by_device(client, customer_id: str, period, campaign_id: str | None = None) -> Breakdown:
@@ -1222,6 +1250,77 @@ def fetch_budget_simulations(client, customer_id: str, limit: int = 50) -> list[
                 campaign=r.campaign.name,
                 current_budget=int(getattr(r.campaign_budget, "amount_micros", 0) or 0) / 1_000_000,
                 points=points,
+            )
+        )
+    return out
+
+
+@dataclass
+class CampaignAssetsRow:
+    """Ф6 (G50/G51/G52): сколько расширений ДЕЙСТВУЕТ на кампании. Счётчик — сумма трёх уровней
+    привязки (кампания + аккаунт + группы): ассет, привязанный на аккаунт, показывается во всех
+    кампаниях, и не учесть его — значит написать «ситилинков нет» аккаунту, где они есть."""
+
+    campaign_id: str
+    campaign: str
+    channel_type: str
+    sitelinks: int
+    callouts: int
+    snippets: int
+
+
+_ASSET_FIELDS = {"SITELINK": "sitelinks", "CALLOUT": "callouts", "STRUCTURED_SNIPPET": "snippets"}
+
+
+def fetch_campaign_assets(client, customer_id: str) -> list[CampaignAssetsRow]:
+    """Расширения ENABLED-кампаний: campaign_asset + customer_asset (аккаунт-уровень, действует на
+    ВСЕ кампании) + ad_group_asset. Считаем ссылки, а не уникальные ассеты: один ассет, привязанный
+    на двух уровнях, посчитается дважды — ошибка в сторону МОЛЧАНИЯ чека (порог «<4» не сработает),
+    что честнее ложной находки «расширений нет». READ-ONLY."""
+    ensure_read_allowed(customer_id)
+    ft_filter = "('SITELINK', 'CALLOUT', 'STRUCTURED_SNIPPET')"
+
+    # Аккаунт-уровень: действует на все кампании сразу.
+    acct: dict[str, int] = {}
+    cust_q = (
+        "SELECT customer_asset.field_type FROM customer_asset "
+        f"WHERE customer_asset.status = 'ENABLED' AND customer_asset.field_type IN {ft_filter}"
+    )
+    for r in _search(client, customer_id, cust_q):
+        f = _ASSET_FIELDS.get(_enum_name(r.customer_asset.field_type))
+        if f:
+            acct[f] = acct.get(f, 0) + 1
+
+    counts: dict[str, dict[str, int]] = {}
+    for res, link in (("campaign_asset", "campaign_asset"), ("ad_group_asset", "ad_group_asset")):
+        q = (
+            f"SELECT campaign.id, {link}.field_type FROM {res} "
+            f"WHERE {link}.status = 'ENABLED' AND {link}.field_type IN {ft_filter} "
+            "AND campaign.status = 'ENABLED'"
+        )
+        for r in _search(client, customer_id, q):
+            f = _ASSET_FIELDS.get(_enum_name(getattr(r, link).field_type))
+            if not f:
+                continue
+            c = counts.setdefault(str(r.campaign.id), {})
+            c[f] = c.get(f, 0) + 1
+
+    out: list[CampaignAssetsRow] = []
+    meta_q = (
+        "SELECT campaign.id, campaign.name, campaign.advertising_channel_type "
+        "FROM campaign WHERE campaign.status = 'ENABLED'"
+    )
+    for r in _search(client, customer_id, meta_q):
+        cid_ = str(r.campaign.id)
+        c = counts.get(cid_, {})
+        out.append(
+            CampaignAssetsRow(
+                campaign_id=cid_,
+                campaign=r.campaign.name,
+                channel_type=_enum_name(r.campaign.advertising_channel_type),
+                sitelinks=c.get("sitelinks", 0) + acct.get("sitelinks", 0),
+                callouts=c.get("callouts", 0) + acct.get("callouts", 0),
+                snippets=c.get("snippets", 0) + acct.get("snippets", 0),
             )
         )
     return out

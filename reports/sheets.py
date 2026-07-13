@@ -19,7 +19,16 @@ from dataclasses import dataclass
 from typing import Any
 
 from core.logging import log
-from reports.queries import metric_headers
+from reports.labels import (
+    account_report_title,
+    currency_line,
+    loc,
+    loc_all,
+    metric_headers,
+    period_line,
+    top_note,
+)
+from reports.queries import METRIC_FORMATS, TOP_N
 from reports.service import ReportData
 
 # drive.file — минимально достаточный scope для СОЗДАНИЯ таблиц (доступ к файлам, созданным нами).
@@ -55,6 +64,9 @@ def is_shared(status: str) -> bool:
 class SheetTab:
     title: str
     rows: list[list[Any]]  # включая строку-шапку
+    # Раскладка вкладки — чтобы форматировать ЧИСЛА, а не только шапку (см. _format_tabs):
+    dim_count: int = 0  # сколько колонок-измерений перед колонками метрик
+    header_row: int = 0  # индекс строки-шапки (0-based): пометка об усечении/мета сдвигают её
 
 
 def _sanitize_title(title: str, seen: set[str]) -> str:
@@ -70,36 +82,56 @@ def _sanitize_title(title: str, seen: set[str]) -> str:
     return t
 
 
-def build_sheets_data(report: ReportData) -> list[SheetTab]:
-    """Чистая сборка вкладок (без сети): «Сводка» + по вкладке на разбивку. Зеркало xlsx."""
+def build_sheets_data(report: ReportData, lang: str = "ru") -> list[SheetTab]:
+    """Чистая сборка вкладок (без сети): «Сводка» + по вкладке на разбивку. Зеркало xlsx.
+    lang — язык ПОДПИСЕЙ (reports.labels); значения ячеек (имена кампаний, статусы) не трогаем."""
+    from reports.period import label_i18n
+
     seen: set[str] = set()
     p = report.period
     currency = getattr(report, "currency", "") or ""  # defensive: фейк-репорты без поля
-    headers = metric_headers(currency)  # §9: код валюты на денежных колонках
+    headers = metric_headers(currency, lang)  # §9: код валюты на денежных колонках
     summary_meta: list[list[Any]] = [
-        [f"Отчёт по аккаунту {report.customer_id}"],
-        [f"Период: {p.label} ({p.date_from.isoformat()} — {p.date_to.isoformat()})"],
+        [account_report_title(report.customer_id, lang)],
+        [period_line(p, lang)],
     ]
     if currency:
-        summary_meta.append([f"Валюта: {currency}"])
+        summary_meta.append([currency_line(currency, lang)])
     summary_rows: list[list[Any]] = [
         *summary_meta,
         [],
-        ["Период", *headers],
-        [p.label, *report.totals.as_row()],
+        [loc("Период", lang), *headers],
+        [label_i18n(p, lang), *report.totals.as_row()],
     ]
     if report.prev_totals is not None:
-        summary_rows.append([p.previous().label, *report.prev_totals.as_row()])
-    tabs = [SheetTab(_sanitize_title("Сводка", seen), summary_rows)]
+        summary_rows.append([label_i18n(p.previous(), lang), *report.prev_totals.as_row()])
+    tabs = [
+        SheetTab(
+            _sanitize_title(loc("Сводка", lang), seen),
+            summary_rows,
+            dim_count=1,  # колонка «Период»
+            header_row=len(summary_meta) + 1,  # мета + пустая строка
+        )
+    ]
 
     for b in report.breakdowns:
         rows: list[list[Any]] = []
-        if b.note:
-            rows.append([b.note])  # пометка об усечении — первой строкой
-        rows.append([*b.dim_headers, *headers])
+        kind = getattr(b, "note_kind", None)  # defensive: фейк-разбивки в тестах без поля
+        note = top_note(kind, TOP_N, lang) if (b.note and kind) else b.note
+        if note:
+            rows.append([note])  # пометка об усечении — первой строкой
+        header_row = len(rows)
+        rows.append([*loc_all(b.dim_headers, lang), *headers])
         for dims, m in b.rows:
             rows.append([*dims, *m.as_row()])
-        tabs.append(SheetTab(_sanitize_title(b.title, seen), rows))
+        tabs.append(
+            SheetTab(
+                _sanitize_title(loc(b.title, lang), seen),
+                rows,
+                dim_count=len(b.dim_headers),
+                header_row=header_row,
+            )
+        )
     return tabs
 
 
@@ -222,16 +254,30 @@ def _share_anyone(spreadsheet_id: str, *, role: str, drive_service: Any = None) 
         return SHARE_FAILED
 
 
-def _format_headers(svc: Any, spreadsheet_id: str, n_tabs: int) -> None:
-    """§9/§16 (P2-b): косметика — жирная строка 1 + фиксация (freeze) на каждой вкладке через
-    spreadsheets().batchUpdate (метод §16, ранее не использовался). BEST-EFFORT: сбой форматирования
-    НЕ роняет экспорт (значения уже записаны) — логируем и продолжаем. Зеркалит xlsx-шапку."""
+def _number_format(pattern: str) -> dict:
+    """Паттерн Excel → userEnteredFormat.numberFormat Google Sheets (синтаксис паттерна общий)."""
+    return {"type": "PERCENT" if "%" in pattern else "NUMBER", "pattern": pattern}
+
+
+def format_requests(tabs: list[SheetTab]) -> list[dict]:
+    """Запросы форматирования вкладок (чистая функция — тестируется офлайн).
+
+    Шапка: жирная + freeze ПО СВОЕЙ строке (пометка об усечении/мета-строки сдвигают её вниз —
+    раньше жирнили строку 1, то есть пометку, а шапку не трогали).
+    Числа: формат по колонкам метрик из реестра METRIC_FORMATS — тот же, что в .xlsx. Раньше в
+    Sheets форматов не было вовсе: CTR читался как «0.0523» (сырая доля вместо 5,23%), расход —
+    без разделителей разрядов. valueInputOption=RAW → значения остаются ЧИСЛАМИ, формат только
+    отображает их правильно."""
     requests: list[dict] = []
-    for i in range(n_tabs):
+    for i, t in enumerate(tabs):
         requests.append(
             {
                 "repeatCell": {
-                    "range": {"sheetId": i, "startRowIndex": 0, "endRowIndex": 1},
+                    "range": {
+                        "sheetId": i,
+                        "startRowIndex": t.header_row,
+                        "endRowIndex": t.header_row + 1,
+                    },
                     "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
                     "fields": "userEnteredFormat.textFormat.bold",
                 }
@@ -240,17 +286,45 @@ def _format_headers(svc: Any, spreadsheet_id: str, n_tabs: int) -> None:
         requests.append(
             {
                 "updateSheetProperties": {
-                    "properties": {"sheetId": i, "gridProperties": {"frozenRowCount": 1}},
+                    "properties": {
+                        "sheetId": i,
+                        "gridProperties": {"frozenRowCount": t.header_row + 1},
+                    },
                     "fields": "gridProperties.frozenRowCount",
                 }
             }
         )
+        if len(t.rows) <= t.header_row + 1:  # данных нет — форматировать нечего
+            continue
+        for j, pattern in enumerate(METRIC_FORMATS):
+            col = t.dim_count + j
+            requests.append(
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": i,
+                            "startRowIndex": t.header_row + 1,
+                            "endRowIndex": len(t.rows),
+                            "startColumnIndex": col,
+                            "endColumnIndex": col + 1,
+                        },
+                        "cell": {"userEnteredFormat": {"numberFormat": _number_format(pattern)}},
+                        "fields": "userEnteredFormat.numberFormat",
+                    }
+                }
+            )
+    return requests
+
+
+def _format_tabs(svc: Any, spreadsheet_id: str, tabs: list[SheetTab]) -> None:
+    """§9/§16 (P2-b): формат вкладок одним spreadsheets().batchUpdate. BEST-EFFORT: сбой
+    форматирования НЕ роняет экспорт (значения уже записаны) — логируем и продолжаем."""
     try:
         svc.spreadsheets().batchUpdate(
-            spreadsheetId=spreadsheet_id, body={"requests": requests}
+            spreadsheetId=spreadsheet_id, body={"requests": format_requests(tabs)}
         ).execute()
     except Exception as e:  # noqa: BLE001 — форматирование необязательно, экспорт уже успешен
-        log.warning("sheets-format: %s (пропуск форматирования шапки)", type(e).__name__)
+        log.warning("sheets-format: %s (пропуск форматирования)", type(e).__name__)
 
 
 def publish_report_to_sheets(
@@ -259,12 +333,13 @@ def publish_report_to_sheets(
     title: str | None = None,
     service: Any = None,
     drive_service: Any = None,
+    lang: str = "ru",
 ) -> tuple[str, str]:
     """Создать новую таблицу с вкладками отчёта и вернуть (ссылка, статус_шаринга: роль|off|failed).
     `service`/`drive_service` — для тестов (моки). Отчёт открывается anyone-with-link ЧИТАТЕЛЕМ
     (финансовый артефакт — писать в него никому не нужно). Логирует вызовы Sheets API (создание +
     запись значений, длительность, исход — БЕЗ секретов; §15)."""
-    tabs = build_sheets_data(report)
+    tabs = build_sheets_data(report, lang)
     svc = service or _build_service()
     start = time.monotonic()
     try:
@@ -292,7 +367,7 @@ def publish_report_to_sheets(
                 "data": [{"range": f"'{t.title}'!A1", "values": t.rows} for t in tabs],
             },
         ).execute()
-        _format_headers(svc, sid, len(tabs))  # §9/§16 (P2-b): жирная шапка + фиксация строки 1
+        _format_tabs(svc, sid, tabs)  # §9/§16 (P2-b): жирная шапка + фиксация + форматы чисел
     except Exception as e:
         log.warning(
             "sheets-publish: %s за %dмс (вкладок=%d)",
@@ -320,11 +395,19 @@ _IRRELEVANT_MARK = "❌ Нерелевантно"
 _NO_DATA = "—"
 
 
-def build_keyword_sheet_rows(ideas, relevance: dict[str, bool]) -> list[list]:
+def keyword_headers(currency: str = "") -> list[str]:
+    """Шапка таблицы ключей с кодом валюты на денежной колонке (§9, как metric_headers): ставка
+    приходит в валюте АККАУНТА, и без кода «0.30–0.90» читалось как доллары по умолчанию."""
+    if not currency:
+        return list(_KW_HEADERS)
+    return [f"{h}, {currency}" if h == "Top-of-page bid" else h for h in _KW_HEADERS]
+
+
+def build_keyword_sheet_rows(ideas, relevance: dict[str, bool], currency: str = "") -> list[list]:
     """Строки таблицы ключей (§19.4.2): шапка + по строке на идею. ideas — ads.keyword_plan.KeywordIdea.
     Релевантность из relevance (по тексту); отсутствующее → релевантно (advisory). Чистая сборка.
     Пустые метрики (объём/конкуренция/ставка = 0/UNSPECIFIED) → «—», не ложный ноль."""
-    rows: list[list] = [list(_KW_HEADERS)]
+    rows: list[list] = [keyword_headers(currency)]
     for it in ideas:
         low = float(getattr(it, "low_bid", 0.0) or 0.0)
         high = float(getattr(it, "high_bid", 0.0) or 0.0)
@@ -349,6 +432,7 @@ def publish_keywords_to_sheets(
     relevance: dict[str, bool],
     *,
     title: str,
+    currency: str = "",
     service: Any = None,
     drive_service: Any = None,
 ) -> tuple[str, str, str]:
@@ -357,7 +441,7 @@ def publish_keywords_to_sheets(
     на возврате для сверки присланной менеджером ссылки. Таблица открывается anyone-with-link
     РЕДАКТОРОМ: флоу просит менеджера/заказчика править её («удалите лишние строки») с любого
     Google-аккаунта."""
-    rows = build_keyword_sheet_rows(ideas, relevance)
+    rows = build_keyword_sheet_rows(ideas, relevance, currency)
     svc = service or _build_service()
     start = time.monotonic()
     try:

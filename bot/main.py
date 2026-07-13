@@ -2817,7 +2817,8 @@ async def _run_export(
             report.currency = await _read_currency(client, acct)  # §9: валюта денежных метрик
             fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_report_")
             os.close(fd)
-            await asyncio.to_thread(write_report_xlsx, report, path)
+            # §9/RU-EN: подписи книги — на языке пользователя (значения ячеек — данные Google).
+            await asyncio.to_thread(write_report_xlsx, report, path, i18n.current_lang())
         scope = f"_{campaign_id}" if campaign_id else ""
         # даты берём из ОТЧЁТА, а не из локального period: окно пере-якорено в TZ аккаунта (§8) —
         # иначе имя файла разошлось бы с содержимым на день.
@@ -2855,7 +2856,9 @@ async def _run_sheets(
                 client, acct, period, campaign_id=campaign_id, account_name=_account_name(acct)
             )
             report.currency = await _read_currency(client, acct)  # §9: валюта денежных метрик
-            url, share = await asyncio.to_thread(publish_report_to_sheets, report)
+            url, share = await asyncio.to_thread(
+                publish_report_to_sheets, report, lang=i18n.current_lang()
+            )
     except Exception as e:  # сеть/доступ/SDK/нет OAuth-scope Sheets
         # A4: если корень — деактивированный/недоступный аккаунт (ошибка Ads, НЕ Sheets-scope),
         # не показываем сбивающую подсказку про drive.file — даём честную причину.
@@ -3000,7 +3003,7 @@ async def _send_mcc_xlsx(m: Message, summaries: list, period) -> None:
             try:
                 fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_mcc_")
                 os.close(fd)
-                await asyncio.to_thread(write_mcc_xlsx, summary, path)
+                await asyncio.to_thread(write_mcc_xlsx, summary, path, i18n.current_lang())
                 fname = f"aimash_mcc_{manager_id}_{period.date_from}_{period.date_to}.xlsx"
                 await m.answer_document(FSInputFile(path, filename=fname))
             except Exception as e:  # noqa: BLE001 — xlsx best-effort, текст уже ушёл
@@ -3125,7 +3128,8 @@ async def _run_mcc_deep_export(m: Message, period, arg_code: str | None) -> None
                 # листов занимал поток пула НАВСЕГДА. to_thread неотменяем — таймаут возвращает
                 # управление боту, поток дожмёт/умрёт сам.
                 await asyncio.wait_for(
-                    asyncio.to_thread(write_mcc_deep_xlsx, deep, path), timeout=120
+                    asyncio.to_thread(write_mcc_deep_xlsx, deep, path, i18n.current_lang()),
+                    timeout=120,
                 )
                 fname = f"aimash_mcc_deep_{manager_id}_{period.date_from}_{period.date_to}.xlsx"
                 await m.answer_document(FSInputFile(path, filename=fname))

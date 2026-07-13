@@ -11,9 +11,26 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from reports.queries import Breakdown, metric_headers
+from reports.labels import (
+    account_report_title,
+    currency_line,
+    loc,
+    loc_all,
+    mcc_deep_title,
+    mcc_summary_title,
+    period_line,
+    top_note,
+)
+from reports.queries import METRIC_FORMATS, TOP_N, Breakdown, metric_headers
 from reports.safe_cell import safe_row  # A9: защита от формула-инъекции в ячейках
 from reports.service import ReportData
+
+
+def _note(b: Breakdown, lang: str) -> str | None:
+    """Пометка об усечении на языке пользователя (b.note хранится RU — см. Breakdown.note_kind)."""
+    if b.note and b.note_kind:
+        return top_note(b.note_kind, TOP_N, lang)
+    return b.note
 
 
 def _append(ws, row) -> None:
@@ -25,18 +42,8 @@ def _append(ws, row) -> None:
 _HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
 _HEADER_FONT = Font(bold=True, color="FFFFFF")
 
-# Формат ячеек по позиции в METRIC_HEADERS: Показы,Клики,CTR,CPC,Расход,Конв,Ценность,CPA,ROAS.
-_METRIC_FORMATS = [
-    "#,##0",
-    "#,##0",
-    "0.00%",
-    "0.00",
-    "#,##0.00",
-    "0.00",
-    "#,##0.00",
-    "0.00",
-    "0.00",
-]
+# Формат ячеек по позиции в METRIC_HEADERS — реестр один на xlsx и Sheets (reports.queries).
+_METRIC_FORMATS = METRIC_FORMATS
 
 
 def _style_header_row(ws, ncols: int) -> None:
@@ -57,11 +64,12 @@ def _autosize(ws, ncols: int, *, cap: int = 48) -> None:
         ws.column_dimensions[letter].width = min(max(width + 2, 10), cap)
 
 
-def _write_breakdown(wb: Workbook, b: Breakdown, currency: str = "") -> None:
-    ws = wb.create_sheet(title=b.title[:31])
-    if b.note:
-        _append(ws, [b.note])  # пометка об усечении — первой строкой
-    headers = b.dim_headers + metric_headers(currency)
+def _write_breakdown(wb: Workbook, b: Breakdown, currency: str = "", lang: str = "ru") -> None:
+    ws = wb.create_sheet(title=loc(b.title, lang)[:31])
+    note = _note(b, lang)
+    if note:
+        _append(ws, [note])  # пометка об усечении — первой строкой
+    headers = loc_all(b.dim_headers, lang) + metric_headers(currency, lang)
     header_row = ws.max_row + 1
     _append(ws, headers)
     for dims, m in b.rows:
@@ -84,22 +92,24 @@ def _apply_metric_formats_at(ws, dim_count: int, first_data_row: int, ndata: int
             ws.cell(row=r, column=col).number_format = fmt
 
 
-def _write_summary(ws, report: ReportData) -> None:
+def _write_summary(ws, report: ReportData, lang: str = "ru") -> None:
+    from reports.period import label_i18n
+
     p = report.period
     currency = getattr(report, "currency", "") or ""  # defensive: фейк-репорты без поля
-    _append(ws, [f"Отчёт по аккаунту {report.customer_id}"])
-    _append(ws, [f"Период: {p.label} ({p.date_from.isoformat()} — {p.date_to.isoformat()})"])
+    _append(ws, [account_report_title(report.customer_id, lang)])
+    _append(ws, [period_line(p, lang)])
     if currency:
-        _append(ws, [f"Валюта: {currency}"])  # §9: денежные метрики — в валюте аккаунта
+        _append(ws, [currency_line(currency, lang)])  # §9: денежные метрики — в валюте аккаунта
     _append(ws, [])
     # Таблица итогов: шапка + строка «текущий период» (+ «предыдущий», если есть сравнение).
-    headers = metric_headers(currency)
-    _append(ws, ["Период", *headers])
+    headers = metric_headers(currency, lang)
+    _append(ws, [loc("Период", lang), *headers])
     header_row = ws.max_row
-    _append(ws, [p.label, *report.totals.as_row()])
+    _append(ws, [label_i18n(p, lang), *report.totals.as_row()])
     ndata = 1
     if report.prev_totals is not None:
-        _append(ws, [p.previous().label, *report.prev_totals.as_row()])
+        _append(ws, [label_i18n(p.previous(), lang), *report.prev_totals.as_row()])
         ndata = 2
     for c in range(1, len(headers) + 2):
         ws.cell(row=header_row, column=c).fill = _HEADER_FILL
@@ -109,20 +119,20 @@ def _write_summary(ws, report: ReportData) -> None:
     _autosize(ws, len(headers) + 1)
 
 
-def build_workbook(report: ReportData) -> Workbook:
+def build_workbook(report: ReportData, lang: str = "ru") -> Workbook:
     wb = Workbook()
     summary = wb.active
-    summary.title = "Сводка"
-    _write_summary(summary, report)
+    summary.title = loc("Сводка", lang)
+    _write_summary(summary, report, lang)
     currency = getattr(report, "currency", "") or ""  # defensive: фейк-репорты без поля
     for b in report.breakdowns:
-        _write_breakdown(wb, b, currency)
+        _write_breakdown(wb, b, currency, lang)
     return wb
 
 
-def write_report_xlsx(report: ReportData, path: str) -> str:
-    """Сохранить отчёт в .xlsx по пути path. Возвращает path."""
-    build_workbook(report).save(path)
+def write_report_xlsx(report: ReportData, path: str, lang: str = "ru") -> str:
+    """Сохранить отчёт в .xlsx по пути path. Возвращает path. lang — язык ПОДПИСЕЙ (не данных)."""
+    build_workbook(report, lang).save(path)
     return path
 
 
@@ -137,7 +147,7 @@ def _mcc_campaign_status_cell(cr) -> str:
     return f"ENABLED:{n}" if n is not None else ""
 
 
-def build_mcc_workbook(summary) -> Workbook:
+def build_mcc_workbook(summary, lang: str = "ru") -> Workbook:
     """Книга по сводке дочерних MCC (reports.mcc.MccSummary, duck-typed). Листы: «Сводка MCC»
     (подытоги ПО ВАЛЮТАМ — без FX), «Аккаунты» (по строке на лист-аккаунт), «Пропущено/ошибки»
     (read-list/менеджерские/частичные сбои — без тихого замалчивания, §8/§5)."""
@@ -147,11 +157,11 @@ def build_mcc_workbook(summary) -> Workbook:
     # 1) Сводка MCC: подытоги по валюте (валюта — отдельной колонкой, т.к. денежные колонки
     # разных валют нельзя свести в один заголовок; FX не делаем).
     ws = wb.active
-    ws.title = "Сводка MCC"
-    _append(ws, [f"Сводка по MCC {summary.manager_id}"])
-    _append(ws, [f"Период: {p.label} ({p.date_from.isoformat()} — {p.date_to.isoformat()})"])
+    ws.title = loc("Сводка MCC", lang)
+    _append(ws, [mcc_summary_title(summary.manager_id, lang)])
+    _append(ws, [period_line(p, lang)])
     _append(ws, [])
-    headers = ["Валюта", "Аккаунтов", *metric_headers("")]
+    headers = [loc("Валюта", lang), loc("Аккаунтов", lang), *metric_headers("", lang)]
     _append(ws, headers)
     header_row = ws.max_row
     for sub in summary.subtotals:
@@ -164,9 +174,12 @@ def build_mcc_workbook(summary) -> Workbook:
     _autosize(ws, len(headers))
 
     # 2) Аккаунты: по строке на лист-аккаунт (id/имя/валюта/статус + метрики).
-    acc = wb.create_sheet(title="Аккаунты")
+    acc = wb.create_sheet(title=loc("Аккаунты", lang))
     # §8: колонка «Кампании (статус)» — разбивка по статусу (ENABLED:n, PAUSED:m) перед метриками.
-    acc_headers = ["ID", "Аккаунт", "Валюта", "Статус", "Кампании (статус)", *metric_headers("")]
+    acc_headers = [
+        *loc_all(["ID", "Аккаунт", "Валюта", "Статус", "Кампании (статус)"], lang),
+        *metric_headers("", lang),
+    ]
     _append(acc, acc_headers)
     for cr in summary.children:
         a = cr.account
@@ -186,27 +199,37 @@ def build_mcc_workbook(summary) -> Workbook:
     _autosize(acc, len(acc_headers))
 
     # 3) Пропущено/ошибки: read-list пропуски, менеджерские, частичные сбои чтения.
-    iss = wb.create_sheet(title="Пропущено и ошибки")
-    _append(iss, ["Тип", "Аккаунт", "Причина"])
-    _style_header_row(iss, 3)
-    for ch in getattr(summary, "inactive", []):
-        name = getattr(ch, "name", "") or ch.id
-        _append(
-            iss, ["неактивный (не ENABLED)", f"{name} ({ch.id})", getattr(ch, "status", "") or ""]
-        )
-    for cid in summary.skipped:
-        _append(iss, ["пропущен (нет доступа на чтение)", cid, ""])
-    for cid in summary.managers:
-        _append(iss, ["менеджерский (без собственных метрик)", cid, ""])
-    for cid, reason in summary.errors:
-        _append(iss, ["ошибка чтения", cid, reason])
-    _autosize(iss, 3)
+    _write_issues(wb, summary, lang)
     return wb
 
 
-def write_mcc_xlsx(summary, path: str) -> str:
+def _write_issues(wb: Workbook, src, lang: str) -> None:
+    """Лист «Пропущено и ошибки» — общий для MCC-книги и DEEP-книги (§8/§5: без замалчивания)."""
+    iss = wb.create_sheet(title=loc("Пропущено и ошибки", lang))
+    _append(iss, loc_all(["Тип", "Аккаунт", "Причина"], lang))
+    _style_header_row(iss, 3)
+    for ch in getattr(src, "inactive", []):
+        name = getattr(ch, "name", "") or ch.id
+        _append(
+            iss,
+            [
+                loc("неактивный (не ENABLED)", lang),
+                f"{name} ({ch.id})",
+                getattr(ch, "status", "") or "",
+            ],
+        )
+    for cid in src.skipped:
+        _append(iss, [loc("пропущен (нет доступа на чтение)", lang), cid, ""])
+    for cid in src.managers:
+        _append(iss, [loc("менеджерский (без собственных метрик)", lang), cid, ""])
+    for cid, reason in src.errors:
+        _append(iss, [loc("ошибка чтения", lang), cid, reason])
+    _autosize(iss, 3)
+
+
+def write_mcc_xlsx(summary, path: str, lang: str = "ru") -> str:
     """Сохранить MCC-сводку в .xlsx по пути path. Возвращает path."""
-    build_mcc_workbook(summary).save(path)
+    build_mcc_workbook(summary, lang).save(path)
     return path
 
 
@@ -245,7 +268,7 @@ def _unique_sheet_title(title: str, used: set[str]) -> str:
     raise ValueError(f"не удалось подобрать уникальное имя листа для {title!r}")
 
 
-def build_mcc_deep_workbook(deep) -> Workbook:
+def build_mcc_deep_workbook(deep, lang: str = "ru") -> Workbook:
     """Книга DEEP-отчёта (reports.mcc.MccDeep, duck-typed): лист «Сводка» (строка на аккаунт,
     метрики в валюте аккаунта — БЕЗ FX) → по ЛИСТУ НА АККАУНТ (итоги+сравнение периода, как
     write_report_xlsx, + таблица разбивки по кампаниям — не 8 листов × N акк.) → «Пропущено и
@@ -254,11 +277,11 @@ def build_mcc_deep_workbook(deep) -> Workbook:
     p = deep.period
 
     ws = wb.active
-    ws.title = "Сводка"
-    _append(ws, [f"Глубокий отчёт по MCC {deep.manager_id}"])
-    _append(ws, [f"Период: {p.label} ({p.date_from.isoformat()} — {p.date_to.isoformat()})"])
+    ws.title = loc("Сводка", lang)
+    _append(ws, [mcc_deep_title(deep.manager_id, lang)])
+    _append(ws, [period_line(p, lang)])
     _append(ws, [])
-    headers = ["ID", "Аккаунт", "Валюта", *metric_headers("")]
+    headers = [*loc_all(["ID", "Аккаунт", "Валюта"], lang), *metric_headers("", lang)]
     _append(ws, headers)
     header_row = ws.max_row
     for ch, report in deep.items:
@@ -283,11 +306,13 @@ def build_mcc_deep_workbook(deep) -> Workbook:
         title = _unique_sheet_title(_sheet_title(getattr(ch, "name", "") or "", ch.id), used_titles)
         used_titles.add(title)
         acc_ws = wb.create_sheet(title=title)
-        _write_summary(acc_ws, report)
+        _write_summary(acc_ws, report, lang)
         camp = next((b for b in report.breakdowns if b.key == "campaign"), None)
         if camp and camp.rows:
             _append(acc_ws, [])
-            camp_headers = camp.dim_headers + metric_headers(report.currency or "")
+            camp_headers = loc_all(camp.dim_headers, lang) + metric_headers(
+                report.currency or "", lang
+            )
             _append(acc_ws, camp_headers)
             hrow = acc_ws.max_row
             for dims, m in camp.rows:
@@ -298,25 +323,11 @@ def build_mcc_deep_workbook(deep) -> Workbook:
             _apply_metric_formats_at(acc_ws, len(camp.dim_headers), hrow + 1, len(camp.rows))
             _autosize(acc_ws, len(camp_headers))
 
-    iss = wb.create_sheet(title="Пропущено и ошибки")
-    _append(iss, ["Тип", "Аккаунт", "Причина"])
-    _style_header_row(iss, 3)
-    for ch in deep.inactive:
-        name = getattr(ch, "name", "") or ch.id
-        _append(
-            iss, ["неактивный (не ENABLED)", f"{name} ({ch.id})", getattr(ch, "status", "") or ""]
-        )
-    for cid in deep.skipped:
-        _append(iss, ["пропущен (нет доступа на чтение)", cid, ""])
-    for cid in deep.managers:
-        _append(iss, ["менеджерский (без собственных метрик)", cid, ""])
-    for cid, reason in deep.errors:
-        _append(iss, ["ошибка чтения", cid, reason])
-    _autosize(iss, 3)
+    _write_issues(wb, deep, lang)
     return wb
 
 
-def write_mcc_deep_xlsx(deep, path: str) -> str:
+def write_mcc_deep_xlsx(deep, path: str, lang: str = "ru") -> str:
     """Сохранить DEEP-книгу по пути path. Возвращает path."""
-    build_mcc_deep_workbook(deep).save(path)
+    build_mcc_deep_workbook(deep, lang).save(path)
     return path
