@@ -36,6 +36,13 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "⏳ Too frequent — wait a couple of seconds.",
     },
     "rejected": {"ru": "❌ Отменено", "en": "❌ Cancelled"},
+    # Кнопки/статусы выгрузки результата /audit (bot.keyboards.audit_export_kb)
+    "audit_export_btn_sheets": {"ru": "📄 В Google Sheets", "en": "📄 To Google Sheets"},
+    "audit_export_btn_xlsx": {"ru": "📊 Скачать .xlsx", "en": "📊 Download .xlsx"},
+    "audit_export_stale": {
+        "ru": "⏳ Результат аудита устарел — запусти /audit заново, затем жми кнопку выгрузки.",
+        "en": "⏳ The audit result has expired — run /audit again, then tap the export button.",
+    },
     # §12 2FA — PIN перед исполнением опасной операции (opt-in, дефолт OFF)
     "twofa_prompt": {
         "ru": "🔐 Операция <b>{op}</b> требует подтверждения кодом. Введи PIN одним сообщением "
@@ -246,7 +253,8 @@ CATALOG: dict[str, dict[str, str]] = {
             "/alerts — anomaly alert thresholds (spend spike / conversions drop)\n\n"
             "<b>ℹ️ Clients</b>\n"
             "/clients — knowledge base: client profile as text + site crawling → relevant generation\n"
-            "/client &lt;id&gt; — client card by account id\n\n"
+            "/client &lt;id&gt; — client card by account id\n"
+            "/crawl [url] — crawl a client's site (from the argument or the profile); summary when done\n\n"
             "<b>⚙️ Settings and service</b>\n"
             "/account &lt;id&gt; | reset — read account for reports/keywords (default Draft)\n"
             "/accounts — my accessible accounts · /whoami — my chat_id and access mode\n"

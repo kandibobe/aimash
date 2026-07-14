@@ -17,6 +17,9 @@ from __future__ import annotations
 
 from reports.labels import loc
 
+# Заголовки вкладок выгрузки /audit (loc → EN). Один источник — чтобы вкладка и её ярлык не разошлись.
+OVERVIEW_TITLE = "Обзор"
+FAMILY_SUMMARY_TITLE = "По семьям"
 # Заголовок листа/вкладки (loc → «Findings» на EN).
 FINDINGS_TITLE = "Находки"
 
@@ -70,6 +73,41 @@ def findings_rows(result, lang: str = "ru") -> list[list]:
                 round(float(f.at_risk), 2) if f.at_risk > 0 else "",
                 finding_text(f, lang, cur),
                 f.check_id,
+            ]
+        )
+    return rows
+
+
+# ── Вкладка «По семьям»: свод из AuditResult.families (уже посчитан движком, без доп-чтений) ──
+# Колонки: [Семья, Находок, Под риском(валюта), Штраф]. Штраф — вклад семьи в −score (thresholds).
+_FAMILY_COLUMNS = ["Семья", "Находок", "Под риском", "Штраф"]
+FAMILY_MONEY_COL = 2  # 0-based индекс «Под риском» — единственная денежная колонка свода
+FAMILY_SUMMARY_FORMATS: list[tuple[int, str]] = [(FAMILY_MONEY_COL, MONEY_FORMAT)]
+
+
+def family_summary_headers(currency: str = "", lang: str = "ru") -> list[str]:
+    """Шапка свода семей: код валюты на денежной колонке (как findings_headers)."""
+    out = [loc(h, lang) for h in _FAMILY_COLUMNS]
+    if currency:
+        out[FAMILY_MONEY_COL] = f"{out[FAMILY_MONEY_COL]}, {currency}"
+    return out
+
+
+def family_summary_rows(result, lang: str = "ru") -> list[list]:
+    """Свод по семьям из уже вычисленного result.families, сортировка worst-first (по −штрафу).
+    at_risk == 0 → пустая ячейка (неденежная семья), а НЕ 0.00 — как в findings_rows."""
+    from audit.render import family_label
+
+    families = getattr(result, "families", None) or {}
+    rows: list[list] = []
+    for fam, data in sorted(families.items(), key=lambda kv: -float(kv[1].get("penalty", 0.0))):
+        at_risk = float(data.get("at_risk", 0.0) or 0.0)
+        rows.append(
+            [
+                family_label(fam, lang),
+                int(data.get("count", 0)),
+                round(at_risk, 2) if at_risk > 0 else "",
+                round(float(data.get("penalty", 0.0) or 0.0), 2),
             ]
         )
     return rows

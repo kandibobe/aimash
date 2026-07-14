@@ -36,6 +36,37 @@ async def client_cmd(m: bm.Message, command: bm.CommandObject, state: bm.FSMCont
     await bm._cli_show_card(m, m.chat.id, cid)
 
 
+@bm.dp.message(bm.Command("crawl"))
+async def crawl_cmd(m: bm.Message, command: bm.CommandObject, state: bm.FSMContext) -> None:
+    """/crawl [url] — краулинг сайта клиента (§20.4). Видимый вход в тот же обход, что и кнопка
+    «Перекраулить». Аккаунт: выбранный в разделе «Клиенты» (FSM) → активный read-аккаунт. URL: из
+    аргумента команды → из website профиля. Доступ fail-closed (_cli_check_access); краул фоновый,
+    сводка по готовности. Свежий аккаунт (профиля нет) → краул сам создаст профиль (crawl_save)."""
+    chat_id = m.chat.id
+    customer_id = await bm._cli_selected_account(state) or await bm._active_read_account(chat_id)
+    if not await bm._cli_check_access(chat_id, customer_id):
+        await m.answer(bm.i18n.t("cli_access_denied"))
+        return
+    arg = (command.args or "").strip()
+    if arg:
+        url = arg
+    else:
+        profile = await bm.CLIENTS.get_by_account(customer_id)
+        url = (profile or {}).get("website")
+    if not url:
+        await m.answer(bm.i18n.t("cli_no_website"))
+        return
+    if not str(url).startswith(("http://", "https://")):
+        url = "https://" + str(url).lstrip("/")
+    from urllib.parse import urlparse
+
+    domain = bm.texts.esc(urlparse(url).netloc or url)
+    if not bm._spawn_crawl(m.bot, chat_id, customer_id, url):
+        await m.answer(bm.i18n.t("cli_crawl_already", domain=domain))
+        return
+    await m.answer(bm.i18n.t("cli_crawl_started", domain=domain))
+
+
 @bm.dp.callback_query(bm.ClientCB.filter(bm.F.action == "acct"))
 async def cli_account_cb(
     cq: bm.CallbackQuery, callback_data: bm.ClientCB, state: bm.FSMContext

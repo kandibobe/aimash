@@ -48,6 +48,15 @@ class PeriodCB(CallbackData, prefix="per"):
     code: str  # "7" | "30" | "90" | "MTD"
 
 
+class AuditExportCB(CallbackData, prefix="auex"):
+    """Выгрузка результата /audit файлом/ссылкой (кнопки под карточкой аудита). fmt — формат:
+    'sheets' (Google Sheets, ссылка reader) | 'xlsx' (файл). Аккаунт и сам AuditResult берём из
+    _AUDIT_EXPORT_CACHE[chat_id] (пере-собирать аудит не нужно — он уже посчитан). GR3: экспорт —
+    БУМАГА (нет колонки «применить»); Google Ads не мутирует, proposal не создаёт."""
+
+    fmt: str  # "sheets" | "xlsx"
+
+
 class ReportAcctCB(CallbackData, prefix="rpta"):
     """§8: выбор АККАУНТА для отчёта/экспорта (/report /export /sheets). idx — позиция в
     _REPORT_ACCT_CACHE[chat_id]; customer_id в callback_data НЕ кладём (64 байта + резолв по chat_id).

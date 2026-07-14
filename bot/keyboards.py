@@ -17,6 +17,7 @@ from bot.callbacks import (
     AdviseCB,
     AlertCB,
     AudienceCB,
+    AuditExportCB,
     BugCB,
     CampCB,
     CcCB,
@@ -108,6 +109,7 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="newcampaign", description="Создание кампании: пошаговый визард"),
     BotCommand(command="clients", description="ℹ️ Информация про клиентов: профили и сайты"),
     BotCommand(command="client", description="Карточка клиента: /client <id>"),
+    BotCommand(command="crawl", description="Краулинг сайта клиента: /crawl [url]"),
     BotCommand(command="pause", description="Пауза кампании: /pause Название"),
     BotCommand(command="resume", description="Возобновить кампанию: /resume Название"),
     BotCommand(command="report", description="Сводка за период (7/30/90/MTD)"),
@@ -155,6 +157,7 @@ BOT_COMMANDS_EN: list[BotCommand] = [
     BotCommand(command="newcampaign", description="Create campaign: step-by-step wizard"),
     BotCommand(command="clients", description="ℹ️ Client info: profiles and sites"),
     BotCommand(command="client", description="Client card: /client <id>"),
+    BotCommand(command="crawl", description="Crawl a client's site: /crawl [url]"),
     BotCommand(command="pause", description="Pause a campaign: /pause Name"),
     BotCommand(command="resume", description="Resume a campaign: /resume Name"),
     BotCommand(command="report", description="Period summary (7/30/90/MTD)"),
@@ -732,6 +735,26 @@ def advise_feedback_kb(
     return kb.as_markup()
 
 
+def audit_export_kb(lang: str | None = None, *, with_xlsx: bool = True) -> InlineKeyboardMarkup:
+    """Кнопки под карточкой /audit: выгрузить результат «📄 В Google Sheets» (ссылка reader) и
+    «📊 Скачать .xlsx» (файл). Клик читает УЖЕ посчитанный AuditResult из кэша (пере-собирать аудит
+    не нужно) и строит бумагу — Google Ads НЕ мутирует (GR3). Чистая функция (только i18n)."""
+    from bot import i18n
+
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text=i18n.t("audit_export_btn_sheets", lang),
+        callback_data=AuditExportCB(fmt="sheets"),
+    )
+    if with_xlsx:
+        kb.button(
+            text=i18n.t("audit_export_btn_xlsx", lang),
+            callback_data=AuditExportCB(fmt="xlsx"),
+        )
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 # ── Inline: универсальная навигация мастеров (Назад + Отмена) ────────────────────
 def nav_kb(back_cb: CallbackData | None = None, lang: str | None = None) -> InlineKeyboardMarkup:
     """Кнопки навигации для шага FSM-визарда: «‹ Назад» (если передан back_cb — родительский
@@ -899,6 +922,14 @@ def client_card_kb(
             kb.button(
                 text="🆕 Re-crawl (new only)" if en else "🆕 Перекраулить только новое",
                 callback_data=ClientCB(action="recrawl", sub="incr"),
+            )
+        else:
+            # Профиль есть, а сайта нет → видимый путь «добавить сайт + краулить»: ведёт в приём
+            # текста (action=add), где после вставки URL появится «🕷 Сохранить и краулить». Операцию
+            # выберет _cli_extract_and_propose по before is not None (profile_update) — не затрёт.
+            kb.button(
+                text="🕷 Add site & crawl" if en else "🕷 Добавить сайт и краулить",
+                callback_data=ClientCB(action="add", sub=sub),
             )
         kb.button(
             text="🗑 Clear profile" if en else "🗑 Очистить профиль",

@@ -138,7 +138,8 @@ HELP = (
     "/alerts — пороги алертов аномалий (всплеск расхода / падение конверсий)\n\n"
     "<b>ℹ️ Клиенты</b>\n"
     "/clients — база знаний: профиль клиента текстом + краулинг сайта → релевантная генерация\n"
-    "/client &lt;id&gt; — карточка клиента по номеру аккаунта\n\n"
+    "/client &lt;id&gt; — карточка клиента по номеру аккаунта\n"
+    "/crawl [url] — краулить сайт клиента (из аргумента или профиля); сводка по готовности\n\n"
     "<b>⚙️ Настройки и сервис</b>\n"
     "/account &lt;id&gt; | reset — аккаунт чтения для отчётов/ключей (по умолч. Draft)\n"
     "/accounts — мои доступные аккаунты · /whoami — мой chat_id и режим доступа\n"
@@ -2261,6 +2262,7 @@ def fmt_my_sheets(rows, lang: str | None = None) -> str:
     kinds = {
         "keywords": "keywords" if en else "ключи",
         "report": "report" if en else "отчёт",
+        "audit": "audit" if en else "аудит",
     }
     private = " · 🔒 " + ("access on request" if en else "доступ по запросу")
     L = [head, ""]

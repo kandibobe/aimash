@@ -559,3 +559,14 @@ async def period_sheets(cq: bm.CallbackQuery, callback_data: bm.PeriodCB) -> Non
     await bm._remember_period(bm._cq_chat_id(cq), callback_data.code)  # §UX-память
     acct, campaign_id, campaign_name = await bm._report_target(bm._cq_chat_id(cq))
     await bm._run_sheets(msg, period, acct, campaign_id, campaign_name)
+
+
+@bm.dp.callback_query(bm.AuditExportCB.filter())
+async def on_audit_export(cq: bm.CallbackQuery, callback_data: bm.AuditExportCB) -> None:
+    """Кнопки «📄 В Google Sheets» / «📊 Скачать .xlsx» под карточкой /audit — выгрузка УЖЕ
+    посчитанного результата (кэш bot.main). Read-only, GR3: бумага. Аудит по клику не пересобираем."""
+    await cq.answer()
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        return
+    await bm._run_audit_export(msg, callback_data.fmt, bm._cq_chat_id(cq))

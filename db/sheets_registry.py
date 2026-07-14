@@ -21,7 +21,7 @@ from db.session import Session
 
 @dataclass
 class SheetExportRow:
-    kind: str  # keywords|report
+    kind: str  # keywords|report|audit
     url: str
     title: str | None
     customer_id: str | None

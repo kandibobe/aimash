@@ -12,10 +12,15 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from reports.findings import (
+    FAMILY_SUMMARY_FORMATS,
+    FAMILY_SUMMARY_TITLE,
     FINDINGS_FORMATS,
     FINDINGS_TITLE,
     MONEY_FORMAT,
+    OVERVIEW_TITLE,
     account_health_cells,
+    family_summary_headers,
+    family_summary_rows,
     findings_headers,
     findings_meta_rows,
     findings_rows,
@@ -119,6 +124,22 @@ def _write_findings(wb: Workbook, result, currency: str = "", lang: str = "ru") 
     _autosize(ws, len(headers), cap=90)  # «Что не так» — предложение, а не ярлык
 
 
+def _write_simple_table(wb, title, headers, rows, formats, *, cap=48):
+    """Лист «шапка (строка 1) + строки данных» с денежным форматом по колонкам formats (0-based).
+    Общий раскладчик простых вкладок книги аудита («По семьям», «Находки») — у отчёта шапка часто не
+    в первой строке (пометка об усечении), поэтому у него отдельный путь. title — УЖЕ локализован."""
+    ws = wb.create_sheet(title=title[:31])
+    _append(ws, headers)
+    for row in rows:
+        _append(ws, row)
+    _style_header_row(ws, len(headers))
+    for col, fmt in formats:
+        for r in range(2, 2 + len(rows)):
+            ws.cell(row=r, column=col + 1).number_format = fmt
+    _autosize(ws, len(headers), cap=cap)
+    return ws
+
+
 def _apply_metric_formats_at(ws, dim_count: int, first_data_row: int, ndata: int) -> None:
     for i, fmt in enumerate(_METRIC_FORMATS):
         col = dim_count + 1 + i
@@ -171,6 +192,43 @@ def build_workbook(report: ReportData, lang: str = "ru", *, audit=None) -> Workb
 def write_report_xlsx(report: ReportData, path: str, lang: str = "ru", *, audit=None) -> str:
     """Сохранить отчёт в .xlsx по пути path. Возвращает path. lang — язык ПОДПИСЕЙ (не данных)."""
     build_workbook(report, lang, audit=audit).save(path)
+    return path
+
+
+def build_audit_workbook(result, lang: str = "ru") -> Workbook:
+    """Книга выгрузки /audit из УЖЕ вычисленного AuditResult: «Обзор» (карточка без топ-3/дисклеймера,
+    проза в колонке A) + «По семьям» (свод) + «Находки» (весь список worst-first). Зеркало
+    reports.sheets.build_audit_sheets_data. Аудит НЕ пересобираем — на вход готовый result (кэш
+    bot-слоя); никаких доп-чтений Google Ads. GR3: колонки «применить» нет — экспорт бумага."""
+    wb = Workbook()
+    overview = wb.active
+    overview.title = loc(OVERVIEW_TITLE, lang)[:31]
+    for row in findings_meta_rows(result, lang):
+        _append(overview, row)
+    overview.cell(row=1, column=1).font = Font(bold=True, size=14)
+    _autosize(overview, 1, cap=90)  # проза (строки карточки) длиннее ярлыка
+    currency = getattr(result, "currency", "") or ""
+    _write_simple_table(
+        wb,
+        loc(FAMILY_SUMMARY_TITLE, lang),
+        family_summary_headers(currency, lang),
+        family_summary_rows(result, lang),
+        FAMILY_SUMMARY_FORMATS,
+    )
+    _write_simple_table(
+        wb,
+        loc(FINDINGS_TITLE, lang),
+        findings_headers(currency, lang),
+        findings_rows(result, lang),
+        FINDINGS_FORMATS,
+        cap=90,  # «Что не так» — предложение, а не ярлык
+    )
+    return wb
+
+
+def write_audit_xlsx(result, path: str, lang: str = "ru") -> str:
+    """Сохранить выгрузку /audit в .xlsx по пути path. Возвращает path. lang — язык ПОДПИСЕЙ."""
+    build_audit_workbook(result, lang).save(path)
     return path
 
 

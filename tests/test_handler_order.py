@@ -39,6 +39,7 @@ def test_state_and_command_handlers_precede_catchall():
         "cc_account_search",  # §19 Этап 0 (поиск аккаунта)
         "cc_kw_verify",  # §19 Этап 2 (ссылка на таблицу)
         "cli_accumulate_text",  # §20 приём текста профиля
+        "crawl_cmd",  # §20.4 /crawl [url] (команда с текстом — до catch-all)
         "rsa_list_edited",  # §10 list-UX paste-back
         "report_",  # /report
         "on_document",  # файлы (ключи XLSX/CSV)

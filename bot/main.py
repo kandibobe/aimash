@@ -87,6 +87,7 @@ from bot.callbacks import (
     AdviseCB,
     AlertCB,
     AudienceCB,
+    AuditExportCB,
     BugCB,
     CampCB,
     CcCB,
@@ -131,6 +132,7 @@ from bot.keyboards import (
     advise_feedback_kb,
     advise_header_kb,
     alerts_kb,
+    audit_export_kb,
     BTN_CAMPAIGNS_ALL,
     BTN_EXPORT_ALL,
     BTN_HELP_ALL,
@@ -986,6 +988,10 @@ async def _start_advise_picker(message: Message, *, topic: str | None = None) ->
 _AUDIT_PERIOD_CACHE: dict[
     int, object
 ] = {}  # значения — reports.period.Period; переживают выбор аккаунта в пикере
+# Кэш последнего результата /audit по chat_id для кнопок выгрузки (Sheets/xlsx): (AuditResult, acct).
+# Держим УЖЕ посчитанный аудит, чтобы клик по кнопке не гонял gather_audit заново (≈23 чтения). Один
+# слот на чат (новый /audit затирает старый). Холодный слот (рестарт/старая клавиатура) → stale-алерт.
+_AUDIT_EXPORT_CACHE: dict[int, tuple[object, str]] = {}
 _AUDIT_MAX_FINDINGS = 8  # сколько находок показываем отдельными сообщениями (анти-спам)
 
 
@@ -3017,6 +3023,82 @@ async def _run_sheets(
         share=share,
         customer_id=acct,
     )
+
+
+async def _run_audit_sheets(m: Message, result, acct: str) -> None:
+    """Выгрузить УЖЕ посчитанный AuditResult в Google Sheets (3 вкладки), прислать ссылку. Read-only,
+    GR3: бумага. gather_audit НЕ зовём (result из кэша) — доп-чтений Google Ads нет."""
+    await m.answer(i18n.t("report_preparing_sheets"))
+    try:
+        from reports.sheets import publish_audit_to_sheets
+
+        async with ux.typing_action(m):
+            url, share = await asyncio.to_thread(
+                publish_audit_to_sheets, result, lang=i18n.current_lang()
+            )
+    except Exception as e:  # сеть/нет OAuth-scope Sheets — GR5: наружу только через ux.err_text
+        await _capture_cmd_error(e, "cmd:audit_sheets")  # A2: в /diag + алерт
+        await m.answer(i18n.t("err_sheets", err=ux.err_text(e)))
+        return
+    from db import sheets_registry
+    from reports.sheets import SHARE_OFF, is_shared, parse_spreadsheet_id
+
+    if is_shared(share):
+        key = "sheets_public_warn"
+    else:
+        key = "sheets_share_off_note" if share == SHARE_OFF else "sheets_share_failed_note"
+    await m.answer(i18n.t("sheets_ready", url=url) + "\n" + i18n.t(key))
+    await sheets_registry.record(
+        chat_id=m.chat.id,
+        kind="audit",
+        spreadsheet_id=parse_spreadsheet_id(url) or "",
+        url=url,
+        title=_account_name(acct) or acct,
+        share=share,
+        customer_id=acct,
+    )
+
+
+async def _run_audit_xlsx(m: Message, result, acct: str) -> None:
+    """Сохранить УЖЕ посчитанный AuditResult в .xlsx (Обзор/По семьям/Находки) и прислать файлом.
+    Read-only, GR3: бумага. gather_audit НЕ зовём (result из кэша)."""
+    import os
+    import tempfile
+
+    await m.answer(i18n.t("report_preparing_xlsx"))
+    path: str | None = None
+    try:
+        from reports.xlsx import write_audit_xlsx
+
+        async with ux.upload_action(m):  # «отправляет документ…» пока строим .xlsx
+            fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_audit_")
+            os.close(fd)
+            await asyncio.to_thread(write_audit_xlsx, result, path, i18n.current_lang())
+        await m.answer_document(FSInputFile(path, filename=f"aimash_audit_{acct}.xlsx"))
+    except Exception as e:  # openpyxl/файловая — GR5: наружу только редактированное
+        await _capture_cmd_error(e, "cmd:audit_xlsx")  # A2: в /diag + алерт
+        await m.answer(i18n.t("err_report_make", err=ux.err_text(e)))
+    finally:
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+async def _run_audit_export(m: Message, fmt: str, chat_id: int) -> None:
+    """Точка входа кнопок выгрузки /audit: читает УЖЕ посчитанный результат из _AUDIT_EXPORT_CACHE и
+    строит бумагу (Sheets или .xlsx). Холодный кэш (рестарт бота / старая клавиатура) → stale-алерт:
+    пере-собирать аудит по клику НЕ гоняем (≈23 чтения — только по явной команде /audit)."""
+    cached = _AUDIT_EXPORT_CACHE.get(chat_id)
+    if cached is None:
+        await m.answer(i18n.t("audit_export_stale"))
+        return
+    result, acct = cached
+    if fmt == "sheets":
+        await _run_audit_sheets(m, result, acct)
+    else:
+        await _run_audit_xlsx(m, result, acct)
 
 
 def _mcc_period_factory(arg: str | None):
@@ -5996,10 +6078,18 @@ async def _audit_run(
     else:
         trend_line = await _audit_trend_line(result, client, acct, days, lang)
     # Обзор (score + семьи + Google-балл) БЕЗ топ-3 — действия идут отдельными сообщениями с кнопками.
+    # Под обзором — кнопки выгрузки (Sheets/xlsx) под тем же kill-switch, что и лист «Находки» в
+    # /export (settings.export_findings). Кэшируем УЖЕ посчитанный result, чтобы клик не пере-собирал
+    # аудит. GR3: кнопки строят БУМАГУ (нет «применить»), Google Ads не мутируют.
+    export_kb = None
+    if settings.export_findings:
+        _AUDIT_EXPORT_CACHE[chat_id] = (result, acct)
+        export_kb = audit_export_kb(lang)
     await target.answer(
         render_audit(result, lang, actions=False, period_label=plabel, momentary=is_custom)
         + trend_line,
         parse_mode=None,
+        reply_markup=export_kb,
     )
     # P3: агентный НАРРАТИВ поверх детерминированной карточки (числа = КОД, разбор = LLM). READ-ONLY,
     # multi-turn (может уточнить кампанию/поисковые запросы drill-инструментами). Сбой/timeout/бюджет-

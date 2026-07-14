@@ -167,9 +167,57 @@ def build_sheets_data(report: ReportData, lang: str = "ru", *, audit=None) -> li
     return tabs
 
 
+def build_audit_sheets_data(result, lang: str = "ru") -> list[SheetTab]:
+    """Чистая сборка 3 вкладок выгрузки /audit из УЖЕ вычисленного AuditResult (без сети и без
+    доп-чтений Google Ads): «Обзор» (карточка без топ-3/дисклеймера), «По семьям» (свод) и «Находки»
+    (весь список worst-first). Зеркало reports.xlsx.build_audit_workbook. lang — язык ПОДПИСЕЙ; значения
+    ячеек (имена кампаний, тексты находок) не трогаем.
+
+    На вход готовый AuditResult — слой reports не пересобирает аудит и не импортирует audit-слой (гард
+    test_mcc_deep_health_is_engine_only): полный разбор веером по MCC (23 чтения) сюда не ходит."""
+    from reports.findings import (
+        FAMILY_SUMMARY_FORMATS,
+        FAMILY_SUMMARY_TITLE,
+        FINDINGS_FORMATS,
+        FINDINGS_TITLE,
+        OVERVIEW_TITLE,
+        family_summary_headers,
+        family_summary_rows,
+        findings_headers,
+        findings_meta_rows,
+        findings_rows,
+    )
+
+    currency = getattr(result, "currency", "") or ""
+    seen: set[str] = set()
+    return [
+        SheetTab(
+            _sanitize_title(loc(OVERVIEW_TITLE, lang), seen),
+            findings_meta_rows(result, lang),
+            # проза в колонке A — числовых колонок нет; formats=[] гасит метрик-формат по умолчанию
+            formats=[],
+        ),
+        SheetTab(
+            _sanitize_title(loc(FAMILY_SUMMARY_TITLE, lang), seen),
+            [family_summary_headers(currency, lang), *family_summary_rows(result, lang)],
+            formats=FAMILY_SUMMARY_FORMATS,
+        ),
+        SheetTab(
+            _sanitize_title(loc(FINDINGS_TITLE, lang), seen),
+            [findings_headers(currency, lang), *findings_rows(result, lang)],
+            formats=FINDINGS_FORMATS,
+        ),
+    ]
+
+
 def _default_title(report: ReportData) -> str:
     p = report.period
     return f"Aimash {report.customer_id} {p.date_from.isoformat()}—{p.date_to.isoformat()}"
+
+
+def _audit_title(result, lang: str = "ru") -> str:
+    cid = getattr(result, "customer_id", "") or ""
+    return f"Aimash audit {cid}" if lang == "en" else f"Aimash аудит {cid}"
 
 
 def _oauth_credentials(*, external_read: bool = False) -> Any:
@@ -363,21 +411,19 @@ def _format_tabs(svc: Any, spreadsheet_id: str, tabs: list[SheetTab]) -> None:
         log.warning("sheets-format: %s (пропуск форматирования)", type(e).__name__)
 
 
-def publish_report_to_sheets(
-    report: ReportData,
+def _publish_tabs(
+    tabs: list[SheetTab],
+    title: str,
     *,
-    title: str | None = None,
-    service: Any = None,
-    drive_service: Any = None,
-    lang: str = "ru",
-    audit=None,
+    role: str,
+    service: Any,
+    drive_service: Any,
+    log_label: str,
 ) -> tuple[str, str]:
-    """Создать новую таблицу с вкладками отчёта и вернуть (ссылка, статус_шаринга: роль|off|failed).
-    `service`/`drive_service` — для тестов (моки). `audit` — AuditResult → вкладка «Находки» (None →
-    её нет). Отчёт открывается anyone-with-link ЧИТАТЕЛЕМ (финансовый артефакт — писать в него никому
-    не нужно). Логирует вызовы Sheets API (создание + запись значений, длительность, исход — БЕЗ
-    секретов; §15)."""
-    tabs = build_sheets_data(report, lang, audit=audit)
+    """Общий транспорт Sheets: создать таблицу с ГОТОВЫМИ вкладками, записать значения (RAW), задать
+    формат (best-effort) и открыть anyone-with-link ролью role. Возвращает (url, статус_шаринга).
+    Раскладку строит вызыватель — отчёт и аудит делят один код записи/шаринга/лога (§15, без секретов).
+    Сбой шаринга не роняет экспорт (см. _share_anyone); сбой create/write логируется и пробрасывается."""
     svc = service or _build_service()
     start = time.monotonic()
     try:
@@ -385,7 +431,7 @@ def publish_report_to_sheets(
             svc.spreadsheets()
             .create(
                 body={
-                    "properties": {"title": title or _default_title(report)},
+                    "properties": {"title": title[:_TITLE_MAXLEN]},
                     # sheetId=i явно (P2-b): чтобы адресовать вкладку в форматирующем batchUpdate
                     # без доп. запроса на чтение sheetId.
                     "sheets": [
@@ -408,20 +454,70 @@ def publish_report_to_sheets(
         _format_tabs(svc, sid, tabs)  # §9/§16 (P2-b): жирная шапка + фиксация + форматы чисел
     except Exception as e:
         log.warning(
-            "sheets-publish: %s за %dмс (вкладок=%d)",
+            "%s: %s за %dмс (вкладок=%d)",
+            log_label,
             type(e).__name__,
             int((time.monotonic() - start) * 1000),
             len(tabs),
         )
         raise
-    share = _share_anyone(sid, role="reader", drive_service=drive_service)
+    share = _share_anyone(sid, role=role, drive_service=drive_service)
     log.info(
-        "sheets-publish: ok за %dмс (вкладок=%d, share=%s)",
+        "%s: ok за %dмс (вкладок=%d, share=%s)",
+        log_label,
         int((time.monotonic() - start) * 1000),
         len(tabs),
         share,
     )
     return url, share
+
+
+def publish_report_to_sheets(
+    report: ReportData,
+    *,
+    title: str | None = None,
+    service: Any = None,
+    drive_service: Any = None,
+    lang: str = "ru",
+    audit=None,
+) -> tuple[str, str]:
+    """Создать новую таблицу с вкладками отчёта и вернуть (ссылка, статус_шаринга: роль|off|failed).
+    `service`/`drive_service` — для тестов (моки). `audit` — AuditResult → вкладка «Находки» (None →
+    её нет). Отчёт открывается anyone-with-link ЧИТАТЕЛЕМ (финансовый артефакт — писать в него никому
+    не нужно). Логирует вызовы Sheets API (создание + запись значений, длительность, исход — БЕЗ
+    секретов; §15)."""
+    tabs = build_sheets_data(report, lang, audit=audit)
+    return _publish_tabs(
+        tabs,
+        title or _default_title(report),
+        role="reader",
+        service=service,
+        drive_service=drive_service,
+        log_label="sheets-publish",
+    )
+
+
+def publish_audit_to_sheets(
+    result,
+    *,
+    title: str | None = None,
+    service: Any = None,
+    drive_service: Any = None,
+    lang: str = "ru",
+) -> tuple[str, str]:
+    """Создать таблицу с 3 вкладками аудита (Обзор/По семьям/Находки) из УЖЕ вычисленного AuditResult
+    и вернуть (ссылка, статус_шаринга). Как publish_report_to_sheets — anyone-with-link ЧИТАТЕЛЕМ
+    (GR3: экспорт — бумага, «применить» из таблицы нет). На вход готовый result (кэш bot-слоя):
+    аудит здесь не пересобираем, доп-чтений Google Ads нет."""
+    tabs = build_audit_sheets_data(result, lang)
+    return _publish_tabs(
+        tabs,
+        title or _audit_title(result, lang),
+        role="reader",
+        service=service,
+        drive_service=drive_service,
+        log_label="sheets-audit",
+    )
 
 
 # ── §19.4.2: выгрузка ключей с пометкой релевантности + чтение верифицированного списка ─────
