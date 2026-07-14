@@ -185,6 +185,14 @@ class RollbackCB(CallbackData, prefix="rbk"):
     token: str
 
 
+class JournalRollbackCB(CallbackData, prefix="rbj"):
+    """Доп.2B: «↩️ Откатить» из /journal — ПЕРСИСТЕНТНЫЙ откат по confirmation_id (не in-memory
+    token, как RollbackCB, гибнущий при рестарте). Применённую строку находим в БД, реверс собираем
+    из proposals.params['_before']. Минтит ОБРАТНЫЙ черновик за confirm-гейтом (НЕ исполняет)."""
+
+    cid: str
+
+
 class SearchBidCB(CallbackData, prefix="sbid"):
     """A7: «✏️ Изменить ставку» на карточке черновика create_search_campaign (/newsearch). token —
     ключ _SEARCH_BID_EDIT[chat_id] (не confirmation_id: правка ставки минтит НОВЫЙ черновик). Не

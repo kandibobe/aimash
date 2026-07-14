@@ -1998,6 +1998,15 @@ _AUDIT_STATUS_EN = {
     "rejected": ("❌", "rejected"),
     "needs_review": ("⚠️", "needs review"),
 }
+
+
+def op_human(operation: str, lang: str | None = None) -> str:
+    """Человекочитаемое имя операции (переиспуёт карту /journal). Доп.2B: подпись кнопки
+    «↩️ Откатить: <op>». Неизвестная op → сама строка операции (не падаем)."""
+    ops = _OP_HUMAN_EN if _lang(lang) == "en" else _OP_HUMAN
+    return ops.get(operation, operation)
+
+
 _OP_HUMAN_EN = {
     "update_budget": "budget",
     "update_bid": "CPC bid",

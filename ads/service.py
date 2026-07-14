@@ -18,6 +18,7 @@ from ads.read import (  # D6: «было» для гео-мутаций; вал�
     read_campaign_targeting,
 )
 from core.config import normalize_customer_id, settings  # D7: гео-дефолты из env, не хардкод «UA»
+from core.logging import log, redact_text  # Доп.2A: лог сбоя пост-проверки (редактируем текст)
 
 # ── Единый источник истины: какие операции РЕАЛЬНО исполняются за confirm-гейтом. ──
 # Это потолок возможностей: всё, чего тут нет, агент обязан отклонить ДО показа кнопок
@@ -315,8 +316,10 @@ def _assert_no_drift(params: dict, current) -> None:
         )
 
 
-async def execute_confirmed(store, confirmation_id: str) -> dict:
-    """store — ConfirmStore. Возвращает result операции или бросает ошибку."""
+async def _apply_confirmed(store, confirmation_id: str) -> dict:
+    """Внутреннее ядро исполнения: резолв → gated apply_*. store — ConfirmStore. Возвращает result
+    операции или бросает ошибку. Публичный вход — execute_confirmed (оборачивает окном пост-
+    проверки Доп.2A); все прежние гейты/инварианты (defense-in-depth, ensure_allowed, claim) — здесь."""
     p = await store.get_confirmed(confirmation_id)
     if p is None:
         raise ValueError("черновик не найден")
@@ -1077,3 +1080,170 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
 
     # Не должно случиться: op ∈ SUPPORTED_OPERATIONS, но ветки нет (рассинхрон). Fail-closed.
     raise ValueError(f"операция '{op}' заявлена поддержанной, но не имеет обработчика (баг)")
+
+
+async def execute_confirmed(store, confirmation_id: str) -> dict:
+    """Публичный вход: исполнить подтверждённый черновик + ОКНО ПОСТ-ПРОВЕРКИ (Доп.2A).
+
+    Это чужие деньги: после «✅ применено» никто не перечитывал аккаунт, а `_assert_no_drift`
+    защищает лишь ДО применения (TOCTOU). Тут, ПОСЛЕ успешного apply и только для diffable-операций
+    со снимком `_before`, READ-ONLY перечитываем аккаунт теми же резолверами, что кормят read_before,
+    и сверяем фактическое значение с ожидаемым «станет». Расхождение (частичный сбой/гонка/тихая
+    деградация SDK) → applied→needs_review + флаг наверх (бот предупредит).
+
+    Инварианты, которые здесь НЕ нарушаются:
+    • Гейт денег цел (golden rule #3): _verify_applied — чистое ЧТЕНИЕ, ads.mutations не трогает.
+    • Все прежние проверки/исключения летят из _apply_confirmed БЕЗ перехвата (форма отказа не
+      изменилась: ValueError/PermissionError доходят до вызывающего как раньше).
+    • Сбой самой проверки НЕ откатывает уже применённую мутацию (degrade → verified=None).
+    • result операции остаётся прежним; ключ `verification` дописывается ТОЛЬКО при расхождении
+      (verified is False), чтобы не менять контракт result для happy-path."""
+    result = await _apply_confirmed(store, confirmation_id)
+    # Метаданные для сверки берём ПОСЛЕ apply (статус теперь applied): op/params/customer_id.
+    try:
+        snap = await store.get_confirmed(confirmation_id)
+    except Exception:  # noqa: BLE001 — метаданные не прочитать → пропускаем проверку, не роняем apply
+        return result
+    if snap is None or snap.operation not in _DIFFABLE_OPS or not isinstance(result, dict):
+        return result
+    try:
+        verification = await _verify_applied(snap.operation, snap.params or {}, snap.customer_id)
+    except Exception as e:  # noqa: BLE001 — проверка READ-ONLY: её сбой не влияет на исход мутации
+        log.warning(
+            "post-apply verify cid=%s не выполнена: %s",
+            confirmation_id,
+            redact_text(str(e)),
+        )
+        return result
+    if verification.get("verified") is False:
+        result = {**result, "verification": verification}
+        try:
+            await store.record_verification(confirmation_id, verification=verification)
+        except Exception:  # noqa: BLE001 — флаг не записали: мутация всё равно применена, лог и дальше
+            log.exception("record_verification не записан cid=%s", confirmation_id)
+    return result
+
+
+def _verify_cmp(kind: str, expected, actual) -> dict:
+    """Итог сверки. expected/actual is None ⇒ проверить НЕЧЕМ (нет снимка/значение не прочитано):
+    verified=None — НЕ расхождение (fail-safe, без ложного needs_review). Оба конкретны ⇒ сравниваем."""
+    if expected is None or actual is None:
+        return {"verified": None, "kind": kind, "expected": expected, "actual": actual}
+    return {
+        "verified": bool(expected == actual),
+        "kind": kind,
+        "expected": expected,
+        "actual": actual,
+    }
+
+
+async def _verify_applied(op: str, params: dict, customer_id: str | None) -> dict:
+    """Доп.2A: ПОСТ-проверка применённой мутации. READ-ONLY повторное чтение аккаунта теми же
+    резолверами, что кормят read_before, и сверка фактического значения с ожидаемым «станет».
+    Возвращает {"verified": True|False|None, "kind", "expected", "actual"}.
+
+    🔒 ads.mutations здесь НЕ вызывается — это чистое чтение (golden rule #3 цел). Гейт: без снимка
+    `_before` (реальные черновики из _present_proposal его всегда несут) не сверяем — verified=None,
+    чтобы прямые тест-черновики и легаси-строки не давали ложных расхождений. Для kind без «после»
+    в снимке (status/name/bidding) ожидаемое выводим из самой операции/params."""
+    before = params.get("_before")
+    if not isinstance(before, dict) or not before:
+        return {"verified": None, "reason": "no_before_snapshot"}
+    cid = normalize_customer_id(customer_id) if customer_id else DRAFT_ACCOUNT_ID
+    name = params.get("campaign")
+    client = await build_client_async(cid)
+
+    if op == "update_budget":
+        ref = await asyncio.to_thread(resolve.find_campaign_by_name, client, cid, name)
+        actual = int(ref.budget_micros) if ref is not None else None
+        exp = before.get("after_micros")
+        return _verify_cmp("budget", int(exp) if exp is not None else None, actual)
+
+    if op == "update_bid":
+        ags = await asyncio.to_thread(resolve.find_ad_groups, client, cid, name)
+        actual = [int(ag.cpc_bid_micros) for ag in ags] if ags else None
+        exp = before.get("after_micros")
+        exp = [int(x) for x in exp] if isinstance(exp, list) else None
+        # позиционная сверка (тот же ORDER BY ad_group.id) — разошлись длины ⇒ сверять нечем
+        if isinstance(exp, list) and isinstance(actual, list) and len(exp) != len(actual):
+            return {"verified": None, "kind": "bid", "expected": exp, "actual": actual}
+        return _verify_cmp("bid", exp, actual)
+
+    if op == "update_keyword_bid":
+        kws = await asyncio.to_thread(
+            resolve.find_keywords,
+            client,
+            cid,
+            name,
+            params.get("keyword"),
+            params.get("ad_group") or None,
+            params.get("match_type") or None,
+        )
+        actual = [int(k.bid_micros) for k in kws] if kws else None
+        exp = before.get("after_micros")
+        exp = [int(x) for x in exp] if isinstance(exp, list) else None
+        if isinstance(exp, list) and isinstance(actual, list) and len(exp) != len(actual):
+            return {"verified": None, "kind": "keyword_bid", "expected": exp, "actual": actual}
+        return _verify_cmp("keyword_bid", exp, actual)
+
+    if op in ("pause_campaign", "resume_campaign", "launch_campaign"):
+        ref = await asyncio.to_thread(resolve.find_campaign_by_name, client, cid, name)
+        actual = ref.status if ref is not None else None
+        exp = "PAUSED" if op == "pause_campaign" else "ENABLED"
+        return _verify_cmp("status", exp, actual)
+
+    if op in ("pause_ad_group", "resume_ad_group"):
+        ag = await asyncio.to_thread(
+            resolve.find_ad_group_by_name, client, cid, name, params.get("ad_group", "")
+        )
+        actual = ag.status if ag is not None else None
+        exp = "PAUSED" if op == "pause_ad_group" else "ENABLED"
+        return _verify_cmp("status", exp, actual)
+
+    if op in ("pause_ad", "resume_ad"):
+        matches = await asyncio.to_thread(
+            resolve.find_ads_in_group,
+            client,
+            cid,
+            name,
+            params.get("ad_group", ""),
+            params.get("ad", ""),
+        )
+        actual = matches[0].status if len(matches) == 1 else None  # неоднозначно ⇒ сверять нечем
+        exp = "PAUSED" if op == "pause_ad" else "ENABLED"
+        return _verify_cmp("status", exp, actual)
+
+    if op == "update_campaign":
+        # после переименования кампания зовётся new_name → ищем по нему
+        new_name = params.get("new_name")
+        ref = await asyncio.to_thread(resolve.find_campaign_by_name, client, cid, new_name)
+        actual = ref.name if ref is not None else None
+        return _verify_cmp("name", new_name or None, actual)
+
+    if op == "set_campaign_network":
+        info = await asyncio.to_thread(resolve.campaign_network_settings, client, cid, name)
+        actual = bool(info["search_partners"]) if info is not None else None
+        return _verify_cmp("network", bool(params.get("search_partners")), actual)
+
+    if op == "set_campaign_display_network":
+        info = await asyncio.to_thread(resolve.campaign_display_network, client, cid, name)
+        actual = bool(info["display_network"]) if info is not None else None
+        return _verify_cmp("display_network", bool(params.get("display_network")), actual)
+
+    if op == "set_campaign_geo_target_type":
+        info = await asyncio.to_thread(resolve.campaign_geo_target_type, client, cid, name)
+        # actual "" = Google вернул UNSPECIFIED/UNKNOWN → сверить нечем (не флагуем)
+        actual = (str(info["geo_target_type"] or "") or None) if info is not None else None
+        exp = str(params.get("geo_target_type") or "") or None
+        return _verify_cmp("geo_target_type", exp, actual)
+
+    if op == "set_bidding_strategy":
+        info = await asyncio.to_thread(resolve.campaign_bidding_strategy, client, cid, name)
+        actual = (str(info["strategy"] or "").upper() or None) if info is not None else None
+        # literal схемы (manual_cpc/…) → ENUM-имя (MANUAL_CPC/…) — прямой upper() совпадает 1:1
+        exp = str(params.get("strategy") or "").upper() or None
+        return _verify_cmp("bidding", exp, actual)
+
+    # set_geo_location / set_geo_proximity: применённое гео Google нормализует (id/радиусы) —
+    # надёжной поэлементной сверки нет, не флагуем (verified=None).
+    return {"verified": None, "kind": "geo", "reason": "geo_not_verifiable"}

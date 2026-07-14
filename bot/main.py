@@ -95,6 +95,7 @@ from bot.callbacks import (
     DiagCB,
     ExtCB,
     GeoCB,
+    JournalRollbackCB,
     KwAddCB,
     KwCfgCB,
     LangCB,
@@ -175,6 +176,7 @@ from bot.keyboards import (
     ext_menu_kb,
     ext_snippet_header_kb,
     geo_mode_kb,
+    journal_rollback_kb,
     kw_add_campaigns_kb,
     kw_geo_kb,
     kw_lang_kb,
@@ -1141,7 +1143,35 @@ async def _send_journal(message: Message) -> None:
         await _capture_cmd_error(e, "cmd:journal")  # A2: в /diag + алерт админам
         await message.answer(i18n.t("err_journal", err=ux.err_text(e)))
         return
-    await message.answer(texts.fmt_journal(events), parse_mode=ParseMode.HTML)
+    # Доп.2B: к СВОИМ применённым обратимым строкам — кнопка «↩️ Откатить» (персистентно из БД).
+    # Реверс собираем из Proposal.params[_before] (переживает рестарт), поэтому строки, где снимка
+    # не хватает (_reverse_spec=None: нет _before/неоднозначно), кнопки НЕ получают — честно, без
+    # мёртвых кнопок. Владение по chat_id — откатывать можно только свои операции (fail-closed на клике).
+    rollback_rows: list[tuple[str, str]] = []
+    own_applied = [
+        e
+        for e in events
+        if e.status == "applied"
+        and e.operation in _ROLLBACKABLE_OPS
+        and e.chat_id == message.chat.id
+    ]
+    if own_applied:
+        try:
+            snaps = await STORE.load_proposals([e.confirmation_id for e in own_applied])
+        except Exception:  # noqa: BLE001 — не смогли подгрузить черновики → просто без кнопок отката
+            snaps = {}
+        for e in own_applied:
+            snap = snaps.get(e.confirmation_id)
+            if snap is None:
+                continue
+            rev = _reverse_spec(e.operation, snap.params or {}, (snap.params or {}).get("_before"))
+            if rev is not None:
+                rollback_rows.append((e.confirmation_id, texts.op_human(e.operation)))
+    await message.answer(
+        texts.fmt_journal(events),
+        parse_mode=ParseMode.HTML,
+        reply_markup=journal_rollback_kb(rollback_rows),
+    )
 
 
 def _camp_account(chat_id: int) -> str:
@@ -6417,6 +6447,21 @@ async def _do_confirm(
     # (эскейп внутри) — texts.esc здесь дал бы двойное экранирование.
     human_result = texts.fmt_mutation_result(snap.operation if snap else "", result)
     await _safe_edit(cq, i18n.t("applied", result=human_result), parse_mode=ParseMode.HTML)
+    # Доп.2A: окно пост-проверки разошлось с подтверждённым «станет» → предупреждаем (операция уже
+    # помечена needs_review в execute_confirmed). Текст код-генерирован (без сырого SDK, golden rule #5).
+    if isinstance(result, dict) and isinstance(result.get("verification"), dict):
+        v = result["verification"]
+        if v.get("verified") is False:
+            msg = _cq_msg(cq)
+            if msg is not None:
+                await msg.answer(
+                    i18n.t(
+                        "verify_mismatch",
+                        expected=texts.esc(str(v.get("expected"))),
+                        actual=texts.esc(str(v.get("actual"))),
+                    ),
+                    parse_mode=ParseMode.HTML,
+                )
     # D2: применена обратимая операция → предложить «↩️ Откатить» (мятие ОБРАТНОГО черновика за
     # confirm-гейтом; прямого исполнения нет). Только если снимок _before достаточен для реверса.
     if snap is not None and snap.operation in _ROLLBACKABLE_OPS:

@@ -2300,6 +2300,26 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "↩️ Не удалось собрать откат: {err}",
         "en": "↩️ Couldn’t build the undo: {err}",
     },
+    # Доп.2A: окно пост-проверки — применённое значение разошлось с подтверждённым «станет».
+    # Значения код-генерированы (микро/enum), не сырой SDK. Строка помечена needs_review.
+    "verify_mismatch": {
+        "ru": (
+            "⚠️ Проверка после применения не сошлась: в аккаунте <b>{actual}</b>, "
+            "ожидалось <b>{expected}</b>. Операция помечена на ревью (см. /journal) — "
+            "проверь аккаунт вручную; при необходимости откати кнопкой ниже."
+        ),
+        "en": (
+            "⚠️ Post-apply check didn’t match: account shows <b>{actual}</b>, "
+            "expected <b>{expected}</b>. Flagged for review (see /journal) — "
+            "verify the account manually; undo below if needed."
+        ),
+    },
+    # Доп.2B: персистентный откат из /journal — реверс не собрать (нет снимка/смешанные ставки/
+    # не та операция). Кнопка была, но на клике честно отказываем (fail-closed).
+    "rollback_not_reversible": {
+        "ru": "↩️ Эту операцию откатить нельзя (нет снимка «было» или откат неоднозначен).",
+        "en": "↩️ This operation can’t be undone (no “before” snapshot or ambiguous reverse).",
+    },
     # §20.6: sitelinks предложены из РЕАЛЬНОЙ карты страниц краула (не выдуманы LLM)
     "cc_asset_sitelinks_from_crawl": {
         "ru": "🔗 Ссылки предложены из реальной карты сайта ({n} стр. из краула §20).",

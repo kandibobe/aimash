@@ -65,6 +65,52 @@ async def on_rollback(cq: bm.CallbackQuery, callback_data: bm.RollbackCB) -> Non
     )
 
 
+# ── Доп.2B: «↩️ Откатить» из /journal — ПЕРСИСТЕНТНЫЙ откат (снимок из БД, не in-memory) ──
+@bm.dp.callback_query(bm.JournalRollbackCB.filter())
+async def on_journal_rollback(cq: bm.CallbackQuery, callback_data: bm.JournalRollbackCB) -> None:
+    """Клик «↩️ Откатить» в /journal → снимок черновика берём из БД по confirmation_id (переживает
+    рестарт, в отличие от in-memory _ROLLBACK_CACHE), строим ОБРАТНУЮ операцию из params[_before] и
+    показываем ОБЫЧНЫМ черновиком (confirm-гейт ✅/❌; НЕ исполняем сразу).
+
+    Fail-closed на клике: чужой чат / не applied / не в _ROLLBACKABLE_OPS → generic-«устарело» (не
+    выдаём существование чужой строки). Реверс необратим (нет _before/неоднозначно) → внятный отказ.
+    _present_proposal сам ставит user_initiated=True и заново проходит ensure_allowed — бюджет-откат
+    легитимен (правило 3), мутационный замок сохранён."""
+    chat_id = bm._cq_chat_id(cq)
+    snap = await bm.STORE.get_confirmed(callback_data.cid)
+    if (
+        snap is None
+        or snap.chat_id != chat_id  # владение: откатить можно ТОЛЬКО свою строку
+        or snap.status != "applied"  # откатываем лишь применённое
+        or snap.operation not in bm._ROLLBACKABLE_OPS  # allow-list обратимых
+    ):
+        await cq.answer(bm.i18n.t("rollback_stale"), show_alert=True)
+        return
+    rev = bm._reverse_spec(snap.operation, snap.params or {}, (snap.params or {}).get("_before"))
+    if rev is None:  # снимка _before не хватает / реверс неоднозначен — честно не откатываем
+        await cq.answer(bm.i18n.t("rollback_not_reversible"), show_alert=True)
+        return
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    await cq.answer()
+    try:
+        cid, operation, params, summary = bm._build_proposal(rev[0], **rev[1])
+    except Exception as e:  # noqa: BLE001 — валидация обратных params (маловероятно) → внятно
+        await msg.answer(bm.i18n.t("rollback_failed", err=bm.ux.err_text(e)))
+        return
+    await bm._present_proposal(
+        msg,
+        chat_id=chat_id,
+        operation=operation,
+        params=params,
+        summary=summary,
+        cid=cid,
+        customer_id=snap.customer_id,  # откат на ТОМ ЖЕ аккаунте (execute заново пройдёт ensure_allowed)
+    )
+
+
 # Legacy-fallback: старые сообщения с "ok:/no:" (до рестарта). После переходного периода удалить.
 @bm.dp.callback_query(bm.F.data.startswith("ok:"))
 async def on_confirm_legacy(cq: bm.CallbackQuery, state: bm.FSMContext | None = None) -> None:

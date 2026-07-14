@@ -116,6 +116,32 @@ class ConfirmStore:
                 chat_id=p.chat_id,
             )
 
+    async def load_proposals(self, confirmation_ids: list[str]) -> dict[str, ConfirmedProposal]:
+        """Пакетно снять черновики по списку confirmation_id ОДНИМ запросом (Доп.2B: /journal решает,
+        какие applied-строки обратимы, без N+1 обращений). Read-only. Отсутствующие id просто не
+        попадут в словарь. Пустой/фейковый список → {}."""
+        ids = [c for c in confirmation_ids if c]
+        if not ids:
+            return {}
+        async with Session() as s:
+            rows = (
+                (await s.execute(select(Proposal).where(Proposal.confirmation_id.in_(ids))))
+                .scalars()
+                .all()
+            )
+        return {
+            p.confirmation_id: ConfirmedProposal(
+                operation=p.operation,
+                status=p.status,
+                user_initiated=p.user_initiated,
+                params=p.params,
+                customer_id=p.customer_id,
+                summary=p.summary,
+                chat_id=p.chat_id,
+            )
+            for p in rows
+        }
+
     async def claim(self, confirmation_id: str, *, operation: str) -> ConfirmedProposal | None:
         """Атомарно «застолбить» подтверждённый черновик под исполнение: confirmed → executing
         (одноразово, с проверкой операции). Возвращает снимок, если застолбил, иначе None.
@@ -309,6 +335,45 @@ class ConfirmStore:
             await s.commit()
             return True
 
+    async def record_verification(self, confirmation_id: str, *, verification: dict) -> bool:
+        """Доп.2A: пост-проверка применённой мутации разошлась с ожидаемым «станет» →
+        applied → needs_review (АТОМАРНО) + audit-строка needs_review со сводкой сверки.
+        Вызывается ТОЛЬКО при verified=False.
+
+        CAS: UPDATE … WHERE status='applied' — переводим лишь из ТЕРМИНАЛЬНОГО applied (норма
+        сразу после finalize). Иной статус (реконсиляция/гонка) ⇒ rowcount≠1 → False, без
+        спурьёзной audit-строки. Терминальность needs_review сохраняет replay-защиту (claim
+        требует 'confirmed'). Значения сверки — числа/enum'ы (не секреты), но текст всё равно
+        прогоняем через redact_text (единая дисциплина границы БД, golden rule #5)."""
+        exp, act = verification.get("expected"), verification.get("actual")
+        msg = redact_text(f"пост-проверка не сошлась: применено {act}, ожидалось {exp}")
+        async with Session() as s:
+            res = await s.execute(
+                update(Proposal)
+                .where(
+                    Proposal.confirmation_id == confirmation_id,
+                    Proposal.status == "applied",
+                )
+                .values(status="needs_review", decided_at=func.now())
+            )
+            # cast: DML возвращает CursorResult (есть .rowcount); async-стаб видит общий Result.
+            if cast(CursorResult, res).rowcount != 1:
+                await s.rollback()
+                return False
+            p = (
+                await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
+            ).scalar_one()
+            s.add(
+                _audit(
+                    p,
+                    p.chat_id,
+                    "needs_review",
+                    result={"error": msg, "verification": verification},
+                )
+            )
+            await s.commit()
+            return True
+
     async def mark_confirmed_failed(self, confirmation_id: str, *, error: str) -> bool:
         """confirmed → failed (АТОМАРНО, одноразово; для реконсиляции A6 «завис в confirmed»).
 
@@ -397,6 +462,10 @@ class AuditEvent:
     actor_username: str | None
     result: dict | None
     confirmation_id: str
+    # Доп.2B: чат-владелец строки — для персистентного «↩️ Откатить» из /journal только СВОИХ
+    # применённых операций (fail-closed на клике). Дефолт 0 = совместимость с позиционным
+    # конструированием (тесты/легаси) без chat_id.
+    chat_id: int = 0
 
 
 async def list_recent_audit(limit: int = 15) -> list[AuditEvent]:
@@ -430,7 +499,16 @@ async def list_recent_audit(limit: int = 15) -> list[AuditEvent]:
         if au is None and not an:  # applied/failed: actor восстановим из confirmed-строки
             au, an = actor.get(r.confirmation_id, (None, None))
         out.append(
-            AuditEvent(r.created_at, r.status, r.operation, au, an, r.result, r.confirmation_id)
+            AuditEvent(
+                r.created_at,
+                r.status,
+                r.operation,
+                au,
+                an,
+                r.result,
+                r.confirmation_id,
+                chat_id=int(r.chat_id or 0),
+            )
         )
         if len(out) >= limit:
             break

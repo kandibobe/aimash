@@ -25,6 +25,7 @@ from bot.callbacks import (
     DiagCB,
     ExtCB,
     GeoCB,
+    JournalRollbackCB,
     KwAddCB,
     KwCfgCB,
     LangCB,
@@ -1336,6 +1337,22 @@ def rollback_kb(token: str, lang: str | None = None) -> InlineKeyboardMarkup:
         text="↩️ Undo" if en else "↩️ Откатить",
         callback_data=RollbackCB(token=token),
     )
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def journal_rollback_kb(rows, lang: str | None = None) -> InlineKeyboardMarkup | None:
+    """Доп.2B: кнопки «↩️ Откатить» под /journal для СВОИХ применённых обратимых операций.
+    rows — [(confirmation_id, label)], уже отфильтровано вызывающим (applied ∩ _ROLLBACKABLE_OPS ∩
+    свой чат). Пусто → None (клавиатуры нет). Клик минтит ОБРАТНЫЙ черновик за confirm-гейтом
+    (persistent: cid из БД, переживает рестарт — в отличие от in-memory rollback_kb)."""
+    if not rows:
+        return None
+    en = _lang(lang) == "en"
+    prefix = "↩️ Undo: " if en else "↩️ Откатить: "
+    kb = InlineKeyboardBuilder()
+    for cid, label in rows:
+        kb.button(text=f"{prefix}{label}", callback_data=JournalRollbackCB(cid=cid))
     kb.adjust(1)
     return kb.as_markup()
 
