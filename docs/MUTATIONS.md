@@ -53,7 +53,7 @@ MUTATION_TOOLS?» отмечает членство в наборе, разре�
 | `update_budget` | `apply_update_budget` (:107) | Меняет дневной бюджет кампании (CampaignBudget) | **Да** | Да |
 | `update_bid` | `apply_update_bid` (:455) | Меняет CPC-ставку на всех группах кампании; только при MANUAL_CPC | **Да** | Да |
 | `update_keyword_bid` | `apply_update_keyword_bid` (:495) | Ф1: ставка на уровне КЛЮЧА (ad_group_criterion.cpc_bid_micros); только MANUAL_CPC | **Да** | Да |
-| `add_keywords` | `apply_add_keywords` (:590) | Добавляет позитивные ключи во все группы кампании | Нет | Да |
+| `add_keywords` | `apply_add_keywords` (:590) | Добавляет позитивные ключи в группы кампании; опц. `ad_group` СУЖАЕТ до одной группы (Ф4 «сбор урожая» — иначе веер по всем группам = каннибализация) | Нет | Да |
 | `remove_keywords` | `apply_remove_keywords` (:1824) | Удаляет ключи по тексту+типу из групп кампании | Нет | Да |
 | `add_negative_keywords` | `apply_add_negative_keywords` (:620) | Добавляет минус-слова на уровне кампании | Нет | Да |
 | `remove_negative_keywords` | `apply_remove_negative_keywords` (:648) | Снимает минус-слова кампании по тексту+типу | Нет | Да |

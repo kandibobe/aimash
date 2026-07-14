@@ -237,6 +237,55 @@ async def test_scheduled_report_multi_account_one_digest(monkeypatch):
     assert f"R:{A}" in sent[0][1] and f"R:{B}" in sent[0][1]  # оба аккаунта в дайджесте
 
 
+async def test_scheduled_report_prefixes_health_and_survives_broken_report(monkeypatch):
+    """Плановый отчёт открывается тем же «что горит», что и /report: балл/грейд/под-риском НАД
+    цифрами (engine-only, 0 доп. чтений). Здоровье — КОСМЕТИКА: отчёт, по которому движок не смог
+    посчитать (кривой/пустой), обязан дойти БЕЗ строки, а не упасть — иначе новая фича роняет
+    доставку старой (её и проверяет соседний тест: там report — строка, движок давится и молчит)."""
+    from types import SimpleNamespace
+
+    from reports.queries import Breakdown, Metrics
+    from scheduler import jobs
+
+    A = "1112223334"
+    m = Metrics(impressions=1000, clicks=100, cost_micros=int(500 * 1e6), conversions=0.0)
+    camp = Breakdown("campaign", "Кампании", ["Кампания", "Статус"], [(("Поиск", "ENABLED"), m)])
+    rep = SimpleNamespace(
+        customer_id=A,
+        totals=m,
+        prev_totals=None,
+        period=SimpleNamespace(date_from="2026-06-29", date_to="2026-07-05"),
+        currency="USD",
+        breakdowns=[camp],
+    )
+
+    async def fake_report(_client, _acct, _period, **k):
+        return rep
+
+    monkeypatch.setattr(jobs, "_scheduled_accounts", lambda: [A])
+    monkeypatch.setattr(jobs, "build_client_async", _fake_client_async)
+    monkeypatch.setattr(jobs, "build_account_report_async", fake_report)
+    monkeypatch.setattr(jobs, "summary_text", lambda r, lang=None: "SUMMARY")
+    monkeypatch.setattr(jobs, "_recipients", _arecipients({1}))
+
+    sent: list[tuple[int, str]] = []
+
+    class FakeBot:
+        async def send_message(self, chat_id, text, **kw):
+            sent.append((chat_id, text))
+
+    await jobs.run_scheduled_report(FakeBot())
+
+    from audit.engine import build_audit
+    from audit.render import audit_headline
+
+    expected = audit_headline(build_audit(rep), "ru")
+    assert expected, "движку есть что сказать (иначе тест зелен вхолостую)"
+    body = sent[0][1]
+    assert expected in body
+    assert body.index(expected) < body.index("SUMMARY"), "здоровье идёт НАД цифрами, как в /report"
+
+
 async def test_anomaly_multi_account_one_message(monkeypatch):
     """run_anomaly_check собирает аномалии по нескольким аккаунтам в ОДНО сообщение на оператора."""
     from scheduler import jobs
@@ -331,6 +380,40 @@ def test_scheduler_never_imports_mutations():
                 name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
                 assert name != "execute_confirmed", f"{py.name}: вызов execute_confirmed"
                 assert not name.startswith(("apply_", "mutate_")), f"{py.name}: вызов {name}"
+
+
+# ── КОД-ГАРД (квота): здоровье в дайджестах — ТОЛЬКО engine-only ──────────────────
+def test_scheduler_audit_is_engine_only():
+    """Планировщик ходит ВЕЕРОМ по всем аккаунтам и на КАЖДОМ прогоне. Полный сбор аудита
+    (audit.collect.gather_audit) — 23 параллельных чтения Google Ads на аккаунт: N аккаунтов × 4
+    прогона в сутки съедят квоту, ради строки, которую никто не просил. Здоровье в дайджесте строится
+    ТОЛЬКО по уже собранному отчёту (build_audit — чистая функция, 0 доп. чтений). Гард структурный:
+    нельзя импортировать — нельзя случайно позвать (правило «дорогое чтение — только по прямой
+    просьбе человека»: /audit, /export, досье)."""
+    import ast
+
+    pkg = pathlib.Path(__file__).resolve().parents[1] / "scheduler"
+    for py in pkg.glob("*.py"):
+        tree = ast.parse(py.read_text(encoding="utf-8"), filename=py.name)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                assert (node.module or "") != "audit.collect", f"{py.name}: import из audit.collect"
+                if (node.module or "") == "audit":
+                    for a in node.names:
+                        assert a.name != "collect", f"{py.name}: from audit import collect"
+            elif isinstance(node, ast.Import):
+                for a in node.names:
+                    assert a.name != "audit.collect", f"{py.name}: import audit.collect"
+            elif isinstance(node, ast.Call):
+                fn = node.func
+                name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+                assert name != "gather_audit", f"{py.name}: вызов gather_audit (23 чтения/аккаунт)"
+                # Снимок тренда пишет ТОЛЬКО /audit (полный ctx). Upsert из дайджеста (engine-only,
+                # тот же score_model_version, тот же ключ) молча затёр бы честную базу — и клиент
+                # увидел бы «▲ +15 за неделю», которого не было.
+                assert name != "record_snapshot", (
+                    f"{py.name}: вызов record_snapshot (отравит тренд)"
+                )
 
 
 # ── 1.3: еженедельный дайджест — текст + файл админам, no-op без админов ───────────

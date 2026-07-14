@@ -156,6 +156,45 @@ async def on_searchterms_neg(cq: bm.CallbackQuery, callback_data: bm.SearchTerms
     )
 
 
+@bm.dp.callback_query(bm.SearchTermsCB.filter(bm.F.action == "add"))
+async def on_searchterms_add(cq: bm.CallbackQuery, callback_data: bm.SearchTermsCB) -> None:
+    """Ф4 «сбор урожая»: «➕ в ключи» по конвертящему запросу → черновик add_keywords (EXACT, в ТУ
+    группу, где запрос уже крутился) за confirm-гейтом. Сам SDK — только после «да» (правило 1/2).
+
+    Группу передаём ЯВНО: без неё add_keywords положил бы ключ во ВСЕ группы кампании — это ровно та
+    каннибализация, которую флажит аудит. idx указывает в _SEARCH_TERMS_HARVEST (не в «мусорный»
+    кэш!), gen общий: клик по старой клавиатуре после повторного /searchterms → «список устарел»."""
+    chat_id = bm._cq_chat_id(cq)
+    items = bm._SEARCH_TERMS_HARVEST.get(chat_id)
+    if (
+        not items
+        or not (0 <= callback_data.idx < len(items))
+        or int(getattr(callback_data, "gen", 0)) != bm._SEARCH_TERMS_GEN.get(chat_id, 0)
+    ):
+        await cq.answer(bm.i18n.t("searchterms_stale"), show_alert=True)
+        return
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        await cq.answer()
+        return
+    it = items[callback_data.idx]
+    try:
+        cid, operation, params, summary = bm._build_proposal(
+            "add_keywords",
+            campaign=it["campaign"],
+            ad_group=it["ad_group"],
+            keywords=[it["term"]],
+            match_type="exact",
+        )
+    except Exception as e:  # noqa: BLE001 — валидация схемы (пустой/длинный ключ) → понятный ответ
+        await cq.answer(await bm._friendly_error(e, "searchterms:add", short=True), show_alert=True)
+        return
+    await cq.answer()
+    await bm._present_proposal_active(
+        msg, chat_id=chat_id, operation=operation, params=params, summary=summary, cid=cid
+    )
+
+
 @bm.dp.message(bm.F.text.in_(bm.BTN_REPORT_ALL))
 async def btn_report(m: bm.Message) -> None:
     await bm._start_report_picker(m, "report")  # §8: аккаунт → кампания → период

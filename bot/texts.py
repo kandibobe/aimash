@@ -1199,7 +1199,11 @@ def fmt_mutation_summary(operation: str, params: dict, lang: str | None = None) 
         removals = operation in ("remove_keywords", "remove_negative_keywords")
         what = "минус-слов" if negatives else "ключевых слов"
         verb = "удалить" if removals else "добавить"
-        head = f"Кампания «{c}» — {verb} {len(kws)} {what} (тип соответствия: {mt}):"
+        # Ф4: add_keywords может быть сужен до ОДНОЙ группы — человек обязан видеть КУДА лягут ключи
+        # (без группы они идут во все группы кампании; это разные последствия, а не деталь).
+        ag = str(params.get("ad_group") or "").strip()
+        where = f"«{c}» → группа «{ag}»" if ag else f"«{c}»"
+        head = f"Кампания {where} — {verb} {len(kws)} {what} (тип соответствия: {mt}):"
         shown = list(kws)[:KW_INLINE_MAX]
         lines = "\n".join(f"  • {k}" for k in shown)
         if len(kws) > KW_INLINE_MAX:
@@ -1393,7 +1397,9 @@ def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
         removals = operation in ("remove_keywords", "remove_negative_keywords")
         what = "negative keywords" if negatives else "keywords"
         verb = "remove" if removals else "add"
-        head = f"Campaign “{c}” — {verb} {len(kws)} {what} (match type: {mt}):"
+        ag = str(params.get("ad_group") or "").strip()  # Ф4: narrowed to a single ad group
+        where = f"“{c}” → ad group “{ag}”" if ag else f"“{c}”"
+        head = f"Campaign {where} — {verb} {len(kws)} {what} (match type: {mt}):"
         shown = list(kws)[:KW_INLINE_MAX]
         lines = "\n".join(f"  • {k}" for k in shown)
         if len(kws) > KW_INLINE_MAX:
@@ -1597,6 +1603,32 @@ def fmt_searchterms(items: list[dict], *, currency: str = "", lang: str | None =
             f"{round(float(it['cost']), 2)}{cur} · {esc(it['campaign'])}"
         )
     lines.append("\n<i>Нажми 🚫, чтобы добавить запрос в минус-слова (нужно подтверждение).</i>")
+    return "\n".join(lines)
+
+
+def fmt_harvest(items: list[dict], *, currency: str = "", lang: str | None = None) -> str:
+    """Ф4 «сбор урожая»: запросы, которые ПРИНЕСЛИ конверсии, но своего ключа не имеют. Кнопка «➕»
+    минтит черновик add_keywords (EXACT, в группу, где запрос уже крутился) — за confirm-гейтом.
+    Адрес (кампания → группа) показываем явно: человек подтверждает КУДА, а не только ЧТО."""
+    cur = f" {currency}" if currency else ""
+    if _lang(lang) == "en":
+        lines = ["🌱 <b>Harvest: converting terms with no keyword</b>", ""]
+        for it in items:
+            lines.append(
+                f"• <b>{esc(it['term'])}</b> — {round(float(it['conversions']), 2)} conv., "
+                f"{it['clicks']} clicks, {round(float(it['cost']), 2)}{cur} · "
+                f"{esc(it['campaign'])} → {esc(it['ad_group'])}"
+            )
+        lines.append("\n<i>Tap ➕ to add it as an exact keyword (confirmation required).</i>")
+        return "\n".join(lines)
+    lines = ["🌱 <b>Сбор урожая: запросы с конверсиями, а ключа под них нет</b>", ""]
+    for it in items:
+        lines.append(
+            f"• <b>{esc(it['term'])}</b> — {round(float(it['conversions']), 2)} конв., "
+            f"{it['clicks']} кл., {round(float(it['cost']), 2)}{cur} · "
+            f"{esc(it['campaign'])} → {esc(it['ad_group'])}"
+        )
+    lines.append("\n<i>Нажми ➕, чтобы добавить точным ключом (нужно подтверждение).</i>")
     return "\n".join(lines)
 
 

@@ -199,6 +199,7 @@ from bot.keyboards import (
     report_campaigns_kb,
     report_recall_kb,
     rollback_kb,
+    harvest_kb,
     searchterms_kb,
     slash_mutate_campaigns_kb,
     rsa_aslist_kb,
@@ -2526,16 +2527,23 @@ def _slash_mut_store(chat_id: int, camps: list[dict]) -> int:
 # §7: /searchterms — топ «мусорных» поисковых запросов (клики без конверсий) → предложить в
 # минус-слова за confirm-гейтом. Кэш кандидатов на chat_id (имя запроса не влезает в callback_data).
 _SEARCH_TERMS_CACHE: dict[int, list[dict]] = {}
+# Ф4 «сбор урожая» (2026-07-14): ОБРАТНЫЙ ход — запросы С конверсиями, которых нет в ключах.
+# Отдельный кэш, но ОБЩЕЕ поколение с «мусорным» списком: обе клавиатуры минтятся одним /searchterms,
+# и клик по любой из них после повторного запуска обязан дать «список устарел».
+_SEARCH_TERMS_HARVEST: dict[int, list[dict]] = {}
 _SEARCH_TERMS_GEN: dict[int, int] = {}  # поколение списка (анти-stale, как _SLASH_MUT_GEN)
 
 
-def _searchterms_store(chat_id: int, items: list[dict]) -> int:
+def _searchterms_store(
+    chat_id: int, items: list[dict], harvest_items: list[dict] | None = None
+) -> int:
     """Записать список кандидатов /searchterms с новым поколением: клик по СТАРОЙ клавиатуре после
     повторного /searchterms обязан дать «список устарел», а не другой запрос (idx указывал бы в иной
     список)."""
     gen = _SEARCH_TERMS_GEN.get(chat_id, 0) + 1
     _SEARCH_TERMS_GEN[chat_id] = gen
     _SEARCH_TERMS_CACHE[chat_id] = items
+    _SEARCH_TERMS_HARVEST[chat_id] = harvest_items or []
     return gen
 
 
@@ -2609,7 +2617,8 @@ async def _searchterms_run(m: Message, period) -> None:
         for r in rows
         if r.metrics.clicks > 0 and (r.metrics.conversions or 0) == 0 and r.metrics.cost > 0
     ][:10]
-    if not waste:
+    harvest_items = await _searchterms_harvest(client, acct, period, rows)
+    if not waste and not harvest_items:
         await m.answer(i18n.t("searchterms_none"))
         return
     items = [
@@ -2636,12 +2645,62 @@ async def _searchterms_run(m: Message, period) -> None:
     except Exception:  # noqa: BLE001 — тег релевантности advisory, не критичен
         pass
     currency = await _read_currency(client, acct)  # §9: валюта для расхода в сводке
-    gen = _searchterms_store(m.chat.id, items)
-    await m.answer(
-        texts.fmt_searchterms(items, currency=currency),
-        reply_markup=searchterms_kb(items, gen),
-        parse_mode=ParseMode.HTML,
+    gen = _searchterms_store(m.chat.id, items, harvest_items)
+    if items:
+        await m.answer(
+            texts.fmt_searchterms(items, currency=currency),
+            reply_markup=searchterms_kb(items, gen),
+            parse_mode=ParseMode.HTML,
+        )
+    if (
+        harvest_items
+    ):  # Ф4: обратный ход — «➕ в ключи» (черновик add_keywords, тот же confirm-гейт)
+        await m.answer(
+            texts.fmt_harvest(harvest_items, currency=currency, lang=i18n.get_lang(m.chat.id)),
+            reply_markup=harvest_kb(harvest_items, gen),
+            parse_mode=ParseMode.HTML,
+        )
+
+
+async def _searchterms_harvest(client, acct: str, period, rows: list) -> list[dict]:
+    """Ф4 «сбор урожая»: запросы, которые ПРИНЕСЛИ конверсии, но ключа под них нет → кандидаты «в
+    плюс» (точным соответствием, в ТУ группу, где они уже крутились). Обратный ход к «🚫 в минус».
+
+    Отбор — тот же код, что у чека `audit.check_keyword_harvest` (`audit.terms.harvest`), чтобы совет
+    в /searchterms и находка в /audit не разошлись. Инвентарь ключей здесь — ОТРИЦАТЕЛЬНЫЙ фильтр
+    («чего у меня нет»), поэтому при усечении лимитом или сбое чтения возвращаем ПУСТО: предложить
+    собрать уже собранное хуже, чем не предложить ничего (GR8 — «нет данных» ≠ «ноль»). READ-ONLY."""
+    from audit.terms import harvest
+    from audit.thresholds import DEFAULT_AUDIT_THRESHOLDS as thr
+    from reports.queries import KEYWORD_INVENTORY_LIMIT, fetch_keyword_inventory
+
+    try:
+        inv = await run_ads_read_call(
+            fetch_keyword_inventory, client, acct, period, label="fetch_keyword_inventory"
+        )
+    except Exception as e:  # noqa: BLE001 — «урожай» опционален; «мусорный» список уже собран
+        log.warning("инвентарь ключей для /searchterms не прочитан: %s", type(e).__name__)
+        return []
+    if inv is None or len(inv) >= KEYWORD_INVENTORY_LIMIT:
+        return []  # усечён ⇒ молчим (иначе предложим добавить то, что уже есть)
+    picks = harvest(
+        rows,
+        [k.keyword for k in inv],
+        min_conv=float(thr.get("harvest_min_conv", 1.0)),
+        top_n=int(thr.get("harvest_top_n", 5)),
     )
+    return [
+        {
+            "term": p.term,
+            "campaign": p.campaign,
+            "ad_group": p.ad_group,
+            "cost": p.cost,
+            "clicks": p.clicks,
+            "conversions": p.conversions,
+        }
+        for p in picks
+        if p.campaign and p.ad_group  # без адреса ключ класть некуда → кнопку не рисуем
+    ]
 
 
 async def _slash_mutate_present(message: Message, chat_id: int, operation: str, name: str) -> None:
@@ -2807,6 +2866,33 @@ async def _run_report(
     await m.answer(body)
 
 
+async def _export_audit(client, report, acct: str, campaign_id: str | None, chat_id: int):
+    """Аудит для листа «Находки» выгрузки — ПОЛНЫЙ gather_audit (≈23 чтения). Зовём только здесь:
+    человек сам набрал /export или /sheets (в планировщике/веере по MCC — только engine-only, квота).
+
+    None → листа не будет:
+    • kill-switch settings.export_findings;
+    • ПОКАМПАНИЙНЫЙ экспорт — находки аккаунтные (минус-слова, конверсии, бюджеты), рядом с отчётом
+      по ОДНОЙ кампании они вводили бы в заблуждение;
+    • сбой сбора — best-effort: книга уходит без листа, а не падает (диагноз необязателен, отчёт нет).
+
+    period берём из report.period, а НЕ из локального: build_account_report_async пере-якорил окно в
+    TZ аккаунта (§8) — лист находок обязан покрывать те же дни, что «Сводка»."""
+    from core.config import settings
+
+    if campaign_id is not None or not settings.export_findings:
+        return None
+    try:
+        from audit.collect import gather_audit
+
+        return await gather_audit(
+            client, acct, report.period, target_cpa=await _load_target_cpa(chat_id, acct)
+        )
+    except Exception as e:  # noqa: BLE001 — сеть/доступ/SDK: выгрузка важнее диагноза
+        log.warning("export-audit: %s — книга уйдёт без листа «Находки»", type(e).__name__)
+        return None
+
+
 async def _run_export(
     m: Message, period, acct: str, campaign_id: str | None = None, campaign_name: str | None = None
 ) -> None:
@@ -2827,10 +2913,13 @@ async def _run_export(
                 client, acct, period, campaign_id=campaign_id, account_name=_account_name(acct)
             )
             report.currency = await _read_currency(client, acct)  # §9: валюта денежных метрик
+            audit = await _export_audit(client, report, acct, campaign_id, m.chat.id)
             fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_report_")
             os.close(fd)
             # §9/RU-EN: подписи книги — на языке пользователя (значения ячеек — данные Google).
-            await asyncio.to_thread(write_report_xlsx, report, path, i18n.current_lang())
+            await asyncio.to_thread(
+                write_report_xlsx, report, path, i18n.current_lang(), audit=audit
+            )
         scope = f"_{campaign_id}" if campaign_id else ""
         # даты берём из ОТЧЁТА, а не из локального period: окно пере-якорено в TZ аккаунта (§8) —
         # иначе имя файла разошлось бы с содержимым на день.
@@ -2868,8 +2957,9 @@ async def _run_sheets(
                 client, acct, period, campaign_id=campaign_id, account_name=_account_name(acct)
             )
             report.currency = await _read_currency(client, acct)  # §9: валюта денежных метрик
+            audit = await _export_audit(client, report, acct, campaign_id, m.chat.id)
             url, share = await asyncio.to_thread(
-                publish_report_to_sheets, report, lang=i18n.current_lang()
+                publish_report_to_sheets, report, lang=i18n.current_lang(), audit=audit
             )
     except Exception as e:  # сеть/доступ/SDK/нет OAuth-scope Sheets
         # A4: если корень — деактивированный/недоступный аккаунт (ошибка Ads, НЕ Sheets-scope),
@@ -3974,14 +4064,59 @@ async def _cc_present_stage0(target: Message, chat_id: int) -> None:
         await target.answer(await _friendly_error(e, "cc:accounts_picker"))
 
 
+async def _live_proposal_media_ids(chat_id: int) -> set[str]:
+    """media_id, которые держит любой НЕзавершённый proposal чата (pending/confirmed/executing).
+
+    П6: черновик визарда остаётся active и ПОСЛЕ «предложить» (B9), а созданный им proposal ссылается
+    на те же временные кадры. Прежде чем supersede визарда чистит медиа прежнего active-черновика,
+    надо исключить те media_id, что ещё нужны живому proposal — иначе его ✅ не найдёт кадры и упадёт
+    (service.py теперь не глотает пропажу). Read-only. Сбой БД НЕ глушим — вызывающий трактует его
+    как «неизвестно» и консервативно НЕ чистит (лишний файл дешевле осиротевшего живого черновика)."""
+    from sqlalchemy import select as _select
+
+    from ads.assets import collect_search_campaign_media_ids
+    from db.models import Proposal as _P
+    from db.session import Session as _S
+
+    ids: set[str] = set()
+    async with _S() as s:
+        rows = (
+            await s.execute(
+                _select(_P.operation, _P.params).where(
+                    _P.chat_id == int(chat_id),
+                    _P.status.in_(("pending", "confirmed", "executing")),
+                )
+            )
+        ).all()
+    for operation, params in rows:
+        p = params or {}
+        if operation == "create_search_campaign":
+            ids.update(collect_search_campaign_media_ids(p))
+        elif operation == "create_gdn_campaign" and p.get("media_id"):
+            ids.add(str(p["media_id"]))
+        elif operation == "create_demand_gen_campaign" and p.get("logo_media_id"):
+            ids.add(str(p["logo_media_id"]))
+    return ids
+
+
 async def _cc_begin(target: Message, chat_id: int, state: FSMContext) -> None:
     """Создать свежий черновик (гасит прежние активные) и показать Этап 0. Перед сменой — чистим
-    временные изображения прежнего активного черновика (иначе осиротеют при supersede)."""
+    временные изображения прежнего активного черновика (иначе осиротеют при supersede), КРОМЕ тех,
+    что ещё держит незавершённый proposal (П6, см. _live_proposal_media_ids)."""
     prev = await CDRAFTS.get_active(chat_id)
     if prev is not None:
-        await asyncio.to_thread(
-            clear_pending_media_ids, (prev.wizard_state.get("images") or {}).get("media_ids") or []
-        )
+        prev_ids = [
+            str(m) for m in ((prev.wizard_state.get("images") or {}).get("media_ids") or [])
+        ]
+        if prev_ids:
+            try:
+                held = await _live_proposal_media_ids(chat_id)
+            except Exception:  # noqa: BLE001 — не выяснили, что держат живые proposals →
+                held = None  # консервативно НЕ чистим (лишний файл дешевле осиротевшего живого)
+            if held is not None:
+                to_clear = [m for m in prev_ids if m not in held]
+                if to_clear:
+                    await asyncio.to_thread(clear_pending_media_ids, to_clear)
     # §8: аккаунт МУТАЦИИ визарда = активный аккаунт чтения (дефолт Draft); preview_customer_id
     # (медианы «по аналогии») выбирается отдельно на Этапе 0. Замок — в _present_proposal на создании.
     session_id = await CDRAFTS.create(
@@ -4224,6 +4359,45 @@ async def _cli_check_access(chat_id: int, customer_id: str) -> bool:
         return True
     except PermissionError:
         return False
+
+
+async def _cli_dossier_text(chat_id: int, customer_id: str, markdown: str) -> str:
+    """§20 «📄 Досье»: сохранённое досье + секция здоровья, посчитанная ПРЯМО СЕЙЧАС — полный
+    `gather_audit` (≈23 чтения). Дорогой режим здесь законен: человек САМ открыл карточку (тот же
+    принцип, что у /export). Веерных вызовов нет — один аккаунт на тап.
+
+    Здоровье НЕ сохраняем в `client_dossiers`: строка досье пишется раз за краул и живёт неделями, а
+    балл — днями (вмороженное число, по которому решают через месяц, хуже, чем никакого); плюс схема
+    досье уезжает в промпты RSA/ключей (`render_llm_context`) — находкам аудита там не место.
+
+    Гейты по порядку: грант профиля (уже проверен вызывающим `_cli_check_access`) → read-замок аккаунта
+    (`ensure_read_allowed` внутри каждого чтения). Нет доступа/сбой сбора ⇒ досье уходит БЕЗ секции:
+    кнопка не падает, файл клиент получает."""
+    from ads.client import build_client_async
+    from audit.collect import gather_audit
+    from clients.dossier_render import render_health_markdown, with_health
+    from reports.period import last_n_days
+    from reports.tz import account_period
+
+    lang = i18n.get_lang(chat_id)
+    try:
+        client = await build_client_async(customer_id)
+        # §8: окно якорим в TZ аккаунта — те же 30 дней, что покажет /audit, иначе секция и карточка
+        # разойдутся на день.
+        period = await account_period(client, customer_id, last_n_days(30), label="dossier_tz")
+        result = await gather_audit(
+            client, customer_id, period, target_cpa=await _load_target_cpa(chat_id, customer_id)
+        )
+        # Тренд ЧИТАЕМ (аудит полный, окно 30 дней — ровно режим /audit), но снапшот НЕ пишем:
+        # единственный писатель baseline — /audit (record=False).
+        trend = await _audit_trend_line(
+            result, client, customer_id, period.days, lang, record=False
+        )
+        health = render_health_markdown(result, lang, trend=trend)
+    except Exception as e:  # noqa: BLE001 — файл важнее секции
+        log.warning("dossier-health: %s — досье уйдёт без секции здоровья", type(e).__name__)
+        return markdown
+    return with_health(markdown, health)
 
 
 async def _cli_present_accounts(m: Message) -> None:
@@ -5666,10 +5840,16 @@ async def _account_local_date(client, acct: str) -> str:
     return (await account_today(client, acct, label="audit_tz")).isoformat()
 
 
-async def _audit_trend_line(result, client, acct: str, days: int, lang: str) -> str:
+async def _audit_trend_line(
+    result, client, acct: str, days: int, lang: str, *, record: bool = True
+) -> str:
     """N1.1: записать снапшот health-score (ЛОКАЛЬНАЯ БД, fail-open) и вернуть строку тренда Δ
     к предыдущему прогону. Δ считается ТОЛЬКО между снапшотами ОДНОЙ score_model_version и ОДНОГО
-    окна (N1.0a): смена модели оценки → честное «н/д», не ложный «−10 за неделю». '' → без строки."""
+    окна (N1.0a): смена модели оценки → честное «н/д», не ложный «−10 за неделю». '' → без строки.
+
+    `record=False` — ЧИТАТЬ тренд, но НЕ писать baseline (досье §20): единственный писатель снапшотов
+    остаётся /audit. Иначе открытое досье зафиксировало бы свой прогон как базу, и следующий /audit
+    сравнил бы аккаунт сам с собой в тот же день («▲ 0») вместо честной недельной дельты."""
     try:
         from audit.render import score_affecting_gaps
         from audit.snapshot import previous_snapshot, record_snapshot
@@ -5680,7 +5860,7 @@ async def _audit_trend_line(result, client, acct: str, days: int, lang: str) -> 
         # оштрафованы). Такой балл нельзя (а) писать в baseline — отравит будущие дельты; (б)
         # сравнивать с чистым прошлым — покажет ложное «−N за неделю». Честно: н/д, снапшот не пишем.
         blind = score_affecting_gaps(result)
-        if not blind:
+        if record and not blind:
             await record_snapshot(result, snapshot_date=snap_date, period_days=days)
         if result.score is None:
             return ""
@@ -5813,17 +5993,23 @@ async def _audit_run(
     # (+ «применить» ТОЛЬКО для не-денежных op из _ADVISE_APPLY_OPS). apply переиспользует существующий
     # _advise_apply → confirm-гейт; rec.customer_id = ПРОАУДИРОВАННЫЙ аккаунт (минтит proposal на него,
     # не на чужой). Сам аудит proposal НЕ создаёт (record_recommendations пишет только в локальную БД).
-    findings = result.findings[:_AUDIT_MAX_FINDINGS]
+    # ⚠️ Гейт ДО среза, а не после: advisable_findings выкидывает семьи, чей сигнал ctx не прочитан
+    # (сбой fetch_conversion_health ⇒ «нет отслеживания» там, где оно есть, — и это №1 по деньгам).
+    # Срез после гейта ⇒ zip(findings, recs) ниже выровнен по построению: маппер получит ровно этот
+    # список. Карточка выше (render_audit) видит ПОЛНЫЕ result.findings — /audit не подавляет диагноз,
+    # гейт живёт только на поверхности советов (кнопки 👍/👎/применить).
+    from advisor.from_findings import advisable_findings, to_recommendations
+
+    findings = advisable_findings(result)[:_AUDIT_MAX_FINDINGS]
     if findings:
         from advisor import store as advisor_store
-        from advisor.from_findings import to_recommendations
 
         # ⚠️ kind = check_id БЕЗ префикса (маппер): до 2026-07-13 здесь стоял kind=f"audit_{check_id}",
         # и 👍/👎 под находками /audit копились в бакете, который experience.load_experience никогда не
         # читал (она ищет kind='high_cpa', а лежало 'audit_high_cpa') — обучение молча пропадало.
         # Порядок — движка (деньги-под-риском): rank_recommendations здесь НЕ зовём осознанно
         # (suppress спрятал бы находку, которая всё равно штрафует score) — см. advisor.rules.
-        recs = to_recommendations(findings, lang, result.currency)
+        recs = to_recommendations(result, lang, result.currency, findings=findings)
         # Персист — best-effort: сбой ЛОКАЛЬНОЙ БД не должен съедать находки (диагноз важнее кнопок).
         # Без rec_uid нет 👍/👎/«применить» — показываем находки голым текстом, а не роняем /audit.
         try:
@@ -5854,12 +6040,22 @@ async def _audit_run(
 
 def _advise_apply_params(rec) -> dict | None:
     """Собрать params мутации из рекомендации для one-tap «применить». None — нельзя собрать.
-    pause_campaign → {campaign}; add_negative_keywords → {campaign, keywords:[ключ], match_type}."""
+    pause_campaign → {campaign}; add_negative_keywords → {campaign, keywords:[ключ], match_type};
+    set_campaign_display_network → {campaign, display_network: False};
+    set_campaign_geo_target_type → {campaign, geo_target_type: 'PRESENCE'}.
+
+    ⚠️ Направление у последних двух — КОНСТАНТА, а не поле находки: одним тапом бот только ЧИНИТ
+    (выключает КМС, сужает гео). Включить КМС или расширить гео до PRESENCE_OR_INTEREST можно лишь
+    прямой командой человека — иначе кнопка «применить совет» стала бы способом РАСШИРИТЬ показы."""
     campaign = rec.target_campaign
     if not campaign:
         return None
     if rec.suggested_operation == "pause_campaign":
         return {"campaign": campaign}
+    if rec.suggested_operation == "set_campaign_display_network":
+        return {"campaign": campaign, "display_network": False}
+    if rec.suggested_operation == "set_campaign_geo_target_type":
+        return {"campaign": campaign, "geo_target_type": "PRESENCE"}
     if rec.suggested_operation == "add_negative_keywords":
         kw = (rec.evidence or {}).get("keyword")
         if not kw:

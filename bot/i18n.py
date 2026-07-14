@@ -813,6 +813,8 @@ CATALOG: dict[str, dict[str, str]] = {
     },
     "advise_apply_btn_pause": {"ru": "⏸ Поставить на паузу", "en": "⏸ Pause it"},
     "advise_apply_btn_negatives": {"ru": "➖ В минус-слова", "en": "➖ Add as negatives"},
+    "advise_apply_btn_display_off": {"ru": "🚫 Выключить КМС", "en": "🚫 Turn off Display"},
+    "advise_apply_btn_geo_presence": {"ru": "📍 Только присутствие", "en": "📍 Presence only"},
     "advise_apply_stale": {
         "ru": "Рекомендация устарела — запусти /advise заново.",
         "en": "Recommendation expired — run /advise again.",

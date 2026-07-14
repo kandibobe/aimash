@@ -270,7 +270,14 @@ class UpdateKeywordBid(BaseModel):
 
 
 class AddKeywords(BaseModel):
+    """Позитивные ключи в кампанию. ad_group (опц., Ф4 «сбор урожая», 2026-07-14) СУЖАЕТ адрес до
+    одной группы: по умолчанию ключ ложится во ВСЕ группы кампании, а это своими руками делает ту
+    самую каннибализацию (один ключ в нескольких группах конкурирует сам с собой), которую флажит
+    check_keyword_cannibalization. Группы нет в кампании → отказ в execute_confirmed, не тихий
+    веер по всем группам."""
+
     campaign: str  # обязателен: ключи добавляются в группы этой кампании
+    ad_group: str | None = None  # опц.: только эта группа (иначе — все группы кампании)
     keywords: list[str] = Field(min_length=1, max_length=ADD_KEYWORDS_MAX)
     match_type: MatchType
 

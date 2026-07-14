@@ -95,7 +95,7 @@ def test_advisor_never_imports_mutations():
 def _candidates(report, topics=None):
     """Кандидаты /advise: находки движка аудита, спроецированные маппером (детекторов у advisor нет)."""
     res = build_audit(report)
-    return to_recommendations(res.findings, "ru", res.currency, topics=topics)
+    return to_recommendations(res, "ru", res.currency, topics=topics)
 
 
 def test_kind_is_bare_check_id_and_topic_is_family():
@@ -232,11 +232,105 @@ def test_advise_findings_are_subset_of_audit():
     audit_ids = {f.check_id for f in live.findings}
     assert "zero_conversions" in audit_ids  # с ctx: отслеживание есть, конверсий нет
 
-    advise = to_recommendations(build_audit(rep).findings, "ru", rep.currency, report_only=True)
+    blind = build_audit(
+        rep
+    )  # engine-only: ctx_signals пуст ⇒ маппер сам знает, что семье верить нельзя
+    assert "no_conversion_tracking" in {f.check_id for f in blind.findings}, (
+        "находка обязана РОДИТЬСЯ (штраф семьи честен — деньги в риске), гейт снимает только ЯРЛЫК"
+    )
+    advise = to_recommendations(blind, "ru", rep.currency)
     kinds = {c.kind for c in advise}
     assert kinds, "ожидались рекомендации"
     assert "no_conversion_tracking" not in kinds  # без ctx — молчим, а не врём
     assert kinds <= audit_ids, f"/advise сказал то, чего /audit не говорит: {kinds - audit_ids}"
+
+
+def _repo_py_files():
+    """Первичный код проекта (без .venv/миграций) — для структурных гардов."""
+    root = pathlib.Path(__file__).resolve().parents[1]
+    skip = {".venv", "venv", ".git", "node_modules", "migrations", "__pycache__"}
+    return [p for p in root.rglob("*.py") if not (skip & set(p.relative_to(root).parts))]
+
+
+def test_recommendation_door_cannot_be_bypassed():
+    """ГАРД КЛАССА (структурный, по AST). Честность советов держится на провенансе сбора: маппер
+    молчит про семьи, чей ctx-сигнал движку не подали (CTX_ONLY_FAMILIES). Провенанс живёт на
+    AuditResult.ctx_signals — значит маппер обязан получать РЕЗУЛЬТАТ. Три способа это обойти, каждый
+    тихий, каждый уже случался или напрашивается:
+
+      a) вернуть булев флаг `report_only=`, который потребитель обязан ПОМНИТЬ (его-то /audit и забыл —
+         при упавшем чтении конверсий показывал ложную карточку «нет отслеживания» с кнопками);
+      b) звать to_recommendation (единственное число) в обход двери — гейт остался бы в стороне;
+      c) передать первым аргументом сырой список находок (`result.findings`, срез, литерал) — объект
+         без ctx_signals; fail-safe в untrusted_families тогда промолчит про ВСЮ семью навсегда, и
+         честный /audit тихо потеряет карточку conversion_tracking.
+
+    Ловится до ревью: новый потребитель движка (экспорт, досье, дайджест) не сможет добыть
+    Recommendation мимо advisable_findings()."""
+    door = "advisor/from_findings.py"
+    for py in _repo_py_files():
+        rel = py.relative_to(pathlib.Path(__file__).resolve().parents[1]).as_posix()
+        tree = ast.parse(py.read_text(encoding="utf-8"), filename=py.name)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+            assert not any(k.arg == "report_only" for k in node.keywords), (
+                f"{rel}: kwarg report_only воскрешён — недоверие выводится из "
+                f"AuditResult.ctx_signals, флаг забыть нельзя, потому что флага нет"
+            )
+            if name == "to_recommendation" and rel != door:
+                raise AssertionError(f"{rel}: to_recommendation в обход двери ({door})")
+            if name != "to_recommendations" or not node.args:
+                continue
+            first = node.args[0]
+            base = first.value if isinstance(first, ast.Subscript) else first
+            bad = isinstance(first, ast.List) or (
+                isinstance(base, ast.Attribute) and base.attr == "findings"
+            )
+            assert not bad, (
+                f"{rel}: to_recommendations получает СЫРЫЕ находки. Первым аргументом идёт "
+                f"AuditResult — из него маппер берёт ctx_signals; список находок провенанс теряет "
+                f"(свой срез — через advisable_findings(result) и kwarg findings=)"
+            )
+
+
+def test_ctx_gate_is_silence_without_signal_not_silence_always():
+    """Гейт обязан молчать ТОЛЬКО без сигнала. Иначе «починили ложь» превратилось бы в «навсегда
+    выключили критический чек»: аккаунт без отслеживания конверсий (сигнал прочитан, ENABLED-действий
+    нет) — самая дорогая поломка, и совет по ней обязан доходить."""
+    from advisor.from_findings import untrusted_families
+
+    rows = [(("Camp A", "ENABLED"), _m(100, clicks=50, conv=0))]
+    rep = _report(rows, _m(100, clicks=50, conv=0))
+
+    blind = build_audit(rep)  # engine-only
+    assert untrusted_families(blind) == frozenset({"conversion_tracking"})
+
+    live = build_audit(rep, conversion_actions=[])  # прочитано, действий нет — ФАКТ, а не пробел
+    assert untrusted_families(live) == frozenset()
+    kinds = {r.kind for r in to_recommendations(live, "ru", live.currency)}
+    assert "no_conversion_tracking" in kinds, "с прочитанным сигналом совет обязан дойти"
+
+    # Fail-safe: объект без ctx_signals (сырой результат чужого происхождения) = собран БЕЗ ctx.
+    assert untrusted_families(SimpleNamespace()) == frozenset({"conversion_tracking"})
+
+
+def test_audit_card_recs_stay_aligned_with_findings():
+    """Кнопки 👍/👎/«применить» бот вешает через zip(findings, recs) — списки обязаны совпадать
+    поэлементно. Гейт фильтрует, значит срез /audit СТРОИТСЯ из advisable_findings, а не из
+    result.findings: иначе кнопка (и запись опыта) уедет к чужой находке."""
+    from advisor.from_findings import advisable_findings
+
+    rows = [(("Camp A", "ENABLED"), _m(100, clicks=50, conv=0))]
+    rep = _report(rows, _m(100, clicks=50, conv=0))
+    res = build_audit(rep)  # engine-only ⇒ conversion_tracking отфильтруется
+
+    findings = advisable_findings(res)[:8]
+    recs = to_recommendations(res, "ru", res.currency, findings=findings)
+    assert [r.kind for r in recs] == [f.check_id for f in findings]
+    assert len(res.findings) > len(findings), "тест бессмыслен, если гейт ничего не отфильтровал"
 
 
 # ── analyze_account — read-only tool + loop → advise_intent ─────────────────────────

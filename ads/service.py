@@ -634,7 +634,9 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
         )
 
     if op == "add_keywords":
-        # Ключи добавляются в группы кампании (во все группы кампании).
+        # Ключи добавляются в группы кампании; params['ad_group'] (опц.) СУЖАЕТ адрес до одной группы.
+        # Без сужения ключ ложится во ВСЕ группы кампании — это ровно та каннибализация, которую сам
+        # же аудит и флажит. Имя группы не совпало → ОТКАЗ (fail-closed), а не веер по всем группам.
         ad_groups = await asyncio.to_thread(
             resolve.find_ad_groups, client, customer_id, params["campaign"]
         )
@@ -642,6 +644,13 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             raise ValueError(
                 f"в кампании '{params['campaign']}' нет групп объявлений (или кампания не найдена)"
             )
+        want = str(params.get("ad_group") or "").strip()
+        if want:
+            ad_groups = [ag for ag in ad_groups if str(ag.name) == want]
+            if not ad_groups:
+                raise ValueError(
+                    f"в кампании '{params['campaign']}' нет группы объявлений '{want}'"
+                )
         return await mutations.apply_add_keywords(
             customer_id=customer_id,
             ad_group_ids=[ag.id for ag in ad_groups],

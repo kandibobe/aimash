@@ -93,6 +93,12 @@ jobs:
             git reset --hard origin/master
             docker compose up -d --build
             docker image prune -f
+            # `image prune` НЕ трогает кэш сборок BuildKit — а он растёт ~600 МБ за КАЖДЫЙ деплой
+            # (к 2026-07-14 накопил 26.5 ГБ = 81% диска; байты лежат в /var/lib/containerd, поэтому
+            # `du /var/lib/docker` их не показывает). Полный диск = сборка падает, авто-деплой встаёт,
+            # Postgres отказывает в записи. Прунинг ПОСЛЕ сборки: свежий кэш остаётся, срезается хвост.
+            # Флаг именно `--max-used-space` (Docker 29): старого `--keep-storage` больше нет.
+            docker builder prune -f --max-used-space 4GB
             docker compose ps
             # B1: пост-деплой проверка здоровья. `compose up` возвращается сразу — деплой считался бы
             # «зелёным», даже если бот крэш-лупит (битая миграция / плохой рантайм-конфиг / 409).

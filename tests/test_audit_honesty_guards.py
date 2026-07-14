@@ -116,6 +116,79 @@ def test_family_signals_cover_ctx_reads():
         )
 
 
+def _collect_signal_vocabulary() -> set[str]:
+    """Имена сигналов, которыми оперирует слой сбора (список пар в `data_gaps`, audit/collect.py) —
+    выведены из кода (AST), а не переписаны руками. `pmax` добавляется явно: два чтения — один сигнал.
+    `rsa_age`/усечение инвентаря сюда НЕ входят: это пробелы, ВЫВЕДЕННЫЕ из содержимого прочитанных
+    строк, а не «чтение не удалось»."""
+    src = (Path(__file__).resolve().parents[1] / "audit" / "collect.py").read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(src)):
+        if (
+            isinstance(node, ast.Assign)
+            and any(getattr(t, "id", "") == "data_gaps" for t in node.targets)
+            and isinstance(node.value, ast.ListComp)
+        ):
+            return {
+                el.value
+                for gen in node.value.generators
+                for tup in ast.walk(gen.iter)
+                if isinstance(tup, ast.Tuple) and tup.elts
+                for el in tup.elts[:1]
+                if isinstance(el, ast.Constant) and isinstance(el.value, str)
+            } | {"pmax"}
+    raise AssertionError("не найден список сигналов data_gaps в audit/collect.py")
+
+
+def test_engine_ctx_signals_speak_the_same_vocabulary_as_collect():
+    """Провенанс сбора (`AuditResult.ctx_signals`) и пробелы (`data_gaps`) обязаны называть сигналы
+    ОДИНАКОВО: по первому потребители советов решают, какой семье верить (CTX_ONLY_FAMILIES), по
+    второму карточка решает, где сказать «недостаточно данных». Разъедься имена — гейт молча
+    перестанет срабатывать (сигнала с таким именем в ctx_signals просто нет ⇒ семья слепа НАВСЕГДА)
+    или сработает вхолостую. Ловит «добавил ctx-сигнал в collect — забыл в build_audit»."""
+    full = build_audit(
+        _report(100.0, conv=0.0),
+        is_rows=[],
+        conversion_actions=[],
+        bidding=[],
+        optimization_score=SimpleNamespace(score=0.9, uplift=0.1),
+        recommendations=[],
+        search_terms=[],
+        ad_policy=[],
+        adgroup_structure=[],
+        negative_lists=SimpleNamespace(count=0, campaign_level_count=0),  # объект, не список
+        keyword_quality=[],
+        geo_waste=[],
+        schedule=[],
+        bid_landscape=[],
+        rsa_ads=[],
+        keyword_inventory=[],
+        campaign_assets=[],
+        campaign_settings=[],
+        pmax_campaigns=[],
+        pmax_asset_groups=[],
+    )
+    assert set(full.ctx_signals) == _collect_signal_vocabulary()
+    # Пустой список — ПОДАННЫЙ сигнал («прочитано, строк нет» ≠ «не прочитано»), как и в collect.
+    assert build_audit(_report(100.0)).ctx_signals == frozenset()  # engine-only: ничего не подали
+
+
+def test_ctx_only_families_declare_signals_their_checks_really_read():
+    """Политика гейта (advisor.from_findings.CTX_ONLY_FAMILIES: семья → сигнал) обязана совпадать с
+    КОДОМ чеков. Объявишь семье сигнал, которого её чеки не читают, — гейт будет молчать по семье,
+    которая на самом деле не слепнет (потеря честных советов, тихая). Промахнёшься в имени — гейт не
+    сработает вовсе (ложь дойдёт до клиента с кнопкой «применить»)."""
+    from advisor.from_findings import CTX_ONLY_FAMILIES
+
+    reads = _ctx_reads_by_family()
+    vocab = _collect_signal_vocabulary()
+    for family, signal in CTX_ONLY_FAMILIES.items():
+        assert signal in vocab, f"{family!r}: сигнал {signal!r} не существует (опечатка?)"
+        assert signal in reads.get(family, set()), (
+            f"семья {family!r} объявлена зависимой от {signal!r}, но её чеки его не читают — "
+            f"гейт душит советы, которые на самом деле честны"
+        )
+
+
 def test_every_signal_and_family_has_labels_in_both_languages():
     """Всё, что попадает в карточку, имеет человекочитаемую метку на RU и EN. Иначе клиенту
     показывают сырой идентификатор («adgroup_structure», «competition»)."""

@@ -96,6 +96,39 @@ async def _account_period(client, acct: str, n_days: int):
     return await account_period(client, acct, last_n_days(n_days), label=f"sched_tz_{acct}")
 
 
+def _account_health(report):
+    """Аудит по УЖЕ собранному отчёту — engine-only: НИ ОДНОГО доп. чтения Google Ads. Планировщик
+    ходит веером по всем аккаунтам, и полный gather_audit (23 чтения × N аккаунтов × каждый прогон)
+    съел бы квоту — поэтому здесь только чеки, которым хватает отчёта (остальные молчат честно, а не
+    говорят «в норме»: GR8). Косметика: сбой не валит дайджест.
+
+    ⛔ Снимок тренда (record_snapshot) отсюда НЕ пишем. Индекс account_health_snapshot —
+    (customer_id, snapshot_date, period_days), без измерения «режим сбора», а score_model_version у
+    engine-only и полного /audit ОДИНАКОВ (хэш конфигурации модели, не полноты данных) ⇒ upsert
+    дайджеста молча затёр бы честную базу /audit, и клиент увидел бы выдуманное «▲ +15 за неделю».
+    Дайджесты — читатели снимков, не писатели."""
+    try:
+        from audit.engine import build_audit
+
+        return build_audit(report)
+    except Exception:  # noqa: BLE001 — здоровье необязательно, отчёт важнее
+        return None
+
+
+def _health_line(result, lang: str) -> str:
+    """Строка «🩺 Здоровье: N/100 (B) · под риском X · /audit» — тот же рендер, что у /audit и
+    /report (audit.render.audit_headline): новой прозы ноль, расхождению текстов взяться неоткуда.
+    Пустой/мёртвый аккаунт → '' (без фейковых 100)."""
+    if result is None:
+        return ""
+    try:
+        from audit.render import audit_headline
+
+        return audit_headline(result, lang)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
     """Плановый отчёт (последние N дн.) по ВСЕМ разрешённым на чтение аккаунтам (§8) — ОДИН дайджест
     на оператора (анти-спам, не N сообщений). READ-ONLY. Сбой одного аккаунта не валит остальные
@@ -142,8 +175,12 @@ async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
                 except Exception:  # noqa: BLE001
                     currency = ""
                 report = await build_account_report_async(client, acct, period, currency=currency)
+                # Здоровье считаем ОДИН раз на аккаунт (движок — чистая функция, ctx не зависит от
+                # языка), рендерим per-lang. Как в /report: сначала «что горит», потом цифры.
+                health = _account_health(report)
                 for lang in langs:
-                    blocks[lang][acct] = summary_text(report, lang)
+                    hl = _health_line(health, lang)
+                    blocks[lang][acct] = (hl + "\n\n" if hl else "") + summary_text(report, lang)
             except Exception as e:  # сеть/доступ/SDK — фиксируем (§15), остальные аккаунты живут
                 if is_account_access_error(e):
                     # A3: аккаунт деактивирован/нет прав — ОЖИДАЕМО (не дефект). Не пишем в /diag
@@ -771,7 +808,7 @@ async def run_business_digest(bot) -> None:
 
         thr_by_chat = await _thresholds_by_chat(chats)
         # 1) Отчёты per-account — один раз на прогон (with_comparison=True: prev-период внутри).
-        acct_data: dict[str, tuple[object, str]] = {}
+        acct_data: dict[str, tuple[object, str, object]] = {}
         for acct in accounts:
             tok = set_context(customer_id=acct)
             try:
@@ -787,7 +824,8 @@ async def run_business_digest(bot) -> None:
                 except Exception:  # noqa: BLE001 — валюта best-effort
                     currency = ""
                 report = await build_account_report_async(client, acct, period, currency=currency)
-                acct_data[str(acct)] = (report, currency)
+                # Здоровье — engine-only по уже собранному отчёту (0 доп. чтений, см. _account_health).
+                acct_data[str(acct)] = (report, currency, _account_health(report))
             except Exception as e:  # сбой одного аккаунта не валит дайджест
                 if is_account_access_error(e):
                     log.info("bizdigest: аккаунт %s недоступен (ожидаемо, пропуск)", acct)
@@ -805,13 +843,18 @@ async def run_business_digest(bot) -> None:
             # C2: в дайджест оператора попадают только доступные ему аккаунты.
             allowed = set(await accessible_accounts_for_user(chat_id, list(acct_data)))
             blocks: list[str] = []
-            for acct, (report, currency) in acct_data.items():
+            for acct, (report, currency, health) in acct_data.items():
                 if acct not in allowed:
                     continue
                 part = [summary_text(report, lang)]
                 cpa = _biz_cpa_line(report, currency, lang)
                 if cpa:
                     part.append(cpa)
+                hl = _health_line(
+                    health, lang
+                )  # балл/грейд/под-риском — тот же движок, что у /audit
+                if hl:
+                    part.append(hl)
                 # топ-3 рекомендаций — витрина недели (persist=False: без карточек/кнопок)
                 try:
                     rec_set = await advisor_service.build_recommendations(

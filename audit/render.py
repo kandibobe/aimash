@@ -168,13 +168,26 @@ def _money(v: float, cur: str) -> str:
 
 def _quick_win_line(f: Finding, lang: str, cur: str) -> str:
     """Ф8: сверхкороткая строка «быстрой победы»: ЧТО жмём и СКОЛЬКО это жжёт. Только для one_tap
-    находок — их бот применяет одной кнопкой (ONE_TAP_OPS = пауза кампании / минус-слово)."""
+    находок — их бот применяет одной кнопкой (ONE_TAP_OPS: пауза / минус-слово / КМС-off / гео)."""
     fa = f.facts
     camp = fa.get("campaign", "")
     money = f" — {_money(f.at_risk, cur)} " + ("wasted" if lang == "en" else "впустую")
     money = money if f.at_risk > 0 else ""
     if f.suggested_operation == "pause_campaign":
         return f"⏸ Pause «{camp}»{money}" if lang == "en" else f"⏸ Пауза «{camp}»{money}"
+    if f.suggested_operation == "set_campaign_display_network":
+        if lang == "en":
+            return f"🚫 Turn off Display in «{camp}»{money}"
+        return f"🚫 Выключить КМС в «{camp}»{money}"
+    if f.suggested_operation == "set_campaign_geo_target_type":
+        # at_risk у geo_interest_waste = 0 (деньги в headline кладёт geo_no_conv — эпоха 5), поэтому
+        # расход берём из фактов: без цифры «быстрая победа» не объясняет, ЗАЧЕМ её жать.
+        out = float(fa.get("outside_cost", 0.0) or 0.0)
+        spent = f" — {_money(out, cur)} " + ("outside target" if lang == "en" else "вне таргета")
+        spent = spent if out > 0 else ""
+        if lang == "en":
+            return f"📍 Presence-only geo in «{camp}»{spent}"
+        return f"📍 Гео «только присутствие» в «{camp}»{spent}"
     # add_negative_keywords: ключ (wasteful_keyword) ИЛИ поисковый запрос (wasteful_search_term,
     # pmax_search_term_waste) — в facts лежит ровно одно из двух.
     term = fa.get("search_term") or fa.get("keyword") or ""
@@ -602,6 +615,12 @@ def _rec_type_human(t: str) -> str:
 def finding_text(f: Finding, lang: str, cur: str) -> str:
     """Публичная строка одной находки (для per-finding сообщений bot-слоя с кнопкой «применить»)."""
     return _finding_line(f, lang, cur)
+
+
+def family_label(family: str, lang: str = "ru") -> str:
+    """Публичная метка семьи (карточка, лист «Находки» выгрузок, досье §20) — один словарь на всех:
+    иначе «Слив бюджета» в боте и «waste» в Excel читались бы как разные вещи."""
+    return _FAMILY_LABEL["en" if lang == "en" else "ru"].get(family, family)
 
 
 def audit_headline(result: AuditResult, lang: str = "ru") -> str:

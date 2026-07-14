@@ -68,10 +68,13 @@ services:
     restart: unless-stopped
     # Потолок ресурсов одного инстанса (long-poll бот лёгкий; лимит ловит утечку/раздувание).
     # docker compose v2 (не-swarm) применяет deploy.resources.limits для memory/cpus.
+    # 1200M (было 768M): пиковый путь — deep-MCC xlsx (`/export` → «Все аккаунты»), он держит в RAM
+    # ReportData ВСЕХ дочерних сразу (reports/mcc.py) и строит полный объектный граф openpyxl.
+    # Хост тянет: 1.2G (бот) + 512M (pg) + ~700M системы ≈ 2.4G из 3.8G, плюс 2G swap.
     deploy:
       resources:
         limits:
-          memory: 768M
+          memory: 1200M
           cpus: "1.0"
     # Ротация логов: без неё json-file растёт безгранично и забивает диск VPS.
     logging:

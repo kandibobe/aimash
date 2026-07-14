@@ -11,6 +11,15 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from reports.findings import (
+    FINDINGS_FORMATS,
+    FINDINGS_TITLE,
+    MONEY_FORMAT,
+    account_health_cells,
+    findings_headers,
+    findings_meta_rows,
+    findings_rows,
+)
 from reports.labels import (
     account_report_title,
     currency_line,
@@ -85,6 +94,31 @@ def _write_breakdown(wb: Workbook, b: Breakdown, currency: str = "", lang: str =
     _autosize(ws, len(headers))
 
 
+def _write_findings(wb: Workbook, result, currency: str = "", lang: str = "ru") -> None:
+    """Лист «Находки»: обзор аудита (тот же, что в карточке /audit) + таблица ВСЕХ находок.
+
+    Раскладку даёт reports.findings (общая с Google Sheets), здесь — только запись и формат. Никакой
+    колонки «применить»: экспорт — бумага (золотое правило №3)."""
+    ws = wb.create_sheet(title=loc(FINDINGS_TITLE, lang)[:31])
+    for row in findings_meta_rows(result, lang):
+        _append(ws, row)
+    _append(ws, [])
+    headers = findings_headers(currency, lang)
+    _append(ws, headers)
+    header_row = ws.max_row
+    rows = findings_rows(result, lang)
+    for row in rows:
+        _append(ws, row)
+    for c in range(1, len(headers) + 1):
+        ws.cell(row=header_row, column=c).fill = _HEADER_FILL
+        ws.cell(row=header_row, column=c).font = _HEADER_FONT
+    for col, fmt in FINDINGS_FORMATS:
+        for r in range(header_row + 1, header_row + 1 + len(rows)):
+            ws.cell(row=r, column=col + 1).number_format = fmt
+    ws.cell(row=1, column=1).font = Font(bold=True, size=14)
+    _autosize(ws, len(headers), cap=90)  # «Что не так» — предложение, а не ярлык
+
+
 def _apply_metric_formats_at(ws, dim_count: int, first_data_row: int, ndata: int) -> None:
     for i, fmt in enumerate(_METRIC_FORMATS):
         col = dim_count + 1 + i
@@ -119,20 +153,24 @@ def _write_summary(ws, report: ReportData, lang: str = "ru") -> None:
     _autosize(ws, len(headers) + 1)
 
 
-def build_workbook(report: ReportData, lang: str = "ru") -> Workbook:
+def build_workbook(report: ReportData, lang: str = "ru", *, audit=None) -> Workbook:
+    """audit — AuditResult (keyword-only ⇒ прежние позиционные вызовы целы). None → книга как раньше,
+    без листа «Находки»: собирать аудит — 23 чтения, решает вызыватель (bot._export_audit)."""
     wb = Workbook()
     summary = wb.active
     summary.title = loc("Сводка", lang)
     _write_summary(summary, report, lang)
     currency = getattr(report, "currency", "") or ""  # defensive: фейк-репорты без поля
+    if audit is not None:
+        _write_findings(wb, audit, currency, lang)  # сразу за «Сводкой»: находки важнее разбивок
     for b in report.breakdowns:
         _write_breakdown(wb, b, currency, lang)
     return wb
 
 
-def write_report_xlsx(report: ReportData, path: str, lang: str = "ru") -> str:
+def write_report_xlsx(report: ReportData, path: str, lang: str = "ru", *, audit=None) -> str:
     """Сохранить отчёт в .xlsx по пути path. Возвращает path. lang — язык ПОДПИСЕЙ (не данных)."""
-    build_workbook(report, lang).save(path)
+    build_workbook(report, lang, audit=audit).save(path)
     return path
 
 
@@ -281,7 +319,13 @@ def build_mcc_deep_workbook(deep, lang: str = "ru") -> Workbook:
     _append(ws, [mcc_deep_title(deep.manager_id, lang)])
     _append(ws, [period_line(p, lang)])
     _append(ws, [])
-    headers = [*loc_all(["ID", "Аккаунт", "Валюта"], lang), *metric_headers("", lang)]
+    # Здоровье (балл/грейд/под риском) — движком по УЖЕ собранным отчётам: 0 доп. чтений на N
+    # аккаунтов. Полный аудит веером (23 чтения × N) сюда НЕ заводим — квота (см. reports.findings).
+    headers = [
+        *loc_all(["ID", "Аккаунт", "Валюта"], lang),
+        *metric_headers("", lang),
+        *loc_all(["Балл", "Оценка", "Под риском"], lang),
+    ]
     _append(ws, headers)
     header_row = ws.max_row
     for ch, report in deep.items:
@@ -292,12 +336,17 @@ def build_mcc_deep_workbook(deep, lang: str = "ru") -> Workbook:
                 getattr(ch, "name", "") or "",
                 ch.currency or "",
                 *report.totals.as_row(),
+                *account_health_cells(report),
             ],
         )
     for c in range(1, len(headers) + 1):
         ws.cell(row=header_row, column=c).fill = _HEADER_FILL
         ws.cell(row=header_row, column=c).font = _HEADER_FONT
     _apply_metric_formats_at(ws, 3, header_row + 1, len(deep.items))
+    for r in range(header_row + 1, header_row + 1 + len(deep.items)):
+        ws.cell(row=r, column=len(headers)).number_format = MONEY_FORMAT  # «Под риском»
+    _append(ws, [])
+    _append(ws, [loc("Балл — по данным отчёта (без полного аудита); полный разбор — /audit", lang)])
     ws.cell(row=1, column=1).font = Font(bold=True, size=14)
     _autosize(ws, len(headers))
 

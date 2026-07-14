@@ -103,9 +103,18 @@ Confirm-гейт разделяет предложение (proposal, тольк
   собирает только черновик `add_keywords`.
 - Добавление минус-слов через confirm-гейт: `ads/mutations.py:255`
   (`apply_add_negative_keywords`).
+- **`/searchterms` — двусторонняя работа с поисковыми запросами** (Ф4): «🚫 в минус» (конвертящих
+  нет, деньги жгут → `add_negative_keywords`, EXACT) И «➕ в ключи» — **сбор урожая**: запросы,
+  которые ПРИНЕСЛИ конверсии, но своего ключа не имеют → черновик `add_keywords` (EXACT, в ТУ
+  группу, где запрос уже крутился — `ad_group` в схеме сужает адрес, иначе был бы веер по всем
+  группам = каннибализация). Отбор — тот же код, что у чека `audit.check_keyword_harvest`
+  (`audit/terms.py:harvest`), чтобы совет и находка не разошлись. Инвентарь ключей здесь —
+  отрицательный фильтр; усечён лимитом или не прочитан ⇒ «урожай» молчит (GR8: нет данных ≠ ноль).
+  Обе клавиатуры минтит один `/searchterms`, поколение общее (анти-stale).
 - **Тесты:** `tests/test_keyword_plan.py`, `tests/test_keywords_cluster.py`,
   `tests/test_kw_add.py`, `tests/test_keywords_pipeline.py`, `tests/test_keywords_export_csv.py`,
-  `tests/test_keyword_sheets.py`.
+  `tests/test_keyword_sheets.py`, `tests/test_onetap_and_harvest.py` (сужение группы + молчание
+  на неполном инвентаре).
 
 ---
 

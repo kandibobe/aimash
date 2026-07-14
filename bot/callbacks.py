@@ -330,8 +330,12 @@ class SearchTermsCB(CallbackData, prefix="sterm"):
     """§7: /searchterms — топ «мусорных» поисковых запросов (клики без конверсий) → предложить
     в МИНУС-слова. idx — позиция запроса в _SEARCH_TERMS_CACHE[chat_id]; gen — поколение списка
     (анти-stale, как SlashMutCB.gen). action='neg' минтит proposal add_negative_keywords (confirm-
-    гейт + «да»); 'cancel' — закрыть. SDK-вызов НЕ здесь — только после подтверждения (правило 1/2)."""
+    гейт + «да»); 'cancel' — закрыть. SDK-вызов НЕ здесь — только после подтверждения (правило 1/2).
 
-    action: str  # "neg" | "cancel"
+    Ф4 (2026-07-14): action='add' — ОБРАТНЫЙ ход («сбор урожая»): конвертящий запрос без своего
+    ключа → черновик add_keywords (EXACT, в ту же группу). idx указывает в _SEARCH_TERMS_HARVEST —
+    ДРУГОЙ кэш, поколение общее (обе клавиатуры минтит один /searchterms)."""
+
+    action: str  # "neg" | "add" | "cancel"
     idx: int = -1
     gen: int = 0

@@ -41,7 +41,18 @@ from audit.thresholds import (
 
 # Операции, применимые в ОДИН тап (совпадает с bot ADVISE_APPLY_OPS — не денежные). Всё остальное
 # (бюджет/ставка) — только прозаический совет без кнопки: бюджет меняется лишь прямой командой (rule #3).
-ONE_TAP_OPS = frozenset({"pause_campaign", "add_negative_keywords"})
+# G12/G11 (2026-07-14) добавлены сюда осознанно: обе НЕ денежные (не в MONEY_OPS), обратимы одним
+# кликом и чинятся строго в БЕЗОПАСНУЮ сторону — КМС выключаем, гео сужаем до PRESENCE. Обратное
+# (включить КМС / расширить гео) бот одним тапом не предлагает никогда: параметры зашиты константами
+# в bot.main._advise_apply_params, а не берутся из находки.
+ONE_TAP_OPS = frozenset(
+    {
+        "pause_campaign",
+        "add_negative_keywords",
+        "set_campaign_display_network",
+        "set_campaign_geo_target_type",
+    }
+)
 
 
 @dataclass
@@ -112,6 +123,13 @@ class AuditResult:
     # а не заработанные) — показывается ОТДЕЛЬНОЙ строкой «💡 Упущено ~X», помеченной как оценка. 0.0 →
     # нет оценки. В конце dataclass (позиционные конструкторы/тесты не ломаются).
     lost_opportunity: float = 0.0
+    # Провенанс сбора: какие ctx-сигналы движку ФАКТИЧЕСКИ подали (kwarg is not None). Имена — тот же
+    # словарь, что у data_gaps в collect. Это НЕ data_gaps: тот — заявление слоя СБОРА («пробовал
+    # прочитать, вернулось None»), а это факт слоя ДВИЖКА («мне подали аргумент»). Пусто → engine-only
+    # вызов (/report, дайджест): чеки семей, чей вердикт без ctx недостоверен, гадают по метрикам —
+    # штраф честен, а ЯРЛЫК нет. Потребители советов обязаны такие семьи молчать
+    # (advisor.from_findings.untrusted_families); флаг report_only, который надо было ПОМНИТЬ, — снят.
+    ctx_signals: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -2339,8 +2357,9 @@ def check_display_on_search_campaign(report, thr: dict, ctx: _Ctx) -> list[Findi
                 at_risk=round(cost, 2),
                 spend_segment=r.campaign,
                 target_campaign=r.campaign,
-                suggested_operation=None,  # смена сетей кампании — через карточку /campaigns + «да»
-                advice_operation="set_campaign_display_network",
+                # One-tap (2026-07-14): выключить КМС — не деньги, обратимо, чинится в одну сторону.
+                # Кнопка минтит ЧЕРНОВИК (confirm-гейт), а не исполняет: «да» по-прежнему за человеком.
+                suggested_operation="set_campaign_display_network",
                 facts={
                     "campaign": r.campaign,
                     "content_cost": round(cost, 2),
@@ -2391,8 +2410,9 @@ def check_geo_interest_waste(report, thr: dict, ctx: _Ctx) -> list[Finding]:
                 # …но балл штрафуем ПРОПОРЦИОНАЛЬНО расходу вне таргета (не фиксом NONMONEY_INTENSITY):
                 # настройка на 3% бюджета и на 60% — разные болезни.
                 score_intensity=(min(1.0, cost / total_spend) if total_spend > 0 else 0.0),
-                suggested_operation=None,  # переключение гео-типа — через карточку кампании + «да»
-                advice_operation="set_campaign_geo_target_type",
+                # One-tap (2026-07-14): сузить гео до PRESENCE. Расширение (PRESENCE_OR_INTEREST)
+                # кнопкой недоступно — параметр зашит константой в bot.main._advise_apply_params.
+                suggested_operation="set_campaign_geo_target_type",
                 facts={
                     "campaign": r.campaign,
                     "outside_cost": round(cost, 2),
@@ -3036,6 +3056,36 @@ def build_audit(
     # аккаунте: suspension объясняет отсутствие активности). Иначе None (активен / статус не прочитан).
     acct_status = account_status if account_status in ("SUSPENDED", "CANCELED", "CLOSED") else None
 
+    # Провенанс ctx (см. AuditResult.ctx_signals): что нам подали, а не что collect пытался прочитать.
+    # Словарь имён — тот же, что у data_gaps (audit/collect.py); `[]` считается ПОДАННЫМ («прочитано,
+    # строк нет» ≠ «не прочитано»), как и там. Симуляторы/brand_terms/target_cpa — не сигналы семей.
+    ctx_signals = frozenset(
+        name
+        for name, val in (
+            ("impression_share", is_rows),
+            ("optimization_score", optimization_score),
+            ("conversion_actions", conversion_actions),
+            ("bidding", bidding),
+            ("recommendations", recommendations),
+            ("search_terms", search_terms),
+            ("ad_policy", ad_policy),
+            ("adgroup_structure", adgroup_structure),
+            ("negative_lists", negative_lists),
+            ("keyword_quality", keyword_quality),
+            ("geo_waste", geo_waste),
+            ("schedule", schedule),
+            ("bid_landscape", bid_landscape),
+            ("rsa_ads", rsa_ads),
+            ("keyword_inventory", keyword_inventory),
+            ("campaign_assets", campaign_assets),
+            ("campaign_settings", campaign_settings),
+        )
+        if val is not None
+    )
+    # Ф7: два чтения — один сигнал (как в data_gaps: семья pmax слепа, если не прочитано ЛЮБОЕ из них).
+    if pmax_campaigns is not None and pmax_asset_groups is not None:
+        ctx_signals |= {"pmax"}
+
     impressions = float(getattr(totals, "impressions", 0) or 0)
     has_activity = impressions > 0 or total_spend > 0
     if not has_activity:
@@ -3055,6 +3105,7 @@ def build_audit(
             score_model_version=SCORE_MODEL_VERSION,
             data_gaps=data_gaps,
             account_status=acct_status,
+            ctx_signals=ctx_signals,
         )
 
     campaign_cost = {name: m.cost for (name, _status), m in _campaign_rows(report)}
@@ -3160,4 +3211,5 @@ def build_audit(
         measurement_gap=measurement_gap,
         account_status=acct_status,
         lost_opportunity=lost_opportunity,
+        ctx_signals=ctx_signals,
     )

@@ -53,7 +53,7 @@ def _report(*, campaign_rows=None, keyword_rows=None, ad_rows=None, totals=None,
 
 def _recs(report, topics=None):
     res = build_audit(report)
-    return to_recommendations(res.findings, "ru", res.currency, topics=topics)
+    return to_recommendations(res, "ru", res.currency, topics=topics)
 
 
 def _of_kind(report, kind):
@@ -155,5 +155,5 @@ def test_body_is_rendered_for_every_kind():
     )
     res = build_audit(rep)
     for lang in ("ru", "en"):
-        for r in to_recommendations(res.findings, lang, res.currency):
+        for r in to_recommendations(res, lang, res.currency):
             assert r.body, f"пустой текст рекомендации {r.kind} ({lang})"

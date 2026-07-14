@@ -188,9 +188,9 @@ async def build_recommendations(
 
     result = build_audit(report, thresholds)  # без ctx-сигналов → те же чтения, что и раньше
     cands = rank_recommendations(
-        # report_only: без ctx семья conversion_tracking врёт («нет отслеживания» там, где оно есть) —
-        # см. advisor/from_findings.py::CTX_ONLY_FAMILIES. Точный вердикт даёт /audit.
-        to_recommendations(result.findings, lang, result.currency, topics=topics, report_only=True),
+        # Маппер сам увидит по result.ctx_signals (тут пусто), что семья conversion_tracking без ctx
+        # врёт («нет отслеживания» там, где оно есть), и промолчит — см. from_findings.CTX_ONLY_FAMILIES.
+        to_recommendations(result, lang, result.currency, topics=topics),
         experience=experience,
         thresholds=thresholds,  # 2.6: per-chat suppress_money_floor (валюта аккаунта, без FX)
     )[:MAX_RECS]

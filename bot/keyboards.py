@@ -66,6 +66,21 @@ def searchterms_kb(items: list[dict], gen: int) -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
+def harvest_kb(items: list[dict], gen: int) -> InlineKeyboardMarkup:
+    """Ф4 «сбор урожая»: по кнопке «➕ <запрос>» на каждый конвертящий запрос без своего ключа.
+    Клик минтит черновик add_keywords (EXACT, в ТУ группу, где запрос уже крутился) — исполнение
+    только после «да». gen общий со списком «в минус»: обе клавиатуры живут одно поколение."""
+    from bot import i18n
+
+    b = InlineKeyboardBuilder()
+    for i, it in enumerate(items):
+        term = _ellipsize(str(it.get("term") or ""))
+        b.button(text=f"➕ {term}", callback_data=SearchTermsCB(action="add", idx=i, gen=gen))
+    b.button(text=i18n.t("searchterms_cancel_btn"), callback_data=SearchTermsCB(action="cancel"))
+    b.adjust(1)
+    return b.as_markup()
+
+
 def _ellipsize(s: str, limit: int = _NAME_LIMIT) -> str:
     """Обрезать имя с видимым многоточием (иначе непонятно, что текст усечён)."""
     s = s or ""
@@ -672,6 +687,10 @@ def advise_header_kb(proactive_on: bool, lang: str | None = None) -> InlineKeybo
 _ADVISE_APPLY_LABELS = {
     "pause_campaign": "advise_apply_btn_pause",
     "add_negative_keywords": "advise_apply_btn_negatives",
+    # G12/G11 (2026-07-14): «быстрые победы» аудита, которые бот реально чинит одной кнопкой.
+    # Направление зашито (КМС→off, гео→PRESENCE) в bot.main._advise_apply_params — не из находки.
+    "set_campaign_display_network": "advise_apply_btn_display_off",
+    "set_campaign_geo_target_type": "advise_apply_btn_geo_presence",
 }
 # ЕДИНЫЙ источник множества one-tap операций: bot.main (интерактивный /advise) и scheduler-дайджест
 # импортируют ЭТО множество — дублирование списков разъехалось бы молча (гард денег #3).

@@ -67,6 +67,9 @@ class SheetTab:
     # Раскладка вкладки — чтобы форматировать ЧИСЛА, а не только шапку (см. _format_tabs):
     dim_count: int = 0  # сколько колонок-измерений перед колонками метрик
     header_row: int = 0  # индекс строки-шапки (0-based): пометка об усечении/мета сдвигают её
+    # Формат колонок (0-based индекс, паттерн). None → колонки метрик по METRIC_FORMATS с dim_count
+    # (прежнее поведение). Задан → вкладка НЕ метрическая (лист «Находки»: одна денежная колонка).
+    formats: list[tuple[int, str]] | None = None
 
 
 def _sanitize_title(title: str, seen: set[str]) -> str:
@@ -82,9 +85,36 @@ def _sanitize_title(title: str, seen: set[str]) -> str:
     return t
 
 
-def build_sheets_data(report: ReportData, lang: str = "ru") -> list[SheetTab]:
-    """Чистая сборка вкладок (без сети): «Сводка» + по вкладке на разбивку. Зеркало xlsx.
-    lang — язык ПОДПИСЕЙ (reports.labels); значения ячеек (имена кампаний, статусы) не трогаем."""
+def _findings_tab(result, currency: str, lang: str, seen: set[str]) -> SheetTab:
+    """Вкладка «Находки» — зеркало листа .xlsx (раскладка общая, reports.findings)."""
+    from reports.findings import (
+        FINDINGS_FORMATS,
+        FINDINGS_TITLE,
+        findings_headers,
+        findings_meta_rows,
+        findings_rows,
+    )
+
+    meta = findings_meta_rows(result, lang)
+    rows: list[list[Any]] = [
+        *meta,
+        [],
+        findings_headers(currency, lang),
+        *findings_rows(result, lang),
+    ]
+    return SheetTab(
+        _sanitize_title(loc(FINDINGS_TITLE, lang), seen),
+        rows,
+        header_row=len(meta) + 1,  # обзор + пустая строка
+        formats=FINDINGS_FORMATS,
+    )
+
+
+def build_sheets_data(report: ReportData, lang: str = "ru", *, audit=None) -> list[SheetTab]:
+    """Чистая сборка вкладок (без сети): «Сводка» + «Находки» (если подан audit) + по вкладке на
+    разбивку. Зеркало xlsx. lang — язык ПОДПИСЕЙ (reports.labels); значения ячеек (имена кампаний,
+    статусы) не трогаем. audit — AuditResult (keyword-only ⇒ прежние вызовы целы); None → вкладки
+    находок нет: собирать аудит — 23 чтения, решает вызыватель."""
     from reports.period import label_i18n
 
     seen: set[str] = set()
@@ -113,6 +143,8 @@ def build_sheets_data(report: ReportData, lang: str = "ru") -> list[SheetTab]:
             header_row=len(summary_meta) + 1,  # мета + пустая строка
         )
     ]
+    if audit is not None:
+        tabs.append(_findings_tab(audit, currency, lang, seen))  # сразу за «Сводкой»
 
     for b in report.breakdowns:
         rows: list[list[Any]] = []
@@ -296,8 +328,12 @@ def format_requests(tabs: list[SheetTab]) -> list[dict]:
         )
         if len(t.rows) <= t.header_row + 1:  # данных нет — форматировать нечего
             continue
-        for j, pattern in enumerate(METRIC_FORMATS):
-            col = t.dim_count + j
+        cols = (
+            [(t.dim_count + j, p) for j, p in enumerate(METRIC_FORMATS)]
+            if t.formats is None
+            else t.formats
+        )
+        for col, pattern in cols:
             requests.append(
                 {
                     "repeatCell": {
@@ -334,12 +370,14 @@ def publish_report_to_sheets(
     service: Any = None,
     drive_service: Any = None,
     lang: str = "ru",
+    audit=None,
 ) -> tuple[str, str]:
     """Создать новую таблицу с вкладками отчёта и вернуть (ссылка, статус_шаринга: роль|off|failed).
-    `service`/`drive_service` — для тестов (моки). Отчёт открывается anyone-with-link ЧИТАТЕЛЕМ
-    (финансовый артефакт — писать в него никому не нужно). Логирует вызовы Sheets API (создание +
-    запись значений, длительность, исход — БЕЗ секретов; §15)."""
-    tabs = build_sheets_data(report, lang)
+    `service`/`drive_service` — для тестов (моки). `audit` — AuditResult → вкладка «Находки» (None →
+    её нет). Отчёт открывается anyone-with-link ЧИТАТЕЛЕМ (финансовый артефакт — писать в него никому
+    не нужно). Логирует вызовы Sheets API (создание + запись значений, длительность, исход — БЕЗ
+    секретов; §15)."""
+    tabs = build_sheets_data(report, lang, audit=audit)
     svc = service or _build_service()
     start = time.monotonic()
     try:

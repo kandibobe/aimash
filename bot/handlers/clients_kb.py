@@ -106,9 +106,10 @@ async def cli_card_cb(
 async def cli_dossier_cb(
     cq: bm.CallbackQuery, callback_data: bm.ClientCB, state: bm.FSMContext
 ) -> None:
-    """§20 «📄 Досье»: отдать .md-файл текущего досье (сведено краулом). Read-only: файл уже лежит в
-    БД (client_dossiers.status='current'), LLM не зовём и профиль не трогаем. Доступ — тот же
-    композитный fail-closed чек, что и у карточки: в досье лежат контакты и имена людей клиента."""
+    """§20 «📄 Досье»: отдать .md-файл текущего досье (сведено краулом) + секция здоровья аккаунта,
+    посчитанная в момент тапа (полный аудит, `bm._cli_dossier_text`). Read-only: LLM не зовём, профиль
+    не трогаем, в БД ничего не пишем (ни досье, ни снапшот балла). Доступ — тот же композитный
+    fail-closed чек, что и у карточки: в досье лежат контакты и имена людей клиента."""
     chat_id = bm._cq_chat_id(cq)
     customer_id = bm.normalize_customer_id(callback_data.sub) or await bm._cli_selected_account(
         state
@@ -125,9 +126,11 @@ async def cli_dossier_cb(
         await cq.answer(bm.i18n.t("cli_dossier_none"), show_alert=True)
         return
     await cq.answer()
+    async with bm.ux.typing_action(msg):  # полный аудит — секунды, не мгновение
+        text = await bm._cli_dossier_text(chat_id, customer_id, row["markdown"])
     await bm.ux.send_text_document(
         msg,
-        text=row["markdown"],
+        text=text,
         filename=f"dossier_{customer_id}_v{row.get('version', 1)}.md",
     )
 

@@ -145,6 +145,100 @@ async def test_bizdigest_one_message_with_blocks_no_proposal(monkeypatch):
     assert p0 == p1  # READ-ONLY: proposal не создаются
 
 
+async def test_bizdigest_health_line_is_engine_only_and_writes_no_snapshot(monkeypatch):
+    """Здоровье в дайджесте: та же строка, что у /audit и /report (один движок — расхождению текстов
+    взяться неоткуда), но БЕЗ единого доп. чтения Google Ads.
+
+    Два инварианта, каждый — про честность, а не про красоту:
+    • gather_audit (23 чтения/аккаунт) в планировщике не зовётся: квота (структурный гард —
+      tests/test_scheduler.py::test_scheduler_audit_is_engine_only);
+    • снимок тренда НЕ пишется. Ключ account_health_snapshot — (customer_id, snapshot_date,
+      period_days) без «режима сбора», а score_model_version у engine-only и полного /audit одинаков ⇒
+      upsert дайджеста затёр бы честную базу, и клиент прочитал бы выдуманное «▲ +15 за неделю»."""
+    from sqlalchemy import func, select
+
+    import advisor.service as advisor_service
+    from db.models import AccountHealthSnapshot
+    from db.session import Session, init_db
+    from reports.queries import Breakdown, Metrics
+    from scheduler import jobs
+
+    await init_db()
+    chat, A = 6205, "3334445556"
+
+    def _live_report():
+        """Аккаунт с расходом и БЕЗ конверсий — движку есть что сказать (балл < 100)."""
+        m = Metrics(impressions=1000, clicks=100, cost_micros=int(500 * 1e6), conversions=0.0)
+        camp = Breakdown(
+            "campaign", "Кампании", ["Кампания", "Статус"], [(("Поиск", "ENABLED"), m)]
+        )
+        return SimpleNamespace(
+            customer_id=A,
+            totals=m,
+            prev_totals=m,
+            period=SimpleNamespace(date_from="2026-06-29", date_to="2026-07-05"),
+            currency="USD",
+            breakdowns=[camp],
+        )
+
+    async def _arecipients():
+        return {chat}
+
+    async def _achats(_recipients):
+        return {chat}
+
+    async def _fake_client(cid=None):
+        return object()
+
+    async def _fake_period(_client, _acct, _n):
+        return SimpleNamespace(date_from="2026-06-29", date_to="2026-07-05")
+
+    async def _fake_read(fn, client, acct, *a, **kw):
+        return "USD"
+
+    async def _fake_report(_client, _acct, _period, **kw):
+        return _live_report()
+
+    async def _fake_build(chat_id, acct, **kw):
+        return SimpleNamespace(recs=[])
+
+    monkeypatch.setattr(jobs, "_recipients", _arecipients)
+    monkeypatch.setattr(jobs, "_business_digest_chats", _achats)
+    monkeypatch.setattr(jobs, "_scheduled_accounts", lambda: [A])
+    monkeypatch.setattr(jobs, "build_client_async", _fake_client)
+    monkeypatch.setattr(jobs, "_account_period", _fake_period)
+    monkeypatch.setattr(jobs, "run_ads_read_call", _fake_read)
+    monkeypatch.setattr(jobs, "build_account_report_async", _fake_report)
+    monkeypatch.setattr(jobs, "summary_text", lambda r, lang=None: "SUMMARY")
+    monkeypatch.setattr(jobs, "detect_anomalies", lambda *a, **kw: [])
+    monkeypatch.setattr(advisor_service, "build_recommendations", _fake_build)
+
+    sent: list[tuple[int, str]] = []
+
+    class FakeBot:
+        async def send_message(self, chat_id, text, **kw):
+            sent.append((chat_id, text))
+
+    async with Session() as s:
+        snap0 = (await s.execute(select(func.count()).select_from(AccountHealthSnapshot))).scalar()
+
+    await jobs.run_business_digest(FakeBot())
+
+    assert len(sent) == 1
+    text = sent[0][1]
+    # Ровно та строка, что рисует движок для /audit и /report — не переписанная в планировщике.
+    from audit.engine import build_audit
+    from audit.render import audit_headline
+
+    expected = audit_headline(build_audit(_live_report()), "ru")
+    assert expected, "движку есть что сказать про этот аккаунт (иначе тест зелен вхолостую)"
+    assert expected in text
+
+    async with Session() as s:
+        snap1 = (await s.execute(select(func.count()).select_from(AccountHealthSnapshot))).scalar()
+    assert snap0 == snap1, "дайджест ПИШЕТ снимок здоровья — он отравит baseline тренда /audit"
+
+
 async def test_bizdigest_silent_without_optin(monkeypatch):
     from scheduler import jobs
 

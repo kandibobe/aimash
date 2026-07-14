@@ -9,6 +9,9 @@
     телефон директора не нужен, а утечка — нужна ещё меньше.
     Здесь же нет и фактов ОТРАСЛИ (`Fact.industry` — цифры рынка из блога клиента): в объявлении они
     превратились бы в ложное утверждение о самом клиенте, а это снятие объявлений Google.
+
+Здоровье аккаунта (`render_health_markdown` + `with_health`) стоит СБОКУ от обоих: его нет ни в схеме
+`Dossier`, ни в сторе. Считается при отдаче файла, вклеивается в готовый markdown — см. `with_health`.
 """
 
 from __future__ import annotations
@@ -16,6 +19,15 @@ from __future__ import annotations
 from clients.dossier_schema import Dossier
 
 CONTEXT_MAX_CHARS = 3000  # дефолт бюджета контекста в промпте (см. settings.profile_ctx_chars)
+HEALTH_TOP = 5  # находок в секции здоровья: досье — не карточка /audit, это врезка «что горит»
+
+_HEALTH_HEAD = {"ru": "## 🩺 Здоровье аккаунта", "en": "## 🩺 Account health"}
+_HEALTH_NOTE = {
+    "ru": "_Аудит посчитан в момент открытия досье (окно 30 дней) и в файле не хранится: балл живёт "
+    "днями, а досье — неделями. Полный разбор — /audit._",
+    "en": "_Audited when this dossier was opened (30-day window); not stored in the file: a score "
+    "lives for days, a dossier for weeks. Full breakdown — /audit._",
+}
 
 
 def _bullets(title: str, items: list[str]) -> list[str]:
@@ -111,6 +123,47 @@ def render_markdown(d: Dossier, *, generated_at: str = "") -> str:
         "Проверьте перед использованием: бот берёт только то, что написано на сайте._",
     ]
     return "\n".join(out).strip() + "\n"
+
+
+def render_health_markdown(result, lang: str = "ru", *, trend: str = "") -> str:
+    """Секция «здоровье аккаунта» из `AuditResult`. Чистая: всю прозу берём из `audit.render` (та же
+    строка, что видит клиент в карточке /audit и в совете) — здесь только markdown-обвязка, ни одного
+    своего слова про находку. '' → аккаунт без активности: секции не будет.
+
+    `result` — намеренно без аннотации: модуль `clients/` не тянет `audit.engine` в импорты краула."""
+    from audit.render import audit_headline, family_label, finding_text
+
+    head = audit_headline(result, lang)
+    if not head:
+        return ""
+    key = "en" if lang == "en" else "ru"
+    out = [_HEALTH_HEAD[key], "", head]
+    if (trend or "").strip():
+        out.append(trend.strip())
+    cur = getattr(result, "currency", "") or ""
+    top = list(getattr(result, "findings", []) or [])[:HEALTH_TOP]
+    if top:
+        out.append("")
+        out += [f"- **{family_label(f.family, lang)}** — {finding_text(f, lang, cur)}" for f in top]
+    return "\n".join([*out, "", _HEALTH_NOTE[key], ""])
+
+
+def with_health(markdown: str, health: str) -> str:
+    """Вклеить секцию здоровья в УЖЕ СОБРАННОЕ досье — над сгибом, перед первой секцией («что горит»
+    видно раньше, чем «чем занимается»). Пустая секция → markdown байт-в-байт как был.
+
+    Именно вклеить, а не отрендерить внутри `render_markdown`: .md пишется ОДИН раз краулом
+    (`client_dossiers.markdown`) и живёт неделями, а балл — днями; вмороженное число, по которому примут
+    решение через месяц, хуже, чем никакого. Плюс здоровье в схеме `Dossier` рано или поздно утекло бы в
+    `render_llm_context` → в промпт RSA. Вне схемы это невозможно по построению."""
+    if not (health or "").strip():
+        return markdown
+    block = health.rstrip("\n").split("\n")
+    lines = markdown.split("\n")
+    for i, line in enumerate(lines):  # первая секция или футер «---», что встретится раньше
+        if line.startswith("## ") or line.rstrip() == "---":
+            return "\n".join([*lines[:i], *block, "", *lines[i:]])
+    return markdown.rstrip("\n") + "\n\n" + "\n".join(block) + "\n"
 
 
 def render_llm_context(d: Dossier, *, max_chars: int = CONTEXT_MAX_CHARS) -> str:

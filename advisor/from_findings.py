@@ -15,6 +15,12 @@
     прямой команде). Гард: tests/test_audit_engine.test_advice_operation_never_one_tap.
   • topic == family — ОДНА таксономия на аудит и советы. Меню /advise (optimize|keywords|rsa|
     structure) отображается на семьи через ADVISE_TOPIC_FAMILIES, а не наоборот.
+
+Вход маппера — AuditResult, а НЕ список находок: из результата берётся провенанс сбора
+(`ctx_signals`), по которому семьи с недостоверным без ctx вердиктом молчат сами. Раньше это решал
+булев `report_only`, который потребитель обязан был ПОМНИТЬ передать (и /audit его не передавал —
+при упавшем чтении конверсий показывал ложную карточку с кнопками). Забыть новый контракт нельзя:
+объект без ctx_signals трактуется как собранный БЕЗ ctx ⇒ семья молчит (fail-safe).
 """
 
 from __future__ import annotations
@@ -31,14 +37,15 @@ ADVISE_TOPIC_FAMILIES: dict[str, frozenset[str]] = {
     "structure": frozenset({"structure"}),
 }
 
-# Семьи, чей ВЕРДИКТ зависит от ctx-сигналов (живые conversion_action и т.п.). /advise и дайджест
-# строят аудит ТОЛЬКО по отчёту (report-only, без доп. запросов к API), а там
+# Семья → ctx-сигнал, без которого её ВЕРДИКТ недостоверен. Без conversion_actions
 # check_no_conversion_tracking уходит в метрическую эвристику: аккаунту с настроенным отслеживанием и
 # 0 конверсий она скажет «отслеживания нет» (с ctx тот же вход даёт ДРУГОЙ чек — zero_conversions).
-# Плюс at_risk такой находки = ВЕСЬ расход аккаунта ⇒ ложь заняла бы №1 в ранге и в дайджесте, а 👍/👎
-# по ней снова расщепили бы бакет опыта надвое. Молчать честнее: точный вердикт даёт /audit (он ctx
-# читает). Гард класса — tests/test_advisor.py::test_advise_findings_are_subset_of_audit.
-CTX_ONLY_FAMILIES: frozenset[str] = frozenset({"conversion_tracking"})
+# Штраф при этом честен (расход есть, конверсий нет — деньги в риске в обоих случаях), врёт только
+# ЯРЛЫК. Но at_risk такой находки = ВЕСЬ расход аккаунта ⇒ ложь заняла бы №1 в ранге и в дайджесте, а
+# 👍/👎 по ней расщепили бы бакет опыта надвое. Молчать честнее: точный вердикт даёт /audit (он ctx
+# читает). Гарды: tests/test_advisor.py::test_advise_findings_are_subset_of_audit + сверка с реальными
+# чтениями ctx в tests/test_audit_honesty_guards.py.
+CTX_ONLY_FAMILIES: dict[str, str] = {"conversion_tracking": "conversion_actions"}
 
 
 def families_for_topics(topics) -> set[str] | None:
@@ -49,6 +56,27 @@ def families_for_topics(topics) -> set[str] | None:
     for t in topics:
         out |= ADVISE_TOPIC_FAMILIES.get(str(t), frozenset())
     return out
+
+
+def untrusted_families(result) -> frozenset[str]:
+    """Семьи, чей сигнал движку НЕ подали ⇒ их вердикт нельзя показывать как совет.
+
+    `getattr` — fail-safe, а не удобство: объект без ctx_signals (сырой список находок, самодельный
+    результат, будущий потребитель) считается собранным БЕЗ ctx ⇒ семья молчит. Забыл контракт —
+    промолчал, а не соврал."""
+    have = frozenset(getattr(result, "ctx_signals", None) or ())
+    return frozenset(fam for fam, sig in CTX_ONLY_FAMILIES.items() if sig not in have)
+
+
+def advisable_findings(result, *, topics=None, findings=None) -> list:
+    """Находки результата, которые ВПРАВЕ уйти в советы: фильтр по темам меню + ctx-гейт.
+
+    Единственное место, где читается CTX_ONLY_FAMILIES. `findings` — уже отобранный список из того же
+    result (гейт идемпотентен, применять до среза безопасно); None → result.findings."""
+    fams = families_for_topics(topics)
+    blind = untrusted_families(result)
+    src = result.findings if findings is None else findings
+    return [f for f in src if (fams is None or f.family in fams) and f.family not in blind]
 
 
 def to_recommendation(f, lang: str, currency: str) -> Recommendation:
@@ -71,16 +99,15 @@ def to_recommendation(f, lang: str, currency: str) -> Recommendation:
 
 
 def to_recommendations(
-    findings, lang: str, currency: str, *, topics=None, report_only: bool = False
+    result, lang: str, currency: str, *, topics=None, findings=None
 ) -> list[Recommendation]:
-    """Находки → рекомендации, отфильтрованные по темам меню (topics=None ⇒ все).
+    """AuditResult → рекомендации: фильтр по темам меню (topics=None ⇒ все) + ctx-гейт.
 
-    report_only=True — аудит собран БЕЗ ctx-сигналов (путь /advise и дайджеста): выкидываем семьи,
-    чей вердикт без ctx недостоверен (CTX_ONLY_FAMILIES)."""
-    fams = families_for_topics(topics)
+    Первым аргументом идёт РЕЗУЛЬТАТ, а не список находок: из него берётся провенанс сбора. Кто
+    строит свой срез находок (карточка /audit — она же вешает на них кнопки), обязан отобрать его
+    через advisable_findings() и передать сюда как `findings` — иначе zip(findings, recs) разъедется
+    и кнопка уедет к чужой находке."""
     return [
         to_recommendation(f, lang, currency)
-        for f in findings
-        if (fams is None or f.family in fams)
-        and not (report_only and f.family in CTX_ONLY_FAMILIES)
+        for f in advisable_findings(result, topics=topics, findings=findings)
     ]
