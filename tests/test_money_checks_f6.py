@@ -313,15 +313,33 @@ def test_display_on_search_flags_burned_money_not_the_checkbox():
 
 def test_geo_interest_waste_measures_money_of_people_outside_target():
     """G11 — «присутствие ИЛИ интерес» флажим ТОЛЬКО с деньгами клиентов, физически вне таргета
-    (user_location_view.targeting_location=FALSE). Нет типа гео (нет данных) → молчим."""
+    (user_location_view.targeting_location=FALSE). Нет типа гео (нет данных) → молчим.
+
+    Эпоха 5: деньги вне таргета в headline кладёт geo_no_conv (те же клики, другой срез) ⇒ здесь
+    at_risk=0, но балл штрафуется ПРОПОРЦИОНАЛЬНО (score_intensity = доля расхода вне таргета) —
+    иначе «Под риском» задваивался бы (сегменты «geo::кампания::регион» и «кампания» не пересекались,
+    и дедуп их складывал). Цифра в тексте карточки — из facts, она не пропала."""
     rep = _report([("Поиск", 100.0, 5.0)])
     res = build_audit(
         rep,
         campaign_settings=[_settings("Поиск", geo="PRESENCE_OR_INTEREST", outside_cost=50.0)],
     )
     f = next(f for f in res.findings if f.check_id == "geo_interest_waste")
-    assert f.at_risk == 50.0 and f.family == "geo"
+    assert f.family == "geo"
+    assert f.at_risk == 0.0 and f.spend_segment is None  # деньги — за geo_no_conv
+    assert f.facts["outside_cost"] == 50.0  # …но факт не потерян
+    assert f.score_intensity == 0.5  # 50 из 100 расхода: штраф по доле, не фикс NONMONEY (0.5≠факт)
     assert "ВНЕ ваших регионов" in finding_text(f, "ru", "USD")
+
+    # Тот же слив, но кампания вдесятеро больше ⇒ болезнь та же, а вес её меньше: интенсивность
+    # ПАДАЕТ (фикс NONMONEY_INTENSITY этого различить не мог бы).
+    big = build_audit(
+        _report([("Поиск", 1000.0, 50.0)]),
+        campaign_settings=[_settings("Поиск", geo="PRESENCE_OR_INTEREST", outside_cost=50.0)],
+    )
+    assert (
+        next(f for f in big.findings if f.check_id == "geo_interest_waste").score_intensity == 0.05
+    )
 
     # Гео-тип «присутствие» → настройка верная, вне-таргетный расход (если и есть) — погрешность гео.
     ok = build_audit(rep, campaign_settings=[_settings("Поиск", geo="PRESENCE", outside_cost=50.0)])
@@ -413,6 +431,33 @@ def test_fetch_campaign_settings_sums_only_content_and_outside_target():
     # …и оба чека на этих данных срабатывают на реальные деньги.
     res = build_audit(_report([("Поиск", 120.0, 4.0)]), campaign_settings=rows)
     assert {"display_on_search_campaign", "geo_interest_waste"} <= _ids(res)
-    assert (
-        res.at_risk <= res.total_spend
-    )  # дедуп по кампании: 30 и 20 не складываются поверх расхода
+    # ТОЧНОЕ значение, а не «≤ расхода»: сливы КМС (30) и «интересующихся» (20) — РАЗНЫЕ срезы одних
+    # и тех же денег кампании, складывать их нельзя. Неравенство «≤ 120» пропустило бы и 50 (двойной
+    # счёт), и 0 (потерянные деньги) — пинуем ровно 30: КМС в headline, гео-тип штрафует лишь балл.
+    assert res.at_risk == 30.0 and res.total_spend == 120.0
+
+
+def test_geo_interest_waste_does_not_double_count_geo_no_conv_money():
+    """Регрессия (ревизия волны): гео-слив НЕ задваивается. geo_no_conv (регионы без конверсий) и
+    geo_interest_waste (гео-тип «присутствие ИЛИ интерес») смотрят на ОДНИ И ТЕ ЖЕ клики людей вне
+    таргета — но разными срезами (регион vs кампания), поэтому их spend_segment не пересекались и
+    _dedup_at_risk их СКЛАДЫВАЛ: сожгли 300, «Под риском» показывал 600.
+
+    Контракт: деньги в headline кладёт РОВНО ОДИН чек (geo_no_conv), второй штрафует только балл."""
+    from reports.queries import GeoWasteRow
+
+    rep = _report([("Поиск", 1000.0, 10.0)])
+    geo_rows = [  # регион вне таргета: 300 сожжено, 0 конверсий
+        GeoWasteRow(
+            campaign="Поиск",
+            region="Мухосранск",
+            metrics=Metrics(impressions=500, clicks=50, cost_micros=300_000_000, conversions=0.0),
+        )
+    ]
+    res = build_audit(
+        rep,
+        geo_waste=geo_rows,
+        campaign_settings=[_settings("Поиск", geo="PRESENCE_OR_INTEREST", outside_cost=300.0)],
+    )
+    assert {"geo_no_conv", "geo_interest_waste"} <= _ids(res)
+    assert res.at_risk == 300.0  # ровно сожжённое, НЕ 600

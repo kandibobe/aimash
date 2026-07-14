@@ -35,6 +35,27 @@ def test_reverse_bid_only_when_uniform():
     assert bm._reverse_spec("update_bid", {"campaign": "К"}, mixed) is None
 
 
+def test_reverse_keyword_bid_only_when_keyword_had_its_own_bid():
+    """Ревизия волны (ДЕНЬГИ): у ключа могло не быть СВОЕЙ ставки — он наследовал ставку группы,
+    и «было» в снимке = ставка группы. Откат через set_to завёл бы критерию собственную ставку:
+    числом то же, состоянием другое (группа больше не управляет ключом) — это не откат, а тихая
+    смена модели наследования. Предлагаем «↩️» только когда КАЖДЫЙ ключ имел свою ставку."""
+    base = {"campaign": "К", "keyword": "ремонт"}
+    own = {"kind": "keyword_bid", "before_micros": [500_000, 500_000], "own_bid": [True, True]}
+    op, params = bm._reverse_spec("update_keyword_bid", base, own)
+    assert op == "update_keyword_bid" and params["mode"] == "set_to" and params["value"] == 0.5
+
+    # хоть один ключ наследовал ставку группы → отката не предлагаем
+    inherited = {**own, "own_bid": [True, False]}
+    assert bm._reverse_spec("update_keyword_bid", base, inherited) is None
+    # старый снимок без флага (до ревизии) → тоже не предлагаем: молча не гадаем про чужие деньги
+    legacy = {"kind": "keyword_bid", "before_micros": [500_000, 500_000]}
+    assert bm._reverse_spec("update_keyword_bid", base, legacy) is None
+    # флаг есть, но короче списка ставок → снимок бит, отказ (fail-closed)
+    torn = {**own, "own_bid": [True]}
+    assert bm._reverse_spec("update_keyword_bid", base, torn) is None
+
+
 def test_reverse_status_opposite_operation():
     # была ENABLED → поставили на паузу → откат = resume
     assert bm._reverse_spec(

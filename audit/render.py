@@ -21,6 +21,9 @@ _FAMILY_LABEL = {
         "geo": "Гео и таргетинг",
         "assets": "Расширения",
         "pmax": "Performance Max",
+        # Вес 0 в скоре, но находки семей показываются — без метки в карточку лез сырой id.
+        "competition": "Конкуренция",
+        "recommendations": "Рекомендации Google",
     },
     "en": {
         "waste": "Wasted spend",
@@ -34,10 +37,17 @@ _FAMILY_LABEL = {
         "geo": "Geo & targeting",
         "assets": "Assets",
         "pmax": "Performance Max",
+        "competition": "Competition",
+        "recommendations": "Google recommendations",
     },
 }
 
 _SEV_EMOJI = {"critical": "🛑", "warning": "❗", "info": "🟡"}
+
+# Ф8/ревизия: из скольких ПЕРВЫХ находок можно брать «быстрые победы». Ровно столько находок бот
+# показывает отдельными сообщениями с кнопками (`bot.main._AUDIT_MAX_FINDINGS`) — обещать «в один
+# тап» находке, у которой кнопки нет, нельзя. Константы связаны тестом.
+QUICK_WIN_POOL = 8
 
 # N1.3: человекочитаемые метки best-effort сигналов collect-слоя (для строки «недостаточно данных»).
 _SIGNAL_LABEL = {
@@ -62,6 +72,7 @@ _SIGNAL_LABEL = {
         "keyword_inventory": "инвентарь ключей",
         "campaign_assets": "расширения объявлений",
         "campaign_settings": "настройки кампаний (сети/гео)",
+        "rsa_age": "возраст объявлений",
     },
     "en": {
         "impression_share": "impression share",
@@ -82,24 +93,37 @@ _SIGNAL_LABEL = {
         "keyword_inventory": "keyword inventory",
         "campaign_assets": "ad assets",
         "campaign_settings": "campaign settings (networks/geo)",
+        "rsa_age": "ad age",
     },
 }
 
 # N1.3: семья → доп-сигналы, без которых «✅ в норме» утверждать нечестно (сигнал упал → семья
 # не попадает в «в норме», а сигнал показывается строкой «недостаточно данных»).
+#
+# ⚠️ Карта ДОЛЖНА покрывать все ctx-сигналы, которые читают чеки семьи — иначе семья скажет «проблем
+# нет» ровно там, где чек ослеп (ревизия волны: у `waste` записи не было вовсе, у `rsa` не хватало
+# самих объявлений). Дрейф стережёт тест `test_family_signals_cover_ctx_reads` — он выводит нужные
+# сигналы ИЗ КОДА чеков (AST, транзитивно через хелперы) и требует ⊆ этой карты.
 _FAMILY_SIGNALS = {
-    "keywords": ("search_terms", "negative_lists"),
+    # display_on_search_campaign читает campaign_settings, pmax_asset_group_no_conv — pmax.
+    "waste": ("campaign_settings", "pmax"),
+    "keywords": ("search_terms", "negative_lists", "keyword_inventory", "pmax"),
     "budget": ("impression_share",),
-    "rsa": ("impression_share", "adgroup_structure", "keyword_quality"),
+    # rsa_* судят по самим объявлениям; rsa_age — «возраст не прочитан» (см. fetch_rsa_assets).
+    "rsa": ("impression_share", "adgroup_structure", "keyword_quality", "rsa_ads", "rsa_age"),
     "conversion_tracking": ("conversion_actions",),
     # Ф1: без слоя ставок/позиций (bid_landscape) «ставки в норме» утверждать нечестно — именно там
-    # живут «ставка ниже оценки Google» и «верх потерян по рангу».
-    "bidding": ("bidding", "bid_landscape"),
+    # живут «ставка ниже оценки Google» и «верх потерян по рангу». negative_lists — broad_unmanaged.
+    "bidding": ("bidding", "bid_landscape", "negative_lists"),
     "delivery": (
         "ad_policy",
     ),  # упал ad_policy → delivery не «в норме» (zero_impressions — из отчёта)
-    "structure": ("adgroup_structure",),  # D: без структуры групп не утверждаем «структура в норме»
-    "geo": ("geo_waste",),  # A: без geographic_view не утверждаем «гео в норме»
+    # D: без структуры групп не утверждаем «структура в норме»; brand_nonbrand_mixed живёт на
+    # инвентаре ключей, pmax_brand_cannibalization — на PMax.
+    "structure": ("adgroup_structure", "keyword_inventory", "pmax"),
+    # A: без geographic_view не утверждаем «гео в норме»; schedule_waste — расписание,
+    # geo_interest_waste — настройки кампаний (тип гео-таргетинга).
+    "geo": ("geo_waste", "schedule", "campaign_settings"),
     "assets": ("campaign_assets",),  # Ф8: без list_campaign_assets «расширения в норме» — враньё
 }
 
@@ -368,10 +392,12 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
         return f"«{camp}»: бренд и не-бренд в одной кампании ({fa.get('brand_kw', 0)} брендовых: {ex}; {fa.get('other_kw', 0)} остальных) — бренд забирает {fa.get('brand_share', 0)}% расхода и вытягивает средний CPA, за ним не видно, как работает небрендовая часть. Раздели на две кампании."
     if f.check_id in ("assets_sitelinks_thin", "assets_callouts_thin", "assets_no_snippets"):
         n, need = fa.get("count", 0), fa.get("need", 0)
+        # EN — цельная фраза, а не склейка «none structured snippets» (ревизия волны: «нет» и «3 из 4»
+        # по-английски строятся по-разному, шаблон «{кол-во} {что}» ломался ровно на снippets).
         what_en = {
-            "assets_sitelinks_thin": ("sitelinks", f"{n} of {need}+"),
-            "assets_callouts_thin": ("callouts", f"{n} of {need}+"),
-            "assets_no_snippets": ("structured snippets", "none"),
+            "assets_sitelinks_thin": f"{n} of {need}+ sitelinks",
+            "assets_callouts_thin": f"{n} of {need}+ callouts",
+            "assets_no_snippets": "no structured snippets",
         }[f.check_id]
         what_ru = {
             "assets_sitelinks_thin": ("ситилинков", f"{n} из {need}+"),
@@ -379,7 +405,7 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
             "assets_no_snippets": ("структурированных описаний", "нет"),
         }[f.check_id]
         if lang == "en":
-            return f"«{camp}»: {what_en[1]} {what_en[0]} — the ad takes less space in the results and gets a lower CTR at the same bid. Add them: /campaigns → the campaign → Extensions."
+            return f"«{camp}»: {what_en} — the ad takes less space in the results and gets a lower CTR at the same bid. Add them: /campaigns → the campaign → Extensions."
         return f"«{camp}»: {what_ru[0]} — {what_ru[1]}. Объявление занимает меньше места в выдаче и собирает меньше кликов при той же ставке. Добавить: /campaigns → карточка кампании → Расширения."
     if f.check_id == "display_on_search_campaign":
         cost = _money(fa.get("content_cost", 0), fa.get("currency") or cur)
@@ -707,7 +733,13 @@ def render_audit(
     # весу семьи; чинится руками и не за минуту). Сортировка — по деньгам, не по severity: смысл
     # блока — «сколько вернём прямо сейчас». Деньги НЕ суммируем: расходы находок пересекаются
     # (запрос ⊂ кампания) и сумма врала бы — показываем цену КАЖДОЙ строки (крит.C2).
-    quick = sorted((f for f in result.findings if f.one_tap), key=lambda f: -f.at_risk)[:3]
+    #
+    # ⚠️ Берём ТОЛЬКО из первых QUICK_WIN_POOL находок (ревизия волны): кнопки бот рисует именно им
+    # (bot.main._AUDIT_MAX_FINDINGS), а обещание «в один тап» для находки без кнопки — ложь. Равенство
+    # констант стережёт тест `test_quick_win_pool_matches_bot_slice`.
+    quick = sorted(
+        (f for f in result.findings[:QUICK_WIN_POOL] if f.one_tap), key=lambda f: -f.at_risk
+    )[:3]
     if quick:
         lines.append("")
         lines.append(
@@ -779,4 +811,7 @@ def _family_emoji(family: str) -> str:
         "delivery": "🚫",
         "geo": "📍",
         "assets": "🔗",
+        "pmax": "🅿️",
+        "competition": "⚔️",
+        "recommendations": "💡",
     }.get(family, "•")

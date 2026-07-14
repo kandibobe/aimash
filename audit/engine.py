@@ -155,6 +155,11 @@ class _Ctx:
     # Ф4: ПОЛНЫЙ список активных ключей — вместе с нулевыми (топ-по-расходу выборка их теряет).
     # Он же «что уже покрыто» для майнинга запросов. None → не читано (майнинг молчит, а не врёт).
     keyword_inventory: list | None = None
+    # Ревизия волны: список УПЁРСЯ в LIMIT фетчера ⇒ он неполный. Для чеков-«счётчиков» (нули,
+    # каннибализация) это недосчёт, а для майнинга — ЛОЖНЫЕ СОВЕТЫ: инвентарь там работает
+    # ОТРИЦАТЕЛЬНЫМ фильтром («чего нет — предложи», «что своё — не минусуй»), и обрезанный ключ
+    # выглядит как несуществующий. Флаг ставит collect-слой (он знает лимит фетчера).
+    keyword_inventory_truncated: bool = False
     # Ф6: токены бренда из профиля клиента (§20). Пусто → brand_nonbrand_mixed молчит: угадывать
     # бренд нечем, а ложно назвать брендовым чужой ключ хуже, чем промолчать.
     brand_terms: set | None = None
@@ -1266,8 +1271,11 @@ def check_keyword_harvest(report, thr: dict, ctx: _Ctx) -> list[Finding]:
 
     🔒 На балл НЕ влияет (score_intensity=0.0): это невыбранная возможность, а не дефект аккаунта —
     штрафовать за неё значило бы ругать клиента за то, чего у него нет. Нужны ОБА сигнала (запросы
-    и список ключей): без ключей мы не знаем, что уже покрыто, и предложили бы дубли."""
-    if not ctx.search_terms or ctx.keyword_inventory is None:
+    и список ключей): без ключей мы не знаем, что уже покрыто, и предложили бы дубли.
+
+    Инвентарь УСЕЧЁН лимитом фетчера (огромный аккаунт) → тоже молчим: обрезанный ключ неотличим от
+    отсутствующего, и мы предложили бы добавить то, что у клиента уже есть."""
+    if not ctx.search_terms or ctx.keyword_inventory is None or ctx.keyword_inventory_truncated:
         return []
     items = harvest(
         ctx.search_terms,
@@ -1318,8 +1326,12 @@ def check_ngram_waste(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     фактах, а в балл идём как неденежный warning.
 
     Не one-tap (в отличие от точного минуса на один запрос): n-грамма пересекает кампании, а
-    add_negative_keywords бьёт по ОДНОЙ — кнопка применила бы половину, а выглядело бы как «готово»."""
-    if not ctx.search_terms or ctx.keyword_inventory is None:
+    add_negative_keywords бьёт по ОДНОЙ — кнопка применила бы половину, а выглядело бы как «готово».
+
+    Усечённый инвентарь → молчим: гард «свои ключи неприкосновенны» держится на ПОЛНОМ списке, а на
+    обрезанном мы посоветовали бы заминусовать слово, входящее в собственный ключ клиента (применение
+    такого совета — прямой убыток, а не недосчёт)."""
+    if not ctx.search_terms or ctx.keyword_inventory is None or ctx.keyword_inventory_truncated:
         return []
     grams = waste_ngrams(
         ctx.search_terms,
@@ -2340,10 +2352,20 @@ def check_geo_interest_waste(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     это чистый слив: приехать и купить они не могут.
 
     Меряем деньгами, а не галочкой: user_location_view.targeting_location = FALSE — это клики людей
-    вне таргета. Расход по ним ≥ порога И ноль конверсий → находка (at_risk = этот расход). Если
-    «интересующиеся» конвертят — молчим: у национального/онлайн-бизнеса настройка законна (GR8)."""
+    вне таргета. Расход по ним ≥ порога И ноль конверсий → находка. Если «интересующиеся» конвертят —
+    молчим: у национального/онлайн-бизнеса настройка законна (GR8).
+
+    ⚠️ Эпоха 5 (ревизия волны): деньги в at_risk НЕ кладём (0.0 + score_intensity), хотя условие
+    срабатывания — по-прежнему деньги. Клик человека вне таргета уже посчитан `geo_no_conv`: тот же
+    расход приходит из geographic_view с LOCATION_OF_PRESENCE (регион вне таргета) — это ОДНИ И ТЕ ЖЕ
+    деньги с двух сторон. Сегменты у чеков разные (`geo::камп::регион` vs кампания), поэтому дедуп
+    брал не MAX, а СУММУ, и headline «Под риском» задваивался (600 при 300 сожжённых). Схлопнуть
+    сегменты нельзя: у `geo_no_conv` регионы ВНУТРИ таргета — разные деньги, их сумма законна.
+    Прецедент — `schedule_waste`/`is_lost_revenue`: расход показывается в тексте находки и штрафует
+    балл через intensity, но в «Под риском» его кладёт РОВНО ОДИН чек."""
     min_spend = float(thr.get("geo_interest_min_spend", 20.0))
     cur = getattr(report, "currency", "")
+    total_spend = float(getattr(report.totals, "cost", 0.0) or 0.0)
     out: list[Finding] = []
     for r in _settings_rows(ctx, channel=None):
         if getattr(r, "geo_target_type", "") not in ("PRESENCE_OR_INTEREST", "SEARCH_INTEREST"):
@@ -2357,9 +2379,12 @@ def check_geo_interest_waste(report, thr: dict, ctx: _Ctx) -> list[Finding]:
                 check_id="geo_interest_waste",
                 family="geo",
                 severity="warning",
-                at_risk=round(cost, 2),
-                spend_segment=r.campaign,
+                at_risk=0.0,  # деньги вне таргета кладёт в headline geo_no_conv — иначе двойной счёт
+                spend_segment=None,
                 target_campaign=r.campaign,
+                # …но балл штрафуем ПРОПОРЦИОНАЛЬНО расходу вне таргета (не фиксом NONMONEY_INTENSITY):
+                # настройка на 3% бюджета и на 60% — разные болезни.
+                score_intensity=(min(1.0, cost / total_spend) if total_spend > 0 else 0.0),
                 suggested_operation=None,  # переключение гео-типа — через карточку кампании + «да»
                 advice_operation="set_campaign_geo_target_type",
                 facts={
@@ -2624,8 +2649,14 @@ def check_pmax_no_signals(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     без товарного фида. Google учится с нуля, тратя бюджет на разведку.
 
     Все три условия обязательны: аудитория — такой же сигнал, что и тема, а у retail-PMax сигналом
-    служит сам фид (merchant_id). Проверять одни search_themes значило бы врать двум типам кампаний."""
-    feed = {c.campaign_id: bool(getattr(c, "merchant_id", "")) for c in (ctx.pmax_campaigns or [])}
+    служит сам фид (merchant_id). Проверять одни search_themes значило бы врать двум типам кампаний.
+
+    GR8: фид живёт в ДРУГОМ чтении (ctx.pmax_campaigns). Упало оно одно — `or []` превратил бы
+    «фид не прочитан» в «фида нет», и retail-PMax (законно работающий на одном фиде) получил бы
+    обвинение «ни одного сигнала». Нет фид-сигнала → молчим."""
+    if ctx.pmax_campaigns is None:
+        return []
+    feed = {c.campaign_id: bool(getattr(c, "merchant_id", "")) for c in ctx.pmax_campaigns}
     out: list[Finding] = []
     for g in _pmax_spending_groups(ctx, thr):
         if int(getattr(g, "search_themes", 0) or 0) > 0 or int(getattr(g, "audiences", 0) or 0) > 0:
@@ -2964,6 +2995,7 @@ def build_audit(
     budget_simulations: list | None = None,
     rsa_ads: list | None = None,
     keyword_inventory: list | None = None,
+    keyword_inventory_truncated: bool = False,
     brand_terms: set | None = None,
     campaign_assets: list | None = None,
     campaign_settings: list | None = None,
@@ -3039,6 +3071,7 @@ def build_audit(
         recommendations=recommendations,
         rsa_ads=rsa_ads,
         keyword_inventory=keyword_inventory,
+        keyword_inventory_truncated=keyword_inventory_truncated,
         brand_terms=brand_terms,
         campaign_assets=campaign_assets,
         campaign_settings=campaign_settings,

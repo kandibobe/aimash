@@ -810,14 +810,24 @@ class KeywordInventoryRow:
     metrics: Metrics
 
 
+KEYWORD_INVENTORY_LIMIT = 10000
+"""Потолок строк инвентаря ключей. Достигнут ⇒ список УСЕЧЁН и как «свои ключи» непригоден
+(см. докстринг `fetch_keyword_inventory`): вызывающий обязан пометить `keyword_inventory_truncated`."""
+
+
 def fetch_keyword_inventory(
-    client, customer_id: str, period, limit: int = 10000
+    client, customer_id: str, period, limit: int = KEYWORD_INVENTORY_LIMIT
 ) -> list[KeywordInventoryRow]:
     """Полный список ENABLED-ключей за период — БЕЗ `ORDER BY cost` (иначе нули отсекаются) и без
     метрик-фильтров. Нужен трём чекам: нулевые показы, каннибализация (один ключ в разных группах),
     и как «список своих ключей» для майнинга запросов (что уже есть — не собирать, что своё — не
-    минусовать). Усечение по LIMIT возможно на огромных аккаунтах: чек тогда НЕДОсчитает, но не
-    придумает лишнего. READ-ONLY."""
+    минусовать).
+
+    ⚠️ Усечение по LIMIT НЕ безобидно (ревизия волны): в майнинге инвентарь — ОТРИЦАТЕЛЬНЫЙ фильтр
+    («чего у меня нет»), поэтому недосчёт списка = ПЕРЕсчёт совета: `keyword_harvest` предложит
+    собрать уже собранное, а `ngram_waste` — заминусовать слово, входящее в СВОЙ же ключ (применить =
+    убить трафик). Поэтому при `len(rows) >= limit` вызывающий помечает `keyword_inventory_truncated`
+    и эти два чека МОЛЧАТ (нет данных ≠ ноль, GR8). READ-ONLY."""
     ensure_read_allowed(customer_id)
     q = (
         "SELECT campaign.name, ad_group.name, ad_group_criterion.keyword.text, "
@@ -1142,7 +1152,9 @@ def _rsa_query(period, limit: int, with_dates: bool) -> str:
 
 def _age_days(started: str) -> int:
     """Дней с начала показа объявления. Пустая/нечитаемая дата → -1 («не знаем», не «сегодня»).
-    Google отдаёт `start_date_time` как «YYYY-MM-DD HH:MM:SS» в таймзоне аккаунта — берём дату."""
+    Google отдаёт `start_date_time` как «YYYY-MM-DD HH:MM:SS» в таймзоне аккаунта — берём дату.
+
+    ⚠️ У БОЛЬШИНСТВА объявлений это поле ПУСТО (см. `fetch_rsa_assets`) ⇒ -1 — норма, а не сбой."""
     head = (started or "")[:10]
     try:
         return max(0, (date.today() - date.fromisoformat(head)).days)
@@ -1153,20 +1165,24 @@ def _age_days(started: str) -> int:
 def _rsa_keywords(client, customer_id: str, ad_group_ids: set[str]) -> dict[str, list[str]]:
     """Ключи ENABLED-групп (позитивные) → {ad_group_id: [текст, …]}. Нужны, чтобы проверить, ВХОДЯТ
     ли слова, за которые платим, в заголовки объявления (G35). Метрик тут нет by design: покрытие —
-    свойство текста, а не трафика; отсев «платящих» групп делает движок по метрикам объявления."""
+    свойство текста, а не трафика; отсев «платящих» групп делает движок по метрикам объявления.
+
+    ⚠️ Сужаем ЗАПРОСОМ (`ad_group.id IN …`), а не пост-фильтром (ревизия волны): аккаунт-wide выборка
+    под LIMIT на большом аккаунте вырезала бы ключи именно топ-спендовых групп (порядок не задан) —
+    и `rsa_keyword_coverage_low` обвинял бы объявление в непокрытии ключей, которых просто не увидел.
+    Батчами по 200 id: длина GAQL не безгранична."""
     out: dict[str, list[str]] = {}
-    if not ad_group_ids:
-        return out
-    q = (
-        "SELECT ad_group.id, ad_group_criterion.keyword.text FROM ad_group_criterion "
-        "WHERE ad_group_criterion.type = 'KEYWORD' AND ad_group_criterion.negative = FALSE "
-        "AND ad_group_criterion.status = 'ENABLED' AND ad_group.status = 'ENABLED' "
-        "AND campaign.status = 'ENABLED' LIMIT 5000"
-    )
-    for r in _search(client, customer_id, q):
-        agid = str(r.ad_group.id)
-        if agid in ad_group_ids:
-            out.setdefault(agid, []).append(r.ad_group_criterion.keyword.text)
+    ids = sorted(str(a) for a in ad_group_ids if a)
+    for i in range(0, len(ids), 200):
+        batch = ", ".join(ids[i : i + 200])
+        q = (
+            "SELECT ad_group.id, ad_group_criterion.keyword.text FROM ad_group_criterion "
+            "WHERE ad_group_criterion.type = 'KEYWORD' AND ad_group_criterion.negative = FALSE "
+            "AND ad_group_criterion.status = 'ENABLED' AND ad_group.status = 'ENABLED' "
+            f"AND campaign.status = 'ENABLED' AND ad_group.id IN ({batch})"
+        )
+        for r in _search(client, customer_id, q):
+            out.setdefault(str(r.ad_group.id), []).append(r.ad_group_criterion.keyword.text)
     return out
 
 
@@ -1179,7 +1195,15 @@ def fetch_rsa_assets(client, customer_id: str, period, limit: int = 200) -> list
 
     Деградация: `ad_group_ad.start_date_time` поддерживается не везде — если сервер его отвергнет,
     повторяем запрос БЕЗ даты (тексты/пины/сила важнее). Тогда `age_days=-1` ⇒ чек «объявления не
-    обновлялись» молчит: нет данных ≠ «в норме» (gr8)."""
+    обновлялись» молчит: нет данных ≠ «в норме» (gr8).
+
+    ⚠️ ЧЕСТНО О ВОЗРАСТЕ (ревизия волны, проверено по прото v24): `start_date_time` — это НЕ дата
+    создания объявления, а ОГРАНИЧЕНИЕ РАСПИСАНИЯ («ad starts serving … on top of the campaign's
+    start date. Only supported for some ad types») — у обычного RSA оно ПУСТОЕ. Значит `age_days`
+    почти всегда -1, и `rsa_stale` на живом аккаунте молчит by design. Чтобы это молчание не читалось
+    как «объявления свежие», сборщик (`audit/collect.py`) объявляет пробел `rsa_age`, когда RSA есть,
+    а даты нет ни у одного. Настоящий возраст = `change_status` / `min(segments.date)` по объявлению —
+    отдельное чтение, в эту волну НЕ входит."""
     ensure_read_allowed(customer_id)
     try:
         rows = list(_search(client, customer_id, _rsa_query(period, limit, True)))

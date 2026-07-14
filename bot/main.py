@@ -1393,6 +1393,14 @@ def _reverse_spec(operation: str, params: dict, before) -> tuple[str, dict] | No
         uniq = {int(x) for x in (before.get("before_micros") or [])}
         if not kw or len(uniq) != 1:  # ключ в разных группах со РАЗНЫМИ ставками — одним set_to
             return None  # прежние не вернуть (честно не предлагаем откат)
+        # У ключа могло НЕ БЫТЬ своей ставки (наследовал группу) — «было» тогда = ставка группы.
+        # set_to завёл бы критерию СОБСТВЕННУЮ ставку: числом то же, состоянием — другое (группа
+        # больше не управляет ключом). Это не откат. Нет флага (старый снимок) → тоже не предлагаем.
+        own = before.get("own_bid")
+        if not isinstance(own, list) or len(own) != len(before.get("before_micros") or []):
+            return None
+        if not all(bool(x) for x in own):
+            return None
         spec = {"campaign": camp, "keyword": kw, "mode": "set_to", "value": next(iter(uniq)) / 1e6}
         for narrow in (
             "ad_group",

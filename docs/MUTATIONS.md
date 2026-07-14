@@ -20,9 +20,14 @@ Google Ads, где она объявлена и какими гейтами за
 
 ### Замок аккаунта и confirm-гейт (золотые правила)
 
-- **Мутации только на Draft `7753643025`.** Каждая `apply_*` первым делом зовёт
-  `ensure_allowed(customer_id)` (импорт `ads/mutations.py:30`). `execute_confirmed`
-  всегда передаёт `customer_id = DRAFT_ACCOUNT_ID`.
+- **Мутируем только аккаунт, ВИДИМЫЙ боту.** Каждая `apply_*` первым делом зовёт
+  `ensure_allowed(customer_id)` — единственный чокпойнт замка. Draft-only режим
+  **снят** (решение владельца 2026-07): прод-дефолт — сентинел
+  `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all` (мутации на всех видимых аккаунтах), явный
+  список id **сужает** набор, в dev/test пустой список ⇒ мутаций нет вовсе
+  (fail-closed). `execute_confirmed` берёт аккаунт **из самого черновика**
+  (`proposal.customer_id`, `ads/service.py:322`), а не из константы, и заново проходит
+  `ensure_allowed`. Точный контракт потолка — [`SECURITY.md`](SECURITY.md).
 - **`confirmation_id` обязателен в каждой `apply_*`.** Без валидного одноразового
   подтверждения `_require_confirmation` бросает `PermissionError`
   (`ads/mutations.py:76-80`).
@@ -33,50 +38,64 @@ Google Ads, где она объявлена и какими гейтами за
 
 ## Таблица покрытия
 
-Все 29 операций ниже присутствуют одновременно в `SUPPORTED_OPERATIONS`
-(`ads/service.py:21-53`) и имеют ветку в `execute_confirmed`. Столбец «в
+Все 39 операций ниже присутствуют одновременно в `SUPPORTED_OPERATIONS`
+(`ads/service.py`) и имеют ветку в `execute_confirmed`. Столбец «в
 MUTATION_TOOLS?» отмечает членство в наборе, разрешённом LLM-агенту
-(`agent/tools/schemas.py:41-69`); часть операций, будучи в наборе, всё же минтуется
+(`agent/tools/schemas.py`); часть операций, будучи в наборе, всё же минтуется
 только ботом-визардом (нет tool-схемы для модели) — это отмечено в ячейке.
+Полноту таблицы стережёт тест `test_docs_mutations_table_matches_supported_operations`
+(`tests/test_write_layer.py`): новая операция без строки здесь роняет сборку — раньше
+док молча отставал (в таблице было 29 из 39, среди пропавших — **денежная**
+`update_keyword_bid`).
 
 | operation | `apply_*` (ads/mutations.py) | Что делает | Деньги? (нужен `user_initiated`) | В `MUTATION_TOOLS`? |
 |---|---|---|---|---|
-| `update_budget` | `apply_update_budget` (:85) | Меняет дневной бюджет кампании (CampaignBudget) | **Да** | Да |
-| `update_bid` | `apply_update_bid` (:225) | Меняет CPC-ставку на всех группах кампании; только при MANUAL_CPC | **Да** | Да |
-| `add_keywords` | `apply_add_keywords` (:258) | Добавляет позитивные ключи во все группы кампании | Нет | Да |
-| `remove_keywords` | `apply_remove_keywords` (:1155) | Удаляет ключи по тексту+типу из групп кампании | Нет | Да |
-| `add_negative_keywords` | `apply_add_negative_keywords` (:282) | Добавляет минус-слова на уровне кампании | Нет | Да |
-| `remove_negative_keywords` | `apply_remove_negative_keywords` (:304) | Снимает минус-слова кампании по тексту+типу | Нет | Да |
-| `pause_campaign` | `apply_pause_campaign` (:121) | Ставит кампанию на паузу (status=PAUSED) | Нет | Да |
-| `resume_campaign` | `apply_resume_campaign` (:140) | Включает кампанию (status=ENABLED) | Нет | Да |
-| `update_campaign` | `apply_update_campaign` (:161) | Переименовывает кампанию (§3 «изменение»); имя ≤255, уникально в аккаунте | Нет | Да |
-| `pause_ad_group` | `apply_pause_ad_group` (:188) | Пауза отдельной группы объявлений | Нет | Да |
-| `resume_ad_group` | `apply_resume_ad_group` (:206) | Возобновление отдельной группы объявлений | Нет | Да |
-| `set_geo_proximity` | `apply_set_geo_proximity` (:340) | Радиус-таргетинг вокруг адреса (remove-before-create) | Нет | Да |
-| `set_geo_location` | `apply_set_geo_location` (:379) | Гео по стране/городу через geoTargetConstant (remove-before-create) | Нет | Да |
-| `set_bidding_strategy` | `apply_set_bidding_strategy` (:850) | Смена стратегии ставок кампании | **Да** | Да |
-| `attach_audience` | `apply_attach_audience` (:420) | Прикрепляет user_list/audience к кампании | Нет | В наборе, но без tool-схемы → минтует бот |
-| `detach_audience` | `apply_detach_audience` (:473) | Снимает ранее прикреплённые аудитории с кампании | Нет | В наборе, но без tool-схемы → минтует бот |
-| `create_rsa` | `apply_create_rsa` (:934) | Создаёт RSA-объявление в группе (PAUSED) | Нет | Да (минтуется ботом после курации) |
-| `create_gdn_campaign` | `apply_create_gdn_campaign` (:2131) | Создаёт Display-кампанию из фото (всё PAUSED) | **Да** | Да (обычно через бот-визард) |
-| `create_search_campaign` | `apply_create_search_campaign` (:1571) | Создаёт поисковую кампанию (всё PAUSED) | **Да** | Да (обычно через бот-визард) |
-| `create_demand_gen_campaign` | `apply_create_demand_gen_campaign` (:2402) | Создаёт Demand Gen из YouTube-видео (всё PAUSED) | **Да** | Да (обычно через бот-визард) |
-| `create_video_campaign` | `apply_create_video_campaign` (:2630) | Создаёт Video-кампанию (YouTube, всё PAUSED) | **Да** | Да (обычно через бот-визард) |
-| `add_sitelinks` | `apply_add_sitelinks` (:583) | Добавляет sitelinks (campaign_asset SITELINK) | Нет | Да |
-| `add_callouts` | `apply_add_callouts` (:605) | Добавляет callouts (уточнения) | Нет | Да |
-| `add_structured_snippets` | `apply_add_structured_snippets` (:625) | Добавляет структурное описание (header+values) | Нет | Да |
-| `attach_image_asset` | `apply_attach_image_asset` (:651) | Прикрепляет изображение-ассет к кампании | Нет | Нет (нужно фото → бот-визард) |
-| `add_call_asset` | `apply_add_call_asset` (:730) | Телефон-расширение (CallAsset) | Нет | Да |
-| `add_promotion` | `apply_add_promotion` (:756) | Промо-расширение (PromotionAsset) | Нет | Да |
-| `add_price_asset` | `apply_add_price_asset` (:791) | Прайс-расширение (PriceAsset, 3–8 оферов) | Нет | Да |
-| `remove_asset_link` | `apply_remove_asset_link` (:822) | Открепляет связь campaign_asset (не сам ассет) | Нет | Да |
+| `update_budget` | `apply_update_budget` (:107) | Меняет дневной бюджет кампании (CampaignBudget) | **Да** | Да |
+| `update_bid` | `apply_update_bid` (:455) | Меняет CPC-ставку на всех группах кампании; только при MANUAL_CPC | **Да** | Да |
+| `update_keyword_bid` | `apply_update_keyword_bid` (:495) | Ф1: ставка на уровне КЛЮЧА (ad_group_criterion.cpc_bid_micros); только MANUAL_CPC | **Да** | Да |
+| `add_keywords` | `apply_add_keywords` (:590) | Добавляет позитивные ключи во все группы кампании | Нет | Да |
+| `remove_keywords` | `apply_remove_keywords` (:1824) | Удаляет ключи по тексту+типу из групп кампании | Нет | Да |
+| `add_negative_keywords` | `apply_add_negative_keywords` (:620) | Добавляет минус-слова на уровне кампании | Нет | Да |
+| `remove_negative_keywords` | `apply_remove_negative_keywords` (:648) | Снимает минус-слова кампании по тексту+типу | Нет | Да |
+| `pause_campaign` | `apply_pause_campaign` (:143) | Ставит кампанию на паузу (status=PAUSED) | Нет | Да |
+| `resume_campaign` | `apply_resume_campaign` (:162) | Включает кампанию (status=ENABLED) | Нет | Да |
+| `launch_campaign` | `apply_launch_campaign` (:189) | Запуск созданной визардом кампании (PAUSED → ENABLED) | Нет | В наборе нет: минтует бот (§19 визард) |
+| `remove_campaign` | `apply_remove_campaign` (:424) | Необратимое удаление кампании (status→REMOVED) | Нет | Да (в UI — двойное подтверждение) |
+| `update_campaign` | `apply_update_campaign` (:207) | Переименовывает кампанию (§3 «изменение»); имя ≤255, уникально в аккаунте | Нет | Да |
+| `set_campaign_network` | `apply_set_campaign_network` (:237) | Поисковые партнёры Google (`target_search_network`) вкл/выкл | Нет | Да |
+| `set_campaign_display_network` | `apply_set_campaign_display_network` (:264) | Ф6.2b (G12): КМС (`target_content_network`) на поисковой кампании вкл/выкл | Нет | Да |
+| `set_campaign_geo_target_type` | `apply_set_campaign_geo_target_type` (:294) | Ф6.2b (G11): тип гео-таргетинга PRESENCE / PRESENCE_OR_INTEREST | Нет | Да |
+| `pause_ad_group` | `apply_pause_ad_group` (:324) | Пауза отдельной группы объявлений | Нет | Да |
+| `resume_ad_group` | `apply_resume_ad_group` (:342) | Возобновление отдельной группы объявлений | Нет | Да |
+| `remove_ad_group` | `apply_remove_ad_group` (:439) | Необратимое удаление группы (status→REMOVED) | Нет | Да (в UI — двойное подтверждение) |
+| `pause_ad` | `apply_pause_ad` (:364) | Пауза отдельного объявления | Нет | Да |
+| `resume_ad` | `apply_resume_ad` (:383) | Возобновление отдельного объявления | Нет | Да |
+| `remove_ad` | `apply_remove_ad` (:402) | Необратимое удаление объявления (status→REMOVED) | Нет | Да (в UI — двойное подтверждение) |
+| `set_geo_proximity` | `apply_set_geo_proximity` (:690) | Радиус-таргетинг вокруг адреса (remove-before-create) | Нет | Да |
+| `set_geo_location` | `apply_set_geo_location` (:729) | Гео по стране/городу через geoTargetConstant (remove-before-create) | Нет | Да |
+| `set_bidding_strategy` | `apply_set_bidding_strategy` (:1232) | Смена стратегии ставок кампании | **Да** | Да |
+| `attach_audience` | `apply_attach_audience` (:770) | Прикрепляет user_list/audience к кампании | Нет | В наборе, но без tool-схемы → минтует бот |
+| `detach_audience` | `apply_detach_audience` (:823) | Снимает ранее прикреплённые аудитории с кампании | Нет | В наборе, но без tool-схемы → минтует бот |
+| `create_rsa` | `apply_create_rsa` (:1329) | Создаёт RSA-объявление в группе (PAUSED) | Нет | Да (минтуется ботом после курации) |
+| `create_gdn_campaign` | `apply_create_gdn_campaign` (:3013) | Создаёт Display-кампанию из фото (всё PAUSED) | **Да** | Да (обычно через бот-визард) |
+| `create_search_campaign` | `apply_create_search_campaign` (:2292) | Создаёт поисковую кампанию (всё PAUSED) | **Да** | Да (обычно через бот-визард) |
+| `create_demand_gen_campaign` | `apply_create_demand_gen_campaign` (:3295) | Создаёт Demand Gen из YouTube-видео (всё PAUSED) | **Да** | Да (обычно через бот-визард) |
+| `create_video_campaign` | `apply_create_video_campaign` (:3561) | Создаёт Video-кампанию (YouTube, всё PAUSED) | **Да** | Да (обычно через бот-визард) |
+| `add_sitelinks` | `apply_add_sitelinks` (:933) | Добавляет sitelinks (campaign_asset SITELINK) | Нет | Да |
+| `add_callouts` | `apply_add_callouts` (:962) | Добавляет callouts (уточнения) | Нет | Да |
+| `add_structured_snippets` | `apply_add_structured_snippets` (:989) | Добавляет структурное описание (header+values) | Нет | Да |
+| `attach_image_asset` | `apply_attach_image_asset` (:1018) | Прикрепляет изображение-ассет к кампании | Нет | Нет (нужно фото → бот-визард) |
+| `add_call_asset` | `apply_add_call_asset` (:1100) | Телефон-расширение (CallAsset) | Нет | Да |
+| `add_promotion` | `apply_add_promotion` (:1129) | Промо-расширение (PromotionAsset) | Нет | Да |
+| `add_price_asset` | `apply_add_price_asset` (:1167) | Прайс-расширение (PriceAsset, 3–8 оферов) | Нет | Да |
+| `remove_asset_link` | `apply_remove_asset_link` (:1201) | Открепляет связь campaign_asset (не сам ассет) | Нет | Да |
 
 **Примечание по «деньги?».** Денежными помечены операции, где внутри `apply_*`
 стоит явная проверка `if not proposal.user_initiated: raise PermissionError`: это
-`update_budget`, `update_bid`, `set_bidding_strategy` и все четыре `create_*_campaign`
-(они несут бюджет). Остальные (статусы, переименование, ключи, минус-слова, гео,
-аудитории, ассеты-расширения, `create_rsa`) деньгами не управляют → `user_initiated`
-не требуют. Инвариант
+`update_budget`, `update_bid`, `update_keyword_bid`, `set_bidding_strategy` и все
+четыре `create_*_campaign` (они несут бюджет). Остальные (статусы, переименование,
+ключи, минус-слова, гео, сети, аудитории, ассеты-расширения, `create_rsa`) деньгами
+не управляют → `user_initiated` не требуют. Инвариант
 `test_money_apply_functions_match_registry_and_guard_user_initiated`
 (`tests/test_invariants_core.py`) держит этот список в синхроне с кодом.
 
@@ -116,16 +135,18 @@ return {"type": "text", ...}` (`agent/loop.py:147-150`). Это не даёт п
 
 ## Пробелы покрытия и ограничения (честно)
 
-### (a) Изменение кампании — реализовано ПЕРЕИМЕНОВАНИЕ, прочие настройки — нет
+### (a) Изменение кампании — имя, статус, сети, гео-тип, стратегия; расписание/даты — нет
 
-`apply_update_campaign` (`ads/mutations.py:161`, SDK-исполнитель
-`_update_campaign_name_via_sdk` `:1014`) меняет **только имя** уже созданной кампании
-(§3 «изменение»); имя уникально в аккаунте — `DUPLICATE_CAMPAIGN_NAME` перехватывается
-понятной ошибкой. Прочие настройки существующей кампании (сети, расписание, даты,
-URL-опции) **править нельзя** — они задаются только при создании
-(`apply_create_search_campaign` `:1571`). Итого апдейты уровня campaign, которые код
-умеет: имя (`update_campaign`), статус (`pause`/`resume_campaign`) и стратегия ставок
-(`set_bidding_strategy`).
+`apply_update_campaign` (`ads/mutations.py:207`) меняет **только имя** уже созданной
+кампании (§3 «изменение»); имя уникально в аккаунте — `DUPLICATE_CAMPAIGN_NAME`
+перехватывается понятной ошибкой. Кроме имени код умеет править у СУЩЕСТВУЮЩЕЙ
+кампании: статус (`pause`/`resume`/`launch`/`remove_campaign`), стратегию ставок
+(`set_bidding_strategy`), поисковых партнёров (`set_campaign_network`), КМС
+(`set_campaign_display_network`, Ф6.2b) и тип гео-таргетинга
+(`set_campaign_geo_target_type`, Ф6.2b), а также гео-локации/радиус
+(`set_geo_location`/`set_geo_proximity`). **Не правятся** расписание показов, даты
+старта/окончания и URL-опции — они задаются только при создании
+(`apply_create_search_campaign` `:2292`).
 
 ### (b) Смена типа соответствия у ключа — через remove+add
 

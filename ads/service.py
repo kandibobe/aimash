@@ -227,6 +227,11 @@ async def read_before(operation: str, params: dict, customer_id: str | None = No
             return {
                 "kind": "keyword_bid",
                 "before_micros": [int(k.bid_micros) for k in kws],
+                # СВОЯ ли была ставка у критерия. Нужно откату (ревизия волны): у ключа без своей
+                # ставки «было» — это ставка ГРУППЫ, и set_to вернул бы не прежнее состояние, а НОВУЮ
+                # собственную ставку — наследование от группы молча оборвалось бы. Такой откат
+                # `_reverse_spec` не предлагает вовсе.
+                "own_bid": [bool(k.own_bid) for k in kws],
                 "after_micros": [
                     int(
                         resolve.compute_new_micros(

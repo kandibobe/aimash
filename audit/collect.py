@@ -31,6 +31,7 @@ async def gather_audit(
     from ads.read import account_currency
     from core.resilience import run_ads_read_call
     from reports.queries import (
+        KEYWORD_INVENTORY_LIMIT,
         fetch_account_status,
         fetch_ad_policy_health,
         fetch_adgroup_structure,
@@ -156,6 +157,17 @@ async def gather_audit(
     # («PMax в аккаунте нет») пробелом НЕ считается: это факт, а не отсутствие данных.
     if pmax_campaigns is None or pmax_asset_groups is None:
         data_gaps.append("pmax")
+    # Ревизия волны: инвентарь ключей УПЁРСЯ в LIMIT ⇒ он неполон, а в майнинге он — отрицательный
+    # фильтр («чего у меня нет»). Неполный список ⇒ совет «собери/заминусуй» может указать на СВОЙ же
+    # ключ. Чеки harvest/ngram обязаны замолчать, а карточка — честно сказать «данных не хватает».
+    kw_truncated = kw_inventory is not None and len(kw_inventory) >= KEYWORD_INVENTORY_LIMIT
+    if kw_truncated and "keyword_inventory" not in data_gaps:
+        data_gaps.append("keyword_inventory")
+    # RSA прочитаны, но НИ У ОДНОГО нет даты старта (`start_date_time` пуст у большинства объявлений —
+    # это ограничение расписания, а не дата создания) ⇒ чек rsa_stale физически слеп. Без этой пометки
+    # рендер сказал бы «объявления в норме» там, где мы про их возраст просто ничего не знаем (GR8).
+    if rsa_ads and all(int(getattr(a, "age_days", -1) or -1) < 0 for a in rsa_ads):
+        data_gaps.append("rsa_age")
     # Симуляторы Google в data_gaps НЕ идут: их отсутствие — норма (Google строит их только при
     # достаточных данных и только на ручных ставках), а не сбой чтения. Пометив пробелом, мы бы
     # написали «данных нет» здоровому аккаунту без симуляторов.
@@ -183,6 +195,7 @@ async def gather_audit(
         budget_simulations=budget_sims,
         rsa_ads=rsa_ads,
         keyword_inventory=kw_inventory,
+        keyword_inventory_truncated=kw_truncated,
         brand_terms=brand_terms,
         campaign_assets=campaign_assets,
         campaign_settings=campaign_settings,

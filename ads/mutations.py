@@ -542,15 +542,21 @@ def _apply_keyword_bid_via_sdk(client, customer_id: str, campaign_id: str, bids:
 
     svc = client.get_service("AdGroupCriterionService")
     ops = []
-    applied = {  # criterion_id → применённая (округлённая) ставка: считаем ОДИН раз — в SDK и в audit
-        str(crit): _round_money(client, customer_id, m) for _ag, crit, m in bids
+    # Ключ словаря — ПАРА (группа, критерий), а не один criterion_id: у Google criterion_id уникален
+    # в пределах ГРУППЫ, и один и тот же ключ («ремонт», PHRASE) в двух группах несёт ОДИН И ТОТ ЖЕ
+    # id. По одному id строки схлопывались бы: второй группе уходила ставка первой, а audit-строка
+    # и откат врали про обе (ревизия волны — это деньги, не косметика).
+    applied = {  # (ad_group_id, criterion_id) → применённая (округлённая) ставка: считаем ОДИН раз
+        (str(ag), str(crit)): _round_money(client, customer_id, m) for ag, crit, m in bids
     }
     for ad_group_id, criterion_id, _micros in bids:
         op = client.get_type("AdGroupCriterionOperation")
         op.update.resource_name = svc.ad_group_criterion_path(
             str(customer_id), str(ad_group_id), str(criterion_id)
         )
-        op.update.cpc_bid_micros = applied[str(criterion_id)]  # кратно биллинг-единице валюты
+        op.update.cpc_bid_micros = applied[
+            (str(ad_group_id), str(criterion_id))
+        ]  # кратно биллинг-единице валюты
         client.copy_from(op.update_mask, protobuf_helpers.field_mask(None, op.update._pb))
         ops.append(op)
     try:
@@ -571,7 +577,7 @@ def _apply_keyword_bid_via_sdk(client, customer_id: str, campaign_id: str, bids:
             {
                 "ad_group_id": str(ag),
                 "criterion_id": str(crit),
-                "new_cpc_bid_micros": applied[str(crit)],
+                "new_cpc_bid_micros": applied[(str(ag), str(crit))],
             }
             for ag, crit, _m in bids
         ],

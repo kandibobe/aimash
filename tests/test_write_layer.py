@@ -250,6 +250,77 @@ async def test_apply_update_keyword_bid_replay_is_one_shot():
     assert calls["n"] == 1
 
 
+def test_keyword_bid_via_sdk_keys_by_ad_group_and_criterion_pair():
+    """Регрессия (ревизия волны, ДЕНЬГИ): criterion_id уникален лишь В ПРЕДЕЛАХ ГРУППЫ — один и тот
+    же ключ («ремонт», PHRASE) в двух группах несёт ОДИН И ТОТ ЖЕ id. Словарь применённых ставок,
+    ключёванный только по criterion_id, схлопывал такие строки: второй группе уходила ставка первой,
+    а audit-строка (и построенный на ней откат) врали про обе. Ключ — ПАРА (группа, критерий)."""
+    ops_seen = []
+
+    class _Op:
+        def __init__(self):
+            self.update = SimpleNamespace(resource_name=None, cpc_bid_micros=None, _pb=object())
+            self.update_mask = SimpleNamespace()
+
+    class _Crit:
+        def ad_group_criterion_path(self, cid, ag, crit):
+            return f"customers/{cid}/adGroupCriteria/{ag}~{crit}"
+
+        def mutate_ad_group_criteria(self, customer_id, operations):
+            ops_seen.extend(operations)
+            return SimpleNamespace(results=[])
+
+    class _Client:
+        def get_service(self, name):
+            return _Crit()
+
+        def get_type(self, name):
+            return _Op()
+
+        def copy_from(self, dst, src):
+            return None
+
+    # Одна и та же criterion_id «9001» в группах 42 и 77, ставки РАЗНЫЕ.
+    bids = [("42", "9001", 1_500_000), ("77", "9001", 3_000_000)]
+    with (
+        patched(mut, "_assert_manual_cpc", lambda *a, **k: None),
+        patched(mut, "_round_money", lambda _c, _cid, m: int(m)),
+        patched(mut, "protobuf_helpers", SimpleNamespace(field_mask=lambda a, b: None)),
+    ):
+        res = mut._apply_keyword_bid_via_sdk(_Client(), DRAFT_ACCOUNT_ID, "7", bids)
+
+    sent = {(o.update.resource_name.split("/")[-1]): o.update.cpc_bid_micros for o in ops_seen}
+    assert sent == {"42~9001": 1_500_000, "77~9001": 3_000_000}  # каждой группе — СВОЯ ставка
+    # …и audit-строка повторяет ровно то, что ушло в SDK (иначе откат вернёт чужое значение).
+    assert [(k["ad_group_id"], k["new_cpc_bid_micros"]) for k in res["keywords"]] == [
+        ("42", 1_500_000),
+        ("77", 3_000_000),
+    ]
+
+
+def test_docs_mutations_table_matches_supported_operations():
+    """`docs/MUTATIONS.md` — карта того, что код умеет менять в чужом аккаунте; отставший док опаснее
+    отсутствующего (в нём было 29 операций из 39, и среди пропавших — ДЕНЕЖНАЯ update_keyword_bid).
+    Таблица обязана перечислять ровно `SUPPORTED_OPERATIONS`, а денежные — быть помечены деньгами."""
+    import pathlib
+    import re
+
+    from ads.resolve import MONEY_OPS
+    from ads.service import SUPPORTED_OPERATIONS
+
+    doc = (pathlib.Path(__file__).resolve().parents[1] / "docs" / "MUTATIONS.md").read_text(
+        encoding="utf-8"
+    )
+    rows = dict(re.findall(r"^\| `([a-z_]+)` \|[^|]*\|[^|]*\|([^|]*)\|", doc, re.M))
+    assert set(rows) == set(SUPPORTED_OPERATIONS), (
+        f"док разошёлся с кодом: нет строк для {sorted(set(SUPPORTED_OPERATIONS) - set(rows))}, "
+        f"лишние строки {sorted(set(rows) - set(SUPPORTED_OPERATIONS))}"
+    )
+    # Денежные операции (гейт user_initiated) не должны числиться в доке безобидными.
+    for op in MONEY_OPS:
+        assert "Да" in rows[op], f"{op} — деньги, а в доке помечена как «{rows[op].strip()}»"
+
+
 async def test_apply_update_keyword_bid_validates_range_before_claim():
     """Диапазон считает КОД и ДО claim: абсурдная ставка не должна сжигать одноразовый черновик."""
     store = _kw_bid_store()
