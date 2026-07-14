@@ -193,7 +193,7 @@ async def run_ads_call(
         async with _get_ads_semaphore():  # потолок одновременных вызовов к Google Ads
             result: T = await retryer(_inner)
     except Exception as e:
-        log.warning("ads-call %s: %s за %dмс", name, type(e).__name__, _ms(start))
+        log.warning("ads-call %s: %s за %dмс", name, _fail_cause(e), _ms(start))
         raise
     quota.record(account, kind="mutate", count=op_count)  # учёт операций батча в квоте (§3)
     log.info("ads-call %s: ok за %dмс", name, _ms(start))
@@ -225,7 +225,7 @@ async def run_ads_create_call(
             async with asyncio.timeout(ADS_TIMEOUT_S):
                 result: T = await asyncio.to_thread(fn, *args, **kwargs)
     except Exception as e:
-        log.warning("ads-create %s: %s за %dмс", name, type(e).__name__, _ms(start))
+        log.warning("ads-create %s: %s за %dмс", name, _fail_cause(e), _ms(start))
         raise
     quota.record(account, kind="mutate", count=op_count)  # учёт операций батча в квоте (§3)
     log.info("ads-create %s: ok за %dмс", name, _ms(start))
@@ -265,7 +265,7 @@ async def run_ads_read_call(
         async with _get_ads_semaphore():  # тот же потолок конкурентности, что и для мутаций
             result: T = await retryer(_inner)
     except Exception as e:
-        log.warning("ads-read %s: %s за %dмс", name, type(e).__name__, _ms(start))
+        log.warning("ads-read %s: %s за %dмс", name, _fail_cause(e), _ms(start))
         raise
     quota.record(account, kind="read")  # учёт чтения в дневной квоте (§3), без блокировки
     log.info("ads-read %s: ok за %dмс", name, _ms(start))
@@ -274,6 +274,19 @@ async def run_ads_read_call(
 
 def _ms(start: float) -> int:
     return int((time.monotonic() - start) * 1000)
+
+
+def _fail_cause(exc: BaseException) -> str:
+    """Причина сбоя для лога (§15): для GoogleAdsException — имена enum-кодов (FIELD_NOT_FOUND,
+    USER_PERMISSION_DENIED…) вместо неинформативного 'GoogleAdsException'; иначе тип класса
+    (покрывает TimeoutError и пр.). GR5: в лог идут ТОЛЬКО имена enum-кодов (константы) + имя
+    типа; сырой str(exc)/e.failure/трейсбэк — НЕЛЬЗЯ (могут нести developer_token/креды)."""
+    from core.ads_errors import error_code_names
+
+    names = error_code_names(exc)
+    if names:
+        return ",".join(sorted(names))
+    return type(exc).__name__
 
 
 async def call_llm(coro_factory: Callable[[], Awaitable[T]], *, label: str | None = None) -> T:
