@@ -1484,8 +1484,9 @@ def campaign_actions_kb(
 
 
 def campaign_network_kb(idx: int, lang: str | None = None, gen: int = 0) -> InlineKeyboardMarkup:
-    """§19.3: тумблер поисковых партнёров кампании. Кнопка лишь СОЗДАЁТ черновик
-    set_campaign_network (confirm-гейт); КМС/ограниченную партнёрскую сеть не трогаем."""
+    """§19.3: тумблеры сетей кампании — поисковые ПАРТНЁРЫ и КМС (G12, аудит меряет расход КМС
+    внутри Search-кампании). Кнопки лишь СОЗДАЮТ черновики (set_campaign_network /
+    set_campaign_display_network) за confirm-гейтом; ограниченную партнёрскую сеть не трогаем."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     kb.button(
@@ -1495,6 +1496,14 @@ def campaign_network_kb(idx: int, lang: str | None = None, gen: int = 0) -> Inli
     kb.button(
         text="✅ Partners ON" if en else "✅ Партнёры ВКЛ",
         callback_data=CampCB(action="net_on", idx=idx, gen=gen),
+    )
+    kb.button(
+        text="🚫 Display Network OFF" if en else "🚫 КМС ВЫКЛ (для поисковых — верно)",
+        callback_data=CampCB(action="kms_off", idx=idx, gen=gen),
+    )
+    kb.button(
+        text="✅ Display Network ON" if en else "✅ КМС ВКЛ",
+        callback_data=CampCB(action="kms_on", idx=idx, gen=gen),
     )
     kb.button(
         text="‹ Back" if en else "‹ Назад",
@@ -1584,6 +1593,16 @@ def geo_mode_kb(idx: int, lang: str | None = None, gen: int = 0) -> InlineKeyboa
     kb.button(
         text="📍 Radius around a point" if en else "📍 Радиус вокруг точки",
         callback_data=GeoCB(action="prox", idx=idx),
+    )
+    # G11: тип таргетинга — КОГО считать «в регионе». Дефолт Google (присутствие ИЛИ интерес)
+    # пускает клики людей ФИЗИЧЕСКИ вне регионов; аудит меряет их расход, здесь — починка.
+    kb.button(
+        text="🎯 Presence only (recommended)" if en else "🎯 Только те, кто В регионе (реком.)",
+        callback_data=CampCB(action="gt_p", idx=idx, gen=gen),
+    )
+    kb.button(
+        text="🌐 Presence OR interest" if en else "🌐 Присутствие ИЛИ интерес",
+        callback_data=CampCB(action="gt_pi", idx=idx, gen=gen),
     )
     kb.button(
         text="‹ Back" if en else "‹ Назад", callback_data=CampCB(action="menu", idx=idx, gen=gen)

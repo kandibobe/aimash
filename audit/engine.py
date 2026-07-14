@@ -2314,7 +2314,7 @@ def check_display_on_search_campaign(report, thr: dict, ctx: _Ctx) -> list[Findi
                 spend_segment=r.campaign,
                 target_campaign=r.campaign,
                 suggested_operation=None,  # смена сетей кампании — через карточку /campaigns + «да»
-                advice_operation="set_campaign_network",
+                advice_operation="set_campaign_display_network",
                 facts={
                     "campaign": r.campaign,
                     "content_cost": round(cost, 2),

@@ -256,6 +256,68 @@ async def apply_set_campaign_network(
     return result
 
 
+# ── КМС на кампании (G12): выключить контекстно-медийную сеть у поисковой кампании ──
+# Аудит (audit/engine.check_display_on_search_campaign) считает ДЕНЬГИ, ушедшие в КМС внутри
+# Search-кампании; здесь — исполнитель починки. Отдельная операция от set_campaign_network:
+# партнёры и КМС — разные сети, разные кнопки, разный откат. Меняется ТОЛЬКО
+# target_content_network. НЕ денежная операция → user_initiated не требуется. Оба гейта обязательны.
+async def apply_set_campaign_display_network(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    display_network: bool,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    ensure_allowed(customer_id)
+    await _require_confirmation(confirm_store, confirmation_id, "set_campaign_display_network")
+    result = await run_ads_call(
+        _set_campaign_display_network_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_id,
+        bool(display_network),
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+# ── Тип гео-таргетинга (G11): «присутствие ИЛИ интерес» → «присутствие» ───────────
+# Дефолт Google — PRESENCE_OR_INTEREST: показы уходят людям, физически находящимся ВНЕ целевых
+# регионов. Аудит меряет расход такого трафика (user_location_view.targeting_location = FALSE),
+# здесь — починка. Значение валидируем В КОДЕ до claim (плохое не должно съедать одноразовый
+# черновик). НЕ денежная операция → user_initiated не требуется. Оба гейта обязательны.
+GEO_TARGET_TYPES = ("PRESENCE", "PRESENCE_OR_INTEREST")
+
+
+async def apply_set_campaign_geo_target_type(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    geo_target_type: str,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    ensure_allowed(customer_id)
+    value = str(geo_target_type or "").strip().upper()
+    if value not in GEO_TARGET_TYPES:
+        raise ValueError(
+            f"geo_target_type должен быть одним из {', '.join(GEO_TARGET_TYPES)}, получено «{geo_target_type}»"
+        )
+    await _require_confirmation(confirm_store, confirmation_id, "set_campaign_geo_target_type")
+    result = await run_ads_call(
+        _set_campaign_geo_target_type_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_id,
+        value,
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
 # ── Пауза/возобновление ГРУППЫ объявлений (§16 AdGroupService) ───────────────────
 # Зеркало pause/resume кампании, но статус живёт на ad_group. Деньги НЕ трогаются →
 # user_initiated не требуется (как и для паузы кампании). Оба гейта обязательны.
@@ -1417,6 +1479,47 @@ def _set_campaign_network_via_sdk(
         "customer_id": customer_id,
         "campaign_id": str(campaign_id),
         "search_partners": bool(search_partners),
+        "applied": True,
+    }
+
+
+def _set_campaign_display_network_via_sdk(
+    client, customer_id: str, campaign_id: str, display_network: bool
+) -> dict:
+    """G12: тумблер КМС кампании (network_settings.target_content_network). Маска — ЯВНО на лист:
+    главный сценарий здесь «выключить» (False), а proto3 не маскирует default-скаляры, т.е.
+    protobuf_helpers.field_mask просто не увидел бы это изменение и mutate прошёл бы вхолостую."""
+    svc = client.get_service("CampaignService")
+    op = client.get_type("CampaignOperation")
+    op.update.resource_name = svc.campaign_path(str(customer_id), str(campaign_id))
+    op.update.network_settings.target_content_network = bool(display_network)
+    op.update_mask.paths.append("network_settings.target_content_network")
+    svc.mutate_campaigns(customer_id=str(customer_id), operations=[op])
+    return {
+        "customer_id": customer_id,
+        "campaign_id": str(campaign_id),
+        "display_network": bool(display_network),
+        "applied": True,
+    }
+
+
+def _set_campaign_geo_target_type_via_sdk(
+    client, customer_id: str, campaign_id: str, geo_target_type: str
+) -> dict:
+    """G11: campaign.geo_target_type_setting.positive_geo_target_type. Отрицательный тип
+    (negative_geo_target_type) НЕ трогаем — он про исключения регионов, другой вопрос."""
+    svc = client.get_service("CampaignService")
+    op = client.get_type("CampaignOperation")
+    op.update.resource_name = svc.campaign_path(str(customer_id), str(campaign_id))
+    op.update.geo_target_type_setting.positive_geo_target_type = getattr(
+        client.enums.PositiveGeoTargetTypeEnum, geo_target_type
+    )
+    op.update_mask.paths.append("geo_target_type_setting.positive_geo_target_type")
+    svc.mutate_campaigns(customer_id=str(customer_id), operations=[op])
+    return {
+        "customer_id": customer_id,
+        "campaign_id": str(campaign_id),
+        "geo_target_type": geo_target_type,
         "applied": True,
     }
 

@@ -845,6 +845,19 @@ def _before(params: dict) -> dict | None:
     return b if isinstance(b, dict) else None
 
 
+def _geo_type_human(value: str, lang: str) -> str:
+    """G11: тип гео-таргетинга человеческим языком. Пустая строка (Google вернул UNSPECIFIED) —
+    пустая и на выходе: «было» неизвестно, и выдумывать его нельзя."""
+    en = lang == "en"
+    if value == "PRESENCE":
+        return "только присутствие в регионе" if not en else "presence in region only"
+    if value == "PRESENCE_OR_INTEREST":
+        return "присутствие ИЛИ интерес" if not en else "presence OR interest"
+    if value == "SEARCH_INTEREST":
+        return "интерес к региону" if not en else "search interest"
+    return ""
+
+
 def _geo_before_str(b: dict, en: bool) -> str:
     """D6: текущее ГЕО из снимка _before (kind='geo') одной строкой: локации + радиусы, либо
     «все регионы» (пустой таргетинг = показ везде — это НЕ ошибка)."""
@@ -1065,6 +1078,26 @@ def fmt_mutation_summary(operation: str, params: dict, lang: str | None = None) 
             before = "ВКЛ" if b.get("before_search_partners") else "ВЫКЛ"
             return f"Кампания «{c}»: поисковые партнёры {before} → {after}."
         return f"Кампания «{c}»: поисковые партнёры → {after}."
+    if operation == "set_campaign_display_network":
+        # G12: КМС на поисковой кампании — баннеры съедают поисковый бюджет.
+        after = "ВКЛ" if params.get("display_network") else "ВЫКЛ"
+        b = _before(params)
+        if b and b.get("kind") == "display_network":
+            before = "ВКЛ" if b.get("before_display_network") else "ВЫКЛ"
+            return f"Кампания «{c}»: контекстно-медийная сеть (КМС) {before} → {after}."
+        return f"Кампания «{c}»: контекстно-медийная сеть (КМС) → {after}."
+    if operation == "set_campaign_geo_target_type":
+        # G11: «присутствие ИЛИ интерес» пускает клики людей ФИЗИЧЕСКИ вне регионов.
+        after = _geo_type_human(str(params.get("geo_target_type") or ""), lng)
+        b = _before(params)
+        before = (
+            _geo_type_human(str(b.get("before_geo_target_type") or ""), lng)
+            if b and b.get("kind") == "geo_target_type"
+            else ""
+        )
+        if before:
+            return f"Кампания «{c}»: гео-таргетинг {before} → {after}."
+        return f"Кампания «{c}»: гео-таргетинг → {after}."
     if operation == "remove_campaign":
         return f"🗑 УДАЛИТЬ кампанию «{c}» целиком.\n⚠️ Действие необратимо (статус станет REMOVED)."
     if operation == "remove_ad_group":
@@ -1243,6 +1276,24 @@ def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
             before = "ON" if b.get("before_search_partners") else "OFF"
             return f"Campaign “{c}”: search partners {before} → {after}."
         return f"Campaign “{c}”: search partners → {after}."
+    if operation == "set_campaign_display_network":
+        after = "ON" if params.get("display_network") else "OFF"
+        b = _before(params)
+        if b and b.get("kind") == "display_network":
+            before = "ON" if b.get("before_display_network") else "OFF"
+            return f"Campaign “{c}”: Display Network {before} → {after}."
+        return f"Campaign “{c}”: Display Network → {after}."
+    if operation == "set_campaign_geo_target_type":
+        after = _geo_type_human(str(params.get("geo_target_type") or ""), "en")
+        b = _before(params)
+        before = (
+            _geo_type_human(str(b.get("before_geo_target_type") or ""), "en")
+            if b and b.get("kind") == "geo_target_type"
+            else ""
+        )
+        if before:
+            return f"Campaign “{c}”: geo targeting {before} → {after}."
+        return f"Campaign “{c}”: geo targeting → {after}."
     if operation == "remove_campaign":
         return f"🗑 DELETE the whole campaign “{c}”.\n⚠️ Irreversible (status becomes REMOVED)."
     if operation == "remove_ad_group":

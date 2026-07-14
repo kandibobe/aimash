@@ -124,6 +124,8 @@ MUTATION_TOOLS = {
     "resume_campaign",
     "update_campaign",
     "set_campaign_network",
+    "set_campaign_display_network",
+    "set_campaign_geo_target_type",
     "remove_campaign",
     "remove_ad_group",
     "pause_ad_group",
@@ -342,6 +344,26 @@ class SetCampaignNetwork(BaseModel):
 
     campaign: str
     search_partners: bool  # True = включить поисковых партнёров, False = выключить
+
+
+class SetCampaignDisplayNetwork(BaseModel):
+    """G12: КМС (контекстно-медийная сеть) на ПОИСКОВОЙ кампании — баннеры съедают поисковый бюджет.
+    Отдельная операция, а НЕ второй флаг у set_campaign_network: у тумблера партнёров своя кнопка,
+    свой откат и свой текст карточки; расширение его схемы поменяло бы смысл уже подтверждённых
+    черновиков. Меняется ТОЛЬКО target_content_network."""
+
+    campaign: str
+    display_network: bool  # True = включить КМС, False = выключить (дефолт для Search-кампаний)
+
+
+class SetCampaignGeoTargetType(BaseModel):
+    """G11: кого считать «в регионе». PRESENCE — только физически находящиеся в целевых регионах;
+    PRESENCE_OR_INTEREST (Google-дефолт) — плюс «интересующиеся» регионом, т.е. клики людей вне
+    его. Для локального бизнеса дефолт молча жжёт бюджет. SEARCH_INTEREST в allow-list НЕ пускаем:
+    он ещё шире дефолта, а чинить мы пришли обратное."""
+
+    campaign: str
+    geo_target_type: Literal["PRESENCE", "PRESENCE_OR_INTEREST"]
 
 
 class PauseAdGroup(BaseModel):
@@ -1210,6 +1232,8 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "launch_campaign": LaunchCampaign,
     "update_campaign": UpdateCampaign,
     "set_campaign_network": SetCampaignNetwork,
+    "set_campaign_display_network": SetCampaignDisplayNetwork,
+    "set_campaign_geo_target_type": SetCampaignGeoTargetType,
     "pause_ad_group": PauseAdGroup,
     "resume_ad_group": ResumeAdGroup,
     "pause_ad": PauseAd,
@@ -1316,6 +1340,21 @@ TOOLS: list[dict] = [
         "«отключи поисковых партнёров на кампании X», «включи партнёрскую сеть». "
         "search_partners=false — выключить (рекомендованный дефолт), true — включить.",
         SetCampaignNetwork,
+    ),
+    _tool(
+        "set_campaign_display_network",
+        "Включить/выключить КОНТЕКСТНО-МЕДИЙНУЮ СЕТЬ (КМС, Display) у существующей кампании. Для "
+        "команд «отключи КМС на кампании X», «выключи медийную сеть», «turn off display network». "
+        "display_network=false — выключить (правильно для поисковых кампаний), true — включить.",
+        SetCampaignDisplayNetwork,
+    ),
+    _tool(
+        "set_campaign_geo_target_type",
+        "Тип гео-таргетинга кампании: PRESENCE — показывать только тем, кто ФИЗИЧЕСКИ в целевых "
+        "регионах; PRESENCE_OR_INTEREST — ещё и тем, кто просто интересуется регионом (клики "
+        "из-за рубежа). Для команд «показывай только тем, кто в моём регионе», «убери интерес "
+        "из гео», «switch geo targeting to presence».",
+        SetCampaignGeoTargetType,
     ),
     _tool(
         "pause_ad_group",

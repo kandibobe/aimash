@@ -553,6 +553,54 @@ async def camp_net_on(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
     )
 
 
+# G12: КМС на кампании — «выключить» чинит поисковую кампанию, где баннеры ели поисковый бюджет.
+@bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "kms_off"))
+async def camp_kms_off(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
+    await bm._camp_mutate(
+        cq,
+        callback_data.idx,
+        "set_campaign_display_network",
+        gen=callback_data.gen,
+        display_network=False,
+    )
+
+
+@bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "kms_on"))
+async def camp_kms_on(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
+    await bm._camp_mutate(
+        cq,
+        callback_data.idx,
+        "set_campaign_display_network",
+        gen=callback_data.gen,
+        display_network=True,
+    )
+
+
+# G11: тип гео-таргетинга (кнопки живут в подменю «📍 Гео-таргетинг» — geo_mode_kb).
+@bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "gt_p"))
+async def camp_geo_type_presence(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:
+    await bm._camp_mutate(
+        cq,
+        callback_data.idx,
+        "set_campaign_geo_target_type",
+        gen=callback_data.gen,
+        geo_target_type="PRESENCE",
+    )
+
+
+@bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "gt_pi"))
+async def camp_geo_type_presence_or_interest(
+    cq: bm.CallbackQuery, callback_data: bm.CampCB
+) -> None:
+    await bm._camp_mutate(
+        cq,
+        callback_data.idx,
+        "set_campaign_geo_target_type",
+        gen=callback_data.gen,
+        geo_target_type="PRESENCE_OR_INTEREST",
+    )
+
+
 # ── §3 Аудитории: меню кампании → список аудиторий → черновик attach_audience ───────
 @bm.dp.callback_query(bm.CampCB.filter(bm.F.action == "audience"))
 async def camp_audience(cq: bm.CallbackQuery, callback_data: bm.CampCB) -> None:

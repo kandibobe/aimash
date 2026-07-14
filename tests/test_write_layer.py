@@ -773,6 +773,185 @@ def test_set_campaign_network_via_sdk_mask_and_field_real_proto():
         )
 
 
+# ── G12: apply_set_campaign_display_network — КМС на кампании, НЕ деньги ──────────
+async def test_apply_set_campaign_display_network_happy_path():
+    called = {}
+
+    def fake(client, customer_id, campaign_id, display_network):
+        called.update(campaign_id=campaign_id, display_network=display_network)
+        return {"applied": True, "display_network": display_network}
+
+    # user_initiated=False намеренно: сети — не деньги (как и у тумблера партнёров).
+    store = FakeStore(FakeProposal("set_campaign_display_network", "confirmed", False))
+    with patched(mut, "_set_campaign_display_network_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_set_campaign_display_network(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_id="23",
+            display_network=False,
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+        )
+    assert res["applied"] is True
+    assert called["campaign_id"] == "23" and called["display_network"] is False
+    assert store.finalized is True
+
+
+async def test_apply_set_campaign_display_network_replay_is_one_shot():
+    """Тот же confirmation_id второй раз → PermissionError, SDK вызван РОВНО один раз.
+    («Чужой аккаунт» и «без подтверждения» для этой операции покрывает матрица _apply_case.)"""
+    calls = {"n": 0}
+
+    def fake(client, customer_id, campaign_id, display_network):
+        calls["n"] += 1
+        return {"applied": True}
+
+    async def call(store):
+        return await mut.apply_set_campaign_display_network(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_id="23",
+            display_network=False,
+            confirmation_id="c1",
+            confirm_store=store,
+            ads_client=object(),
+        )
+
+    store = FakeStore(FakeProposal("set_campaign_display_network", "confirmed", False))
+    with patched(mut, "_set_campaign_display_network_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        await call(store)
+        try:
+            await call(store)
+            raise AssertionError("replay должен падать PermissionError")
+        except PermissionError:
+            pass
+    assert calls["n"] == 1
+
+
+def test_set_campaign_display_network_via_sdk_mask_and_field_real_proto():
+    """На РЕАЛЬНЫХ прото: маска — лист network_settings.target_content_network; явный False в маске
+    (иначе proto3 не увидел бы «выключить»); партнёрские сети в маске НЕ появляются."""
+    for flag in (False, True):
+        client = _RealProtoClient()
+        res = mut._set_campaign_display_network_via_sdk(client, DRAFT_ACCOUNT_ID, "23", flag)
+        assert res["applied"] is True and res["display_network"] is flag
+        op = client.captured["op"]
+        paths = list(op.update_mask.paths)
+        assert paths == ["network_settings.target_content_network"], paths
+        _assert_mask_paths_are_leaf(paths)
+        assert bool(op.update.network_settings.target_content_network) is flag
+        assert not any("search_network" in p for p in paths), paths
+
+
+# ── G11: apply_set_campaign_geo_target_type — «присутствие ИЛИ интерес» → «присутствие» ──
+async def test_apply_set_campaign_geo_target_type_happy_path():
+    called = {}
+
+    def fake(client, customer_id, campaign_id, geo_target_type):
+        called.update(campaign_id=campaign_id, geo_target_type=geo_target_type)
+        return {"applied": True, "geo_target_type": geo_target_type}
+
+    store = FakeStore(FakeProposal("set_campaign_geo_target_type", "confirmed", False))
+    with (
+        patched(mut, "_set_campaign_geo_target_type_via_sdk", fake),
+        allowed_ids(DRAFT_ACCOUNT_ID),
+    ):
+        res = await mut.apply_set_campaign_geo_target_type(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_id="23",
+            geo_target_type="presence",  # регистр нормализует КОД, не модель
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+        )
+    assert res["applied"] is True
+    assert called["geo_target_type"] == "PRESENCE" and store.finalized is True
+
+
+async def test_apply_set_campaign_geo_target_type_rejects_unknown_value_before_claim():
+    """Мусорное значение (в т.ч. SEARCH_INTEREST — он вне allow-list) отвергается ДО claim:
+    одноразовый черновик остаётся жив, SDK не зовётся."""
+    calls = {"n": 0}
+
+    def fake(client, customer_id, campaign_id, geo_target_type):
+        calls["n"] += 1
+        return {"applied": True}
+
+    for bad in ("SEARCH_INTEREST", "", "DROP TABLE"):
+        store = FakeStore(FakeProposal("set_campaign_geo_target_type", "confirmed", False))
+        with (
+            patched(mut, "_set_campaign_geo_target_type_via_sdk", fake),
+            allowed_ids(DRAFT_ACCOUNT_ID),
+        ):
+            try:
+                await mut.apply_set_campaign_geo_target_type(
+                    customer_id=DRAFT_ACCOUNT_ID,
+                    campaign_id="23",
+                    geo_target_type=bad,
+                    confirmation_id="ok",
+                    confirm_store=store,
+                    ads_client=object(),
+                )
+                raise AssertionError(f"ожидался ValueError на «{bad}»")
+            except ValueError:
+                pass
+        assert store.finalized is False
+        # черновик НЕ съеден: после отказа его всё ещё можно заклеймить корректным значением
+        assert await store.claim("ok", operation="set_campaign_geo_target_type") is not None
+    assert calls["n"] == 0
+
+
+async def test_apply_set_campaign_geo_target_type_replay_is_one_shot():
+    calls = {"n": 0}
+
+    def fake(client, customer_id, campaign_id, geo_target_type):
+        calls["n"] += 1
+        return {"applied": True}
+
+    async def call(store):
+        return await mut.apply_set_campaign_geo_target_type(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_id="23",
+            geo_target_type="PRESENCE",
+            confirmation_id="c1",
+            confirm_store=store,
+            ads_client=object(),
+        )
+
+    store = FakeStore(FakeProposal("set_campaign_geo_target_type", "confirmed", False))
+    with (
+        patched(mut, "_set_campaign_geo_target_type_via_sdk", fake),
+        allowed_ids(DRAFT_ACCOUNT_ID),
+    ):
+        await call(store)
+        try:
+            await call(store)
+            raise AssertionError("replay должен падать PermissionError")
+        except PermissionError:
+            pass
+    assert calls["n"] == 1
+
+
+def test_set_campaign_geo_target_type_via_sdk_mask_and_enum_real_proto():
+    """На РЕАЛЬНЫХ прото: маска — лист geo_target_type_setting.positive_geo_target_type; значение
+    ложится настоящим enum'ом; negative_geo_target_type НЕ трогаем."""
+    from google.ads.googleads.v24.enums.types.positive_geo_target_type import (
+        PositiveGeoTargetTypeEnum,
+    )
+
+    for value in ("PRESENCE", "PRESENCE_OR_INTEREST"):
+        client = _RealProtoClient()
+        res = mut._set_campaign_geo_target_type_via_sdk(client, DRAFT_ACCOUNT_ID, "23", value)
+        assert res["applied"] is True and res["geo_target_type"] == value
+        op = client.captured["op"]
+        paths = list(op.update_mask.paths)
+        assert paths == ["geo_target_type_setting.positive_geo_target_type"], paths
+        _assert_mask_paths_are_leaf(paths)
+        assert op.update.geo_target_type_setting.positive_geo_target_type == getattr(
+            PositiveGeoTargetTypeEnum.PositiveGeoTargetType, value
+        )
+        assert not any("negative" in p for p in paths), paths
+
+
 # ── C6: пауза/возобновление/удаление ОТДЕЛЬНОГО объявления (AdGroupAdService) ─────
 async def test_apply_pause_ad_happy_path():
     called = {}
@@ -1426,6 +1605,18 @@ class _RealProtoClient:
             "TargetSpend": TargetSpend,
             "ManualCpc": ManualCpc,
         }[name]()
+
+    @property
+    def enums(self):
+        """Зеркало google.ads…client._EnumGetter: отдаёт ВНУТРЕННИЙ enum (ProtoEnumMeta), а не
+        сообщение-обёртку. Значения настоящие — подстановка мусора в прото упадёт, как у SDK."""
+        from google.ads.googleads.v24.enums.types.positive_geo_target_type import (
+            PositiveGeoTargetTypeEnum,
+        )
+
+        return SimpleNamespace(
+            PositiveGeoTargetTypeEnum=PositiveGeoTargetTypeEnum.PositiveGeoTargetType
+        )
 
     @staticmethod
     def copy_from(destination, origin):  # как google.ads…GoogleAdsClient.copy_from
@@ -2081,6 +2272,18 @@ def _apply_case(op):
         return mut.apply_pause_campaign, {"campaign_id": "7", **base}
     if op == "update_campaign":
         return mut.apply_update_campaign, {"campaign_id": "7", "new_name": "Новое имя", **base}
+    if op == "set_campaign_display_network":
+        return mut.apply_set_campaign_display_network, {
+            "campaign_id": "7",
+            "display_network": False,
+            **base,
+        }
+    if op == "set_campaign_geo_target_type":
+        return mut.apply_set_campaign_geo_target_type, {
+            "campaign_id": "7",
+            "geo_target_type": "PRESENCE",
+            **base,
+        }
     if op == "set_campaign_network":
         return mut.apply_set_campaign_network, {
             "campaign_id": "7",

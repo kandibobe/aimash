@@ -37,6 +37,8 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
         "launch_campaign",
         "update_campaign",
         "set_campaign_network",
+        "set_campaign_display_network",
+        "set_campaign_geo_target_type",
         "remove_campaign",
         "remove_ad_group",
         "pause_ad_group",
@@ -77,6 +79,8 @@ _DIFFABLE_OPS = frozenset(
         "launch_campaign",
         "update_campaign",
         "set_campaign_network",
+        "set_campaign_display_network",
+        "set_campaign_geo_target_type",
         "pause_ad_group",
         "resume_ad_group",
         "pause_ad",
@@ -146,6 +150,24 @@ async def read_before(operation: str, params: dict, customer_id: str | None = No
                 "kind": "network",
                 "before_search_partners": bool(info["search_partners"]),
                 "after_search_partners": bool(params.get("search_partners")),
+            }
+        if operation == "set_campaign_display_network":
+            info = await asyncio.to_thread(resolve.campaign_display_network, client, cid, name)
+            if info is None:
+                return None
+            return {
+                "kind": "display_network",
+                "before_display_network": bool(info["display_network"]),
+                "after_display_network": bool(params.get("display_network")),
+            }
+        if operation == "set_campaign_geo_target_type":
+            info = await asyncio.to_thread(resolve.campaign_geo_target_type, client, cid, name)
+            if info is None:
+                return None
+            return {
+                "kind": "geo_target_type",
+                "before_geo_target_type": str(info["geo_target_type"] or ""),
+                "after_geo_target_type": str(params.get("geo_target_type") or ""),
             }
         if operation in ("pause_ad_group", "resume_ad_group"):
             ag = await asyncio.to_thread(
@@ -392,6 +414,36 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             customer_id=customer_id,
             campaign_id=ref.id,
             search_partners=bool(params.get("search_partners")),
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
+    if op == "set_campaign_display_network":
+        ref = await asyncio.to_thread(
+            resolve.find_campaign_by_name, client, customer_id, params["campaign"]
+        )
+        if ref is None:
+            raise ValueError(f"кампания '{params['campaign']}' не найдена")
+        return await mutations.apply_set_campaign_display_network(
+            customer_id=customer_id,
+            campaign_id=ref.id,
+            display_network=bool(params.get("display_network")),
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
+    if op == "set_campaign_geo_target_type":
+        ref = await asyncio.to_thread(
+            resolve.find_campaign_by_name, client, customer_id, params["campaign"]
+        )
+        if ref is None:
+            raise ValueError(f"кампания '{params['campaign']}' не найдена")
+        return await mutations.apply_set_campaign_geo_target_type(
+            customer_id=customer_id,
+            campaign_id=ref.id,
+            geo_target_type=str(params.get("geo_target_type") or ""),
             confirmation_id=confirmation_id,
             confirm_store=store,
             ads_client=client,

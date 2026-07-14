@@ -101,6 +101,45 @@ def campaign_network_settings(client: GoogleAdsClient, customer_id: str, name: s
     return None
 
 
+def campaign_display_network(client: GoogleAdsClient, customer_id: str, name: str) -> dict | None:
+    """G12: включена ли КМС у кампании — для «было→станет» set_campaign_display_network.
+    READ-ONLY. None = кампания не найдена."""
+    ensure_allowed(customer_id)
+    ga = client.get_service("GoogleAdsService")
+    safe = gaql_escape(name)
+    q = (
+        "SELECT campaign.id, campaign.network_settings.target_content_network FROM campaign "
+        f"WHERE campaign.name = '{safe}' AND campaign.status != 'REMOVED' LIMIT 1"
+    )
+    for row in ga.search(customer_id=str(customer_id), query=q):
+        return {
+            "id": str(row.campaign.id),
+            "display_network": bool(row.campaign.network_settings.target_content_network),
+        }
+    return None
+
+
+def campaign_geo_target_type(client: GoogleAdsClient, customer_id: str, name: str) -> dict | None:
+    """G11: текущий тип гео-таргетинга — для «было→станет» set_campaign_geo_target_type.
+    READ-ONLY. None = кампания не найдена. Пустая строка в geo_target_type = Google вернул
+    UNSPECIFIED/UNKNOWN: «было» неизвестно, и врать о нём мы не будем (карточка покажет только
+    «станет»)."""
+    ensure_allowed(customer_id)
+    ga = client.get_service("GoogleAdsService")
+    safe = gaql_escape(name)
+    q = (
+        "SELECT campaign.id, campaign.geo_target_type_setting.positive_geo_target_type "
+        f"FROM campaign WHERE campaign.name = '{safe}' AND campaign.status != 'REMOVED' LIMIT 1"
+    )
+    for row in ga.search(customer_id=str(customer_id), query=q):
+        geo = row.campaign.geo_target_type_setting.positive_geo_target_type.name
+        return {
+            "id": str(row.campaign.id),
+            "geo_target_type": "" if geo in ("UNSPECIFIED", "UNKNOWN") else geo,
+        }
+    return None
+
+
 def campaign_bidding_strategy(client: GoogleAdsClient, customer_id: str, name: str) -> dict | None:
     """D6: текущий тип стратегии ставок кампании — для «было→станет» set_bidding_strategy. READ-ONLY.
     Возврат {"id", "strategy": <ENUM-имя, напр. MAXIMIZE_CONVERSIONS>}. None = кампания не найдена."""
