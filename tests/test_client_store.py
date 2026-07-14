@@ -341,3 +341,40 @@ async def test_top_site_pages_orders_by_usefulness():
     assert types[-1] == "home"  # главная — последней (обычно уже final_url)
     assert (await store.top_site_pages(CID, limit=2)).__len__() == 2
     assert await store.top_site_pages("9999999998") == []  # нет профиля → []
+
+
+@pytest.mark.asyncio
+async def test_site_page_title_capped_and_text_persisted():
+    """title пишется в String(512): без обрезки длинный <title> роняет ВЕСЬ upsert на Postgres
+    (22001 StringDataRightTruncation; SQLite длину не enforce'ит — на тестах баг был невидим).
+    text страницы хранится: досье пересобирается без повторного обхода сайта."""
+    from db.models import ClientSitePage
+
+    await init_db()
+    cid = "1000000019"
+    store = ClientProfileStore()
+    await store.apply_upsert(
+        cid,
+        {"brand": "X"},
+        operation="profile_save",
+        crawl_extra={
+            "site_pages": [
+                {
+                    "url": "https://x.example/about",
+                    "title": "Т" * 900,  # реальные <title> с SEO-хвостом бывают и длиннее
+                    "page_type": "about",
+                    "text": "Компания основана в 2016 году.",
+                    "content_hash": "h1",
+                }
+            ]
+        },
+    )
+    async with Session() as s:
+        prof_id = (
+            await s.execute(select(ClientProfile.id).where(ClientProfile.customer_id == cid))
+        ).scalar()
+        row = (
+            await s.execute(select(ClientSitePage).where(ClientSitePage.profile_id == prof_id))
+        ).scalar_one()
+    assert len(row.title) == 500 and row.title.startswith("Т")
+    assert row.text == "Компания основана в 2016 году."

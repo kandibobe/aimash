@@ -53,10 +53,10 @@ def _fake_result() -> CrawlResult:
 
 
 async def _noop_robots(url):
-    return lambda u: True
+    return (lambda u: True), 0.0, []  # (can_fetch, crawl_delay, sitemaps из robots.txt)
 
 
-async def _noop_sitemap(url):
+async def _noop_sitemap(url, *, max_children=50, extra_urls=None):
     return None
 
 

@@ -130,6 +130,44 @@ async def test_purge_deletes_old_keeps_running_and_audit(monkeypatch):
     assert au >= 1  # audit_log цел
 
 
+async def test_purge_nulls_stale_page_text_but_keeps_row(monkeypatch):
+    """§20: протухает ТЕКСТ страницы, а не строка — карта sitelinks (top_site_pages) должна выжить."""
+    from core.config import settings
+    from db.models import ClientSitePage
+    from db.session import Session, init_db
+    from scheduler import jobs
+
+    await init_db()
+    monkeypatch.setattr(settings, "error_events_retain_days", 0)
+    monkeypatch.setattr(settings, "crawl_jobs_retain_days", 0)
+    monkeypatch.setattr(settings, "account_health_retain_days", 0)
+    monkeypatch.setattr(settings, "site_page_text_retain_days", 90)
+    async with Session() as s:
+        await s.execute(delete(ClientSitePage))
+        s.add(
+            ClientSitePage(
+                profile_id=9901,
+                url="https://x.test/old",
+                title="old",
+                text="старый текст",
+                crawled_at=datetime(2020, 1, 1),
+            )
+        )
+        s.add(ClientSitePage(profile_id=9901, url="https://x.test/new", title="new", text="свежий"))
+        await s.commit()
+
+    res = await jobs.purge_stale_rows()
+    assert res["site_page_text"] == 1
+    async with Session() as s:
+        rows = {
+            r.url: r.text
+            for r in (
+                await s.execute(select(ClientSitePage).where(ClientSitePage.profile_id == 9901))
+            ).scalars()
+        }
+    assert rows == {"https://x.test/old": None, "https://x.test/new": "свежий"}  # строки обе целы
+
+
 async def test_purge_disabled_when_retain_zero(monkeypatch):
     from core.config import settings
     from db.models import ErrorEvent
@@ -140,6 +178,7 @@ async def test_purge_disabled_when_retain_zero(monkeypatch):
     monkeypatch.setattr(settings, "error_events_retain_days", 0)  # 0 ⇒ не чистить
     monkeypatch.setattr(settings, "crawl_jobs_retain_days", 0)
     monkeypatch.setattr(settings, "account_health_retain_days", 0)  # N1.1: та же семантика
+    monkeypatch.setattr(settings, "site_page_text_retain_days", 0)  # §20: тексты краула
     async with Session() as s:
         await s.execute(delete(ErrorEvent))
         s.add(
@@ -156,6 +195,7 @@ async def test_purge_disabled_when_retain_zero(monkeypatch):
         "error_events": 0,
         "crawl_jobs": 0,
         "account_health_snapshot": 0,
+        "site_page_text": 0,
     }
     async with Session() as s:
         cnt = (await s.execute(select(func.count()).select_from(ErrorEvent))).scalar()

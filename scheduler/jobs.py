@@ -1442,19 +1442,27 @@ def _older_than(ts: datetime | None, cutoff: datetime) -> bool:
 
 async def purge_stale_rows(*, now: datetime | None = None) -> dict[str, int]:
     """C2 (§15): УДАЛИТЬ старые строки монотонно растущих таблиц (error_events / crawl_jobs /
-    account_health_snapshot). Остальные cleanup-джобы лишь меняют статус — эти таблицы копятся
-    вечно. Пороги — settings.error_events_retain_days / crawl_jobs_retain_days /
-    account_health_retain_days (0 ⇒ ВЫКЛ для этой таблицы, fail-safe: не удаляем ничего).
+    account_health_snapshot) и ОБНУЛИТЬ протухшие тексты страниц (client_site_pages.text — строка
+    остаётся, карта sitelinks не рушится). Остальные cleanup-джобы лишь меняют статус — эти таблицы
+    копятся вечно. Пороги — settings.error_events_retain_days / crawl_jobs_retain_days /
+    account_health_retain_days / site_page_text_retain_days (0 ⇒ ВЫКЛ для этой таблицы, fail-safe:
+    не удаляем ничего).
     crawl_jobs чистим ТОЛЬКО в терминальном статусе (done|failed) — running/незавершённые закрывает
     reconcile_stale_crawls. ⛔ audit_log НЕ трогаем НИКОГДА (денежный реестр, ручной колд-архив —
     docs/BACKUP.md). Возраст — в Python (tz-нейтрально). Возвращает {table: удалено}.
     Удаляем батчами по 500 id (лимит переменных SQLite)."""
     from sqlalchemy import delete as sa_delete
+    from sqlalchemy import update as sa_update
 
-    from db.models import AccountHealthSnapshot, CrawlJob, ErrorEvent
+    from db.models import AccountHealthSnapshot, ClientSitePage, CrawlJob, ErrorEvent
 
     now = now or datetime.now(timezone.utc)
-    result = {"error_events": 0, "crawl_jobs": 0, "account_health_snapshot": 0}
+    result = {
+        "error_events": 0,
+        "crawl_jobs": 0,
+        "account_health_snapshot": 0,
+        "site_page_text": 0,
+    }
     with request_scope("scheduler:purge"):  # §15: корреляция логов джобы по request_id
         async with Session() as s:
             if settings.error_events_retain_days > 0:
@@ -1494,13 +1502,34 @@ async def purge_stale_rows(*, now: datetime | None = None) -> dict[str, int]:
                         )
                     )
                 result["account_health_snapshot"] = len(stale)
+            if settings.site_page_text_retain_days > 0:  # §20: тексты краула (крупные, чужой контент)
+                cutoff = now - timedelta(days=settings.site_page_text_retain_days)
+                rows = (
+                    await s.execute(
+                        select(ClientSitePage.id, ClientSitePage.crawled_at).where(
+                            ClientSitePage.text.is_not(None)
+                        )
+                    )
+                ).all()
+                stale = [rid for rid, ca in rows if _older_than(ca, cutoff)]
+                for i in range(0, len(stale), 500):
+                    # СТРОКУ не удаляем: карта страниц (top_site_pages → sitelinks) должна жить,
+                    # протухает только тяжёлый текст — досье по нему всё равно уже собрано.
+                    await s.execute(
+                        sa_update(ClientSitePage)
+                        .where(ClientSitePage.id.in_(stale[i : i + 500]))
+                        .values(text=None)
+                    )
+                result["site_page_text"] = len(stale)
             if any(result.values()):
                 await s.commit()
         if any(result.values()):
             log.info(
-                "scheduler: purge — error_events удалено %d, crawl_jobs %d, health-снапшотов %d",
+                "scheduler: purge — error_events удалено %d, crawl_jobs %d, health-снапшотов %d, "
+                "текстов страниц обнулено %d",
                 result["error_events"],
                 result["crawl_jobs"],
                 result["account_health_snapshot"],
+                result["site_page_text"],
             )
         return result

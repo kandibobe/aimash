@@ -54,6 +54,9 @@ class _FakeClient:
     def stream(self, method, url):
         return _StreamCM(self._resp)
 
+    async def aclose(self):  # SiteFetcher закрывает пул в __aexit__
+        return None
+
 
 def _patch_httpx(monkeypatch, resp):
     import httpx

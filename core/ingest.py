@@ -72,14 +72,35 @@ def _is_public_host(host: str) -> bool:
     return True
 
 
-def _html_to_text(html: str) -> str:
-    """HTML → читаемый текст: убираем script/style/nav-мусор, заголовок страницы — в начало."""
+# Обвязка страницы (меню/подвал/сайдбар/формы) — она одинакова на всех страницах сайта и раньше
+# уезжала в LLM как «текст страницы»: на живом сайте это ровно половина корпуса (8 страниц darial
+# отдали по 1431 символа — одно меню). Роли (role=navigation/banner/contentinfo) ловят тему, где
+# семантические теги подменены div'ами.
+_CHROME_TAGS = ("nav", "footer", "aside", "form")
+_CHROME_ROLES = ("navigation", "banner", "contentinfo", "search", "menubar", "complementary")
+
+
+def _html_to_text(html: str, *, drop_chrome: bool = True) -> str:
+    """HTML → читаемый текст: убираем script/style, обвязку страницы, заголовок страницы — в начало.
+
+    drop_chrome=True (дефолт) вырезает nav/footer/aside/form и элементы с навигационными ARIA-ролями.
+    <header> сносится только верхнеуровневый: внутри <article>/<main> он несёт H1 самой статьи.
+    Отключать имеет смысл лишь там, где меню — и есть искомое содержимое (в проекте таких мест нет)."""
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(html, "html.parser")
     title = (soup.title.string if soup.title and soup.title.string else "").strip()  # ДО decompose
     for tag in soup(["script", "style", "noscript", "template", "svg", "head"]):
         tag.decompose()
+    if drop_chrome:
+        for tag in soup(list(_CHROME_TAGS)):
+            tag.decompose()
+        for tag in soup.find_all("header"):
+            if tag.find_parent(["article", "main"]) is None:
+                tag.decompose()
+        for tag in soup.find_all(attrs={"role": True}):
+            if str(tag.get("role", "")).strip().lower() in _CHROME_ROLES:
+                tag.decompose()
     body = soup.get_text(separator="\n")
     lines = [ln.strip() for ln in body.splitlines()]
     text = "\n".join(ln for ln in lines if ln)

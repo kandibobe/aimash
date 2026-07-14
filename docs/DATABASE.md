@@ -23,13 +23,13 @@ Alembic-миграцией (см. колонку «Миграция»). Коло
 | `client_profiles` | база знаний о клиенте на `customer_id` (§20): бренд/ниша/гео/сайт | `customer_id` (unique), `brand`, `business_desc`, `geo`, `language`, `website`, `socials` (JSON), `notes`, `last_crawled_at` | `0013` | ACTIVE |
 | `client_contacts` | контакты клиента (§20.7): телефон/e-mail/адрес/соцсеть/мессенджер | `profile_id`, `kind`, `value` | `0013` | ACTIVE |
 | `client_services` | услуги/товары клиента (§20.7): для сниппетов/callouts/релевантности | `profile_id`, `name`, `description`, `price`, `category` | `0013` | ACTIVE |
-| `client_site_pages` | карта страниц сайта после краулинга (§20.7) → будущие sitelinks | `profile_id`, `url`, `title`, `page_type`, `key_links` (JSON), `content_hash` | `0013` (+`0014` hash) | ACTIVE |
+| `client_site_pages` | карта страниц сайта после краулинга (§20.7) → sitelinks + сырьё для досье | `profile_id`, `url`, `title`, `page_type`, `key_links` (JSON), `content_hash`, `text` (очищенный от шаблона; ретеншн `site_page_text_retain_days`) | `0013` (+`0014` hash, +`0028` text) | ACTIVE |
 | `crawl_jobs` | журнал задач краулинга сайта (§20.4): статус/страницы/ошибка | `job_id` (unique), `customer_id`, `chat_id`, `domain`, `mode`, `status`, `pages_crawled`, `error` | `0013` | ACTIVE |
 | `client_profile_history` | версии профиля «до» для отката/аудита (§20.5); переживают clear | `customer_id`, `snapshot` (JSON), `operation`, `confirmation_id` | `0013` | ACTIVE |
 | `account_health_snapshot` | агрегаты health-score `/audit` на дату в TZ аккаунта (субстрат трендов, N1.1); без PII/имён кампаний | `customer_id` + `snapshot_date` + `period_days` (unique тройка), `score`, `grade`, `at_risk`, `family_penalty` (JSON), `score_model_version` | `0022` | ACTIVE |
 | `sheet_exports` | реестр созданных ботом Google-таблиц (`/sheets`, ключи визарда §19.4.2) → выдача в `/mysheets`; секретов нет (url уже уходил в чат) | `chat_id` (+ индекс `chat_id, id`), `customer_id`, `kind` (keywords\|report), `spreadsheet_id`, `url`, `title`, `share` (роль\|off\|failed) | `0025` | ACTIVE |
 
-> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0027`
+> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0028`
 > (`op.create_table(...)`). Инициалка `0001` создаёт базовые таблицы
 > (`whitelist`, `user_settings`, `proposals`, `audit_log`, `oauth_tokens`;
 > [`migrations/versions/0001_initial.py:22-92`](../migrations/versions/0001_initial.py)), остальные —
@@ -118,7 +118,9 @@ alembic history                          # список ревизий
 ссылка переживает закрытие визарда и рестарт, выдаётся в `/mysheets`) →
 `0026` (auction_insight_row: импортированные срезы «Статистики аукционов», `/competitors`) →
 `0027` (индекс `ix_proposals_chat_status` на `proposals(chat_id, status)`: пикер/списки черновиков
-чата шли seq-scan по всей таблице — она растёт с каждой мутацией) — **head**.
+чата шли seq-scan по всей таблице — она растёт с каждой мутацией) →
+`0028` (`client_site_pages.text`: текст страницы после вычитания шаблона — досье §20 пересобирается
+без повторного обхода чужого сайта; ретеншн `site_page_text_retain_days`, 90 дней) — **head**.
 
 ### Добавить миграцию
 ```bash

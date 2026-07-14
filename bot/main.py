@@ -4313,6 +4313,45 @@ def _crawl_findings(result, patch: dict) -> dict:
     }
 
 
+# Класс исключения → человеческая причина. Наружу идёт ТОЛЬКО она: сырой str(e) запрещён (правило 5
+# — исключение может нести токен), а у сетевых исключений он к тому же пустой (`str(TimeoutError())`
+# == ''), из-за чего пользователь и видел «⚠️ Краулинг darial.co.jp не удался: ?».
+_CRAWL_ERR_BY_CLASS = {
+    "TimeoutError": "crawl_err_timeout",
+    "ConnectTimeout": "crawl_err_timeout",
+    "ReadTimeout": "crawl_err_timeout",
+    "WriteTimeout": "crawl_err_timeout",
+    "PoolTimeout": "crawl_err_timeout",
+    "CancelledError": "crawl_err_timeout",
+    "ConnectError": "crawl_err_unreachable",
+    "ConnectionRefusedError": "crawl_err_unreachable",
+    "gaierror": "crawl_err_unreachable",
+    "RemoteProtocolError": "crawl_err_unreachable",
+    "SSLError": "crawl_err_tls",
+    "SSLCertVerificationError": "crawl_err_tls",
+    "CircuitOpen": "crawl_err_down",
+    "TooManyRedirects": "crawl_err_redirects",
+}
+
+
+def _crawl_fail_reason(e: BaseException) -> str:
+    """Человеческая причина отказа краула (без имени класса и без сырого текста исключения)."""
+    name = type(e).__name__
+    key = _CRAWL_ERR_BY_CLASS.get(name)
+    if key is None and "Timeout" in name:
+        key = "crawl_err_timeout"
+    if key is None and name == "HTTPStatusError":
+        code = getattr(getattr(e, "response", None), "status_code", None)
+        if code in (401, 403):
+            return i18n.t("crawl_err_forbidden")
+        if code == 404:
+            return i18n.t("crawl_err_notfound")
+        return i18n.t("crawl_err_http", code=int(code) if code else 0)
+    if key is None and isinstance(e, ValueError) and "заблокирован" in str(e):
+        key = "crawl_err_blocked"  # SSRF-гард: адрес внутренний
+    return i18n.t(key or "crawl_err_generic")
+
+
 async def _run_client_crawl(
     bot, chat_id: int, customer_id: str, url: str, *, mode: str = "full"
 ) -> None:
@@ -4331,26 +4370,54 @@ async def _run_client_crawl(
     )
     with request_scope(f"crawl:{job_id}"):
         try:
-            can_fetch = await crawler.load_robots(url)
-            sitemap = await crawler.fetch_sitemap(url)
+            # robots — fail-closed: сбой/5xx бросает исключение (обход не начинаем), 404 = «правил
+            # нет». Оттуда же берём Crawl-delay и объявленные карты сайта.
+            can_fetch, robots_delay, robots_sitemaps = await crawler.load_robots(url)
+            sitemap = await crawler.fetch_sitemap(url, extra_urls=robots_sitemaps)
             # Дедлайн живёт ВНУТРИ обхода (отдаёт собранное, partial=True); внешний wait_for —
             # только страховка от зависшего сокета, с запасом, чтобы не съесть результат целиком.
-            result = await asyncio.wait_for(
-                crawler.crawl_site(
-                    url,
-                    fetcher=crawler.fetch_url_html,
-                    can_fetch=can_fetch,
-                    sitemap_xml=sitemap,
-                    max_pages=settings.crawl_max_pages,
-                    max_depth=settings.crawl_max_depth,
-                    delay_s=settings.crawl_delay_s,
-                    max_text_chars=settings.crawl_max_text_chars,
-                    time_budget_s=settings.crawl_time_budget_s,
-                ),
-                timeout=settings.crawl_time_budget_s + 30.0,
+            async with crawler.SiteFetcher(
+                concurrency=settings.crawl_concurrency,
+                delay_s=max(settings.crawl_delay_s, robots_delay or 0.0),
+            ) as site_fetcher:
+                result = await asyncio.wait_for(
+                    crawler.crawl_site(
+                        url,
+                        fetcher=site_fetcher.fetch,
+                        can_fetch=can_fetch,
+                        sitemap_xml=sitemap,
+                        max_pages=settings.crawl_max_pages,
+                        max_depth=settings.crawl_max_depth,
+                        delay_s=0.0,  # вежливая пауза живёт в SiteFetcher (общая на все воркеры)
+                        max_text_chars=settings.crawl_max_text_chars,
+                        time_budget_s=settings.crawl_time_budget_s,
+                        concurrency=settings.crawl_concurrency,
+                        stats=site_fetcher.stats,
+                    ),
+                    timeout=settings.crawl_time_budget_s + 60.0,
+                )
+            # Раньше всё это молча глоталось `except Exception: continue` — на живом сайте 51 битая
+            # ссылка из 87, и ни одной строки в логе.
+            log.info(
+                "crawl %s: pages=%d %s stopped=%s",
+                domain,
+                result.pages_count,
+                result.stats.summary(),
+                result.stopped or "-",
             )
             if not result.pages:
-                await crawl_jobs.mark_failed(job_id, error="no pages")
+                await crawl_jobs.mark_failed(job_id, error=f"no pages ({result.stats.summary()})")
+                # Ноль страниц при заблокированных запросах — это robots, а не «пустой сайт».
+                if result.stats.blocked and not result.stats.ok:
+                    await bot.send_message(
+                        chat_id,
+                        i18n.t(
+                            "cli_crawl_failed",
+                            domain=texts.esc(domain),
+                            err=texts.esc(i18n.t("crawl_err_robots")),
+                        ),
+                    )
+                    return
                 await bot.send_message(chat_id, i18n.t("cli_crawl_empty", domain=texts.esc(domain)))
                 return
             extract = await structure_crawl(
@@ -4365,7 +4432,7 @@ async def _run_client_crawl(
             crawl_extra = {
                 "website": url,
                 "last_crawled_at_now": True,
-                "site_pages": result.site_pages_payload(),
+                "site_pages": result.site_pages_payload(limit=settings.crawl_store_max_pages),
                 # §20.5: перекраул ДОПОЛНЯЕТ карту страниц, а не стирает не обойденное в этот раз
                 # (лимит страниц/бюджет времени — и половина сайта пропадала из карты sitelinks).
                 "site_pages_merge": mode == "incremental",
@@ -4474,17 +4541,19 @@ async def _run_client_crawl(
                 )
         except Exception as e:  # noqa: BLE001 — фон не должен ронять loop; ошибку редактируем
             log.warning("crawl job %s failed: %s", job_id, type(e).__name__, exc_info=e)
-            await crawl_jobs.mark_failed(job_id, error=str(e))
+            # В БД — класс + редактированный текст (для нас, диагностика). Пользователю класс не
+            # показываем (решение P1-аудита), но и `str(e)` не показываем тоже: у половины сетевых
+            # исключений он ПУСТОЙ — отсюда и приезжало «⚠️ Краулинг darial.co.jp не удался: ?».
+            await crawl_jobs.mark_failed(
+                job_id, error=f"{type(e).__name__}: {redact_text(str(e))}".strip()
+            )
             try:
-                # Без имени класса (P1-аудит): причина — редактированный текст ошибки; пустой →
-                # generic (класс остаётся в логе строкой выше).
-                reason = redact_text(str(e)).strip() or "?"
                 await bot.send_message(
                     chat_id,
                     i18n.t(
                         "cli_crawl_failed",
                         domain=texts.esc(domain),
-                        err=texts.esc(reason),
+                        err=texts.esc(_crawl_fail_reason(e)),
                     ),
                 )
             except Exception:  # noqa: BLE001 — чат недоступен; уже залогировали

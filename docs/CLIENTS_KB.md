@@ -75,19 +75,42 @@ whitelisted. `CLIENTS = ClientProfileStore()` — синглтон стора в
 Чистая логика в `clients/crawler.py` (без БД и бота); оркестрация — `bot.main._run_client_crawl`
 (фоновая `asyncio`-задача через `_spawn_crawl`).
 
-- **Обход** `crawl_site` — BFS от главной + сиды из `sitemap.xml` (`fetch_sitemap`, глубина сидов = 1).
-  Уважает `robots.txt` (`load_robots` → `can_fetch`; нет/битый robots → permissive). Внешние ссылки не
-  обходятся — фиксируются как соцсети.
-- **Лимиты** из `core.config`: `crawl_max_pages` (50), `crawl_max_depth` (3), `crawl_time_budget_s` (90 c,
-  общий `asyncio.wait_for`), `crawl_delay_s` (0.5 c вежливая пауза), `crawl_max_text_chars` (5000 на страницу).
+- **Сеть** `clients/crawl_fetch.py::SiteFetcher` — ОДИН `httpx.AsyncClient` (пул keep-alive) на весь обход,
+  конкурентность `crawl_concurrency` (6, потолок `MAX_CONCURRENCY=8`), минимальный интервал между стартами
+  (`MIN_INTERVAL_S`, ≤ ~3.3 rps) с уважением `Crawl-delay` из robots, повтор по `Retry-After` на 429/5xx
+  (`MAX_RETRIES=2`), предохранитель `BREAKER_THRESHOLD=8` отказов подряд → `CircuitOpen`, обход останавливается.
+  Раньше клиент создавался на КАЖДЫЙ URL (TLS-хендшейк заново): 5.35 c/страница.
+- **Обход** `crawl_site` — приоритетный фронтир (`clients/crawl_frontier.py`), не FIFO: `about|company|team|
+  services|products|catalog|pricing|contacts|faq` и корень идут первыми, `blog|news` — последними. **Deny-list**:
+  `/login /logout /register /dashboard /cart /checkout /password-reset /profile-settings /wp-admin /feed /?s=`
+  и не-HTML расширения — личный кабинет больше не выедает бюджет страниц. Сиды — из `sitemap.xml` (глубина 1).
+  Внешние ссылки не обходятся — фиксируются как соцсети (свой домен ВЫИГРЫВАЕТ у карты соцсетей).
+- **robots — fail-closed** (правило 10): `load_robots` → `(can_fetch, crawl_delay, sitemaps)`. 404 = «правил нет»
+  ⇒ разрешено; **401/403 = запрет всего сайта** (RFC 9309); **5xx/сетевой сбой ⇒ raise** — обход не начинается,
+  пользователь видит причину. (Было `except Exception: return lambda: True` — fail-open.)
+- **sitemap**: `fetch_sitemap` берёт карты, объявленные в robots (`Sitemap:`), затем `/sitemap.xml`,
+  `/sitemap_index.xml`; `<sitemapindex>` раскрывается **полностью** (`max_children=50`; было 5 — у сайта с
+  восемью картами три терялись молча), `.xml.gz` распаковывается по magic-байтам.
+- **Лимиты** из `core.config`: `crawl_max_pages` (**1000** — прямое указание владельца, отклонение от ТЗ §20.4
+  «50–100»), `crawl_max_depth` (3), `crawl_time_budget_s` (240 c — ВНУТРЕННИЙ дедлайн, отдаёт собранное с
+  `partial=True`; внешний `wait_for` = бюджет + 60), `crawl_max_text_chars` (5000 на страницу),
+  `crawl_store_max_pages` (1000 — единственный потолок хранения; раньше их было два: 60 в payload и 200 в upsert).
 - **Извлечение** (`_extract`, bs4 в `to_thread`): title, текст, ссылки того же домена, соцсети (по хост-мапу
-  `_SOCIAL_HOSTS`), телефоны/e-mail (regex). В начало текста вшиваются **мета-данные** — `<meta description>`
-  и заголовки H1–H3 (сигнал тематики до усечения). Тип страницы — эвристика по пути/заголовку (`_page_type`:
-  home/about/contacts/price/services/catalog/blog/other). `CrawlResult.combined_text()` — единый текст для LLM;
-  `site_pages_payload()` — карта страниц для сохранения; `diff_against()` — см. §5.
-- **SSRF-защита**: реальная сеть `fetch_url_html` переиспользует гард `core.ingest._is_public_host` на
-  исходном URL и КАЖДОМ редиректе (event hook), таймаут `FETCH_TIMEOUT_S`, потолок `MAX_FETCH_BYTES`,
-  только http/https. Внутренние/приватные адреса блокируются.
+  `_SOCIAL_HOSTS`). В начало текста вшиваются **мета-данные** — `<meta description>` и заголовки H1–H3.
+  Тип страницы — эвристика по пути/заголовку (`_page_type`). Шаблон (nav/header/footer/aside/form, `role=`)
+  режется в `core.ingest._html_to_text(drop_chrome=True)`, остаток — вычитанием по частоте строк
+  (`clients/boilerplate.py`: строка на ≥50% страниц при корпусе ≥5 → выкинуть; fail-safe: если от страницы
+  осталось <200 символов, вернуть оригинал). На живом сайте это ровно половина корпуса.
+  `content_hash` считается ПОСЛЕ очистки — правка меню больше не «меняет» все страницы разом.
+- **Контакты — кодом, по убыванию доверия**: `href="tel:"` / `href="mailto:"` → JSON-LD
+  (`schema.org/Organization`: `telephone`/`email`) → строгий регекс (только международный формат, 8–15 цифр).
+  Раньше регекс тащил рег.номер компании и почтовый индекс, а достоверные `tel:`/`mailto:` выбрасывались.
+- **Диагностика**: `CrawlResult.stats` (`FetchStats`: ok / по кодам / по классам ошибок / ctype / retry /
+  blocked) и `stopped` (`""|time|circuit|pages`). Раньше `except Exception: continue` глотал всё — на живом
+  сайте 51 битую ссылку из 87. Сводка идёт в лог (`crawl <domain>: pages=… ok=36 404×51 …`).
+- **SSRF-защита**: гард `core.ingest._is_public_host` навешан event-хуком на КАЖДЫЙ запрос (включая редиректы),
+  таймаут `FETCH_TIMEOUT_S`, потолок `MAX_FETCH_BYTES`, только http/https. Content-Type проверяется ДО чтения
+  тела (бинарь не доезжает до LLM). Внутренние/приватные адреса блокируются.
 - **Фон и дедуп**: `_spawn_crawl` держит ссылку на задачу в `_CRAWL_INFLIGHT[customer_id]` (иначе GC соберёт
   незавершённую) и **дедуплицирует по customer_id** — второй параллельный краул того же аккаунта не плодится
   (двойной клик → False, «обход уже идёт»).
@@ -163,16 +186,20 @@ whitelisted. `CLIENTS = ClientProfileStore()` — синглтон стора в
 
 ## 8. Безопасность / PII
 
-- **Краул хранит только нужное для генерации**: карта страниц + усечённый текст (сигнатура), контакты/соцсети.
-  Полный HTML не сохраняется.
+- **Краул хранит только нужное для генерации**: карта страниц + очищенный от шаблона ТЕКСТ страницы
+  (`client_site_pages.text`, миграция 0028 — чтобы пересобрать досье без повторного обхода чужого сайта),
+  контакты/соцсети. Полный HTML не сохраняется; текст протухает через `site_page_text_retain_days` (90 дней):
+  `scheduler.jobs.purge_stale_rows` обнуляет ТЕКСТ, оставляя строку (карта sitelinks не должна усохнуть).
 - **PII в БД есть**: контакты (телефоны/e-mail) хранятся в `client_contacts` — бэкапы БД содержат PII;
   учитывать при доступе к дампам. В **логи PII сырьём не пишем** (golden rule #5); `profile_context_text` PII
   не отдаёт.
-- **`crawl_jobs.error` редактируется** через `redact_text` (без секретов/PII), сообщения об ошибке
-  краула пользователю — только `type(e).__name__` под `redact_text` + `texts.esc`.
+- **`crawl_jobs.error` редактируется** через `redact_text` (без секретов/PII) — для нас там
+  `f"{type(e).__name__}: {redact_text(str(e))}"`. **Пользователю — только человеческая фраза**
+  (`bm._crawl_fail_reason` → i18n `crawl_err_*`): ни имени класса, ни сырого `str(e)`. Раньше показывалось
+  `redact_text(str(e)) or "?"` — а `str(TimeoutError())` пуст, отсюда «Краулинг не удался: ?».
 - **Egress в LLM (аудит 2026-07)**: телефоны/e-mail извлекаются краулером детерминированно
-  (regex) и **НЕ включаются** в `combined_text`, уходящий во внешний LLM (OpenRouter); соцсети
-  (публичные хэндлы) включаются. Residual: контакт в самом тексте страницы может попасть в
+  (tel:/mailto:/JSON-LD/регекс) и **НЕ включаются** в `combined_text`, уходящий во внешний LLM (OpenRouter);
+  соцсети (публичные хэндлы) включаются. Residual: контакт в самом тексте страницы может попасть в
   payload — осознанное ограничение.
 - **Cross-domain инвариант**: memory-операция не пройдёт через ads-исполнитель, и наоборот — оба
   fail-closed по спискам операций (`MEMORY_OPERATIONS` vs `SUPPORTED_OPERATIONS`). `claim` атомарен
@@ -186,7 +213,10 @@ whitelisted. `CLIENTS = ClientProfileStore()` — синглтон стора в
 - `test_client_store.py` — стор: upsert/мердж, clear, history, `profile_context_text` (в т.ч. усечение и
   отсутствие PII), `site_page_hashes`.
 - `test_client_extract.py` — LLM-разбор текста в `ClientProfileExtract`, salvage кривого JSON, `to_patch`.
-- `test_client_crawler.py` — BFS, sitemap, robots, извлечение, `combined_text`/`diff_against`, SSRF-гард.
+- `test_client_crawler.py` — обход, sitemap, robots, извлечение, `combined_text`/`diff_against`, SSRF-гард.
+- `test_crawl_hardening.py` — фронтир (deny-list/приоритет/normalize), robots **fail-closed** (404 разрешает,
+  403 запрещает, 5xx роняет), полное раскрытие sitemap-index + gzip, вычитание шаблона + fail-safe,
+  контакты из `tel:`/`mailto:`/JSON-LD (рег.номер ≠ телефон), `_crawl_fail_reason` (пустой `str(e)` → фраза).
 - `test_client_crawl_job.py` — журнал `crawl_jobs` (running→done/failed, редакция error).
 - `test_client_crawl_orchestration.py` — `_run_client_crawl`: свежий → auto-save, существующий → черновик,
   инкрементальный diff по content_hash, дедуп.

@@ -361,6 +361,10 @@ class ClientSitePage(Base):
     content_hash: Mapped[str | None] = mapped_column(
         String(32)
     )  # §20.5: сигнатура для diff перекраула
+    # Текст страницы (после вычитания шаблона). Раньше выбрасывался сразу после LLM-вызова: чтобы
+    # пересобрать досье (clients.dossier_*) с новой схемой, приходилось заново обходить весь сайт.
+    # Ретеншн — scheduler.jobs.purge_stale_rows (site_page_text_retain_days).
+    text: Mapped[str | None] = mapped_column(Text)
     crawled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

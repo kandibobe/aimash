@@ -2178,6 +2178,53 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "⚠️ Краулинг {domain} не удался: {err}",
         "en": "⚠️ Crawl of {domain} failed: {err}",
     },
+    # Причины отказа краула — человеческим языком. Класс исключения наружу не идёт (решение
+    # P1-аудита), сырой str(e) — тем более (правило 5), и у сетевых ошибок он вдобавок ПУСТОЙ:
+    # именно так пользователю приезжало «не удался: ?».
+    "crawl_err_timeout": {
+        "ru": "сайт не ответил за отведённое время — попробуй ещё раз чуть позже",
+        "en": "the site didn't respond in time — try again a bit later",
+    },
+    "crawl_err_unreachable": {
+        "ru": "сайт недоступен: домен не отвечает или не существует — проверь адрес",
+        "en": "site unreachable: the domain doesn't respond or doesn't exist — check the address",
+    },
+    "crawl_err_tls": {
+        "ru": "проблема с сертификатом сайта (HTTPS) — обход остановлен",
+        "en": "the site's TLS certificate is invalid — crawl stopped",
+    },
+    "crawl_err_down": {
+        "ru": "сайт перестал отвечать (много ошибок подряд) — обход остановлен",
+        "en": "the site kept failing (too many errors in a row) — crawl stopped",
+    },
+    "crawl_err_redirects": {
+        "ru": "слишком много переадресаций — сайт зациклил редиректы",
+        "en": "too many redirects — the site is looping",
+    },
+    "crawl_err_robots": {
+        "ru": "robots.txt сайта запрещает обход — данные собрать нельзя",
+        "en": "the site's robots.txt forbids crawling — no data can be collected",
+    },
+    "crawl_err_forbidden": {
+        "ru": "сайт закрыл доступ боту (403) — обход невозможен",
+        "en": "the site denied access to the bot (403) — crawl not possible",
+    },
+    "crawl_err_notfound": {
+        "ru": "страница не найдена (404) — проверь адрес сайта",
+        "en": "page not found (404) — check the site address",
+    },
+    "crawl_err_http": {
+        "ru": "сайт вернул ошибку {code} — попробуй позже",
+        "en": "the site returned error {code} — try later",
+    },
+    "crawl_err_blocked": {
+        "ru": "адрес заблокирован политикой безопасности (внутренний/небезопасный)",
+        "en": "the address is blocked by the security policy (internal/unsafe)",
+    },
+    "crawl_err_generic": {
+        "ru": "не удалось прочитать сайт — подробности в логе",
+        "en": "couldn't read the site — details are in the log",
+    },
     # — §19: визард «Создание кампании» —
     "cc_pick_account": {
         "ru": (

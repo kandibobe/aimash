@@ -24,6 +24,7 @@ from typing import Any
 
 from sqlalchemy import delete, func, select
 
+from core.config import settings
 from db.models import (
     ClientContact,
     ClientProfile,
@@ -507,18 +508,23 @@ class ClientProfileStore:
                                 "page_type": row.page_type,
                                 "key_links": row.key_links,
                                 "content_hash": row.content_hash,
+                                "text": row.text,
                             }
                         )
                 await s.execute(delete(ClientSitePage).where(ClientSitePage.profile_id == p.id))
-                for pg in (list(fresh.values()) + kept)[:200]:  # свежие приоритетнее при потолке
+                # Потолок хранения — один на весь путь (crawl_store_max_pages); свежие приоритетнее.
+                for pg in (list(fresh.values()) + kept)[: settings.crawl_store_max_pages]:
                     s.add(
                         ClientSitePage(
                             profile_id=p.id,
                             url=str(pg.get("url", ""))[:2048],
-                            title=_clean_str(pg.get("title")),
+                            # title — String(512): без обрезки длинный <title> роняет транзакцию на
+                            # Postgres (22001 StringDataRightTruncation; SQLite в тестах не enforce'ит).
+                            title=_clean_str(pg.get("title"), max_chars=500),
                             page_type=_clean_str(pg.get("page_type")),
                             key_links=pg.get("key_links") or None,
                             content_hash=_clean_str(pg.get("content_hash")),
+                            text=_clean_str(pg.get("text")),
                         )
                     )
                 changed.append("site_pages")
