@@ -105,6 +105,8 @@ DEFAULT_AUDIT_THRESHOLDS: dict[str, float] = {
     "assets_min_sitelinks": 4,  # G50: <N ситилинков на кампанию (Google даёт до 20)
     "assets_min_callouts": 4,  # G51: <N уточнений (до 20)
     "assets_min_spend": 20.0,  # расширения на кампании-«копейке» — не находка, а шум
+    "content_on_search_min_spend": 5.0,  # G12: расход ПО СЕТИ КМС внутри Search-кампании ≥ N …
+    "geo_interest_min_spend": 20.0,  # G11: кампания с расходом ≥ N и гео «присутствие ИЛИ интерес»
 }
 
 

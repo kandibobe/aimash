@@ -1324,3 +1324,101 @@ def fetch_campaign_assets(client, customer_id: str) -> list[CampaignAssetsRow]:
             )
         )
     return out
+
+
+@dataclass
+class CampaignSettingsRow:
+    """Ф6.2 (G12/G11): настройки ENABLED-кампании, которые молча жгут бюджет, — И ДЕНЬГИ, которые они
+    уже сожгли. Настройка без денег — это спор о галочке; настройка с деньгами — находка.
+
+    content_* — расход/конверсии, пришедшие ИМЕННО с КМС внутри этой кампании
+    (segments.ad_network_type = CONTENT).
+    outside_* — расход/конверсии по кликам людей, физически находившихся ВНЕ таргетируемых регионов
+    (user_location_view.targeting_location = FALSE). Ровно это и покупает гео-тип «присутствие ИЛИ
+    интерес»: без такого замера чек был бы вкусовщиной («а вдруг бизнес национальный»).
+    geo_target_type — «» когда Google не вернул значение ⇒ чек молчит (нет данных ≠ «настроено верно»).
+    """
+
+    campaign_id: str
+    campaign: str
+    channel_type: str
+    search_network: bool
+    content_network: bool
+    geo_target_type: str
+    content_cost: float = 0.0
+    content_conversions: float = 0.0
+    outside_cost: float = 0.0
+    outside_conversions: float = 0.0
+
+
+def _sum_by_campaign(client, customer_id: str, query: str, keep) -> dict[str, tuple[float, float]]:
+    """(расход, конверсии) по campaign.id из сегментированного запроса; keep(row) решает, что считать."""
+    acc: dict[str, tuple[float, float]] = {}
+    for r in _search(client, customer_id, query):
+        if not keep(r):
+            continue
+        cid_ = str(r.campaign.id)
+        cost, conv = acc.get(cid_, (0.0, 0.0))
+        acc[cid_] = (
+            cost + int(r.metrics.cost_micros) / 1_000_000,
+            conv + float(r.metrics.conversions),
+        )
+    return acc
+
+
+def fetch_campaign_settings(client, customer_id: str, period) -> list[CampaignSettingsRow]:
+    """Сети (поиск/партнёры/КМС) + тип гео-таргетинга ENABLED-кампаний + деньги, которые уже ушли
+    в КМС и «в интерес».
+
+    Обе сегментации (segments.ad_network_type, user_location_view) НЕ задваивают расход: сумма по
+    сегментам = расход кампании. Значит content_cost/outside_cost ⊂ cost кампании, и дедуп в engine
+    возьмёт по одному spend_segment (имя кампании) МАКСИМУМ, а не сумму. READ-ONLY."""
+    ensure_read_allowed(customer_id)
+
+    net = _sum_by_campaign(
+        client,
+        customer_id,
+        "SELECT campaign.id, segments.ad_network_type, metrics.cost_micros, metrics.conversions "
+        f"FROM campaign WHERE {_where(period, None)} AND campaign.status = 'ENABLED'",
+        lambda r: _enum_name(r.segments.ad_network_type) == "CONTENT",
+    )
+    # Гео: клик засчитан кампании, а физическое место человека — вне таргета. targeting_location
+    # False — это и есть «интерес», за который платят.
+    outside = _sum_by_campaign(
+        client,
+        customer_id,
+        "SELECT campaign.id, user_location_view.targeting_location, metrics.cost_micros, "
+        f"metrics.conversions FROM user_location_view WHERE {_where(period, None)} "
+        "AND campaign.status = 'ENABLED'",
+        lambda r: not bool(r.user_location_view.targeting_location),
+    )
+
+    out: list[CampaignSettingsRow] = []
+    q = (
+        "SELECT campaign.id, campaign.name, campaign.advertising_channel_type, "
+        "campaign.network_settings.target_search_network, "
+        "campaign.network_settings.target_content_network, "
+        "campaign.geo_target_type_setting.positive_geo_target_type "
+        "FROM campaign WHERE campaign.status = 'ENABLED'"
+    )
+    for r in _search(client, customer_id, q):
+        c = r.campaign
+        cid_ = str(c.id)
+        cost, conv = net.get(cid_, (0.0, 0.0))
+        out_cost, out_conv = outside.get(cid_, (0.0, 0.0))
+        geo = _enum_name(getattr(c.geo_target_type_setting, "positive_geo_target_type", ""))
+        out.append(
+            CampaignSettingsRow(
+                campaign_id=cid_,
+                campaign=c.name,
+                channel_type=_enum_name(c.advertising_channel_type),
+                search_network=bool(c.network_settings.target_search_network),
+                content_network=bool(c.network_settings.target_content_network),
+                geo_target_type="" if geo in ("UNSPECIFIED", "UNKNOWN") else geo,
+                content_cost=cost,
+                content_conversions=conv,
+                outside_cost=out_cost,
+                outside_conversions=out_conv,
+            )
+        )
+    return out

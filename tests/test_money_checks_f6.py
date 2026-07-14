@@ -1,5 +1,6 @@
 """Ф6: денежные чеки каталога claude-ads — G37 (задушенная цель CPA), G05 (бренд + не-бренд в одной
-кампании), G50/G51/G52 (расширения).
+кампании), G50/G51/G52 (расширения), G12 (КМС на поисковой кампании), G11 (гео «присутствие ИЛИ
+интерес»).
 
 Что пинуется (всё — про ложные срабатывания, они дороже пропусков):
 1. G37 молчит, пока факт. CPA не превысил цель ВДВОЕ и пока конверсий меньше tcpa_min_conv: «CPA» по
@@ -25,6 +26,7 @@ from core.config import settings  # noqa: E402
 from reports.queries import (  # noqa: E402
     Breakdown,
     CampaignAssetsRow,
+    CampaignSettingsRow,
     KeywordInventoryRow,
     Metrics,
 )
@@ -246,3 +248,168 @@ def test_account_level_assets_count_for_every_campaign():
     res = build_audit(_report([("Поиск", 100.0, 5.0)]), campaign_assets=rows)
     assert "assets_sitelinks_thin" not in _ids(res)
     assert "assets_no_snippets" in _ids(res)
+
+
+# ── Ф6.2 · G12/G11: настройки, которые ЖГУТ деньги ───────────────────────────────────
+def _settings(
+    name: str,
+    *,
+    channel: str = "SEARCH",
+    content: bool = False,
+    geo: str = "PRESENCE",
+    content_cost: float = 0.0,
+    content_conv: float = 0.0,
+    outside_cost: float = 0.0,
+    outside_conv: float = 0.0,
+):
+    return CampaignSettingsRow(
+        campaign_id="1",
+        campaign=name,
+        channel_type=channel,
+        search_network=False,
+        content_network=content,
+        geo_target_type=geo,
+        content_cost=content_cost,
+        content_conversions=content_conv,
+        outside_cost=outside_cost,
+        outside_conversions=outside_conv,
+    )
+
+
+def test_display_on_search_flags_burned_money_not_the_checkbox():
+    """G12 — находка только там, где КМС УЖЕ съел деньги и не дал конверсий. Включённая галочка без
+    расхода — не потеря; конвертящий КМС — не слив (GR8: галочка ≠ факт)."""
+    rep = _report([("Поиск", 100.0, 5.0)])
+    res = build_audit(rep, campaign_settings=[_settings("Поиск", content=True, content_cost=40.0)])
+    f = next(f for f in res.findings if f.check_id == "display_on_search_campaign")
+    assert f.at_risk == 40.0 and f.family == "waste" and f.spend_segment == "Поиск"
+    assert f.at_risk <= res.total_spend  # расход по сети ⊂ расход кампании
+    assert "КМС" in finding_text(f, "ru", "USD")
+
+    # Галочка включена, но КМС ничего не потратил → нечего терять, молчим.
+    quiet = build_audit(rep, campaign_settings=[_settings("Поиск", content=True, content_cost=0.0)])
+    assert "display_on_search_campaign" not in _ids(quiet)
+
+    # КМС тратит и КОНВЕРТИТ → это не слив, а канал. Молчим.
+    works = build_audit(
+        rep,
+        campaign_settings=[_settings("Поиск", content=True, content_cost=40.0, content_conv=3.0)],
+    )
+    assert "display_on_search_campaign" not in _ids(works)
+
+    # Кампания и есть медийная (DISPLAY) → КМС там по определению, не находка.
+    display = build_audit(
+        rep,
+        campaign_settings=[_settings("Поиск", channel="DISPLAY", content=True, content_cost=40.0)],
+    )
+    assert "display_on_search_campaign" not in _ids(display)
+
+    # Настройки не прочитаны (фетчер упал) → чек молчит, а не пишет «всё чисто».
+    assert "display_on_search_campaign" not in _ids(build_audit(rep))
+
+
+def test_geo_interest_waste_measures_money_of_people_outside_target():
+    """G11 — «присутствие ИЛИ интерес» флажим ТОЛЬКО с деньгами клиентов, физически вне таргета
+    (user_location_view.targeting_location=FALSE). Нет типа гео (нет данных) → молчим."""
+    rep = _report([("Поиск", 100.0, 5.0)])
+    res = build_audit(
+        rep,
+        campaign_settings=[_settings("Поиск", geo="PRESENCE_OR_INTEREST", outside_cost=50.0)],
+    )
+    f = next(f for f in res.findings if f.check_id == "geo_interest_waste")
+    assert f.at_risk == 50.0 and f.family == "geo"
+    assert "ВНЕ ваших регионов" in finding_text(f, "ru", "USD")
+
+    # Гео-тип «присутствие» → настройка верная, вне-таргетный расход (если и есть) — погрешность гео.
+    ok = build_audit(rep, campaign_settings=[_settings("Поиск", geo="PRESENCE", outside_cost=50.0)])
+    assert "geo_interest_waste" not in _ids(ok)
+
+    # «Интересующиеся» конвертят → у онлайн-бизнеса настройка законна. Молчим.
+    works = build_audit(
+        rep,
+        campaign_settings=[
+            _settings("Поиск", geo="PRESENCE_OR_INTEREST", outside_cost=50.0, outside_conv=2.0)
+        ],
+    )
+    assert "geo_interest_waste" not in _ids(works)
+
+    # Google не вернул тип гео → «» ⇒ чек молчит (нет данных ≠ «настроено верно»).
+    unknown = build_audit(rep, campaign_settings=[_settings("Поиск", geo="", outside_cost=50.0)])
+    assert "geo_interest_waste" not in _ids(unknown)
+
+
+def test_fetch_campaign_settings_sums_only_content_and_outside_target():
+    """Фетчер: расход по КМС берётся ТОЛЬКО из строк CONTENT, «интересный» расход — ТОЛЬКО из строк
+    targeting_location=FALSE. Иначе чек припишет кампании весь её расход и соврёт в разы."""
+    from reports.queries import fetch_campaign_settings
+
+    def _row(**kw):
+        return SimpleNamespace(**kw)
+
+    def _m(cost: float, conv: float = 0.0):
+        return _row(cost_micros=int(cost * 1_000_000), conversions=conv)
+
+    class _Svc:
+        def search(self, customer_id: str, query: str):
+            if "segments.ad_network_type" in query:
+                return [
+                    _row(
+                        campaign=_row(id=1),
+                        segments=_row(ad_network_type=_row(name="SEARCH")),
+                        metrics=_m(90.0, 4.0),
+                    ),
+                    _row(
+                        campaign=_row(id=1),
+                        segments=_row(ad_network_type=_row(name="CONTENT")),
+                        metrics=_m(30.0, 0.0),
+                    ),
+                ]
+            if "FROM user_location_view" in query:
+                return [
+                    _row(
+                        campaign=_row(id=1),
+                        user_location_view=_row(targeting_location=True),
+                        metrics=_m(100.0, 4.0),
+                    ),
+                    _row(
+                        campaign=_row(id=1),
+                        user_location_view=_row(targeting_location=False),
+                        metrics=_m(20.0, 0.0),
+                    ),
+                ]
+            return [
+                _row(
+                    campaign=_row(
+                        id=1,
+                        name="Поиск",
+                        advertising_channel_type=_row(name="SEARCH"),
+                        network_settings=_row(
+                            target_search_network=False, target_content_network=True
+                        ),
+                        geo_target_type_setting=_row(
+                            positive_geo_target_type=_row(name="PRESENCE_OR_INTEREST")
+                        ),
+                    )
+                )
+            ]
+
+    class _Client:
+        def get_service(self, _name: str):
+            return _Svc()
+
+    with allowed_ids(DRAFT_ACCOUNT_ID):  # замок чтения — фетчер обязан его проходить
+        rows = fetch_campaign_settings(
+            _Client(), DRAFT_ACCOUNT_ID, SimpleNamespace(gaql_between=lambda: "X")
+        )
+    assert len(rows) == 1
+    r = rows[0]
+    assert r.content_network is True and r.geo_target_type == "PRESENCE_OR_INTEREST"
+    assert r.content_cost == 30.0 and r.content_conversions == 0.0  # SEARCH-строка НЕ в счёт
+    assert r.outside_cost == 20.0 and r.outside_conversions == 0.0  # targeted-строка НЕ в счёт
+
+    # …и оба чека на этих данных срабатывают на реальные деньги.
+    res = build_audit(_report([("Поиск", 120.0, 4.0)]), campaign_settings=rows)
+    assert {"display_on_search_campaign", "geo_interest_waste"} <= _ids(res)
+    assert (
+        res.at_risk <= res.total_spend
+    )  # дедуп по кампании: 30 и 20 не складываются поверх расхода

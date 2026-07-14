@@ -38,6 +38,7 @@ async def gather_audit(
         fetch_bid_simulations,
         fetch_budget_simulations,
         fetch_campaign_assets,
+        fetch_campaign_settings,
         fetch_conversion_health,
         fetch_geo_waste,
         fetch_impression_share,
@@ -84,6 +85,7 @@ async def gather_audit(
         rsa_ads,
         kw_inventory,
         campaign_assets,
+        campaign_settings,
     ) = await asyncio.gather(
         build_account_report_async(client, cid, period, with_comparison=False, currency=currency),
         _safe(fetch_impression_share, client, cid, period, label="audit_is"),
@@ -105,6 +107,7 @@ async def gather_audit(
         _safe(fetch_rsa_assets, client, cid, period, label="audit_rsa_assets"),
         _safe(fetch_keyword_inventory, client, cid, period, label="audit_keyword_inventory"),
         _safe(fetch_campaign_assets, client, cid, label="audit_campaign_assets"),
+        _safe(fetch_campaign_settings, client, cid, period, label="audit_campaign_settings"),
     )
 
     # Ф6 (G05): бренд-токены из профиля клиента (§20) — локальная БД, не Google Ads (в gather выше
@@ -139,6 +142,7 @@ async def gather_audit(
             ("rsa_ads", rsa_ads),
             ("keyword_inventory", kw_inventory),
             ("campaign_assets", campaign_assets),
+            ("campaign_settings", campaign_settings),
         )
         if val is None
     ]
@@ -171,6 +175,7 @@ async def gather_audit(
         keyword_inventory=kw_inventory,
         brand_terms=brand_terms,
         campaign_assets=campaign_assets,
+        campaign_settings=campaign_settings,
     )
 
 

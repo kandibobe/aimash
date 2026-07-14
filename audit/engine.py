@@ -160,6 +160,9 @@ class _Ctx:
     brand_terms: set | None = None
     # Ф6: счётчики расширений по кампаниям (ситилинки/уточнения/структ. описания). None → не читано.
     campaign_assets: list | None = None
+    # Ф6.2: настройки сетей + тип гео-таргетинга ENABLED-кампаний (+ расход по сети КМС внутри
+    # кампании). None → не читано ⇒ G12/G11 молчат: галочку не видно — значит не видно, а не «выкл».
+    campaign_settings: list | None = None
 
     def target_for(self, campaign_name: str) -> float | None:
         """Цель CPA для кампании: пер-кампанийная стратегия (tCPA) побеждает глобальный /target."""
@@ -2278,6 +2281,91 @@ def check_assets_no_snippets(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     ]
 
 
+def _settings_rows(ctx: _Ctx, channel: str | None = "SEARCH"):
+    """Ф6.2: строки настроек кампаний (channel=None → все каналы). Не читано → пусто ⇒ чеки молчат."""
+    rows = ctx.campaign_settings or []
+    return [r for r in rows if channel is None or getattr(r, "channel_type", "") == channel]
+
+
+def check_display_on_search_campaign(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф6.2 (claude-ads G12): у SEARCH-кампании включена сеть КМС («Display expansion»). Баннерный
+    трафик подмешивается к поисковому: он дешевле по клику, поэтому съедает заметную долю бюджета,
+    а конверсий не даёт — и портит средние показатели, по которым Smart Bidding учится.
+
+    Флажим ТОЛЬКО по деньгам: расход именно по сети CONTENT ≥ порога И ноль конверсий с неё
+    (GR8 — включённая галочка без расхода это не потеря, а конвертящий КМС не «слив»). at_risk =
+    расход по КМС; он ⊂ расхода кампании, поэтому spend_segment — имя кампании (дедуп возьмёт max)."""
+    min_spend = float(thr.get("content_on_search_min_spend", 5.0))
+    cur = getattr(report, "currency", "")
+    out: list[Finding] = []
+    for r in _settings_rows(ctx):
+        if not getattr(r, "content_network", False):
+            continue
+        cost = float(getattr(r, "content_cost", 0.0) or 0.0)
+        conv = float(getattr(r, "content_conversions", 0.0) or 0.0)
+        if cost < min_spend or conv > 0:
+            continue
+        out.append(
+            Finding(
+                check_id="display_on_search_campaign",
+                family="waste",
+                severity="warning",
+                at_risk=round(cost, 2),
+                spend_segment=r.campaign,
+                target_campaign=r.campaign,
+                suggested_operation=None,  # смена сетей кампании — через карточку /campaigns + «да»
+                advice_operation="set_campaign_network",
+                facts={
+                    "campaign": r.campaign,
+                    "content_cost": round(cost, 2),
+                    "currency": cur,
+                },
+                evidence={"content_conversions": round(conv, 2)},
+            )
+        )
+    return out
+
+
+def check_geo_interest_waste(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф6.2 (claude-ads G11): гео-таргетинг «присутствие ИЛИ интерес» — объявления видят люди,
+    физически находящиеся ВНЕ ваших регионов (им просто «интересен» регион). Для локального бизнеса
+    это чистый слив: приехать и купить они не могут.
+
+    Меряем деньгами, а не галочкой: user_location_view.targeting_location = FALSE — это клики людей
+    вне таргета. Расход по ним ≥ порога И ноль конверсий → находка (at_risk = этот расход). Если
+    «интересующиеся» конвертят — молчим: у национального/онлайн-бизнеса настройка законна (GR8)."""
+    min_spend = float(thr.get("geo_interest_min_spend", 20.0))
+    cur = getattr(report, "currency", "")
+    out: list[Finding] = []
+    for r in _settings_rows(ctx, channel=None):
+        if getattr(r, "geo_target_type", "") not in ("PRESENCE_OR_INTEREST", "SEARCH_INTEREST"):
+            continue
+        cost = float(getattr(r, "outside_cost", 0.0) or 0.0)
+        conv = float(getattr(r, "outside_conversions", 0.0) or 0.0)
+        if cost < min_spend or conv > 0:
+            continue
+        out.append(
+            Finding(
+                check_id="geo_interest_waste",
+                family="geo",
+                severity="warning",
+                at_risk=round(cost, 2),
+                spend_segment=r.campaign,
+                target_campaign=r.campaign,
+                suggested_operation=None,  # переключение гео-типа — через карточку кампании + «да»
+                advice_operation="set_campaign_geo_target_type",
+                facts={
+                    "campaign": r.campaign,
+                    "outside_cost": round(cost, 2),
+                    "geo_target_type": r.geo_target_type,
+                    "currency": cur,
+                },
+                evidence={"outside_conversions": round(conv, 2)},
+            )
+        )
+    return out
+
+
 # Порядок проверок = порядок запуска (на рендер не влияет — там сортировка по важности).
 _CHECKS = (
     check_no_conversion_tracking,
@@ -2313,6 +2401,8 @@ _CHECKS = (
     check_assets_sitelinks_thin,
     check_assets_callouts_thin,
     check_assets_no_snippets,
+    check_display_on_search_campaign,
+    check_geo_interest_waste,
     check_bid_below_first_page,
     check_bid_below_top_of_page,
     check_top_is_rank_lost,
@@ -2376,6 +2466,10 @@ CHECK_REGISTRY: dict[str, tuple[str, str]] = {
     "assets_sitelinks_thin": ("assets", "info"),
     "assets_callouts_thin": ("assets", "info"),
     "assets_no_snippets": ("assets", "info"),
+    # Ф6.2 (G12/G11). Оба — ДЕНЕЖНЫЕ (at_risk = реально сожжённый расход сегмента), поэтому warning
+    # и живые семьи: КМС на поиске — «waste», «интерес» вместо «присутствия» — «geo».
+    "display_on_search_campaign": ("waste", "warning"),
+    "geo_interest_waste": ("geo", "warning"),
     "bid_below_first_page": ("bidding", "warning"),
     "bid_below_top_of_page": ("bidding", "info"),
     "top_is_rank_lost": ("bidding", "info"),
@@ -2493,6 +2587,7 @@ def build_audit(
     keyword_inventory: list | None = None,
     brand_terms: set | None = None,
     campaign_assets: list | None = None,
+    campaign_settings: list | None = None,
 ) -> AuditResult:
     """Собрать аудит по УЖЕ прочитанным данным. Чистая функция (без сети/SDK). Опц. живые данные
     (is_rows / conversion_actions / bidding / optimization_score / recommendations) — duck-typed,
@@ -2565,6 +2660,7 @@ def build_audit(
         keyword_inventory=keyword_inventory,
         brand_terms=brand_terms,
         campaign_assets=campaign_assets,
+        campaign_settings=campaign_settings,
     )
 
     # N1.3 (ревью): IS-строки прочитаны, но НИ ОДНА не прошла tolerance-гейт (proto3-нули) —

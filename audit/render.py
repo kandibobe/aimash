@@ -336,6 +336,16 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
         if lang == "en":
             return f"«{camp}»: {what_en[1]} {what_en[0]} — the ad takes less space in the results and gets a lower CTR at the same bid. Add them: /campaigns → the campaign → Extensions."
         return f"«{camp}»: {what_ru[0]} — {what_ru[1]}. Объявление занимает меньше места в выдаче и собирает меньше кликов при той же ставке. Добавить: /campaigns → карточка кампании → Расширения."
+    if f.check_id == "display_on_search_campaign":
+        cost = _money(fa.get("content_cost", 0), fa.get("currency") or cur)
+        if lang == "en":
+            return f"«{camp}»: the Display Network is on in a Search campaign — {cost} went to banners with zero conversions. Turn the content network off: /campaigns → the campaign → Networks."
+        return f"«{camp}»: в поисковой кампании включена сеть КМС — {cost} ушло на баннеры, конверсий ноль. Выключить контекстно-медийную сеть: /campaigns → карточка кампании → Сети."
+    if f.check_id == "geo_interest_waste":
+        cost = _money(fa.get("outside_cost", 0), fa.get("currency") or cur)
+        if lang == "en":
+            return f"«{camp}»: location targeting is «presence OR interest» — {cost} was spent on clicks from people physically outside your regions, with zero conversions. Switch to «presence» (people in your locations): /campaigns → the campaign → Geo."
+        return f"«{camp}»: гео-таргетинг «присутствие ИЛИ интерес» — {cost} потрачено на клики людей, физически находящихся ВНЕ ваших регионов, конверсий с них ноль. Переключить на «присутствие»: /campaigns → карточка кампании → Гео."
     if f.check_id in ("bid_below_first_page", "bid_below_top_of_page"):
         # Ставка/цель/на сколько поднять + оговорка правила #3 (бот сам ставку не тронет).
         kw = fa.get("keyword", "")

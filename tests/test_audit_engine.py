@@ -936,6 +936,8 @@ def test_weight_vector_snapshot_pins_full_model():
         "assets_min_sitelinks": 4,  # G50/G51/G52: расширения
         "assets_min_callouts": 4,
         "assets_min_spend": 20.0,
+        "content_on_search_min_spend": 5.0,
+        "geo_interest_min_spend": 20.0,
     }
     # Ф3: порог релевантности НЕ отдельное число аудита — он ОДИН с генератором текстов.
     assert DEFAULT_AUDIT_THRESHOLDS["rsa_kw_coverage_min"] == MIN_KEYWORD_COVERAGE
