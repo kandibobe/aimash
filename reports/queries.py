@@ -1422,3 +1422,286 @@ def fetch_campaign_settings(client, customer_id: str, period) -> list[CampaignSe
             )
         )
     return out
+
+
+# ── Ф7: Performance Max ──────────────────────────────────────────────────────────────
+# У PMax НЕТ ad_group / ad_group_ad / keyword_view: привычные срезы Search тут не существуют, а
+# segments.keyword.* в SELECT молча ОТФИЛЬТРУЕТ все PMax-данные (дока по сегментации) — поэтому
+# поисковые запросы берём из campaign_search_term_view, а не из search_term_view (fetch_search_terms
+# PMax не видит вовсе). Метрики на asset_group — честная партиция кампании (сумма сходится); метрики
+# на asset_group_asset НЕ суммируемы (один показ висит на КАЖДОМ ассете комбинации) — не читаем их.
+
+
+@dataclass
+class PmaxSearchTermRow:
+    """Запрос, по которому показывалась PMax-кампания (campaign_search_term_view). Брендовость решает
+    ДВИЖОК (токены бренда — из профиля клиента §20, а не из Google Ads).
+
+    clicks — чтобы отличить «дорого и без результата» от «показы без кликов» (второе ставкой/минусом
+    не лечится: денег на клик там не потрачено)."""
+
+    search_term: str
+    cost: float
+    clicks: int
+    conversions: float
+
+
+@dataclass
+class PmaxCampaignRow:
+    """Ф7: PMax-кампания целиком — деньги за период + защита от мусорного трафика + брендовые запросы.
+
+    negatives — ОБЪЕДИНЕНИЕ трёх уровней (минус-слова прямо на кампании + подключённые минус-списки +
+    аккаунтные списки): аккаунтный список действует и на PMax, и не учесть его значит написать
+    «минус-слов нет» аккаунту, где они есть.
+    brand_exclusions — criterion типа BRAND/BRAND_LIST (SharedSet типа BRANDS). Механизм проверен по
+    прото v24: бренд-исключения PMax живут в SharedSet, а НЕ в AssetSet (BRAND_LIST там нет).
+    merchant_id — товарный фид (shopping_setting): для retail-PMax фид САМ является сигналом, поэтому
+    «нет сигналов» без учёта фида было бы ложной находкой. "" ⇒ фида нет.
+    days — длина периода: «мало конверсий» имеет смысл только в пересчёте на 30 дней.
+    """
+
+    campaign_id: str
+    campaign: str
+    cost: float
+    clicks: int
+    conversions: float
+    days: int
+    negatives: int
+    brand_exclusions: int
+    merchant_id: str = ""
+    search_terms: list[PmaxSearchTermRow] = field(default_factory=list)
+
+
+@dataclass
+class PmaxAssetGroupRow:
+    """Ф7: группа активов PMax + ЕЁ деньги (asset_group — честная партиция кампании).
+
+    ad_strength — оценка САМОГО Google («» когда не вернул ⇒ чек молчит, GR8).
+    action_items — [(тип ассета, сколько добавить)] из asset_coverage.ad_strength_action_items: Google
+    прямым текстом говорит, чего не хватает. Это сильнее самодельной «плотности ассетов» — её и не
+    считаем (порог «20 картинок» из головы дал бы ложные находки).
+    videos / videos_auto — СВОИ видео и авто-сгенерированные Google (asset_group_asset.source =
+    AUTOMATICALLY_CREATED). Считать их вместе — значит промолчать ровно там, где Google сам собрал
+    видео из картинок вместо рекламодателя, то есть в самом плохом случае.
+    """
+
+    campaign_id: str
+    campaign: str
+    asset_group_id: str
+    asset_group: str
+    ad_strength: str
+    cost: float
+    clicks: int
+    conversions: float
+    headlines: int
+    descriptions: int
+    images: int
+    logos: int
+    videos: int
+    videos_auto: int
+    search_themes: int
+    audiences: int
+    action_items: list[tuple[str, int]] = field(default_factory=list)
+
+
+_PMAX_CHANNEL = "campaign.advertising_channel_type = 'PERFORMANCE_MAX'"
+# Ассеты PMax по смыслу, а не по одному enum: HEADLINE и LONG_HEADLINE — оба заголовки, логотип бывает
+# трёх форм. Считаем группы, а не отдельные значения AssetFieldType.
+_PMAX_ASSET_BUCKETS = {
+    "HEADLINE": "headlines",
+    "LONG_HEADLINE": "headlines",
+    "DESCRIPTION": "descriptions",
+    "MARKETING_IMAGE": "images",
+    "SQUARE_MARKETING_IMAGE": "images",
+    "PORTRAIT_MARKETING_IMAGE": "images",
+    "TALL_PORTRAIT_MARKETING_IMAGE": "images",
+    "LOGO": "logos",
+    "LANDSCAPE_LOGO": "logos",
+    "BUSINESS_LOGO": "logos",
+    "YOUTUBE_VIDEO": "videos",
+}
+# Негативные criterion PMax: сами ключи, подключённый минус-список — и отдельно БРЕНД (другой смысл).
+_NEG_KEYWORD_TYPES = ("KEYWORD", "NEGATIVE_KEYWORD_LIST")
+_NEG_BRAND_TYPES = ("BRAND", "BRAND_LIST")
+
+
+def fetch_pmax_campaigns(
+    client, customer_id: str, period, limit: int = TOP_N
+) -> list[PmaxCampaignRow]:
+    """PMax-кампании: деньги за период + минус-слова (кампания ∪ списки ∪ аккаунт) + бренд-исключения
+    + поисковые запросы (campaign_search_term_view). Пусто → PMax в аккаунте нет; чеки семьи молчат.
+
+    Запросы к campaign_shared_set / customer_negative_criterion идут БЕЗ фильтра по каналу (матрица
+    selectable_with для них не проверена вживую) — пересечение с PMax считает КОД. READ-ONLY."""
+    ensure_read_allowed(customer_id)
+
+    rows: dict[str, PmaxCampaignRow] = {}
+    q = (
+        "SELECT campaign.id, campaign.name, campaign.shopping_setting.merchant_id, "
+        "metrics.cost_micros, metrics.clicks, metrics.conversions "
+        f"FROM campaign WHERE {_where(period, None)} AND campaign.status = 'ENABLED' "
+        f"AND {_PMAX_CHANNEL}"
+    )
+    for r in _search(client, customer_id, q):
+        merchant = int(getattr(r.campaign.shopping_setting, "merchant_id", 0) or 0)
+        rows[str(r.campaign.id)] = PmaxCampaignRow(
+            campaign_id=str(r.campaign.id),
+            campaign=r.campaign.name,
+            cost=int(r.metrics.cost_micros) / 1_000_000,
+            clicks=int(r.metrics.clicks),
+            conversions=float(r.metrics.conversions),
+            days=int(getattr(period, "days", 30) or 30),
+            negatives=0,
+            brand_exclusions=0,
+            merchant_id=str(merchant) if merchant else "",
+        )
+    if not rows:
+        return []
+
+    # Минусы и бренд-исключения ПРЯМО на кампании.
+    crit_q = (
+        "SELECT campaign.id, campaign_criterion.type FROM campaign_criterion "
+        f"WHERE {_PMAX_CHANNEL} AND campaign_criterion.negative = TRUE "
+        "AND campaign_criterion.status != 'REMOVED'"
+    )
+    for r in _search(client, customer_id, crit_q):
+        row = rows.get(str(r.campaign.id))
+        if row is None:
+            continue
+        t = _enum_name(r.campaign_criterion.type_)
+        if t in _NEG_KEYWORD_TYPES:
+            row.negatives += 1
+        elif t in _NEG_BRAND_TYPES:
+            row.brand_exclusions += 1
+
+    # Подключённые минус-списки (shared set) — по всем кампаниям, пересечение с PMax в коде.
+    shared_q = (
+        "SELECT campaign.id, shared_set.type FROM campaign_shared_set "
+        "WHERE campaign_shared_set.status != 'REMOVED'"
+    )
+    for r in _search(client, customer_id, shared_q):
+        row = rows.get(str(r.campaign.id))
+        if row is not None and _enum_name(r.shared_set.type_) == "NEGATIVE_KEYWORDS":
+            row.negatives += 1
+
+    # Аккаунтные минус-списки действуют на ВСЕ кампании, включая PMax.
+    acct_neg = sum(
+        1
+        for r in _search(
+            client,
+            customer_id,
+            "SELECT customer_negative_criterion.type FROM customer_negative_criterion",
+        )
+        if _enum_name(r.customer_negative_criterion.type_) == "NEGATIVE_KEYWORD_LIST"
+    )
+    if acct_neg:
+        for row in rows.values():
+            row.negatives += acct_neg
+
+    # Поисковые запросы PMax. segments.keyword.* сюда НЕ добавлять — он отфильтрует все PMax-строки.
+    st_q = (
+        "SELECT campaign.id, campaign_search_term_view.search_term, metrics.cost_micros, "
+        f"metrics.clicks, metrics.conversions FROM campaign_search_term_view "
+        f"WHERE {_where(period, None)} AND {_PMAX_CHANNEL} "
+        f"ORDER BY metrics.cost_micros DESC LIMIT {int(limit)}"
+    )
+    for r in _search(client, customer_id, st_q):
+        row = rows.get(str(r.campaign.id))
+        if row is None:
+            continue
+        row.search_terms.append(
+            PmaxSearchTermRow(
+                search_term=r.campaign_search_term_view.search_term,
+                cost=int(r.metrics.cost_micros) / 1_000_000,
+                clicks=int(r.metrics.clicks),
+                conversions=float(r.metrics.conversions),
+            )
+        )
+    return list(rows.values())
+
+
+def fetch_pmax_asset_groups(client, customer_id: str, period) -> list[PmaxAssetGroupRow]:
+    """Группы активов PMax: сила объявлений от Google + что Google просит добавить + состав ассетов +
+    поисковые темы + деньги группы. READ-ONLY."""
+    ensure_read_allowed(customer_id)
+
+    rows: dict[str, PmaxAssetGroupRow] = {}
+    q = (
+        "SELECT campaign.id, campaign.name, asset_group.id, asset_group.name, "
+        "asset_group.ad_strength, asset_group.asset_coverage "
+        f"FROM asset_group WHERE {_PMAX_CHANNEL} AND campaign.status = 'ENABLED' "
+        "AND asset_group.status = 'ENABLED'"
+    )
+    for r in _search(client, customer_id, q):
+        ag = r.asset_group
+        strength = _enum_name(ag.ad_strength)
+        items: list[tuple[str, int]] = []
+        for ai in getattr(getattr(ag, "asset_coverage", None), "ad_strength_action_items", []):
+            det = getattr(ai, "add_asset_details", None)
+            ft = _enum_name(getattr(det, "asset_field_type", ""))
+            n = int(getattr(det, "asset_count", 0) or 0)
+            if ft and ft not in ("UNSPECIFIED", "UNKNOWN") and n > 0:
+                items.append((ft, n))
+        rows[str(ag.id)] = PmaxAssetGroupRow(
+            campaign_id=str(r.campaign.id),
+            campaign=r.campaign.name,
+            asset_group_id=str(ag.id),
+            asset_group=ag.name,
+            ad_strength="" if strength in ("UNSPECIFIED", "UNKNOWN") else strength,
+            cost=0.0,
+            clicks=0,
+            conversions=0.0,
+            headlines=0,
+            descriptions=0,
+            images=0,
+            logos=0,
+            videos=0,
+            videos_auto=0,
+            search_themes=0,
+            audiences=0,
+            action_items=items,
+        )
+    if not rows:
+        return []
+
+    metrics_q = (
+        "SELECT asset_group.id, metrics.cost_micros, metrics.clicks, metrics.conversions "
+        f"FROM asset_group WHERE {_where(period, None)} AND {_PMAX_CHANNEL} "
+        "AND asset_group.status = 'ENABLED'"
+    )
+    for r in _search(client, customer_id, metrics_q):
+        row = rows.get(str(r.asset_group.id))
+        if row is not None:
+            row.cost += int(r.metrics.cost_micros) / 1_000_000
+            row.clicks += int(r.metrics.clicks)
+            row.conversions += float(r.metrics.conversions)
+
+    assets_q = (
+        "SELECT asset_group.id, asset_group_asset.field_type, asset_group_asset.source "
+        "FROM asset_group_asset WHERE asset_group_asset.status = 'ENABLED'"
+    )
+    for r in _search(client, customer_id, assets_q):
+        row = rows.get(str(r.asset_group.id))
+        bucket = _PMAX_ASSET_BUCKETS.get(_enum_name(r.asset_group_asset.field_type))
+        if row is None or not bucket:
+            continue
+        auto = _enum_name(getattr(r.asset_group_asset, "source", "")) == "AUTOMATICALLY_CREATED"
+        if bucket == "videos" and auto:
+            row.videos_auto += 1
+        else:
+            setattr(row, bucket, getattr(row, bucket) + 1)
+
+    signals_q = (
+        "SELECT asset_group.id, asset_group_signal.search_theme.text, "
+        "asset_group_signal.audience.audience FROM asset_group_signal"
+    )
+    for r in _search(client, customer_id, signals_q):
+        row = rows.get(str(r.asset_group.id))
+        if row is None:
+            continue
+        # Строка сигнала — ЛИБО поисковая тема, ЛИБО аудитория (oneof): у аудиторий text пустой.
+        if (r.asset_group_signal.search_theme.text or "").strip():
+            row.search_themes += 1
+        elif (getattr(r.asset_group_signal.audience, "audience", "") or "").strip():
+            row.audiences += 1
+    return list(rows.values())

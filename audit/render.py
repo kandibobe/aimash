@@ -20,6 +20,7 @@ _FAMILY_LABEL = {
         "delivery": "Показ и модерация",
         "geo": "Гео и таргетинг",
         "assets": "Расширения",
+        "pmax": "Performance Max",
     },
     "en": {
         "waste": "Wasted spend",
@@ -32,6 +33,7 @@ _FAMILY_LABEL = {
         "delivery": "Delivery & policy",
         "geo": "Geo & targeting",
         "assets": "Assets",
+        "pmax": "Performance Max",
     },
 }
 
@@ -48,6 +50,7 @@ _SIGNAL_LABEL = {
         "recommendations": "рекомендации Google",
         "ad_policy": "модерация объявлений",
         "bid_landscape": "ставки и оценки позиций",
+        "pmax": "Performance Max (группы активов)",
     },
     "en": {
         "impression_share": "impression share",
@@ -58,6 +61,7 @@ _SIGNAL_LABEL = {
         "recommendations": "Google recommendations",
         "ad_policy": "ad policy status",
         "bid_landscape": "bids & position estimates",
+        "pmax": "Performance Max (asset groups)",
     },
 }
 
@@ -442,6 +446,66 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
         if lang == "en":
             return f"{fa.get('count', 0)} time slot(s) spend {_money(fa.get('cost', 0), cur)} with 0 conversions (worst {fa.get('worst_day', '')} @ {fa.get('worst_hour', 0)}h) — adjust ad schedule/bids by time."
         return f"{fa.get('count', 0)} временных ячеек тратят {_money(fa.get('cost', 0), cur)} при 0 конверсий (худшая {fa.get('worst_day', '')} в {fa.get('worst_hour', 0)}ч) — настрой расписание/ставки по времени."
+    # ── Ф7: Performance Max ──
+    if f.check_id == "pmax_search_term_waste":
+        term = fa.get("search_term", "")
+        if lang == "en":
+            return f"«{camp}» / PMax query «{term}»: {_money(fa.get('cost', 0), cur)}, {fa.get('clicks', 0)} clicks, 0 conversions — add as an exact negative (PMax takes campaign-level negatives)."
+        return f"«{camp}» / запрос PMax «{term}»: {_money(fa.get('cost', 0), cur)}, {fa.get('clicks', 0)} кликов, 0 конверсий — в минус-слова точным соответствием (PMax принимает минусы на уровне кампании)."
+    if f.check_id == "pmax_asset_group_no_conv":
+        ex = ", ".join(fa.get("examples", []))
+        if lang == "en":
+            return f"«{camp}»: {fa.get('groups', 0)} asset group(s) burn {_money(fa.get('cost', 0), cur)} with clicks but 0 conversions while the campaign does convert ({ex}) — they take budget from the working groups: rework the creatives/signals or pause the group."
+        return f"«{camp}»: {fa.get('groups', 0)} групп(ы) активов жгут {_money(fa.get('cost', 0), cur)} с кликами и 0 конверсий, хотя кампания конвертит ({ex}) — они забирают бюджет у рабочих групп: переделай креативы/сигналы или выключи группу."
+    if f.check_id == "pmax_brand_cannibalization":
+        ex = ", ".join(fa.get("examples", []))
+        if fa.get("brand_excluded"):
+            if lang == "en":
+                return f"«{camp}»: {fa.get('brand_share', 0)}% of conversions come from brand queries ({ex}) even though a brand exclusion is set — the list is too narrow: extend it, otherwise PMax keeps claiming traffic your brand campaign would win anyway."
+            return f"«{camp}»: {fa.get('brand_share', 0)}% конверсий — с брендовых запросов ({ex}), хотя исключение бренда включено — список слишком узкий: расширь его, иначе PMax и дальше присваивает трафик, который взяла бы брендовая кампания."
+        if lang == "en":
+            return f"«{camp}»: {fa.get('brand_share', 0)}% of conversions come from brand queries ({ex}) — PMax is claiming your cheapest traffic and its ROAS looks better than it is. Turn on brand exclusions (Shared set «Brands»)."
+        return f"«{camp}»: {fa.get('brand_share', 0)}% конверсий — с брендовых запросов ({ex}) — PMax присваивает самый дешёвый трафик, и его ROAS выглядит лучше, чем есть. Включи исключение бренда (общий список «Бренды»)."
+    if f.check_id == "pmax_ad_strength_poor":
+        ag = fa.get("asset_group", "")
+        items = ", ".join(fa.get("action_items", []))
+        add = (
+            (f" Google asks for: {items}." if items else "")
+            if lang == "en"
+            else (f" Google просит добавить: {items}." if items else "")
+        )
+        if lang == "en":
+            return f"«{camp}» / «{ag}»: Google rates the ad strength as {fa.get('ad_strength', '')} — with a weak asset group PMax has nothing to combine.{add}"
+        return f"«{camp}» / «{ag}»: Google оценивает силу объявлений как {fa.get('ad_strength', '')} — комбинировать нечего.{add}"
+    if f.check_id == "pmax_no_video":
+        ag = fa.get("asset_group", "")
+        auto = int(fa.get("videos_auto", 0) or 0)
+        if lang == "en":
+            tail = (
+                f" Google auto-generated {auto} video(s) from your images instead — that is the worst possible video."
+                if auto
+                else " Google will auto-generate one from your images — that is the worst possible video."
+            )
+            return f"«{camp}» / «{ag}»: no video of your own.{tail} Upload a 10–15s vertical + horizontal video."
+        tail = (
+            f" Google уже собрал {auto} видео из твоих картинок — это худшее из возможных видео."
+            if auto
+            else " Google соберёт его сам из картинок — это худшее из возможных видео."
+        )
+        return f"«{camp}» / «{ag}»: своего видео нет.{tail} Загрузи 10–15-секундное вертикальное + горизонтальное."
+    if f.check_id == "pmax_no_signals":
+        ag = fa.get("asset_group", "")
+        if lang == "en":
+            return f"«{camp}» / «{ag}»: no signals at all — no search themes, no audiences, no product feed. PMax is learning from scratch on your budget: add 3–5 search themes and an audience signal."
+        return f"«{camp}» / «{ag}»: нет ни одного сигнала — ни поисковых тем, ни аудиторий, ни товарного фида. PMax учится с нуля на твои деньги: добавь 3–5 поисковых тем и сигнал аудитории."
+    if f.check_id == "pmax_no_negatives":
+        if lang == "en":
+            return f"«{camp}»: PMax spends {_money(fa.get('cost', 0), cur)} without a single negative keyword (campaign, list or account level) — it will pay for «free», «jobs», «diy» sooner or later."
+        return f"«{camp}»: PMax тратит {_money(fa.get('cost', 0), cur)} без единого минус-слова (ни на кампании, ни списком, ни на аккаунте) — рано или поздно заплатит за «бесплатно», «вакансии», «своими руками»."
+    if f.check_id == "pmax_insufficient_conversions":
+        if lang == "en":
+            return f"{fa.get('campaigns', 0)} PMax campaigns, and each gets fewer than {fa.get('need', 30)} conversions per 30 days (best {fa.get('best', 0)}) — the signal is split, none of them learns. Merge them into one."
+        return f"{fa.get('campaigns', 0)} PMax-кампании, и каждая набирает меньше {fa.get('need', 30)} конверсий за 30 дней (лучшая — {fa.get('best', 0)}) — сигнал делится, не учится ни одна. Объедини их в одну."
     return camp or f.check_id
 
 

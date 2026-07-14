@@ -163,6 +163,11 @@ class _Ctx:
     # Ф6.2: настройки сетей + тип гео-таргетинга ENABLED-кампаний (+ расход по сети КМС внутри
     # кампании). None → не читано ⇒ G12/G11 молчат: галочку не видно — значит не видно, а не «выкл».
     campaign_settings: list | None = None
+    # Ф7: PMax — кампании (деньги, минусы, бренд-исключения, фид, топ поисковых запросов) и группы
+    # активов (оценка Google + состав ассетов + сигналы + деньги группы). None → не читано ⇒ вся
+    # семья молчит. [] → PMax в аккаунте НЕТ: это не пробел данных, а факт (в data_gaps не идёт).
+    pmax_campaigns: list | None = None
+    pmax_asset_groups: list | None = None
 
     def target_for(self, campaign_name: str) -> float | None:
         """Цель CPA для кампании: пер-кампанийная стратегия (tCPA) побеждает глобальный /target."""
@@ -2366,6 +2371,353 @@ def check_geo_interest_waste(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     return out
 
 
+# ── Ф7: Performance Max ──────────────────────────────────────────────────────────────
+# ⚠️ ДЕНЬГИ PMax НЕ СУММИРУЮТСЯ. Расход поисковых запросов ⊂ расход групп активов ⊂ расход кампании:
+# это ОДНИ И ТЕ ЖЕ деньги, посчитанные с разных сторон. Поэтому у обоих денежных чеков
+# spend_segment = ИМЯ КАМПАНИИ — _dedup_at_risk берёт по сегменту МАКСИМУМ, а не сумму. Дать им
+# разные сегменты значит вернуть ровно тот дефект двойного счёта, из-за которого чинили эпоху 4.
+# Поисковые запросы PMax живут только в campaign_search_term_view: fetch_search_terms их НЕ ВИДИТ
+# (segments.keyword.* отфильтровывает PMax), поэтому wasteful_search_term тут молчит и не дублирует.
+
+
+def check_pmax_search_term_waste(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф7: поисковый запрос PMax с расходом ≥ порога и кликами, но 0 конверсий → в минус-слова.
+    PMax принимает минус-слова НА УРОВНЕ КАМПАНИИ (campaign_criterion) — операция одна и та же,
+    поэтому находка one-tap: match_type=exact режет только этот запрос.
+
+    Сегмент денег — кампания (не запрос): расход запроса ⊂ расход группы активов той же кампании,
+    иначе pmax_asset_group_no_conv и этот чек сложили бы одни деньги дважды."""
+    rows = ctx.pmax_campaigns or []
+    min_spend = float(thr["kw_min_spend"])
+    cur = getattr(report, "currency", "")
+    out: list[Finding] = []
+    for c in rows:
+        for st in getattr(c, "search_terms", []) or []:
+            cost = float(getattr(st, "cost", 0.0) or 0.0)
+            if cost < min_spend or int(getattr(st, "clicks", 0) or 0) <= 0:
+                continue
+            if float(getattr(st, "conversions", 0.0) or 0.0) > 0:
+                continue
+            term = getattr(st, "search_term", "") or ""
+            if not term:
+                continue
+            out.append(
+                Finding(
+                    check_id="pmax_search_term_waste",
+                    family="keywords",
+                    severity="warning",
+                    at_risk=round(cost, 2),
+                    spend_segment=c.campaign,
+                    target_campaign=c.campaign,
+                    suggested_operation="add_negative_keywords",
+                    facts={
+                        "campaign": c.campaign,
+                        "search_term": term,
+                        "cost": round(cost, 2),
+                        "clicks": int(getattr(st, "clicks", 0) or 0),
+                        "currency": cur,
+                    },
+                    evidence={
+                        "keyword": term,
+                        "match_type": "exact",
+                        "cost": round(cost, 2),
+                        "clicks": int(getattr(st, "clicks", 0) or 0),
+                    },
+                )
+            )
+    out.sort(key=lambda f: -float(f.evidence.get("cost", 0) or 0))
+    return out[: int(thr.get("kw_top_n", 5))]
+
+
+def check_pmax_asset_group_no_conv(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф7: группа активов PMax тратит и кликает, но не конвертит — ВНУТРИ кампании, которая в целом
+    конвертит. Группы делят один бюджет кампании: пустая группа забирает показы у работающей.
+
+    Флажим только при живых конверсиях кампании (GR8): если не конвертит ВСЯ кампания, дело не в
+    группе — про это говорит spend_no_conv/high_cpa, и дублировать их находку нельзя. Клики > 0:
+    группа без кликов деньги не жгла. at_risk = расход неконвертящих групп (⊂ расход кампании)."""
+    groups = ctx.pmax_asset_groups
+    camps = ctx.pmax_campaigns
+    if not groups or not camps:
+        return []
+    conv_by_camp = {c.campaign_id: float(getattr(c, "conversions", 0.0) or 0.0) for c in camps}
+    min_spend = float(thr.get("pmax_min_spend", 20.0))
+    cur = getattr(report, "currency", "")
+    per: dict[str, dict] = {}
+    for g in groups:
+        if conv_by_camp.get(g.campaign_id, 0.0) <= 0:
+            continue
+        cost = float(getattr(g, "cost", 0.0) or 0.0)
+        if cost < min_spend or int(getattr(g, "clicks", 0) or 0) <= 0:
+            continue
+        if float(getattr(g, "conversions", 0.0) or 0.0) > 0:
+            continue
+        d = per.setdefault(g.campaign, {"cost": 0.0, "names": []})
+        d["cost"] += cost
+        d["names"].append(g.asset_group)
+    out: list[Finding] = []
+    for camp, d in sorted(per.items(), key=lambda kv: -kv[1]["cost"]):
+        out.append(
+            Finding(
+                check_id="pmax_asset_group_no_conv",
+                family="waste",
+                severity="warning",
+                at_risk=round(d["cost"], 2),
+                spend_segment=camp,
+                target_campaign=camp,
+                suggested_operation=None,  # группы активов PMax через API не паузим — правка вручную
+                facts={
+                    "campaign": camp,
+                    "groups": len(d["names"]),
+                    "examples": sorted(d["names"])[:3],
+                    "cost": round(d["cost"], 2),
+                    "currency": cur,
+                },
+                evidence={"cost": round(d["cost"], 2)},
+            )
+        )
+    return out
+
+
+def check_pmax_brand_cannibalization(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф7 (G-PM3 + G07): PMax собирает конверсии с БРЕНДОВЫХ запросов. Бренд — самый дешёвый трафик:
+    человек уже искал вас по имени и пришёл бы всё равно. PMax присваивает эту конверсию себе, её
+    ROAS выглядит блестящим, и бюджет перетекает туда с настоящего поискового спроса.
+
+    Бренд-токены — только из профиля клиента (§20); профиля нет → чек МОЛЧИТ (угадывать бренд нечем).
+    at_risk=0: деньги не сгорают, искажена АТРИБУЦИЯ. Оценка доли КОНСЕРВАТИВНА — брендовые конверсии
+    считаем по топ-N запросов (фетчер режет по расходу), а долю берём от ВСЕХ конверсий кампании.
+    brand_excluded (есть ли исключение бренда, SharedSet BRANDS) меняет совет: без него — «включите
+    исключение бренда», с ним — «оно есть, но конверсии всё равно брендовые, проверьте список»."""
+    rows = ctx.pmax_campaigns
+    brands = ctx.brand_terms
+    if not rows or not brands:
+        return []
+    min_conv = float(thr.get("pmax_brand_min_conv", 3.0))
+    min_share = float(thr.get("pmax_brand_conv_share", 0.30))
+    cur = getattr(report, "currency", "")
+    out: list[Finding] = []
+    for c in rows:
+        total_conv = float(getattr(c, "conversions", 0.0) or 0.0)
+        if total_conv <= 0:
+            continue
+        brand_conv = 0.0
+        brand_cost = 0.0
+        examples: list[str] = []
+        for st in getattr(c, "search_terms", []) or []:
+            term = getattr(st, "search_term", "") or ""
+            if not (set(t_tokens(term)) & brands):
+                continue
+            brand_conv += float(getattr(st, "conversions", 0.0) or 0.0)
+            brand_cost += float(getattr(st, "cost", 0.0) or 0.0)
+            examples.append(term)
+        share = brand_conv / total_conv if total_conv else 0.0
+        if brand_conv < min_conv or share < min_share:
+            continue
+        out.append(
+            Finding(
+                check_id="pmax_brand_cannibalization",
+                family="structure",
+                severity="warning",
+                at_risk=0.0,  # атрибуция, а не сожжённые деньги
+                spend_segment=None,
+                target_campaign=c.campaign,
+                suggested_operation=None,
+                facts={
+                    "campaign": c.campaign,
+                    "brand_share": round(100.0 * share),
+                    "brand_conv": round(brand_conv, 1),
+                    "brand_cost": round(brand_cost, 2),
+                    "brand_excluded": bool(getattr(c, "brand_exclusions", 0)),
+                    "examples": sorted(set(examples))[:3],
+                    "currency": cur,
+                },
+                evidence={"cost": round(brand_cost, 2)},
+            )
+        )
+    return out
+
+
+def _pmax_spending_groups(ctx: _Ctx, thr: dict) -> list:
+    """Группы активов PMax с расходом ≥ порога: спящая группа — не дефект, а ещё не запущенная."""
+    min_spend = float(thr.get("pmax_min_spend", 20.0))
+    return [
+        g
+        for g in (ctx.pmax_asset_groups or [])
+        if float(getattr(g, "cost", 0.0) or 0.0) >= min_spend
+    ]
+
+
+def check_pmax_ad_strength_poor(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф7 (G-PM2): сам Google оценил группу активов как POOR/NO_ADS. AVERAGE не флажим — это половина
+    живых групп, находка была бы шумом (тот же принцип, что в rsa_ad_strength_poor).
+
+    Чего именно не хватает — тоже говорит Google: asset_coverage.ad_strength_action_items («добавьте
+    N ассетов типа X»). Своей «плотности ассетов» (20 картинок / 5 лого) НЕ считаем: это лимиты
+    слотов Google, а не порог качества — порог из головы дал бы ложные находки."""
+    rows = [
+        g
+        for g in _pmax_spending_groups(ctx, thr)
+        if getattr(g, "ad_strength", "") in ("POOR", "NO_ADS")
+    ]
+    rows.sort(key=lambda g: -float(getattr(g, "cost", 0.0) or 0.0))
+    cur = getattr(report, "currency", "")
+    out: list[Finding] = []
+    for g in rows[:3]:
+        items = [f"{t}×{n}" for t, n in (getattr(g, "action_items", []) or [])][:3]
+        out.append(
+            Finding(
+                check_id="pmax_ad_strength_poor",
+                family="pmax",
+                severity="info",
+                at_risk=0.0,
+                spend_segment=None,
+                target_campaign=g.campaign,
+                suggested_operation=None,
+                facts={
+                    "campaign": g.campaign,
+                    "asset_group": g.asset_group,
+                    "ad_strength": g.ad_strength,
+                    "action_items": items,
+                    "cost": round(float(getattr(g, "cost", 0.0) or 0.0), 2),
+                    "currency": cur,
+                },
+                evidence={"cost": round(float(getattr(g, "cost", 0.0) or 0.0), 2)},
+            )
+        )
+    return out
+
+
+def check_pmax_no_video(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф7 (G32): в группе активов нет СВОЕГО видео. Google всё равно покажет видео на YouTube — он
+    соберёт его сам из картинок (source = AUTOMATICALLY_CREATED), и это худшее из возможных видео.
+    Считать авто-видео за своё нельзя: чек промолчал бы ровно в самом плохом случае."""
+    out: list[Finding] = []
+    for g in _pmax_spending_groups(ctx, thr):
+        if int(getattr(g, "videos", 0) or 0) > 0:
+            continue
+        out.append(
+            Finding(
+                check_id="pmax_no_video",
+                family="pmax",
+                severity="info",
+                at_risk=0.0,
+                spend_segment=None,
+                target_campaign=g.campaign,
+                suggested_operation=None,
+                facts={
+                    "campaign": g.campaign,
+                    "asset_group": g.asset_group,
+                    "videos_auto": int(getattr(g, "videos_auto", 0) or 0),
+                },
+                evidence={"cost": round(float(getattr(g, "cost", 0.0) or 0.0), 2)},
+            )
+        )
+    return out
+
+
+def check_pmax_no_signals(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф7 (G-PM4): группа активов без ЕДИНОГО сигнала — ни поисковых тем, ни аудиторий — и кампания
+    без товарного фида. Google учится с нуля, тратя бюджет на разведку.
+
+    Все три условия обязательны: аудитория — такой же сигнал, что и тема, а у retail-PMax сигналом
+    служит сам фид (merchant_id). Проверять одни search_themes значило бы врать двум типам кампаний."""
+    feed = {c.campaign_id: bool(getattr(c, "merchant_id", "")) for c in (ctx.pmax_campaigns or [])}
+    out: list[Finding] = []
+    for g in _pmax_spending_groups(ctx, thr):
+        if int(getattr(g, "search_themes", 0) or 0) > 0 or int(getattr(g, "audiences", 0) or 0) > 0:
+            continue
+        if feed.get(g.campaign_id, False):
+            continue
+        out.append(
+            Finding(
+                check_id="pmax_no_signals",
+                family="pmax",
+                severity="info",
+                at_risk=0.0,
+                spend_segment=None,
+                target_campaign=g.campaign,
+                suggested_operation=None,
+                facts={"campaign": g.campaign, "asset_group": g.asset_group},
+                evidence={"cost": round(float(getattr(g, "cost", 0.0) or 0.0), 2)},
+            )
+        )
+    return out
+
+
+def check_pmax_no_negatives(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф7 (G-PM6): у PMax-кампании с расходом нет НИ ОДНОГО минус-слова — ни своего, ни через список,
+    ни аккаунтного. PMax тянет трафик из всех сетей; без минусов он неизбежно платит за «бесплатно»,
+    «вакансии», «своими руками». info, а не warning: сожжённые деньги доказывает
+    pmax_search_term_waste — этот чек про отсутствующую защиту, а не про факт потери."""
+    min_spend = float(thr.get("pmax_min_spend", 20.0))
+    out: list[Finding] = []
+    for c in ctx.pmax_campaigns or []:
+        cost = float(getattr(c, "cost", 0.0) or 0.0)
+        if cost < min_spend or int(getattr(c, "negatives", 0) or 0) > 0:
+            continue
+        out.append(
+            Finding(
+                check_id="pmax_no_negatives",
+                family="pmax",
+                severity="info",
+                at_risk=0.0,
+                spend_segment=None,
+                target_campaign=c.campaign,
+                suggested_operation=None,
+                facts={
+                    "campaign": c.campaign,
+                    "cost": round(cost, 2),
+                    "currency": getattr(report, "currency", ""),
+                },
+                evidence={"cost": round(cost, 2)},
+            )
+        )
+    return out
+
+
+def check_pmax_insufficient_conversions(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф7 (G-PM7): НЕСКОЛЬКО PMax-кампаний, и каждая набирает меньше 30 конверсий за 30 дней — сигнал
+    делится на всех, и не учится ни одна. Лечится слиянием.
+
+    Одна кампания ниже порога — МОЛЧИМ: это «мало спроса», а не ошибка настройки, и лекарства у нас
+    нет (совет «получите больше конверсий» — вода). Период < 14 дней — тоже молчим: экстраполяция
+    двух недель на месяц слишком шумная, чтобы называть это находкой."""
+    rows = [c for c in (ctx.pmax_campaigns or []) if float(getattr(c, "cost", 0.0) or 0.0) > 0]
+    if len(rows) < 2:
+        return []
+    min_days = int(thr.get("pmax_min_days", 14))
+    need = float(thr.get("pmax_learn_min_conv", 30.0))
+    if any(int(getattr(c, "days", 0) or 0) < min_days for c in rows):
+        return []
+    per_month = {
+        c.campaign: float(getattr(c, "conversions", 0.0) or 0.0)
+        * 30.0
+        / max(int(getattr(c, "days", 30) or 30), 1)
+        for c in rows
+    }
+    if any(v >= need for v in per_month.values()):
+        return []
+    return [
+        Finding(
+            check_id="pmax_insufficient_conversions",
+            family="pmax",
+            severity="info",
+            at_risk=0.0,
+            spend_segment=None,
+            target_campaign=None,
+            suggested_operation=None,
+            facts={
+                "campaigns": len(rows),
+                "need": int(need),
+                "worst": round(min(per_month.values()), 1),
+                "best": round(max(per_month.values()), 1),
+            },
+            evidence={"cost": round(sum(float(getattr(c, "cost", 0.0) or 0.0) for c in rows), 2)},
+        )
+    ]
+
+
 # Порядок проверок = порядок запуска (на рендер не влияет — там сортировка по важности).
 _CHECKS = (
     check_no_conversion_tracking,
@@ -2412,6 +2764,14 @@ _CHECKS = (
     check_google_recommendations,
     check_geo_no_conv,
     check_schedule_waste,
+    check_pmax_search_term_waste,
+    check_pmax_asset_group_no_conv,
+    check_pmax_brand_cannibalization,
+    check_pmax_ad_strength_poor,
+    check_pmax_no_video,
+    check_pmax_no_signals,
+    check_pmax_no_negatives,
+    check_pmax_insufficient_conversions,
 )
 
 # N1.0a: полный реестр эмитируемых проверок check_id → (family, severity) — входит в версию
@@ -2483,6 +2843,19 @@ CHECK_REGISTRY: dict[str, tuple[str, str]] = {
     "google_recommendations_pending": ("recommendations", "info"),
     "geo_no_conv": ("geo", "warning"),
     "schedule_waste": ("geo", "info"),
+    # Ф7 (PMax). ДЕНЕЖНЫЕ два — и они живут в СВОИХ семьях (waste/keywords), потому что деньги горят
+    # одинаково в любом канале. Остальные пять — конфигурация PMax: семья «pmax», намеренно вне
+    # FAMILY_WEIGHT (вес 0, как competition/recommendations) — покажем в карточке, но баллом не
+    # штрафуем, пока вес не назначен ОСОЗНАННО в Ф8 (иначе PMax-аккаунт просядет на ровном месте).
+    # Каннибализация бренда — «structure» и warning: это ровно тот же дефект, что brand_nonbrand_mixed.
+    "pmax_search_term_waste": ("keywords", "warning"),
+    "pmax_asset_group_no_conv": ("waste", "warning"),
+    "pmax_brand_cannibalization": ("structure", "warning"),
+    "pmax_ad_strength_poor": ("pmax", "info"),
+    "pmax_no_video": ("pmax", "info"),
+    "pmax_no_signals": ("pmax", "info"),
+    "pmax_no_negatives": ("pmax", "info"),
+    "pmax_insufficient_conversions": ("pmax", "info"),
 }
 CHECK_IDS = frozenset(CHECK_REGISTRY)
 
@@ -2588,6 +2961,8 @@ def build_audit(
     brand_terms: set | None = None,
     campaign_assets: list | None = None,
     campaign_settings: list | None = None,
+    pmax_campaigns: list | None = None,
+    pmax_asset_groups: list | None = None,
 ) -> AuditResult:
     """Собрать аудит по УЖЕ прочитанным данным. Чистая функция (без сети/SDK). Опц. живые данные
     (is_rows / conversion_actions / bidding / optimization_score / recommendations) — duck-typed,
@@ -2661,6 +3036,8 @@ def build_audit(
         brand_terms=brand_terms,
         campaign_assets=campaign_assets,
         campaign_settings=campaign_settings,
+        pmax_campaigns=pmax_campaigns,
+        pmax_asset_groups=pmax_asset_groups,
     )
 
     # N1.3 (ревью): IS-строки прочитаны, но НИ ОДНА не прошла tolerance-гейт (proto3-нули) —

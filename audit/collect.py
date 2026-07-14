@@ -46,6 +46,8 @@ async def gather_audit(
         fetch_keyword_quality,
         fetch_negative_lists,
         fetch_optimization_score,
+        fetch_pmax_asset_groups,
+        fetch_pmax_campaigns,
         fetch_recommendations,
         fetch_rsa_assets,
         fetch_schedule,
@@ -86,6 +88,8 @@ async def gather_audit(
         kw_inventory,
         campaign_assets,
         campaign_settings,
+        pmax_campaigns,
+        pmax_asset_groups,
     ) = await asyncio.gather(
         build_account_report_async(client, cid, period, with_comparison=False, currency=currency),
         _safe(fetch_impression_share, client, cid, period, label="audit_is"),
@@ -108,6 +112,8 @@ async def gather_audit(
         _safe(fetch_keyword_inventory, client, cid, period, label="audit_keyword_inventory"),
         _safe(fetch_campaign_assets, client, cid, label="audit_campaign_assets"),
         _safe(fetch_campaign_settings, client, cid, period, label="audit_campaign_settings"),
+        _safe(fetch_pmax_campaigns, client, cid, period, label="audit_pmax_campaigns"),
+        _safe(fetch_pmax_asset_groups, client, cid, period, label="audit_pmax_asset_groups"),
     )
 
     # Ф6 (G05): бренд-токены из профиля клиента (§20) — локальная БД, не Google Ads (в gather выше
@@ -146,6 +152,10 @@ async def gather_audit(
         )
         if val is None
     ]
+    # Ф7: два чтения — один сигнал (семья pmax слепа, если не прочитано ЛЮБОЕ из них). Пустой список
+    # («PMax в аккаунте нет») пробелом НЕ считается: это факт, а не отсутствие данных.
+    if pmax_campaigns is None or pmax_asset_groups is None:
+        data_gaps.append("pmax")
     # Симуляторы Google в data_gaps НЕ идут: их отсутствие — норма (Google строит их только при
     # достаточных данных и только на ручных ставках), а не сбой чтения. Пометив пробелом, мы бы
     # написали «данных нет» здоровому аккаунту без симуляторов.
@@ -176,6 +186,8 @@ async def gather_audit(
         brand_terms=brand_terms,
         campaign_assets=campaign_assets,
         campaign_settings=campaign_settings,
+        pmax_campaigns=pmax_campaigns,
+        pmax_asset_groups=pmax_asset_groups,
     )
 
 
