@@ -51,8 +51,8 @@ def _report(totals: Metrics, campaign_rows=(), keyword_rows=(), ad_rows=(), curr
 
 
 def test_golden_score_and_grade():
-    """Один waste-финдинг на 50% расхода → штраф 30×0.5=15 → score 85 (B), at_risk 500.
-    ЖЁСТКО пинует модель score: смена веса waste (30) или SEVERITY_MULT сразу ломает тест (C1)."""
+    """Один waste-финдинг на 50% расхода → штраф 28×0.5=14 → score 86 (B), at_risk 500.
+    ЖЁСТКО пинует модель score: смена веса waste (28) или SEVERITY_MULT сразу ломает тест (C1)."""
     totals = Metrics(impressions=3000, clicks=300, cost_micros=1_000_000_000, conversions=5)
     rows = [
         (
@@ -65,7 +65,7 @@ def test_golden_score_and_grade():
         ),
     ]
     res = build_audit(_report(totals, rows))
-    assert res.score == 85
+    assert res.score == 86
     assert res.grade == "B"
     assert res.at_risk == 500.0
     assert res.total_spend == 1000.0
@@ -537,7 +537,7 @@ def test_audit_headline_empty_and_active():
         ),
     ]
     hl = audit_headline(build_audit(_report(totals, rows)), "ru")
-    assert "85/100" in hl and "· B" in hl and "/audit" in hl and "под риском" in hl
+    assert "86/100" in hl and "· B" in hl and "/audit" in hl and "под риском" in hl
 
 
 def test_wasteful_search_term_mining():
@@ -794,7 +794,7 @@ _ACTION = SimpleNamespace(status="ENABLED", primary_for_goal=True, name="Purchas
 _GOLDEN_MATRIX = [
     # (метка, totals, campaign_rows, kwargs, score, grade, at_risk)
     (
-        "A",  # один мелкий слив 20% расхода → waste 30×0.2=6 → 94
+        "A",  # один мелкий слив 20% расхода → waste 28×0.2=5.6 → 94
         Metrics(impressions=3000, clicks=300, cost_micros=1_000_000_000, conversions=5),
         [_campaign("Small-Waste", 200, 40, 0), _campaign("Main", 800, 260, 5, imps=2000)],
         {},
@@ -803,16 +803,16 @@ _GOLDEN_MATRIX = [
         200.0,
     ),
     (
-        "B",  # клон исходного golden: слив 50% → waste 15 → 85
+        "B",  # клон исходного golden: слив 50% → waste 28×0.5=14 → 86
         Metrics(impressions=3000, clicks=300, cost_micros=1_000_000_000, conversions=5),
         [_campaign("Brand", 500, 100, 0), _campaign("Generic", 500, 200, 5, imps=2000)],
         {},
-        85,
+        86,
         "B",
         500.0,
     ),
     (
-        "C",  # два слива 50%+30% → waste 30×0.8=24 → 76
+        "C",  # два слива 50%+30% → waste 28×0.8=22.4 → 78
         Metrics(impressions=3000, clicks=190, cost_micros=1_000_000_000, conversions=4),
         [
             _campaign("Brand", 500, 100, 0),
@@ -820,21 +820,22 @@ _GOLDEN_MATRIX = [
             _campaign("Main", 200, 40, 4),
         ],
         {},
-        76,
+        78,
         "C",
         800.0,
     ),
     (
-        "D",  # полный слив (30) + zero_conversions при живом трекинге (20) → ровно 50 (граница D)
+        "D",  # полный слив (waste 28) + zero_conversions при живом трекинге (critical, но семья и так
+        # насыщена: 1.5×1.0 → min(1,·) → conversion_tracking 18) → 54
         Metrics(impressions=6000, clicks=300, cost_micros=1_000_000_000, conversions=0),
         [_campaign("A", 500, 150, 0, imps=3000), _campaign("B", 500, 150, 0, imps=3000)],
         {"conversion_actions": [_ACTION]},
-        50,
+        54,
         "D",
         1000.0,
     ),
     (
-        "F",  # D + два дорогих ключа (keywords 10×0.4=4) → 46
+        "F",  # D + два дорогих ключа по 40% расхода (keywords 10×0.8=8) → 46
         Metrics(impressions=6000, clicks=300, cost_micros=1_000_000_000, conversions=0),
         [_campaign("A", 500, 150, 0, imps=3000), _campaign("B", 500, 150, 0, imps=3000)],
         {
@@ -842,11 +843,11 @@ _GOLDEN_MATRIX = [
             "keyword_rows": [
                 (
                     ("A", "grp", "kw1", "PHRASE"),
-                    Metrics(impressions=500, clicks=40, cost_micros=200_000_000, conversions=0),
+                    Metrics(impressions=500, clicks=40, cost_micros=400_000_000, conversions=0),
                 ),
                 (
                     ("B", "grp", "kw2", "PHRASE"),
-                    Metrics(impressions=500, clicks=40, cost_micros=200_000_000, conversions=0),
+                    Metrics(impressions=500, clicks=40, cost_micros=400_000_000, conversions=0),
                 ),
             ],
         },
@@ -873,19 +874,20 @@ def test_weight_vector_snapshot_pins_full_model():
     """N1.0b: полный вектор констант модели — точным равенством. Правка ЛЮБОГО веса/порога обязана
     осознанно править этот тест (и тем самым — версию модели N1.0a), а не молча сдвигать grade."""
     assert FAMILY_WEIGHT == {
-        "waste": 30.0,
-        "conversion_tracking": 20.0,
-        "budget": 10.0,
+        "waste": 28.0,
+        "conversion_tracking": 18.0,
         "keywords": 10.0,
-        "geo": 8.0,
+        "budget": 9.0,
+        "geo": 7.0,
         "rsa": 7.0,
         "delivery": 6.0,
         "structure": 5.0,
         "bidding": 4.0,
-        "assets": 0.0,
+        "assets": 3.0,
+        "pmax": 3.0,
     }
     assert sum(FAMILY_WEIGHT.values()) == 100.0
-    assert SEVERITY_MULT == {"warning": 1.0, "info": 0.4}
+    assert SEVERITY_MULT == {"critical": 1.5, "warning": 1.0, "info": 0.4}
     assert NONMONEY_INTENSITY == 0.5
     assert GRADE_BANDS == ((90.0, "A"), (80.0, "B"), (65.0, "C"), (50.0, "D"), (0.0, "F"))
     assert DEFAULT_AUDIT_THRESHOLDS == {
@@ -1345,7 +1347,7 @@ def test_account_status_banner_over_score_not_suppressed():
     assert build_audit(_report(totals, rows)).account_status is None
     # SUSPENDED → баннер НАД score, score НЕ подавлен
     res = build_audit(_report(totals, rows), account_status="SUSPENDED")
-    assert res.account_status == "SUSPENDED" and res.score == 85
+    assert res.account_status == "SUSPENDED" and res.score == 86
     card = render_audit(res, "ru")
     assert "показы остановлены" in card
     assert card.index("показы остановлены") < card.index(f"{res.score}/100")

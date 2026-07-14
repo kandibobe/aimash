@@ -37,7 +37,7 @@ _FAMILY_LABEL = {
     },
 }
 
-_SEV_EMOJI = {"warning": "❗", "info": "🟡"}
+_SEV_EMOJI = {"critical": "🛑", "warning": "❗", "info": "🟡"}
 
 # N1.3: человекочитаемые метки best-effort сигналов collect-слоя (для строки «недостаточно данных»).
 _SIGNAL_LABEL = {
@@ -51,6 +51,17 @@ _SIGNAL_LABEL = {
         "ad_policy": "модерация объявлений",
         "bid_landscape": "ставки и оценки позиций",
         "pmax": "Performance Max (группы активов)",
+        # Ф8: раньше эти сигналы падали в строку «недостаточно данных» СЫРЫМ идентификатором
+        # (slabels.get(s, s)) — русскому клиенту показывали «adgroup_structure». Метки — на все.
+        "adgroup_structure": "структура групп",
+        "negative_lists": "минус-слова",
+        "keyword_quality": "показатель качества",
+        "geo_waste": "гео-разбивка",
+        "schedule": "расписание показов",
+        "rsa_ads": "объявления (RSA)",
+        "keyword_inventory": "инвентарь ключей",
+        "campaign_assets": "расширения объявлений",
+        "campaign_settings": "настройки кампаний (сети/гео)",
     },
     "en": {
         "impression_share": "impression share",
@@ -62,6 +73,15 @@ _SIGNAL_LABEL = {
         "ad_policy": "ad policy status",
         "bid_landscape": "bids & position estimates",
         "pmax": "Performance Max (asset groups)",
+        "adgroup_structure": "ad group structure",
+        "negative_lists": "negative keywords",
+        "keyword_quality": "Quality Score",
+        "geo_waste": "geo breakdown",
+        "schedule": "ad schedule",
+        "rsa_ads": "ads (RSA)",
+        "keyword_inventory": "keyword inventory",
+        "campaign_assets": "ad assets",
+        "campaign_settings": "campaign settings (networks/geo)",
     },
 }
 
@@ -80,10 +100,13 @@ _FAMILY_SIGNALS = {
     ),  # упал ad_policy → delivery не «в норме» (zero_impressions — из отчёта)
     "structure": ("adgroup_structure",),  # D: без структуры групп не утверждаем «структура в норме»
     "geo": ("geo_waste",),  # A: без geographic_view не утверждаем «гео в норме»
+    "assets": ("campaign_assets",),  # Ф8: без list_campaign_assets «расширения в норме» — враньё
 }
 
-# Семьи с реализованными проверками (assets — задел: про неё не утверждаем ни «в норме», ни «нет
-# данных» — проверок ещё нет). geo стала реализованной (geo_no_conv/schedule_waste, A).
+# Семьи с реализованными проверками. Ф8: assets вошла — чеки G50/G51/G52 живут с Ф6.1, и теперь у
+# семьи есть вес; про неё честно говорим «в норме»/«нет данных» (сигнал campaign_assets).
+# «pmax» НАМЕРЕННО вне списка: у аккаунта БЕЗ PMax-кампаний нечему быть «в норме» — строка
+# «✅ Performance Max — в норме» на чистом Search-аккаунте была бы бессмыслицей (GR8).
 _IMPLEMENTED_FAMILIES = (
     "waste",
     "conversion_tracking",
@@ -94,12 +117,30 @@ _IMPLEMENTED_FAMILIES = (
     "structure",
     "delivery",
     "geo",
+    "assets",
 )
 
 
 def _money(v: float, cur: str) -> str:
     s = f"{v:,.2f}".replace(",", " ")
     return f"{s} {cur}" if cur else s
+
+
+def _quick_win_line(f: Finding, lang: str, cur: str) -> str:
+    """Ф8: сверхкороткая строка «быстрой победы»: ЧТО жмём и СКОЛЬКО это жжёт. Только для one_tap
+    находок — их бот применяет одной кнопкой (ONE_TAP_OPS = пауза кампании / минус-слово)."""
+    fa = f.facts
+    camp = fa.get("campaign", "")
+    money = f" — {_money(f.at_risk, cur)} " + ("wasted" if lang == "en" else "впустую")
+    money = money if f.at_risk > 0 else ""
+    if f.suggested_operation == "pause_campaign":
+        return f"⏸ Pause «{camp}»{money}" if lang == "en" else f"⏸ Пауза «{camp}»{money}"
+    # add_negative_keywords: ключ (wasteful_keyword) ИЛИ поисковый запрос (wasteful_search_term,
+    # pmax_search_term_waste) — в facts лежит ровно одно из двух.
+    term = fa.get("search_term") or fa.get("keyword") or ""
+    if lang == "en":
+        return f"➖ Negative «{term}» in «{camp}»{money}"
+    return f"➖ Минус-слово «{term}» в «{camp}»{money}"
 
 
 def _finding_line(f: Finding, lang: str, cur: str) -> str:
@@ -660,6 +701,20 @@ def render_audit(
                 lines.append(f"{_family_emoji(fam)} {label} — {n} {noun} · ~{_money(money, cur)}")
             else:
                 lines.append(f"{_family_emoji(fam)} {label} — {n} {noun}")
+
+    # Ф8: «⚡ Быстрые победы» — подмножество находок, которые бот применяет ОДНОЙ кнопкой (one_tap:
+    # пауза кампании / минус-слово). Отвечает на ДРУГОЙ вопрос, чем «Что важно» (там — худшее по
+    # весу семьи; чинится руками и не за минуту). Сортировка — по деньгам, не по severity: смысл
+    # блока — «сколько вернём прямо сейчас». Деньги НЕ суммируем: расходы находок пересекаются
+    # (запрос ⊂ кампания) и сумма врала бы — показываем цену КАЖДОЙ строки (крит.C2).
+    quick = sorted((f for f in result.findings if f.one_tap), key=lambda f: -f.at_risk)[:3]
+    if quick:
+        lines.append("")
+        lines.append(
+            "⚡ Quick wins (one tap each):" if lang == "en" else "⚡ Быстрые победы (в один тап):"
+        )
+        for f in quick:
+            lines.append(f"• {_quick_win_line(f, lang, cur)}")
 
     # N1.3: «нет данных» ≠ «в норме» (GR8). Только когда collect-слой ЯВНО отчитался о сигналах
     # (data_gaps is not None) — engine-only вызовы (/report health) семьи не комментируют вовсе.

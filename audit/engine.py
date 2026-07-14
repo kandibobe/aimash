@@ -283,7 +283,7 @@ def check_kill_rule(report, thr: dict, ctx: _Ctx) -> list[Finding]:
                 Finding(
                     check_id="kill_rule",
                     family="waste",
-                    severity="warning",
+                    severity="critical",  # Ф8: втрое дороже СВОЕЙ цели — не «дороговато», а стоп-кран
                     at_risk=round(excess, 2),
                     spend_segment=name,
                     target_campaign=name,
@@ -540,7 +540,10 @@ def check_single_campaign(report, thr: dict, ctx: _Ctx) -> list[Finding]:
 def check_no_conversion_tracking(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     """Отслеживание конверсий. С живыми conversion_action (ctx): НЕТ активных действий при расходе →
     красный «no_conversion_tracking» (весь расход под риском); есть действия, но 0 конверсий при
-    кликах → «zero_conversions». Без данных о действиях — метрическая эвристика (расход & 0 конв)."""
+    кликах → «zero_conversions». Без данных о действиях — метрическая эвристика (расход & 0 конв).
+
+    Ф8: обе находки — critical. Это не «одна проблема из многих»: без измерения конверсий ВСЕ прочие
+    числа аудита (CPA, «слив», Smart Bidding) опираются на пустоту — чинить надо это, и первым."""
     t = report.totals
     total_cost = float(getattr(t, "cost", 0.0) or 0.0)
     clicks = float(getattr(t, "clicks", 0) or 0)
@@ -556,7 +559,7 @@ def check_no_conversion_tracking(report, thr: dict, ctx: _Ctx) -> list[Finding]:
                 Finding(
                     check_id="no_conversion_tracking",
                     family="conversion_tracking",
-                    severity="warning",
+                    severity="critical",
                     at_risk=round(total_cost, 2),
                     spend_segment="__account__",
                     facts={
@@ -573,7 +576,7 @@ def check_no_conversion_tracking(report, thr: dict, ctx: _Ctx) -> list[Finding]:
                 Finding(
                     check_id="zero_conversions",
                     family="conversion_tracking",
-                    severity="warning",
+                    severity="critical",
                     at_risk=round(total_cost, 2),
                     spend_segment="__account__",
                     facts={
@@ -593,7 +596,7 @@ def check_no_conversion_tracking(report, thr: dict, ctx: _Ctx) -> list[Finding]:
             Finding(
                 check_id="no_conversion_tracking",
                 family="conversion_tracking",
-                severity="warning",
+                severity="critical",
                 at_risk=round(total_cost, 2),
                 spend_segment="__account__",
                 facts={"cost": round(total_cost, 2), "clicks": int(clicks), "currency": cur},
@@ -2780,14 +2783,17 @@ _CHECKS = (
 CHECK_REGISTRY: dict[str, tuple[str, str]] = {
     "spend_no_conv": ("waste", "warning"),
     "high_cpa": ("waste", "warning"),
-    "kill_rule": ("waste", "warning"),
+    # Ф8: ТРИ critical на весь реестр — фундамент, а не отдельная кампания. kill_rule: жжём втрое
+    # дороже собственной цели. no_conversion_tracking/zero_conversions: без измерения конверсий все
+    # прочие числа аудита — гадание. Уровень редкий ОСОЗНАННО: critical у половины чеков = нет уровня.
+    "kill_rule": ("waste", "critical"),
     "wasteful_keyword": ("keywords", "warning"),
     "wasteful_search_term": ("keywords", "warning"),
     "low_ctr_ad": ("rsa", "info"),
     "budget_imbalance": ("budget", "info"),
     "single_campaign": ("structure", "info"),
-    "no_conversion_tracking": ("conversion_tracking", "warning"),
-    "zero_conversions": ("conversion_tracking", "warning"),
+    "no_conversion_tracking": ("conversion_tracking", "critical"),
+    "zero_conversions": ("conversion_tracking", "critical"),
     "is_budget_constrained": ("budget", "info"),
     "is_lost_revenue": ("budget", "warning"),
     "is_rank_constrained": ("rsa", "info"),
@@ -2819,8 +2825,8 @@ CHECK_REGISTRY: dict[str, tuple[str, str]] = {
     "qs_landing_below": ("rsa", "info"),
     "manual_bid_high_vol": ("bidding", "info"),
     # Ф6 (G37/G05/G50-52). Задушенная цель CPA и смесь бренд/не-бренд — warning: обе тихо ломают
-    # экономику кампании. Семья «assets» пока весит 0 в FAMILY_WEIGHT (ребаланс — в Ф8): чеки уже
-    # РАБОТАЮТ и видны в карточке, но балл не двигают, пока вес не назначен осознанно.
+    # экономику кампании. Семья «assets» с Ф8 весит 3 (была 0): расширения — не деньги, а упущенный
+    # CTR, поэтому вес мал; аккаунт без расширений находок не получает вовсе (GR8) и не штрафуется.
     "target_cpa_too_low": ("bidding", "warning"),
     "brand_nonbrand_mixed": ("structure", "warning"),
     "assets_sitelinks_thin": ("assets", "info"),
@@ -2844,9 +2850,9 @@ CHECK_REGISTRY: dict[str, tuple[str, str]] = {
     "geo_no_conv": ("geo", "warning"),
     "schedule_waste": ("geo", "info"),
     # Ф7 (PMax). ДЕНЕЖНЫЕ два — и они живут в СВОИХ семьях (waste/keywords), потому что деньги горят
-    # одинаково в любом канале. Остальные пять — конфигурация PMax: семья «pmax», намеренно вне
-    # FAMILY_WEIGHT (вес 0, как competition/recommendations) — покажем в карточке, но баллом не
-    # штрафуем, пока вес не назначен ОСОЗНАННО в Ф8 (иначе PMax-аккаунт просядет на ровном месте).
+    # одинаково в любом канале. Остальные пять — конфигурация PMax: семья «pmax», с Ф8 вес 3 (была 0).
+    # Вес мал ОСОЗНАННО: это info-находки о настройке, а не сожжённые деньги; аккаунт без PMax находок
+    # не получает (GR8) ⇒ и не штрафуется — «pmax» появляется в карточке только там, где PMax есть.
     # Каннибализация бренда — «structure» и warning: это ровно тот же дефект, что brand_nonbrand_mixed.
     "pmax_search_term_waste": ("keywords", "warning"),
     "pmax_asset_group_no_conv": ("waste", "warning"),

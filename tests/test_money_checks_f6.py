@@ -162,13 +162,16 @@ def _assets(name: str, *, sitelinks: int, callouts: int, snippets: int, channel:
     )
 
 
-def test_assets_thin_fires_per_type_and_never_touches_score():
+def test_assets_thin_fires_per_type_and_bites_score_within_family_cap():
     rep = _report([("Поиск", 100.0, 5.0)])
     res = build_audit(rep, campaign_assets=[_assets("Поиск", sitelinks=2, callouts=0, snippets=0)])
     assert {"assets_sitelinks_thin", "assets_callouts_thin", "assets_no_snippets"} <= _ids(res)
-    # Семья assets весит 0 до Ф8 → штраф ровно 0 (чек виден, балл не трогает).
-    assert res.families["assets"]["penalty"] == 0.0
-    assert res.score == build_audit(rep).score
+    # Ф8: семья assets ожила (вес 3). Три info-находки: 0.4 × NONMONEY 0.5 = 0.2 каждая → Σ 0.6 →
+    # штраф 3 × 0.6 = 1.8. Балл двигается, но потолок семьи (3) не пробивается — расширения это
+    # упущенный CTR, а не сожжённые деньги.
+    assert res.families["assets"]["penalty"] == 1.8
+    assert res.families["assets"]["at_risk"] == 0.0
+    assert res.score == build_audit(rep).score - 2  # round(100−1.8) = 98
     f = next(f for f in res.findings if f.check_id == "assets_sitelinks_thin")
     assert f.advice_operation == "add_sitelinks" and not f.one_tap  # кнопки нет: это не one-tap
     assert "Расширения" in finding_text(f, "ru", "USD")

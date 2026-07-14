@@ -52,6 +52,37 @@ Bidding продолжаем флажить. Мораль: приписки ка
 (у заказчика UGX), фиксированные $10 туда не переносятся; поднять = молча погасить слив там, где клик
 дешёвый. Это настройка (переопределяема per-chat), а не ложное срабатывание.
 
+### Ф1–Ф8 (2026-07-13/14): волна «аудит → инструмент оптимизации» — новые пороги и что РЕЖЕТСЯ
+
+Пороги — в `audit/thresholds.py` (валюта аккаунта, переопределяемы per-chat). Источник каждого — ниже;
+где каталог claude-ads расходится с фактом v24, прав **факт** (проверено запуском python по прото SDK).
+
+| Фаза | Проверки (check_id) | Порог / источник |
+|---|---|---|
+| Ф1 ставки | `bid_below_first_page`, `bid_below_top_of_page`, `top_is_rank_lost`, `sim_bid_upside`, `sim_budget_upside` | `bid_gap_min` 0.10, `kw_rank_lost_top_min` 0.30, `sim_min_conv_gain` 0.5 — свои (шум оценки Google); данные: `ad_group_criterion.position_estimates`, `*_simulation` |
+| Ф2 Google | `google_recommendations_pending` | без порога; `recommendation.impact.potential−base` (докстринг «impact недоступен в v24» был НЕВЕРЕН) |
+| Ф3 тексты | `rsa_keyword_coverage_low`, `rsa_headlines_thin`, `rsa_descriptions_thin`, `rsa_ad_strength_poor`, `rsa_overpinned`, `rsa_stale` | покрытие = `adcopy.validate.MIN_KEYWORD_COVERAGE` (ЕДИНОЕ с генерацией), <8 заголовков (G27), <3 описаний (G28), 90 дней (G-AD1) |
+| Ф4 ключи | `keyword_harvest`, `ngram_waste`, `keyword_cannibalization`, `zero_impression_keywords` | `harvest_min_conv` 1.0, `ngram_min_cost` 10 + `ngram_min_terms` 2 (система, а не случай), `zero_impr_share` 0.5 при ≥20 ключах (G-KW1) |
+| Ф5 конкуренты | `competitive_pressure` + `/competitors` (CSV) | `comp_min_impressions` 500 / `comp_is_max` 0.60 / `comp_rank_min` 0.20. **Auction Insights через API НЕТ** (Google не отдаёт) — только импорт CSV |
+| Ф6 деньги | `target_cpa_too_low` (G37), `brand_nonbrand_mixed` (G05), `assets_*` (G50-52), `display_on_search_campaign` (G12), `geo_interest_waste` (G11) | `tcpa_gap_factor` 2.0, `brand_mix_min_nonbrand` 3, `assets_min_sitelinks/callouts` 4, `content_on_search_min_spend` 5, `geo_interest_min_spend` 20 |
+| Ф7 PMax | `pmax_search_term_waste`, `pmax_asset_group_no_conv`, `pmax_brand_cannibalization`, `pmax_ad_strength_poor`, `pmax_no_video`, `pmax_no_signals`, `pmax_no_negatives`, `pmax_insufficient_conversions` | `pmax_min_spend` 20, `pmax_brand_conv_share` 0.30 (G-PM3), `pmax_learn_min_conv` 30 / `pmax_min_days` 14 (G-PM7) |
+
+**Срезано по фактам v24** (каталог обещал, API не даёт):
+- **G34 `pmax_url_expansion`** — поля `campaign.url_expansion_opt_out` в v24 **нет** (url-поля Campaign:
+  только `tracking_url_template`, `url_custom_parameters`, `final_url_suffix`). Чек невозможен.
+- **G31 `pmax_asset_density`** (≥20 картинок / ≥5 лого / ≥5 видео) — это **слотовые максимумы Google**, а не
+  порог качества. Вместо самодельной «плотности» читаем вердикт самого Google: `asset_group.ad_strength` +
+  `asset_coverage.ad_strength_action_items` («добавьте 1 видео») — он же и рецепт.
+- **G07** (brand exclusions при живой брендовой Search-кампании) — через asset-set недоказуем (`AssetSetTypeEnum`
+  не содержит `BRAND_LIST`); свёрнут в факт `brand_excluded` внутри `pmax_brand_cannibalization` (читаем
+  `SharedSet(BRANDS)` → `campaign_shared_set`).
+
+**Модель скора (Ф8).** Уровень `critical` (×1.5) — ровно три чека: `no_conversion_tracking`,
+`zero_conversions` (без измерения все прочие числа — гадание), `kill_rule` (втрое дороже своей цели).
+`FAMILY_WEIGHT` (Σ=100): ожили `assets` 3 и `pmax` 3, доноры waste 30→28, conversion_tracking 20→18,
+budget 10→9, geo 8→7. `competition`/`recommendations` осознанно вне вектора (вес 0) — диагноз и мнение
+Google, а не дефект аккаунта. `SCORE_MODEL_EPOCH` **не бампнут**: всё, что изменила Ф8, хэш версии видит сам.
+
 ## itallstartedwithaidea/agent-skills (MIT)
 73 скила-инструкции (SKILL.md) — keyword research, копирайт, бид, PMax/Shopping, аудитории. **Брать как текст** в `agent/system_prompt.py` после ревью (инъекции/хардкод-ключи). Без гард-рейлов — безопасность своя.
 
