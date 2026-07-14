@@ -102,6 +102,36 @@ async def cli_card_cb(
     await bm._cli_show_card(msg, chat_id, customer_id)
 
 
+@bm.dp.callback_query(bm.ClientCB.filter(bm.F.action == "dossier"))
+async def cli_dossier_cb(
+    cq: bm.CallbackQuery, callback_data: bm.ClientCB, state: bm.FSMContext
+) -> None:
+    """§20 «📄 Досье»: отдать .md-файл текущего досье (сведено краулом). Read-only: файл уже лежит в
+    БД (client_dossiers.status='current'), LLM не зовём и профиль не трогаем. Доступ — тот же
+    композитный fail-closed чек, что и у карточки: в досье лежат контакты и имена людей клиента."""
+    chat_id = bm._cq_chat_id(cq)
+    customer_id = bm.normalize_customer_id(callback_data.sub) or await bm._cli_selected_account(
+        state
+    )
+    msg = bm._cq_msg(cq)
+    if not customer_id or msg is None:
+        await cq.answer(bm.i18n.t("cli_card_stale"), show_alert=True)
+        return
+    if not await bm._cli_check_access(chat_id, customer_id):
+        await cq.answer(bm.i18n.t("cli_access_denied"), show_alert=True)
+        return
+    row = await bm.DOSSIERS.get_current(customer_id)
+    if not row or not (row.get("markdown") or "").strip():
+        await cq.answer(bm.i18n.t("cli_dossier_none"), show_alert=True)
+        return
+    await cq.answer()
+    await bm.ux.send_text_document(
+        msg,
+        text=row["markdown"],
+        filename=f"dossier_{customer_id}_v{row.get('version', 1)}.md",
+    )
+
+
 @bm.dp.callback_query(bm.ClientCB.filter(bm.F.action.in_({"add", "update"})))
 async def cli_add_update_cb(
     cq: bm.CallbackQuery, callback_data: bm.ClientCB, state: bm.FSMContext

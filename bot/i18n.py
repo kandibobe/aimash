@@ -2162,6 +2162,30 @@ CATALOG: dict[str, dict[str, str]] = {
             "run the crawl again to pick up the rest."
         ),
     },
+    "cli_dossier_none": {
+        "ru": "Досье ещё нет: запусти обход сайта («🕷 Сохранить и краулить» / «🔄 Перекраулить»).",
+        "en": "No dossier yet: run a site crawl («🕷 Save and crawl» / «🔄 Re-crawl»).",
+    },
+    "cli_crawl_dossier_line": {
+        "ru": (
+            "📄 Досье собрано: услуг {services} · людей {people} · фактов {facts} "
+            "(файл ниже — он же контекст для текстов объявлений)"
+        ),
+        "en": (
+            "📄 Dossier built: {services} services · {people} people · {facts} facts "
+            "(file below — same context feeds ad copy)"
+        ),
+    },
+    "cli_crawl_dossier_budget": {
+        "ru": (
+            "📄 Досье не собрано: дневной лимит ИИ исчерпан ({used}/{limit}). "
+            "Страницы сайта сохранены — запусти обход завтра, досье соберётся."
+        ),
+        "en": (
+            "📄 Dossier not built: daily AI limit reached ({used}/{limit}). "
+            "Site pages are saved — run the crawl tomorrow to build the dossier."
+        ),
+    },
     "cli_crawl_profile_updated": {
         "ru": "Профиль клиента обновлён. Готов использовать в кампаниях и объявлениях.",
         "en": "Client profile updated. Ready to use in campaigns and ads.",

@@ -18,6 +18,7 @@ import json
 import logging
 
 from agent.router import chat, finish_reason
+from core.config import settings
 
 log = logging.getLogger("aimash.keywords")
 
@@ -74,7 +75,11 @@ async def filter_relevance(
         batch = uniq[i : i + _BATCH]
         ctx = (
             f"Язык: {language}.\nТема кампании: {topic}.\n"
-            + (f"О клиенте:\n{profile[:1000]}\n" if (profile or "").strip() else "")
+            + (
+                f"О клиенте:\n{profile[: settings.profile_ctx_chars]}\n"
+                if (profile or "").strip()
+                else ""
+            )
             + "Ключевые слова:\n"
             + "\n".join(batch)
         )

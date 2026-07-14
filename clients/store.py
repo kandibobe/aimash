@@ -25,8 +25,10 @@ from typing import Any
 from sqlalchemy import delete, func, select
 
 from core.config import settings
+from core.logging import log
 from db.models import (
     ClientContact,
+    ClientDossier,
     ClientProfile,
     ClientProfileHistory,
     ClientService,
@@ -309,12 +311,21 @@ class ClientProfileStore:
             )
         return set(rows)
 
-    async def profile_context_text(self, customer_id: str, *, max_chars: int = 1500) -> str:
+    async def profile_context_text(self, customer_id: str, *, max_chars: int | None = None) -> str:
         """Компактный текст профиля как КОНТЕКСТ для генераторов (§10/§19). Нет профиля → ''.
+
+        §20 досье: если сайт клиента обойден и досье ПОДТВЕРЖДЕНО (client_dossiers.status='current'),
+        контекст берётся из него — там факты, рынки и УТП со всего сайта, а не два предложения из
+        карточки. Досье PII-free по построению (clients/dossier_render.render_llm_context: ни
+        контактов, ни имён сотрудников — правило 5). Нет досье → прежний текст профиля, дословно.
 
         Порядок — от важного к второстепенному (бренд/бизнес/УТП/услуги/гео), чтобы усечение по
         max_chars срезало наименее важное. Телефоны/e-mail сюда НЕ кладём (генерации не нужны и это
         PII) — контакты используются отдельными ассетами (call), не текстом заголовков."""
+        cap = int(settings.profile_ctx_chars if max_chars is None else max_chars)
+        dossier = await self._dossier_context(customer_id, cap)
+        if dossier:
+            return dossier
         prof = await self.get_by_account(customer_id)
         if not prof:
             return ""
@@ -347,7 +358,18 @@ class ClientProfileStore:
                 parts.append("Категории услуг/товаров: " + ", ".join(cats[:12]))
         if prof.get("notes"):
             parts.append(f"Заметки: {prof['notes']}")
-        return "\n".join(parts).strip()[:max_chars]
+        return "\n".join(parts).strip()[:cap]
+
+    async def _dossier_context(self, customer_id: str, cap: int) -> str:
+        """PII-free контекст подтверждённого досье. Сбой чтения не роняет генерацию — просто фолбэк
+        на профиль (ленивый импорт: store не должен тянуть рендер досье ради каждого upsert)."""
+        try:
+            from clients.dossier_store import ClientDossierStore
+
+            return await ClientDossierStore().context_text(customer_id, max_chars=cap)
+        except Exception:  # noqa: BLE001 — досье — обогащение, а не обязательное условие генерации
+            log.warning("dossier: контекст не прочитан (%s)", customer_id)
+            return ""
 
     async def protected_negative_terms(self, customer_id: str) -> set[str]:
         """Токены бренда и услуг/товаров клиента для защиты от минус-слов (§7): их НЕ предлагаем
@@ -544,7 +566,11 @@ class ClientProfileStore:
         operation: str = "profile_clear",
         confirmation_id: str | None = None,
     ) -> dict:
-        """Удалить профиль клиента и все детали (§20 «Очистить профиль»). История «до» сохраняется."""
+        """Удалить профиль клиента и все детали (§20 «Очистить профиль»). История «до» сохраняется.
+
+        Досье (client_dossiers) удаляется ВСЕГДА — по customer_id, даже если профиля уже нет: в нём
+        лежат имена сотрудников клиента (чужая PII), и «очистить» должно очищать их тоже. В снапшот
+        истории досье не попадает (её ключ — customer_id, она clear переживает)."""
         async with Session() as s:
             p = await self._load(s, customer_id)
             before = await self._to_dict(s, p) if p is not None else None
@@ -556,6 +582,7 @@ class ClientProfileStore:
                     confirmation_id=confirmation_id,
                 )
             )
+            await s.execute(delete(ClientDossier).where(ClientDossier.customer_id == customer_id))
             if p is not None:
                 pid = p.id
                 await s.execute(delete(ClientContact).where(ClientContact.profile_id == pid))

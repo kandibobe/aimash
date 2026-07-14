@@ -248,10 +248,12 @@ class ClientCB(CallbackData, prefix="cli"):
     """§20: раздел «ℹ️ Информация про клиентов». Контекст (выбранный customer_id) держит FSM —
     в callback_data его НЕ кладём (резолв idx→аккаунт по chat_id через _CLI_ACCT_CACHE, как CcCB).
     Кнопки лишь двигают UI/накопление; РЕАЛЬНАЯ мутация памяти (save/update/clear) — только через
-    confirm-гейт (proposal profile_* → ✅). action: acct|card|add|update|save|clear|recrawl|back;
-    idx — индекс аккаунта в кэше; sub — под-действие (напр. режим краула full|incr)."""
+    confirm-гейт (proposal profile_* → ✅). action: acct|card|add|update|save|clear|recrawl|dossier|back;
+    idx — индекс аккаунта в кэше; sub — под-действие (напр. режим краула full|incr).
 
-    action: str  # acct|card|add|update|save|clear|recrawl|back
+    dossier — отдать .md-файл текущего досье (read-only: файл уже в БД, LLM не зовём)."""
+
+    action: str  # acct|card|add|update|save|clear|recrawl|dossier|back
     idx: int = -1
     sub: str = ""
 

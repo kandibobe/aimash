@@ -841,6 +841,7 @@ def client_card_kb(
     has_website: bool = False,
     lang: str | None = None,
     customer_id: str = "",
+    has_dossier: bool = False,
 ) -> InlineKeyboardMarkup:
     """§20.2: кнопки карточки клиента. Есть профиль → Обновить/Очистить (+Перекраулить, если есть
     сайт); нет → Добавить. Краулинг/изменения памяти — фоново/через confirm-гейт (см. bot.main).
@@ -858,6 +859,13 @@ def client_card_kb(
         text="🔎 Fill from account" if en else "🔎 Подтянуть из аккаунта",
         callback_data=ClientCB(action="autofill", sub=sub),
     )
+    if (
+        has_dossier
+    ):  # §20: досье (map-reduce по сайту) отдаётся .md-файлом — кнопка только если есть
+        kb.button(
+            text="📄 Dossier" if en else "📄 Досье",
+            callback_data=ClientCB(action="dossier", sub=sub),
+        )
     if has_profile:
         kb.button(
             text="✏️ Update info" if en else "✏️ Обновить инфу",

@@ -23,6 +23,7 @@ from adcopy.validate import (
     validate,
 )
 from agent.router import chat
+from core.config import settings
 
 # Считает КОД (adcopy.validate) — здесь только псевдонимы для обратной совместимости импортов.
 _keyword_coverage = keyword_coverage
@@ -88,8 +89,10 @@ def _user_prompt(brief: CopyBrief, need_h: int, need_d: int) -> str:
     if brief.keywords:
         parts.append("Ключевые слова: " + ", ".join(brief.keywords) + ".")
     if brief.profile:
-        # §20: профиль клиента — первым (бренд/УТП авторитетнее лендинга), с капом (токены).
-        parts.append(f"О клиенте: {brief.profile[:1200]}.")
+        # §20: профиль\досье клиента — первым (бренд/УТП авторитетнее лендинга), с капом (токены).
+        # Кап один на всех потребителей контекста — settings.profile_ctx_chars: досье режется по
+        # приоритету секций ещё в render_llm_context, второй раз резать его чужой цифрой незачем.
+        parts.append(f"О клиенте: {brief.profile[: settings.profile_ctx_chars]}.")
     if brief.usp:
         parts.append(f"УТП: {brief.usp}.")
     if brief.tone:

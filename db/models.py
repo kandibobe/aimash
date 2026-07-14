@@ -368,6 +368,44 @@ class ClientSitePage(Base):
     crawled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class ClientDossier(Base):
+    """§20: ДОСЬЕ клиента — сведённый по всему сайту документ (map-reduce поверх client_site_pages).
+
+    Почему отдельная таблица, а не поля в client_profiles: снапшот профиля пишется в
+    client_profile_history, которая ПЕРЕЖИВАЕТ «🗑 Очистить профиль» (ключ — customer_id, не FK) —
+    имена сотрудников (чужая PII) остались бы в БД после удаления. Досье удаляется вместе с профилем
+    (clients.store.apply_clear), истории не имеет.
+
+    Confirm-гейт (правила 1–2): досье пишется как status='draft' и переводится в 'current' ТОЛЬКО
+    внутри атомарного claim подтверждения (clients.execute.execute_confirmed_memory) — либо сразу,
+    если профиля ещё не было (auto-save, гейта нет и у самого профиля). Один 'current' на аккаунт.
+
+    Два артефакта: markdown — файл владельцу (с контактами); llm_context — то, что уезжает в промпт
+    генераторов RSA/ключей (БЕЗ PII, clients.dossier_render). data — сведённый Dossier (JSON) для
+    пересборки рендеров без повторного обхода."""
+
+    __tablename__ = "client_dossiers"
+    __table_args__ = (
+        Index("ix_client_dossiers_customer_status", "customer_id", "status"),
+        Index("ix_client_dossiers_profile", "profile_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    customer_id: Mapped[str] = mapped_column(String(20), index=True, nullable=False)
+    profile_id: Mapped[int | None] = mapped_column(
+        Integer
+    )  # client_profiles.id (без FK, как и всё §20)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="draft"
+    )  # draft|current
+    markdown: Mapped[str | None] = mapped_column(Text)  # файл владельцу (контакты ЕСТЬ)
+    llm_context: Mapped[str | None] = mapped_column(Text)  # контекст генераторам (PII НЕТ)
+    data: Mapped[dict | None] = mapped_column(JSON)  # сведённый Dossier целиком
+    confirmation_id: Mapped[str | None] = mapped_column(String(64), index=True)  # сшивка с audit
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class CrawlJob(Base):
     """§20.4: журнал задачи краулинга (фоновая). Статус running→done/failed; зависшие running
     (in-process задача умерла с процессом на рестарте) реконсилятся в failed (scheduler)."""

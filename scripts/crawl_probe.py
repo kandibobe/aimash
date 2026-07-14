@@ -70,7 +70,9 @@ async def main() -> int:
     print("\nпорядок обхода (первые 15):")
     for p in res.pages[:15]:
         print(f"  [{p.page_type:8}] {len(p.text):5} симв  {p.url}")
-    account = [p.url for p in res.pages if any(s in p.url for s in ("/login", "/dashboard", "/cart"))]
+    account = [
+        p.url for p in res.pages if any(s in p.url for s in ("/login", "/dashboard", "/cart"))
+    ]
     print(f"\nстраниц личного кабинета в обходе: {len(account)} (ожидание: 0)")
     about = next((p for p in res.pages if p.page_type == "about"), None)
     if about:

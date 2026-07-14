@@ -73,6 +73,18 @@ async def execute_confirmed_memory(store, confirmation_id: str) -> dict:
                 "crawl_extra"
             ),  # §20.4: сайт/карта страниц (при краул-обновлении)
         )
+        # §20 досье: черновик (client_dossiers.status='draft'), собранный краулом, становится
+        # 'current' ТОЛЬКО ЗДЕСЬ — ПОСЛЕ атомарного claim (правила 1–2: показали «было→станет»,
+        # получили ✅, и лишь тогда меняем то, что уедет в промпт генераторов RSA). id черновика
+        # берём из proposal.params — не «последний по времени»: два краула подряд не перепутаются.
+        did = params.get("dossier_id")
+        if did:
+            from clients.dossier_store import ClientDossierStore
+
+            promoted = await ClientDossierStore().promote(
+                int(did), customer_id=customer_id, confirmation_id=confirmation_id
+            )
+            result["dossier_promoted"] = promoted
     elif op == "profile_clear":
         result = await profile_store.apply_clear(
             customer_id, operation=op, confirmation_id=confirmation_id

@@ -11,6 +11,7 @@ import json
 import re
 
 from agent.router import chat
+from core.config import settings
 
 SEED_COUNT = 15  # §19.4.2 (P1-7): больше сид-ключей → богаче набор идей от Keyword Planner
 
@@ -82,7 +83,7 @@ async def generate_seed_keywords(
     if url:
         ctx += f"\nURL: {url}"
     if (profile or "").strip():
-        ctx += f"\nО клиенте/странице:\n{profile[:1500]}"
+        ctx += f"\nО клиенте/странице:\n{profile[: settings.profile_ctx_chars]}"
     try:
         msg = await chat(
             [

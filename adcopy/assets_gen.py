@@ -21,6 +21,7 @@ from adcopy.validate import (
     assert_asset_len,
 )
 from agent.router import chat
+from core.config import settings
 
 # Семейства, для которых поддержана автогенерация текста (из темы/сайта).
 AUTOGEN_FAMILIES = ("sitelinks", "callouts", "structured_snippets", "business_name")
@@ -51,7 +52,7 @@ def _ctx(topic: str, url: str | None, profile: str, language: str) -> str:
     if url:
         out += f"\nURL: {url}"
     if (profile or "").strip():
-        out += f"\nО клиенте/странице:\n{profile[:1200]}"
+        out += f"\nО клиенте/странице:\n{profile[: settings.profile_ctx_chars]}"
     return out
 
 

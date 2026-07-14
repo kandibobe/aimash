@@ -16,6 +16,7 @@ import re
 from dataclasses import dataclass, field
 
 from agent.router import chat, finish_reason
+from core.config import settings
 
 log = logging.getLogger("aimash.keywords")
 
@@ -328,7 +329,7 @@ async def suggest_negative_keywords(
         return []
     ctx = f"Язык: {language}. Тема: {topic}.\n"
     if (profile or "").strip():
-        ctx += f"О клиенте:\n{profile[:1000]}\n"
+        ctx += f"О клиенте:\n{profile[: settings.profile_ctx_chars]}\n"
     ctx += "Идеи ключей:\n" + "\n".join(sample)
     try:
         msg = await chat(

@@ -32,6 +32,11 @@ ROLE_MODELS = {
     "clustering": settings.llm_clustering or settings.llm_parsing,
     # P3: аналитик (агентный нарратив /audit); пусто ⇒ модель parsing (дешёвый дефолт)
     "analyst": settings.llm_analyst or settings.llm_parsing,
+    # §20 досье, map-фаза: извлечение фактов из чанка краула. ДЕСЯТКИ вызовов на сайт ⇒ дешёвая
+    # модель (пусто ⇒ parsing). Ошибки безвредны: выход — JSON, который валидирует и сливает КОД.
+    "extract": settings.llm_extract or settings.llm_parsing,
+    # §20 досье, reduce-фаза: ОДИН синтез связной прозы на сайт ⇒ сильная модель (пусто ⇒ keywords).
+    "dossier": settings.llm_dossier or settings.llm_keywords or settings.llm_parsing,
 }
 
 # Потолок генерации по ролям (явный max_tokens). Зачем ЯВНО: без max_tokens OpenRouter
@@ -46,6 +51,10 @@ ROLE_MAX_TOKENS = {
     "keywords": settings.llm_max_tokens_keywords,  # фильтр релевантности на 120 ключей крупнее parsing
     "clustering": settings.llm_max_tokens_parsing,  # ответ — компактный JSON групп
     "analyst": settings.llm_max_tokens_analyst,  # короткий человеческий разбор аудита
+    # §20 досье: JSON фактов с чанка и финальная проза — оба заметно крупнее keywords-2048.
+    # Дефолт роли — страховка; clients/dossier_* всё равно передают max_tokens ЯВНО (R13).
+    "extract": settings.llm_max_tokens_extract,
+    "dossier": settings.llm_max_tokens_dossier,
 }
 
 
