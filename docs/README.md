@@ -13,6 +13,8 @@
 ## Старт и эксплуатация
 - [OAUTH_SETUP.md](OAUTH_SETUP.md) — доступы Google Ads с нуля: test MCC, developer token, OAuth-клиент, refresh token.
 - [DEPLOYMENT.md](DEPLOYMENT.md) — `.env`, секреты, Fernet-ключ, Docker, prod-чеклист, Google Sheets scope.
+- [RUNBOOK_ENV.md](RUNBOOK_ENV.md) — **переменные на проде**: три слоя (код → `.env.defaults` → серверный `.env`), что дописать руками, как применить без даунтайма, откат.
+- [RUNBOOK_ACCESS.md](RUNBOOK_ACCESS.md) — выдача доступов: whitelist, гранты на аккаунты, админы.
 - [DATABASE.md](DATABASE.md) — схема таблиц, миграции Alembic, dev/SQLite vs prod/Postgres.
 - [BACKUP.md](BACKUP.md) — бэкап/restore Postgres (в т.ч. PII клиентов §20).
 - [TESTING.md](TESTING.md) — как устроены и гоняются офлайн-тесты; паттерн фейка SDK; smoke-доступ.
