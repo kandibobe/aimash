@@ -85,8 +85,9 @@ def _notes_from(d: Dossier) -> str | None:
     ПЕРЕЖИВАЕТ «🗑 Очистить профиль» (ключ — customer_id, не FK) — чужая PII осталась бы в БД после
     удаления. Команда живёт в client_dossiers, которая удаляется вместе с профилем."""
     lines: list[str] = []
-    if d.facts:
-        lines.append("Факты с сайта: " + "; ".join(f.claim for f in d.facts[:15]))
+    own_facts = [f.claim for f in d.facts if not f.industry]  # без статистики отрасли из блога
+    if own_facts:
+        lines.append("Факты с сайта: " + "; ".join(own_facts[:15]))
     if d.usp:
         lines.append("Преимущества: " + "; ".join(d.usp[:8]))
     if d.company.founded:

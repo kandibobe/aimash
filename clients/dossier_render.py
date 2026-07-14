@@ -7,6 +7,8 @@
     сотрудников НЕТ (правило 5: PII не уезжает в LLM; тот же инвариант, что у
     `CrawlResult.combined_text` — `test_combined_text_excludes_contacts_pii`). Рекламному тексту
     телефон директора не нужен, а утечка — нужна ещё меньше.
+    Здесь же нет и фактов ОТРАСЛИ (`Fact.industry` — цифры рынка из блога клиента): в объявлении они
+    превратились бы в ложное утверждение о самом клиенте, а это снятие объявлений Google.
 """
 
 from __future__ import annotations
@@ -70,9 +72,19 @@ def render_markdown(d: Dossier, *, generated_at: str = "") -> str:
         out += [f"- **{p.name}**" + (f" — {p.role}" if p.role else "") for p in d.people]
         out.append("")
 
-    if d.facts:
-        out += [f"## Факты ({len(d.facts)})"]
-        for f in d.facts:
+    own = [f for f in d.facts if not f.industry]
+    industry = [f for f in d.facts if f.industry]
+    if own:
+        out += [f"## Факты ({len(own)})"]
+        for f in own:
+            src = f" ([источник]({f.source_url}))" if f.source_url else ""
+            out.append(f"- {f.claim}{src}")
+        out.append("")
+    if industry:
+        # Отдельно и с оговоркой: это цифры отрасли из блога клиента, а не его достижения. В тексты
+        # объявлений они не пойдут (их нет в render_llm_context) — владельцу видны как справка.
+        out += [f"## Отраслевой контекст из блога ({len(industry)}) — НЕ факты о клиенте"]
+        for f in industry:
             src = f" ([источник]({f.source_url}))" if f.source_url else ""
             out.append(f"- {f.claim}{src}")
         out.append("")
@@ -124,8 +136,11 @@ def render_llm_context(d: Dossier, *, max_chars: int = CONTEXT_MAX_CHARS) -> str
     if d.services:
         svc = [f"{s.name}" + (f" — {s.price}" if s.price else "") for s in d.services[:25]]
         parts.append("Услуги: " + "; ".join(svc))
-    if d.facts:
-        parts.append("Факты: " + "; ".join(f.claim for f in d.facts[:20]))
+    # Только факты О КЛИЕНТЕ: статистика отрасли из блога (Fact.industry) сюда не попадает — модель
+    # приписала бы её клиенту («мы продали 3 млн авто»), а Google снимает такие объявления.
+    own_facts = [f.claim for f in d.facts if not f.industry]
+    if own_facts:
+        parts.append("Факты: " + "; ".join(own_facts[:20]))
     if d.usp:
         parts.append("Преимущества: " + "; ".join(d.usp[:10]))
     if d.faq:

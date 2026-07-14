@@ -75,10 +75,17 @@ class Person(BaseModel):
 
 class Fact(BaseModel):
     """Проверяемый факт с сайта («6000+ автомобилей», «100+ стран»). `source_url` проставляет КОД
-    (чанк знает свои страницы) — модели URL не показываем, чтобы она их не выдумывала."""
+    (чанк знает свои страницы) — модели URL не показываем, чтобы она их не выдумывала.
+
+    `industry` — факт взят с БЛОГОВОЙ страницы, то есть это статистика ОТРАСЛИ, а не клиента
+    («в 2023 на японских аукционах выставлено 3.08 млн авто»). Такие факты нужны владельцу в файле,
+    но в контекст генерации RSA не идут: модель приписала бы их клиенту, а Google снимает объявления
+    с недостоверными утверждениями (misrepresentation). Флаг ставит КОД по page_type страницы —
+    не модель (правило: факты о деньгах решает код). См. `render_llm_context`."""
 
     claim: str
     source_url: str | None = None
+    industry: bool = False
 
 
 class FaqItem(BaseModel):
@@ -170,7 +177,9 @@ class Dossier(BaseModel):
         return {
             "services": len(self.services),
             "people": len(self.people),
-            "facts": len(self.facts),
+            # Считаем факты О КЛИЕНТЕ: отраслевые (industry) лежат в файле справкой и в рекламу не идут —
+            # обещать «фактов 17», где 9 из них про рынок, значит завышать в сводке подтверждения.
+            "facts": len([f for f in self.facts if not f.industry]),
             "markets": len(self.markets),
             "usp": len(self.usp),
             "faq": len(self.faq),

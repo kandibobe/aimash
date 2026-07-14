@@ -85,12 +85,22 @@ def redact_pii(text: str, *, known: list[str] | None = None) -> str:
     return _PHONE_LOCAL_RE.sub(_local_is_phone, s)
 
 
+# Страницы, где живёт статистика ОТРАСЛИ, а не клиента («в 2023 на аукционах продано 1.98 млн авто»).
+# Факты отсюда помечаются Fact.industry=True и не идут в контекст RSA — см. Fact в dossier_schema.
+_INDUSTRY_TYPES = frozenset({"blog", "news"})
+
+
 @dataclass
 class Chunk:
-    """Один map-вызов: текст (уже отредактированный) и страницы, из которых он собран."""
+    """Один map-вызов: текст (уже отредактированный) и страницы, из которых он собран.
+
+    `industry` — чанк собран ТОЛЬКО из блоговых страниц. Чанки однородны по этому признаку
+    (`build_chunks` не пакует блог вместе с контентными страницами), поэтому флаг переносится на
+    факты чанка без домыслов."""
 
     text: str
     urls: list[str] = field(default_factory=list)
+    industry: bool = False
 
 
 def select_pages(pages: list[dict], *, max_per_type: int | None = None) -> list[dict]:
@@ -134,27 +144,38 @@ def build_chunks(
     known_contacts: list[str] | None = None,
 ) -> list[Chunk]:
     """Страницы → чанки под map-вызовы. Длинная страница РЕЖЕТСЯ на несколько чанков (а не
-    обрезается: терять текст — ровно та болезнь, которую лечим), короткие — пакуются вместе."""
+    обрезается: терять текст — ровно та болезнь, которую лечим), короткие — пакуются вместе.
+
+    Блоговые страницы в один чанк с контентными НЕ пакуются: иначе факт отрасли из блога унаследовал
+    бы `industry=False` от соседней страницы «О компании» и уехал бы в текст объявления как факт
+    клиента."""
     size = max(1000, chunk_chars or settings.dossier_chunk_chars)
     chunks: list[Chunk] = []
     cur: list[str] = []
     cur_urls: list[str] = []
     cur_len = 0
+    cur_industry = False
 
     def flush() -> None:
         nonlocal cur, cur_urls, cur_len
         if cur:
-            chunks.append(Chunk(text="\n\n".join(cur).strip(), urls=list(cur_urls)))
+            chunks.append(
+                Chunk(text="\n\n".join(cur).strip(), urls=list(cur_urls), industry=cur_industry)
+            )
         cur, cur_urls, cur_len = [], [], 0
 
     for p in pages:
         url = str(p.get("url") or "")
-        head = f"## {(p.get('title') or url).strip()} — {url} ({p.get('page_type') or 'other'})"
+        ptype = str(p.get("page_type") or "other")
+        industry = ptype in _INDUSTRY_TYPES
+        head = f"## {(p.get('title') or url).strip()} — {url} ({ptype})"
         body = redact_pii((p.get("text") or "").strip(), known=known_contacts)
         for part in _split_text(body, size - len(head) - 2):
             block = f"{head}\n{part}"
-            if cur_len and cur_len + len(block) > size:
+            if cur_len and (cur_len + len(block) > size or industry != cur_industry):
                 flush()
+            if not cur:
+                cur_industry = industry
             cur.append(block)
             if url and url not in cur_urls:
                 cur_urls.append(url)
@@ -260,9 +281,10 @@ async def _map_one(chunk: Chunk, *, language: str) -> DossierExtract:
     )
     res = _parse(getattr(msg, "content", "") or "")
     src = chunk.urls[0] if chunk.urls else None
-    for f in res.facts:  # URL проставляет КОД: модель их не видит и не выдумывает
+    for f in res.facts:  # URL и «отраслевой» проставляет КОД: модель их не видит и не решает
         if not f.source_url:
             f.source_url = src
+        f.industry = chunk.industry
     return res
 
 

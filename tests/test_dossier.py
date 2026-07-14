@@ -119,6 +119,58 @@ def test_llm_context_excludes_contacts_and_people():
     assert "Alexey Lim" in md and "Owner" in md
 
 
+def test_industry_facts_from_blog_never_reach_ad_copy():
+    """Живой прогон по darial.co.jp: модель вытащила из БЛОГА клиента статистику рынка («3.08 млн
+    авто выставлено на аукционах в 2023») и положила рядом с фактами компании. В рекламу такой факт
+    уезжать не должен: RSA скажет «мы продали 3 млн авто» — это ложное утверждение о рекламодателе,
+    и Google снимает объявление (misrepresentation). Флаг ставит КОД по page_type — не модель.
+
+    Владельцу в .md факт остаётся: как справка, отдельным разделом и с оговоркой."""
+    from clients.dossier import _notes_from
+    from clients.dossier_merge import _prose_input
+
+    blog = _page("текст" * 40, url="https://darial.co.jp/blog/guide/", ptype="blog")
+    about = _page("текст" * 40, url="https://darial.co.jp/about-us/", ptype="about")
+    # Чанк не смешивает блог с «О компании»: иначе факт отрасли унаследовал бы industry=False.
+    chunks = build_chunks([about, blog])
+    assert [c.industry for c in chunks] == [False, True]
+
+    d = merge_extracts(
+        [
+            DossierExtract(facts=[Fact(claim="6000+ автомобилей экспортировано")]),
+            DossierExtract(
+                facts=[
+                    Fact(
+                        claim="3.08 million vehicles listed in 2023",
+                        source_url="https://darial.co.jp/blog/guide/",
+                        industry=True,
+                    )
+                ]
+            ),
+        ],
+        domain="darial.co.jp",
+        website="https://darial.co.jp",
+        contacts=[],
+        socials={},
+        pages_count=32,
+        map_calls=2,
+    )
+
+    # …ни в контекст генератора RSA/ключей…
+    ctx = render_llm_context(d)
+    assert "6000+ автомобилей экспортировано" in ctx
+    assert "3.08 million" not in ctx
+    # …ни в промпт синтеза прозы (оттуда он попал бы в business_desc карточки)…
+    assert "3.08 million" not in _prose_input(d)
+    # …ни в notes профиля…
+    assert "3.08 million" not in (_notes_from(d) or "")
+    # …ни в счётчик сводки подтверждения («фактов N» — только про клиента).
+    assert d.counts()["facts"] == 1
+
+    md = render_markdown(d)  # но владельцу — виден, отдельно и с оговоркой
+    assert "3.08 million" in md and "НЕ факты о клиенте" in md
+
+
 # ── правило 8: краулёный текст не командует ───────────────────────────────────────
 def test_crawl_text_cannot_wipe_services():
     """Prompt-injection: страница уговорила модель вернуть replace_services=true — до store флаг не

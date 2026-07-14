@@ -169,7 +169,11 @@ _SYSTEM = (
 
 
 def _prose_input(d: Dossier) -> str:
-    """Что показываем модели синтеза. Контактов здесь нет — только то, что уже прошло map (правило 5)."""
+    """Что показываем модели синтеза. Контактов здесь нет — только то, что уже прошло map (правило 5).
+
+    Фактов отрасли (`Fact.industry`, цифры рынка из блога) здесь тоже нет: проза отсюда уезжает и в
+    описание компании в карточке, и в контекст RSA — «мы продали 3 млн авто» стоило бы клиенту
+    снятых объявлений."""
     lines: list[str] = []
     c = d.company
     if c.legal_name:
@@ -187,8 +191,9 @@ def _prose_input(d: Dossier) -> str:
         )
     if d.usp:
         lines.append("Заявленные преимущества: " + "; ".join(d.usp[:10]))
-    if d.facts:
-        lines.append("Факты: " + "; ".join(f.claim for f in d.facts[:20]))
+    own_facts = [f.claim for f in d.facts if not f.industry]
+    if own_facts:
+        lines.append("Факты: " + "; ".join(own_facts[:20]))
     if d.people:
         lines.append("Команда: " + ", ".join(f"{p.name} — {p.role or '?'}" for p in d.people[:10]))
     return "\n".join(lines)
