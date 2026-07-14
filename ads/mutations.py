@@ -31,7 +31,10 @@ from ads import extensions, geo
 from ads.client import ensure_allowed
 from ads.keyword_plan import LANGUAGE_IDS  # ISO → languageConstant id (полная таблица Google)
 from ads.read import account_currency  # валюта аккаунта → биллинг-единица округления (кэш, 1 GAQL)
-from ads.resolve import gaql_escape  # единый GAQL-эскейп для literal-WHERE (defense-in-depth)
+from ads.resolve import (  # единый GAQL-эскейп для literal-WHERE (defense-in-depth) + shared-budget
+    campaigns_sharing_budget,
+    gaql_escape,
+)
 from ads.validation import assert_keyword_ok, dedup_keyword_pairs, normalize_keywords
 from core.ads_errors import (  # единый источник имён кодов ошибок Google Ads
     error_code_names,
@@ -112,6 +115,7 @@ async def apply_update_budget(
     confirmation_id: str,
     confirm_store: ConfirmStore,
     ads_client: object,
+    disclosed_shared_scope: bool = False,
 ) -> dict:
     # Гейт 1 — замок аккаунта (до всего остального): только Aimash Draft.
     ensure_allowed(customer_id)
@@ -131,9 +135,16 @@ async def apply_update_budget(
         raise PermissionError("изменение бюджета должно быть прямой командой пользователя")
 
     # Реальный вызов SDK (google-ads синхронный → в потоке). _apply_budget_via_sdk вынесен
-    # отдельно, чтобы юнит-тест мог подменить его (офлайн, без живого аккаунта).
+    # отдельно, чтобы юнит-тест мог подменить его (офлайн, без живого аккаунта). disclosed_shared_scope
+    # (П1): раскрыт ли на карточке общий scope бюджета — прокидывается доверенным вызывающим
+    # (execute_confirmed из _before.shared); дефолт False = fail-closed (см. гард в _apply_budget_via_sdk).
     result = await run_ads_call(
-        _apply_budget_via_sdk, ads_client, customer_id, campaign_id, new_budget_micros
+        _apply_budget_via_sdk,
+        ads_client,
+        customer_id,
+        campaign_id,
+        new_budget_micros,
+        disclosed_shared_scope,
     )
     await confirm_store.finalize(confirmation_id, result=result)
     return result
@@ -1394,7 +1405,11 @@ def _default_cpc_bid_micros(client, customer_id: str) -> int:
 
 
 def _apply_budget_via_sdk(
-    client, customer_id: str, campaign_id: str, new_budget_micros: int
+    client,
+    customer_id: str,
+    campaign_id: str,
+    new_budget_micros: int,
+    disclosed_shared_scope: bool = False,
 ) -> dict:
     ga = client.get_service("GoogleAdsService")
     budget_rn = None
@@ -1406,6 +1421,23 @@ def _apply_budget_via_sdk(
         break
     if not budget_rn:
         raise ValueError(f"кампания {campaign_id} не найдена")
+    # П1 (fail-closed, authoritative-гейт денег): CampaignBudget может быть ОБЩИМ. Меняя его
+    # resource_name, мы меняем бюджет ВСЕХ привязанных кампаний — а карточка называла одну. Если к
+    # бюджету привязана хоть одна ДРУГАЯ (неудалённая) кампания, а её общий scope НЕ был раскрыт
+    # пользователю (disclosed_shared_scope=False) — отказываем: он подтвердил бы изменение с бОльшим
+    # радиусом, чем видел (нарушение §5 «было→станет»). Дефолт False ⇒ прямой вызов (dev-скрипт,
+    # будущий код) не тронет общий бюджет вслепую. Проверяем по ФАКТУ живого аккаунта (не по флагу из
+    # черновика) — это и TOCTOU-страховка: бюджет мог стать общим после показа карточки.
+    others = [
+        c
+        for c in campaigns_sharing_budget(client, customer_id, budget_rn)
+        if c["id"] != str(campaign_id)
+    ]
+    if others and not disclosed_shared_scope:
+        raise PermissionError(
+            "это общий бюджет — изменение затронет и другие кампании; применимо только после "
+            "раскрытия общего охвата на карточке (создай черновик заново и переподтверди)"
+        )
     svc = client.get_service("CampaignBudgetService")
     op = client.get_type("CampaignBudgetOperation")
     op.update.resource_name = budget_rn
@@ -1420,7 +1452,10 @@ def _apply_budget_via_sdk(
     return {
         "customer_id": customer_id,
         "campaign_id": str(campaign_id),
+        "budget_resource": str(budget_rn),
         "new_budget_micros": applied_micros,
+        # audit: кого ещё затронул общий бюджет (пусто = только эту кампанию) — фиксируем радиус.
+        "shared_with": [c["name"] for c in others],
         "applied": True,
     }
 
@@ -2129,16 +2164,21 @@ def _set_bidding_strategy_via_sdk(
     # При этом ПУСТУЮ стратегию (maximize_conversions без target) protobuf_helpers.field_mask НЕ
     # увидит (proto3 не маскирует set-but-empty message и default-скаляры), поэтому маску на лист
     # ставим ЯВНО: лист и переключает oneof стратегии, и задаёт/очищает target (0 = без таргета).
+    # Округляем ОДИН раз и переиспользуем и в SDK-операции, и в возвращаемом dict (→ audit-row),
+    # как во всех остальных денежных *_via_sdk (_apply_budget/_apply_bid/_apply_keyword_bid): иначе
+    # журнал зафиксировал бы неокруглённую сумму, а в кампанию ушла бы округлённая — расхождение
+    # audit↔SDK (для валют с крупной единицей биллинга — до половины единицы, граничный 2x).
+    applied_target_cpa = (
+        _round_money(client, customer_id, target_cpa_micros) if target_cpa_micros else None
+    )
     if strategy == "manual_cpc":
         c.manual_cpc.enhanced_cpc_enabled = bool(enhanced_cpc)
         mask_path = "manual_cpc.enhanced_cpc_enabled"
     elif strategy == "maximize_conversions":
-        if target_cpa_micros:
+        if applied_target_cpa:
             # target_cpa обязан быть >= минимальной биллинг-единицы валюты (proto v24): для UGX
             # это 1 000 000 micros, и «target_cpa 0.5» ушёл бы ниже порога → отказ ПОСЛЕ «да».
-            c.maximize_conversions.target_cpa_micros = _round_money(
-                client, customer_id, target_cpa_micros
-            )
+            c.maximize_conversions.target_cpa_micros = applied_target_cpa
         else:  # пустая стратегия (без таргета) — присваиваем чистое сообщение
             client.copy_from(c.maximize_conversions, client.get_type("MaximizeConversions"))
         mask_path = "maximize_conversions.target_cpa_micros"
@@ -2161,7 +2201,7 @@ def _set_bidding_strategy_via_sdk(
         "customer_id": str(customer_id),
         "campaign_id": str(campaign_id),
         "strategy": strategy,
-        "target_cpa_micros": int(target_cpa_micros) if target_cpa_micros else None,
+        "target_cpa_micros": applied_target_cpa,
         "target_roas": float(target_roas) if target_roas else None,
         "enhanced_cpc": bool(enhanced_cpc) if strategy == "manual_cpc" else None,
         "applied": True,

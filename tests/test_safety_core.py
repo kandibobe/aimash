@@ -341,7 +341,7 @@ def test_budget_applies_when_confirmed_and_user_initiated():
     # пройдены, исполнитель вызван с правильным customer_id и proposal финализирован.
     import ads.mutations as mut
 
-    def fake_sdk(client, customer_id, campaign_id, new_budget_micros):
+    def fake_sdk(client, customer_id, campaign_id, new_budget_micros, disclosed_shared_scope=False):
         return {
             "customer_id": customer_id,
             "campaign_id": str(campaign_id),

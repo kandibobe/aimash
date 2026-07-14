@@ -23,6 +23,11 @@ class CampaignRef:
     status: str
     budget_resource: str
     budget_micros: int
+    # П1: общий бюджет? explicitly_shared=True — бюджет создан как общий; reference_count>1 — к нему
+    # привязана НЕ одна кампания. Меняя CampaignBudget, меняем его ДЛЯ ВСЕХ них — это и есть скрытый
+    # «радиус поражения» денежной команды. Дефолты safe (обычный бюджет: не общий, одна кампания).
+    budget_explicitly_shared: bool = False
+    budget_reference_count: int = 0
 
 
 @dataclass
@@ -68,7 +73,8 @@ def find_campaign_by_name(
     # СТАРШУЮ (удалённую) строку, и денежная команда «увеличь бюджет Sale» ушла бы в мёртвую сущность.
     q = (
         "SELECT campaign.id, campaign.name, campaign.status, campaign.campaign_budget, "
-        "campaign_budget.amount_micros FROM campaign "
+        "campaign_budget.amount_micros, campaign_budget.explicitly_shared, "
+        "campaign_budget.reference_count FROM campaign "
         f"WHERE campaign.name = '{safe}' AND campaign.status != 'REMOVED' LIMIT 1"
     )
     for row in ga.search(customer_id=str(customer_id), query=q):
@@ -79,8 +85,34 @@ def find_campaign_by_name(
             status=row.campaign.status.name,
             budget_resource=row.campaign.campaign_budget,
             budget_micros=row.campaign_budget.amount_micros,
+            budget_explicitly_shared=bool(row.campaign_budget.explicitly_shared),
+            budget_reference_count=int(row.campaign_budget.reference_count or 0),
         )
     return None
+
+
+def campaigns_sharing_budget(
+    client: GoogleAdsClient, customer_id: str, budget_resource: str
+) -> list[dict]:
+    """П1: все НЕудалённые кампании, привязанные к данному ресурсу бюджета — реальный «радиус
+    поражения» изменения общего (explicitly_shared) бюджета. Меняя CampaignBudget, мы меняем его
+    ДЛЯ ВСЕХ этих кампаний, а не только для той, что назвал пользователь. READ-ONLY.
+
+    Возвращает [{id, name}] (может быть пусто/из одной кампании, если бюджет не общий). status !=
+    REMOVED (A3): удалённые тёзки не считаем «затронутыми». resource_name — из Google API, но
+    literal-WHERE эскейпим единообразно (gaql_escape), без дыр-исключений."""
+    ensure_allowed(customer_id)
+    ga = client.get_service("GoogleAdsService")
+    safe = gaql_escape(str(budget_resource))
+    q = (
+        "SELECT campaign.id, campaign.name FROM campaign "
+        f"WHERE campaign.campaign_budget = '{safe}' AND campaign.status != 'REMOVED' "
+        "ORDER BY campaign.name"
+    )
+    return [
+        {"id": str(row.campaign.id), "name": row.campaign.name}
+        for row in ga.search(customer_id=str(customer_id), query=q)
+    ]
 
 
 def campaign_network_settings(client: GoogleAdsClient, customer_id: str, name: str) -> dict | None:
@@ -307,10 +339,15 @@ def find_ads_in_group(
     ensure_allowed(customer_id)
     ga = client.get_service("GoogleAdsService")
     safe_c, safe_g = gaql_escape(campaign_name), gaql_escape(ad_group_name)
+    # status != REMOVED (A3): как в find_ad_groups/find_keywords — отсекаем удалённую кампанию-тёзку
+    # И удалённую группу-тёзку. Без этих двух отсечек pause/resume/remove_ad мог бы адресовать
+    # объявление в мёртвой кампании с переиспользованным именем (статусы детей при удалении
+    # родителя в REMOVED не каскадируются), а живой тёзка продолжал бы крутиться и тратить деньги.
     q = (
         "SELECT ad_group.id, ad_group_ad.ad.id, ad_group_ad.status, "
         "ad_group_ad.ad.responsive_search_ad.headlines FROM ad_group_ad "
-        f"WHERE campaign.name = '{safe_c}' AND ad_group.name = '{safe_g}' "
+        f"WHERE campaign.name = '{safe_c}' AND campaign.status != 'REMOVED' "
+        f"AND ad_group.name = '{safe_g}' AND ad_group.status != 'REMOVED' "
         "AND ad_group_ad.status != 'REMOVED' ORDER BY ad_group_ad.ad.id"
     )
     want = (needle or "").strip()

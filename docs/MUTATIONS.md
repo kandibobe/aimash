@@ -99,6 +99,16 @@ MUTATION_TOOLS?» отмечает членство в наборе, разре�
 `test_money_apply_functions_match_registry_and_guard_user_initiated`
 (`tests/test_invariants_core.py`) держит этот список в синхроне с кодом.
 
+**Примечание по общему бюджету (П1).** `update_budget` меняет `CampaignBudget`, а он
+может быть ОБЩИМ (`explicitly_shared` / `reference_count > 1`) — тогда изменение затронет
+ВСЕ привязанные кампании, не только названную. `read_before` раскрывает радиус
+(`resolve.campaigns_sharing_budget` → `_before.shared_campaigns`), карточка печатает
+«⚠️ Общий бюджет — затронет также: …», а `apply_update_budget` без раскрытого согласия
+(`disclosed_shared_scope`, который `execute_confirmed` ставит из `_before.shared`) —
+**fail-closed `raise PermissionError`**: молча тронуть чужие кампании нельзя. Радиус
+`apply_*` перечитывает по ЖИВОМУ аккаунту (не по snapshot карточки) → TOCTOU-safe в обе
+стороны (бюджет стал общим ПОСЛЕ показа карточки — откажем; перестал — не соврём).
+
 **Примечание по аудиториям и `attach_image_asset`.** `attach_audience`/`detach_audience`
 входят в `MUTATION_TOOLS`, но НЕ имеют tool-схемы в `TOOLS` — модель их не эмитит,
 их минтует бот из пикера аудиторий (`resource_name` из `ads.read.list_audiences`).

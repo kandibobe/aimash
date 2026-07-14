@@ -119,7 +119,15 @@ def _patched_service(monkeypatch, *, budget_micros: int, raises: Exception | Non
     def _find(_client, _cid, _name):
         if raises is not None:
             raise raises
-        return SimpleNamespace(id="1", budget_micros=budget_micros)
+        # CampaignRef-контракт: B добавил поля общего бюджета (дефолты — не общий). Фейк обязан их
+        # отдавать, иначе read_before упрётся в AttributeError и деградирует до «без было».
+        return SimpleNamespace(
+            id="1",
+            budget_micros=budget_micros,
+            budget_explicitly_shared=False,
+            budget_reference_count=0,
+            budget_resource="customers/1/campaignBudgets/1",
+        )
 
     async def _cur(_client, _cid):
         return "USD"

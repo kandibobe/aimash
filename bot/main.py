@@ -5551,12 +5551,28 @@ async def _audit_trend_line(result, client, acct: str, days: int, lang: str) -> 
     к предыдущему прогону. Δ считается ТОЛЬКО между снапшотами ОДНОЙ score_model_version и ОДНОГО
     окна (N1.0a): смена модели оценки → честное «н/д», не ложный «−10 за неделю». '' → без строки."""
     try:
+        from audit.render import score_affecting_gaps
         from audit.snapshot import previous_snapshot, record_snapshot
 
         snap_date = await _account_local_date(client, acct)
         prev = await previous_snapshot(acct, before_date=snap_date, period_days=days)
-        await record_snapshot(result, snapshot_date=snap_date, period_days=days)
-        if prev is None or result.score is None:
+        # F: балл, посчитанный при непрочитанном сигнале весомой семьи, ЗАВЫШЕН (её дефекты не
+        # оштрафованы). Такой балл нельзя (а) писать в baseline — отравит будущие дельты; (б)
+        # сравнивать с чистым прошлым — покажет ложное «−N за неделю». Честно: н/д, снапшот не пишем.
+        blind = score_affecting_gaps(result)
+        if not blind:
+            await record_snapshot(result, snapshot_date=snap_date, period_days=days)
+        if result.score is None:
+            return ""
+        if blind:
+            if prev is None:
+                return ""
+            return (
+                "\n📊 Trend: n/a (incomplete data this run)"
+                if lang == "en"
+                else "\n📊 Тренд: н/д (в этом прогоне неполные данные)"
+            )
+        if prev is None:
             return ""
         if prev.score_model_version != result.score_model_version:
             return (

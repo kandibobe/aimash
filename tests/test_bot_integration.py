@@ -476,7 +476,7 @@ async def test_on_confirm_runs_real_execute_confirmed_gates():
     fake_ref = SimpleNamespace(id="77", budget_micros=40_000_000, status="ENABLED")
     sdk: dict = {"n": 0}
 
-    def fake_sdk(client, customer_id, campaign_id, micros):  # нижний SDK-исполнитель
+    def fake_sdk(client, customer_id, campaign_id, micros, disclosed_shared_scope=False):
         sdk["n"] += 1
         sdk["args"] = (customer_id, campaign_id, micros)
         return {"customer_id": customer_id, "campaign_id": campaign_id, "applied": True}

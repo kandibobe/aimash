@@ -1128,9 +1128,20 @@ async def cleanup_stale_proposals(
                     created = created.replace(tzinfo=timezone.utc)
                 if created < cutoff:
                     stale.append((p.confirmation_id, p.chat_id))
+        rejected = 0
         for cid, chat_id in stale:
+            # П7: СНАЧАЛА атомарный reject (pending→rejected, CAS), и ТОЛЬКО потом чистим медиа.
+            # Раньше unlink шёл ДО reject: если владелец успевал нажать ✅ в окне между выборкой
+            # stale и этим циклом, черновик становился confirmed/executing, reject давал False —
+            # но кадры были уже удалены → кампания создавалась без изображений (тихо, при старом
+            # глотании в service.py). Порядок «reject → clear» это закрывает: False (успел ✅ /
+            # гонка / чужой) ⇒ continue, живые медиа не трогаем; True ⇒ черновик терминально мёртв,
+            # кадры больше не нужны никому.
+            if not await store.reject(cid, chat_id=chat_id):
+                continue
+            rejected += 1
             # §19/§11: TTL-просроченные create_search/gdn/demand_gen_campaign несут временные медиа
-            # по media_id — чистим их перед reject (иначе осиротеют на диске).
+            # по media_id — после reject чистим их (иначе осиротеют на диске).
             snap = await store.get_confirmed(cid)
             if snap is not None:
                 from ads.assets import clear_pending_media_ids, collect_search_campaign_media_ids
@@ -1143,10 +1154,9 @@ async def cleanup_stale_proposals(
                     clear_pending_media_ids([p["media_id"]])
                 elif snap.operation == "create_demand_gen_campaign" and p.get("logo_media_id"):
                     clear_pending_media_ids([p["logo_media_id"]])
-            await store.reject(cid, chat_id=chat_id)  # pending→rejected + audit (одноразово)
-        if stale:
-            log.info("scheduler: отклонено просроченных черновиков: %d", len(stale))
-        return len(stale)
+        if rejected:
+            log.info("scheduler: отклонено просроченных черновиков: %d", rejected)
+        return rejected
 
 
 # B2: за сколько часов до истечения TTL черновика предупреждать владельца. При ttl <= окна
@@ -1502,7 +1512,9 @@ async def purge_stale_rows(*, now: datetime | None = None) -> dict[str, int]:
                         )
                     )
                 result["account_health_snapshot"] = len(stale)
-            if settings.site_page_text_retain_days > 0:  # §20: тексты краула (крупные, чужой контент)
+            if (
+                settings.site_page_text_retain_days > 0
+            ):  # §20: тексты краула (крупные, чужой контент)
                 cutoff = now - timedelta(days=settings.site_page_text_retain_days)
                 rows = (
                     await s.execute(

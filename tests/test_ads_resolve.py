@@ -62,7 +62,15 @@ class _FakeClient:
         return self._ga
 
 
-def _campaign_row(*, cid="123", name="Бренд", status="ENABLED", budget_micros=1_000_000):
+def _campaign_row(
+    *,
+    cid="123",
+    name="Бренд",
+    status="ENABLED",
+    budget_micros=1_000_000,
+    explicitly_shared=False,
+    reference_count=1,
+):
     return SimpleNamespace(
         campaign=SimpleNamespace(
             id=int(cid),
@@ -71,7 +79,11 @@ def _campaign_row(*, cid="123", name="Бренд", status="ENABLED", budget_micr
             resource_name=f"customers/{DRAFT_ACCOUNT_ID}/campaigns/{cid}",
             campaign_budget=f"customers/{DRAFT_ACCOUNT_ID}/campaignBudgets/{cid}",
         ),
-        campaign_budget=SimpleNamespace(amount_micros=budget_micros),
+        campaign_budget=SimpleNamespace(
+            amount_micros=budget_micros,
+            explicitly_shared=explicitly_shared,  # П1: общий бюджет?
+            reference_count=reference_count,  # П1: сколько кампаний на бюджете
+        ),
     )
 
 

@@ -144,6 +144,22 @@ _IMPLEMENTED_FAMILIES = (
     "assets",
 )
 
+# F: сигналы, чьё ОТСУТСТВИЕ завышает балл. Каждый ведёт в весомую семью (FAMILY_WEIGHT>0): если
+# сигнал не прочитан, чеки семьи молчат «нет данных», штраф не начисляется → score выше, чем на
+# полных данных. Это РОВНО объединение _FAMILY_SIGNALS (все ведут в весомые семьи) — выводим из него,
+# чтобы карта не разъехалась. optimization_score/recommendations сюда НЕ входят: «второе мнение»
+# (семьи competition/recommendations вне FAMILY_WEIGHT), их пробел балл не двигает.
+_SCORE_AFFECTING_SIGNALS = frozenset(s for sigs in _FAMILY_SIGNALS.values() for s in sigs)
+
+
+def score_affecting_gaps(result) -> set[str]:
+    """F: подмножество data_gaps, из-за которых балл может быть ЗАВЫШЕН (сигнал весомой семьи не
+    прочитан ⇒ её дефекты не оштрафованы). Пусто → балл посчитан на полных для score данных, его
+    можно честно сравнивать во времени. Используют карточка (честный текст) и тренд (н/д + не писать
+    снапшот, чтобы не отравить baseline). `getattr` — гейт денег/тренда не должен падать на
+    result-подобном объекте без поля (отсутствие data_gaps = пробелов нет)."""
+    return set(getattr(result, "data_gaps", None) or ()) & _SCORE_AFFECTING_SIGNALS
+
 
 def _money(v: float, cur: str) -> str:
     s = f"{v:,.2f}".replace(",", " ")
@@ -772,12 +788,25 @@ def render_audit(
                 )
             if gaps:
                 slabels = _SIGNAL_LABEL[lang]
-                names = ", ".join(slabels.get(s, s) for s in sorted(gaps))
-                lines.append(
-                    f"ℹ️ Not enough data: {names} (no score impact)"
-                    if lang == "en"
-                    else f"ℹ️ Недостаточно данных: {names} (на score не влияет)"
-                )
+                # F (GR8): не все пробелы равны. Сигнал весомой семьи не прочитан ⇒ её дефекты не
+                # оштрафованы ⇒ балл ЗАВЫШЕН — писать про него «на score не влияет» было бы враньём.
+                # «Второе мнение» Google (opt_score/recommendations) балл и правда не двигает.
+                affecting = gaps & _SCORE_AFFECTING_SIGNALS
+                neutral = gaps - affecting
+                if affecting:
+                    names = ", ".join(slabels.get(s, s) for s in sorted(affecting))
+                    lines.append(
+                        f"⚠️ Incomplete data: {names} — these families weren't checked, the score may be overstated."
+                        if lang == "en"
+                        else f"⚠️ Неполные данные: {names} — эти семьи не проверены, балл может быть завышен."
+                    )
+                if neutral:
+                    names = ", ".join(slabels.get(s, s) for s in sorted(neutral))
+                    lines.append(
+                        f"ℹ️ Not enough data: {names} (no score impact)"
+                        if lang == "en"
+                        else f"ℹ️ Недостаточно данных: {names} (на score не влияет)"
+                    )
 
     # Топ-3 действия + дисклеймер — только в самодостаточной карточке (actions=True). При actions=False
     # это ОБЗОР: действия идут отдельными сообщениями с кнопками (bot-слой), дисклеймер шлётся там же.

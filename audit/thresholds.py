@@ -159,7 +159,13 @@ DEFAULT_AUDIT_THRESHOLDS: dict[str, float] = {
 # «Под риском» задваивался на кампаниях с гео «присутствие ИЛИ интерес»). Ровно как в эпохе 4: тело
 # чека сменило смысл при неизменных check_id/family/severity/порогах ⇒ хэш слеп — нужен бамп, иначе
 # тренд сравнил бы старые (задвоенные) деньги с новыми (честными).
-SCORE_MODEL_EPOCH: int = 5
+# Эпоха 6 (2026-07-14, ревизия багов): три чека на инвентаре ключей (zero_impression_keywords,
+# keyword_cannibalization, brand_nonbrand_mixed) теперь молчат при усечённом инвентаре
+# (keyword_inventory_truncated) — как harvest/ngram. На аккаунте, где инвентарь упёрся в LIMIT,
+# zero_impression_keywords раньше штрафовал балл (info×NONMONEY_INTENSITY) по произвольному обрезку;
+# теперь нет. check_id/family/severity/пороги те же ⇒ хэш слеп — бамп, иначе тренд сравнил бы балл,
+# посчитанный по неполному списку, с честным.
+SCORE_MODEL_EPOCH: int = 6
 
 
 def grade_for(score: float | None) -> str:

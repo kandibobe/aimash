@@ -126,12 +126,25 @@ async def read_before(operation: str, params: dict, customer_id: str | None = No
             after = resolve.compute_new_micros(
                 ref.budget_micros, params["mode"], params["value"], currency=cur
             )
-            return {
+            snap = {
                 "kind": "budget",
                 "before_micros": int(ref.budget_micros),
                 "after_micros": int(after),
                 "currency": cur or "",  # для карточки: zero-decimal валюты показываем без копеек
             }
+            # П1: общий бюджет? explicitly_shared / reference_count>1 ⇒ есть ДРУГИЕ кампании на том же
+            # бюджете — изменение затронет их ВСЕ. Раскрываем радиус на карточке (§5, информированное
+            # согласие) и помечаем _before.shared: execute_confirmed прокинет это как disclosed_shared_
+            # scope в apply_update_budget, чей fail-closed гард иначе откажет (радиус не раскрыт).
+            if ref.budget_explicitly_shared or int(ref.budget_reference_count or 0) > 1:
+                others = await asyncio.to_thread(
+                    resolve.campaigns_sharing_budget, client, cid, ref.budget_resource
+                )
+                names = [c["name"] for c in others if c["name"] != name]
+                if names:
+                    snap["shared"] = True
+                    snap["shared_campaigns"] = names
+            return snap
         if operation in ("pause_campaign", "resume_campaign", "launch_campaign"):
             ref = await asyncio.to_thread(resolve.find_campaign_by_name, client, cid, name)
             if ref is None:
@@ -348,6 +361,10 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
             confirmation_id=confirmation_id,
             confirm_store=store,
             ads_client=client,
+            # П1: общий scope раскрыт на карточке? _before.shared проставляет read_before, когда к
+            # бюджету привязаны и другие кампании. Только тогда гард apply_update_budget пропустит
+            # изменение общего бюджета (иначе fail-closed отказ — пользователь не видел радиус).
+            disclosed_shared_scope=bool((params.get("_before") or {}).get("shared")),
         )
 
     if op == "pause_campaign":
@@ -984,12 +1001,17 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
         if media_ids:
             from ads.assets import load_pending_media
 
+            # П6/П1-медиа: media_id перечислены в params ПОДТВЕРЖДЁННОГО черновика — это часть diff'а,
+            # который пользователь увидел и подтвердил (карточка показывает число изображений). Если
+            # кадр пропал (преждевременный unlink: supersede визарда / TTL-cleanup / гонка отмены),
+            # НЕ глотаем — иначе создали бы кампанию с ДРУГИМ составом, чем подтверждён (нарушение
+            # золотых правил 1/6: код применяет РОВНО подтверждённый diff или падает). raise идёт ДО
+            # apply_* (до claim, SDK ещё не звался) → _do_confirm ловит, record_failure помечает
+            # confirmed→failed + audit, юзеру уходит редактированное «медиа устарело». Повтор =
+            # новый черновик через возобновление визарда, а не тихая порча.
             for mid in media_ids:
-                try:
-                    landscape, _square = await asyncio.to_thread(load_pending_media, mid)
-                    image_specs.append((landscape, f"{params['campaign_name']}_img"))
-                except Exception:  # noqa: BLE001 — медиа протухло/нет → просто без него
-                    pass
+                landscape, _square = await asyncio.to_thread(load_pending_media, mid)
+                image_specs.append((landscape, f"{params['campaign_name']}_img"))
         try:
             return await mutations.apply_create_search_campaign(
                 customer_id=customer_id,

@@ -1217,7 +1217,10 @@ def test_data_gaps_rendered_not_claimed_healthy():
     )
     assert res.data_gaps == ["conversion_actions", "bidding"]
     card = render_audit(res, "ru", actions=False)
-    assert "Недостаточно данных" in card and "действия-конверсии" in card
+    # F: конверсии и ставки — сигналы весомых семей → честно «балл может быть завышен» (не «на score
+    # не влияет»: их отсутствие снимает штраф с conversion_tracking/bidding и завышает балл).
+    assert "Неполные данные" in card and "действия-конверсии" in card
+    assert "балл может быть завышен" in card
     ok_line = next(line for line in card.splitlines() if line.startswith("✅"))
     assert "Отслеживание конверсий" not in ok_line and "Ставки" not in ok_line
     assert "Структура" in ok_line  # у structure нет доп-сигналов — честное «в норме»
@@ -1362,7 +1365,7 @@ def test_delivery_data_gap_not_claimed_healthy():
 
     totals = Metrics(impressions=3000, clicks=300, cost_micros=1_000_000_000, conversions=5)
     rows = [_campaign("Brand", 500, 100, 0), _campaign("Generic", 500, 200, 5, imps=2000)]
-    # ad_policy упал (None → data gap) → delivery НЕ «в норме», сигнал — ℹ️
+    # ad_policy упал (None → data gap) → delivery НЕ «в норме», сигнал весомой семьи ⇒ балл завышен
     res = build_audit(
         _report(totals, rows),
         search_terms=[],
@@ -1371,7 +1374,7 @@ def test_delivery_data_gap_not_claimed_healthy():
         data_gaps=["ad_policy"],
     )
     card = render_audit(res, "ru", actions=False)
-    assert "Недостаточно данных" in card and "модерация объявлений" in card
+    assert "Неполные данные" in card and "модерация объявлений" in card
     ok_line = next((line for line in card.splitlines() if line.startswith("✅")), "")
     assert "Показ и модерация" not in ok_line
 

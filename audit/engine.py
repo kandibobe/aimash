@@ -1376,7 +1376,9 @@ def check_keyword_cannibalization(report, thr: dict, ctx: _Ctx) -> list[Finding]
     группах) — дубль-«спящий» никому не мешает; разные типы соответствия (broad + exact одного
     текста) — НОРМАЛЬНАЯ структура, не каннибализация."""
     inv = ctx.keyword_inventory
-    if not inv:
+    # G/GR8: обрезанный инвентарь (LIMIT без ORDER BY) — произвольное подмножество; дубль-ключ мог
+    # оказаться по разные стороны отсечки → молчим, иначе врём про полноту (как harvest/ngram).
+    if not inv or ctx.keyword_inventory_truncated:
         return []
     groups: dict[tuple[str, str], list] = {}
     for k in inv:
@@ -1435,7 +1437,9 @@ def check_zero_impression_keywords(report, thr: dict, ctx: _Ctx) -> list[Finding
     молодой кампании. Фетчер тут ОТДЕЛЬНЫЙ (fetch_keyword_inventory) именно потому, что топ-по-
     расходу выборка нулевые ключи выбрасывает первыми."""
     inv = ctx.keyword_inventory
-    if not inv:
+    # G/GR8 (критично здесь): чек считает ДОЛЮ zero/total. Обрезанный инвентарь (LIMIT без ORDER BY)
+    # = произвольное подмножество → доля бессмысленна и даст ложную находку. Обрезано ⇒ молчим.
+    if not inv or ctx.keyword_inventory_truncated:
         return []
     total = len(inv)
     zero = [k for k in inv if int(getattr(getattr(k, "metrics", None), "impressions", 0) or 0) <= 0]
@@ -2163,7 +2167,9 @@ def check_brand_nonbrand_mixed(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     Считаем только ключи с показами: спящий брендовый ключ ни с кем бюджет не делит."""
     inv = ctx.keyword_inventory
     brands = ctx.brand_terms
-    if not inv or not brands:
+    # G/GR8: обрезанный инвентарь → небрендовые ключи кампании могли не попасть в выборку; «чисто
+    # брендовая» станет ложной. Обрезано ⇒ молчим (как harvest/ngram/cannibalization).
+    if not inv or not brands or ctx.keyword_inventory_truncated:
         return []
     need_other = int(thr.get("brand_mix_min_nonbrand", 3))
     min_spend = float(thr.get("brand_mix_min_spend", 20.0))

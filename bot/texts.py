@@ -923,7 +923,15 @@ def _money_summary(label: str, params: dict, lang: str | None = None) -> str:
                 tail = f" ({sign}{f'{v} {cur}'.strip()})"
             else:
                 tail = ""
-            return f"Campaign “{c}” — {label}: {before_s} → {after_s}{tail}".rstrip()
+            base = f"Campaign “{c}” — {label}: {before_s} → {after_s}{tail}".rstrip()
+            # П1: раскрываем радиус общего бюджета — пользователь видит, что изменение затронет и
+            # ДРУГИЕ кампании (иначе fail-closed гард apply_update_budget не даст применить).
+            sc = b.get("shared_campaigns") or []
+            if sc:
+                shown = ", ".join(f"“{n}”" for n in sc[:5])
+                more = f" +{len(sc) - 5}" if len(sc) > 5 else ""
+                base += f"\n⚠️ Shared budget — also affects: {shown}{more}"
+            return base
         if pct:
             return f"Campaign “{c}” — {label}: {sign}{v}%"
         if amt:
@@ -942,7 +950,15 @@ def _money_summary(label: str, params: dict, lang: str | None = None) -> str:
             tail = f" ({sign}{f'{v} {cur}'.strip()})"  # cur='' (валюта аккаунта) → «(+10)», без лишнего пробела
         else:
             tail = ""
-        return f"Кампания «{c}» — {label}: {before_s} → {after_s}{tail}".rstrip()
+        base = f"Кампания «{c}» — {label}: {before_s} → {after_s}{tail}".rstrip()
+        # П1: раскрываем радиус общего бюджета — пользователь видит, что изменение затронет и ДРУГИЕ
+        # кампании (иначе fail-closed гард apply_update_budget не даст применить).
+        sc = b.get("shared_campaigns") or []
+        if sc:
+            shown = ", ".join(f"«{n}»" for n in sc[:5])
+            more = f" +{len(sc) - 5}" if len(sc) > 5 else ""
+            base += f"\n⚠️ Общий бюджет — затронет также: {shown}{more}"
+        return base
     # fallback без «было» (чтение не удалось / старый черновик)
     if pct:
         return f"Кампания «{c}» — {label}: {sign}{v}%"

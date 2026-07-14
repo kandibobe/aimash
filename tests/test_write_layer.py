@@ -2197,6 +2197,75 @@ async def test_apply_update_budget_rejects_absurd_amount():
     assert store.finalized is False
 
 
+# ── П1: общий бюджет — fail-closed гард в _apply_budget_via_sdk ───────────────────
+# Меняя CampaignBudget, мы меняем его для ВСЕХ привязанных кампаний. Если к бюджету привязана
+# другая (неудалённая) кампания, а её общий scope НЕ раскрыт (disclosed_shared_scope=False) —
+# отказ ДО мутации. Гард читает живой аккаунт (TOCTOU-safe), не флаг из черновика.
+class _ReachedBudgetMutate(Exception):
+    """Сигнал: гард пройден и код дошёл до CampaignBudgetService (реальной мутации)."""
+
+
+class _BudgetGuardClient:
+    """Фейк-клиент для _apply_budget_via_sdk: GoogleAdsService.search маршрутизирует по запросу
+    (resolve budget_rn vs campaigns_sharing_budget), любой другой сервис = «дошли до мутации»."""
+
+    def __init__(self, budget_rn: str, linked):
+        self._budget_rn = budget_rn
+        self._linked = linked  # [(id, name), ...] — кампании на этом бюджете
+
+    def get_service(self, name):
+        if name == "GoogleAdsService":
+            client = self
+
+            class _GA:
+                def search(self, *, customer_id, query):
+                    if "campaign.campaign_budget =" in query:  # campaigns_sharing_budget
+                        return [
+                            SimpleNamespace(campaign=SimpleNamespace(id=int(i), name=n))
+                            for i, n in client._linked
+                        ]
+                    # resolve budget_rn по campaign.id
+                    return [
+                        SimpleNamespace(campaign=SimpleNamespace(campaign_budget=client._budget_rn))
+                    ]
+
+            return _GA()
+        raise _ReachedBudgetMutate(name)
+
+
+def test_shared_budget_blocked_without_disclosure():
+    # К бюджету привязана ДРУГАЯ кампания (id=2), scope не раскрыт → PermissionError ДО мутации.
+    client = _BudgetGuardClient("customers/1/campaignBudgets/9", linked=[("1", "A"), ("2", "B")])
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        try:
+            mut._apply_budget_via_sdk(client, DRAFT_ACCOUNT_ID, "1", 50_000_000, False)
+            raise AssertionError("ожидался PermissionError (общий бюджет без раскрытия)")
+        except PermissionError:
+            pass  # гард сработал, до CampaignBudgetService не дошли
+
+
+def test_shared_budget_allowed_when_disclosed():
+    # Тот же общий бюджет, но scope раскрыт (disclosed=True) → гард пропускает к мутации.
+    client = _BudgetGuardClient("customers/1/campaignBudgets/9", linked=[("1", "A"), ("2", "B")])
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        try:
+            mut._apply_budget_via_sdk(client, DRAFT_ACCOUNT_ID, "1", 50_000_000, True)
+            raise AssertionError("ожидался _ReachedBudgetMutate (гард пройден)")
+        except _ReachedBudgetMutate:
+            pass
+
+
+def test_solo_budget_allowed_without_disclosure():
+    # Бюджет только у этой кампании (нет «соседей») → гард не срабатывает даже без раскрытия.
+    client = _BudgetGuardClient("customers/1/campaignBudgets/9", linked=[("1", "A")])
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        try:
+            mut._apply_budget_via_sdk(client, DRAFT_ACCOUNT_ID, "1", 50_000_000, False)
+            raise AssertionError("ожидался _ReachedBudgetMutate (гард пройден)")
+        except _ReachedBudgetMutate:
+            pass
+
+
 # ── pause_campaign: happy path (был вообще без теста) ────────────────────────────
 async def test_apply_pause_campaign_happy_path():
     called = {}

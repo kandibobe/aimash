@@ -190,6 +190,99 @@ def test_truncated_keyword_inventory_silences_mining_checks():
     assert not (mining & {f.check_id for f in cut.findings})
 
 
+def test_keyword_inventory_readers_honor_truncation():
+    """AST-инвариант (закрывает КЛАСС, не три случая): любой check_*, читающий ctx.keyword_inventory
+    (прямо ИЛИ транзитивно через хелпер вроде `_kw_texts`), ОБЯЗАН считаться с
+    ctx.keyword_inventory_truncated. Иначе выдаст находку по произвольному обрезку LIMIT'ом — доля
+    нулевых, дубли-каннибалы и бренд-микс на неполном списке систематически врут (GR8)."""
+    src = _ENGINE.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+
+    def ctx_attrs(name: str, seen: set[str]) -> set[str]:
+        if name in seen or name not in funcs:
+            return set()
+        seen.add(name)
+        out: set[str] = set()
+        for n in ast.walk(funcs[name]):
+            if (
+                isinstance(n, ast.Attribute)
+                and isinstance(n.value, ast.Name)
+                and n.value.id == "ctx"
+            ):
+                out.add(n.attr)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+                out |= ctx_attrs(n.func.id, seen)
+        return out
+
+    offenders = [
+        name
+        for name in funcs
+        if name.startswith("check_")
+        and "keyword_inventory" in (used := ctx_attrs(name, set()))
+        and "keyword_inventory_truncated" not in used
+    ]
+    assert not offenders, (
+        f"чеки читают keyword_inventory без учёта усечения: {offenders} — "
+        "добавь ранний выход `or ctx.keyword_inventory_truncated`"
+    )
+
+
+def test_truncated_keyword_inventory_silences_share_check():
+    """Самый опасный из трёх (ложно-ПОЛОЖИТЕЛЬНЫЙ): zero_impression_keywords судит по ДОЛЕ нулевых.
+    На обрезке LIMIT'ом (произвольное подмножество без ORDER BY) доля бессмысленна → чек молчит."""
+    rep = _report(1000.0, 10.0)
+
+    def _kw0(text: str):  # ключ без показов
+        return KeywordInventoryRow(
+            campaign="Поиск",
+            ad_group="Группа",
+            keyword=text,
+            match_type="PHRASE",
+            metrics=Metrics(impressions=0, clicks=0, cost_micros=0, conversions=0.0),
+        )
+
+    inv = [_kw0(f"нулевой ключ {i}") for i in range(25)]
+    live = build_audit(rep, keyword_inventory=inv)
+    assert "zero_impression_keywords" in {f.check_id for f in live.findings}, (
+        "предпосылка теста: на полном списке чек ГОВОРИТ"
+    )
+    cut = build_audit(rep, keyword_inventory=inv, keyword_inventory_truncated=True)
+    assert "zero_impression_keywords" not in {f.check_id for f in cut.findings}
+
+
+def test_score_affecting_gaps_excludes_second_opinion_signals():
+    """F: пробел «второго мнения» Google (opt_score/recommendations) балл НЕ двигает — тренд по нему
+    честен и снапшот пишется. Пробел сигнала весомой семьи (конверсии/IS/инвентарь) балл ЗАВЫШАЕТ —
+    тренд по нему обязан быть «н/д», а снапшот — не записан (иначе отравит baseline)."""
+    from audit.render import score_affecting_gaps
+
+    assert score_affecting_gaps(SimpleNamespace(data_gaps=None)) == set()
+    assert (
+        score_affecting_gaps(SimpleNamespace(data_gaps=["optimization_score", "recommendations"]))
+        == set()
+    )
+    assert score_affecting_gaps(
+        SimpleNamespace(data_gaps=["conversion_actions", "optimization_score"])
+    ) == {"conversion_actions"}
+    for sig in ("impression_share", "keyword_inventory", "bidding", "campaign_assets"):
+        assert score_affecting_gaps(SimpleNamespace(data_gaps=[sig])) == {sig}
+
+
+def test_card_flags_score_affecting_gap_as_overstated_not_harmless():
+    """F (GR8): пробел весомой семьи в карточке — «балл может быть завышен», НЕ обманчивое «на score
+    не влияет». Мягкая формулировка остаётся ТОЛЬКО для второго мнения Google (opt_score)."""
+    from audit.render import render_audit
+
+    rep = _report(500.0, 5.0)
+    res = build_audit(rep, data_gaps=["conversion_actions", "optimization_score"])
+    card = render_audit(res, "ru")
+    assert "балл может быть завышен" in card, (
+        "пробел весомой семьи обязан честно пометить завышение"
+    )
+    assert "на score не влияет" in card, "второе мнение Google остаётся мягкой пометкой"
+
+
 async def _gaps(monkeypatch, *, rsa_rows, kw_rows) -> set[str]:
     """data_gaps, которые объявит collect-слой при таких RSA/инвентаре (остальные фетчеры — []),
     т.е. НЕ сбой чтения: список пуст → «данных нет», а не «сигнал потерян»."""
