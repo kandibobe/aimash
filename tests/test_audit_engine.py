@@ -130,15 +130,32 @@ def test_kill_rule_noop_without_target_but_fires_with_target():
 
 
 def test_no_conversion_tracking_flags_whole_spend():
-    """Расход есть, клики есть, 0 конверсий по аккаунту → красная семья, весь расход под риском."""
+    """С ПРОЧИТАННЫМИ действиями-конверсиями (conversion_actions=[]) и 0 активных при расходе → красная
+    семья, весь расход под риском. Это УВЕРЕННЫЙ путь: мы проверили и знаем, что действий нет."""
     totals = Metrics(
         impressions=5000, clicks=400, cost_micros=200_000_000, conversions=0
     )  # $200, 0 conv
-    res = build_audit(_report(totals, []))
+    res = build_audit(_report(totals, []), conversion_actions=[])  # прочитано, действий нет — ФАКТ
     fams = res.families
     assert "conversion_tracking" in fams
     # весь расход под риском (capped by spend)
     assert res.at_risk == 200.0
+
+
+def test_no_conversion_silent_when_reader_failed():
+    """Вариант B (решение владельца 2026-07-15): ридер действий-конверсий УПАЛ в /audit
+    ("conversion_actions" ∈ data_gaps) ⇒ верификации не было. Молчим, а не эмитим ложный уверенный
+    critical: балл НЕ занижен, «Под риском» НЕ раздут, честность несёт data_gaps («балл может быть
+    завышен»). Отличать от engine-only (data_gaps=None), где находка РОЖДАЕТСЯ (штраф честен)."""
+    totals = Metrics(impressions=5000, clicks=400, cost_micros=200_000_000, conversions=0)
+    # /audit, ридер упал: сигнал в data_gaps, conversion_actions не подан (None).
+    failed = build_audit(_report(totals, []), data_gaps=["conversion_actions"])
+    assert not any(f.check_id == "no_conversion_tracking" for f in failed.findings)
+    assert "conversion_tracking" not in failed.families
+    assert failed.at_risk == 0.0  # весь расход НЕ под риском — верификации не было
+    # engine-only (data_gaps=None): находка обязана родиться — деньги в риске, штраф честен.
+    blind = build_audit(_report(totals, []))
+    assert any(f.check_id == "no_conversion_tracking" for f in blind.findings)
 
 
 def test_grade_bands():

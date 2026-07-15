@@ -139,6 +139,11 @@ class _Ctx:
     target_cpa: float | None = None
     is_rows: list | None = None
     conversion_actions: list | None = None
+    # Вариант B: ридер действий-конверсий УПАЛ в collect (сигнал попал в data_gaps), а НЕ «ctx не
+    # подавали вовсе» (engine-only /advise,/report,дайджест). При упавшей верификации
+    # check_no_conversion_tracking МОЛЧИТ — честность несёт data_gaps («балл может быть завышен»),
+    # а не выдуманный уверенный critical. False (engine-only) → метрическая эвристика РОЖДАЕТ находку.
+    conversion_read_failed: bool = False
     search_terms: list | None = None
     bidding_by_name: dict = field(default_factory=dict)
     ad_policy: list | None = (
@@ -613,7 +618,19 @@ def check_no_conversion_tracking(report, thr: dict, ctx: _Ctx) -> list[Finding]:
             ]
         return []
 
-    # Fallback без данных о действиях: метрическая эвристика.
+    # Fallback без живых действий-конверсий (ctx.conversion_actions is None).
+    if ctx.conversion_read_failed:
+        # /audit, но ридер действий-конверсий УПАЛ (collect пометил "conversion_actions" в data_gaps).
+        # Верификации НЕ было — эмитить уверенный critical «отслеживания нет» с at_risk = весь расход
+        # значит соврать: ТА ЖЕ карточка честно пишет «⚠️ Неполные данные: действия-конверсии — балл
+        # может быть завышен» (score_affecting_gaps). Уверенная находка + «завышен» = «занижен И
+        # завышен» одновременно. Честность несёт data_gaps, а не выдуманный вердикт (Вариант B,
+        # решение владельца 2026-07-15). measurement_gap здесь тоже False (только при ЖИВЫХ действиях).
+        return []
+    # Engine-only (/advise,/report,дайджест): ctx НЕ подавали вовсе (data_gaps=None). Метрическая
+    # эвристика — расход+клики+0 конв → находка РОЖДАЕТСЯ (штраф семьи честен: деньги в риске), но
+    # ЯРЛЫК недостоверен ⇒ advisor.untrusted_families снимает его на советующих поверхностях
+    # (инвариант test_advise_findings_are_subset_of_audit).
     if spends and clicks > 0 and conv == 0:
         return [
             Finding(
@@ -3114,6 +3131,9 @@ def build_audit(
         target_cpa=target_cpa,
         is_rows=is_rows,
         conversion_actions=conversion_actions,
+        # "conversion_actions" ∈ data_gaps ⇒ collect ПЫТАЛСЯ прочитать действия-конверсии и упал (/audit,
+        # случай пользователя). data_gaps=None (engine-only) или сигнала там нет ⇒ False.
+        conversion_read_failed=("conversion_actions" in (data_gaps or ())),
         search_terms=search_terms,
         bidding_by_name=bidding_by_name,
         ad_policy=ad_policy,
