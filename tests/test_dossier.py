@@ -14,9 +14,11 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -293,6 +295,175 @@ def test_merge_dedups_people_services_facts():
     assert d.usp == ["японские аукционы"]
     assert d.company.legal_name == "Darial Co., Ltd." and d.company.founded == "2016"
     assert d.company.mission == "экспорт автомобилей из Японии по всему миру"  # содержательнее
+
+
+# ── §20 язык: рынки — детерминированный код; услуги/УТП/факты — LLM-нормализация к RU ──
+def test_merge_markets_canonicalizes_cross_language_and_regions():
+    """Двуязычный сайт (darial.co.jp): «Tanzania»+«Танзания» код-дедуп по _key НЕ схлопнул бы (разные
+    алфавиты). _merge_markets канонизирует страну/регион к русскому виду ДО дедупа; неизвестный —
+    как есть."""
+    from clients.dossier_merge import _merge_markets
+
+    got = _merge_markets(
+        [
+            "Tanzania",
+            "Танзания",
+            "Japan",
+            "Япония",
+            "UK",
+            "United Kingdom",
+            "Великобритания",
+            "over 100 countries",
+            "100 стран",
+            "Africa",
+            "Африка",
+            "Neverland",
+        ],
+        40,
+    )
+    assert got == ["Танзания", "Япония", "Великобритания", "более 100 стран", "Африка", "Neverland"]
+
+
+@pytest.mark.asyncio
+async def test_normalize_ru_translates_and_dedups(monkeypatch):
+    """reduce-шаг перед синтезом: EN+RU дубли услуг/УТП/фактов схлопываются в одну русскую запись, а
+    ЦЕНА/source_url/industry/имя остаются КОДОМ (модель их не касается). Отраслевой факт не идёт в
+    модель и доживает нетронутым."""
+    from clients.dossier_merge import normalize_ru
+
+    d = merge_extracts(
+        [
+            DossierExtract(
+                company=Company(founded="February 4, 2016"),
+                services=[
+                    Service(name="Vehicle sourcing and export from Japan", price="from $4000")
+                ],
+                people=[Person(name="Alexey Lim", role="Owner")],
+                facts=[Fact(claim="Over 6000 vehicles exported", source_url="https://d/about")],
+                usp=["Direct auction access"],
+            ),
+            DossierExtract(
+                services=[Service(name="Подбор и экспорт авто из Японии")],
+                facts=[
+                    Fact(claim="Экспортировано более 6000 авто", source_url="https://d/ru/about"),
+                    Fact(
+                        claim="3.08 million vehicles listed in 2023",
+                        source_url="https://d/blog",
+                        industry=True,
+                    ),
+                ],
+                usp=["Прямой доступ к аукционам"],
+            ),
+        ],
+        domain="d.co",
+        website=None,
+        contacts=[],
+        socials={},
+        pages_count=2,
+        map_calls=2,
+    )
+    # код-дедуп НЕ кросс-язычный: EN и RU — разный текст, обе версии дожили до нормализации
+    assert len(d.services) == 2 and len(d.usp) == 2
+    assert len([f for f in d.facts if not f.industry]) == 2
+
+    payload = json.dumps(
+        {
+            "services": [
+                {
+                    "keep": [0, 1],
+                    "name": "Подбор и экспорт авто из Японии",
+                    "description": "аукционы Японии",
+                }
+            ],
+            "usp": ["Прямой доступ к аукционам"],
+            "facts": [{"keep": [0, 1], "claim": "Экспортировано более 6000 авто"}],
+            "people": [{"i": 0, "role": "Владелец"}],
+            "company": {"founded": "4 февраля 2016"},
+        }
+    )
+
+    async def _chat(messages, **kw):
+        return SimpleNamespace(content=payload)
+
+    monkeypatch.setattr("clients.dossier_merge.chat", _chat)
+    monkeypatch.setattr("clients.dossier_merge.consume", lambda _cid: None)
+
+    out = await normalize_ru(d, chat_id=None, language="ru")
+
+    # услуги: EN+RU → одна русская; цена сохранена КОДОМ из первого индекса группы
+    assert len(out.services) == 1
+    assert out.services[0].name == "Подбор и экспорт авто из Японии"
+    assert out.services[0].price == "from $4000"
+    # УТП: EN+RU → одно
+    assert out.usp == ["Прямой доступ к аукционам"]
+    # факты клиента: EN+RU → один; source_url КОДОМ из первого индекса; отраслевой факт цел
+    client = [f for f in out.facts if not f.industry]
+    assert len(client) == 1 and client[0].claim == "Экспортировано более 6000 авто"
+    assert client[0].source_url == "https://d/about"
+    industry = [f for f in out.facts if f.industry]
+    assert len(industry) == 1 and industry[0].claim == "3.08 million vehicles listed in 2023"
+    # роль переведена моделью, имя оставлено КОДОМ; год компании — переведён
+    assert out.people[0].role == "Владелец" and out.people[0].name == "Alexey Lim"
+    assert out.company.founded == "4 февраля 2016"
+
+
+@pytest.mark.asyncio
+async def test_normalize_ru_fail_open_keeps_code_merged(monkeypatch):
+    """Сбой нормализации не роняет досье: остаются код-сведённые списки как есть (и сырой текст ошибки
+    наружу не идёт — только type(e).__name__ в лог)."""
+    from clients.dossier_merge import normalize_ru
+
+    d = merge_extracts(
+        [
+            DossierExtract(services=[Service(name="Export from Japan", price="$4000")]),
+            DossierExtract(services=[Service(name="Экспорт из Японии")]),
+        ],
+        domain="d.co",
+        website=None,
+        contacts=[],
+        socials={},
+        pages_count=2,
+        map_calls=2,
+    )
+    assert len(d.services) == 2  # код их не схлопнул (разные языки)
+
+    async def _boom(messages, **kw):
+        raise RuntimeError("openrouter down: secret-xyz")
+
+    monkeypatch.setattr("clients.dossier_merge.chat", _boom)
+    monkeypatch.setattr("clients.dossier_merge.consume", lambda _cid: None)
+
+    out = await normalize_ru(d, chat_id=None, language="ru")
+    assert len(out.services) == 2 and out.services[0].price == "$4000"  # fail-open, досье целое
+
+
+@pytest.mark.asyncio
+async def test_normalize_ru_reraises_budget(monkeypatch):
+    """Исчерпанный дневной лимит — ответ пользователю, а не молча урезанное досье: пробрасывается
+    (как synthesize), в OpenRouter не ходим."""
+    from clients.dossier_merge import normalize_ru
+
+    d = merge_extracts(
+        [DossierExtract(services=[Service(name="Export")])],
+        domain="d.co",
+        website=None,
+        contacts=[],
+        socials={},
+        pages_count=1,
+        map_calls=1,
+    )
+
+    def _raise(_cid):
+        raise LLMBudgetExceededError(500, 500)
+
+    async def _chat_never(messages, **kw):
+        raise AssertionError("chat не должен вызываться при исчерпанном бюджете")
+
+    monkeypatch.setattr("clients.dossier_merge.consume", _raise)
+    monkeypatch.setattr("clients.dossier_merge.chat", _chat_never)
+
+    with pytest.raises(LLMBudgetExceededError):
+        await normalize_ru(d, chat_id=777, language="ru")
 
 
 # ── правила 1–2: досье и confirm-гейт ─────────────────────────────────────────────

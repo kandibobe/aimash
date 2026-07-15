@@ -10,8 +10,9 @@
 from __future__ import annotations
 
 from clients.dossier_map import map_pages
-from clients.dossier_merge import merge_extracts, synthesize
+from clients.dossier_merge import merge_extracts, normalize_ru, synthesize
 from clients.dossier_schema import Dossier
+from core.config import settings
 from core.logging import log
 
 # Меньше этого текста на весь сайт — собирать нечего (заглушка/парковка домена): не тратим вызовы.
@@ -65,6 +66,12 @@ async def build_dossier(
         pages_count=len(pages or []),
         map_calls=mapped.calls,
     )
+    # Свести двуязычный сайт к одному языку и схлопнуть кросс-язычные дубли ДО синтеза прозы — иначе
+    # проза (и патч карточки) строилась бы по задвоенным EN+RU спискам. Рынки уже канонизированы кодом
+    # в merge_extracts; здесь — услуги/УТП/факты/роли/компания. Fail-open: сбой оставит код-сведённые
+    # списки, LLMBudgetExceededError пробрасывается (как synthesize).
+    if settings.dossier_normalize_ru:
+        d = await normalize_ru(d, chat_id=chat_id, language=language)
     d = await synthesize(d, chat_id=chat_id, language=language)
     log.info(
         "dossier: собрано (страниц %d, вызовов %d, услуг %d, людей %d, фактов %d)",
