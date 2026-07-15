@@ -169,6 +169,25 @@ def test_bot_command_descriptions_have_no_internal_markers():
             )
 
 
+def test_bot_command_menu_ru_en_parity():
+    """Гард от дрейфа RU↔EN: набор команд в меню «/» ОБЯЗАН совпадать (одинаковые фичи на обоих
+    языках). Ловит класс бага «команда добавлена в RU, забыта в EN» — так /searchterms однажды
+    пропала из EN-меню, и EN-клиенты Telegram её не видели."""
+    from bot.keyboards import BOT_COMMANDS, BOT_COMMANDS_EN
+
+    ru = [bc.command for bc in BOT_COMMANDS]
+    en = [bc.command for bc in BOT_COMMANDS_EN]
+    assert set(ru) == set(en), (
+        f"расхождение меню RU↔EN: только в RU {sorted(set(ru) - set(en))}, "
+        f"только в EN {sorted(set(en) - set(ru))}"
+    )
+    # порядок тоже держим синхронным (одинаковый приоритет прокрутки на обоих языках)
+    assert ru == en, "порядок команд RU и EN разошёлся — держите списки в одном порядке"
+    # и без дублей внутри каждого списка
+    assert len(ru) == len(set(ru)), "дубли команд в BOT_COMMANDS"
+    assert len(en) == len(set(en)), "дубли команд в BOT_COMMANDS_EN"
+
+
 def test_formatter_en_smoke_journal_and_mutation():
     # fmt_mutation_summary под EN-contextvar — узнаваемо английский
     tok = i18n.set_current_lang("en")

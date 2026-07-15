@@ -3,10 +3,12 @@
 Токены НИКОГДА не хранятся в открытом виде в БД и НИКОГДА не уходят в промпт/логи.
 Ключ — из окружения (SECRETS_ENCRYPTION_KEY), не из кода.
 
-⚠️ СТАТУС (тест-фаза): этот модуль + таблица db.models.OAuthToken — ЗАДЕЛ под мультиаккаунт (§8).
-В рантайме ads.client.build_client пока берёт единственный refresh-токен из .env (SecretStr),
-а не из oauth_tokens. encrypt/decrypt включаются вместе со снятием замка аккаунта (golden rule #9,
-golden rule #5). Не считать «шифрование токенов в БД» активным до этой проводки.
+СТАТУС: encrypt/decrypt АКТИВНЫ для пер-аккаунтных токенов §8 (мультиаккаунт). На старте
+ads.client.load_oauth_cache() читает db.models.OAuthToken и decrypt(refresh_token_enc) → _OAUTH_RUNTIME
+(шифротекст в БД, открытый токен только в памяти процесса). ЕДИНСТВЕННЫЙ основной refresh-токен
+(Draft/главный аккаунт) намеренно берётся из .env (SecretStr), а НЕ из БД, — это env-секрет, не
+«at-rest в БД», отдельный контур конфигурации (golden rule #5). Правило «токены в БД шифруются
+at-rest» относится к OAuthToken и здесь соблюдено.
 """
 
 from __future__ import annotations

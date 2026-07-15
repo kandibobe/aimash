@@ -1190,6 +1190,16 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": texts.FAILED,
         "en": "⚠️ Failed to execute: {err}",
     },
+    # Денежный путь: исход мутации НЕИЗВЕСТЕН (таймаут/INTERNAL/DEADLINE во время SDK — могла
+    # примениться на сервере). НЕ «failed» — иначе повтор задвоил бы. Просим сверить перед повтором.
+    "needs_review": {
+        "ru": texts.NEEDS_REVIEW,
+        "en": (
+            "⚠️ <b>Outcome unknown.</b> Google Ads didn't respond in time — the change "
+            "<b>may have applied</b>. Check the account in Google Ads <b>before retrying</b> "
+            "(otherwise you may duplicate it): {err}"
+        ),
+    },
     "no_campaigns": {
         "ru": texts.NO_CAMPAIGNS,
         "en": "No campaigns.",

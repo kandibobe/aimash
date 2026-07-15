@@ -59,6 +59,31 @@ _ACCESS_ERROR_CODES: frozenset[str] = frozenset(
 )
 
 
+# Коды «исход НЕИЗВЕСТЕН после попытки мутации»: сервер МОГ применить изменение, но ответ не дошёл.
+# Ровно те коды, что core.resilience ИСКЛЮЧАЕТ из ретрая мутаций (RETRYABLE_ADS_MUTATE_NAMES не
+# содержит их) именно потому, что повтор неидемпотентного батча дал бы дубли (см. resilience.py §2.9).
+_OUTCOME_UNKNOWN_CODES: frozenset[str] = frozenset({"INTERNAL_ERROR", "DEADLINE_EXCEEDED"})
+
+
+def is_outcome_unknown_after_mutate(exc: BaseException) -> bool:
+    """True, если ошибка означает «мутация МОГЛА примениться на сервере, но подтверждения нет»:
+    TimeoutError (asyncio.timeout поверх to_thread — воркер SDK НЕ отменяется, mutate мог
+    закоммититься) или серверные INTERNAL_ERROR/DEADLINE_EXCEEDED (GoogleAdsException или
+    google.api_core транспорт). На денежном пути такой исход — needs_review (сверить вручную),
+    НЕ failed: 'failed' утверждало бы «не применено» и провоцировало бы повторное создание → дубль.
+    Ошибки ДО SDK-вызова (валидация/доступ/резолв) сюда НЕ попадают — там исход точно «не применено».
+    Дакт-безопасно для тестов (error_code_names работает и с protobuf, и с фейком)."""
+    if isinstance(exc, TimeoutError):  # asyncio.TimeoutError == TimeoutError на 3.11+
+        return True
+    if error_code_names(exc) & _OUTCOME_UNKNOWN_CODES:
+        return True
+    try:
+        from google.api_core import exceptions as gapi
+    except Exception:  # pragma: no cover — SDK всегда есть, но не падаем из-за импорта
+        return False
+    return isinstance(exc, (gapi.DeadlineExceeded, gapi.InternalServerError))
+
+
 def _grpc_status_name(exc: object) -> str:
     """Имя gRPC-статуса (напр. 'PERMISSION_DENIED') из _InactiveRpcError. GoogleAdsException хранит
     исходный RpcError на .error; у него (или у самого exc) есть .code() → StatusCode. '' если нет."""

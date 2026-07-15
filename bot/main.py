@@ -220,7 +220,11 @@ from confirm.store import ConfirmStore
 from core import ingest
 from core import twofa  # §12 2FA-гейт опасных операций (opt-in, дефолт OFF, fail-closed)
 from core.access import ensure_account_allowed_for_user, is_whitelisted
-from core.ads_errors import humanize_google_ads_error, is_account_access_error
+from core.ads_errors import (
+    humanize_google_ads_error,
+    is_account_access_error,
+    is_outcome_unknown_after_mutate,
+)
 from core.config import normalize_customer_id, settings
 from core.context import (
     new_request_id,
@@ -6556,6 +6560,28 @@ async def _do_confirm(
         # §15: человекочитаемая ошибка Google Ads (сообщения+коды+request_id) вместо «GoogleAdsException».
         # humanize_google_ads_error сам редактирует секреты (golden rule #5) — кладём в audit И юзеру.
         human = humanize_google_ads_error(e)
+        # Денежный путь: отличаем «точно НЕ применено» (валидация/доступ/резолв ДО SDK) от «исход
+        # НЕИЗВЕСТЕН» (таймаут/INTERNAL/DEADLINE во время SDK — asyncio.timeout не отменяет воркер
+        # to_thread, mutate мог закоммититься на сервере). Второе НЕЛЬЗЯ метить 'failed' («не
+        # применено») — внимательный оператор пересоздал бы кампанию → дубль бюджета/сущности. Честный
+        # терминал — needs_review (тот же, что реконсиляция зависших 'executing'); юзеру говорим
+        # «сверьте в Google Ads перед повтором», без предложения «повторить». mark_needs_review — CAS
+        # из 'executing'; такие ошибки приходят только из SDK-вызова (после claim) ⇒ статус executing.
+        if is_outcome_unknown_after_mutate(e):
+            marked = False
+            try:
+                marked = await STORE.mark_needs_review(cid, error=human)
+            except Exception:  # noqa: BLE001 — БД недоступна; ниже сообщим юзеру всё равно
+                log.exception("mark_needs_review не записан cid=%s (БД недоступна?)", cid)
+            if marked:  # черновик был в 'executing' и переведён в needs_review
+                await _safe_edit(
+                    cq,
+                    i18n.t("needs_review", err=texts.esc(human)),
+                    parse_mode=ParseMode.HTML,
+                )
+                return False
+            # marked=False — черновик уже не в 'executing' (гонка с finalize/реконсиляцией) или сбой
+            # БД: падаем на record_failure ниже (терминальный applied/failed не тронется, GR замок цел).
         # record_failure в своём try: если БД недоступна, audit-строку не записали, но пользователю
         # ВСЁ РАВНО сообщим о провале (иначе он навсегда остался бы с «executing…», а исключение
         # ушло бы в глобальный errors-хендлер). Полнота уведомления важнее полноты audit при сбое БД.

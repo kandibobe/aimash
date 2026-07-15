@@ -102,96 +102,114 @@ def _lang(lang: str | None) -> str:
 
 # ── Меню-кнопка Telegram (список команд в «/») ──────────────────────────────────
 # Показываем только то, что бот реально умеет, + честные пометки «скоро» для фаз 2-3.
+# Порядок = приоритет прокрутки в меню «/» (Telegram не даёт секций): ежедневные рабочие глаголы
+# вверху, редкое/служебное — внизу. Группы-комментарии только для читаемости кода. Набор команд
+# RU и EN обязан совпадать (гард tests/test_i18n.py::test_bot_command_menu_ru_en_parity).
 BOT_COMMANDS: list[BotCommand] = [
+    # ── Каждый день ──────────────────────────────────────────────────────────
     BotCommand(command="start", description="Запуск и меню"),
     BotCommand(command="help", description="Что я умею"),
     BotCommand(command="status", description="Статистика аккаунта (30 дн.)"),
     BotCommand(command="campaigns", description="Кампании: список и быстрые действия"),
+    BotCommand(command="report", description="Сводка за период (7/30/90/MTD)"),
+    BotCommand(command="audit", description="🩺 Аудит аккаунта: оценка 0-100 + что чинить"),
+    BotCommand(command="advise", description="💡 Рекомендации по улучшению аккаунта"),
+    # ── Действия с трафиком ──────────────────────────────────────────────────
+    BotCommand(command="pause", description="Пауза кампании: /pause Название"),
+    BotCommand(command="resume", description="Возобновить кампанию: /resume Название"),
+    BotCommand(command="bids", description="📈 Возможности по ставкам: какие ключи поднять"),
+    BotCommand(command="addkeys", description="Добавить ключи в кампанию (файл/ссылка/текст)"),
+    BotCommand(command="searchterms", description="Мусорные поисковые запросы → минус-слова"),
+    BotCommand(command="rsa", description="Сгенерировать тексты объявления (RSA)"),
+    # ── Создание ─────────────────────────────────────────────────────────────
     BotCommand(command="newcampaign", description="Создание кампании: пошаговый визард"),
+    BotCommand(command="newsearch", description="Создать поисковую кампанию (RSA + ключи)"),
+    BotCommand(command="newvideo", description="Кампания из видео: Demand Gen / Video (YouTube)"),
+    BotCommand(command="keywords", description="Подбор ключевых слов"),
+    BotCommand(command="templates", description="Шаблоны кампаний: список и создание"),
+    # ── Клиенты ──────────────────────────────────────────────────────────────
     BotCommand(command="clients", description="ℹ️ Информация про клиентов: профили и сайты"),
     BotCommand(command="client", description="Карточка клиента: /client <id>"),
     BotCommand(command="crawl", description="Краулинг сайта клиента: /crawl [url]"),
-    BotCommand(command="pause", description="Пауза кампании: /pause Название"),
-    BotCommand(command="resume", description="Возобновить кампанию: /resume Название"),
-    BotCommand(command="report", description="Сводка за период (7/30/90/MTD)"),
+    BotCommand(command="target", description="🎯 Целевой CPA аккаунта (для правила 3× в /audit)"),
+    # ── Отчёты и выгрузки ────────────────────────────────────────────────────
     BotCommand(command="export", description="Глубокий отчёт .xlsx"),
     BotCommand(command="sheets", description="Глубокий отчёт в Google Sheets (ссылка)"),
     BotCommand(command="mysheets", description="Мои Google-таблицы: ссылки на отчёты и ключи"),
+    # ── Аккаунты и доступ ────────────────────────────────────────────────────
     BotCommand(command="mcc", description="Сводка по всем дочерним аккаунтам MCC"),
     BotCommand(command="account", description="Аккаунт отчётов (чтение): /account <id> | reset"),
     BotCommand(command="accounts", description="Мои доступные аккаунты (чтение)"),
     BotCommand(command="whoami", description="Мой chat_id, активный аккаунт, режим доступа"),
-    BotCommand(command="refresh", description="Обновить аккаунты/кэши без рестарта"),
-    BotCommand(command="quota", description="Дневная квота Google Ads API"),
-    BotCommand(command="advise", description="💡 Рекомендации по улучшению аккаунта"),
-    BotCommand(command="audit", description="🩺 Аудит аккаунта: оценка 0-100 + что чинить"),
-    BotCommand(command="bids", description="📈 Возможности по ставкам: какие ключи поднять"),
-    BotCommand(command="competitors", description="🥊 Конкуренты: импорт CSV статистики аукционов"),
-    BotCommand(command="target", description="🎯 Целевой CPA аккаунта (для правила 3× в /audit)"),
+    # ── Служебное ────────────────────────────────────────────────────────────
     BotCommand(command="alerts", description="Пороги алертов аномалий (расход/конверсии)"),
-    BotCommand(command="rsa", description="Сгенерировать тексты объявления (RSA)"),
-    BotCommand(command="newsearch", description="Создать поисковую кампанию (RSA + ключи)"),
-    BotCommand(command="newvideo", description="Кампания из видео: Demand Gen / Video (YouTube)"),
-    BotCommand(command="templates", description="Шаблоны кампаний: список и создание"),
+    BotCommand(command="competitors", description="🥊 Конкуренты: импорт CSV статистики аукционов"),
+    BotCommand(command="quota", description="Дневная квота Google Ads API"),
+    BotCommand(command="journal", description="Журнал изменений (что/когда/кто)"),
+    BotCommand(command="diag", description="Журнал ошибок (диагностика)"),
+    BotCommand(command="recent", description="Недавние действия: повторить"),
+    BotCommand(command="cancel", description="Отменить текущий черновик"),
     BotCommand(
         command="savetemplate", description="Сохранить шаблон: /savetemplate имя [from Кампания]"
     ),
-    BotCommand(command="recent", description="Недавние действия: повторить"),
-    BotCommand(command="cancel", description="Отменить текущий черновик"),
-    BotCommand(command="keywords", description="Подбор ключевых слов"),
-    BotCommand(command="addkeys", description="Добавить ключи в кампанию (файл/ссылка/текст)"),
-    BotCommand(command="searchterms", description="Мусорные поисковые запросы → минус-слова"),
+    BotCommand(command="refresh", description="Обновить аккаунты/кэши без рестарта"),
     BotCommand(command="model", description="Модель ИИ (OpenRouter)"),
     BotCommand(command="balance", description="Бюджет ИИ: баланс OpenRouter и траты"),
-    BotCommand(command="journal", description="Журнал изменений (что/когда/кто)"),
-    BotCommand(command="diag", description="Журнал ошибок (диагностика)"),
     BotCommand(command="reportbug", description="🐞 Сообщить об ошибке"),
     BotCommand(command="lang", description="Язык интерфейса / interface language"),
 ]
 
 # EN-вариант меню команд (Telegram отдаёт его клиентам с language_code='en'; RU — дефолтный fallback).
 BOT_COMMANDS_EN: list[BotCommand] = [
+    # ── Every day ────────────────────────────────────────────────────────────
     BotCommand(command="start", description="Launch and menu"),
     BotCommand(command="help", description="What I can do"),
     BotCommand(command="status", description="Account stats (30 days)"),
     BotCommand(command="campaigns", description="Campaigns: list and quick actions"),
+    BotCommand(command="report", description="Period summary (7/30/90/MTD)"),
+    BotCommand(command="audit", description="🩺 Account audit: 0-100 score + what to fix"),
+    BotCommand(command="advise", description="💡 Recommendations to improve the account"),
+    # ── Traffic actions ──────────────────────────────────────────────────────
+    BotCommand(command="pause", description="Pause a campaign: /pause Name"),
+    BotCommand(command="resume", description="Resume a campaign: /resume Name"),
+    BotCommand(command="bids", description="📈 Bid opportunities: which keywords to raise"),
+    BotCommand(command="addkeys", description="Add keywords to a campaign (file/link/text)"),
+    BotCommand(command="searchterms", description="Junk search terms → negative keywords"),
+    BotCommand(command="rsa", description="Generate ad copy (RSA)"),
+    # ── Create ───────────────────────────────────────────────────────────────
     BotCommand(command="newcampaign", description="Create campaign: step-by-step wizard"),
+    BotCommand(command="newsearch", description="Create a search campaign (RSA + keywords)"),
+    BotCommand(command="newvideo", description="Campaign from video: Demand Gen / Video (YouTube)"),
+    BotCommand(command="keywords", description="Keyword research"),
+    BotCommand(command="templates", description="Campaign templates: list and create"),
+    # ── Clients ──────────────────────────────────────────────────────────────
     BotCommand(command="clients", description="ℹ️ Client info: profiles and sites"),
     BotCommand(command="client", description="Client card: /client <id>"),
     BotCommand(command="crawl", description="Crawl a client's site: /crawl [url]"),
-    BotCommand(command="pause", description="Pause a campaign: /pause Name"),
-    BotCommand(command="resume", description="Resume a campaign: /resume Name"),
-    BotCommand(command="report", description="Period summary (7/30/90/MTD)"),
+    BotCommand(command="target", description="🎯 Account target CPA (for the 3× rule in /audit)"),
+    # ── Reports & exports ────────────────────────────────────────────────────
     BotCommand(command="export", description="Deep report .xlsx"),
     BotCommand(command="sheets", description="Deep report in Google Sheets (link)"),
     BotCommand(command="mysheets", description="My Google Sheets: report and keyword links"),
+    # ── Accounts & access ────────────────────────────────────────────────────
     BotCommand(command="mcc", description="All MCC child-accounts summary"),
     BotCommand(command="account", description="Reports account (read): /account <id> | reset"),
     BotCommand(command="accounts", description="My accessible accounts (read)"),
     BotCommand(command="whoami", description="My chat_id, active account, access mode"),
-    BotCommand(command="refresh", description="Refresh accounts/caches without a restart"),
-    BotCommand(command="quota", description="Google Ads API daily quota"),
-    BotCommand(command="advise", description="💡 Recommendations to improve the account"),
-    BotCommand(command="audit", description="🩺 Account audit: 0-100 score + what to fix"),
-    BotCommand(command="bids", description="📈 Bid opportunities: which keywords to raise"),
-    BotCommand(command="competitors", description="🥊 Competitors: import auction insights CSV"),
-    BotCommand(command="target", description="🎯 Account target CPA (for the 3× rule in /audit)"),
+    # ── Service ──────────────────────────────────────────────────────────────
     BotCommand(command="alerts", description="Anomaly alert thresholds (spend/conversions)"),
-    BotCommand(command="rsa", description="Generate ad copy (RSA)"),
-    BotCommand(command="newsearch", description="Create a search campaign (RSA + keywords)"),
-    BotCommand(command="newvideo", description="Campaign from video: Demand Gen / Video (YouTube)"),
-    BotCommand(command="templates", description="Campaign templates: list and create"),
+    BotCommand(command="competitors", description="🥊 Competitors: import auction insights CSV"),
+    BotCommand(command="quota", description="Google Ads API daily quota"),
+    BotCommand(command="journal", description="Change journal (what/when/who)"),
+    BotCommand(command="diag", description="Error log (diagnostics)"),
+    BotCommand(command="recent", description="Recent actions: repeat"),
+    BotCommand(command="cancel", description="Cancel the current draft"),
     BotCommand(
         command="savetemplate", description="Save a template: /savetemplate name [from Campaign]"
     ),
-    BotCommand(command="recent", description="Recent actions: repeat"),
-    BotCommand(command="cancel", description="Cancel the current draft"),
-    BotCommand(command="keywords", description="Keyword research"),
-    BotCommand(command="addkeys", description="Add keywords to a campaign (file/link/text)"),
+    BotCommand(command="refresh", description="Refresh accounts/caches without a restart"),
     BotCommand(command="model", description="AI model (OpenRouter)"),
     BotCommand(command="balance", description="AI budget: OpenRouter balance and spend"),
-    BotCommand(command="journal", description="Change journal (what/when/who)"),
-    BotCommand(command="diag", description="Error log (diagnostics)"),
     BotCommand(command="reportbug", description="🐞 Report a bug"),
     BotCommand(command="lang", description="Interface language / язык интерфейса"),
 ]
