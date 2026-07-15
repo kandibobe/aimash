@@ -845,7 +845,43 @@ async def on_diag_cb(cq: bm.CallbackQuery, callback_data: bm.DiagCB) -> None:
     )
 
 
-# ── 3E: «➕ Ещё» — inline-хаб вторичных флоу (обнаружимость без ручного ввода команд) ─
+# ── Аудит #4b: новые кнопки главного экрана (ежедневные «рабочие глаголы» + хабы) ─
+# Все read-only/UI: btn_audit/btn_advise/btn_bids запускают read-only анализ, btn_create/btn_reports
+# открывают inline-хаб. Реальный диспатч кнопок меню — в menu_guard._dispatch_menu_button (гард
+# стоит первым); эти хендлеры — источник для _reexport (bm.btn_*) и фолбэк вне визарда.
+@bm.dp.message(bm.F.text.in_(bm.BTN_AUDIT_ALL))
+async def btn_audit(m: bm.Message, state: bm.FSMContext) -> None:
+    """Кнопка «🩺 Аудит» = /audit без периода: health-score + что чинить (read-only). state → режим
+    доп-вопросов после карточки (#6), как в audit_cmd."""
+    await bm._start_audit_picker(m, state=state)
+
+
+@bm.dp.message(bm.F.text.in_(bm.BTN_ADVISE_ALL))
+async def btn_advise(m: bm.Message) -> None:
+    """Кнопка «💡 Идеи» = /advise без темы: рекомендации по аккаунту (advisory, read-only)."""
+    await bm._start_advise_picker(m)
+
+
+@bm.dp.message(bm.F.text.in_(bm.BTN_BIDS_ALL))
+async def btn_bids(m: bm.Message) -> None:
+    """Кнопка «📈 Ставки» = /bids за 30 дн.: возможности по ставкам (read-only, без кнопок —
+    ставка меняется только прямой командой через confirm-гейт, правило #3)."""
+    await bm._bids_run(m, bm._period_from_arg(None))
+
+
+@bm.dp.message(bm.F.text.in_(bm.BTN_CREATE_ALL))
+async def btn_create(m: bm.Message) -> None:
+    """Кнопка «➕ Создать» — inline-хаб создания (кампании/тексты/ключи/шаблоны)."""
+    await m.answer(bm.i18n.t("create_menu_title"), reply_markup=bm.create_menu_kb())
+
+
+@bm.dp.message(bm.F.text.in_(bm.BTN_REPORTS_ALL))
+async def btn_reports(m: bm.Message) -> None:
+    """Кнопка «📄 Отчёты» — inline-хаб выгрузок (отчёт/экспорт/Sheets/мои таблицы)."""
+    await m.answer(bm.i18n.t("reports_menu_title"), reply_markup=bm.reports_menu_kb())
+
+
+# ── 3E: «⚙️ Ещё» — inline-хаб вторичных/служебных флоу (обнаружимость без ручного ввода команд) ─
 @bm.dp.message(bm.F.text.in_(bm.BTN_MORE_ALL))
 async def btn_more(m: bm.Message) -> None:
     await m.answer(bm.i18n.t("more_menu_title"), reply_markup=bm.more_menu_kb())
@@ -860,7 +896,38 @@ async def on_more(cq: bm.CallbackQuery, callback_data: bm.MoreCB, state: bm.FSMC
     if msg is None:
         return
     action = callback_data.action
-    if action == "newsearch":
+    # ── хаб «➕ Создать» (create_menu_kb) ──
+    if action == "newcampaign":
+        await bm._cc_entry(msg, state)  # §19: guided-визард создания кампании
+    elif action == "rsa":
+        await bm.rsa_cmd(msg, state)  # ✍️ генерация текстов RSA
+    elif action == "keywords":
+        await bm.btn_keywords(msg, state)  # 🔑 подбор ключей (визард)
+    # ── хаб «📄 Отчёты» (reports_menu_kb) ──
+    elif action == "report":
+        await bm._start_report_picker(msg, "report")  # §8: аккаунт → кампания → период
+    elif action == "export":
+        await bm._start_report_picker(msg, "export")
+    elif action == "sheets":
+        await bm._start_report_picker(msg, "sheets")
+    elif action == "mysheets":
+        await bm.mysheets_(msg)  # 🗂 таблицы, созданные ботом для этого чата
+    # ── хаб «⚙️ Ещё» (more_menu_kb): демотированные настройки/сводки/разведка/справка ──
+    elif action == "model":
+        await bm.btn_model(msg, state)  # 🧠 выбор модели ИИ
+    elif action == "balance":
+        await bm.btn_balance(msg)  # 💳 бюджет/траты ИИ
+    elif action == "mcc":
+        await bm._send_mcc(msg, None)  # 🏢 §8: сводка по дочерним аккаунтам (30 дн.)
+    elif action == "journal":
+        await bm.btn_journal(msg)  # 📜 журнал действий
+    elif action == "competitors":
+        await bm.competitors_cmd(msg, state)  # 🥊 разведка конкурентов
+    elif action == "lang":
+        await bm.btn_lang(msg)  # 🌐 язык интерфейса
+    elif action == "help":
+        await bm.btn_help(msg)  # ❓ справка
+    elif action == "newsearch":
         await bm.newsearch_cmd(msg, state)
     elif action == "newvideo":
         await bm.newvideo_cmd(msg, state)

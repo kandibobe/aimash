@@ -35,6 +35,16 @@ async def _dispatch_menu_button(m: bm.Message, state: bm.FSMContext) -> None:
         await bm.btn_status(m)
     elif text in bm.BTN_CAMPAIGNS_ALL:
         await bm.btn_campaigns(m)
+    elif text in bm.BTN_AUDIT_ALL:
+        await bm.btn_audit(m, state)
+    elif text in bm.BTN_ADVISE_ALL:
+        await bm.btn_advise(m)
+    elif text in bm.BTN_BIDS_ALL:
+        await bm.btn_bids(m)
+    elif text in bm.BTN_CREATE_ALL:
+        await bm.btn_create(m)
+    elif text in bm.BTN_REPORTS_ALL:
+        await bm.btn_reports(m)
     elif text in bm.BTN_REPORT_ALL:
         await bm.btn_report(m)
     elif text in bm.BTN_EXPORT_ALL:

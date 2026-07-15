@@ -871,8 +871,16 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "Doesn't look like a valid number (percent 1–1000). Try again.",
     },
     "more_menu_title": {
-        "ru": "➕ <b>Ещё</b> — дополнительные возможности:",
-        "en": "➕ <b>More</b> — additional features:",
+        "ru": "⚙️ <b>Ещё</b> — настройки, сводки и служебное:",
+        "en": "⚙️ <b>More</b> — settings, summaries and service:",
+    },
+    "create_menu_title": {
+        "ru": "➕ <b>Создать</b> — новые кампании и объекты:",
+        "en": "➕ <b>Create</b> — new campaigns and assets:",
+    },
+    "reports_menu_title": {
+        "ru": "📄 <b>Отчёты</b> — статистика и выгрузки:",
+        "en": "📄 <b>Reports</b> — stats and exports:",
     },
     "cc_edit_not_understood": {
         "ru": (

@@ -346,7 +346,13 @@ BTN_BALANCE = {"ru": "💳 Бюджет ИИ", "en": "💳 AI budget"}
 BTN_JOURNAL = {"ru": "📜 Журнал", "en": "📜 Journal"}
 BTN_LANG = {"ru": "🌐 Язык", "en": "🌐 Language"}
 BTN_HELP = {"ru": "❓ Помощь", "en": "❓ Help"}
-BTN_MORE = {"ru": "➕ Ещё", "en": "➕ More"}  # 3E: хаб вторичных флоу (обнаружимость)
+# Аудит #4b: главный экран — ежедневные «рабочие глаголы» вперёд; редкое — в хабы (Создать/Отчёты/Ещё).
+BTN_AUDIT = {"ru": "🩺 Аудит", "en": "🩺 Audit"}  # /audit: score аккаунта + что чинить (read-only)
+BTN_ADVISE = {"ru": "💡 Советы", "en": "💡 Advice"}  # /advise: рекомендации (advisory, read-only)
+BTN_BIDS = {"ru": "📈 Ставки", "en": "📈 Bids"}  # /bids: возможности по ставкам (read-only)
+BTN_CREATE = {"ru": "➕ Создать", "en": "➕ Create"}  # хаб create_menu_kb (кампании/тексты/ключи)
+BTN_REPORTS = {"ru": "📄 Отчёты", "en": "📄 Reports"}  # хаб reports_menu_kb (отчёт/экспорт/Sheets)
+BTN_MORE = {"ru": "⚙️ Ещё", "en": "⚙️ More"}  # 3E: хаб вторичных/служебных флоу (обнаружимость)
 
 # Множества всех языковых вариантов для матчинга в хендлерах (F.text.in_(BTN_*_ALL)).
 BTN_NEWCAMPAIGN_ALL = frozenset(BTN_NEWCAMPAIGN.values())
@@ -364,6 +370,11 @@ BTN_BALANCE_ALL = frozenset(BTN_BALANCE.values())
 BTN_JOURNAL_ALL = frozenset(BTN_JOURNAL.values())
 BTN_LANG_ALL = frozenset(BTN_LANG.values())
 BTN_HELP_ALL = frozenset(BTN_HELP.values())
+BTN_AUDIT_ALL = frozenset(BTN_AUDIT.values())
+BTN_ADVISE_ALL = frozenset(BTN_ADVISE.values())
+BTN_BIDS_ALL = frozenset(BTN_BIDS.values())
+BTN_CREATE_ALL = frozenset(BTN_CREATE.values())
+BTN_REPORTS_ALL = frozenset(BTN_REPORTS.values())
 BTN_MORE_ALL = frozenset(BTN_MORE.values())
 
 # 3A: ВСЕ подписи кнопок главного меню (оба языка) — для гарда menu_guard: кнопка меню,
@@ -385,46 +396,46 @@ ALL_MENU_BUTTONS: frozenset[str] = (
     | BTN_JOURNAL_ALL
     | BTN_LANG_ALL
     | BTN_HELP_ALL
+    | BTN_AUDIT_ALL
+    | BTN_ADVISE_ALL
+    | BTN_BIDS_ALL
+    | BTN_CREATE_ALL
+    | BTN_REPORTS_ALL
 )
 
 
 def main_menu(lang: str | None = None) -> ReplyKeyboardMarkup:
-    """Полное нижнее меню: все основные функции одним тапом (мутации — через цель в /campaigns).
+    """Главный экран (аудит #4b): вперёд — ежедневные «рабочие глаголы» медиабайера, редкое — в хабы.
 
-    D1: кнопки сгруппированы по смыслу построчно (у reply-клавиатуры нет заголовков секций —
-    группируем раскладкой adjust): создание/управление · быстрая статистика · отчёты · инструменты ·
-    настройки · служебное. Порядок логичнее «плоской» сетки; набор кнопок и BTN_*_ALL не меняются
-    (хендлеры матчат по тексту, а не по позиции)."""
+    9 кнопок вместо прежних 16: у reply-клавиатуры нет заголовков секций, поэтому группируем
+    раскладкой adjust(2,3,3,1):
+      • обзор:    📊 Статистика · 📋 Кампании
+      • анализ:   🩺 Аудит · 💡 Идеи · 📈 Ставки
+      • действия: 📄 Отчёты(хаб) · ➕ Создать(хаб) · ℹ️ Клиенты
+      • прочее:   ⚙️ Ещё (хаб служебного)
+    Демотированные кнопки (report/export/sheets/mcc/keywords/rsa/newcampaign/model/balance/journal/
+    lang/help) не удалены: их BTN_*_ALL остаются в ALL_MENU_BUTTONS и хендлерах (набор по-прежнему
+    работает по тексту), они лишь переехали в инлайн-хабы create_menu_kb/reports_menu_kb/more_menu_kb.
+    Мутации — по-прежнему через цель в /campaigns → confirm-гейт (прямых кнопок-мутаций тут нет)."""
     lng = _lang(lang)
     kb = ReplyKeyboardBuilder()
     for btn in (
-        # ── создание/управление ──
-        BTN_NEWCAMPAIGN,  # §19: guided-визард создания кампании
-        BTN_CAMPAIGNS,  # список кампаний + быстрые действия
-        # ── быстрый обзор ──
+        # ── обзор ──
         BTN_STATUS,  # статистика за 30 дней (полная строка)
-        # ── отчёты/экспорт ──
-        BTN_REPORT,
-        BTN_EXPORT,
-        BTN_SHEETS,
-        BTN_MCC,  # §8: сводка по всем дочерним аккаунтам MCC
-        # ── инструменты ──
-        BTN_KEYWORDS,
-        BTN_RSA,
+        BTN_CAMPAIGNS,  # список кампаний + быстрые действия
+        # ── анализ (read-only) ──
+        BTN_AUDIT,  # /audit: health-score + что чинить
+        BTN_ADVISE,  # /advise: рекомендации (advisory)
+        BTN_BIDS,  # /bids: возможности по ставкам
+        # ── действия ──
+        BTN_REPORTS,  # хаб: отчёт/экспорт/Sheets/мои таблицы
+        BTN_CREATE,  # хаб: newcampaign/newsearch/newvideo/rsa/keywords/templates
         BTN_CLIENTS,  # §20: информация про клиентов (профили/сайты)
-        # ── настройки ИИ ──
-        BTN_MODEL,
-        BTN_BALANCE,
-        # ── служебное ──
-        BTN_JOURNAL,
-        BTN_LANG,
-        BTN_HELP,
-        BTN_MORE,  # 3E: хаб вторичных флоу (/newsearch /newvideo /templates /recent /quota /alerts)
+        # ── прочее ──
+        BTN_MORE,  # хаб служебного: model/balance/mcc/journal/competitors/quota/alerts/lang/help/…
     ):
         kb.button(text=btn[lng])
-    kb.adjust(
-        2, 1, 4, 3, 2, 4
-    )  # создание · статистика · отчёты · инструменты · настройки · служебное
+    kb.adjust(2, 3, 3, 1)  # обзор · анализ · действия · прочее
     placeholder = "Command or text…" if lng == "en" else "Команда или текст…"
     return kb.as_markup(
         resize_keyboard=True,
@@ -647,26 +658,71 @@ def bugs_kb(rows, lang: str | None = None) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def more_menu_kb(lang: str | None = None) -> InlineKeyboardMarkup:
-    """3E: inline-хаб «➕ Ещё» — вторичные флоу одним тапом (раньше — только слэш-командой)."""
+def create_menu_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """Аудит #4b: inline-хаб «➕ Создать» — всё создание в одном месте (раньше newcampaign жил в
+    главном, а newsearch/newvideo/templates — в «Ещё»: разнесены нелогично). Кнопка лишь запускает
+    визард/entry (тот же, что слэш-команда), мутаций не создаёт — они за confirm-гейтом."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     for label_en, label_ru, action in (
-        ("💡 Recommendations", "💡 Рекомендации", "advise"),
-        ("🩺 Account audit", "🩺 Аудит аккаунта", "audit"),
-        ("🔎 Search campaign (quick)", "🔎 Поисковая кампания (быстро)", "newsearch"),
+        ("➕ New campaign (wizard)", "➕ Новая кампания (визард)", "newcampaign"),
+        ("🔎 Search campaign (quick)", "🔎 Поисковая (быстро)", "newsearch"),
         ("🎬 Campaign from video", "🎬 Кампания из видео", "newvideo"),
+        ("✍️ Ad copy (RSA)", "✍️ Тексты (RSA)", "rsa"),
+        ("🔑 Keyword research", "🔑 Подбор ключей", "keywords"),
         ("📁 Campaign templates", "📁 Шаблоны кампаний", "templates"),
-        # P3: добавление ключей в кампанию — свой файл/ссылка/текст (бывшая кнопка под отчётом)
+    ):
+        kb.button(text=label_en if en else label_ru, callback_data=MoreCB(action=action))
+    kb.adjust(1, 2, 2, 1)
+    return kb.as_markup()
+
+
+def reports_menu_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """Аудит #4b: inline-хаб «📄 Отчёты» — четыре близкие выгрузки в одном месте (раньше report/export/
+    sheets висели в главном экране, mysheets — только слэшем). Кнопка стартует пикер/entry (read-only)."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    for label_en, label_ru, action in (
+        ("📈 Report", "📈 Отчёт", "report"),
+        ("📄 Export .xlsx", "📄 Экспорт .xlsx", "export"),
+        ("🟢 Google Sheets", "🟢 Google Sheets", "sheets"),
+        ("🗂 My sheets", "🗂 Мои таблицы", "mysheets"),
+    ):
+        kb.button(text=label_en if en else label_ru, callback_data=MoreCB(action=action))
+    kb.adjust(2, 2)
+    return kb.as_markup()
+
+
+def more_menu_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """3E / аудит #4b: inline-хаб «⚙️ Ещё» — вторичное и служебное одним тапом (раньше — слэшем).
+    После реорга главного экрана сюда переехали настройки ИИ (model/balance), аккаунтные сводки
+    (mcc/journal), разведка (competitors) и справка (lang/help). Кнопка лишь МАРШРУТИЗИРУЕТ в тот же
+    entry, что и команда; мутаций не создаёт (advise/audit/create/reports вынесены в главный экран)."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    for label_en, label_ru, action in (
+        # ── настройки ИИ ──
+        ("🧠 Model", "🧠 Модель", "model"),
+        ("💳 AI budget", "💳 Бюджет ИИ", "balance"),
+        # ── аккаунт / данные ──
+        ("🏢 MCC (all accounts)", "🏢 MCC (все аккаунты)", "mcc"),
+        ("📜 Journal", "📜 Журнал", "journal"),
+        # ── разведка / инструменты ──
+        ("🥊 Competitors", "🥊 Конкуренты", "competitors"),
         ("➕ Keywords to a campaign", "➕ Ключи в кампанию", "addkeys"),
         ("↻ Recent actions", "↻ Недавние действия", "recent"),
+        # ── мониторинг ──
         ("📉 API quota", "📉 Квота API", "quota"),
         ("🔔 Alert thresholds", "🔔 Пороги алертов", "alerts"),
+        # ── справка / поддержка ──
+        ("🌐 Language", "🌐 Язык", "lang"),
+        ("❓ Help", "❓ Помощь", "help"),
         ("🐞 Report a bug", "🐞 Сообщить об ошибке", "reportbug"),
+        # ── сервисный суб-хаб ──
         ("⚙️ Service / Accounts", "⚙️ Сервис / Аккаунты", "service"),
     ):
         kb.button(text=label_en if en else label_ru, callback_data=MoreCB(action=action))
-    kb.adjust(2, 1, 1, 2, 2, 2, 1)
+    kb.adjust(2, 2, 2, 2, 2, 2, 1)
     return kb.as_markup()
 
 

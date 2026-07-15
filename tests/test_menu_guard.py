@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import inspect
+import re
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -17,7 +19,66 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bot.main as bm  # noqa: E402
 from bot import keyboards as kb  # noqa: E402
+from bot.handlers import menu_guard  # noqa: E402
 from db.session import init_db  # noqa: E402
+
+
+def _menu_texts(markup) -> list[str]:
+    return [b.text for row in markup.keyboard for b in row]
+
+
+def test_main_menu_buttons_registered():
+    """Аудит #4b: каждая ВИДИМАЯ кнопка главного экрана (RU и EN) обязана быть в ALL_MENU_BUTTONS —
+    иначе во время визарда btn_guard_menu её не поймает и подпись уйдёт в LLM (мёртвая кнопка)."""
+    for lang in ("ru", "en"):
+        for text in _menu_texts(kb.main_menu(lang)):
+            assert text in kb.ALL_MENU_BUTTONS, (
+                f"{text!r} видима в main_menu({lang}), но не в ALL_MENU_BUTTONS — "
+                "во время визарда станет мёртвой (гард её не перехватит)"
+            )
+
+
+def test_every_menu_button_has_dispatch_branch():
+    """Аудит #4b (гард класса «мёртвая кнопка»): множество BTN_*_ALL, разводимых в
+    _dispatch_menu_button, обязано СОВПАДАТЬ с ALL_MENU_BUTTONS. Добавил кнопку в ALL_MENU_BUTTONS,
+    но забыл ветку диспатча → btn_guard_menu «съест» её без действия. Забыл убрать ветку у снятой
+    кнопки → orphan. Оба случая ловятся этим равенством."""
+    src = inspect.getsource(menu_guard._dispatch_menu_button)
+    referenced = set(re.findall(r"bm\.(BTN_\w+_ALL)", src))
+    dispatched: frozenset[str] = frozenset()
+    for name in referenced:
+        dispatched |= getattr(kb, name)
+    missing = kb.ALL_MENU_BUTTONS - dispatched
+    orphan = dispatched - kb.ALL_MENU_BUTTONS
+    assert not missing, (
+        f"в ALL_MENU_BUTTONS, но нет ветки в _dispatch_menu_button: {sorted(missing)}"
+    )
+    assert not orphan, (
+        f"ветка в _dispatch_menu_button на кнопку вне ALL_MENU_BUTTONS: {sorted(orphan)}"
+    )
+
+
+def _hub_actions(markup) -> set[str]:
+    out: set[str] = set()
+    for row in markup.inline_keyboard:
+        for b in row:
+            if b.callback_data:
+                out.add(bm.MoreCB.unpack(b.callback_data).action)
+    return out
+
+
+def test_hub_buttons_have_on_more_route():
+    """Аудит #4b (гард класса «мёртвая инлайн-кнопка»): каждая MoreCB-кнопка хабов (Создать/Отчёты/
+    Ещё/Сервис) обязана иметь ветку в on_more — иначе клик делает cq.answer() и молча ничего.
+    Гарантирует, что 14 добавленных маршрутов покрывают все кнопки, и ловит будущий рассинхрон."""
+    from bot.handlers import commands as cmd
+
+    routed = set(re.findall(r'action == "(\w+)"', inspect.getsource(cmd.on_more)))
+    hub_actions: set[str] = set()
+    for factory in (kb.create_menu_kb, kb.reports_menu_kb, kb.more_menu_kb, kb.service_menu_kb):
+        hub_actions |= _hub_actions(factory())
+    missing = hub_actions - routed
+    assert not missing, f"кнопки хаба без маршрута в on_more (мёртвые при клике): {sorted(missing)}"
 
 
 @contextmanager
