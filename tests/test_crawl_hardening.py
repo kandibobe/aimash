@@ -390,6 +390,8 @@ def test_crawl_fail_reason_never_empty():
 
     import bot.main as bm
 
+    from core.ingest import SSRFBlocked
+
     cases = [
         TimeoutError(),  # str(e) == "" — ровно это давало пользователю «?»
         httpx.ConnectTimeout(""),
@@ -397,12 +399,19 @@ def test_crawl_fail_reason_never_empty():
         CircuitOpen(""),
         httpx.TooManyRedirects(""),
         ValueError("адрес заблокирован (внутренний/небезопасный): 127.0.0.1"),
+        SSRFBlocked(
+            "адрес заблокирован (внутренний/небезопасный): 169.254.169.254"
+        ),  # новый тип SSRF
         RuntimeError(""),
     ]
     for e in cases:
         reason = bm._crawl_fail_reason(e)
         assert reason and reason.strip() not in ("?", "")
         assert type(e).__name__ not in reason  # имя класса наружу не светим (решение P1-аудита)
+    # SSRF-блок распознан как «заблокирован», не свалился в generic
+    assert bm._crawl_fail_reason(
+        SSRFBlocked("адрес заблокирован: 10.0.0.5")
+    ) == bm._crawl_fail_reason(ValueError("адрес заблокирован: 10.0.0.5"))
 
 
 def test_crawl_fail_reason_http_codes():

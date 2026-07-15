@@ -5,9 +5,11 @@
 против prompt-injection из стороннего контента (golden rule #8).
 
 Безопасность:
-- URL-фетч под SSRF-гардом: только http/https; хост резолвится и ВСЕ адреса должны быть
-  публичными (приватные/loopback/link-local/reserved/multicast — отказ). Редиректы валидируются
-  тем же гардом (event hook на каждый запрос). Таймаут + потолок размера ответа.
+- URL-фетч под SSRF-гардом с ПИННИНГОМ IP: хост резолвится и ВСЕ адреса должны быть публичными
+  (приватные/loopback/link-local/reserved/CGNAT/multicast — отказ), после чего коннект идёт РОВНО
+  к проверенному IP (`make_ssrf_safe_transport`). Это закрывает TOCTOU DNS-rebinding: проверка и
+  соединение — по одному IP, а не по двум резолвам. Редиректы валидируются тем же транспортом
+  (резолв на каждый hop). Таймаут + потолок размера ответа.
 - Размер файла/текста ограничен (MAX_*). PDF без зависимости pypdf — мягкий отказ.
 - Никаких секретов: читаем только то, что прислал пользователь.
 """
@@ -37,6 +39,12 @@ class IngestError(Exception):
     """Понятная пользователю ошибка чтения (показывается как есть, без сырых трейсбеков)."""
 
 
+class SSRFBlocked(IngestError):
+    """Адрес отклонён SSRF-гардом (внутренний/небезопасный). Подкласс IngestError ⇒ путь
+    fetch_url_text показывает его как обычную ошибку чтения; краулер (clients/crawl_fetch) ловит
+    его ОТДЕЛЬНО (это МЫ заблокировали, а не сайт упал — предохранитель не трогать)."""
+
+
 def extract_urls(text: str) -> list[str]:
     """Все http(s)-URL из текста (с обрезкой хвостовой пунктуации .,;)!?»)."""
     out: list[str] = []
@@ -45,31 +53,124 @@ def extract_urls(text: str) -> list[str]:
     return out
 
 
+def _addr_is_blocked(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Адрес НЕ подлежит запросу (SSRF-риск). `not is_global` — основной гейт: ловит приватные,
+    loopback, link-local, а также CGNAT 100.64/10 и shared-address-space, которых нет среди
+    боевых сайтов. Явные флаги — для ясной категоризации и на случай version-specific трактовки
+    is_global в разных патчах CPython (перестраховка, оба слоя fail-closed)."""
+    return (
+        not addr.is_global
+        or addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    )
+
+
+def _validated_connect_ip(ip_str: str) -> str:
+    """IP из резолвера → строка IP для коннекта, если он ПУБЛИЧНЫЙ; иначе SSRFBlocked.
+    IPv4-mapped IPv6 (`::ffff:a.b.c.d`) разворачиваем в IPv4 и проверяем/коннектимся по нему —
+    иначе mapped-loopback (`::ffff:127.0.0.1`) мог бы просочиться там, где флаги на mapped-форме
+    трактуются иначе."""
+    try:
+        addr: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(ip_str)
+    except ValueError as e:  # мусор/scoped-адрес из резолвера ⇒ fail-closed
+        raise SSRFBlocked(f"адрес не распознан: {ip_str}") from e
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        addr = mapped
+    if _addr_is_blocked(addr):
+        raise SSRFBlocked(f"адрес заблокирован (внутренний/небезопасный): {ip_str}")
+    return str(addr)
+
+
+def _resolve_pinned_ip(host: str, port: int | None = None) -> str:
+    """host → ОДИН публичный IP для коннекта. ВСЕ адреса резолва обязаны быть публичными (политика
+    all-public, как в старом _is_public_host) — иначе SSRFBlocked. Из публичных берём
+    ДЕТЕРМИНИРОВАННЫЙ (min по (version, packed)): стабильный выбор держит keep-alive пула, т.к.
+    транспорт резолвит на каждый запрос. Блокирующий вызов ⇒ звать через asyncio.to_thread.
+    Fail-closed: gaierror / пустой ответ / любой приватный адрес ⇒ SSRFBlocked."""
+    if not host:
+        raise SSRFBlocked("пустой хост")
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise SSRFBlocked(f"адрес не разрешается: {host}") from e
+    candidates = [_validated_connect_ip(info[4][0]) for info in infos]  # raise на ПЕРВОМ приватном
+    if not candidates:
+        raise SSRFBlocked(f"адрес не разрешается: {host}")
+
+    def _sort_key(s: str) -> tuple[int, bytes]:
+        a = ipaddress.ip_address(s)
+        return (a.version, a.packed)
+
+    return min(candidates, key=_sort_key)
+
+
 def _is_public_host(host: str) -> bool:
-    """True, если ВСЕ резолвы host — публичные IP. Блокирует SSRF к внутренним адресам.
-    Блокирующий resolve → вызывать через asyncio.to_thread."""
+    """True, если host резолвится и ВСЕ адреса публичные. Тонкая обёртка над _resolve_pinned_ip
+    (единая логика классификации) — оставлена для обратной совместимости и как дешёвый пред-чек.
+    АВТОРИТЕТНЫЙ гейт против TOCTOU — сам транспорт (make_ssrf_safe_transport), резолвящий и
+    коннектящийся к ОДНОМУ IP. Блокирующий resolve → вызывать через asyncio.to_thread."""
     if not host:
         return False
     try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
+        _resolve_pinned_ip(host)
+        return True
+    except SSRFBlocked:
         return False
-    for info in infos:
-        ip = info[4][0]
-        try:
-            addr = ipaddress.ip_address(ip)
-        except ValueError:
-            return False
-        if (
-            addr.is_private
-            or addr.is_loopback
-            or addr.is_link_local
-            or addr.is_reserved
-            or addr.is_multicast
-            or addr.is_unspecified
-        ):
-            return False
-    return True
+
+
+_ssrf_transport_cls = (
+    None  # ленивый кэш подкласса (httpx импортируется лениво, не на import модуля)
+)
+
+
+def make_ssrf_safe_transport(**transport_kwargs: object):
+    """httpx-транспорт, который РЕЗОЛВИТ хост и коннектится к ЗАПИНЕННОМУ публичному IP.
+
+    Закрывает TOCTOU DNS-rebinding: «адрес публичный?» и само соединение идут по ОДНОМУ IP
+    (раньше _is_public_host резолвил ОТДЕЛЬНО от httpx-коннекта — между ними DNS мог отдать
+    приватный адрес). Резолв — на КАЖДЫЙ запрос, включая редиректы (handle_async_request зовётся
+    на каждый hop) ⇒ редирект на внутренний хост тоже отклоняется.
+
+    TLS-идентичность сохранена: для https ставим extension sni_hostname=ИСХОДНЫЙ_ХОСТ — httpcore
+    берёт `server_hostname = sni_hostname or origin.host`, поэтому SNI и проверка сертификата идут
+    по ИМЕНИ, а TCP-коннект — по IP. Fail-closed: любой отказ резолва ⇒ SSRFBlocked.
+
+    Пиннинг делаем на КОПИИ запроса, входящий объект НЕ мутируем: httpx держит тот же Request и
+    резолвит ОТНОСИТЕЛЬНЫЕ редиректы через `request.url.join(Location)` (_client.py). Перепиши мы
+    url→IP на исходном объекте — `301 Location: /en/` уехал бы на `https://<IP>/en/` (имя потеряно →
+    провал проверки сертификата по голому IP). На копии исходный `request.url` остаётся с ИМЕНЕМ, и
+    относительный редирект резолвится на реальный хост (который на след. hop заново пинуется). Копия
+    с `stream=` не зовёт `_prepare` ⇒ Host берётся из исходных заголовков (IP в Host не течёт).
+
+    ВНИМАНИЕ: при передаче transport= в httpx.AsyncClient параметры limits=/verify= НА КЛИЕНТЕ
+    игнорируются — передавать их СЮДА (в конструктор транспорта)."""
+    global _ssrf_transport_cls
+    if _ssrf_transport_cls is None:
+        import httpx
+
+        class _PinnedIPTransport(httpx.AsyncHTTPTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                host = request.url.host
+                ip = await asyncio.to_thread(_resolve_pinned_ip, host, request.url.port)
+                ext = request.extensions
+                if request.url.scheme == "https":
+                    ext = {**ext, "sni_hostname": host}
+                pinned = httpx.Request(
+                    request.method,
+                    request.url.copy_with(host=ip),  # TCP → IP
+                    headers=request.headers,  # Host: реальное имя (порт сохранён)
+                    stream=request.stream,  # GET, пустое тело — переиспользование безопасно
+                    extensions=ext,
+                )
+                return await super().handle_async_request(pinned)
+
+        _ssrf_transport_cls = _PinnedIPTransport
+    return _ssrf_transport_cls(**transport_kwargs)
 
 
 # Обвязка страницы (меню/подвал/сайдбар/формы) — она одинакова на всех страницах сайта и раньше
@@ -113,18 +214,13 @@ def _is_textual(content_type: str) -> bool:
 
 
 async def fetch_url_text(url: str) -> str:
-    """Прочитать ссылку → текст (HTML → плоский текст). SSRF-гард на исходный URL и каждый
-    редирект; таймаут; потолок размера. IngestError при отказе/нетекстовом контенте."""
+    """Прочитать ссылку → текст (HTML → плоский текст). SSRF-гард с пиннингом IP на исходный URL и
+    каждый редирект; таймаут; потолок размера. IngestError при отказе/нетекстовом контенте."""
     import httpx
 
     p = urlparse(url)
     if p.scheme not in ("http", "https"):
         raise IngestError("поддерживаются только http/https-ссылки")
-
-    async def _guard(request: "httpx.Request") -> None:
-        # Валидируем КАЖДЫЙ запрос (вкл. редиректы): host должен резолвиться в публичные IP.
-        if not await asyncio.to_thread(_is_public_host, request.url.host):
-            raise IngestError(f"адрес заблокирован (внутренний/небезопасный): {request.url.host}")
 
     try:
         async with httpx.AsyncClient(
@@ -132,7 +228,7 @@ async def fetch_url_text(url: str) -> str:
             max_redirects=MAX_REDIRECTS,
             timeout=FETCH_TIMEOUT_S,
             headers={"User-Agent": _UA},
-            event_hooks={"request": [_guard]},
+            transport=make_ssrf_safe_transport(),
         ) as client:
             async with client.stream("GET", url) as r:
                 r.raise_for_status()

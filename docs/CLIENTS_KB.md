@@ -108,9 +108,11 @@ whitelisted. `CLIENTS = ClientProfileStore()` — синглтон стора в
 - **Диагностика**: `CrawlResult.stats` (`FetchStats`: ok / по кодам / по классам ошибок / ctype / retry /
   blocked) и `stopped` (`""|time|circuit|pages`). Раньше `except Exception: continue` глотал всё — на живом
   сайте 51 битую ссылку из 87. Сводка идёт в лог (`crawl <domain>: pages=… ok=36 404×51 …`).
-- **SSRF-защита**: гард `core.ingest._is_public_host` навешан event-хуком на КАЖДЫЙ запрос (включая редиректы),
-  таймаут `FETCH_TIMEOUT_S`, потолок `MAX_FETCH_BYTES`, только http/https. Content-Type проверяется ДО чтения
-  тела (бинарь не доезжает до LLM). Внутренние/приватные адреса блокируются.
+- **SSRF-защита с пиннингом IP**: транспорт `core.ingest.make_ssrf_safe_transport` резолвит хост и коннектится
+  РОВНО к проверенному публичному IP на КАЖДЫЙ запрос (включая редиректы) — проверка и соединение по одному IP,
+  закрыт TOCTOU DNS-rebinding. Приватные/loopback/link-local/CGNAT-адреса → `SSRFBlocked` (краулер считает
+  `stats.blocked`, предохранитель не трогает). Таймаут `FETCH_TIMEOUT_S`, потолок `MAX_FETCH_BYTES`, только
+  http/https. Content-Type проверяется ДО чтения тела (бинарь не доезжает до LLM).
 - **Фон и дедуп**: `_spawn_crawl` держит ссылку на задачу в `_CRAWL_INFLIGHT[customer_id]` (иначе GC соберёт
   незавершённую) и **дедуплицирует по customer_id** — второй параллельный краул того же аккаунта не плодится
   (двойной клик → False, «обход уже идёт»).

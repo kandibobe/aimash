@@ -11,8 +11,9 @@
 - предохранитель: `BREAKER_THRESHOLD` отказов подряд ⇒ обход останавливается (`CircuitOpen`),
   а не продолжает долбить лежащий сайт.
 
-Безопасность: SSRF-гард `core.ingest._is_public_host` навешан event-хуком на КАЖДЫЙ запрос (включая
-редиректы) — ровно как в `core.ingest.fetch_url_text`; не ослаблять. Content-Type проверяется ДО
+Безопасность: SSRF-гард с ПИННИНГОМ IP — тот же `core.ingest.make_ssrf_safe_transport`, что и в
+`core.ingest.fetch_url_text`: хост резолвится и коннект идёт к проверенному публичному IP на КАЖДЫЙ
+запрос (включая редиректы), закрывая TOCTOU DNS-rebinding; не ослаблять. Content-Type проверяется ДО
 чтения тела (бинарь не должен доехать до LLM), тело режется по `MAX_FETCH_BYTES`.
 
 Диагностика: `FetchStats` считает всё, что раньше глотал `except Exception: continue` — на живом
@@ -28,7 +29,13 @@ import time
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
-from core.ingest import FETCH_TIMEOUT_S, MAX_FETCH_BYTES, _UA, _is_public_host
+from core.ingest import (
+    FETCH_TIMEOUT_S,
+    MAX_FETCH_BYTES,
+    SSRFBlocked,
+    _UA,
+    make_ssrf_safe_transport,
+)
 
 # B13: типы контента, которые краулер парсит как текст (кроме них — всё text/*). Прочее
 # (application/pdf, image/*, application/zip…) отвергаем ДО чтения тела — бинарь не в LLM-профиль.
@@ -149,12 +156,6 @@ def _check_ctype(raw_ctype: str, url: str, *, allow_xml: bool) -> None:
         raise ContentTypeRejected(f"неподдерживаемый тип контента: {ctype} ({url})")
 
 
-async def _guard_request(request) -> None:
-    """SSRF-гард на КАЖДЫЙ запрос, включая редиректы (event hook)."""
-    if not await asyncio.to_thread(_is_public_host, request.url.host):
-        raise ValueError(f"адрес заблокирован (внутренний/небезопасный): {request.url.host}")
-
-
 class SiteFetcher:
     """Пул соединений + вежливая конкурентность + предохранитель на ОДИН обход одного сайта.
 
@@ -191,11 +192,14 @@ class SiteFetcher:
             max_redirects=3,
             timeout=self.timeout_s,
             headers={"User-Agent": _UA},
-            event_hooks={"request": [_guard_request]},
-            limits=httpx.Limits(
-                max_connections=self.concurrency,
-                max_keepalive_connections=self.concurrency,
-                keepalive_expiry=30.0,
+            # SSRF-пиннинг: транспорт резолвит+коннектит к проверенному IP. limits ОБЯЗАНЫ идти в
+            # транспорт — на клиенте они при transport= игнорируются (гоча httpx).
+            transport=make_ssrf_safe_transport(
+                limits=httpx.Limits(
+                    max_connections=self.concurrency,
+                    max_keepalive_connections=self.concurrency,
+                    keepalive_expiry=30.0,
+                ),
             ),
         )
         return self
@@ -268,7 +272,11 @@ class SiteFetcher:
                     self.stats.skipped_ctype += 1
                     self._consecutive_failures = 0  # сайт жив, просто отдал pdf
                     raise
-                except ValueError:  # SSRF-гард / не-http схема
+                except SSRFBlocked:  # запиненный резолв: адрес внутренний/небезопасный
+                    self.stats.blocked += 1
+                    self._consecutive_failures = 0  # заблокировали МЫ, не сайт — брейкер не трогаем
+                    raise
+                except ValueError:  # не-http схема (защитно; гард схемы — выше по стеку)
                     self.stats.blocked += 1
                     raise
                 except Exception as e:  # noqa: BLE001 — сетевые сбои: таймаут/DNS/TLS/reset

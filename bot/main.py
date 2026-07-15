@@ -4717,6 +4717,7 @@ _CRAWL_ERR_BY_CLASS = {
     "SSLCertVerificationError": "crawl_err_tls",
     "CircuitOpen": "crawl_err_down",
     "TooManyRedirects": "crawl_err_redirects",
+    "SSRFBlocked": "crawl_err_blocked",  # SSRF-пиннинг: адрес внутренний/небезопасный
 }
 
 
