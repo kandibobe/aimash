@@ -762,6 +762,12 @@ def render_audit(
                 lines.append(f"{_family_emoji(fam)} {label} — {n} {noun} · ~{_money(money, cur)}")
             else:
                 lines.append(f"{_family_emoji(fam)} {label} — {n} {noun}")
+            # Худшая находка семьи КОНКРЕТИКОЙ, а не голым счётчиком (жалоба: «13 находки» без сути).
+            # Находки worst-first ⇒ первая находка семьи = её худшая. Хвостовые семьи не получают
+            # per-finding сообщения bot-слоя (те режутся по деньгам) — иначе о них ни слова о сути.
+            worst = next((f for f in result.findings if f.family == fam), None)
+            if worst is not None:
+                lines.append(f"   └ {_finding_line(worst, lang, cur)}")
 
     # Ф8: «⚡ Быстрые победы» — подмножество находок, которые бот применяет ОДНОЙ кнопкой (one_tap:
     # пауза кампании / минус-слово). Отвечает на ДРУГОЙ вопрос, чем «Что важно» (там — худшее по
@@ -815,9 +821,9 @@ def render_audit(
                 if affecting:
                     names = ", ".join(slabels.get(s, s) for s in sorted(affecting))
                     lines.append(
-                        f"⚠️ Incomplete data: {names} — these families weren't checked, the score may be overstated."
+                        f"⚠️ Incomplete data: {names} — these reads failed this run, the score may be overstated; rerun /audit."
                         if lang == "en"
-                        else f"⚠️ Неполные данные: {names} — эти семьи не проверены, балл может быть завышен."
+                        else f"⚠️ Неполные данные: {names} — чтение не удалось в этом прогоне, балл может быть завышен; повтори /audit."
                     )
                 if neutral:
                     names = ", ".join(slabels.get(s, s) for s in sorted(neutral))

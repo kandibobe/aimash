@@ -1245,6 +1245,37 @@ def test_data_gaps_rendered_not_claimed_healthy():
     assert res.score == build_audit(_report(totals, rows)).score
 
 
+def test_card_what_matters_shows_worst_finding_per_family():
+    """«Что важно» даёт КОНКРЕТИКУ (худшая находка семьи), а не голый счётчик (жалоба владельца:
+    «Ключевые слова — 13 находки» без сути). Находки worst-first ⇒ под-строка = худшая находка семьи."""
+    from audit.render import render_audit
+
+    totals = Metrics(impressions=3000, clicks=300, cost_micros=1_000_000_000, conversions=5)
+    rows = [_campaign("Brand", 500, 100, 0), _campaign("Generic", 500, 200, 5, imps=2000)]
+    res = build_audit(_report(totals, rows))
+    assert res.findings  # есть находки → блок «Что важно» рисуется
+    card = render_audit(res, "ru", actions=False)
+    sub = next((line for line in card.splitlines() if line.strip().startswith("└")), None)
+    assert sub is not None  # под семьёй — под-строка с сутью, не только счётчик
+    assert "Brand" in sub or "расход" in sub  # текст худшей waste-находки, а не «N находки»
+
+
+def test_incomplete_data_line_is_actionable():
+    """Переформулировка: «Неполные данные» = транзиентный СБОЙ чтения (а не вечный пробел) → зовём
+    повтор /audit, честно про завышенный балл."""
+    from audit.render import render_audit
+
+    totals = Metrics(impressions=3000, clicks=300, cost_micros=1_000_000_000, conversions=5)
+    rows = [_campaign("Brand", 500, 100, 0), _campaign("Generic", 500, 200, 5, imps=2000)]
+    res = build_audit(
+        _report(totals, rows), search_terms=[], is_rows=[], data_gaps=["conversion_actions"]
+    )
+    card = render_audit(res, "ru", actions=False)
+    assert "Неполные данные" in card
+    assert "не удалось" in card and "повтори /audit" in card
+    assert "балл может быть завышен" in card
+
+
 def test_engine_only_render_makes_no_family_claims():
     """/report health зовёт build_audit БЕЗ collect-слоя (data_gaps=None) — рендер не утверждает
     ни «в норме», ни «нет данных» (нечего утверждать: сигналы не собирались)."""
