@@ -1316,46 +1316,72 @@ def post_create_kb(launch_cid: str = "", lang: str | None = None) -> InlineKeybo
 
 
 def kw_add_campaigns_kb(
-    camps: list[dict], token: str, lang: str | None = None, *, gen: int = 0
+    camps: list[dict], token: str, lang: str | None = None, *, gen: int = 0, page: int = 0
 ) -> InlineKeyboardMarkup:
-    """D3: пикер кампаний для /addkeys — кнопка на кампанию (idx → позиция в _KW_ADD_CAMP_CACHE).
+    """D3: пикер кампаний для /addkeys — кнопка на кампанию (idx → ГЛОБАЛЬНАЯ позиция в
+    _KW_ADD_CAMP_CACHE), ПОСТРАНИЧНО (>10 кампаний были не видны — рисовалась лишь первая страница;
+    PageCB kind='kwadd', target=token открывает остальные).
     gen — поколение списка (N1.4-ревью): кэш может перезаписать fuzzy-подсказка, клик по старой
     клавиатуре обязан дать «список устарел», а не другую кампанию по тому же idx.
-    Показываем первую страницу (до _CAMP_PAGE): текст-фолбэк (kw_add_campaign) всегда ловит имя,
-    поэтому на крупном аккаунте остальные кампании доступны вводом названия — без REPLY_MARKUP_TOO_LONG."""
+    Текст-фолбэк (kw_add_campaign) всё равно ловит имя — ввод названия остаётся альтернативой."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
-    for i, c in enumerate(camps[:_CAMP_PAGE]):
+    total = len(camps)
+    pages = max(1, (total + _CAMP_PAGE - 1) // _CAMP_PAGE)
+    page = max(0, min(page, pages - 1))
+    start = page * _CAMP_PAGE
+    shown = 0
+    for i in range(start, min(start + _CAMP_PAGE, total)):
+        c = camps[i]
         mark = {"ENABLED": "▶️", "PAUSED": "⏸"}.get(c.get("status", ""), "•")
         kb.button(
             text=f"{mark} {_ellipsize(c['name'])}",
             callback_data=KwAddCB(action="camp", token=token, idx=i, gen=gen),
         )
+        shown += 1
+    nav_n = _page_nav_row(kb, "kwadd", token, page, pages)
     kb.button(
         text="✖ Cancel" if en else "✖ Отмена", callback_data=KwAddCB(action="cancel", token=token)
     )
-    kb.adjust(1)
+    sizes = [1] * shown
+    if nav_n:
+        sizes.append(nav_n)
+    sizes.append(1)  # Cancel
+    kb.adjust(*sizes)
     return kb.as_markup()
 
 
 def slash_mutate_campaigns_kb(
-    camps: list[dict], op: str, lang: str | None = None, *, gen: int = 0
+    camps: list[dict], op: str, lang: str | None = None, *, gen: int = 0, page: int = 0
 ) -> InlineKeyboardMarkup:
-    """D4: пикер кампаний для /pause и /resume без аргумента. idx → позиция в _SLASH_MUT_CACHE.
+    """D4: пикер кампаний для /pause и /resume без аргумента. idx → ГЛОБАЛЬНАЯ позиция в
+    _SLASH_MUT_CACHE, ПОСТРАНИЧНО (>10 кампаний были не видны; PageCB kind='smut', target=op).
     gen — поколение списка (N1.4-ревью): кэш может перезаписать fuzzy-подсказка, клик по старой
     клавиатуре обязан дать «список устарел», а не другую кампанию по тому же idx.
-    Список уже отфильтрован по статусу (ENABLED для паузы / PAUSED для возобновления). Первая
-    страница (до _CAMP_PAGE): ввод имени командой остаётся фолбэком на крупном аккаунте."""
+    Список уже отфильтрован по статусу (ENABLED для паузы / PAUSED для возобновления). Ввод имени
+    командой остаётся фолбэком."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
-    for i, c in enumerate(camps[:_CAMP_PAGE]):
+    total = len(camps)
+    pages = max(1, (total + _CAMP_PAGE - 1) // _CAMP_PAGE)
+    page = max(0, min(page, pages - 1))
+    start = page * _CAMP_PAGE
+    shown = 0
+    for i in range(start, min(start + _CAMP_PAGE, total)):
+        c = camps[i]
         mark = {"ENABLED": "▶️", "PAUSED": "⏸"}.get(c.get("status", ""), "•")
         kb.button(
             text=f"{mark} {_ellipsize(c['name'])}",
             callback_data=SlashMutCB(op=op, idx=i, gen=gen),
         )
+        shown += 1
+    nav_n = _page_nav_row(kb, "smut", op, page, pages)
     kb.button(text="✖ Cancel" if en else "✖ Отмена", callback_data=NavCB(action="cancel"))
-    kb.adjust(1)
+    sizes = [1] * shown
+    if nav_n:
+        sizes.append(nav_n)
+    sizes.append(1)  # Cancel
+    kb.adjust(*sizes)
     return kb.as_markup()
 
 

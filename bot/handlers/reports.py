@@ -268,6 +268,22 @@ async def on_page_nav(cq: bm.CallbackQuery, callback_data: bm.PageCB) -> None:
         markup = bm.audiences_kb(
             auds, camp_idx, attached=bm._AUD_DET_CACHE.get(chat_id) or [], page=page
         )
+    elif kind == "kwadd":  # #2: пикер кампаний /addkeys (target несёт token сессии)
+        camps = bm._KW_ADD_CAMP_CACHE.get(chat_id)
+        if not camps:
+            await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
+            return
+        markup = bm.kw_add_campaigns_kb(
+            camps, callback_data.target, gen=bm._KW_ADD_CAMP_GEN.get(chat_id, 0), page=page
+        )
+    elif kind == "smut":  # #2: пикер кампаний /pause,/resume (target несёт op)
+        camps = bm._SLASH_MUT_CACHE.get(chat_id)
+        if not camps:
+            await cq.answer(bm.i18n.t("camp_list_stale"), show_alert=True)
+            return
+        markup = bm.slash_mutate_campaigns_kb(
+            camps, callback_data.target, gen=bm._SLASH_MUT_GEN.get(chat_id, 0), page=page
+        )
     else:  # неизвестный kind (старые кнопки после апгрейда) — тихий stale
         await cq.answer(bm.i18n.t("stale"), show_alert=True)
         return
