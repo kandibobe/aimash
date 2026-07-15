@@ -1539,6 +1539,16 @@ class GetSearchTermsArgs(BaseModel):
     """get_search_terms (read-only): без параметров — топ поисковых запросов аккаунта по расходу."""
 
 
+class GetCompetitorsArgs(BaseModel):
+    """get_competitors (read-only): без параметров — последний загруженный срез «Статистики
+    аукционов» (домены соперников и доли показов из /competitors)."""
+
+
+class GetBidLandscapeArgs(BaseModel):
+    """get_bid_landscape (read-only): без параметров — топ ключей по расходу со ставкой, оценками
+    Google (сколько нужно для верха страницы) и долями верхних позиций."""
+
+
 ANALYSIS_TOOLS: list[dict] = [
     _tool(
         "get_campaign_detail",
@@ -1551,6 +1561,20 @@ ANALYSIS_TOOLS: list[dict] = [
         "Прочитать топ реальных поисковых запросов аккаунта по расходу (что люди вводили в Google) — "
         "чтобы показать, на что уходят деньги, и найти кандидатов в минус-слова. READ-ONLY, без аргументов.",
         GetSearchTermsArgs,
+    ),
+    _tool(
+        "get_competitors",
+        "Прочитать срез конкурентов («Статистика аукционов»): домены соперников и их доли показов, "
+        "пересечения, доля обгона. Отвечает «как аккаунт выглядит против конкурентов». READ-ONLY, "
+        "без аргументов. Пусто (has_data:false) = отчёт ещё не загружали командой /competitors.",
+        GetCompetitorsArgs,
+    ),
+    _tool(
+        "get_bid_landscape",
+        "Прочитать ставки топ-ключей по расходу и оценки Google (ставка для верха страницы / первой "
+        "позиции) + доли верхних позиций и потерю верха по рангу. Отвечает «какие ставки поднять и "
+        "почему теряю верх». Осмысленно только на РУЧНЫХ стратегиях (strategy_type). READ-ONLY, без аргументов.",
+        GetBidLandscapeArgs,
     ),
 ]
 ANALYSIS_TOOL_NAMES = frozenset(t["function"]["name"] for t in ANALYSIS_TOOLS)

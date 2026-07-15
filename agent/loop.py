@@ -503,7 +503,15 @@ _ANALYST_QA_SYSTEM = {
         "что здесь только разбор, и подскажи подходящую КОМАНДУ бота (например /pause, /resume, "
         "/newsearch, /addkeys, /rsa) — сам менеджер запустит её, изменение пройдёт через подтверждение. "
         "(3) Отвечай КОНКРЕТНО на заданный вопрос, коротко (2–6 предложений), без воды, без таблиц и "
-        "markdown-разметки. (4) Если в данных аудита нет нужного — честно скажи об этом, не выдумывай. "
+        "markdown-разметки. (4) Прежде чем сказать «нет данных» — попробуй ИНСТРУМЕНТ: про конкурентов "
+        "(домены, доли показов) вызови get_competitors; про ставки/позиции — get_bid_landscape; про "
+        "поисковые запросы — get_search_terms; про кампанию — get_campaign_detail. Только если "
+        "инструмент вернул has_data:false или пусто — тогда честно скажи, чего не хватает: срез "
+        "конкурентов загружают командой /competitors (Google имён соперников через API не отдаёт). "
+        "(5) Отличай «нет ДАННЫХ» от «нет СОВЕТА»: на автоматических стратегиях (Smart Bidding / tCPA / "
+        "Maximize) ставки задаёт алгоритм Google — ручной ставки, которую можно «поднять», там нет; так "
+        "и скажи, не выдумывай число. Ручную ставку показывает get_bid_landscape (strategy_type). "
+        "(6) Если в данных и после инструментов нужного нет — честно скажи об этом, не выдумывай. "
         "Отвечай ПО-РУССКИ."
     ),
     "en": (
@@ -515,8 +523,15 @@ _ANALYST_QA_SYSTEM = {
         "that this is analysis only and point to the right bot COMMAND (e.g. /pause, /resume, "
         "/newsearch, /addkeys, /rsa) — the manager runs it and the change goes through a confirmation. "
         "(3) Answer the specific question CONCRETELY, briefly (2–6 sentences), no fluff, no tables or "
-        "markdown. (4) If the audit data lacks what's needed, say so honestly — do not invent. Answer "
-        "in ENGLISH."
+        "markdown. (4) Before saying 'no data' — try a TOOL: for competitors (domains, impression "
+        "share) call get_competitors; for bids/positions call get_bid_landscape; for search queries "
+        "get_search_terms; for a campaign get_campaign_detail. Only if the tool returns has_data:false "
+        "or empty, say honestly what's missing: the competitor snapshot is loaded via /competitors "
+        "(Google does not expose rival names through the API). (5) Distinguish 'no DATA' from 'no "
+        "ADVICE': on automated strategies (Smart Bidding / tCPA / Maximize) Google's algorithm sets "
+        "the bids — there is no manual bid to 'raise'; say so, don't invent a number. Manual bids show "
+        "in get_bid_landscape (strategy_type). (6) If the data and tools still lack what's needed, say "
+        "so honestly — do not invent. Answer in ENGLISH."
     ),
 }
 _ANALYST_QA_SEED = {

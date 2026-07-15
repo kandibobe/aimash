@@ -5894,10 +5894,40 @@ async def _advise_run(
     await target.answer(i18n.t("advise_disclaimer", lang))
 
 
-def _audit_facts(result, days: int) -> dict:
-    """Компактный dict из AuditResult для СИДА агентного нарратива (числа = КОД движка audit/). Валюту-
-    строку не кладём (лишний шум); имена кампаний — данные клиента (как в /report), не секрет."""
-    return {
+def _audit_pct(v) -> float | None:
+    """Долю 0..1 (impression_share и т.п.) → проценты для сида/drill. Модель цитирует «23%», а
+    fact-guard сверяет ТОКЕН прозы с CODE-числом — храним percent(23.4), НЕ долю(0.234), иначе
+    честный нарратив о конкуренции отвергнется (23 ∉ {0.23}). None-безопасно."""
+    return round(float(v) * 100, 1) if v is not None else None
+
+
+async def _audit_facts(result, days: int) -> dict:
+    """Компактный dict из AuditResult для СИДА агентного нарратива И Q&A (числа = КОД движка audit/).
+    Валюту-строку не кладём (лишний шум); имена кампаний — данные клиента (как в /report), не секрет.
+
+    Сверх топ-N находок добираем ХУДШУЮ находку каждой ещё не представленной семьи: конкуренция и
+    ставки имеют at_risk=0 → сортировка (severity+at_risk) сваливает их в хвост → без добора Q&A врал
+    «данных нет». Плюс срез конкурентов из ЛОКАЛЬНОЙ БД (/competitors) — домены соперников живут
+    отдельно от находок движка (Google имён через API не отдаёт)."""
+
+    def _fd(f) -> dict:
+        return {
+            "issue": f.check_id,
+            "family": f.family,
+            "severity": f.severity,
+            "campaign": f.target_campaign,
+            "at_risk": f.at_risk,
+            **{k: v for k, v in (f.facts or {}).items() if k != "currency"},
+        }
+
+    top = list(result.findings[:_AUDIT_MAX_FINDINGS])
+    seen_fams = {f.family for f in top}
+    extra = []  # worst-first сортировка ⇒ первая находка семьи в хвосте = её худшая находка
+    for f in result.findings[_AUDIT_MAX_FINDINGS:]:
+        if f.family not in seen_fams:
+            seen_fams.add(f.family)
+            extra.append(f)
+    facts = {
         "customer_id": result.customer_id,
         "currency": result.currency,
         "period_days": days,
@@ -5911,18 +5941,34 @@ def _audit_facts(result, days: int) -> dict:
             fam: {"count": info["count"], "at_risk": info["at_risk"]}
             for fam, info in result.families.items()
         },
-        "findings": [
-            {
-                "issue": f.check_id,
-                "family": f.family,
-                "severity": f.severity,
-                "campaign": f.target_campaign,
-                "at_risk": f.at_risk,
-                **{k: v for k, v in (f.facts or {}).items() if k != "currency"},
-            }
-            for f in result.findings[:_AUDIT_MAX_FINDINGS]
-        ],
+        "findings": [_fd(f) for f in (*top, *extra)],
     }
+    # Срез конкурентов (best-effort): домены/доли из /competitors, чтобы Q&A «как я против
+    # конкурентов» отвечал конкретикой, а не «данных нет». Сбой ЛОКАЛЬНОЙ БД не роняет сид.
+    try:
+        from db.competitors import latest_snapshot
+
+        snap = await latest_snapshot(result.customer_id)
+        if snap is not None:
+            facts["competitors"] = {
+                "snapshot_date": snap.snapshot_date,
+                "period_label": snap.period_label,
+                "you_impression_share_pct": (
+                    _audit_pct(snap.you.impression_share) if snap.you else None
+                ),
+                "rivals": [
+                    {
+                        "domain": r.domain,
+                        "impression_share_pct": _audit_pct(r.impression_share),
+                        "outranking_share_pct": _audit_pct(r.outranking_share),
+                        "position_above_rate_pct": _audit_pct(r.position_above_rate),
+                    }
+                    for r in snap.competitors[:6]
+                ],
+            }
+    except Exception as e:  # noqa: BLE001 — срез конкурентов необязателен, сбой не роняет нарратив
+        log.warning("сид конкурентов /audit не загружен: %s", type(e).__name__)
+    return facts
 
 
 def _campaign_cfg_facts(cfg) -> dict:
@@ -5991,6 +6037,58 @@ def _make_audit_drill(client, acct: str, period):
                     }
                 )
             return {"search_terms": out}
+        if name == "get_competitors":
+            # ЛОКАЛЬНАЯ БД (/competitors), не Google Ads: cid=acct (залочен). Google имён соперников
+            # через API не отдаёт — источник только загруженный человеком отчёт «Статистики аукционов».
+            from db.competitors import latest_snapshot
+
+            snap = await latest_snapshot(acct)
+            if snap is None:
+                return {"has_data": False}
+            return {
+                "has_data": True,
+                "snapshot_date": snap.snapshot_date,
+                "period_label": snap.period_label,
+                "you_impression_share_pct": (
+                    _audit_pct(snap.you.impression_share) if snap.you else None
+                ),
+                "rivals": [
+                    {
+                        "domain": r.domain,
+                        "impression_share_pct": _audit_pct(r.impression_share),
+                        "overlap_rate_pct": _audit_pct(r.overlap_rate),
+                        "outranking_share_pct": _audit_pct(r.outranking_share),
+                        "position_above_rate_pct": _audit_pct(r.position_above_rate),
+                    }
+                    for r in snap.competitors[:10]
+                ],
+            }
+        if name == "get_bid_landscape":
+            from reports.queries import fetch_bid_landscape
+
+            rows = await run_ads_read_call(
+                fetch_bid_landscape, client, acct, period, 40, label="audit_drill_bids"
+            )
+            out = []
+            for r in (rows or [])[:20]:
+                out.append(
+                    {
+                        "keyword": getattr(r, "keyword", ""),
+                        "campaign": getattr(r, "campaign", ""),
+                        "match_type": getattr(r, "match_type", ""),
+                        "strategy_type": getattr(r, "strategy_type", ""),
+                        "bid": round(float(getattr(r, "bid", 0.0) or 0.0), 2),
+                        "top_of_page_cpc": round(
+                            float(getattr(r, "top_of_page_cpc", 0.0) or 0.0), 2
+                        ),
+                        "first_position_cpc": round(
+                            float(getattr(r, "first_position_cpc", 0.0) or 0.0), 2
+                        ),
+                        "top_impression_share_pct": _audit_pct(getattr(r, "top_is", 0.0)),
+                        "rank_lost_top_share_pct": _audit_pct(getattr(r, "rank_lost_top_is", 0.0)),
+                    }
+                )
+            return {"bid_landscape": out}
         return {"error": "unknown tool"}
 
     return _drill
@@ -6144,6 +6242,10 @@ async def _audit_run(
         parse_mode=None,
         reply_markup=export_kb,
     )
+    # Сид для нарратива И Q&A считаем ОДИН раз (в т.ч. срез конкурентов из БД) — оба режима делят факты.
+    audit_seed = None
+    if settings.audit_agentic_narrative or (settings.audit_qa_enabled and state is not None):
+        audit_seed = await _audit_facts(result, days)
     # P3: агентный НАРРАТИВ поверх детерминированной карточки (числа = КОД, разбор = LLM). READ-ONLY,
     # multi-turn (может уточнить кампанию/поисковые запросы drill-инструментами). Сбой/timeout/бюджет-
     # стоп/выдуманное число ⇒ None → просто нет разбора (карточка выше уже показана). Конфиг-гейт.
@@ -6153,7 +6255,7 @@ async def _audit_run(
                 from agent.loop import run_analysis_agent
 
                 narrative = await run_analysis_agent(
-                    _audit_facts(result, days),
+                    audit_seed,
                     chat_id=chat_id,
                     lang=lang,
                     drill=_make_audit_drill(client, acct, period),
@@ -6215,7 +6317,7 @@ async def _audit_run(
     # × переданный state (интерактивный путь /audit его тащит; dossier §20 без state — не вооружаем).
     # Выход — любая /команда, кнопка меню (пассивно через middleware) или «✖ Выйти».
     if settings.audit_qa_enabled and state is not None:
-        _AUDIT_QA_CACHE[chat_id] = (_audit_facts(result, days), acct, period)
+        _AUDIT_QA_CACHE[chat_id] = (audit_seed, acct, period)
         await state.set_state(AuditQA.active)
         await target.answer(i18n.t("audit_qa_hint", lang), reply_markup=audit_qa_exit_kb(lang))
 
