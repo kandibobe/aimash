@@ -182,7 +182,7 @@ def test_ngram_money_never_double_counts_at_risk():
     assert f.at_risk == 0.0 and f.facts["cost"] == 120.0
     assert f.suggested_operation is None  # n-грамма пересекает кампании → не one-tap
     assert f.advice_operation == "add_negative_keywords"
-    assert res.at_risk <= float(res.report.totals.cost) if hasattr(res, "report") else True
+    assert res.at_risk <= float(res.report.totals.cost) if res.report is not None else True
     assert "«бесплатно»" in finding_text(f, "ru", "USD")
     assert finding_text(f, "en", "USD")
 
