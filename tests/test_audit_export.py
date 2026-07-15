@@ -34,7 +34,13 @@ from reports.findings import (  # noqa: E402
     family_summary_rows,
 )
 from reports.period import last_n_days  # noqa: E402
-from reports.queries import Breakdown, Metrics  # noqa: E402
+from reports.queries import (  # noqa: E402
+    Breakdown,
+    GeoWasteRow,
+    KeywordQualityRow,
+    Metrics,
+    SearchTermRow,
+)
 from reports.sheets import (  # noqa: E402
     SHARE_FAILED,
     build_audit_sheets_data,
@@ -71,6 +77,35 @@ def _report(campaign: str = "Search Brand"):
 def _result(campaign: str = "Search Brand"):
     r = build_audit(_report(campaign))
     assert r.findings and r.families, "движку есть что сказать про этот аккаунт"
+    return r
+
+
+def _enriched_result(campaign: str = "Search Brand"):
+    """Как gather_audit: тот же result + прицепленное сырьё (report + audit_tables). Данные ЛАТИНИЦЕЙ
+    (в EN-артефакте кириллица = наш ярлык, не данные — как в test_export_i18n)."""
+    from audit.collect import _geo_waste_table, _keyword_quality_table, _search_terms_table
+
+    r = _result(campaign)
+    r.report = _report(campaign)  # ReportData-подобный (breakdowns=[Кампании])
+    m = Metrics(impressions=50, clicks=5, cost_micros=10_000_000, conversions=0.0)
+    r.audit_tables = [
+        t
+        for t in (
+            _search_terms_table(
+                [SearchTermRow("used car export", campaign, "AG", "car", "PHRASE", m)]
+            ),
+            _keyword_quality_table(
+                [
+                    KeywordQualityRow(
+                        campaign, "AG", "car", 0, "UNSPECIFIED", "AVERAGE", "AVERAGE", m
+                    ),
+                    KeywordQualityRow(campaign, "AG", "van", 7, "AVERAGE", "AVERAGE", "AVERAGE", m),
+                ]
+            ),
+            _geo_waste_table([GeoWasteRow(campaign, "Tanzania", m)]),
+        )
+        if t is not None
+    ]
     return r
 
 
@@ -201,6 +236,69 @@ def test_audit_en_has_no_cyrillic():
         n for n in wb.sheetnames if _CYR & set(n)
     ]
     assert not xleaks, f"RU-утечка в EN-книге: {xleaks}"
+
+
+# ── обогащённая выгрузка: секция ДАННЫХ (жалоба «в щитс те же данные, что и в посте») ──
+def test_converters_shape_and_empty():
+    """Конвертеры сырья → Breakdown: форма строк, Metrics берётся как есть, пусто/None → None."""
+    from audit.collect import _geo_waste_table, _keyword_quality_table, _search_terms_table
+
+    m = Metrics(impressions=10, clicks=1, cost_micros=1_000_000)
+
+    st = _search_terms_table([SearchTermRow("used car export", "C", "AG", "car", "PHRASE", m)])
+    assert st.dim_headers[0] == "Запрос"
+    assert st.rows[0][0] == ("used car export", "C", "AG", "car", "PHRASE")
+    assert st.rows[0][1] is m  # Metrics не пересобираем — их считает КОД
+    assert _search_terms_table(None) is None and _search_terms_table([]) is None
+
+    kq = _keyword_quality_table(
+        [
+            KeywordQualityRow("C", "AG", "car", 0, "UNSPECIFIED", "AVERAGE", "ABOVE_AVERAGE", m),
+            KeywordQualityRow("C", "AG", "van", 7, "AVERAGE", "AVERAGE", "AVERAGE", m),
+        ]
+    )
+    assert kq.rows[0][0][3] == "—"  # QS 0 = нет данных → прочерк, не ложный 0
+    assert kq.rows[0][0][4] == ""  # UNSPECIFIED = нет данных → пусто
+    assert kq.rows[1][0][3] == 7 and kq.rows[1][0][5] == "AVERAGE"
+    assert _keyword_quality_table([]) is None
+
+    geo = _geo_waste_table([GeoWasteRow("C", "Tanzania", m)])
+    assert geo.dim_headers == ["Кампания", "Регион"] and geo.rows[0][0] == ("C", "Tanzania")
+    assert _geo_waste_table(None) is None
+
+
+def test_enriched_export_appends_data_section():
+    """report прицеплен → после 3 вкладок идут ДАННЫЕ: Сводка + разбивки отчёта + запросы/QS/гео."""
+    r = _enriched_result()
+    titles = [t.title for t in build_audit_sheets_data(r, "ru")]
+    assert titles[:3] == [OVERVIEW_TITLE, FAMILY_SUMMARY_TITLE, FINDINGS_TITLE]
+    for expect in ("Сводка", "Кампании", "Поисковые запросы", "Показатель качества", "География"):
+        assert expect in titles, f"нет вкладки данных {expect!r}: {titles}"
+    names = build_audit_workbook(r, "ru").sheetnames
+    assert names[:3] == [OVERVIEW_TITLE, FAMILY_SUMMARY_TITLE, FINDINGS_TITLE]
+    for expect in ("Сводка", "Поисковые запросы", "География"):
+        assert expect in names, f"нет листа данных {expect!r}: {names}"
+
+
+def test_no_report_stays_three_tabs():
+    """Старый кэш / engine-only вызов (result.report is None) → прежние 3 вкладки, без деградации."""
+    r = _result()
+    assert getattr(r, "report", None) is None  # build_audit сам не прицепляет
+    assert len(build_audit_sheets_data(r, "ru")) == 3
+    assert len(build_audit_workbook(r, "ru").sheetnames) == 3
+
+
+def test_enriched_export_en_has_no_cyrillic():
+    """EN-артефакт обогащённой выгрузки без кириллицы (RU-утечка): у новых ярлыков есть EN-пары."""
+    r = _enriched_result()
+    tabs = build_audit_sheets_data(r, "en")
+    leaks = [c for c in _cells([row for t in tabs for row in t.rows]) if _CYR & set(c)]
+    leaks += [t.title for t in tabs if _CYR & set(t.title)]
+    assert not leaks, f"RU-утечка в EN-вкладках обогащённого экспорта: {leaks}"
+    wb = build_audit_workbook(r, "en")
+    xleaks = [c for name in wb.sheetnames for c in _xlsx_texts(wb, name) if _CYR & set(c)]
+    xleaks += [n for n in wb.sheetnames if _CYR & set(n)]
+    assert not xleaks, f"RU-утечка в EN-книге обогащённого экспорта: {xleaks}"
 
 
 # ── publish_audit_to_sheets: сеть замокана, шарит reader ─────────────────────────────

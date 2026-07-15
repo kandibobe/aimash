@@ -16,6 +16,82 @@ from typing import Any
 from audit.engine import AuditResult, build_audit
 
 
+def _search_terms_table(rows):
+    """search_term_view → Breakdown для СЕКЦИИ ДАННЫХ выгрузки /audit (эти строки не входят в
+    report.breakdowns). Пусто/None → None (вкладку не создаём). Metrics берём как есть — их считает КОД."""
+    if not rows:
+        return None
+    from reports.queries import Breakdown
+
+    return Breakdown(
+        key="search_terms",
+        title="Поисковые запросы",
+        dim_headers=["Запрос", "Кампания", "Группа", "Ключ", "Тип"],
+        rows=[
+            ((r.search_term, r.campaign, r.ad_group, r.keyword, r.match_type), r.metrics)
+            for r in rows
+        ],
+    )
+
+
+def _keyword_quality_table(rows):
+    """keyword_view (Quality Score + 3 компонента) → Breakdown. QS=0 и UNSPECIFIED — «нет данных»
+    (proto3-нули): показываем честный прочерк, а не ложный 0/UNSPECIFIED. Enum-имена (ABOVE_AVERAGE…)
+    НЕ переводим — это данные Google (как ENABLED/MOBILE), они и без EN-пары латиницей."""
+    if not rows:
+        return None
+    from reports.queries import Breakdown
+
+    def _qs(v):
+        return v if v else "—"  # 0 = нет данных
+
+    def _cmp(v):
+        return "" if (not v or v == "UNSPECIFIED") else v
+
+    return Breakdown(
+        key="keyword_quality",
+        title="Показатель качества",
+        dim_headers=[
+            "Кампания",
+            "Группа",
+            "Ключ",
+            "QS",
+            "Ожид. CTR",
+            "Релевантность",
+            "Целевая стр.",
+        ],
+        rows=[
+            (
+                (
+                    r.campaign,
+                    r.ad_group,
+                    r.keyword,
+                    _qs(r.quality_score),
+                    _cmp(r.expected_ctr),
+                    _cmp(r.ad_relevance),
+                    _cmp(r.landing_page),
+                ),
+                r.metrics,
+            )
+            for r in rows
+        ],
+    )
+
+
+def _geo_waste_table(rows):
+    """geo → Breakdown (расход по регионам — где деньги уходят не туда). Пусто/None → None."""
+    if not rows:
+        return None
+    from reports.queries import Breakdown
+
+    return Breakdown(
+        key="geo_waste",
+        title="География",
+        dim_headers=["Кампания", "Регион"],
+        rows=[((r.campaign, r.region), r.metrics) for r in rows],
+    )
+
+
 async def gather_audit(
     client: Any,
     customer_id: str,
@@ -172,7 +248,7 @@ async def gather_audit(
     # достаточных данных и только на ручных ставках), а не сбой чтения. Пометив пробелом, мы бы
     # написали «данных нет» здоровому аккаунту без симуляторов.
 
-    return build_audit(
+    result = build_audit(
         report,
         thresholds,
         target_cpa,
@@ -202,6 +278,21 @@ async def gather_audit(
         pmax_campaigns=pmax_campaigns,
         pmax_asset_groups=pmax_asset_groups,
     )
+    # Обогащённая выгрузка (bot._run_audit_export → reports.xlsx/sheets): прицепляем сырьё, которое
+    # УЖЕ собрано выше и после build_audit обычно отбрасывается — чтобы книга/Sheets несли ДАННЫЕ
+    # (итоги + кампании/ключи из report.breakdowns + запросы/QS/гео), а не только прозу поста. Это
+    # ТОЛЬКО бумага (GR3): на score/находки/семьи не влияет. Пустые/сбойные (None) секции пропускаем.
+    result.report = report
+    result.audit_tables = [
+        t
+        for t in (
+            _search_terms_table(st),
+            _keyword_quality_table(keyword_quality),
+            _geo_waste_table(geo_waste),
+        )
+        if t is not None
+    ]
+    return result
 
 
 @dataclass

@@ -130,6 +130,16 @@ class AuditResult:
     # штраф честен, а ЯРЛЫК нет. Потребители советов обязаны такие семьи молчать
     # (advisor.from_findings.untrusted_families); флаг report_only, который надо было ПОМНИТЬ, — снят.
     ctx_signals: frozenset[str] = frozenset()
+    # Обогащённая ВЫГРУЗКА /audit (bot._run_audit_export → reports.xlsx/sheets): сырьё, которое
+    # gather_audit УЖЕ собрал и обычно отбрасывает после build_audit, прицеплено к результату, чтобы
+    # книга/Sheets несли ДАННЫЕ (итоги + кампании/ключи/запросы/QS/гео), а не только прозу поста
+    # (жалоба владельца «в щитс те же данные, что и в посте»). Это ТОЛЬКО бумага (GR3) — на
+    # score/находки/семьи НЕ влияет (движок их не читает). None → engine-only вызов (нет слоя сбора)
+    # ИЛИ старый кэш ⇒ выгрузка деградирует к прежним 3 вкладкам. Заполняет их ТОЛЬКО collect.gather_audit.
+    report: object = None
+    audit_tables: list | None = (
+        None  # list[reports.queries.Breakdown]: запросы/QS/гео (не в report.breakdowns)
+    )
 
 
 @dataclass

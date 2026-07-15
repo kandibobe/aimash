@@ -110,14 +110,11 @@ def _findings_tab(result, currency: str, lang: str, seen: set[str]) -> SheetTab:
     )
 
 
-def build_sheets_data(report: ReportData, lang: str = "ru", *, audit=None) -> list[SheetTab]:
-    """Чистая сборка вкладок (без сети): «Сводка» + «Находки» (если подан audit) + по вкладке на
-    разбивку. Зеркало xlsx. lang — язык ПОДПИСЕЙ (reports.labels); значения ячеек (имена кампаний,
-    статусы) не трогаем. audit — AuditResult (keyword-only ⇒ прежние вызовы целы); None → вкладки
-    находок нет: собирать аудит — 23 чтения, решает вызыватель."""
+def _summary_tab(report: ReportData, lang: str, seen: set[str]) -> SheetTab:
+    """Вкладка «Сводка»: шапка аккаунта/период/валюта + строка(и) итогов. Общий раскладчик для отчёта
+    и обогащённой выгрузки /audit (одно поведение — один код)."""
     from reports.period import label_i18n
 
-    seen: set[str] = set()
     p = report.period
     currency = getattr(report, "currency", "") or ""  # defensive: фейк-репорты без поля
     headers = metric_headers(currency, lang)  # §9: код валюты на денежных колонках
@@ -135,35 +132,47 @@ def build_sheets_data(report: ReportData, lang: str = "ru", *, audit=None) -> li
     ]
     if report.prev_totals is not None:
         summary_rows.append([label_i18n(p.previous(), lang), *report.prev_totals.as_row()])
-    tabs = [
-        SheetTab(
-            _sanitize_title(loc("Сводка", lang), seen),
-            summary_rows,
-            dim_count=1,  # колонка «Период»
-            header_row=len(summary_meta) + 1,  # мета + пустая строка
-        )
-    ]
+    return SheetTab(
+        _sanitize_title(loc("Сводка", lang), seen),
+        summary_rows,
+        dim_count=1,  # колонка «Период»
+        header_row=len(summary_meta) + 1,  # мета + пустая строка
+    )
+
+
+def _breakdown_tab(b, currency: str, lang: str, seen: set[str]) -> SheetTab:
+    """Вкладка одной разбивки: (опц.) пометка об усечении + шапка измерений/метрик + строки. Общий
+    раскладчик для отчёта и секции данных выгрузки /audit."""
+    headers = metric_headers(currency, lang)
+    rows: list[list[Any]] = []
+    kind = getattr(b, "note_kind", None)  # defensive: фейк-разбивки в тестах без поля
+    note = top_note(kind, TOP_N, lang) if (b.note and kind) else b.note
+    if note:
+        rows.append([note])  # пометка об усечении — первой строкой
+    header_row = len(rows)
+    rows.append([*loc_all(b.dim_headers, lang), *headers])
+    for dims, m in b.rows:
+        rows.append([*dims, *m.as_row()])
+    return SheetTab(
+        _sanitize_title(loc(b.title, lang), seen),
+        rows,
+        dim_count=len(b.dim_headers),
+        header_row=header_row,
+    )
+
+
+def build_sheets_data(report: ReportData, lang: str = "ru", *, audit=None) -> list[SheetTab]:
+    """Чистая сборка вкладок (без сети): «Сводка» + «Находки» (если подан audit) + по вкладке на
+    разбивку. Зеркало xlsx. lang — язык ПОДПИСЕЙ (reports.labels); значения ячеек (имена кампаний,
+    статусы) не трогаем. audit — AuditResult (keyword-only ⇒ прежние вызовы целы); None → вкладки
+    находок нет: собирать аудит — 23 чтения, решает вызыватель."""
+    seen: set[str] = set()
+    currency = getattr(report, "currency", "") or ""  # defensive: фейк-репорты без поля
+    tabs = [_summary_tab(report, lang, seen)]
     if audit is not None:
         tabs.append(_findings_tab(audit, currency, lang, seen))  # сразу за «Сводкой»
-
     for b in report.breakdowns:
-        rows: list[list[Any]] = []
-        kind = getattr(b, "note_kind", None)  # defensive: фейк-разбивки в тестах без поля
-        note = top_note(kind, TOP_N, lang) if (b.note and kind) else b.note
-        if note:
-            rows.append([note])  # пометка об усечении — первой строкой
-        header_row = len(rows)
-        rows.append([*loc_all(b.dim_headers, lang), *headers])
-        for dims, m in b.rows:
-            rows.append([*dims, *m.as_row()])
-        tabs.append(
-            SheetTab(
-                _sanitize_title(loc(b.title, lang), seen),
-                rows,
-                dim_count=len(b.dim_headers),
-                header_row=header_row,
-            )
-        )
+        tabs.append(_breakdown_tab(b, currency, lang, seen))
     return tabs
 
 
@@ -190,7 +199,7 @@ def build_audit_sheets_data(result, lang: str = "ru") -> list[SheetTab]:
 
     currency = getattr(result, "currency", "") or ""
     seen: set[str] = set()
-    return [
+    tabs = [
         SheetTab(
             _sanitize_title(loc(OVERVIEW_TITLE, lang), seen),
             findings_meta_rows(result, lang),
@@ -208,6 +217,16 @@ def build_audit_sheets_data(result, lang: str = "ru") -> list[SheetTab]:
             formats=FINDINGS_FORMATS,
         ),
     ]
+    # Секция ДАННЫХ (жалоба владельца «в щитс те же данные, что и в посте»): сырьё, прицепленное
+    # слоем сбора аудита к result. Нет report (engine-only вызов / старый кэш) → прежние 3 вкладки.
+    report = getattr(result, "report", None)
+    if report is not None:
+        rcur = getattr(report, "currency", "") or currency
+        tabs.append(_summary_tab(report, lang, seen))
+        extra = getattr(result, "audit_tables", None) or []
+        for b in [*getattr(report, "breakdowns", []), *extra]:
+            tabs.append(_breakdown_tab(b, rcur, lang, seen))
+    return tabs
 
 
 def _default_title(report: ReportData) -> str:

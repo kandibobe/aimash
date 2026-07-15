@@ -223,6 +223,17 @@ def build_audit_workbook(result, lang: str = "ru") -> Workbook:
         FINDINGS_FORMATS,
         cap=90,  # «Что не так» — предложение, а не ярлык
     )
+    # Секция ДАННЫХ (жалоба «в щитс те же данные, что и в посте»): сырьё, прицепленное слоем сбора
+    # аудита к result — «Сводка» (итоги) + разбивки отчёта + аудит-таблицы (запросы/QS/гео). Нет
+    # report (engine-only вызов / старый кэш) → прежние 3 листа. Зеркало
+    # reports.sheets.build_audit_sheets_data.
+    report = getattr(result, "report", None)
+    if report is not None:
+        rcur = getattr(report, "currency", "") or currency
+        _write_summary(wb.create_sheet(title=loc("Сводка", lang)[:31]), report, lang)
+        extra = getattr(result, "audit_tables", None) or []
+        for b in [*getattr(report, "breakdowns", []), *extra]:
+            _write_breakdown(wb, b, rcur, lang)
     return wb
 
 

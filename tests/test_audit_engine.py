@@ -1278,6 +1278,41 @@ async def test_gather_audit_records_data_gaps(monkeypatch):
     monkeypatch.setattr("core.resilience.run_ads_read_call", fake_run)
     res = await gather_audit(object(), "1", None)
     assert set(res.data_gaps) == {"impression_share", "bidding"}
+    # Обогащённая выгрузка: report прицеплен, а пустые ([]) секции в audit_tables не попадают.
+    assert res.report is fake_report and res.audit_tables == []
+
+
+async def test_gather_audit_attaches_data_tables(monkeypatch):
+    """collect прицепляет к result сырьё для секции ДАННЫХ выгрузки: report + запросы/QS/гео как
+    Breakdown (эти строки не в report.breakdowns). Пустые секции пропускаются (см. пред. тест)."""
+    from audit.collect import gather_audit
+    from reports.queries import GeoWasteRow, KeywordQualityRow, SearchTermRow
+
+    fake_report = SimpleNamespace(customer_id="1", totals=Metrics(), breakdowns=[], currency="USD")
+    m = Metrics(impressions=10, clicks=1, cost_micros=1_000_000)
+    rows_by_label = {
+        "audit_search_terms": [SearchTermRow("used car", "C", "AG", "car", "PHRASE", m)],
+        "audit_keyword_quality": [
+            KeywordQualityRow("C", "AG", "car", 7, "AVERAGE", "AVERAGE", "AVERAGE", m)
+        ],
+        "audit_geo_waste": [GeoWasteRow("C", "Tanzania", m)],
+    }
+
+    async def fake_build_report(client, cid, period, **kw):
+        return fake_report
+
+    async def fake_run(fn, *args, label=""):
+        if label == "audit_currency":
+            return "USD"
+        return rows_by_label.get(label, [])
+
+    monkeypatch.setattr("reports.service.build_account_report_async", fake_build_report)
+    monkeypatch.setattr("core.resilience.run_ads_read_call", fake_run)
+    res = await gather_audit(object(), "1", None)
+    assert res.report is fake_report
+    assert [b.key for b in res.audit_tables] == ["search_terms", "keyword_quality", "geo_waste"]
+    st = res.audit_tables[0]
+    assert st.rows[0][0] == ("used car", "C", "AG", "car", "PHRASE") and st.rows[0][1] is m
 
 
 # ── Heartbeat: дизапрувы / 0-показов / приостановка аккаунта (delivery, все НЕденежные) ──
