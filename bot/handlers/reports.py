@@ -368,8 +368,13 @@ async def on_picker_search_query(m: bm.Message, state: bm.FSMContext) -> None:
 
 # ── Inline: выбор АККАУНТА → КАМПАНИИ → периода для отчёта (§8/§9) ─────────────────
 @bm.dp.callback_query(bm.ReportAcctCB.filter())
-async def on_report_account(cq: bm.CallbackQuery, callback_data: bm.ReportAcctCB) -> None:
-    """Выбран аккаунт в пикере /report /export /sheets → показать выбор кампании (или весь аккаунт)."""
+async def on_report_account(
+    cq: bm.CallbackQuery, callback_data: bm.ReportAcctCB, state: bm.FSMContext
+) -> None:
+    """Выбран аккаунт в пикере /report /export /sheets → показать выбор кампании (или весь аккаунт).
+
+    state нужен только ветке target=="audit": после карточки включаем режим доп-вопросов (Q&A, #6).
+    aiogram подставляет FSMContext по cq.from_user (правильный ключ хранилища) — сами его не строим."""
     await cq.answer()
     msg = bm._cq_msg(cq)
     if msg is None:
@@ -437,7 +442,7 @@ async def on_report_account(cq: bm.CallbackQuery, callback_data: bm.ReportAcctCB
         p = bm._AUDIT_PERIOD_CACHE.pop(
             bm._cq_chat_id(cq), None
         )  # Period из пикера (или дефолт 30 в _audit_run)
-        await bm._audit_run(msg, bm._cq_chat_id(cq), account=acct, period=p)
+        await bm._audit_run(msg, bm._cq_chat_id(cq), account=acct, period=p, state=state)
         return
     if callback_data.target == "setacct":  # E/§8 F: выбрать АКТИВНЫЙ аккаунт чтения (персист)
         chat_id = bm._cq_chat_id(cq)
@@ -586,3 +591,63 @@ async def on_audit_export(cq: bm.CallbackQuery, callback_data: bm.AuditExportCB)
     if msg is None:
         return
     await bm._run_audit_export(msg, callback_data.fmt, bm._cq_chat_id(cq))
+
+
+# ── #6: режим доп-вопросов (Q&A) по последнему /audit ──────────────────────────────
+# Свободный текст в состоянии AuditQA.active = вопрос к READ-ONLY аналитику (run_analysis_agent,
+# тот же fact-guard, БЕЗ мутаций). Пассивный выход обеспечивают middleware'ы: /команда снимается
+# SlashCommandExitsWizardMiddleware, кнопка меню — btn_guard_menu (оба зарегистрированы РАНЬШЕ),
+# поэтому сюда доходит только настоящий свободный текст. Хендлер стоит после menu_guard и ДО catch-all
+# on_text (порядок HANDLER_MODULES) — инвариант «on_text строго последний» сохранён.
+@bm.dp.message(bm.AuditQA.active, bm.F.text)
+async def on_audit_qa_question(m: bm.Message, state: bm.FSMContext) -> None:
+    """Вопрос по показанному аудиту → ответ аналитика по КЭШИРОВАННЫМ фактам (числа = КОД движка).
+    READ-ONLY: аккаунт залочен (drill проходит ensure_read_allowed внутри ридеров), мутаций нет —
+    исполнение любого совета остаётся отдельной командой через confirm-гейт. Холодный кэш (рестарт) →
+    снимаем состояние + подсказка. Ответ не прошёл fact-guard/сбой → мягкий фолбэк (сырой str(e) не шлём,
+    GR5). Остаёмся в режиме — можно задать следующий вопрос; выход командой/кнопкой меню/«✖ Выйти»."""
+    chat_id = m.chat.id
+    lang = bm.i18n.get_lang(chat_id)
+    ctx = bm._AUDIT_QA_CACHE.get(chat_id)
+    if not ctx:  # рестарт/новый /audit затёр — режим уже неактуален
+        await state.clear()
+        await m.answer(bm.i18n.t("audit_qa_stale", lang))
+        return
+    facts, acct, period = ctx
+    question = (m.text or "").strip()
+    if not question:
+        return
+    answer: str | None = None
+    async with bm.ux.typing_action(m):  # «печатает…» пока идёт чтение/LLM
+        try:
+            from ads.client import build_client_async
+            from agent.loop import run_analysis_agent
+
+            client = await build_client_async(acct)
+            answer = await run_analysis_agent(
+                facts,
+                chat_id=chat_id,
+                lang=lang,
+                question=question,
+                drill=bm._make_audit_drill(client, acct, period),
+            )
+        except Exception as e:  # noqa: BLE001 — сеть/доступ/SDK: мягкий фолбэк, карточка уже была
+            bm.log.warning("audit Q&A не удался: %s", type(e).__name__)
+            answer = None
+    if answer:
+        await m.answer("🧠 " + answer, parse_mode=None, reply_markup=bm.audit_qa_exit_kb(lang))
+    else:  # None = сбой/timeout/бюджет-стоп/выдуманное число (fact-guard) — не выдумываем ответ
+        await m.answer(bm.i18n.t("audit_qa_failed", lang), reply_markup=bm.audit_qa_exit_kb(lang))
+
+
+@bm.dp.callback_query(bm.AuditQaCB.filter())
+async def on_audit_qa_exit(cq: bm.CallbackQuery, state: bm.FSMContext) -> None:
+    """«✖ Выйти» — явный выход из режима доп-вопросов: снимаем FSM и контекст-кэш. Пассивно из режима
+    выводят и /команда, и кнопка меню — эта кнопка лишь очевидный ручной выход."""
+    await cq.answer()
+    chat_id = bm._cq_chat_id(cq)
+    bm._AUDIT_QA_CACHE.pop(chat_id, None)
+    await state.clear()
+    msg = bm._cq_msg(cq)
+    if msg is not None:
+        await msg.answer(bm.i18n.t("audit_qa_exited", bm.i18n.get_lang(chat_id)))

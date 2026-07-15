@@ -18,6 +18,7 @@ from bot.callbacks import (
     AlertCB,
     AudienceCB,
     AuditExportCB,
+    AuditQaCB,
     BugCB,
     CampCB,
     CcCB,
@@ -751,6 +752,18 @@ def audit_export_kb(lang: str | None = None, *, with_xlsx: bool = True) -> Inlin
             text=i18n.t("audit_export_btn_xlsx", lang),
             callback_data=AuditExportCB(fmt="xlsx"),
         )
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def audit_qa_exit_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """#6: единственная кнопка «✖ Выйти» под подсказкой режима доп-вопросов по /audit — явный выход
+    из FSM-режима Q&A. Пассивно из режима выводит и любая /команда, и кнопка меню (middleware);
+    кнопка нужна для очевидного ручного выхода. Чистая функция (только i18n)."""
+    from bot import i18n
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text=i18n.t("audit_qa_exit_btn", lang), callback_data=AuditQaCB(action="exit"))
     kb.adjust(1)
     return kb.as_markup()
 

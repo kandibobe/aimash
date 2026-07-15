@@ -88,6 +88,7 @@ from bot.callbacks import (
     AlertCB,
     AudienceCB,
     AuditExportCB,
+    AuditQaCB,
     BugCB,
     CampCB,
     CcCB,
@@ -133,6 +134,7 @@ from bot.keyboards import (
     advise_header_kb,
     alerts_kb,
     audit_export_kb,
+    audit_qa_exit_kb,
     BTN_CAMPAIGNS_ALL,
     BTN_EXPORT_ALL,
     BTN_HELP_ALL,
@@ -451,6 +453,7 @@ async def _notify_admins_twofa_lockout(bot, chat_id: int, lock_minutes: int) -> 
 # тестов работают без изменений (позднее связывание).
 from bot.states import (  # noqa: E402
     AlertsWizard,
+    AuditQA,
     BugReportWizard,
     ClientInfoWizard,
     CreateCampaignWizard,
@@ -1008,6 +1011,11 @@ _AUDIT_PERIOD_CACHE: dict[
 # Держим УЖЕ посчитанный аудит, чтобы клик по кнопке не гонял gather_audit заново (≈23 чтения). Один
 # слот на чат (новый /audit затирает старый). Холодный слот (рестарт/старая клавиатура) → stale-алерт.
 _AUDIT_EXPORT_CACHE: dict[int, tuple[object, str]] = {}
+# #6: кэш контекста режима доп-вопросов (Q&A) по последнему /audit — (компактные facts, acct, period).
+# Держим ГОТОВЫЙ facts-dict (числа = КОД движка), чтобы вопрос не пере-собирал аудит; client/drill
+# отстраиваем заново из acct/period в хендлере вопроса (лёгкое переиспользуемое READ-чтение). Один слот
+# на чат (новый /audit затирает). Холодный слот (рестарт/выход) → FSM снят, свободный текст уходит агенту.
+_AUDIT_QA_CACHE: dict[int, tuple[dict, str, object]] = {}
 _AUDIT_MAX_FINDINGS = 8  # сколько находок показываем отдельными сообщениями (анти-спам)
 
 
@@ -1080,9 +1088,13 @@ async def _target_cmd(m: Message) -> None:
         )
 
 
-async def _start_audit_picker(message: Message, *, period=None) -> None:
+async def _start_audit_picker(message: Message, *, period=None, state=None) -> None:
     """Пикер аккаунта → аудит (read-only). Один доступный аккаунт → сразу прогон (без клика). Period
-    живёт в _AUDIT_PERIOD_CACHE (переживает выбор). Переиспользует пикер /report (target='audit')."""
+    живёт в _AUDIT_PERIOD_CACHE (переживает выбор). Переиспользует пикер /report (target='audit').
+
+    state (#6) — FSMContext активной команды: передаём насквозь в _audit_run, чтобы после карточки
+    включить режим доп-вопросов (Q&A). Через пикер (несколько аккаунтов) state не тащим — там прогон
+    идёт из on_report_account, который сам подставит свой state."""
     chat_id = message.chat.id
     rows = await _read_account_rows(chat_id)
     _REPORT_ACCT_CACHE[chat_id] = rows
@@ -1091,7 +1103,7 @@ async def _start_audit_picker(message: Message, *, period=None) -> None:
     else:
         _AUDIT_PERIOD_CACHE.pop(chat_id, None)
     if len(rows) <= 1:  # только Draft/один аккаунт — сразу аудит (пикер не нужен)
-        await _audit_run(message, chat_id, period=period)
+        await _audit_run(message, chat_id, period=period, state=state)
         return
     await message.answer(
         "🩺 " + i18n.t("advise_pick_account"),
@@ -6037,6 +6049,7 @@ async def _audit_run(
     account: str | None = None,
     period=None,
     source: str = "audit",
+    state=None,
 ) -> None:
     """/audit — health-аудит аккаунта: НАШ score (0-100) + семьи находок + топ-3 действий + нативный
     Google optimization_score («второе мнение»). READ-ONLY: собирает данные и СОВЕТУЕТ; ничего не
@@ -6184,6 +6197,15 @@ async def _audit_run(
             else "💡 Задай /target <CPA> — тогда бот предложит паузу для дорогих кампаний (CPA ≥ 3× цели)."
         )
     await target.answer(i18n.t("advise_disclaimer", lang))
+    # #6: включаем режим доп-вопросов (Q&A) по этому аудиту. Свободный текст теперь = вопрос к
+    # READ-ONLY аналитику (run_analysis_agent, тот же fact-guard, БЕЗ мутаций — исполнение любого
+    # совета по-прежнему отдельной командой через confirm-гейт). Гейт: kill-switch settings.audit_qa_enabled
+    # × переданный state (интерактивный путь /audit его тащит; dossier §20 без state — не вооружаем).
+    # Выход — любая /команда, кнопка меню (пассивно через middleware) или «✖ Выйти».
+    if settings.audit_qa_enabled and state is not None:
+        _AUDIT_QA_CACHE[chat_id] = (_audit_facts(result, days), acct, period)
+        await state.set_state(AuditQA.active)
+        await target.answer(i18n.t("audit_qa_hint", lang), reply_markup=audit_qa_exit_kb(lang))
 
 
 def _advise_apply_params(rec) -> dict | None:

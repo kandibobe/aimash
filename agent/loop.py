@@ -488,6 +488,42 @@ _ANALYST_SEED = {
         "Explain it to the client. Optionally drill for detail via tools. AUDIT DATA:\n"
     ),
 }
+# Q&A-режим: пользователь задаёт КОНКРЕТНЫЙ вопрос по уже показанному аудиту. Те же жёсткие правила
+# (числа только из данных/инструментов, read-only), плюс: (а) отвечать на заданный вопрос, не пересказывать
+# весь аудит; (б) если просят ЧТО-ТО ИЗМЕНИТЬ (пауза/бюджет/ставка/ключи) — объяснить, что режим только
+# читает, и подсказать КОМАНДУ (/pause, /newsearch, /addkeys, /rsa …); изменение исполняется отдельно
+# через подтверждение. Нет данных для ответа — честно сказать «в этом аудите таких данных нет».
+_ANALYST_QA_SYSTEM = {
+    "ru": (
+        "Ты — эксперт-аналитик Google Ads. Клиенту уже показан аудит его аккаунта; теперь он задаёт "
+        "ВОПРОС по нему. ЖЁСТКИЕ ПРАВИЛА: (1) Все числа (суммы, CPA, проценты, клики) бери ТОЛЬКО из "
+        "данных аудита и выводов инструментов — НИКОГДА не считай и не выдумывай новые. (2) Ты НИЧЕГО "
+        "не меняешь в аккаунте — только читаешь и советуешь. Если вопрос — это просьба ИЗМЕНИТЬ "
+        "(поставить на паузу, поднять/снизить бюджет или ставку, добавить ключи/объявления), объясни, "
+        "что здесь только разбор, и подскажи подходящую КОМАНДУ бота (например /pause, /resume, "
+        "/newsearch, /addkeys, /rsa) — сам менеджер запустит её, изменение пройдёт через подтверждение. "
+        "(3) Отвечай КОНКРЕТНО на заданный вопрос, коротко (2–6 предложений), без воды, без таблиц и "
+        "markdown-разметки. (4) Если в данных аудита нет нужного — честно скажи об этом, не выдумывай. "
+        "Отвечай ПО-РУССКИ."
+    ),
+    "en": (
+        "You are an expert Google Ads analyst. The client has already seen the audit of their account "
+        "and now asks a QUESTION about it. HARD RULES: (1) Take every number (amounts, CPA, "
+        "percentages, clicks) ONLY from the audit data and tool outputs — NEVER compute or invent new "
+        "ones. (2) You change NOTHING in the account — you only read and advise. If the question is a "
+        "request to CHANGE something (pause, raise/lower a budget or bid, add keywords/ads), explain "
+        "that this is analysis only and point to the right bot COMMAND (e.g. /pause, /resume, "
+        "/newsearch, /addkeys, /rsa) — the manager runs it and the change goes through a confirmation. "
+        "(3) Answer the specific question CONCRETELY, briefly (2–6 sentences), no fluff, no tables or "
+        "markdown. (4) If the audit data lacks what's needed, say so honestly — do not invent. Answer "
+        "in ENGLISH."
+    ),
+}
+_ANALYST_QA_SEED = {
+    "ru": "Данные последнего аудита аккаунта (числа посчитаны кодом — бери как есть):\n",
+    "en": "Data from the account's latest audit (numbers computed by code — use as-is):\n",
+}
+_ANALYST_QA_Q = {"ru": "\n\nВОПРОС КЛИЕНТА: ", "en": "\n\nCLIENT'S QUESTION: "}
 
 
 def _assistant_message_dict(msg: Any) -> dict[str, Any]:
@@ -522,6 +558,7 @@ async def run_analysis_agent(
     chat_id: int = 0,
     lang: str = "ru",
     drill: Any = None,
+    question: str | None = None,
     max_iters: int = ANALYSIS_MAX_ITERS,
     timeout_s: float = ANALYSIS_TIMEOUT_S,
 ) -> str | None:
@@ -532,7 +569,11 @@ async def run_analysis_agent(
 
     audit_facts — компактный dict из AuditResult (числа = КОД). drill=None ⇒ нарратив только по seed
     (без живых уточнений). max_iters включает финальный текстовый ход (последний — БЕЗ инструментов,
-    чтобы гарантированно получить текст, а не зациклиться на tool-call'ах)."""
+    чтобы гарантированно получить текст, а не зациклиться на tool-call'ах).
+
+    question — режим Q&A (#6): вместо обзорного пересказа модель отвечает на КОНКРЕТНЫЙ вопрос клиента
+    по уже показанному аудиту (тот же fact-guard, read-only; просьбу «изменить» она переводит в
+    подсказку команды). None ⇒ обычный обзорный нарратив."""
     from agent.tools.schemas import ANALYSIS_TOOL_NAMES, ANALYSIS_TOOLS
     from audit.factguard import collect_numbers, narrative_facts_preserved
     from core import llm_budget
@@ -542,9 +583,20 @@ async def run_analysis_agent(
     code_numbers = collect_numbers(
         audit_facts
     )  # множество дозволенных чисел (пополняется drill'ами)
-    seed = _ANALYST_SEED[lang] + json.dumps(audit_facts, ensure_ascii=False)
+    qa = bool(question and question.strip())
+    if qa:
+        system = _ANALYST_QA_SYSTEM[lang]
+        seed = (
+            _ANALYST_QA_SEED[lang]
+            + json.dumps(audit_facts, ensure_ascii=False)
+            + _ANALYST_QA_Q[lang]
+            + question.strip()
+        )
+    else:
+        system = _ANALYST_SYSTEM[lang]
+        seed = _ANALYST_SEED[lang] + json.dumps(audit_facts, ensure_ascii=False)
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": _ANALYST_SYSTEM[lang]},
+        {"role": "system", "content": system},
         {"role": "user", "content": seed},
     ]
 

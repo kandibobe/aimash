@@ -146,3 +146,13 @@ class CompetitorsWizard(StatesGroup):
     состояние нужно, чтобы перехватить документ РАНЬШЕ catch-all on_document (тот шлёт файл агенту)."""
 
     awaiting_file = State()  # ждём .csv-выгрузку отчёта из интерфейса Google Ads
+
+
+class AuditQA(StatesGroup):
+    """Доп-вопросы по последнему /audit: после карточки бот включает режим Q&A — свободный текст =
+    вопрос к READ-ONLY аналитику (run_analysis_agent, тот же fact-guard, БЕЗ мутаций). Контекст
+    (компактные факты + аккаунт + период) живёт в bot.main._AUDIT_QA_CACHE. Пассивный выход:
+    любая /команда (SlashCommandExitsWizardMiddleware) или кнопка меню (btn_guard_menu) сворачивают
+    состояние; исполнение изменений — по-прежнему отдельной командой через confirm-гейт."""
+
+    active = State()  # ждём вопрос текстом; выход — команда/кнопка меню/«✖ Выйти»

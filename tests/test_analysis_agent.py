@@ -201,3 +201,58 @@ async def test_unknown_tool_from_model_is_not_executed(monkeypatch):
     out = await run_analysis_agent(FACTS, chat_id=1, lang="ru", drill=drill)
     assert out is not None  # цикл не упал
     assert called == []  # неизвестный тул к drill не ушёл
+
+
+# ── #6: режим доп-вопросов (Q&A) — question=... переключает промпт/сид, fact-guard сохраняется ──
+def _capturing_chat(response):
+    """chat-фейк, запоминающий messages первого хода (system + seed) для инспекции промпта."""
+    seen: dict = {}
+
+    async def _chat(messages, *, role="parsing", tools=None, **kw):
+        if not seen:
+            seen["system"] = messages[0]["content"]
+            seen["seed"] = messages[1]["content"]
+            seen["role"] = role
+        return response
+
+    return _chat, seen
+
+
+async def test_qa_uses_qa_prompt_and_embeds_question(monkeypatch):
+    """question=... → используется Q&A-системный промпт (не обзорный) и вопрос попадает в сид."""
+    from agent.loop import _ANALYST_QA_SYSTEM, _ANALYST_SYSTEM
+
+    resp = _FakeMsg(content="Под риском 8900 USD в кампании Brand-RU — это спенд без конверсий.")
+    chat_fn, seen = _capturing_chat(resp)
+    monkeypatch.setattr("agent.loop.chat", chat_fn)
+
+    q = "Почему у меня так много слитых денег?"
+    out = await run_analysis_agent(FACTS, chat_id=1, lang="ru", drill=None, question=q)
+    assert out is not None and "8900" in out
+    assert seen["system"] == _ANALYST_QA_SYSTEM["ru"]  # Q&A-промпт, НЕ обзорный
+    assert seen["system"] != _ANALYST_SYSTEM["ru"]
+    assert q in seen["seed"]  # вопрос клиента в сиде
+    assert seen["role"] == "analyst"  # роль читателя (read-only цикл)
+
+
+async def test_qa_factguard_still_rejects_fabricated(monkeypatch):
+    """Fact-guard действует и в Q&A: выдуманное число → None (не показываем непроверенный ответ)."""
+    resp = _FakeMsg(content="На самом деле ты потерял 500000 USD, всё пропало.")  # нет в фактах
+    chat_fn, _ = _capturing_chat(resp)
+    monkeypatch.setattr("agent.loop.chat", chat_fn)
+    out = await run_analysis_agent(
+        FACTS, chat_id=1, lang="ru", drill=None, question="Сколько слито?"
+    )
+    assert out is None
+
+
+async def test_qa_blank_question_is_overview_mode(monkeypatch):
+    """Пустой/пробельный question ⇒ обычный обзорный режим (не падаем, промпт обзорный)."""
+    from agent.loop import _ANALYST_SYSTEM
+
+    resp = _FakeMsg(content="Здоровье 62 из 100, под риском 8900 USD. Приоритет: пауза Brand-RU.")
+    chat_fn, seen = _capturing_chat(resp)
+    monkeypatch.setattr("agent.loop.chat", chat_fn)
+    out = await run_analysis_agent(FACTS, chat_id=1, lang="ru", drill=None, question="   ")
+    assert out is not None
+    assert seen["system"] == _ANALYST_SYSTEM["ru"]  # blank → обзорный, не Q&A

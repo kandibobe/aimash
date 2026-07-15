@@ -43,6 +43,28 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "⏳ Результат аудита устарел — запусти /audit заново, затем жми кнопку выгрузки.",
         "en": "⏳ The audit result has expired — run /audit again, then tap the export button.",
     },
+    # #6 Режим доп-вопросов (Q&A) по последнему /audit — свободный текст = вопрос READ-ONLY аналитику
+    "audit_qa_hint": {
+        "ru": "💬 Есть вопросы по этому аудиту? Спрашивай прямо здесь — отвечу по цифрам разбора "
+        "(меняю аккаунт только отдельной командой). Любая команда или кнопка меню закроют режим.",
+        "en": "💬 Questions about this audit? Just ask here — I’ll answer from the report’s numbers "
+        "(I change the account only via a separate command). Any command or menu button closes this mode.",
+    },
+    "audit_qa_exit_btn": {"ru": "✖ Выйти из режима вопросов", "en": "✖ Exit Q&A mode"},
+    "audit_qa_exited": {
+        "ru": "Режим вопросов закрыт. Открыть снова — /audit.",
+        "en": "Q&A mode closed. Reopen it with /audit.",
+    },
+    "audit_qa_stale": {
+        "ru": "⏳ Контекст аудита устарел — запусти /audit заново, чтобы задавать вопросы.",
+        "en": "⏳ The audit context has expired — run /audit again to ask questions.",
+    },
+    "audit_qa_failed": {
+        "ru": "🤔 Не смог уверенно ответить по этому аудиту. Переформулируй вопрос или запусти "
+        "/audit заново. Изменения в аккаунте — отдельной командой (например /pause).",
+        "en": "🤔 I couldn’t answer that confidently from this audit. Rephrase, or run /audit again. "
+        "Account changes go through a separate command (e.g. /pause).",
+    },
     # §12 2FA — PIN перед исполнением опасной операции (opt-in, дефолт OFF)
     "twofa_prompt": {
         "ru": "🔐 Операция <b>{op}</b> требует подтверждения кодом. Введи PIN одним сообщением "

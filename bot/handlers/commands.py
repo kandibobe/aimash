@@ -878,8 +878,8 @@ async def on_more(cq: bm.CallbackQuery, callback_data: bm.MoreCB, state: bm.FSMC
         await bm._start_advise_picker(msg)  # 💡 рекомендации (advisory, read-only) — пикер аккаунта
     elif action == "audit":
         await bm._start_audit_picker(
-            msg
-        )  # 🩺 аудит аккаунта (score + что чинить), read-only — пикер
+            msg, state=state
+        )  # 🩺 аудит аккаунта (score + что чинить), read-only — пикер; state → режим доп-вопросов (#6)
     elif action == "reportbug":
         await bm.reportbug_start(msg, state)  # 🐞 сообщить об ошибке (§6)
     elif action == "service":  # E: открыть суб-хаб «⚙️ Сервис/Аккаунты»
@@ -914,15 +914,18 @@ async def advise_cmd(m: bm.Message) -> None:
 
 
 @bm.dp.message(bm.Command("audit"))
-async def audit_cmd(m: bm.Message) -> None:
+async def audit_cmd(m: bm.Message, state: bm.FSMContext) -> None:
     """/audit [период] — health-аудит активного аккаунта: наш score (0-100) + что чинить (по деньгам) +
     нативный Google optimization_score. Период: число дней (по умолч. 30), «июнь 2025», «прошлый месяц»,
     ISO-диапазон ГГГГ-ММ-ДД … ГГГГ-ММ-ДД, «вчера», «с 1 по 15 июня». READ-ONLY — ничего не меняет;
-    исполнение любого совета идёт отдельной командой через confirm-гейт. Аккаунт — активный чтения."""
+    исполнение любого совета идёт отдельной командой через confirm-гейт. Аккаунт — активный чтения.
+
+    state → после карточки на 1 аккаунте включается режим доп-вопросов (Q&A, #6, read-only)."""
     parts = (m.text or "").split(maxsplit=1)
     period = bm._audit_period_from_arg(parts[1] if len(parts) > 1 else None)
-    # >1 аккаунта чтения → пикер (аудит на выбранном); 1 аккаунт → сразу прогон.
-    await bm._start_audit_picker(m, period=period)
+    # >1 аккаунта чтения → пикер (аудит на выбранном; там state берётся из on_report_account);
+    # 1 аккаунт → сразу прогон, state тащим насквозь для режима доп-вопросов.
+    await bm._start_audit_picker(m, period=period, state=state)
 
 
 @bm.dp.message(bm.Command("bids"))

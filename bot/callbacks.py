@@ -57,6 +57,14 @@ class AuditExportCB(CallbackData, prefix="auex"):
     fmt: str  # "sheets" | "xlsx"
 
 
+class AuditQaCB(CallbackData, prefix="auqa"):
+    """#6: выход из режима доп-вопросов (Q&A) по /audit кнопкой «✖ Выйти». Само состояние живёт в
+    FSM (states.AuditQA.active), контекст — в _AUDIT_QA_CACHE[chat_id]. Кнопка — лишь явный выход;
+    пассивно из режима выводит любая /команда или кнопка меню (middleware). Никаких мутаций."""
+
+    action: str  # "exit"
+
+
 class ReportAcctCB(CallbackData, prefix="rpta"):
     """§8: выбор АККАУНТА для отчёта/экспорта (/report /export /sheets). idx — позиция в
     _REPORT_ACCT_CACHE[chat_id]; customer_id в callback_data НЕ кладём (64 байта + резолв по chat_id).

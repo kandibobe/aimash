@@ -417,5 +417,6 @@ async def test_report_recall_button_reruns_saved_report():
 
     cq = FakeCallbackQuery(FakeMessage(chat_id=chat))
     with patched(bm, "_run_report", fake_run), patched(bm, "ensure_read_allowed", lambda cid: None):
-        await bm.on_report_account(cq, ReportAcctCB(target="report", idx=-2))
+        # state (#6) aiogram инжектит всегда; здесь ветка recall (idx=-2) его не трогает — фейк-заглушка.
+        await bm.on_report_account(cq, ReportAcctCB(target="report", idx=-2), FakeState())
     assert ran == {"acct": "7753643025", "cid": "42", "cname": "Brand"}  # ровно сохранённый отчёт
