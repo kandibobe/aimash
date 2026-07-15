@@ -159,11 +159,15 @@ async def kw_params_cb(
         return
     if field == "geo":
         await cq.answer()
-        await msg.answer(bm.i18n.t("kw_params_pick_geo"), reply_markup=bm.kw_geo_kb())
+        # Саб-пикер открываем ПРАВКОЙ карточки на месте (_safe_edit), а не msg.answer: новое
+        # сообщение оставляло исходную карточку осиротевшим дублем, и каждая смена ГЕО/языка
+        # плодила ещё одну «Параметры подбора». cq.message остаётся одним и тем же на всём цикле —
+        # хвостовой _safe_edit (ниже) вернёт карточку параметров на том же сообщении после выбора.
+        await bm._safe_edit(cq, bm.i18n.t("kw_params_pick_geo"), reply_markup=bm.kw_geo_kb())
         return
     if field == "lang":  # §7: открыть саб-пикер языка (был 3-тактный цикл ru/uk/en)
         await cq.answer()
-        await msg.answer(bm.i18n.t("kw_params_pick_lang"), reply_markup=bm.kw_lang_kb())
+        await bm._safe_edit(cq, bm.i18n.t("kw_params_pick_lang"), reply_markup=bm.kw_lang_kb())
         return
     if field == "geo_pick":
         if value == "custom":

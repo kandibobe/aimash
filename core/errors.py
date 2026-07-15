@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import traceback
 
-from core.context import get_context
+from core.context import get_context, reset_context, set_context, stashed_context
 from core.logging import log, redact_text
 
 _TB_MAX = 8000  # потолок длины traceback в БД (защита error_events от распухания)
@@ -27,20 +27,37 @@ async def capture_exception(exc: BaseException, *, where: str) -> str:
     для /diag. Возвращает request_id текущего контекста («код инцидента» для пользователя).
     Best-effort: персист в БД обёрнут в try — сбой записи НЕ ломает обработку ошибки (лог уже есть).
     `where` — точка перехвата (напр. 'handler', 'scheduler:report')."""
-    ctx = get_context()
-    # request_id/chat попадут в строку лога автоматически (core.logging.ContextFilter).
-    log.error("ошибка в %s: %s", where, type(exc).__name__, exc_info=exc)
-    try:
-        await _persist(
-            exc,
-            where=where,
-            request_id=ctx.request_id,
-            chat_id=ctx.chat_id,
-            customer_id=ctx.customer_id,
+    # aiogram-путь: on_error бежит уже ПОСЛЕ сброса contextvar в TraceMiddleware.finally, поэтому
+    # get_context() тут вернул бы дефолт '-'. Если исключение несёт снимок (stash_context_on) и
+    # текущий контекст пуст — восстанавливаем его на время лога/персиста, чтобы и лог-строка
+    # (ContextFilter), и error_events, и «код инцидента» несли реальный request_id/chat_id, а не '-'.
+    snap = stashed_context(exc)
+    token = None
+    if snap is not None and get_context().request_id == "-":
+        token = set_context(
+            request_id=snap.request_id,
+            chat_id=snap.chat_id,
+            operation=snap.operation,
+            customer_id=snap.customer_id,
         )
-    except Exception:  # noqa: BLE001 — персист не критичен; ошибка уже залогирована/в Sentry
-        log.warning("error-capture: ErrorEvent не сохранён (%s)", type(exc).__name__)
-    return ctx.request_id
+    try:
+        ctx = get_context()
+        # request_id/chat попадут в строку лога автоматически (core.logging.ContextFilter).
+        log.error("ошибка в %s: %s", where, type(exc).__name__, exc_info=exc)
+        try:
+            await _persist(
+                exc,
+                where=where,
+                request_id=ctx.request_id,
+                chat_id=ctx.chat_id,
+                customer_id=ctx.customer_id,
+            )
+        except Exception:  # noqa: BLE001 — персист не критичен; ошибка уже залогирована/в Sentry
+            log.warning("error-capture: ErrorEvent не сохранён (%s)", type(exc).__name__)
+        return ctx.request_id
+    finally:
+        if token is not None:
+            reset_context(token)
 
 
 async def _persist(

@@ -108,6 +108,55 @@ def test_help_mentions_every_bot_command():
             )
 
 
+def test_help_fits_telegram_limit_via_chunking():
+    """Регресс-гард класса: /help давно перерос лимит Telegram (4096) — одиночный answer падал
+    'message is too long' и юзер видел карточку err_unexpected вместо справки. _send_help обязан
+    слать справку ЧАНКАМИ; здесь гоняем реальный чокпойнт и проверяем инвариант «каждое
+    отправленное сообщение ≤ 4096» на обоих языках (help растёт с каждой командой — тест ловит
+    возврат бага, даже если текст ещё подрастёт)."""
+    import asyncio
+
+    import bot.main as bm
+    from bot import ux
+
+    class _FakeMsg:
+        def __init__(self):
+            self.sent: list[str] = []
+
+        async def answer(self, text: str = "", **kw):  # noqa: ANN003
+            self.sent.append(text)
+            return self
+
+    assert len(texts.HELP) > ux.TG_LIMIT, (
+        "предпосылка теста устарела: HELP влезает в одно сообщение — но гард всё равно валиден"
+    )
+
+    async def _drive(lang: str) -> list[str]:
+        tok = i18n.set_current_lang(lang)
+        try:
+            m = _FakeMsg()
+            await bm._send_help(m)
+            return m.sent
+        finally:
+            i18n.reset_current_lang(tok)
+
+    orig_pause = ux.CHUNK_SEND_PAUSE_S
+    ux.CHUNK_SEND_PAUSE_S = 0  # тест не должен спать между чанками
+    try:
+        for lang in ("ru", "en"):
+            sent = asyncio.run(_drive(lang))
+            assert sent, f"_send_help({lang}) не отправил ни одного сообщения"
+            assert len(sent) >= 2, (
+                f"справка {lang} > лимита, но ушла одним сообщением (не чанкована)"
+            )
+            for i, chunk in enumerate(sent):
+                assert len(chunk) <= ux.TG_LIMIT, (
+                    f"чанк /help[{lang}][{i}] = {len(chunk)} символов > {ux.TG_LIMIT} — Telegram отклонит"
+                )
+    finally:
+        ux.CHUNK_SEND_PAUSE_S = orig_pause
+
+
 def test_bot_command_descriptions_have_no_internal_markers():
     """Описания команд в меню Telegram (то, что видит пользователь под «/») НЕ должны содержать
     внутренние ссылки на разделы ТЗ (§19/§20/§8) — это выглядело как черновик разработчика."""

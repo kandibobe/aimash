@@ -70,6 +70,29 @@ def reset_context(token: contextvars.Token) -> None:
     _CTX.reset(token)
 
 
+# Атрибут, под которым снимок req-контекста прикрепляется к исключению. Нужен для aiogram-пути:
+# глобальный on_error бежит УЖЕ ПОСЛЕ того, как TraceMiddleware.finally сбросил contextvar (он
+# внутри update-уровневой ErrorsMiddleware) → get_context() там вернул бы дефолт '-'. Прикрепив
+# снимок к самому исключению, даём capture_exception восстановить реальный request_id/chat_id.
+_EXC_CTX_ATTR = "_aimash_req_ctx"
+
+
+def stash_context_on(exc: BaseException) -> None:
+    """Прикрепить снимок ТЕКУЩЕГО req-контекста к исключению (в except middleware, пока contextvar
+    ещё жив) — чтобы обработчик, бегущий уже вне scope, восстановил «код инцидента», а не дефолт '-'.
+    Best-effort: неустановимый атрибут (экзотическое C-исключение) не должен ронять обработку."""
+    try:
+        exc._aimash_req_ctx = _CTX.get()  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 — прикрепление контекста необязательно
+        pass
+
+
+def stashed_context(exc: BaseException) -> "ReqContext | None":
+    """Снимок req-контекста, прикреплённый stash_context_on (или None, если его нет)."""
+    ctx = getattr(exc, _EXC_CTX_ATTR, None)
+    return ctx if isinstance(ctx, ReqContext) else None
+
+
 @contextmanager
 def request_scope(
     operation: str, *, chat_id: int | None = None, customer_id: str | None = None

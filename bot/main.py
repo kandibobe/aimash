@@ -220,7 +220,13 @@ from core import twofa  # §12 2FA-гейт опасных операций (opt
 from core.access import ensure_account_allowed_for_user, is_whitelisted
 from core.ads_errors import humanize_google_ads_error, is_account_access_error
 from core.config import normalize_customer_id, settings
-from core.context import new_request_id, request_scope, reset_context, set_context
+from core.context import (
+    new_request_id,
+    request_scope,
+    reset_context,
+    set_context,
+    stash_context_on,
+)
 from core.errors import capture_exception
 from core.limits import MONEY_MAX_UNITS  # единый источник денежного потолка (defense-in-depth)
 from core.logging import log, redact_text, setup_logging
@@ -538,6 +544,13 @@ class TraceMiddleware(BaseMiddleware):
         )
         try:
             return await handler(event, data)
+        except Exception as e:
+            # request_id живёт только внутри этого scope, а глобальный on_error бежит УЖЕ ПОСЛЕ
+            # finally (он в update-уровневой ErrorsMiddleware, снаружи нас) → там contextvar сброшен
+            # и «код инцидента» вышел бы дефолтным '-'. Прикрепляем снимок к исключению, чтобы
+            # capture_exception восстановил реальный request_id/chat_id для лога, error_events и /diag.
+            stash_context_on(e)
+            raise
         finally:
             reset_context(token)
 
@@ -861,7 +874,10 @@ async def _notify_admins_started(bot) -> None:
 
 
 async def _send_help(message: Message) -> None:
-    await message.answer(i18n.t("help"), parse_mode=ParseMode.HTML)
+    # HELP давно перерос лимит Telegram (4096): одиночный answer падал TelegramBadRequest
+    # ("message is too long") → юзер видел карточку err_unexpected вместо справки. Шлём чанками
+    # по границам строк (HTML остаётся валидным — тег не рвётся), как /mcc-дайджест.
+    await ux.send_html_chunks(message, i18n.t("help"))
 
 
 def _inactive_read_hint(acct: str) -> str:
@@ -2637,49 +2653,57 @@ async def _searchterms_run(m: Message, period) -> None:
     from reports.tz import account_period
 
     await m.answer(i18n.t("searchterms_loading"))
-    try:
-        client = await build_client_async(acct)
-        period = await account_period(client, acct, period, label="st_tz")  # §8: окно в TZ аккаунта
-        rows = await run_ads_read_call(
-            fetch_search_terms, client, acct, period, label="fetch_search_terms"
-        )
-    except Exception as e:  # сеть/доступ/SDK
-        await m.answer(i18n.t("err_searchterms", err=ux.err_text(e)))
-        return
-    # «Мусорные»: клики есть, конверсий нет, расход >0 (как audit.check_wasteful_search_term).
-    # fetch_search_terms уже сортирует по cost_micros DESC → берём топ по расходу.
-    waste = [
-        r
-        for r in rows
-        if r.metrics.clicks > 0 and (r.metrics.conversions or 0) == 0 and r.metrics.cost > 0
-    ][:10]
-    harvest_items = await _searchterms_harvest(client, acct, period, rows)
-    if not waste and not harvest_items:
-        await m.answer(i18n.t("searchterms_none"))
-        return
-    items = [
-        {
-            "term": r.search_term,
-            "campaign": r.campaign,
-            "cost": round(r.metrics.cost, 2),
-            "clicks": r.metrics.clicks,
-        }
-        for r in waste
-    ]
-    # W8 (advisory): семантический тег «похоже не по теме» ПОВЕРХ финансовой эвристики — прогон
-    # AI-релевантности самих текстов запросов к профилю клиента (маленький набор). Никогда не гейтит
-    # находку, только помечает; метрики модели не отдаём (rule #4). Сбой/нет профиля → без тегов.
-    try:
-        prof = await _cc_profile_ctx_account(acct)
-        if (prof or "").strip():
-            from keywords.filter import filter_relevance
+    # «печатает…» держим на всём тяжёлом участке (GAQL search-terms + harvest + LLM-релевантность
+    # 10-30с) — иначе после одноразового searchterms_loading бот выглядит зависшим. typing_action —
+    # самоизолированный CM (глотает свои ошибки), к денежному пути отношения не имеет.
+    async with ux.typing_action(m):
+        try:
+            client = await build_client_async(acct)
+            period = await account_period(
+                client, acct, period, label="st_tz"
+            )  # §8: окно TZ аккаунта
+            rows = await run_ads_read_call(
+                fetch_search_terms, client, acct, period, label="fetch_search_terms"
+            )
+        except Exception as e:  # сеть/доступ/SDK
+            await m.answer(i18n.t("err_searchterms", err=ux.err_text(e)))
+            return
+        # «Мусорные»: клики есть, конверсий нет, расход >0 (как audit.check_wasteful_search_term).
+        # fetch_search_terms уже сортирует по cost_micros DESC → берём топ по расходу.
+        waste = [
+            r
+            for r in rows
+            if r.metrics.clicks > 0 and (r.metrics.conversions or 0) == 0 and r.metrics.cost > 0
+        ][:10]
+        harvest_items = await _searchterms_harvest(client, acct, period, rows)
+        if not waste and not harvest_items:
+            await m.answer(i18n.t("searchterms_none"))
+            return
+        items = [
+            {
+                "term": r.search_term,
+                "campaign": r.campaign,
+                "cost": round(r.metrics.cost, 2),
+                "clicks": r.metrics.clicks,
+            }
+            for r in waste
+        ]
+        # W8 (advisory): семантический тег «похоже не по теме» ПОВЕРХ финансовой эвристики — прогон
+        # AI-релевантности самих текстов запросов к профилю клиента (маленький набор). Никогда не
+        # гейтит находку, только помечает; метрики модели не отдаём (rule #4). Нет профиля → без тегов.
+        try:
+            prof = await _cc_profile_ctx_account(acct)
+            if (prof or "").strip():
+                from keywords.filter import filter_relevance
 
-            rel = await filter_relevance(texts=[it["term"] for it in items], topic="", profile=prof)
-            for it in items:
-                if rel.get(it["term"], True) is False:
-                    it["off_topic"] = True
-    except Exception:  # noqa: BLE001 — тег релевантности advisory, не критичен
-        pass
+                rel = await filter_relevance(
+                    texts=[it["term"] for it in items], topic="", profile=prof
+                )
+                for it in items:
+                    if rel.get(it["term"], True) is False:
+                        it["off_topic"] = True
+        except Exception:  # noqa: BLE001 — тег релевантности advisory, не критичен
+            pass
     currency = await _read_currency(client, acct)  # §9: валюта для расхода в сводке
     gen = _searchterms_store(m.chat.id, items, harvest_items)
     if items:
@@ -3739,61 +3763,65 @@ async def _kw_run(
     acct, is_live = await _keyword_metrics_account(chat_id)
     if not is_live:
         await target.answer(i18n.t("kw_metrics_test_note"))
-    try:
-        ideas = await _gen(acct)
-    except Exception as e:  # сеть/доступ/SDK/валидация ввода
-        # РЕЗИЛЬЕНТНОСТЬ: если активный (не Draft) аккаунт недоступен для Keyword Planner (напр.
-        # «customer not enabled» — он не под настроенным MCC/деактивирован), НЕ роняем подбор, а
-        # честно откатываемся на Draft, чтобы менеджер всё равно получил идеи. Ошибку показываем
-        # только если и Draft не сработал.
-        if acct != DRAFT_ACCOUNT_ID:
-            await target.answer(
-                i18n.t("kw_acct_fallback", acct=texts.esc(acct)), parse_mode=ParseMode.HTML
-            )
-            try:  # сбрасываем залипший глобальный выбор, чтобы дальше не долбить недоступный аккаунт
-                await _save_selected_account(chat_id, None)
-            except Exception:  # noqa: BLE001 — сброс best-effort
-                pass
-            acct = DRAFT_ACCOUNT_ID
-            try:
-                ideas = await _gen(acct)
-            except Exception as e2:
-                await target.answer(i18n.t("err_kw", err=ux.err_text(e2)))
+    # «печатает…» держим на всём тяжёлом участке: генерация идей (GAQL) + gather (кластеризация,
+    # минус-слова, LLM-релевантность на opus, 10-30с). Иначе после одноразового kw_searching бот
+    # молчит все секунды подбора. typing_action — самоизолированный CM (глотает свои ошибки).
+    async with ux.typing_action(target):
+        try:
+            ideas = await _gen(acct)
+        except Exception as e:  # сеть/доступ/SDK/валидация ввода
+            # РЕЗИЛЬЕНТНОСТЬ: если активный (не Draft) аккаунт недоступен для Keyword Planner (напр.
+            # «customer not enabled» — он не под настроенным MCC/деактивирован), НЕ роняем подбор, а
+            # честно откатываемся на Draft, чтобы менеджер всё равно получил идеи. Ошибку показываем
+            # только если и Draft не сработал.
+            if acct != DRAFT_ACCOUNT_ID:
+                await target.answer(
+                    i18n.t("kw_acct_fallback", acct=texts.esc(acct)), parse_mode=ParseMode.HTML
+                )
+                try:  # сбрасываем залипший глобальный выбор, чтобы не долбить недоступный аккаунт
+                    await _save_selected_account(chat_id, None)
+                except Exception:  # noqa: BLE001 — сброс best-effort
+                    pass
+                acct = DRAFT_ACCOUNT_ID
+                try:
+                    ideas = await _gen(acct)
+                except Exception as e2:
+                    await target.answer(i18n.t("err_kw", err=ux.err_text(e2)))
+                    return
+            else:
+                await target.answer(i18n.t("err_kw", err=ux.err_text(e)))
                 return
-        else:
-            await target.answer(i18n.t("err_kw", err=ux.err_text(e)))
+        if not ideas:
+            await target.answer(i18n.t("kw_empty"))
             return
-    if not ideas:
-        await target.answer(i18n.t("kw_empty"))
-        return
 
-    from keywords.cluster import (
-        Cluster,
-        cluster_keywords,
-        rank_clusters,
-        suggest_negative_keywords,
-    )
-    from keywords.filter import filter_relevance
+        from keywords.cluster import (
+            Cluster,
+            cluster_keywords,
+            rank_clusters,
+            suggest_negative_keywords,
+        )
+        from keywords.filter import filter_relevance
 
-    idea_texts = [i.text for i in ideas]
-    src = ", ".join(seeds) or (url or "")
-    # §7/§19.4.2: профиль клиента активного аккаунта как БИЗНЕС-контекст релевантности и минус-слов.
-    # Раньше standalone /keywords его НЕ грузил → релевантность оценивалась «ключ vs сам сид», а
-    # минус-слова не знали бизнеса/бренда. Это DB-чтения (НЕ LLM) — латентность к gather не добавляют.
-    prof = await _cc_profile_ctx_account(acct)
-    protected = await CLIENTS.protected_negative_terms(acct)  # бренд/услуги — не предлагать в минус
-    # §7: кластеризация по интенту, предложение минус-слов и AI-релевантность (§19.4.2) независимы →
-    # параллельно (без наценки латентности к 2 уже идущим). Все advisory с внутренним fallback;
-    # return_exceptions страхует от пробрасывания (фича не падает). topic = сиды/URL; бизнес-контекст
-    # подаётся через profile.
-    clusters_res, negatives, relevance = await asyncio.gather(
-        cluster_keywords(idea_texts, language),
-        suggest_negative_keywords(
-            src, idea_texts, language=language, profile=prof, protected=protected
-        ),
-        filter_relevance(texts=idea_texts, topic=src, language=language, profile=prof),
-        return_exceptions=True,
-    )
+        idea_texts = [i.text for i in ideas]
+        src = ", ".join(seeds) or (url or "")
+        # §7/§19.4.2: профиль клиента активного аккаунта как БИЗНЕС-контекст релевантности/минус-слов.
+        # Раньше standalone /keywords его НЕ грузил → релевантность оценивалась «ключ vs сам сид», а
+        # минус-слова не знали бизнеса/бренда. Это DB-чтения (НЕ LLM) — латентность к gather не добавляют.
+        prof = await _cc_profile_ctx_account(acct)
+        protected = await CLIENTS.protected_negative_terms(acct)  # бренд/услуги — не в минус
+        # §7: кластеризация по интенту, предложение минус-слов и AI-релевантность (§19.4.2) независимы →
+        # параллельно (без наценки латентности к 2 уже идущим). Все advisory с внутренним fallback;
+        # return_exceptions страхует от пробрасывания (фича не падает). topic = сиды/URL; бизнес-контекст
+        # подаётся через profile.
+        clusters_res, negatives, relevance = await asyncio.gather(
+            cluster_keywords(idea_texts, language),
+            suggest_negative_keywords(
+                src, idea_texts, language=language, profile=prof, protected=protected
+            ),
+            filter_relevance(texts=idea_texts, topic=src, language=language, profile=prof),
+            return_exceptions=True,
+        )
     clusters = (
         clusters_res
         if isinstance(clusters_res, list) and clusters_res
