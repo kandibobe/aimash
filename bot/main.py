@@ -6883,6 +6883,26 @@ from bot import handlers as _handlers  # noqa: E402
 _reexport_handlers(_handlers.register_all())
 
 
+def __getattr__(name: str):
+    """Страховка от кругового импорта (PEP 562). Если хендлер-модуль импортировали ДО bot.main
+    (напр. тест: `import bot.handlers.reports` раньше `import bot.main`), его `import bot.main as bm`
+    втягивает bot.main на середине себя — и eager-реэкспорт выше отрабатывает по ПОЛУ-СОБРАННОМУ
+    модулю, пропуская ещё не определённые функции (btn_report и т.п.). Прод не задет: там bot.main —
+    точка входа, импортируется первым. Здесь доразрешаем имя лениво из уже загруженных хендлер-модулей
+    и кэшируем (впредь без __getattr__). Закреплено tests/test_handler_order.py."""
+    import sys as _sys
+
+    for _n in _handlers.HANDLER_MODULES:
+        _mod = _sys.modules.get(f"bot.handlers.{_n}")
+        if _mod is None:
+            continue
+        _obj = getattr(_mod, name, None)
+        if _obj is not None and getattr(_obj, "__module__", None) == _mod.__name__:
+            globals()[name] = _obj
+            return _obj
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 async def main() -> None:
     setup_logging()
     init_observability()  # Sentry — no-op без SENTRY_DSN (core.observability)

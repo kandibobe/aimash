@@ -41,6 +41,15 @@ os.environ["GOOGLE_ADS_READ_CUSTOMER_IDS"] = ""
 os.environ["GOOGLE_ADS_LOGIN_CUSTOMER_ID"] = ""
 os.environ["GOOGLE_ADS_LOGIN_CUSTOMER_IDS"] = ""
 
+# bot.main — ПЕРВЫМ (как в проде: `python -m bot.main` — точка входа), ПОСЛЕ форса env выше.
+# Гарантирует, что ни один хендлер-модуль не импортируется РАНЬШЕ bot.main. Иначе его
+# `import bot.main as bm` втягивает bot.main на середине себя: register_all регистрирует хендлеры
+# этого модуля уже ПОСЛЕ on_text (catch-all перестаёт быть последним) и теряет ре-экспорт имён —
+# сессионный флак «btn_report пропал»/«on_text не последний», зависящий от порядка тест-модулей.
+# Класс закрыт для всей сессии; страховка имён — module __getattr__ в bot/main.py, инвариант —
+# tests/test_handler_order.py.
+import bot.main  # noqa: E402,F401
+
 
 @pytest.fixture(autouse=True)
 def _reset_discovered_children_cache():

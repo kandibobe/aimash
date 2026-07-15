@@ -87,3 +87,32 @@ def test_reexported_handler_names_present():
     """Ре-экспорт (4A): тесты/скрипты зовут хендлеры как bot.main.<handler> — выборочная проверка."""
     for name in ("on_text", "account_cmd", "btn_report", "cc_final_edit", "grant_cmd"):
         assert hasattr(bm, name), f"bot.main.{name} пропал после рефактора ре-экспорта"
+
+
+def test_reexport_survives_handler_imported_before_main():
+    """Гард класса (круговой импорт): если хендлер-модуль импортирован ДО bot.main, его
+    `import bot.main as bm` втягивал bot.main на середине себя, eager-реэкспорт видел ПОЛУ-собранный
+    модуль и терял имена (btn_report). Прод не задет (bot.main — точка входа), но тесты ловили это
+    как «хендлер пропал». Страховка — module __getattr__ (bot/main.py). Проверяем в ПОДПРОЦЕССЕ:
+    в основном процессе bot.main уже импортирован conftest'ом, порядок не воспроизвести."""
+    import subprocess
+
+    code = (
+        "import bot.handlers.reports\n"  # хендлер ПЕРВЫМ — триггерит круговой импорт bot.main
+        "import bot.main as bm\n"
+        "missing = [n for n in ('btn_report', 'on_text', 'account_cmd', 'grant_cmd') "
+        "if not hasattr(bm, n)]\n"
+        "assert not missing, missing\n"
+        "print('OK')\n"
+    )
+    r = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert r.returncode == 0, (
+        f"реэкспорт потерял имена при импорте хендлера до bot.main:\n{r.stdout}\n{r.stderr}"
+    )
