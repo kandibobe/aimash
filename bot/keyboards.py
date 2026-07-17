@@ -54,17 +54,82 @@ from bot.callbacks import (
 _NAME_LIMIT = 40
 
 
-def searchterms_kb(items: list[dict], gen: int) -> InlineKeyboardMarkup:
-    """§7: клавиатура /searchterms — по кнопке «🚫 <запрос>» на каждый «мусорный» запрос (idx+gen
-    анти-stale) + «Закрыть». Клик минтит черновик add_negative_keywords (confirm-гейт), сам SDK —
-    только после «да». Имя запроса в callback_data НЕ кладём (idx резолвится по chat_id в bot.main)."""
+def searchterms_kb(
+    items: list[dict],
+    gen: int,
+    *,
+    selected: set[int] | None = None,
+    opts: dict | None = None,
+) -> InlineKeyboardMarkup:
+    """§7 + 3.2а: клавиатура /searchterms — чекбокс «⬜/✅ <запрос>» на каждый «мусорный» запрос
+    (idx+gen анти-stale), над «Минусовать выбранные» — цикл-кнопки типа соответствия и уровня
+    (кампания → группа → общий список; для общего — строка выбора списка). Тап по строке только
+    перерисовывает markup; черновик минтит ТОЛЬКО «Минусовать выбранные» (confirm-гейт, сам SDK —
+    после «да»). Имя запроса в callback_data НЕ кладём (idx резолвится по chat_id в bot.main)."""
+    from bot import i18n, texts
+
+    sel = selected or set()
+    o = opts or {}
+    b = InlineKeyboardBuilder()
+    widths: list[int] = []
+    for i, it in enumerate(items):
+        term = _ellipsize(str(it.get("term") or ""))
+        mark = "✅" if i in sel else "⬜"
+        b.button(
+            text=f"{mark} {term}", callback_data=SearchTermsCB(action="toggle", idx=i, gen=gen)
+        )
+        widths.append(1)
+    mt = str(o.get("mt") or "exact")
+    lvl = str(o.get("lvl") or "campaign")
+    b.button(
+        text=i18n.t("searchterms_mt_btn", mt=texts.match_type_human(mt)),
+        callback_data=SearchTermsCB(action="mt", gen=gen),
+    )
+    b.button(
+        text=i18n.t("searchterms_lvl_btn", lvl=i18n.t(f"searchterms_lvl_{lvl}")),
+        callback_data=SearchTermsCB(action="lvl", gen=gen),
+    )
+    widths.append(2)
+    if lvl == "shared":  # какой именно общий список — отдельной строкой (тап → пикер)
+        b.button(
+            text=i18n.t("searchterms_ss_btn", name=_ellipsize(str(o.get("ss") or ""))),
+            callback_data=SearchTermsCB(action="ss_open", gen=gen),
+        )
+        widths.append(1)
+    b.button(
+        text=i18n.t("searchterms_apply_btn", n=len(sel)),
+        callback_data=SearchTermsCB(action="apply", gen=gen),
+    )
+    b.button(text=i18n.t("searchterms_cancel_btn"), callback_data=SearchTermsCB(action="cancel"))
+    widths += [1, 1]
+    b.adjust(*widths)
+    return b.as_markup()
+
+
+def searchterms_sharedset_kb(choices: list[dict], gen: int) -> InlineKeyboardMarkup:
+    """3.2а: пикер общего списка минус-слов для батча /searchterms. Существующие списки аккаунта
+    (из read.list_negative_shared_sets, кэш opts['ss_choices']) + «Новый» (idx=-1 — список с
+    дефолтным именем СОЗДАСТ apply_add_negatives_to_shared_set ПОСЛЕ подтверждения, не пикер) +
+    «Назад». Только перерисовка markup — ничего не мутирует."""
     from bot import i18n
 
     b = InlineKeyboardBuilder()
-    for i, it in enumerate(items):
-        term = _ellipsize(str(it.get("term") or ""))
-        b.button(text=f"🚫 {term}", callback_data=SearchTermsCB(action="neg", idx=i, gen=gen))
-    b.button(text=i18n.t("searchterms_cancel_btn"), callback_data=SearchTermsCB(action="cancel"))
+    for i, ch in enumerate(choices):
+        name = _ellipsize(str(ch.get("name") or ""))
+        n = ch.get("member_count")
+        label = f"📋 {name} ({n})" if n is not None else f"📋 {name}"
+        b.button(text=label, callback_data=SearchTermsCB(action="ss_pick", idx=i, gen=gen))
+    b.button(
+        text=i18n.t(
+            "searchterms_ss_new_btn",
+            name=_ellipsize(i18n.t("searchterms_ss_default_name"), 30),
+        ),
+        callback_data=SearchTermsCB(action="ss_pick", idx=-1, gen=gen),
+    )
+    b.button(
+        text=i18n.t("searchterms_ss_back_btn"),
+        callback_data=SearchTermsCB(action="ss_back", gen=gen),
+    )
     b.adjust(1)
     return b.as_markup()
 

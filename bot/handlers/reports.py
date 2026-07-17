@@ -129,39 +129,211 @@ async def on_searchterms_cancel(cq: bm.CallbackQuery, callback_data: bm.SearchTe
     await bm._safe_edit(cq, bm.i18n.t("rejected"))
 
 
-@bm.dp.callback_query(bm.SearchTermsCB.filter(bm.F.action == "neg"))
-async def on_searchterms_neg(cq: bm.CallbackQuery, callback_data: bm.SearchTermsCB) -> None:
-    """§7: «🚫 в минус» по запросу → черновик add_negative_keywords (EXACT — режет только этот запрос,
-    не шире) за confirm-гейтом. Само добавление — только после «да» (confirmation_id, правило 2).
-    idx+gen анти-stale (клик по старой клавиатуре после повторного /searchterms → «список устарел»)."""
+# 3.2а: батч минус-слов чекбоксами. Тогглы/циклы только перерисовывают markup; черновики минтит
+# ТОЛЬКО «Минусовать выбранные» (confirm-гейт, правило 1/2). Состояние — server-side по chat_id+gen.
+_ST_MT_CYCLE = ("exact", "phrase", "broad")
+_ST_LVL_CYCLE = ("campaign", "adgroup", "shared")
+
+
+async def _st_ctx(
+    cq: bm.CallbackQuery, callback_data: bm.SearchTermsCB, *, need_idx: bool = False
+) -> tuple[int, list[dict], set[int], dict] | None:
+    """Общий анти-stale гейт батч-хендлеров /searchterms: (chat_id, items, sel, opts) или None —
+    тогда уже показан alert «список устарел» (клик по старой клавиатуре / после рестарта)."""
     chat_id = bm._cq_chat_id(cq)
     items = bm._SEARCH_TERMS_CACHE.get(chat_id)
     if (
         not items
-        or not (0 <= callback_data.idx < len(items))
         or int(getattr(callback_data, "gen", 0)) != bm._SEARCH_TERMS_GEN.get(chat_id, 0)
+        or (need_idx and not (0 <= callback_data.idx < len(items)))
     ):
         await cq.answer(bm.i18n.t("searchterms_stale"), show_alert=True)
+        return None
+    sel = bm._SEARCH_TERMS_SEL.setdefault(chat_id, set())
+    opts = bm._SEARCH_TERMS_OPTS.setdefault(
+        chat_id, {"mt": "exact", "lvl": "campaign", "ss": None, "ss_choices": [], "acct": ""}
+    )
+    return chat_id, items, sel, opts
+
+
+async def _st_redraw(
+    cq: bm.CallbackQuery, items: list[dict], gen: int, sel: set[int], opts: dict
+) -> None:
+    await bm._safe_edit_markup(cq, bm.searchterms_kb(items, gen, selected=sel, opts=opts))
+
+
+@bm.dp.callback_query(bm.SearchTermsCB.filter(bm.F.action.in_({"toggle", "neg"})))
+async def on_searchterms_toggle(cq: bm.CallbackQuery, callback_data: bm.SearchTermsCB) -> None:
+    """3.2а: чекбокс по запросу — только выбор и перерисовка markup, НИКАКОГО черновика/мутации.
+    'neg' — легаси-кнопки старых сообщений: их gen всегда старый ⇒ гейт даст «список устарел»."""
+    ctx = await _st_ctx(cq, callback_data, need_idx=True)
+    if ctx is None:
+        return
+    _chat_id, items, sel, opts = ctx
+    sel.symmetric_difference_update({callback_data.idx})
+    await cq.answer()
+    await _st_redraw(cq, items, callback_data.gen, sel, opts)
+
+
+@bm.dp.callback_query(bm.SearchTermsCB.filter(bm.F.action == "mt"))
+async def on_searchterms_mt(cq: bm.CallbackQuery, callback_data: bm.SearchTermsCB) -> None:
+    """3.2а: цикл типа соответствия пакета exact → phrase → broad (только opts + перерисовка)."""
+    ctx = await _st_ctx(cq, callback_data)
+    if ctx is None:
+        return
+    _chat_id, items, sel, opts = ctx
+    cur = str(opts.get("mt") or "exact")
+    i = _ST_MT_CYCLE.index(cur) if cur in _ST_MT_CYCLE else 0
+    opts["mt"] = _ST_MT_CYCLE[(i + 1) % len(_ST_MT_CYCLE)]
+    await cq.answer(bm.texts.match_type_human(opts["mt"]))
+    await _st_redraw(cq, items, callback_data.gen, sel, opts)
+
+
+@bm.dp.callback_query(bm.SearchTermsCB.filter(bm.F.action == "lvl"))
+async def on_searchterms_lvl(cq: bm.CallbackQuery, callback_data: bm.SearchTermsCB) -> None:
+    """3.2а: цикл уровня пакета кампания → группа объявлений → общий список. Вход в «общий список»
+    без выбранного имени подставляет дефолтное (создаст apply ПОСЛЕ подтверждения, не здесь)."""
+    ctx = await _st_ctx(cq, callback_data)
+    if ctx is None:
+        return
+    _chat_id, items, sel, opts = ctx
+    cur = str(opts.get("lvl") or "campaign")
+    i = _ST_LVL_CYCLE.index(cur) if cur in _ST_LVL_CYCLE else 0
+    opts["lvl"] = _ST_LVL_CYCLE[(i + 1) % len(_ST_LVL_CYCLE)]
+    if opts["lvl"] == "shared" and not opts.get("ss"):
+        opts["ss"] = bm.i18n.t("searchterms_ss_default_name")
+    await cq.answer(bm.i18n.t(f"searchterms_lvl_{opts['lvl']}"))
+    await _st_redraw(cq, items, callback_data.gen, sel, opts)
+
+
+@bm.dp.callback_query(bm.SearchTermsCB.filter(bm.F.action == "ss_open"))
+async def on_searchterms_ss_open(cq: bm.CallbackQuery, callback_data: bm.SearchTermsCB) -> None:
+    """3.2а: пикер общего списка — читаем существующие NEGATIVE_KEYWORDS shared sets аккаунта
+    (read-only) и показываем выбор. Сбой чтения → alert, основная клавиатура не трогается."""
+    ctx = await _st_ctx(cq, callback_data)
+    if ctx is None:
+        return
+    _chat_id, _items, _sel, opts = ctx
+    from ads.client import build_client_async
+    from ads.read import list_negative_shared_sets
+
+    acct = str(opts.get("acct") or "")
+    try:
+        client = await build_client_async(acct)
+        choices = await bm.run_ads_read_call(
+            list_negative_shared_sets, client, acct, label="list_negative_shared_sets"
+        )
+    except Exception as e:  # noqa: BLE001 — сеть/доступ/SDK: короткий редактированный alert
+        await cq.answer(await bm._friendly_error(e, "searchterms:ss", short=True), show_alert=True)
+        return
+    opts["ss_choices"] = choices
+    await cq.answer(bm.i18n.t("searchterms_ss_pick_hint"))
+    await bm._safe_edit_markup(cq, bm.searchterms_sharedset_kb(choices, callback_data.gen))
+
+
+@bm.dp.callback_query(bm.SearchTermsCB.filter(bm.F.action == "ss_pick"))
+async def on_searchterms_ss_pick(cq: bm.CallbackQuery, callback_data: bm.SearchTermsCB) -> None:
+    """3.2а: выбор общего списка из пикера. idx=-1 — «новый» с дефолтным именем: здесь только ИМЯ
+    в opts, сам список создаст apply_add_negatives_to_shared_set ПОСЛЕ подтверждения (правило 1)."""
+    ctx = await _st_ctx(cq, callback_data)
+    if ctx is None:
+        return
+    _chat_id, items, sel, opts = ctx
+    choices = list(opts.get("ss_choices") or [])
+    if callback_data.idx == -1:
+        opts["ss"] = bm.i18n.t("searchterms_ss_default_name")
+    elif 0 <= callback_data.idx < len(choices):
+        opts["ss"] = str(choices[callback_data.idx].get("name") or "")
+    else:
+        await cq.answer(bm.i18n.t("searchterms_stale"), show_alert=True)
+        return
+    opts["lvl"] = "shared"
+    await cq.answer(opts["ss"])
+    await _st_redraw(cq, items, callback_data.gen, sel, opts)
+
+
+@bm.dp.callback_query(bm.SearchTermsCB.filter(bm.F.action == "ss_back"))
+async def on_searchterms_ss_back(cq: bm.CallbackQuery, callback_data: bm.SearchTermsCB) -> None:
+    """3.2а: выход из пикера общего списка без изменений."""
+    ctx = await _st_ctx(cq, callback_data)
+    if ctx is None:
+        return
+    _chat_id, items, sel, opts = ctx
+    await cq.answer()
+    await _st_redraw(cq, items, callback_data.gen, sel, opts)
+
+
+@bm.dp.callback_query(bm.SearchTermsCB.filter(bm.F.action == "apply"))
+async def on_searchterms_apply(cq: bm.CallbackQuery, callback_data: bm.SearchTermsCB) -> None:
+    """3.2а: «Минусовать выбранные» → черновик(и) на весь пакет за confirm-гейтом; сам SDK — только
+    после «да» (confirmation_id, правило 1/2). Уровень «общий список» — ОДИН черновик на пакет;
+    кампания/группа при запросах из РАЗНЫХ кампаний — по черновику на кампанию (схема привязана к
+    одной). Целимся в аккаунт, с которого термины ПРОЧИТАНЫ (opts['acct'], «мутируем то, что
+    видим») — не в активный на момент клика; замок ensure_allowed внутри _present_proposal."""
+    ctx = await _st_ctx(cq, callback_data)
+    if ctx is None:
+        return
+    chat_id, items, sel, opts = ctx
+    picked = [items[i] for i in sorted(sel) if 0 <= i < len(items)]
+    if not picked:
+        await cq.answer(bm.i18n.t("searchterms_none_selected"), show_alert=True)
         return
     msg = bm._cq_msg(cq)
     if msg is None:
         await cq.answer()
         return
-    it = items[callback_data.idx]
-    try:
-        cid, operation, params, summary = bm._build_proposal(
-            "add_negative_keywords",
-            campaign=it["campaign"],
-            keywords=[it["term"]],
-            match_type="exact",
+    mt = str(opts.get("mt") or "exact")
+    lvl = str(opts.get("lvl") or "campaign")
+    batches: list[tuple[str, dict]] = []
+    if lvl == "shared":
+        batches.append(
+            (
+                "add_negatives_to_shared_set",
+                {
+                    "shared_set": str(opts.get("ss") or bm.i18n.t("searchterms_ss_default_name")),
+                    "keywords": [it["term"] for it in picked],
+                    "match_type": mt,
+                },
+            )
         )
+    else:
+        groups: dict[tuple[str, str | None], list[str]] = {}
+        for it in picked:
+            ag = (it.get("ad_group") or None) if lvl == "adgroup" else None
+            groups.setdefault((it["campaign"], ag), []).append(it["term"])
+        for (camp, ag), terms in groups.items():
+            kw: dict = {"campaign": camp, "keywords": terms, "match_type": mt}
+            if ag:
+                kw["ad_group"] = ag
+            batches.append(("add_negative_keywords", kw))
+    try:
+        proposals = [bm._build_proposal(op, **kw) for op, kw in batches]
     except Exception as e:  # noqa: BLE001 — валидация схемы (пустой/длинный ключ) → понятный ответ
-        await cq.answer(await bm._friendly_error(e, "searchterms:neg", short=True), show_alert=True)
+        await cq.answer(
+            await bm._friendly_error(e, "searchterms:apply", short=True), show_alert=True
+        )
         return
     await cq.answer()
-    await bm._present_proposal_active(
-        msg, chat_id=chat_id, operation=operation, params=params, summary=summary, cid=cid
+    bm._SEARCH_TERMS_SEL[chat_id] = set()  # выбор израсходован; сами термины остаются
+    await bm._safe_edit_markup(
+        cq, bm.searchterms_kb(items, callback_data.gen, selected=set(), opts=opts)
     )
+    acct = str(opts.get("acct") or "")
+    for cid, operation, params, summary in proposals:
+        if acct:
+            await bm._present_proposal(
+                msg,
+                chat_id=chat_id,
+                operation=operation,
+                params=params,
+                summary=summary,
+                cid=cid,
+                customer_id=acct,
+            )
+        else:  # старый кэш без аккаунта чтения — прежняя семантика активного аккаунта
+            await bm._present_proposal_active(
+                msg, chat_id=chat_id, operation=operation, params=params, summary=summary, cid=cid
+            )
 
 
 @bm.dp.callback_query(bm.SearchTermsCB.filter(bm.F.action == "add"))

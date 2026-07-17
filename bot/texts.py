@@ -1642,7 +1642,10 @@ def fmt_searchterms(items: list[dict], *, currency: str = "", lang: str | None =
                 f"• <b>{esc(it['term'])}</b>{tag} — {it['clicks']} clicks, "
                 f"{round(float(it['cost']), 2)}{cur} · {esc(it['campaign'])}"
             )
-        lines.append("\n<i>Tap 🚫 to add a term to negative keywords (confirmation required).</i>")
+        lines.append(
+            "\n<i>Tick terms in the list, pick match type and level, then tap "
+            "“Add selected to negatives” — I'll show a confirmation first.</i>"
+        )
         return "\n".join(lines)
     lines = ["🔎 <b>«Мусорные» поисковые запросы</b> (клики без конверсий):", ""]
     for it in items:
@@ -1651,7 +1654,10 @@ def fmt_searchterms(items: list[dict], *, currency: str = "", lang: str | None =
             f"• <b>{esc(it['term'])}</b>{tag} — {it['clicks']} кл., "
             f"{round(float(it['cost']), 2)}{cur} · {esc(it['campaign'])}"
         )
-    lines.append("\n<i>Нажми 🚫, чтобы добавить запрос в минус-слова (нужно подтверждение).</i>")
+    lines.append(
+        "\n<i>Отметь запросы галочками, выбери тип соответствия и уровень, затем жми "
+        "«Минусовать выбранные» — сначала покажу подтверждение.</i>"
+    )
     return "\n".join(lines)
 
 

@@ -215,6 +215,7 @@ from bot.keyboards import (
     rollback_kb,
     harvest_kb,
     searchterms_kb,
+    searchterms_sharedset_kb,
     slash_mutate_campaigns_kb,
     rsa_aslist_kb,
     rsa_item_kb,
@@ -2666,18 +2667,31 @@ _SEARCH_TERMS_CACHE: dict[int, list[dict]] = {}
 # и клик по любой из них после повторного запуска обязан дать «список устарел».
 _SEARCH_TERMS_HARVEST: dict[int, list[dict]] = {}
 _SEARCH_TERMS_GEN: dict[int, int] = {}  # поколение списка (анти-stale, как _SLASH_MUT_GEN)
+# 3.2а: батч чекбоксами — выбранные idx и настройки пакета (mt/lvl/ss + acct чтения) server-side:
+# в callback_data только idx+gen (64-байтный лимит Telegram). Живут одно поколение со списком.
+_SEARCH_TERMS_SEL: dict[int, set[int]] = {}
+_SEARCH_TERMS_OPTS: dict[int, dict] = {}
 
 
 def _searchterms_store(
-    chat_id: int, items: list[dict], harvest_items: list[dict] | None = None
+    chat_id: int, items: list[dict], harvest_items: list[dict] | None = None, acct: str = ""
 ) -> int:
     """Записать список кандидатов /searchterms с новым поколением: клик по СТАРОЙ клавиатуре после
     повторного /searchterms обязан дать «список устарел», а не другой запрос (idx указывал бы в иной
-    список)."""
+    список). acct — аккаунт ЧТЕНИЯ, с которого собраны термины: батч-минусовка целится в него же
+    («мутируем то, что видим»), а не в активный на момент клика."""
     gen = _SEARCH_TERMS_GEN.get(chat_id, 0) + 1
     _SEARCH_TERMS_GEN[chat_id] = gen
     _SEARCH_TERMS_CACHE[chat_id] = items
     _SEARCH_TERMS_HARVEST[chat_id] = harvest_items or []
+    _SEARCH_TERMS_SEL[chat_id] = set()
+    _SEARCH_TERMS_OPTS[chat_id] = {
+        "mt": "exact",  # дефолт как у прежней per-term кнопки: режет только этот запрос
+        "lvl": "campaign",
+        "ss": None,  # имя общего списка (уровень 'shared'); None до первого выбора
+        "ss_choices": [],  # кэш пикера существующих списков (read.list_negative_shared_sets)
+        "acct": acct,
+    }
     return gen
 
 
@@ -2723,10 +2737,11 @@ async def _bids_run(m: Message, period) -> None:
 
 async def _searchterms_run(m: Message, period) -> None:
     """§7 search-terms → минус-слова: читаем отчёт по поисковым запросам активного аккаунта ЧТЕНИЯ,
-    КОД отбирает «мусорные» (есть клики, 0 конверсий), показываем топ по расходу с кнопками «🚫 в
-    минус». Добавление — ТОЛЬКО через confirm-гейт по тапу (proposal add_negative_keywords). READ-ONLY
-    до «да». Метрики к модели не уходят (golden rule #4) — фильтр детерминированный; LLM только
-    advisory-тег релевантности (W8)."""
+    КОД отбирает «мусорные» (есть клики, 0 конверсий), показываем топ по расходу с чекбоксами
+    батча (3.2а: тип соответствия + уровень кампания/группа/общий список). Добавление — ТОЛЬКО
+    через confirm-гейт по «Минусовать выбранные» (proposal add_negative_keywords /
+    add_negatives_to_shared_set). READ-ONLY до «да». Метрики к модели не уходят (golden rule #4) —
+    фильтр детерминированный; LLM только advisory-тег релевантности (W8)."""
     acct = await _require_read_account(m, "searchterms")
     if acct is None:
         return  # показан пикер аккаунта — оператор выберет и повторит
@@ -2765,6 +2780,7 @@ async def _searchterms_run(m: Message, period) -> None:
             {
                 "term": r.search_term,
                 "campaign": r.campaign,
+                "ad_group": r.ad_group,  # 3.2а: уровень «группа объявлений» в батч-минусовке
                 "cost": round(r.metrics.cost, 2),
                 "clicks": r.metrics.clicks,
             }
@@ -2787,11 +2803,16 @@ async def _searchterms_run(m: Message, period) -> None:
         except Exception:  # noqa: BLE001 — тег релевантности advisory, не критичен
             pass
     currency = await _read_currency(client, acct)  # §9: валюта для расхода в сводке
-    gen = _searchterms_store(m.chat.id, items, harvest_items)
+    gen = _searchterms_store(m.chat.id, items, harvest_items, acct=acct)
     if items:
         await m.answer(
             texts.fmt_searchterms(items, currency=currency),
-            reply_markup=searchterms_kb(items, gen),
+            reply_markup=searchterms_kb(
+                items,
+                gen,
+                selected=_SEARCH_TERMS_SEL.get(m.chat.id),
+                opts=_SEARCH_TERMS_OPTS.get(m.chat.id),
+            ),
             parse_mode=ParseMode.HTML,
         )
     if (

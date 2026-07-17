@@ -361,13 +361,24 @@ class ExtCB(CallbackData, prefix="ext"):
 class SearchTermsCB(CallbackData, prefix="sterm"):
     """§7: /searchterms — топ «мусорных» поисковых запросов (клики без конверсий) → предложить
     в МИНУС-слова. idx — позиция запроса в _SEARCH_TERMS_CACHE[chat_id]; gen — поколение списка
-    (анти-stale, как SlashMutCB.gen). action='neg' минтит proposal add_negative_keywords (confirm-
-    гейт + «да»); 'cancel' — закрыть. SDK-вызов НЕ здесь — только после подтверждения (правило 1/2).
+    (анти-stale, как SlashMutCB.gen). SDK-вызов НЕ здесь — только после подтверждения (правило 1/2).
+
+    3.2а (2026-07-17): БАТЧ чекбоксами вместо «кнопка = один proposal». Выбор/настройки живут
+    server-side (_SEARCH_TERMS_SEL/_SEARCH_TERMS_OPTS по chat_id, ротация тем же gen — в callback
+    только idx+gen, 64-байтный лимит Telegram):
+      'toggle' — отметить/снять запрос (перерисовка только markup);
+      'mt'     — цикл типа соответствия exact → phrase → broad;
+      'lvl'    — цикл уровня: кампания → группа объявлений → общий список;
+      'ss_open'/'ss_pick'/'ss_back' — пикер общего списка минус-слов (idx в opts['ss_choices'];
+                 idx=-1 — новый список с дефолтным именем, создаст apply ПОСЛЕ подтверждения);
+      'apply'  — минтит черновик(и) на ВЕСЬ выбор: один на пакет; уровень кампании/группы при
+                 запросах из разных кампаний — по одному на кампанию (схема привязана к одной).
+    'neg' (легаси-кнопки в истории чата) — обрабатывается как toggle: gen старый ⇒ «список устарел».
 
     Ф4 (2026-07-14): action='add' — ОБРАТНЫЙ ход («сбор урожая»): конвертящий запрос без своего
     ключа → черновик add_keywords (EXACT, в ту же группу). idx указывает в _SEARCH_TERMS_HARVEST —
     ДРУГОЙ кэш, поколение общее (обе клавиатуры минтит один /searchterms)."""
 
-    action: str  # "neg" | "add" | "cancel"
+    action: str  # "toggle"|"mt"|"lvl"|"ss_open"|"ss_pick"|"ss_back"|"apply"|"add"|"cancel"|"neg"
     idx: int = -1
     gen: int = 0

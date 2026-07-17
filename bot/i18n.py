@@ -494,6 +494,35 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "The list is stale — run /searchterms again.",
     },
     "searchterms_cancel_btn": {"ru": "✖ Закрыть", "en": "✖ Close"},
+    # 3.2а: батч минус-слов чекбоксами — тип соответствия, уровень, «Минусовать выбранные»
+    "searchterms_mt_btn": {"ru": "Тип: {mt} ▸", "en": "Match: {mt} ▸"},
+    "searchterms_lvl_btn": {"ru": "Куда: {lvl} ▸", "en": "Level: {lvl} ▸"},
+    "searchterms_lvl_campaign": {"ru": "кампания", "en": "campaign"},
+    "searchterms_lvl_adgroup": {"ru": "группа объявлений", "en": "ad group"},
+    "searchterms_lvl_shared": {"ru": "общий список", "en": "shared list"},
+    "searchterms_apply_btn": {
+        "ru": "➖ Минусовать выбранные ({n})",
+        "en": "➖ Add selected to negatives ({n})",
+    },
+    "searchterms_none_selected": {
+        "ru": "Сначала отметь запросы галочками — тапни по строкам списка.",
+        "en": "Select terms first — tap the list rows to tick them.",
+    },
+    "searchterms_ss_btn": {"ru": "📋 Список: {name}", "en": "📋 List: {name}"},
+    "searchterms_ss_new_btn": {"ru": "➕ Новый: «{name}»", "en": "➕ New: “{name}”"},
+    "searchterms_ss_back_btn": {"ru": "↩️ Назад", "en": "↩️ Back"},
+    "searchterms_ss_default_name": {
+        "ru": "Минус-слова из поисковых запросов",
+        "en": "Negatives from search terms",
+    },
+    "searchterms_ss_pick_hint": {
+        "ru": "Выбери общий список минус-слов",
+        "en": "Pick a shared negative list",
+    },
+    "err_searchterms_ss": {
+        "ru": "⚠️ Не удалось получить общие списки минус-слов: {err}",
+        "en": "⚠️ Couldn't fetch shared negative lists: {err}",
+    },
     "kw_acct_fallback": {
         "ru": (
             "⚠️ Аккаунт <code>{acct}</code> недоступен для подбора (не под настроенным MCC или "
