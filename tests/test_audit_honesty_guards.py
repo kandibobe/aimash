@@ -413,3 +413,64 @@ def test_pmax_no_signals_stays_silent_when_campaigns_not_read():
     assert "pmax_no_signals" not in {
         f.check_id for f in build_audit(rep, pmax_campaigns=None).findings
     }
+
+
+# ── Замечание 2 (2026-07-17): слепые фетчеры и вечный пробел rsa_age ─────────────────────
+
+
+async def test_safe_fetcher_failure_is_logged_with_reason(monkeypatch, caplog):
+    """Молчаливый None в `_safe` прятал ПРИЧИНУ «неполных данных» — семьи слепли без единой строки
+    в логах, чинить было нечего. Сбой фетчера обязан оставить warning (label + тип), текст
+    исключения — редактированным (SDK может нести куски запроса/заголовков с секретом)."""
+    import logging
+
+    from audit.collect import gather_audit
+
+    raw_sk = "sk-abcdefghijklmnop123"  # фейковый ключ OpenAI-стиля (паттерн sk- + 16+)
+    fake_report = SimpleNamespace(customer_id="1", totals=Metrics(), breakdowns=[], currency="USD")
+
+    async def fake_build_report(client, cid, period, **kw):
+        return fake_report
+
+    async def fake_run(fn, *args, label=""):
+        if label == "audit_currency":
+            return "USD"
+        if label == "audit_geo_waste":
+            raise RuntimeError(f"query rejected, header {raw_sk}")
+        return []
+
+    monkeypatch.setattr("reports.service.build_account_report_async", fake_build_report)
+    monkeypatch.setattr("core.resilience.run_ads_read_call", fake_run)
+    with caplog.at_level(logging.WARNING, logger="aimash"):
+        res = await gather_audit(object(), "1", None)
+    assert "geo_waste" in set(res.data_gaps or ()), "сбой фетчера обязан остаться пробелом"
+    assert "audit_geo_waste" in caplog.text and "RuntimeError" in caplog.text, (
+        "сбой чтения должен быть виден в логах (label + тип), иначе диагностировать нечего"
+    )
+    assert raw_sk not in caplog.text and "REDACTED" in caplog.text, (
+        "текст исключения идёт в лог только через redact_text (правило 5)"
+    )
+
+
+def test_rsa_age_gap_is_permanent_api_limitation_not_run_failure():
+    """rsa_age объявляется на КАЖДОМ живом аккаунте (start_date_time — поле планировщика, у обычных
+    RSA пусто). Пока сигнал числился в _FAMILY_SIGNALS['rsa'], он ВЕЧНО блокировал запись снапшота
+    (тренд «н/д» навсегда), а карточка врала «повтори /audit — балл может быть завышен», хотя
+    повтор ничего не менял. Теперь это своя корзина: ограничение API, без паники."""
+    from audit.render import render_audit, score_affecting_gaps
+
+    # (а) гейт снапшота/тренда: вечный пробел больше не считается «балл завышен»
+    assert score_affecting_gaps(SimpleNamespace(data_gaps=["rsa_age"])) == set()
+    # (б) карточка: своя строка про ограничение API — без «повтори /audit» и без «завышен»
+    res = build_audit(_report(500.0, 5.0), data_gaps=["rsa_age"])
+    card = render_audit(res, "ru")
+    assert "Google не отдаёт возраст объявлений" in card
+    assert "повтори /audit" not in card and "балл может быть завышен" not in card
+    assert "Недостаточно данных: возраст объявлений" not in card, (
+        "«недостаточно данных» звучит как сбой прогона — у постоянного ограничения своя строка"
+    )
+    card_en = render_audit(res, "en")
+    assert "API limitation" in card_en and "rerun /audit" not in card_en
+    # (в) настоящий сбой прогона рядом с вечным пробелом по-прежнему кричит «завышен»
+    both = build_audit(_report(500.0, 5.0), data_gaps=["rsa_age", "conversion_actions"])
+    assert "балл может быть завышен" in render_audit(both, "ru")

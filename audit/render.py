@@ -109,8 +109,9 @@ _FAMILY_SIGNALS = {
     "waste": ("campaign_settings", "pmax"),
     "keywords": ("search_terms", "negative_lists", "keyword_inventory", "pmax"),
     "budget": ("impression_share",),
-    # rsa_* судят по самим объявлениям; rsa_age — «возраст не прочитан» (см. fetch_rsa_assets).
-    "rsa": ("impression_share", "adgroup_structure", "keyword_quality", "rsa_ads", "rsa_age"),
+    # rsa_* судят по самим объявлениям. rsa_age здесь НЕ живёт: это постоянное ограничение API
+    # (_PERMANENT_GAPS), а не сбой чтения — держать его тут значило бы вечно блокировать снапшот/тренд.
+    "rsa": ("impression_share", "adgroup_structure", "keyword_quality", "rsa_ads"),
     "conversion_tracking": ("conversion_actions",),
     # Ф1: без слоя ставок/позиций (bid_landscape) «ставки в норме» утверждать нечестно — именно там
     # живут «ставка ниже оценки Google» и «верх потерян по рангу». negative_lists — broad_unmanaged.
@@ -150,6 +151,13 @@ _IMPLEMENTED_FAMILIES = (
 # чтобы карта не разъехалась. optimization_score/recommendations сюда НЕ входят: «второе мнение»
 # (семьи competition/recommendations вне FAMILY_WEIGHT), их пробел балл не двигает.
 _SCORE_AFFECTING_SIGNALS = frozenset(s for sigs in _FAMILY_SIGNALS.values() for s in sigs)
+
+# Замечание 2 (2026-07-17): постоянные ограничения Google API — не «сбой этого прогона».
+# start_date_time у обычных RSA пуст (это поле планировщика запуска) ⇒ rsa_age объявляется
+# collect'ом на КАЖДОМ живом аккаунте. Пока сигнал сидел в _FAMILY_SIGNALS["rsa"], он вечно
+# блокировал запись снапшота и тренд («н/д» навсегда). Такие пробелы рисуем своей строкой —
+# без «повтори /audit» (повтор ничего не изменит) и без «балл завышен» (score они не двигают).
+_PERMANENT_GAPS = frozenset({"rsa_age"})
 
 
 def score_affecting_gaps(result) -> set[str]:
@@ -816,8 +824,11 @@ def render_audit(
                 # F (GR8): не все пробелы равны. Сигнал весомой семьи не прочитан ⇒ её дефекты не
                 # оштрафованы ⇒ балл ЗАВЫШЕН — писать про него «на score не влияет» было бы враньём.
                 # «Второе мнение» Google (opt_score/recommendations) балл и правда не двигает.
-                affecting = gaps & _SCORE_AFFECTING_SIGNALS
-                neutral = gaps - affecting
+                # Постоянные ограничения API — третья корзина: «недостаточно данных» звучало бы как
+                # сбой прогона, которого нет.
+                perm = gaps & _PERMANENT_GAPS
+                affecting = (gaps - perm) & _SCORE_AFFECTING_SIGNALS
+                neutral = gaps - perm - affecting
                 if affecting:
                     names = ", ".join(slabels.get(s, s) for s in sorted(affecting))
                     lines.append(
@@ -831,6 +842,14 @@ def render_audit(
                         f"ℹ️ Not enough data: {names} (no score impact)"
                         if lang == "en"
                         else f"ℹ️ Недостаточно данных: {names} (на score не влияет)"
+                    )
+                if (
+                    perm
+                ):  # сейчас perm ⊆ {rsa_age} — текст про возраст объявлений и есть вся корзина
+                    lines.append(
+                        "ℹ️ Google doesn't expose ad age (API limitation) — RSA freshness isn't checked."
+                        if lang == "en"
+                        else "ℹ️ Google не отдаёт возраст объявлений (ограничение API) — свежесть RSA не проверяется."
                     )
 
     # Топ-3 действия + дисклеймер — только в самодостаточной карточке (actions=True). При actions=False

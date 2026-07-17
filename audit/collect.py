@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from audit.engine import AuditResult, build_audit
+from core.logging import log, redact_text
 
 
 def _search_terms_table(rows):
@@ -138,7 +139,16 @@ async def gather_audit(
     async def _safe(fn, *args, label: str):
         try:
             return await run_ads_read_call(fn, *args, label=label)
-        except Exception:  # noqa: BLE001 — доп-сигнал не должен ронять аудит
+        except Exception as e:  # noqa: BLE001 — доп-сигнал не должен ронять аудит
+            # Замечание 2 (2026-07-17): молчаливый None прятал ПРИЧИНУ «неполных данных» —
+            # половина семей слепла без единой строки в логах, чинить было нечего. Тип+label хватает для
+            # триажа; текст редактируем (исключение SDK может нести куски запроса/заголовков).
+            log.warning(
+                "audit: фетчер %s не прочитан: %s: %s",
+                label,
+                type(e).__name__,
+                redact_text(str(e))[:300],
+            )
             return None
 
     currency = (await _safe(account_currency, client, cid, label="audit_currency")) or ""
