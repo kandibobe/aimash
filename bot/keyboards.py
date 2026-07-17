@@ -830,9 +830,10 @@ def advise_feedback_kb(
 
 
 def audit_export_kb(lang: str | None = None, *, with_xlsx: bool = True) -> InlineKeyboardMarkup:
-    """Кнопки под карточкой /audit: выгрузить результат «📄 В Google Sheets» (ссылка reader) и
-    «📊 Скачать .xlsx» (файл). Клик читает УЖЕ посчитанный AuditResult из кэша (пере-собирать аудит
-    не нужно) и строит бумагу — Google Ads НЕ мутирует (GR3). Чистая функция (только i18n)."""
+    """Кнопки под карточкой /audit: выгрузить результат «📄 В Google Sheets» (ссылка reader),
+    «📊 Скачать .xlsx» (таблица) и «📝 Скачать .docx» (Word — читаемый отчёт для клиента). Клик
+    читает УЖЕ посчитанный AuditResult из кэша (пере-собирать аудит не нужно) и строит бумагу —
+    Google Ads НЕ мутирует (GR3). Чистая функция (только i18n)."""
     from bot import i18n
 
     kb = InlineKeyboardBuilder()
@@ -845,6 +846,10 @@ def audit_export_kb(lang: str | None = None, *, with_xlsx: bool = True) -> Inlin
             text=i18n.t("audit_export_btn_xlsx", lang),
             callback_data=AuditExportCB(fmt="xlsx"),
         )
+    kb.button(
+        text=i18n.t("audit_export_btn_docx", lang),
+        callback_data=AuditExportCB(fmt="docx"),
+    )
     kb.adjust(1)
     return kb.as_markup()
 

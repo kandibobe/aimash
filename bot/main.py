@@ -3156,10 +3156,38 @@ async def _run_audit_xlsx(m: Message, result, acct: str) -> None:
                 pass
 
 
+async def _run_audit_docx(m: Message, result, acct: str) -> None:
+    """Сохранить УЖЕ посчитанный AuditResult в .docx (Находки/По семьям/Обзор) и прислать файлом —
+    читаемый Word-отчёт для клиента. Read-only, GR3: бумага. gather_audit НЕ зовём (result из кэша)."""
+    import os
+    import tempfile
+
+    await m.answer(i18n.t("report_preparing_docx"))
+    path: str | None = None
+    try:
+        from reports.docx import write_audit_docx
+
+        async with ux.upload_action(m):  # «отправляет документ…» пока строим .docx
+            fd, path = tempfile.mkstemp(suffix=".docx", prefix="aimash_audit_")
+            os.close(fd)
+            await asyncio.to_thread(write_audit_docx, result, path, i18n.current_lang())
+        await m.answer_document(FSInputFile(path, filename=f"aimash_audit_{acct}.docx"))
+    except Exception as e:  # python-docx/файловая — GR5: наружу только редактированное
+        await _capture_cmd_error(e, "cmd:audit_docx")  # A2: в /diag + алерт
+        await m.answer(i18n.t("err_report_make", err=ux.err_text(e)))
+    finally:
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
 async def _run_audit_export(m: Message, fmt: str, chat_id: int) -> None:
     """Точка входа кнопок выгрузки /audit: читает УЖЕ посчитанный результат из _AUDIT_EXPORT_CACHE и
-    строит бумагу (Sheets или .xlsx). Холодный кэш (рестарт бота / старая клавиатура) → stale-алерт:
-    пере-собирать аудит по клику НЕ гоняем (≈23 чтения — только по явной команде /audit)."""
+    строит бумагу (Sheets, .xlsx или .docx). Холодный кэш (рестарт бота / старая клавиатура) →
+    stale-алерт: пере-собирать аудит по клику НЕ гоняем (≈23 чтения — только по явной команде
+    /audit)."""
     cached = _AUDIT_EXPORT_CACHE.get(chat_id)
     if cached is None:
         await m.answer(i18n.t("audit_export_stale"))
@@ -3167,6 +3195,8 @@ async def _run_audit_export(m: Message, fmt: str, chat_id: int) -> None:
     result, acct = cached
     if fmt == "sheets":
         await _run_audit_sheets(m, result, acct)
+    elif fmt == "docx":
+        await _run_audit_docx(m, result, acct)
     else:
         await _run_audit_xlsx(m, result, acct)
 

@@ -50,11 +50,12 @@ class PeriodCB(CallbackData, prefix="per"):
 
 class AuditExportCB(CallbackData, prefix="auex"):
     """Выгрузка результата /audit файлом/ссылкой (кнопки под карточкой аудита). fmt — формат:
-    'sheets' (Google Sheets, ссылка reader) | 'xlsx' (файл). Аккаунт и сам AuditResult берём из
-    _AUDIT_EXPORT_CACHE[chat_id] (пере-собирать аудит не нужно — он уже посчитан). GR3: экспорт —
-    БУМАГА (нет колонки «применить»); Google Ads не мутирует, proposal не создаёт."""
+    'sheets' (Google Sheets, ссылка reader) | 'xlsx' (файл) | 'docx' (Word-документ). Аккаунт и сам
+    AuditResult берём из _AUDIT_EXPORT_CACHE[chat_id] (пере-собирать аудит не нужно — он уже
+    посчитан). GR3: экспорт — БУМАГА (нет колонки «применить»); Google Ads не мутирует, proposal
+    не создаёт."""
 
-    fmt: str  # "sheets" | "xlsx"
+    fmt: str  # "sheets" | "xlsx" | "docx"
 
 
 class AuditQaCB(CallbackData, prefix="auqa"):

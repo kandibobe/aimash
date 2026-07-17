@@ -39,6 +39,7 @@ CATALOG: dict[str, dict[str, str]] = {
     # Кнопки/статусы выгрузки результата /audit (bot.keyboards.audit_export_kb)
     "audit_export_btn_sheets": {"ru": "📄 В Google Sheets", "en": "📄 To Google Sheets"},
     "audit_export_btn_xlsx": {"ru": "📊 Скачать .xlsx", "en": "📊 Download .xlsx"},
+    "audit_export_btn_docx": {"ru": "📝 Скачать .docx", "en": "📝 Download .docx"},
     "audit_export_stale": {
         "ru": "⏳ Результат аудита устарел — запусти /audit заново, затем жми кнопку выгрузки.",
         "en": "⏳ The audit result has expired — run /audit again, then tap the export button.",
@@ -1730,6 +1731,7 @@ CATALOG: dict[str, dict[str, str]] = {
     "cb_approved_all": {"ru": "Одобрены все валидные", "en": "All valid approved"},
     # — прогресс/итог отчётов —
     "report_preparing_xlsx": {"ru": "Готовлю .xlsx-отчёт…", "en": "Preparing the .xlsx report…"},
+    "report_preparing_docx": {"ru": "Готовлю .docx-отчёт…", "en": "Preparing the .docx report…"},
     "report_preparing_sheets": {
         "ru": "Готовлю Google Sheets-отчёт…",
         "en": "Preparing the Google Sheets report…",
