@@ -1218,6 +1218,27 @@ def fmt_mutation_summary(operation: str, params: dict, lang: str | None = None) 
         if len(kws) > KW_INLINE_MAX:
             lines += f"\n  …ещё {len(kws) - KW_INLINE_MAX} — полный список во вложении .xlsx"
         return f"{head}\n{lines}"
+    if operation == "add_negatives_to_shared_set":
+        kws = params.get("keywords") or []
+        mt = match_type_human(params.get("match_type", ""), lng)
+        ss = str(params.get("shared_set") or "")
+        # Честно про создание: существует ли список, узнаём только при исполнении (READ-резолв в
+        # execute_confirmed) — дифф не утверждает, а предупреждает.
+        head = (
+            f"Общий список минус-слов «{ss}» — добавить {len(kws)} минус-слов (тип: {mt}).\n"
+            "Списка с таким именем нет — создам. Список действует только на кампании, "
+            "к которым привязан:"
+        )
+        shown = list(kws)[:KW_INLINE_MAX]
+        lines = "\n".join(f"  • {k}" for k in shown)
+        if len(kws) > KW_INLINE_MAX:
+            lines += f"\n  …ещё {len(kws) - KW_INLINE_MAX} — полный список во вложении .xlsx"
+        return f"{head}\n{lines}"
+    if operation == "attach_shared_set":
+        return (
+            f"Кампания «{c}» — привязать общий список минус-слов "
+            f"«{params.get('shared_set', '')}»: его минус-слова начнут действовать на кампанию."
+        )
     if operation in ("attach_audience", "detach_audience"):
         names = params.get("_audience_names") or []  # дружелюбные имена (инертны для исполнения)
         rns = params.get("audience_resource_names") or []
@@ -1414,6 +1435,25 @@ def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
         if len(kws) > KW_INLINE_MAX:
             lines += f"\n  …{len(kws) - KW_INLINE_MAX} more — full list in the .xlsx attachment"
         return f"{head}\n{lines}"
+    if operation == "add_negatives_to_shared_set":
+        kws = params.get("keywords") or []
+        mt = match_type_human(params.get("match_type", ""), "en")
+        ss = str(params.get("shared_set") or "")
+        head = (
+            f"Shared negative list “{ss}” — add {len(kws)} negative keywords (match type: {mt}).\n"
+            "If no list with this name exists it will be created. The list only affects "
+            "campaigns it is attached to:"
+        )
+        shown = list(kws)[:KW_INLINE_MAX]
+        lines = "\n".join(f"  • {k}" for k in shown)
+        if len(kws) > KW_INLINE_MAX:
+            lines += f"\n  …{len(kws) - KW_INLINE_MAX} more — full list in the .xlsx attachment"
+        return f"{head}\n{lines}"
+    if operation == "attach_shared_set":
+        return (
+            f"Campaign “{c}” — attach shared negative list “{params.get('shared_set', '')}”: "
+            "its negative keywords will start applying to this campaign."
+        )
     if operation in ("attach_audience", "detach_audience"):
         names = params.get("_audience_names") or []
         rns = params.get("audience_resource_names") or []
@@ -1990,6 +2030,8 @@ _OP_HUMAN = {
     "add_keywords": "добавить ключи",
     "remove_keywords": "удалить ключи",
     "add_negative_keywords": "минус-слова",
+    "add_negatives_to_shared_set": "минус-слова в общий список",
+    "attach_shared_set": "привязать список минус-слов",
     "pause_campaign": "пауза кампании",
     "resume_campaign": "возобновить кампанию",
     "launch_campaign": "запустить кампанию",
@@ -2022,6 +2064,8 @@ _OP_HUMAN_EN = {
     "add_keywords": "add keywords",
     "remove_keywords": "remove keywords",
     "add_negative_keywords": "negative keywords",
+    "add_negatives_to_shared_set": "negatives to shared list",
+    "attach_shared_set": "attach shared negative list",
     "pause_campaign": "pause campaign",
     "resume_campaign": "resume campaign",
     "launch_campaign": "launch campaign",
@@ -2181,6 +2225,32 @@ def fmt_mutation_result(operation: str, result: object, lang: str | None = None)
         if isinstance(nf, list) and nf:
             label = "not found" if en else "не найдено"
             L.append(f"• {label}: {esc(', '.join(map(str, nf[:5])))}")
+    elif operation == "add_negatives_to_shared_set":
+        n = int(result.get("count") or 0)
+        mt = str(result.get("match_type") or "")
+        ss = esc(str(result.get("shared_set_name") or ""))
+        label = (
+            f"Negative keywords added to shared list “{ss}”"
+            if en
+            else f"Добавлено минус-слов в общий список «{ss}»"
+        )
+        L.append(f"{label}: <b>{n}</b>" + (f" ({esc(mt)})" if mt else ""))
+        if result.get("shared_set_created"):
+            # Только что созданный список ещё ни к чему не привязан — без attach он «в никуда».
+            L.append(
+                "• list created — attach it to a campaign to take effect"
+                if en
+                else "• список создан — чтобы заработал, привяжи его к кампании"
+            )
+        rej = int(result.get("rejected_count") or 0)
+        if rej:
+            L.append(f"• rejected: {rej}" if en else f"• отклонено: {rej}")
+    elif operation == "attach_shared_set":
+        L.append(
+            "🔗 Shared negative list attached to the campaign."
+            if en
+            else "🔗 Общий список минус-слов привязан к кампании."
+        )
     elif operation in ("profile_save", "profile_update", "profile_clear"):
         if result.get("cleared"):
             L.append("🗑 Profile cleared." if en else "🗑 Профиль очищен.")

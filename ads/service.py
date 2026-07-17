@@ -33,6 +33,8 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
         "remove_keywords",
         "add_negative_keywords",
         "remove_negative_keywords",
+        "add_negatives_to_shared_set",
+        "attach_shared_set",
         "pause_campaign",
         "resume_campaign",
         "launch_campaign",
@@ -726,6 +728,45 @@ async def _apply_confirmed(store, confirmation_id: str) -> dict:
             campaign_id=ref.id,
             keywords=params["keywords"],
             match_type=params["match_type"],
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
+    if op == "add_negatives_to_shared_set":
+        # 3.2б: READ-резолв существующего списка по имени; None ⇒ списка нет — его создаст
+        # apply ПОСЛЕ claim (создание = мутация; до подтверждения не выполняется, правило 1).
+        ss = await asyncio.to_thread(
+            resolve.find_shared_set_by_name, client, customer_id, params["shared_set"]
+        )
+        return await mutations.apply_add_negatives_to_shared_set(
+            customer_id=customer_id,
+            shared_set_name=params["shared_set"],
+            shared_set_id=(ss.id if ss else None),
+            keywords=params["keywords"],
+            match_type=params["match_type"],
+            confirmation_id=confirmation_id,
+            confirm_store=store,
+            ads_client=client,
+        )
+
+    if op == "attach_shared_set":
+        ref = await asyncio.to_thread(
+            resolve.find_campaign_by_name, client, customer_id, params["campaign"]
+        )
+        if ref is None:
+            raise ValueError(f"кампания '{params['campaign']}' не найдена")
+        # Привязать можно ТОЛЬКО существующий список: нет — отказ (fail-closed) ДО claim, НЕ
+        # автосоздание (пустой список, привязанный молча, «работал бы в никуда»).
+        ss = await asyncio.to_thread(
+            resolve.find_shared_set_by_name, client, customer_id, params["shared_set"]
+        )
+        if ss is None:
+            raise ValueError(f"общий список минус-слов '{params['shared_set']}' не найден")
+        return await mutations.apply_attach_shared_set(
+            customer_id=customer_id,
+            campaign_id=ref.id,
+            shared_set_id=ss.id,
             confirmation_id=confirmation_id,
             confirm_store=store,
             ads_client=client,

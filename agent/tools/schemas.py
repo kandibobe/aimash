@@ -120,6 +120,8 @@ MUTATION_TOOLS = {
     "remove_keywords",
     "add_negative_keywords",
     "remove_negative_keywords",
+    "add_negatives_to_shared_set",
+    "attach_shared_set",
     "pause_campaign",
     "resume_campaign",
     "update_campaign",
@@ -326,6 +328,33 @@ class RemoveNegativeKeywords(BaseModel):
     @classmethod
     def _kw(cls, v):
         return normalize_keywords(v)
+
+
+class AddNegativesToSharedSet(BaseModel):
+    """3.2б (2026-07-17): минус-слова в ОБЩИЙ СПИСОК аккаунта (NEGATIVE_KEYWORDS shared set), а не
+    в кампанию. Списка с таким именем нет → он будет СОЗДАН (создание — внутри apply ПОСЛЕ claim;
+    дифф подтверждения говорит об этом явно). Сам по себе список ни на что не действует, пока не
+    привязан к кампании — привязка ОТДЕЛЬНОЙ операцией attach_shared_set (раздельные последствия —
+    раздельные подтверждения)."""
+
+    shared_set: str = Field(min_length=1, max_length=255)  # имя списка; длину считает КОД
+    keywords: list[str] = Field(min_length=1, max_length=ADD_KEYWORDS_MAX)
+    match_type: MatchType = "broad"
+
+    @field_validator("keywords")
+    @classmethod
+    def _kw(cls, v):
+        return normalize_keywords(v)
+
+
+class AttachSharedSet(BaseModel):
+    """3.2б: привязать СУЩЕСТВУЮЩИЙ общий список минус-слов к кампании (CampaignSharedSet).
+    Списка с таким именем нет → отказ в execute_confirmed (fail-closed), НЕ автосоздание: пустой
+    список, привязанный молча, «работал бы в никуда» — создание/наполнение только явной
+    add_negatives_to_shared_set."""
+
+    campaign: str
+    shared_set: str = Field(min_length=1, max_length=255)
 
 
 class PauseCampaign(BaseModel):
@@ -1240,6 +1269,8 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "remove_keywords": RemoveKeywords,
     "add_negative_keywords": AddNegativeKeywords,
     "remove_negative_keywords": RemoveNegativeKeywords,
+    "add_negatives_to_shared_set": AddNegativesToSharedSet,
+    "attach_shared_set": AttachSharedSet,
     "pause_campaign": PauseCampaign,
     "resume_campaign": ResumeCampaign,
     "launch_campaign": LaunchCampaign,
@@ -1340,6 +1371,21 @@ TOOLS: list[dict] = [
         "Удалить минус-слова (по тексту+типу) с уровня указанной кампании. Обратная к "
         "add_negative_keywords. Всегда указывай campaign.",
         RemoveNegativeKeywords,
+    ),
+    _tool(
+        "add_negatives_to_shared_set",
+        "Добавить минус-слова в ОБЩИЙ СПИСОК минус-слов аккаунта (shared negative list), а не в "
+        "кампанию. Только если пользователь явно говорит про общий список («в общий список», "
+        "«shared list»). Списка с таким именем нет — он будет создан. Список действует лишь на "
+        "кампании, к которым привязан (привязка — attach_shared_set).",
+        AddNegativesToSharedSet,
+    ),
+    _tool(
+        "attach_shared_set",
+        "Привязать СУЩЕСТВУЮЩИЙ общий список минус-слов к кампании: его минус-слова начнут "
+        "действовать на неё. Для команд «примени список X к кампании Y», «подключи общий список». "
+        "Несуществующий список — отказ (сначала add_negatives_to_shared_set).",
+        AttachSharedSet,
     ),
     _tool("pause_campaign", "Поставить кампанию на паузу.", PauseCampaign),
     _tool("resume_campaign", "Возобновить (включить) кампанию из паузы.", ResumeCampaign),

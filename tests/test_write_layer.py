@@ -519,6 +519,193 @@ async def test_apply_add_negative_keywords_adgroup_foreign_account_blocked():
     assert store._claimed is False and store.finalized is False
 
 
+# ── 3.2б-2: общий список минус-слов — наполнение (create-if-missing) и привязка ───
+async def test_apply_add_negatives_to_shared_set_happy_path():
+    """Существующий список (id отрезолвлен в execute_confirmed) → SDK позван с этим id, finalize."""
+    called = {}
+
+    def fake(client, customer_id, shared_set_id, name, keywords, match_type):
+        called.update(shared_set_id=shared_set_id, name=name, keywords=list(keywords))
+        return {"applied": True, "count": len(keywords)}
+
+    # user_initiated=False: минус-слова — не деньги, гейтом user_initiated не блокируются.
+    store = FakeStore(
+        FakeProposal("add_negatives_to_shared_set", "confirmed", user_initiated=False)
+    )
+    with patched(mut, "_add_negatives_to_shared_set_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_add_negatives_to_shared_set(
+            customer_id=DRAFT_ACCOUNT_ID,
+            shared_set_name="Общие минуса",
+            shared_set_id="77",
+            keywords=["  бесплатно  "],
+            match_type="broad",
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+        )
+    assert res["applied"] is True
+    assert called["shared_set_id"] == "77" and called["name"] == "Общие минуса"
+    assert called["keywords"] == ["бесплатно"]  # код обрезал пробелы (golden rule #4)
+    assert store.finalized is True
+
+
+async def test_apply_add_negatives_to_shared_set_creates_missing_list():
+    """id=None (списка не было на резолве) → исполнитель позван с None: создание ВНУТРИ него,
+    строго ПОСЛЕ claim (мутаций до подтверждения не бывает, golden rule #1)."""
+    called = {}
+
+    def fake(client, customer_id, shared_set_id, name, keywords, match_type):
+        called.update(shared_set_id=shared_set_id, name=name)
+        return {"applied": True, "shared_set_created": True}
+
+    store = FakeStore(
+        FakeProposal("add_negatives_to_shared_set", "confirmed", user_initiated=False)
+    )
+    with patched(mut, "_add_negatives_to_shared_set_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_add_negatives_to_shared_set(
+            customer_id=DRAFT_ACCOUNT_ID,
+            shared_set_name="Новый список",
+            shared_set_id=None,
+            keywords=["бесплатно"],
+            match_type="broad",
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+        )
+    assert res["shared_set_created"] is True
+    assert called["shared_set_id"] is None and called["name"] == "Новый список"
+    assert store.finalized is True
+
+
+async def test_apply_add_negatives_to_shared_set_bad_name_before_claim():
+    """Имя списка валидирует КОД ДО claim (кириллица = 1): плохое имя не съедает черновик."""
+    calls = {"n": 0}
+
+    def fake(*a, **k):
+        calls["n"] += 1
+        return {"applied": True}
+
+    store = FakeStore(
+        FakeProposal("add_negatives_to_shared_set", "confirmed", user_initiated=False)
+    )
+    with patched(mut, "_add_negatives_to_shared_set_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        for bad in ("", "  ", "я" * 256):
+            try:
+                await mut.apply_add_negatives_to_shared_set(
+                    customer_id=DRAFT_ACCOUNT_ID,
+                    shared_set_name=bad,
+                    shared_set_id=None,
+                    keywords=["бесплатно"],
+                    match_type="broad",
+                    confirmation_id="ok",
+                    confirm_store=store,
+                    ads_client=object(),
+                )
+                raise AssertionError(f"ожидался ValueError (имя {bad!r})")
+            except ValueError:
+                pass
+    assert calls["n"] == 0
+    assert store._claimed is False and store.finalized is False
+
+
+async def test_apply_add_negatives_to_shared_set_replay_is_one_shot():
+    """Тот же confirmation_id второй раз → PermissionError, SDK вызван РОВНО один раз."""
+    calls = {"n": 0}
+
+    def fake(client, customer_id, shared_set_id, name, keywords, match_type):
+        calls["n"] += 1
+        return {"applied": True}
+
+    store = FakeStore(
+        FakeProposal("add_negatives_to_shared_set", "confirmed", user_initiated=False)
+    )
+    kw = {
+        "customer_id": DRAFT_ACCOUNT_ID,
+        "shared_set_name": "Общие минуса",
+        "shared_set_id": "77",
+        "keywords": ["бесплатно"],
+        "match_type": "broad",
+        "confirmation_id": "ok",
+        "ads_client": object(),
+    }
+    with patched(mut, "_add_negatives_to_shared_set_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        await mut.apply_add_negatives_to_shared_set(confirm_store=store, **kw)
+        try:
+            await mut.apply_add_negatives_to_shared_set(confirm_store=store, **kw)
+            raise AssertionError("replay должен падать PermissionError")
+        except PermissionError:
+            pass
+    assert calls["n"] == 1
+
+
+async def test_apply_attach_shared_set_happy_path():
+    called = {}
+
+    def fake(client, customer_id, campaign_id, shared_set_id):
+        called.update(campaign_id=campaign_id, shared_set_id=shared_set_id)
+        return {"applied": True}
+
+    store = FakeStore(FakeProposal("attach_shared_set", "confirmed", user_initiated=False))
+    with patched(mut, "_attach_shared_set_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_attach_shared_set(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_id="23",
+            shared_set_id="77",
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+        )
+    assert res["applied"] is True
+    assert called == {"campaign_id": "23", "shared_set_id": "77"}
+    assert store.finalized is True
+
+
+async def test_apply_attach_shared_set_requires_resolved_id():
+    """Пустой shared_set_id — ошибка оркестрации, НЕ «создай сам»: отказ ДО claim (fail-closed;
+    резолв имени → id и отказ на несуществующем списке живут в execute_confirmed)."""
+    store = FakeStore(FakeProposal("attach_shared_set", "confirmed", user_initiated=False))
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        for bad in ("", "  ", None):
+            try:
+                await mut.apply_attach_shared_set(
+                    customer_id=DRAFT_ACCOUNT_ID,
+                    campaign_id="23",
+                    shared_set_id=bad,
+                    confirmation_id="ok",
+                    confirm_store=store,
+                    ads_client=object(),
+                )
+                raise AssertionError(f"ожидался ValueError (shared_set_id={bad!r})")
+            except ValueError:
+                pass
+    assert store._claimed is False and store.finalized is False
+
+
+async def test_apply_attach_shared_set_replay_is_one_shot():
+    calls = {"n": 0}
+
+    def fake(client, customer_id, campaign_id, shared_set_id):
+        calls["n"] += 1
+        return {"applied": True}
+
+    store = FakeStore(FakeProposal("attach_shared_set", "confirmed", user_initiated=False))
+    kw = {
+        "customer_id": DRAFT_ACCOUNT_ID,
+        "campaign_id": "23",
+        "shared_set_id": "77",
+        "confirmation_id": "ok",
+        "ads_client": object(),
+    }
+    with patched(mut, "_attach_shared_set_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        await mut.apply_attach_shared_set(confirm_store=store, **kw)
+        try:
+            await mut.apply_attach_shared_set(confirm_store=store, **kw)
+            raise AssertionError("replay должен падать PermissionError")
+        except PermissionError:
+            pass
+    assert calls["n"] == 1
+
+
 # ── apply_remove_negative_keywords: симметрично add (по тексту+типу), НЕ деньги ───
 async def test_apply_remove_negative_keywords_happy_path():
     called = {}
@@ -2497,6 +2684,20 @@ def _apply_case(op):
             "match_type": "broad",
             **base,
         }
+    if op == "add_negatives_to_shared_set":
+        return mut.apply_add_negatives_to_shared_set, {
+            "shared_set_name": "Общие минуса",
+            "shared_set_id": "77",
+            "keywords": ["бесплатно"],
+            "match_type": "broad",
+            **base,
+        }
+    if op == "attach_shared_set":
+        return mut.apply_attach_shared_set, {
+            "campaign_id": "7",
+            "shared_set_id": "77",
+            **base,
+        }
     if op == "detach_audience":
         return mut.apply_detach_audience, {
             "campaign_id": "7",
@@ -2740,10 +2941,11 @@ async def test_all_apply_reject_without_confirmation():
 
 # ── FIX: account-lock на уровне РЕЗОЛВЕРОВ (find_campaign_by_name / find_ad_groups) ─
 def test_resolvers_reject_foreign_account():
-    from ads.resolve import find_ad_groups, find_campaign_by_name
+    from ads.resolve import find_ad_groups, find_campaign_by_name, find_shared_set_by_name
 
     with allowed_ids(DRAFT_ACCOUNT_ID):
-        for fn in (find_campaign_by_name, find_ad_groups):
+        # 3.2б-2: find_shared_set_by_name — тот же замок ДО SDK (живёт на пути исполнения мутаций)
+        for fn in (find_campaign_by_name, find_ad_groups, find_shared_set_by_name):
             try:
                 fn(object(), "1234567890", "X")  # ensure_allowed до любого обращения к SDK
                 raise AssertionError(f"{fn.__name__}: чужой аккаунт должен падать")

@@ -698,6 +698,66 @@ async def apply_remove_negative_keywords(
     return result
 
 
+# ── Общий список минус-слов (3.2б): наполнение и привязка к кампании ─────────────
+# НЕ деньги → user_initiated не требуется (как остальные операции минус-слов). Оба гейта обязательны.
+async def apply_add_negatives_to_shared_set(
+    *,
+    customer_id: str,
+    shared_set_name: str,
+    shared_set_id: str | None,
+    keywords: list[str],
+    match_type: str,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    ensure_allowed(customer_id)
+    # Длины/дубли считает КОД — ДО claim (golden rule #4). Имя списка — как у update_campaign.
+    name = str(shared_set_name or "").strip()
+    if not name or len(name) > 255:
+        raise ValueError("имя общего списка минус-слов — 1..255 символов")
+    clean = normalize_keywords(keywords)
+    await _require_confirmation(confirm_store, confirmation_id, "add_negatives_to_shared_set")
+    # shared_set_id=None ⇒ списка не было на момент резолва в execute_confirmed — SDK-исполнитель
+    # СНАЧАЛА создаст его (уже ПОСЛЕ claim: мутаций до подтверждения не бывает, правило 1).
+    # Создание неидемпотентно → run_ads_create_call (без ретраев); существующий список — run_ads_call.
+    runner = run_ads_call if shared_set_id else run_ads_create_call
+    result = await runner(
+        _add_negatives_to_shared_set_via_sdk,
+        ads_client,
+        customer_id,
+        shared_set_id,
+        name,
+        clean,
+        match_type,
+        op_count=len(clean) + (0 if shared_set_id else 1),  # квота §3: критерии (+создание списка)
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+async def apply_attach_shared_set(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    shared_set_id: str,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    ensure_allowed(customer_id)
+    # id обязателен: резолв имени → id (и отказ на несуществующем списке) — в execute_confirmed,
+    # ДО claim. Пустой id здесь означает ошибку оркестрации, а не «создай сам» (fail-closed).
+    if not str(shared_set_id or "").strip():
+        raise ValueError("shared_set_id обязателен (резолв имени — в execute_confirmed)")
+    await _require_confirmation(confirm_store, confirmation_id, "attach_shared_set")
+    result = await run_ads_call(
+        _attach_shared_set_via_sdk, ads_client, customer_id, campaign_id, shared_set_id
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
 # ── Гео-таргетинг по точке с радиусом (A-geo) ────────────────────────────────────
 def _validate_address_fields(address: dict) -> None:
     """Структурный адрес для proximity — валидирует КОД ДО claim (golden rule #4): минимум
@@ -2084,6 +2144,90 @@ def _remove_negative_keywords_via_sdk(
         "removed": removed,
         "count": len(removed),
         "not_found": sorted(k for k in wanted if k not in found),
+        "applied": True,
+    }
+
+
+def _add_negatives_to_shared_set_via_sdk(
+    client,
+    customer_id: str,
+    shared_set_id: str | None,
+    shared_set_name: str,
+    keywords: list,
+    match_type: str,
+) -> dict:
+    """3.2б: наполнить ОБЩИЙ СПИСОК минус-слов (SharedCriterion в NEGATIVE_KEYWORDS shared set).
+
+    shared_set_id=None ⇒ списка не было на момент резолва — СНАЧАЛА создаём (SharedSetService,
+    type=NEGATIVE_KEYWORDS; тёзка успела появиться параллельно → серверный DUPLICATE_NAME,
+    fail loud — не глотаем). negative у SharedCriterion НЕ ставим: исключение задаёт ТИП самого
+    списка (Google-канон; в v24 поле immutable/optional и для NEGATIVE_KEYWORDS не заполняется).
+    partial_failure=True на критериях — контракт rejected как у остальных батчей ключей."""
+    ss_svc = client.get_service("SharedSetService")
+    created_set = False
+    if not shared_set_id:
+        ss_op = client.get_type("SharedSetOperation")
+        ss_op.create.name = shared_set_name
+        ss_op.create.type_ = client.enums.SharedSetTypeEnum.NEGATIVE_KEYWORDS
+        ss_resp = ss_svc.mutate_shared_sets(customer_id=str(customer_id), operations=[ss_op])
+        shared_set_id = ss_resp.results[0].resource_name.rsplit("/", 1)[-1]
+        created_set = True
+    ss_rn = ss_svc.shared_set_path(str(customer_id), str(shared_set_id))
+    svc = client.get_service("SharedCriterionService")
+    mt = getattr(client.enums.KeywordMatchTypeEnum, str(match_type).upper())
+    ops = []
+    meta: list[tuple[str, str]] = []  # ("", text): списочный уровень — без ad_group_id
+    for text in keywords:
+        op = client.get_type("SharedCriterionOperation")
+        op.create.shared_set = ss_rn
+        op.create.keyword.text = text
+        op.create.keyword.match_type = mt
+        ops.append(op)
+        meta.append(("", str(text)))
+    req = client.get_type("MutateSharedCriteriaRequest")
+    req.customer_id = str(customer_id)
+    req.operations.extend(ops)
+    req.partial_failure = True
+    resp = svc.mutate_shared_criteria(request=req)
+    created = [r.resource_name for r in resp.results if getattr(r, "resource_name", "")]
+    rejected = _rejected_from_partial_failure(client, resp, meta, key="keyword")
+    if rejected and not created:
+        reasons = "; ".join(r["reason"] for r in rejected[:3])
+        tail = " — список создан, но пуст" if created_set else ""
+        raise ValueError(f"Google Ads отклонил все минус-слова ({len(rejected)}): {reasons}{tail}")
+    result = {
+        "customer_id": customer_id,
+        "shared_set_id": str(shared_set_id),
+        "shared_set_name": shared_set_name,
+        "shared_set_created": created_set,
+        "match_type": str(match_type),
+        "resource_names": created,
+        "count": len(created),
+        "applied": True,
+    }
+    if rejected:
+        result["rejected"] = rejected
+        result["rejected_count"] = len(rejected)
+    return result
+
+
+def _attach_shared_set_via_sdk(
+    client, customer_id: str, campaign_id: str, shared_set_id: str
+) -> dict:
+    """3.2б: привязать общий список минус-слов к кампании (CampaignSharedSet CREATE). Уже
+    привязан → серверная ошибка — fail loud, не глотаем (состояние не наше, докладываем как есть)."""
+    svc = client.get_service("CampaignSharedSetService")
+    cmp_svc = client.get_service("CampaignService")
+    ss_svc = client.get_service("SharedSetService")
+    op = client.get_type("CampaignSharedSetOperation")
+    op.create.campaign = cmp_svc.campaign_path(str(customer_id), str(campaign_id))
+    op.create.shared_set = ss_svc.shared_set_path(str(customer_id), str(shared_set_id))
+    resp = svc.mutate_campaign_shared_sets(customer_id=str(customer_id), operations=[op])
+    return {
+        "customer_id": customer_id,
+        "campaign_id": str(campaign_id),
+        "shared_set_id": str(shared_set_id),
+        "resource_name": resp.results[0].resource_name,
         "applied": True,
     }
 

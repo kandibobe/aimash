@@ -52,6 +52,16 @@ class AdGroupRef:
         )
 
 
+@dataclass
+class SharedSetRef:
+    # 3.2б: общий список минус-слов (NEGATIVE_KEYWORDS shared set) — для execute_confirmed.
+    id: str
+    resource_name: str
+    name: str
+    status: str
+    member_count: int = 0
+
+
 def gaql_escape(value: str) -> str:
     """Экранирование строкового литерала для GAQL (предотвращает инъекцию в WHERE name = '...').
     ЕДИНЫЙ источник: используют и резолв по имени (user/model-вход), и mutations для literal-WHERE
@@ -87,6 +97,33 @@ def find_campaign_by_name(
             budget_micros=row.campaign_budget.amount_micros,
             budget_explicitly_shared=bool(row.campaign_budget.explicitly_shared),
             budget_reference_count=int(row.campaign_budget.reference_count or 0),
+        )
+    return None
+
+
+def find_shared_set_by_name(
+    client: GoogleAdsClient, customer_id: str, name: str
+) -> SharedSetRef | None:
+    """3.2б: общий список минус-слов по ТОЧНОМУ имени. READ-ONLY, но замок мутаций (ensure_allowed):
+    резолвер живёт на пути исполнения подтверждённых мутаций. type = NEGATIVE_KEYWORDS — placement-
+    списки не наши. status != REMOVED (A3): Google освобождает имя удалённого списка — без фильтра
+    привязка/наполнение ушли бы в мёртвую сущность."""
+    ensure_allowed(customer_id)
+    ga = client.get_service("GoogleAdsService")
+    safe = gaql_escape(name)
+    q = (
+        "SELECT shared_set.id, shared_set.name, shared_set.status, shared_set.member_count "
+        "FROM shared_set "
+        f"WHERE shared_set.name = '{safe}' AND shared_set.type = 'NEGATIVE_KEYWORDS' "
+        "AND shared_set.status != 'REMOVED' LIMIT 1"
+    )
+    for row in ga.search(customer_id=str(customer_id), query=q):
+        return SharedSetRef(
+            id=str(row.shared_set.id),
+            resource_name=row.shared_set.resource_name,
+            name=row.shared_set.name,
+            status=row.shared_set.status.name,
+            member_count=int(row.shared_set.member_count or 0),
         )
     return None
 

@@ -245,6 +245,31 @@ def list_campaigns(
     )
 
 
+def list_negative_shared_sets(client: GoogleAdsClient, customer_id: str) -> list[dict]:
+    """3.2б: общие списки минус-слов аккаунта (NEGATIVE_KEYWORDS shared sets) — для пикера уровня
+    в UI батча минус-слов. Только для белого списка чтения. REMOVED — вон из WHERE (имя освобождено,
+    привязать/наполнить такой список нельзя). reference_count = к скольким кампаниям привязан
+    (0 — список «висит в воздухе» и ни на что не действует; UI это показывает)."""
+    ensure_read_allowed(customer_id)
+    ga = client.get_service("GoogleAdsService")
+    q = (
+        "SELECT shared_set.id, shared_set.name, shared_set.status, shared_set.member_count, "
+        "shared_set.reference_count FROM shared_set "
+        "WHERE shared_set.type = 'NEGATIVE_KEYWORDS' AND shared_set.status != 'REMOVED'"
+    )
+    rows = [
+        {
+            "id": str(r.shared_set.id),
+            "name": r.shared_set.name,
+            "status": r.shared_set.status.name,
+            "member_count": int(r.shared_set.member_count or 0),
+            "reference_count": int(r.shared_set.reference_count or 0),
+        }
+        for r in ga.search(customer_id=str(customer_id), query=q)
+    ]
+    return sorted(rows, key=lambda s: (s["name"] or "").casefold())
+
+
 # Порядок статусов для пикеров: активные → приостановленные → прочие (REMOVED/UNKNOWN).
 _CAMPAIGN_STATUS_ORDER = {"ENABLED": 0, "PAUSED": 1}
 

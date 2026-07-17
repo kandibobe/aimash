@@ -57,6 +57,8 @@ MUTATION_TOOLS?» отмечает членство в наборе, разре�
 | `remove_keywords` | `apply_remove_keywords` (:1824) | Удаляет ключи по тексту+типу из групп кампании | Нет | Да |
 | `add_negative_keywords` | `apply_add_negative_keywords` (:620) | Добавляет минус-слова на уровне кампании | Нет | Да |
 | `remove_negative_keywords` | `apply_remove_negative_keywords` (:648) | Снимает минус-слова кампании по тексту+типу | Нет | Да |
+| `add_negatives_to_shared_set` | `apply_add_negatives_to_shared_set` (:703) | 3.2б: минус-слова в ОБЩИЙ СПИСОК (NEGATIVE_KEYWORDS shared set); списка нет — создаёт (после claim) | Нет | Да |
+| `attach_shared_set` | `apply_attach_shared_set` (:739) | 3.2б: привязывает СУЩЕСТВУЮЩИЙ общий список минус-слов к кампании (CampaignSharedSet); нет списка — отказ | Нет | Да |
 | `pause_campaign` | `apply_pause_campaign` (:143) | Ставит кампанию на паузу (status=PAUSED) | Нет | Да |
 | `resume_campaign` | `apply_resume_campaign` (:162) | Включает кампанию (status=ENABLED) | Нет | Да |
 | `launch_campaign` | `apply_launch_campaign` (:189) | Запуск созданной визардом кампании (PAUSED → ENABLED) | Нет | В наборе нет: минтует бот (§19 визард) |

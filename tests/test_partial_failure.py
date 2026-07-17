@@ -57,7 +57,7 @@ def _pfe(*errs: tuple[int, str, str], code: int = 3):
 
 
 def _client(resp, captured: dict):
-    """Дакт-фейк GoogleAdsClient для _add_keywords_via_sdk/_add_negative_keywords_via_sdk."""
+    """Дакт-фейк GoogleAdsClient для батчевых _*_via_sdk (ключи/минус-слова/shared set)."""
 
     class _AgSvc:
         def ad_group_path(self, cid, agid):
@@ -76,9 +76,32 @@ def _client(resp, captured: dict):
             captured["request"] = request
             return resp
 
+    class _SharedSetSvc:  # 3.2б-2: создание списка + путь sharedSets/<id>
+        def shared_set_path(self, cid, ssid):
+            return f"customers/{cid}/sharedSets/{ssid}"
+
+        def mutate_shared_sets(self, *, customer_id, operations):
+            captured["shared_set_ops"] = operations
+            return SimpleNamespace(results=_results(f"customers/{customer_id}/sharedSets/909"))
+
+    class _SharedCritSvc:
+        def mutate_shared_criteria(self, request):
+            captured["request"] = request
+            return resp
+
+    class _CampSharedSvc:
+        def mutate_campaign_shared_sets(self, *, customer_id, operations):
+            captured["css_ops"] = operations
+            camp = operations[0].create.campaign.rsplit("/", 1)[-1]
+            ss = operations[0].create.shared_set.rsplit("/", 1)[-1]
+            return SimpleNamespace(
+                results=_results(f"customers/{customer_id}/campaignSharedSets/{camp}~{ss}")
+            )
+
     class _Enums:
         KeywordMatchTypeEnum = SimpleNamespace(BROAD="BROAD", PHRASE="PHRASE", EXACT="EXACT")
         AdGroupCriterionStatusEnum = SimpleNamespace(ENABLED="ENABLED")
+        SharedSetTypeEnum = SimpleNamespace(NEGATIVE_KEYWORDS="NEGATIVE_KEYWORDS")
 
     class _Client:
         enums = _Enums()
@@ -89,12 +112,15 @@ def _client(resp, captured: dict):
                 "CampaignService": _CmpSvc(),
                 "AdGroupCriterionService": _CritSvc(),
                 "CampaignCriterionService": _CritSvc(),
+                "SharedSetService": _SharedSetSvc(),
+                "SharedCriterionService": _SharedCritSvc(),
+                "CampaignSharedSetService": _CampSharedSvc(),
             }[name]
 
         def get_type(self, name):
             if name.startswith("Mutate"):
                 return _Req()
-            return _NS()  # AdGroupCriterionOperation / CampaignCriterionOperation
+            return _NS()  # *Operation (ad_group/campaign/shared criterion, shared set, css)
 
     return _Client()
 
@@ -172,6 +198,72 @@ def test_add_negative_keywords_adgroup_partial_failure_mirror():
     assert req.partial_failure is True
     assert req.operations[0].create.negative is True  # исключение, не таргетинг
     assert req.operations[0].create.ad_group == f"customers/{DRAFT}/adGroups/42"
+
+
+# ── 3.2б-2: общий список минус-слов (SharedCriterion / SharedSet / CampaignSharedSet) ──
+def test_add_negatives_to_shared_set_partial_failure_mirror():
+    """Shared-set вариант — тот же контракт rejected. negative на SharedCriterion НЕ ставится
+    (исключение задаёт ТИП самого списка); существующий список → создание НЕ зовётся."""
+    captured: dict = {}
+    resp = SimpleNamespace(
+        results=_results("sc0", ""),
+        partial_failure_error=_pfe((1, "KEYWORD_HAS_INVALID_CHARS", "invalid chars")),
+    )
+    client = _client(resp, captured)
+    res = mut._add_negatives_to_shared_set_via_sdk(
+        client, DRAFT, "77", "Общие минуса", ["ok", "плох@й"], "broad"
+    )
+    assert res["count"] == 1 and res["resource_names"] == ["sc0"]
+    assert res["shared_set_id"] == "77" and res["shared_set_created"] is False
+    assert res["rejected"][0]["keyword"] == "плох@й"
+    req = captured["request"]
+    assert req.partial_failure is True
+    assert req.operations[0].create.shared_set == f"customers/{DRAFT}/sharedSets/77"
+    # vars(), не getattr: у _NS доступ к атрибуту СОЗДАЁТ его — проверяем реальное отсутствие
+    assert "negative" not in vars(req.operations[0].create)
+    assert "shared_set_ops" not in captured  # SharedSetService.create не вызывался
+
+
+def test_add_negatives_to_shared_set_creates_missing_list():
+    """id=None ⇒ СНАЧАЛА SharedSetService.create (type=NEGATIVE_KEYWORDS), критерии — в НОВЫЙ список."""
+    captured: dict = {}
+    resp = SimpleNamespace(results=_results("sc0"))  # без pfe — чистый батч
+    client = _client(resp, captured)
+    res = mut._add_negatives_to_shared_set_via_sdk(
+        client, DRAFT, None, "Новый список", ["a"], "exact"
+    )
+    assert res["shared_set_created"] is True and res["shared_set_id"] == "909"
+    assert res["count"] == 1 and "rejected" not in res
+    ss_create = captured["shared_set_ops"][0].create
+    assert ss_create.name == "Новый список" and ss_create.type_ == "NEGATIVE_KEYWORDS"
+    assert (
+        captured["request"].operations[0].create.shared_set == f"customers/{DRAFT}/sharedSets/909"
+    )
+
+
+def test_add_negatives_to_shared_set_all_rejected_notes_created_list():
+    """Все отклонены на СВЕЖЕсозданном списке → честный ValueError с пометкой про пустой список
+    (side-effect создания не скрываем: список уже существует в аккаунте)."""
+    resp = SimpleNamespace(
+        results=_results(""),
+        partial_failure_error=_pfe((0, "DUPLICATE_KEYWORD", "dup")),
+    )
+    client = _client(resp, {})
+    with pytest.raises(ValueError, match="список создан, но пуст"):
+        mut._add_negatives_to_shared_set_via_sdk(client, DRAFT, None, "Новый", ["a"], "broad")
+
+
+def test_attach_shared_set_via_sdk_shape():
+    """CampaignSharedSet CREATE: правильные resource_name кампании и списка, результат с applied."""
+    captured: dict = {}
+    client = _client(SimpleNamespace(results=_results()), captured)
+    res = mut._attach_shared_set_via_sdk(client, DRAFT, "555", "77")
+    op = captured["css_ops"][0]
+    assert op.create.campaign == f"customers/{DRAFT}/campaigns/555"
+    assert op.create.shared_set == f"customers/{DRAFT}/sharedSets/77"
+    assert res["resource_name"] == f"customers/{DRAFT}/campaignSharedSets/555~77"
+    assert res["campaign_id"] == "555" and res["shared_set_id"] == "77"
+    assert res["applied"] is True
 
 
 # ── B3: ключи визарда §19 идут тем же контрактом, что /addkeys ───────────────────
