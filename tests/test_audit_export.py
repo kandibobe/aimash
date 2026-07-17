@@ -1,13 +1,16 @@
 """Профессиональная выгрузка /audit в Google Sheets (+ .xlsx файлом) — Часть B.
 
 Инварианты (каждый — про честность/деньги, не про красоту):
-• 3 вкладки: Обзор (карточка) + По семьям (свод) + Находки (весь список worst-first) — и в Sheets,
-  и в .xlsx (одна раскладка, reports.findings);
+• 3 вкладки: Находки (весь список worst-first) ПЕРВОЙ + По семьям (свод) + Обзор (карточка)
+  ПОСЛЕДНЕЙ — и в Sheets, и в .xlsx (одна раскладка, reports.findings; замечание 5, 2026-07-17:
+  файл открывают ради находок, а «Обзор» — дословная копия поста в чате);
+• факты находки — отдельными колонками (сортировать/фильтровать), нет факта → пусто, не 0;
+• бумага перечисляет ВСЕ быстрые победы (карточка в чате режет блок под кнопки);
 • вкладка «По семьям» == result.families (движок посчитал — экспорт не пересчитывает);
 • экспорт — БУМАГА: ни колонки suggested_operation, ни кнопки «применить» (золотое правило №3);
 • ячейки клиента обезврежены (safe_row: имя кампании `=HYPERLINK(...)` — текст, не формула);
-• денежный формат ТОЛЬКО на денежной колонке (иначе проза форматировалась бы как проценты);
-• EN-артефакт без кириллицы (RU-утечка), первая вкладка «Overview»;
+• числовой формат ТОЛЬКО на колонках реестра FINDINGS_FORMATS (иначе проза — как проценты);
+• EN-артефакт без кириллицы (RU-утечка), первая вкладка «Findings»;
 • publish_audit_to_sheets шарит reader (финансовая бумага), НЕ writer;
 • клик по кнопке НЕ пересобирает аудит: холодный кэш → stale-алерт, тёплый → тот же result из кэша.
 """
@@ -26,12 +29,17 @@ import pytest  # noqa: E402
 
 from audit.engine import build_audit  # noqa: E402
 from reports.findings import (  # noqa: E402
+    CLICKS_COL,
+    COST_COL,
+    CPA_COL,
     FAMILY_MONEY_COL,
     FAMILY_SUMMARY_TITLE,
     FINDINGS_TITLE,
     MONEY_COL,
     OVERVIEW_TITLE,
     family_summary_rows,
+    findings_meta_rows,
+    findings_rows,
 )
 from reports.period import last_n_days  # noqa: E402
 from reports.queries import (  # noqa: E402
@@ -118,27 +126,29 @@ def _xlsx_texts(wb, sheet: str) -> list[str]:
     return [str(c.value) for row in ws.iter_rows() for c in row if c.value is not None]
 
 
-# ── структура: 3 вкладки в Sheets и в .xlsx ────────────────────────────────────────
+# ── структура: 3 вкладки в Sheets и в .xlsx, «Находки» первой, «Обзор» последней ─────
 def test_audit_export_has_three_sections():
     r = _result()
     assert [t.title for t in build_audit_sheets_data(r, "ru")] == [
-        OVERVIEW_TITLE,
-        FAMILY_SUMMARY_TITLE,
         FINDINGS_TITLE,
+        FAMILY_SUMMARY_TITLE,
+        OVERVIEW_TITLE,
     ]
     assert build_audit_workbook(r, "ru").sheetnames == [
-        OVERVIEW_TITLE,
-        FAMILY_SUMMARY_TITLE,
         FINDINGS_TITLE,
+        FAMILY_SUMMARY_TITLE,
+        OVERVIEW_TITLE,
     ]
 
 
 def test_overview_tab_is_the_audit_card_prose():
-    """Вкладка «Обзор» — та же проза, что в карточке /audit (render_audit actions=False)."""
+    """Вкладка «Обзор» — та же проза, что в карточке /audit (render_audit actions=False), но
+    ПОСЛЕДНЕЙ: это копия поста в чате, из-за неё первой выгрузка читалась как «те же данные»."""
     from audit.render import render_audit
 
     r = _result()
-    tab = build_audit_sheets_data(r, "ru")[0]
+    tab = build_audit_sheets_data(r, "ru")[-1]
+    assert tab.title == OVERVIEW_TITLE
     texts = _cells(tab.rows)
     for line in render_audit(r, "ru", actions=False).split("\n"):
         if line:
@@ -203,13 +213,13 @@ def test_audit_cells_are_formula_safe(tmp_path):
         assert c.data_type == "s" and c.value.startswith("'=")  # текст, НЕ формула
 
 
-# ── формат: денежная колонка одна ───────────────────────────────────────────────────
+# ── формат: числовые колонки строго по реестру FINDINGS_FORMATS ──────────────────────
 def test_money_format_only_on_money_columns():
     r = _result()
     tabs = build_audit_sheets_data(r, "ru")
     reqs = format_requests(tabs)
 
-    def _money_cols(tab_idx: int) -> list[int]:
+    def _num_cols(tab_idx: int) -> list[int]:
         return [
             rq["repeatCell"]["range"]["startColumnIndex"]
             for rq in reqs
@@ -218,16 +228,114 @@ def test_money_format_only_on_money_columns():
             and rq["repeatCell"]["range"]["sheetId"] == tab_idx
         ]
 
-    assert _money_cols(0) == []  # «Обзор» — проза, числовых колонок нет
-    assert _money_cols(1) == [FAMILY_MONEY_COL]  # «По семьям» — только «Под риском»
-    assert _money_cols(2) == [MONEY_COL]  # «Находки» — только «Под риском»
+    # «Находки» — «Под риском» + числовые факты (расход/клики/CPA), и НИЧЕГО сверх реестра
+    assert _num_cols(0) == [MONEY_COL, COST_COL, CLICKS_COL, CPA_COL]
+    assert _num_cols(1) == [FAMILY_MONEY_COL]  # «По семьям» — только «Под риском»
+    assert _num_cols(2) == []  # «Обзор» — проза, числовых колонок нет
+
+
+# ── колонки фактов листа «Находки» (замечание 5: сортировать/фильтровать, а не парсить прозу) ──
+def test_findings_rows_carry_fact_columns():
+    """Факты находки — отдельными колонками: cost/clicks/cpa числами, тип соответствия/регион/ключ
+    строками; нет факта → ПУСТАЯ ячейка (нет данных ≠ ноль). Ключ и запрос делят одну колонку —
+    у находки лежит ровно одно из полей."""
+    full = SimpleNamespace(
+        severity="warning",
+        family="waste",
+        target_campaign="Search Brand",
+        at_risk=120.5,
+        check_id="wasteful_keyword",
+        facts={
+            "campaign": "Search Brand",
+            "cost": 120.456,
+            "clicks": 42,
+            "cpa": 7.5,
+            "match_type": "BROAD",
+            "keyword": "buy cars",
+        },
+    )
+    bare = SimpleNamespace(
+        severity="info",
+        family="structure",
+        target_campaign="",
+        at_risk=0.0,
+        check_id="fake_no_facts",
+        facts={},
+    )
+    row_full, row_bare = findings_rows(SimpleNamespace(currency="USD", findings=[full, bare]), "ru")
+    assert row_full[COST_COL] == 120.46
+    assert row_full[CLICKS_COL] == 42
+    assert row_full[CPA_COL] == 7.5
+    assert row_full[CPA_COL + 1] == "BROAD"  # «Тип соответствия»
+    assert row_full[CPA_COL + 2] == ""  # «Регион»: факта нет → пусто
+    assert row_full[CPA_COL + 3] == "buy cars"  # «Ключ/запрос»
+    # у «голой» находки все факт-колонки пустые, НЕ 0 (нет данных ≠ ноль)
+    assert [row_bare[c] for c in range(MONEY_COL, CPA_COL + 4)] == [""] * 7
+    # поисковый запрос делит колонку «Ключ/запрос» с ключом
+    term = SimpleNamespace(
+        severity="warning",
+        family="search_terms",
+        target_campaign="C",
+        at_risk=1.0,
+        check_id="wasteful_search_term",
+        facts={"search_term": "free stuff"},
+    )
+    (row_term,) = findings_rows(SimpleNamespace(currency="USD", findings=[term]), "ru")
+    assert row_term[CPA_COL + 3] == "free stuff"
+
+
+# ── бумага перечисляет ВСЕ быстрые победы (карточка режет блок под кнопки) ────────────
+def test_paper_lists_quick_wins_beyond_the_button_slice():
+    """В чате «⚡ Быстрые победы» берутся только из первых QUICK_WIN_POOL находок — ровно им бот
+    рисует кнопки, а обещать «в один тап» без кнопки — ложь. У бумаги кнопок нет: обзор выгрузки
+    обязан перечислить КАЖДУЮ такую находку (замечание 5, 2026-07-17)."""
+    from audit.render import QUICK_WIN_POOL, _quick_win_line, render_audit
+
+    camps = [
+        (
+            (f"Camp{i:02d}", "ENABLED"),
+            Metrics(
+                impressions=1000,
+                clicks=50,
+                cost_micros=(1200 - i * 50) * 1_000_000,
+                conversions=0.0,
+            ),
+        )
+        for i in range(12)  # 12 сливающих кампаний > пула кнопок (8)
+    ]
+    camps.append(
+        (
+            ("Winner", "ENABLED"),
+            Metrics(impressions=1000, clicks=50, cost_micros=100_000_000, conversions=10.0),
+        )
+    )
+    report = SimpleNamespace(
+        customer_id="7753643025",
+        totals=Metrics(
+            impressions=13_000, clicks=650, cost_micros=11_200_000_000, conversions=10.0
+        ),
+        prev_totals=None,
+        period=last_n_days(7, today=date(2026, 6, 25)),
+        currency="USD",
+        breakdowns=[Breakdown("campaign", "Кампании", ["Кампания", "Статус"], camps)],
+    )
+    r = build_audit(report)
+    one_tap = [f for f in r.findings if f.one_tap]
+    beyond = [f for i, f in enumerate(r.findings) if i >= QUICK_WIN_POOL and f.one_tap]
+    assert len(one_tap) > QUICK_WIN_POOL and beyond, "фикстура: мало one-tap находок — тест пуст"
+    paper = [row[0] for row in findings_meta_rows(r, "ru") if row]
+    card = render_audit(r, "ru", actions=False)
+    for f in one_tap:  # бумага — инвентарь: строка на КАЖДУЮ
+        assert f"• {_quick_win_line(f, 'ru', r.currency)}" in paper
+    missed = f"• {_quick_win_line(beyond[-1], 'ru', r.currency)}"
+    assert missed in paper and missed not in card  # карточка её не обещает — кнопки нет
 
 
 # ── EN-артефакт без кириллицы ───────────────────────────────────────────────────────
 def test_audit_en_has_no_cyrillic():
     r = _result()
     tabs = build_audit_sheets_data(r, "en")
-    assert tabs[0].title == "Overview"
+    assert tabs[0].title == "Findings" and tabs[-1].title == "Overview"
     leaks = [c for c in _cells([row for t in tabs for row in t.rows]) if _CYR & set(c)]
     leaks += [t.title for t in tabs if _CYR & set(t.title)]
     assert not leaks, f"RU-утечка в EN-вкладках Sheets: {leaks}"
@@ -268,14 +376,17 @@ def test_converters_shape_and_empty():
 
 
 def test_enriched_export_appends_data_section():
-    """report прицеплен → после 3 вкладок идут ДАННЫЕ: Сводка + разбивки отчёта + запросы/QS/гео."""
+    """report прицеплен → между находками/сводом и финальным «Обзором» идут ДАННЫЕ:
+    Сводка + разбивки отчёта + запросы/QS/гео."""
     r = _enriched_result()
     titles = [t.title for t in build_audit_sheets_data(r, "ru")]
-    assert titles[:3] == [OVERVIEW_TITLE, FAMILY_SUMMARY_TITLE, FINDINGS_TITLE]
+    assert titles[:2] == [FINDINGS_TITLE, FAMILY_SUMMARY_TITLE]
+    assert titles[-1] == OVERVIEW_TITLE
     for expect in ("Сводка", "Кампании", "Поисковые запросы", "Показатель качества", "География"):
         assert expect in titles, f"нет вкладки данных {expect!r}: {titles}"
     names = build_audit_workbook(r, "ru").sheetnames
-    assert names[:3] == [OVERVIEW_TITLE, FAMILY_SUMMARY_TITLE, FINDINGS_TITLE]
+    assert names[:2] == [FINDINGS_TITLE, FAMILY_SUMMARY_TITLE]
+    assert names[-1] == OVERVIEW_TITLE
     for expect in ("Сводка", "Поисковые запросы", "География"):
         assert expect in names, f"нет листа данных {expect!r}: {names}"
 
@@ -375,7 +486,7 @@ def test_publish_audit_to_sheets_shares_reader():
     assert share == "reader"  # финансовая бумага — reader, НЕ writer
     create = next(e for e in svc.log if e[0] == "create")
     titles = [s["properties"]["title"] for s in create[1]["sheets"]]
-    assert titles == [OVERVIEW_TITLE, FAMILY_SUMMARY_TITLE, FINDINGS_TITLE]
+    assert titles == [FINDINGS_TITLE, FAMILY_SUMMARY_TITLE, OVERVIEW_TITLE]
     perm = next(e for e in drive.log if e[0] == "permissions.create")
     assert perm[2] == {"type": "anyone", "role": "reader"}
 

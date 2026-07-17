@@ -196,25 +196,14 @@ def write_report_xlsx(report: ReportData, path: str, lang: str = "ru", *, audit=
 
 
 def build_audit_workbook(result, lang: str = "ru") -> Workbook:
-    """Книга выгрузки /audit из УЖЕ вычисленного AuditResult: «Обзор» (карточка без топ-3/дисклеймера,
-    проза в колонке A) + «По семьям» (свод) + «Находки» (весь список worst-first). Зеркало
-    reports.sheets.build_audit_sheets_data. Аудит НЕ пересобираем — на вход готовый result (кэш
-    bot-слоя); никаких доп-чтений Google Ads. GR3: колонки «применить» нет — экспорт бумага."""
+    """Книга выгрузки /audit из УЖЕ вычисленного AuditResult: «Находки» (весь список worst-first)
+    ПЕРВЫМ листом, «По семьям» (свод), секция данных, «Обзор» (карточка без топ-3/дисклеймера,
+    проза в колонке A) ПОСЛЕДНИМ — он дословная копия поста в чате (замечание 5, 2026-07-17).
+    Зеркало reports.sheets.build_audit_sheets_data. Аудит НЕ пересобираем — на вход готовый result
+    (кэш bot-слоя); никаких доп-чтений Google Ads. GR3: колонки «применить» нет — экспорт бумага."""
     wb = Workbook()
-    overview = wb.active
-    overview.title = loc(OVERVIEW_TITLE, lang)[:31]
-    for row in findings_meta_rows(result, lang):
-        _append(overview, row)
-    overview.cell(row=1, column=1).font = Font(bold=True, size=14)
-    _autosize(overview, 1, cap=90)  # проза (строки карточки) длиннее ярлыка
+    wb.remove(wb.active)  # листы кладём create_sheet'ом в нужном порядке — дефолтный «Sheet» лишний
     currency = getattr(result, "currency", "") or ""
-    _write_simple_table(
-        wb,
-        loc(FAMILY_SUMMARY_TITLE, lang),
-        family_summary_headers(currency, lang),
-        family_summary_rows(result, lang),
-        FAMILY_SUMMARY_FORMATS,
-    )
     _write_simple_table(
         wb,
         loc(FINDINGS_TITLE, lang),
@@ -223,9 +212,16 @@ def build_audit_workbook(result, lang: str = "ru") -> Workbook:
         FINDINGS_FORMATS,
         cap=90,  # «Что не так» — предложение, а не ярлык
     )
+    _write_simple_table(
+        wb,
+        loc(FAMILY_SUMMARY_TITLE, lang),
+        family_summary_headers(currency, lang),
+        family_summary_rows(result, lang),
+        FAMILY_SUMMARY_FORMATS,
+    )
     # Секция ДАННЫХ (жалоба «в щитс те же данные, что и в посте»): сырьё, прицепленное слоем сбора
     # аудита к result — «Сводка» (итоги) + разбивки отчёта + аудит-таблицы (запросы/QS/гео). Нет
-    # report (engine-only вызов / старый кэш) → прежние 3 листа. Зеркало
+    # report (engine-only вызов / старый кэш) → без секции. Зеркало
     # reports.sheets.build_audit_sheets_data.
     report = getattr(result, "report", None)
     if report is not None:
@@ -234,6 +230,11 @@ def build_audit_workbook(result, lang: str = "ru") -> Workbook:
         extra = getattr(result, "audit_tables", None) or []
         for b in [*getattr(report, "breakdowns", []), *extra]:
             _write_breakdown(wb, b, rcur, lang)
+    overview = wb.create_sheet(title=loc(OVERVIEW_TITLE, lang)[:31])
+    for row in findings_meta_rows(result, lang):
+        _append(overview, row)
+    overview.cell(row=1, column=1).font = Font(bold=True, size=14)
+    _autosize(overview, 1, cap=90)  # проза (строки карточки) длиннее ярлыка
     return wb
 
 

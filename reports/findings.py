@@ -30,28 +30,65 @@ _SEVERITY = {
 }
 
 # Колонки листа. «#» — ранг (находки уже отсортированы worst-first: строка 1 листа = №1 карточки).
-_COLUMNS = ["#", "Важность", "Семья", "Кампания", "Под риском", "Что не так", "Проверка"]
-MONEY_COL = 4  # 0-based индекс «Под риском» — единственная числовая колонка листа
+# Колонки фактов (Расход…Ключ/запрос) — замечание 5 (2026-07-17): вся конкретика находки сидела в
+# одном текстовом столбце «Что не так» — в таблице по ней нельзя ни сортировать, ни фильтровать.
+# Ключи берём из Finding.facts как есть (их считает КОД в audit.engine); нет факта → пустая ячейка.
+_COLUMNS = [
+    "#",
+    "Важность",
+    "Семья",
+    "Кампания",
+    "Под риском",
+    "Расход",
+    "Клики",
+    "CPA",
+    "Тип соответствия",
+    "Регион",
+    "Ключ/запрос",
+    "Что не так",
+    "Проверка",
+]
+MONEY_COL = 4  # 0-based индекс «Под риском»
+COST_COL, CLICKS_COL, CPA_COL = 5, 6, 7  # числовые колонки фактов
 MONEY_FORMAT = "#,##0.00"  # тот же формат, что у «Расход» в reports.queries.METRIC_FORMATS
+INT_FORMAT = "#,##0"  # «Клики» — целые, как в METRIC_FORMATS
 # (колонка, формат) — для xlsx и для Sheets (SheetTab.formats). Реестр один, как METRIC_FORMATS.
-FINDINGS_FORMATS: list[tuple[int, str]] = [(MONEY_COL, MONEY_FORMAT)]
+FINDINGS_FORMATS: list[tuple[int, str]] = [
+    (MONEY_COL, MONEY_FORMAT),
+    (COST_COL, MONEY_FORMAT),
+    (CLICKS_COL, INT_FORMAT),
+    (CPA_COL, MONEY_FORMAT),
+]
+_CURRENCY_COLS = (MONEY_COL, COST_COL, CPA_COL)  # куда клеить код валюты (§9)
 
 
 def findings_headers(currency: str = "", lang: str = "ru") -> list[str]:
-    """Шапка листа: код валюты на денежной колонке (§9, как metric_headers)."""
+    """Шапка листа: код валюты на денежных колонках (§9, как metric_headers)."""
     out = [loc(h, lang) for h in _COLUMNS]
     if currency:
-        out[MONEY_COL] = f"{out[MONEY_COL]}, {currency}"
+        for c in _CURRENCY_COLS:
+            out[c] = f"{out[c]}, {currency}"
     return out
 
 
 def findings_meta_rows(result, lang: str = "ru") -> list[list]:
     """Шапка-обзор листа: карточка аудита БЕЗ топ-3/дисклеймера (действия — не задача бумаги),
-    по строке на строку. Прозу не переписываем — берём ту же, что у /audit."""
+    по строке на строку. Прозу не переписываем — берём ту же, что у /audit. all_quick_wins=True:
+    бумага — инвентарь, а не клавиатура: «⚡ Быстрые победы» здесь перечисляют ВСЕ такие находки,
+    а не срез первых 8, под которые бот рисует кнопки (замечание 5, 2026-07-17)."""
     from audit.render import render_audit
 
-    text = render_audit(result, lang, actions=False)
+    text = render_audit(result, lang, actions=False, all_quick_wins=True)
     return [[line] if line else [] for line in text.split("\n")]
+
+
+def _fact_num(v, *, nd: int = 2):
+    """Числовой факт находки → ячейка: нет/не число → пусто (нет данных ≠ ноль)."""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return ""
+    return int(x) if nd == 0 else round(x, nd)
 
 
 def findings_rows(result, lang: str = "ru") -> list[list]:
@@ -71,6 +108,13 @@ def findings_rows(result, lang: str = "ru") -> list[list]:
                 family_label(f.family, lang),
                 f.target_campaign or facts.get("campaign", "") or "",
                 round(float(f.at_risk), 2) if f.at_risk > 0 else "",
+                _fact_num(facts.get("cost")),
+                _fact_num(facts.get("clicks"), nd=0),
+                _fact_num(facts.get("cpa")),
+                str(facts.get("match_type", "") or ""),
+                str(facts.get("region", "") or ""),
+                # Кандидат в минус-слова: у находки лежит РОВНО ОДНО из полей (ключ ИЛИ запрос).
+                str(facts.get("keyword") or facts.get("search_term") or facts.get("term") or ""),
                 finding_text(f, lang, cur),
                 f.check_id,
             ]

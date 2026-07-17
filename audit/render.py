@@ -655,12 +655,15 @@ def render_audit(
     actions: bool = True,
     period_label: str | None = None,
     momentary: bool = False,
+    all_quick_wins: bool = False,
 ) -> str:
     """Собрать карточку аудита из AuditResult. actions=True → самодостаточная (топ-3 + дисклеймер);
     actions=False → ОБЗОР (score + семьи + Google-балл) без топ-3/дисклеймера — действия шлёт bot-слой
     отдельными сообщениями с кнопками «применить». period_label — подпись выбранного периода в заголовке;
     momentary=True (аудит за произвольный ИСТОРИЧЕСКИЙ период) → баннер, что моментальные сигналы (Google-
-    балл/рекомендации/статус/модерация/ставки/конверсии) — на СЕЙЧАС, не за период. Всегда offline."""
+    балл/рекомендации/статус/модерация/ставки/конверсии) — на СЕЙЧАС, не за период. all_quick_wins=True —
+    режим БУМАГИ (экспорт): «⚡ Быстрые победы» перечисляют все one_tap находки без среза по кнопкам
+    (в чате блок режется по первым QUICK_WIN_POOL — только им бот рисует кнопки). Всегда offline."""
     lang = "en" if lang == "en" else "ru"
     cur = result.currency
     labels = _FAMILY_LABEL[lang]
@@ -783,12 +786,14 @@ def render_audit(
     # блока — «сколько вернём прямо сейчас». Деньги НЕ суммируем: расходы находок пересекаются
     # (запрос ⊂ кампания) и сумма врала бы — показываем цену КАЖДОЙ строки (крит.C2).
     #
-    # ⚠️ Берём ТОЛЬКО из первых QUICK_WIN_POOL находок (ревизия волны): кнопки бот рисует именно им
-    # (bot.main._AUDIT_MAX_FINDINGS), а обещание «в один тап» для находки без кнопки — ложь. Равенство
-    # констант стережёт тест `test_quick_win_pool_matches_bot_slice`.
-    quick = sorted(
-        (f for f in result.findings[:QUICK_WIN_POOL] if f.one_tap), key=lambda f: -f.at_risk
-    )[:3]
+    # ⚠️ В ЧАТЕ берём ТОЛЬКО из первых QUICK_WIN_POOL находок (ревизия волны): кнопки бот рисует
+    # именно им (bot.main._AUDIT_MAX_FINDINGS), а обещание «в один тап» для находки без кнопки — ложь.
+    # Равенство констант стережёт тест `test_quick_win_pool_matches_bot_slice`. На БУМАГЕ
+    # (all_quick_wins=True) кнопок нет вовсе — там блок честно инвентаризирует все one_tap находки.
+    pool = result.findings if all_quick_wins else result.findings[:QUICK_WIN_POOL]
+    quick = sorted((f for f in pool if f.one_tap), key=lambda f: -f.at_risk)
+    if not all_quick_wins:
+        quick = quick[:3]
     if quick:
         lines.append("")
         lines.append(

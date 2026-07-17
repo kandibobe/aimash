@@ -199,26 +199,23 @@ def build_audit_sheets_data(result, lang: str = "ru") -> list[SheetTab]:
 
     currency = getattr(result, "currency", "") or ""
     seen: set[str] = set()
+    # Порядок — замечание 5 (2026-07-17): «Находки» ПЕРВОЙ (человек открывает файл ради них),
+    # «Обзор» ПОСЛЕДНЕЙ — это дословная копия поста в чате, из-за неё выгрузка читалась как
+    # «те же данные, что и в посте». Зеркало xlsx.build_audit_workbook.
     tabs = [
         SheetTab(
-            _sanitize_title(loc(OVERVIEW_TITLE, lang), seen),
-            findings_meta_rows(result, lang),
-            # проза в колонке A — числовых колонок нет; formats=[] гасит метрик-формат по умолчанию
-            formats=[],
+            _sanitize_title(loc(FINDINGS_TITLE, lang), seen),
+            [findings_headers(currency, lang), *findings_rows(result, lang)],
+            formats=FINDINGS_FORMATS,
         ),
         SheetTab(
             _sanitize_title(loc(FAMILY_SUMMARY_TITLE, lang), seen),
             [family_summary_headers(currency, lang), *family_summary_rows(result, lang)],
             formats=FAMILY_SUMMARY_FORMATS,
         ),
-        SheetTab(
-            _sanitize_title(loc(FINDINGS_TITLE, lang), seen),
-            [findings_headers(currency, lang), *findings_rows(result, lang)],
-            formats=FINDINGS_FORMATS,
-        ),
     ]
     # Секция ДАННЫХ (жалоба владельца «в щитс те же данные, что и в посте»): сырьё, прицепленное
-    # слоем сбора аудита к result. Нет report (engine-only вызов / старый кэш) → прежние 3 вкладки.
+    # слоем сбора аудита к result. Нет report (engine-only вызов / старый кэш) → без секции.
     report = getattr(result, "report", None)
     if report is not None:
         rcur = getattr(report, "currency", "") or currency
@@ -226,6 +223,14 @@ def build_audit_sheets_data(result, lang: str = "ru") -> list[SheetTab]:
         extra = getattr(result, "audit_tables", None) or []
         for b in [*getattr(report, "breakdowns", []), *extra]:
             tabs.append(_breakdown_tab(b, rcur, lang, seen))
+    tabs.append(
+        SheetTab(
+            _sanitize_title(loc(OVERVIEW_TITLE, lang), seen),
+            findings_meta_rows(result, lang),
+            # проза в колонке A — числовых колонок нет; formats=[] гасит метрик-формат по умолчанию
+            formats=[],
+        )
+    )
     return tabs
 
 

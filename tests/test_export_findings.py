@@ -23,7 +23,7 @@ import openpyxl  # noqa: E402
 import pytest  # noqa: E402
 
 from audit.engine import build_audit  # noqa: E402
-from reports.findings import FINDINGS_TITLE, MONEY_COL, findings_rows  # noqa: E402
+from reports.findings import FINDINGS_FORMATS, FINDINGS_TITLE, MONEY_COL, findings_rows  # noqa: E402
 from reports.period import last_n_days  # noqa: E402
 from reports.queries import Breakdown, Metrics  # noqa: E402
 from reports.sheets import build_sheets_data, format_requests  # noqa: E402
@@ -131,8 +131,9 @@ def test_findings_en_has_no_cyrillic():
 
 
 def test_sheets_findings_tab_formats_the_money_column_only():
-    """У вкладки находок раскладка НЕ метрическая: формат вешаем на «Под риском», а не на 9 колонок
-    METRIC_FORMATS (иначе Sheets отформатировал бы прозу как проценты)."""
+    """У вкладки находок раскладка НЕ метрическая: форматы — строго по реестру FINDINGS_FORMATS
+    («Под риском» + числовые факты), а не 9 колонок METRIC_FORMATS (иначе Sheets отформатировал бы
+    прозу как проценты)."""
     report = _report()
     result = build_audit(report)
     tabs = build_sheets_data(report, "ru", audit=result)
@@ -145,9 +146,9 @@ def test_sheets_findings_tab_formats_the_money_column_only():
         and "numberFormat" in r["repeatCell"]["cell"]["userEnteredFormat"]
         and r["repeatCell"]["range"]["sheetId"] == tabs.index(fin)
     ]
-    assert len(num) == 1  # ровно одна числовая колонка
-    assert num[0]["range"]["startColumnIndex"] == MONEY_COL
-    assert num[0]["range"]["startRowIndex"] == fin.header_row + 1
+    assert [rq["range"]["startColumnIndex"] for rq in num] == [c for c, _f in FINDINGS_FORMATS]
+    for rq in num:
+        assert rq["range"]["startRowIndex"] == fin.header_row + 1
 
 
 def _child(cid, name):
