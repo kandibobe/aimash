@@ -2395,8 +2395,15 @@ async def _require_read_account(m: Message, flow: str, *, chat_id: int | None = 
     # только ВНУТРИ пикера (_read_account_rows) — замкнутый круг. Прогреваем discovery ДО
     # account_choice_pending: no-op при непустом наборе и в тестах, кулдаун — в ads.client.
     await ensure_read_children_discovered()
-    if not await account_choice_pending(cid):  # внутри fail-closed к False (Draft, как раньше)
-        return acct
+    # Скрин 2026-07-17: на Draft вход /campaigns должен ВСЕГДА открывать пикер аккаунта, если
+    # живые аккаунты есть («сначала аккаунт, потом кампании») — в т.ч. при ЗАКРЕПЛЁННОМ Draft
+    # (авто-пин _heal_if_stuck_global ⇒ account_choice_pending=False). Тот же сигнал, что и у
+    # баннера «Сменить аккаунт» (_live_account_hint), но пикер теперь ПЕРЕД списком, а не
+    # отложенной кнопкой ПОСЛЕ песочных кампаний. Явный пик Draft из пикера идёт в
+    # _send_campaigns_for напрямую (минуя эту развилку) — цикла нет.
+    force_campaigns_pick = flow == "campaigns" and bool(_live_account_hint(acct))
+    if not await account_choice_pending(cid) and not force_campaigns_pick:
+        return acct  # внутри fail-closed к False (Draft, как раньше)
     await m.answer(i18n.t("pick_live_account_first"), parse_mode=ParseMode.HTML)
     if flow == "campaigns":
         await _start_campaigns_picker(m)

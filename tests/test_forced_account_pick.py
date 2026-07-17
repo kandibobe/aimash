@@ -412,9 +412,58 @@ async def test_require_draft_warms_discovery_before_pending(monkeypatch):
     monkeypatch.setattr(bm, "_active_read_account", _fake_active)
     monkeypatch.setattr(ac, "ensure_read_children_discovered", _fake_discover)
     monkeypatch.setattr(ca, "account_choice_pending", _fake_pending)
+    monkeypatch.setattr(
+        bm, "_live_account_hint", lambda _a: ""
+    )  # живых нет → форс-пик не сработает
     msg = _FakeMsg()
     assert await bm._require_read_account(msg, "campaigns") == bm.DRAFT_ACCOUNT_ID
     assert order == ["discover", "pending"], "прогрев discovery обязан идти ДО решения о пикере"
+
+
+async def test_require_campaigns_pinned_draft_forces_pick_when_live_present(monkeypatch):
+    """Скрин 2026-07-17: закреплённый Draft (account_choice_pending=False), но живые аккаунты
+    ЕСТЬ (_live_account_hint непуст) → вход /campaigns открывает пикер ДО списка, чтение НЕ идёт.
+    «Сначала аккаунт, потом кампании» — даже когда pending=False (пин Draft/авто-пин)."""
+    import core.access as ca
+
+    async def _fake_active(_chat):
+        return bm.DRAFT_ACCOUNT_ID
+
+    async def _fake_pending(_chat):
+        return False  # Draft закреплён — прежняя логика вывалила бы песочные кампании
+
+    started: list = []
+
+    async def _fake_camp_picker(m):
+        started.append("campaigns")
+
+    monkeypatch.setattr(bm, "_active_read_account", _fake_active)
+    monkeypatch.setattr(ca, "account_choice_pending", _fake_pending)
+    monkeypatch.setattr(bm, "_live_account_hint", lambda _a: "есть живые аккаунты")
+    monkeypatch.setattr(bm, "_start_campaigns_picker", _fake_camp_picker)
+    msg = _FakeMsg()
+    assert await bm._require_read_account(msg, "campaigns") is None
+    assert started == ["campaigns"]
+    assert msg.answers, "должна уйти подсказка pick_live_account_first"
+
+
+async def test_require_report_pinned_draft_not_forced_by_live(monkeypatch):
+    """Форс-пик — ТОЛЬКО для потока campaigns. На /report закреплённый Draft при живых аккаунтах
+    остаётся одношаговым (pending=False → Draft), чтобы не ломать осознанный пин на прочих путях."""
+    import core.access as ca
+
+    async def _fake_active(_chat):
+        return bm.DRAFT_ACCOUNT_ID
+
+    async def _fake_pending(_chat):
+        return False
+
+    monkeypatch.setattr(bm, "_active_read_account", _fake_active)
+    monkeypatch.setattr(ca, "account_choice_pending", _fake_pending)
+    monkeypatch.setattr(bm, "_live_account_hint", lambda _a: "есть живые аккаунты")
+    msg = _FakeMsg()
+    assert await bm._require_read_account(msg, "report") == bm.DRAFT_ACCOUNT_ID
+    assert msg.answers == []  # никакого пикера на report
 
 
 def _patch_campaign_read(monkeypatch, camps: list[dict]) -> None:
