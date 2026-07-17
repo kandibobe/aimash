@@ -1904,15 +1904,32 @@ def recent_kb(rows: list, lang: str | None = None) -> InlineKeyboardMarkup:
 def period_kb(
     target: str, lang: str | None = None, *, last: str | None = None
 ) -> InlineKeyboardMarkup:
-    """Выбор периода отчёта. last (§UX-память) — последний выбранный пресет: первой строкой
-    добавляется «↻ N — как в прошлый раз» (тот же PeriodCB, read-only путь). Неизвестный last —
-    игнорируется (fail-safe, обычная клавиатура)."""
+    """Выбор периода отчёта: пресеты 7/14/30/90/MTD/LM + «Свой период…» (3.1: code='CUST' →
+    одноразовый ввод текстом, parse_period_text). last (§UX-память) — последний выбранный пресет:
+    первой строкой добавляется «↻ N — как в прошлый раз» (тот же PeriodCB, read-only путь).
+    Неизвестный last — игнорируется (fail-safe, обычная клавиатура)."""
     en = _lang(lang) == "en"
     kb = InlineKeyboardBuilder()
     if en:
-        items = [("7 days", "7"), ("30 days", "30"), ("90 days", "90"), ("MTD", "MTD")]
+        items = [
+            ("7 days", "7"),
+            ("14 days", "14"),
+            ("30 days", "30"),
+            ("90 days", "90"),
+            ("MTD", "MTD"),
+            ("Last month", "LM"),
+        ]
+        custom_label = "📅 Custom period…"
     else:
-        items = [("7 дней", "7"), ("30 дней", "30"), ("90 дней", "90"), ("MTD", "MTD")]
+        items = [
+            ("7 дней", "7"),
+            ("14 дней", "14"),
+            ("30 дней", "30"),
+            ("90 дней", "90"),
+            ("MTD", "MTD"),
+            ("Прошлый месяц", "LM"),
+        ]
+        custom_label = "📅 Свой период…"
     labels = dict((code, label) for label, code in items)
     has_last = bool(last and last in labels)
     if has_last:
@@ -1924,7 +1941,8 @@ def period_kb(
         kb.button(text=repeat, callback_data=PeriodCB(target=target, code=last))
     for label, code in items:
         kb.button(text=label, callback_data=PeriodCB(target=target, code=code))
-    kb.adjust(*((1, 2, 2) if has_last else (2, 2)))
+    kb.button(text=custom_label, callback_data=PeriodCB(target=target, code="CUST"))
+    kb.adjust(*((1, 2, 2, 2, 1) if has_last else (2, 2, 2, 1)))
     return kb.as_markup()
 
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-PRESET_DAYS: dict[str, int] = {"7": 7, "30": 30, "90": 90}
+PRESET_DAYS: dict[str, int] = {"7": 7, "14": 14, "30": 30, "90": 90}
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,8 @@ def label_i18n(p: Period, lang: str | None = None) -> str:
         base = f"last {p.n} days"
     elif p.kind == "mtd":
         base = "month to date"
+    elif p.kind == "last_month":
+        base = "last month"
     else:
         base = f"{p.date_from.isoformat()} — {p.date_to.isoformat()}"
     return f"{base} (prev.)" if p.prev else base
@@ -81,14 +83,24 @@ def custom(date_from: date, date_to: date) -> Period:
     return Period(date_from, date_to, f"{date_from.isoformat()} — {date_to.isoformat()}", "custom")
 
 
+def last_month(*, today: date | None = None) -> Period:
+    """3.1: прошлый КАЛЕНДАРНЫЙ месяц. kind='last_month' — окно ОТНОСИТЕЛЬНОЕ (что «прошлый месяц»,
+    зависит от «сегодня») → reports.tz.reanchor пере-якорит его на дату аккаунта, как last_n/mtd."""
+    today = today or date.today()
+    prev_end = today.replace(day=1) - timedelta(days=1)
+    return Period(prev_end.replace(day=1), prev_end, "прошлый месяц", "last_month")
+
+
 def from_preset(preset: str, *, today: date | None = None) -> Period:
-    """'7'|'30'|'90'|'MTD' → Period. Используется bot-командами /report /export."""
+    """'7'|'14'|'30'|'90'|'MTD'|'LM' → Period. Используется bot-командами /report /export."""
     key = str(preset).strip()
     if key in PRESET_DAYS:
         return last_n_days(PRESET_DAYS[key], today=today)
     if key.upper() == "MTD":
         return month_to_date(today=today)
-    raise ValueError(f"неизвестный пресет периода: {preset!r} (ожидалось 7/30/90/MTD)")
+    if key.upper() == "LM":  # 3.1: прошлый календарный месяц
+        return last_month(today=today)
+    raise ValueError(f"неизвестный пресет периода: {preset!r} (ожидалось 7/14/30/90/MTD/LM)")
 
 
 # ── C5 (аудит 2026-07): период из СВОБОДНОГО текста — считает КОД, не модель ──────
@@ -204,9 +216,8 @@ def parse_period_text(text: str | None, *, today: date | None = None) -> Period 
         start = today - timedelta(days=today.weekday())  # пн этой недели
         return custom(start, max(start, yesterday))
     if _re.search(r"прошл\w*\s+месяц|last\s+month", t):
-        first_this = today.replace(day=1)
-        prev_end = first_this - timedelta(days=1)
-        return custom(prev_end.replace(day=1), prev_end)
+        # 3.1: kind='last_month' (было custom) — окно относительное, TZ аккаунта пере-якорит.
+        return last_month(today=today)
     m = _N_DAYS_RE.search(t)
     if m:
         return last_n_days(max(1, min(int(m.group(1)), 400)), today=today)

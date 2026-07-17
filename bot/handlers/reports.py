@@ -96,15 +96,23 @@ async def mysheets_(m: bm.Message) -> None:
 
 @bm.dp.message(bm.Command("mcc"))
 async def mcc_(m: bm.Message, command: bm.CommandObject) -> None:
-    """ТЗ §8: сводка по всем дочерним аккаунтам MCC за период (7/30/90/MTD). Read-only."""
+    """ТЗ §8: сводка по всем дочерним аккаунтам MCC за период (7/14/30/90/MTD/LM/ISO). Read-only.
+    Без аргумента — выбор периода кнопками (3.1); с аргументом — сразу за него."""
+    if not (command.args or "").strip():
+        await bm._ask_period(m, "mcc")
+        return
     await bm._send_mcc(m, command.args)
 
 
 @bm.dp.message(bm.Command("searchterms"))
 async def searchterms_(m: bm.Message, command: bm.CommandObject) -> None:
     """§7: топ «мусорных» поисковых запросов (клики без конверсий) → предложить в минус-слова за
-    confirm-гейтом. Без аргумента — за 30 дн.; с аргументом-периодом (7/30/90/MTD/ISO) — за него.
+    confirm-гейтом. Без аргумента — выбор периода кнопками (3.1); с аргументом-периодом
+    (7/14/30/90/MTD/LM/ISO/фраза) — сразу за него.
     Read-only до «да»: клик по «🚫» минтит черновик add_negative_keywords (правило 1/2)."""
+    if not (command.args or "").strip():
+        await bm._ask_period(m, "searchterms")
+        return
     try:
         period = bm._period_from_arg(command.args)
     except ValueError:
@@ -212,8 +220,8 @@ async def btn_sheets(m: bm.Message) -> None:
 
 @bm.dp.message(bm.F.text.in_(bm.BTN_MCC_ALL))
 async def btn_mcc(m: bm.Message) -> None:
-    """§8: кнопка «MCC (все аккаунты)» = /mcc c дефолтным периодом (30 дн.)."""
-    await bm._send_mcc(m, None)
+    """§8: кнопка «MCC (все аккаунты)» = /mcc без аргумента → выбор периода кнопками (3.1)."""
+    await bm._ask_period(m, "mcc")
 
 
 # ── 3E: перелистывание постраничных пикеров (rpta/rptc/camp) ───────────────────────
@@ -431,8 +439,8 @@ async def on_report_account(
     acct = bm.normalize_customer_id(getattr(rows[callback_data.idx], "id", ""))
     if (
         callback_data.target == "status"
-    ):  # §6/§8: пикер → статистика (замок чтения — в _render_status)
-        await bm._render_status(msg, acct)
+    ):  # §6/§8: пикер → выбор периода → статистика (3.1; замок чтения — в _report_target)
+        await bm._start_status_period(msg, bm._cq_chat_id(cq), acct)
         return
     if callback_data.target == "advise":  # advisor на ВЫБРАННОМ аккаунте (замок — в _advise_run)
         topic = bm._ADVISE_TOPIC_CACHE.pop(bm._cq_chat_id(cq), None)  # тема из пикера (или все)
@@ -524,6 +532,24 @@ async def on_report_campaign(cq: bm.CallbackQuery, callback_data: bm.ReportCampC
 
 
 # ── Inline: выбор периода → построение отчёта на ВЫБРАННОМ аккаунте/кампании ───────
+# 3.1: «📅 Свой период…» — РАНЬШЕ пресетных хендлеров (первый совпавший фильтр выигрывает;
+# ниже period_report матчит target=='report' с ЛЮБЫМ code, включая CUST).
+@bm.dp.callback_query(bm.PeriodCB.filter(bm.F.code == "CUST"))
+async def period_custom(
+    cq: bm.CallbackQuery, callback_data: bm.PeriodCB, state: bm.FSMContext
+) -> None:
+    """3.1: «📅 Свой период…» → одноразовый FSM (PeriodCustom.awaiting, паттерн PickerSearch):
+    ждём диапазон текстом («вчера», «с 1 по 15 июня», ISO — parse_period_text). target — в
+    state-data; сам запуск отчёта — в on_period_custom_input."""
+    await cq.answer()
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        return
+    await state.set_state(bm.PeriodCustom.awaiting)
+    await state.update_data(period_target=callback_data.target)
+    await msg.answer(bm.i18n.t("period_custom_prompt"))
+
+
 @bm.dp.callback_query(bm.PeriodCB.filter(bm.F.target == "report"))
 async def period_report(cq: bm.CallbackQuery, callback_data: bm.PeriodCB) -> None:
     await cq.answer()
@@ -535,13 +561,8 @@ async def period_report(cq: bm.CallbackQuery, callback_data: bm.PeriodCB) -> Non
     except ValueError:
         await msg.answer(bm.i18n.t("err_period"))
         return
-    await bm._remember_period(bm._cq_chat_id(cq), callback_data.code)  # §UX-память: «в прошлый раз»
     # ФИКС B2: строим на ВЫБРАННОМ аккаунте/кампании (_report_target), а не на хардкоде Draft.
-    acct, campaign_id, campaign_name = await bm._report_target(bm._cq_chat_id(cq))
-    await bm._run_report(msg, period, acct, campaign_id, campaign_name)
-    await bm._save_report_recall(  # §UX-память: «↻ повторить прошлый отчёт»
-        bm._cq_chat_id(cq), acct, campaign_id, campaign_name, callback_data.code
-    )
+    await bm._dispatch_period_target(msg, bm._cq_chat_id(cq), "report", period, callback_data.code)
 
 
 @bm.dp.callback_query(bm.PeriodCB.filter(bm.F.target == "export"))
@@ -555,15 +576,7 @@ async def period_export(cq: bm.CallbackQuery, callback_data: bm.PeriodCB) -> Non
     except ValueError:
         await msg.answer(bm.i18n.t("err_period"))
         return
-    await bm._remember_period(bm._cq_chat_id(cq), callback_data.code)  # §UX-память
-    chat_id = bm._cq_chat_id(cq)
-    sel = bm._REPORT_SEL.get(chat_id) or {}
-    if sel.get("account") == bm.MCC_ALL:  # 2.2: deep-xlsx по всем аккаунтам MCC
-        bm._REPORT_SEL.pop(chat_id, None)  # одноразовый сентинел (не липнет к след. отчёту)
-        await bm._run_mcc_deep_export(msg, period, callback_data.code)
-        return
-    acct, campaign_id, campaign_name = await bm._report_target(chat_id)
-    await bm._run_export(msg, period, acct, campaign_id, campaign_name)
+    await bm._dispatch_period_target(msg, bm._cq_chat_id(cq), "export", period, callback_data.code)
 
 
 @bm.dp.callback_query(bm.PeriodCB.filter(bm.F.target == "sheets"))
@@ -577,9 +590,57 @@ async def period_sheets(cq: bm.CallbackQuery, callback_data: bm.PeriodCB) -> Non
     except ValueError:
         await msg.answer(bm.i18n.t("err_period"))
         return
-    await bm._remember_period(bm._cq_chat_id(cq), callback_data.code)  # §UX-память
-    acct, campaign_id, campaign_name = await bm._report_target(bm._cq_chat_id(cq))
-    await bm._run_sheets(msg, period, acct, campaign_id, campaign_name)
+    await bm._dispatch_period_target(msg, bm._cq_chat_id(cq), "sheets", period, callback_data.code)
+
+
+@bm.dp.callback_query(
+    bm.PeriodCB.filter(bm.F.target.in_({"audit", "status", "bids", "searchterms", "mcc"}))
+)
+async def period_more_targets(
+    cq: bm.CallbackQuery, callback_data: bm.PeriodCB, state: bm.FSMContext
+) -> None:
+    """3.1: пресет периода для остальных отчётных команд (audit/status/bids/searchterms/mcc) →
+    единый диспатч. state нужен только audit-ветке (Q&A после карточки). READ-ONLY."""
+    await cq.answer()
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        return
+    try:
+        period = bm._period_from_arg(callback_data.code)
+    except ValueError:
+        await msg.answer(bm.i18n.t("err_period"))
+        return
+    await bm._dispatch_period_target(
+        msg, bm._cq_chat_id(cq), callback_data.target, period, callback_data.code, state=state
+    )
+
+
+@bm.dp.message(bm.PeriodCustom.awaiting, bm.F.text)
+async def on_period_custom_input(m: bm.Message, state: bm.FSMContext) -> None:
+    """3.1: произвольный период текстом после «📅 Свой период…». Одноразовый (паттерн PickerSearch):
+    state снят ДО запуска — и разобранный, и нераспознанный ввод выходят из режима (повтор — снова
+    кнопкой). Нераспознано → подсказка + та же клавиатура периода. Пассивный выход /командой или
+    кнопкой меню дают middleware'ы (SlashCommandExitsWizardMiddleware, btn_guard_menu)."""
+    data = await state.get_data()
+    target = data.get("period_target") or "report"
+    await state.clear()
+    text = (m.text or "").strip()
+    period = None
+    if text:  # пустой/пробельный ввод → как нераспознанный (не молчаливый дефолт 30 дн.)
+        try:
+            period = bm._period_from_arg(text)
+        except ValueError:
+            period = None
+    if period is None:
+        await m.answer(bm.i18n.t("err_period"))
+        await m.answer(
+            bm.i18n.t(f"period_pick_{target}"),
+            reply_markup=bm.period_kb(target, last=await bm._last_period(m.chat.id)),
+        )
+        return
+    # code=None: произвольный диапазон — разовый, в §UX-память не пишем (внутри диспатчер
+    # передаст ISO-пару дат тем веткам, которым нужен строковый код: mcc/deep-export/recall).
+    await bm._dispatch_period_target(m, m.chat.id, target, period, None, state=state)
 
 
 @bm.dp.callback_query(bm.AuditExportCB.filter())

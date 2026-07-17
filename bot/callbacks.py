@@ -42,10 +42,14 @@ class AudienceCB(CallbackData, prefix="aud"):
 
 
 class PeriodCB(CallbackData, prefix="per"):
-    """Выбор периода для отчёта/статистики (пресеты ТЗ §9)."""
+    """Выбор периода для отчёта/статистики (пресеты ТЗ §9; 3.1 — во всех отчётных командах).
+    code='CUST' — «Свой период…»: одноразовое состояние PeriodCustom, диапазон текстом
+    (parse_period_text). Все target read-only; диспатч — bot.main._dispatch_period_target."""
 
-    target: str  # "report" | "export" | "status" | "sheets"
-    code: str  # "7" | "30" | "90" | "MTD"
+    target: (
+        str  # "report" | "export" | "sheets" | "status" | "audit" | "bids" | "searchterms" | "mcc"
+    )
+    code: str  # "7" | "14" | "30" | "90" | "MTD" | "LM" | "CUST"
 
 
 class AuditExportCB(CallbackData, prefix="auex"):

@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bot.main as bm  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
-from bot.callbacks import AudienceCB, CampCB, RsaCB  # noqa: E402
+from bot.callbacks import AudienceCB, CampCB, PeriodCB, RsaCB  # noqa: E402
 from confirm.store import ConfirmStore  # noqa: E402
 from db.session import init_db  # noqa: E402
 
@@ -266,6 +266,10 @@ async def test_period_memory_roundtrip_survives_restart():
     assert await bm._last_period(chat) == "7"  # не перезаписан мусором
     await bm._remember_period(chat, "mtd")
     assert await bm._last_period(chat) == "MTD"  # нормализация регистра
+    await bm._remember_period(chat, "lm")
+    assert await bm._last_period(chat) == "LM"  # 3.1: «прошлый месяц» — тоже пресет
+    await bm._remember_period(chat, "14")
+    assert await bm._last_period(chat) == "14"  # 3.1: новый пресет 14 дн.
 
 
 def test_period_kb_offers_repeat_first():
@@ -273,12 +277,158 @@ def test_period_kb_offers_repeat_first():
 
     kb = period_kb("report", last="7")
     rows = kb.inline_keyboard
-    assert len([b for r in rows for b in r]) == 5  # ↻ + 4 пресета
+    assert len([b for r in rows for b in r]) == 8  # ↻ + 6 пресетов + «Свой период» (3.1)
     assert "как в прошлый раз" in rows[0][0].text  # первая строка — повтор
     assert rows[0][0].callback_data.endswith(":7")
-    # без last / с мусорным last — обычная клавиатура из 4 кнопок
-    assert len([b for r in period_kb("report").inline_keyboard for b in r]) == 4
-    assert len([b for r in period_kb("report", last="зюзя").inline_keyboard for b in r]) == 4
+    # без last / с мусорным last — обычная клавиатура из 7 кнопок (6 пресетов + «Свой период»)
+    assert len([b for r in period_kb("report").inline_keyboard for b in r]) == 7
+    assert len([b for r in period_kb("report", last="зюзя").inline_keyboard for b in r]) == 7
+    # 3.1: последняя кнопка — «📅 Свой период…» (code=CUST, ловится period_custom РАНЬШЕ пресетов)
+    flat = [b for r in period_kb("report").inline_keyboard for b in r]
+    assert flat[-1].callback_data.endswith(":CUST")
+    codes = {b.callback_data.rsplit(":", 1)[-1] for b in flat}
+    assert {"7", "14", "30", "90", "MTD", "LM", "CUST"} <= codes
+
+
+# ── 3.1: выбор периода для audit/status/bids/searchterms/mcc + произвольный текстом ─
+class FakeStateData(FakeState):
+    """FakeState + data (period_custom кладёт target в state-data)."""
+
+    def __init__(self):
+        super().__init__()
+        self.data: dict = {}
+
+    async def update_data(self, **kw):
+        self.data.update(kw)
+
+    async def get_data(self):
+        return dict(self.data)
+
+    async def clear(self):
+        await super().clear()
+        self.data = {}
+
+
+async def test_period_more_targets_dispatches_bids():
+    """Пресет на клавиатуре target='bids' → _bids_run с разобранным Period. READ-ONLY путь."""
+    await init_db()
+    chat_id = 66_010
+    cq = FakeCallbackQuery(FakeMessage(chat_id=chat_id), uid=chat_id)
+    seen = {}
+
+    async def fake_bids(m, period):
+        seen["period"] = period
+
+    with patched(bm, "_bids_run", fake_bids):
+        await bm.period_more_targets(cq, PeriodCB(target="bids", code="14"), FakeState())
+    assert seen["period"].days == 14
+    assert await bm._last_period(chat_id) == "14"  # §UX-память записана
+
+
+async def test_period_status_uses_selected_account():
+    """target='status': аккаунт из пикера лежит в _REPORT_SEL → _render_status получает ЕГО и
+    выбранный период (LM → last_month)."""
+    await init_db()
+    chat_id = 66_011
+    bm._REPORT_SEL[chat_id] = {
+        "account": DRAFT_ACCOUNT_ID,
+        "campaign_id": None,
+        "campaign_name": None,
+    }
+    cq = FakeCallbackQuery(FakeMessage(chat_id=chat_id), uid=chat_id)
+    seen = {}
+
+    async def fake_render(m, acct, period=None):
+        seen["acct"], seen["period"] = acct, period
+
+    with patched(bm, "_render_status", fake_render):
+        await bm.period_more_targets(cq, PeriodCB(target="status", code="LM"), FakeState())
+    assert seen["acct"] == DRAFT_ACCOUNT_ID
+    assert seen["period"].kind == "last_month"
+
+
+async def test_period_audit_routes_to_picker_with_period():
+    """target='audit': период уезжает в _start_audit_picker (дальше — прежний пикер аккаунта)."""
+    await init_db()
+    chat_id = 66_012
+    cq = FakeCallbackQuery(FakeMessage(chat_id=chat_id), uid=chat_id)
+    seen = {}
+
+    async def fake_picker(msg, *, period=None, state=None):
+        seen["period"] = period
+
+    with patched(bm, "_start_audit_picker", fake_picker):
+        await bm.period_more_targets(cq, PeriodCB(target="audit", code="90"), FakeState())
+    assert seen["period"].days == 90
+
+
+async def test_period_custom_button_sets_fsm():
+    """«📅 Свой период…» → одноразовый FSM PeriodCustom.awaiting; target — в state-data."""
+    await init_db()
+    msg = FakeMessage(chat_id=66_013)
+    cq = FakeCallbackQuery(msg, uid=66_013)
+    st = FakeStateData()
+    await bm.period_custom(cq, PeriodCB(target="bids", code="CUST"), st)
+    assert st.state == bm.PeriodCustom.awaiting
+    assert st.data.get("period_target") == "bids"
+    assert msg.answers  # показана подсказка с примерами
+
+
+async def test_period_custom_input_parses_and_dispatches():
+    """Текст «с 1 по 15 июня» после кнопки → Period → команда target; state снят (одноразовый)."""
+    await init_db()
+    m = FakeMessage(chat_id=66_014)
+    m.text = "с 1 по 15 июня"
+    st = FakeStateData()
+    st.data = {"period_target": "bids"}
+    seen = {}
+
+    async def fake_bids(msg, period):
+        seen["period"] = period
+
+    with patched(bm, "_bids_run", fake_bids):
+        await bm.on_period_custom_input(m, st)
+    assert st.cleared
+    p = seen["period"]
+    assert (p.date_from.day, p.date_from.month) == (1, 6)
+    assert (p.date_to.day, p.date_to.month) == (15, 6)
+
+
+async def test_period_custom_input_iso_pair_reaches_mcc_as_code():
+    """Произвольный ISO-диапазон для mcc: _send_mcc получает строку-пару дат (его _period_from_arg
+    разберёт её как абсолютный custom — без TZ-пере-якоря)."""
+    await init_db()
+    m = FakeMessage(chat_id=66_015)
+    m.text = "2026-06-01 2026-06-15"
+    st = FakeStateData()
+    st.data = {"period_target": "mcc"}
+    seen = {}
+
+    async def fake_mcc(msg, arg):
+        seen["arg"] = arg
+
+    with patched(bm, "_send_mcc", fake_mcc):
+        await bm.on_period_custom_input(m, st)
+    assert seen["arg"] == "2026-06-01 2026-06-15"
+
+
+async def test_period_custom_input_unparsable_reprompts():
+    """Нераспознанный текст → err_period + та же клавиатура периода снова; state снят (не капкан)."""
+    await init_db()
+    m = FakeMessage(chat_id=66_016)
+    m.text = "абырвалг"
+    st = FakeStateData()
+    st.data = {"period_target": "bids"}
+    called = {}
+
+    async def fake_bids(msg, period):
+        called["period"] = period
+
+    with patched(bm, "_bids_run", fake_bids):
+        await bm.on_period_custom_input(m, st)
+    assert st.cleared and not called  # команда НЕ запущена, режим снят
+    assert len(m.answers) == 2  # подсказка об ошибке + клавиатура периода
+    assert m.answers[1][1].get("reply_markup") is not None
 
 
 async def test_post_create_next_steps_advisory_only():

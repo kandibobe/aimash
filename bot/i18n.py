@@ -127,6 +127,37 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "🟢 За какой период Google Sheets?",
         "en": "🟢 For what period the Google Sheets?",
     },
+    # — 3.1: выбор периода во всех отчётных командах —
+    "period_pick_audit": {
+        "ru": "🩺 За какой период аудит?",
+        "en": "🩺 For what period should I audit?",
+    },
+    "period_pick_status": {
+        "ru": "📊 За какой период статистика?",
+        "en": "📊 For what period the stats?",
+    },
+    "period_pick_bids": {
+        "ru": "📈 За какой период смотреть ставки?",
+        "en": "📈 For what period should I review bids?",
+    },
+    "period_pick_searchterms": {
+        "ru": "🚫 За какой период поисковые запросы?",
+        "en": "🚫 For what period the search terms?",
+    },
+    "period_pick_mcc": {
+        "ru": "🏢 За какой период сводка по всем аккаунтам?",
+        "en": "🏢 For what period the all-accounts summary?",
+    },
+    "period_custom_prompt": {
+        "ru": (
+            "📅 Напиши период текстом — например: «вчера», «прошлая неделя», "
+            "«с 1 по 15 июня», «14.06-30.06», «2026-06-01 2026-06-15»."
+        ),
+        "en": (
+            "📅 Type the period — e.g. “yesterday”, “last week”, "
+            "“june 1-15”, “14.06-30.06”, “2026-06-01 2026-06-15”."
+        ),
+    },
     # — §8/§9: пикер отчётов (аккаунт → кампания → период) —
     "report_pick_account": {
         "ru": "🏢 По какому аккаунту отчёт?",
@@ -1962,8 +1993,14 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "⚠️ Couldn't process the photo: {err}",
     },
     "err_period": {
-        "ru": "⚠️ Не удалось разобрать период. Используй пресет 7/30/90/MTD или даты ГГГГ-ММ-ДД [ГГГГ-ММ-ДД].",
-        "en": "⚠️ Couldn't parse the period. Use a preset 7/30/90/MTD or dates YYYY-MM-DD [YYYY-MM-DD].",
+        "ru": (
+            "⚠️ Не удалось разобрать период. Используй пресет 7/14/30/90/MTD/LM, даты "
+            "ГГГГ-ММ-ДД [ГГГГ-ММ-ДД] или фразу («вчера», «прошлый месяц», «с 1 по 15 июня»)."
+        ),
+        "en": (
+            "⚠️ Couldn't parse the period. Use a preset 7/14/30/90/MTD/LM, dates "
+            "YYYY-MM-DD [YYYY-MM-DD] or a phrase (“yesterday”, “last month”, “june 1-15”)."
+        ),
     },
     "err_unexpected": {
         "ru": "⚠️ Что-то пошло не так — записал в журнал ошибок (код {code}). Попробуй ещё раз.",

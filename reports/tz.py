@@ -13,8 +13,8 @@ Google Ads режет `segments.date` по таймзоне аккаунта. П
 bot._account_local_date) и не применялась к /report, /export, /sheets, /audit, /bids,
 /searchterms. Здесь она одна, а вызывающие делегируют.
 
-Правило: пере-якоряем ТОЛЬКО относительные окна (kind last_n | mtd). Произвольные даты
-(kind custom: «за 3 августа», ISO-диапазон) менеджер назвал ЯВНО — их не трогаем.
+Правило: пере-якоряем ТОЛЬКО относительные окна (kind last_n | mtd | last_month). Произвольные
+даты (kind custom: «за 3 августа», ISO-диапазон) менеджер назвал ЯВНО — их не трогаем.
 READ-ONLY, без секретов. Чтение TZ — best-effort: сбой/неизвестная зона → дата хоста (как раньше).
 """
 
@@ -23,7 +23,7 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from core.resilience import run_ads_read_call
-from reports.period import Period, last_n_days, month_to_date
+from reports.period import Period, last_month, last_n_days, month_to_date
 
 
 def reanchor(period: Period, today: date) -> Period:
@@ -33,6 +33,8 @@ def reanchor(period: Period, today: date) -> Period:
         return last_n_days(period.n, today=today)
     if period.kind == "mtd":
         return month_to_date(today=today)
+    if period.kind == "last_month":  # 3.1: «прошлый месяц» тоже относителен (граница месяца ≠ TZ)
+        return last_month(today=today)
     return period
 
 

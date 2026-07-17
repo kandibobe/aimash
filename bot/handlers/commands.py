@@ -851,9 +851,9 @@ async def on_diag_cb(cq: bm.CallbackQuery, callback_data: bm.DiagCB) -> None:
 # стоит первым); эти хендлеры — источник для _reexport (bm.btn_*) и фолбэк вне визарда.
 @bm.dp.message(bm.F.text.in_(bm.BTN_AUDIT_ALL))
 async def btn_audit(m: bm.Message, state: bm.FSMContext) -> None:
-    """Кнопка «🩺 Аудит» = /audit без периода: health-score + что чинить (read-only). state → режим
-    доп-вопросов после карточки (#6), как в audit_cmd."""
-    await bm._start_audit_picker(m, state=state)
+    """Кнопка «🩺 Аудит» = /audit без периода: выбор периода кнопками (3.1) → пикер аккаунта →
+    health-score + что чинить (read-only). state для Q&A подставит period_more_targets."""
+    await bm._ask_period(m, "audit")
 
 
 @bm.dp.message(bm.F.text.in_(bm.BTN_ADVISE_ALL))
@@ -864,9 +864,10 @@ async def btn_advise(m: bm.Message) -> None:
 
 @bm.dp.message(bm.F.text.in_(bm.BTN_BIDS_ALL))
 async def btn_bids(m: bm.Message) -> None:
-    """Кнопка «📈 Ставки» = /bids за 30 дн.: возможности по ставкам (read-only, без кнопок —
-    ставка меняется только прямой командой через confirm-гейт, правило #3)."""
-    await bm._bids_run(m, bm._period_from_arg(None))
+    """Кнопка «📈 Ставки» = /bids без периода: выбор периода кнопками (3.1) → возможности по
+    ставкам (read-only, без кнопок — ставка меняется только прямой командой через confirm-гейт,
+    правило #3)."""
+    await bm._ask_period(m, "bids")
 
 
 @bm.dp.message(bm.F.text.in_(bm.BTN_CREATE_ALL))
@@ -1007,7 +1008,10 @@ async def audit_cmd(m: bm.Message, state: bm.FSMContext) -> None:
 
     state → после карточки на 1 аккаунте включается режим доп-вопросов (Q&A, #6, read-only)."""
     parts = (m.text or "").split(maxsplit=1)
-    period = bm._audit_period_from_arg(parts[1] if len(parts) > 1 else None)
+    if len(parts) < 2 or not parts[1].strip():  # 3.1: без аргумента — выбор периода кнопками
+        await bm._ask_period(m, "audit")
+        return
+    period = bm._audit_period_from_arg(parts[1])
     # >1 аккаунта чтения → пикер (аудит на выбранном; там state берётся из on_report_account);
     # 1 аккаунт → сразу прогон, state тащим насквозь для режима доп-вопросов.
     await bm._start_audit_picker(m, period=period, state=state)
@@ -1017,7 +1021,11 @@ async def audit_cmd(m: bm.Message, state: bm.FSMContext) -> None:
 async def bids_cmd(m: bm.Message, command: bm.CommandObject) -> None:
     """Ф1 /bids [период] — возможности по ставкам: какие ключи поднять и до скольки (оценки позиций +
     симулятор Google), сверху — наибольший прогнозный прирост конверсий. READ-ONLY и БЕЗ кнопок:
-    ставка — деньги, её меняет только прямая команда пользователя через confirm-гейт (правило #3)."""
+    ставка — деньги, её меняет только прямая команда пользователя через confirm-гейт (правило #3).
+    Без аргумента — выбор периода кнопками (3.1)."""
+    if not (command.args or "").strip():
+        await bm._ask_period(m, "bids")
+        return
     try:
         period = bm._period_from_arg(command.args)
     except ValueError:

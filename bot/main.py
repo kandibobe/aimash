@@ -477,6 +477,7 @@ from bot.states import (  # noqa: E402
     KwWizard,
     ModelWizard,
     MyScheduleWizard,
+    PeriodCustom,
     PickerSearch,
     RsaList,
     RsaRefine,
@@ -933,16 +934,32 @@ def _account_name(cid: str) -> str:
     return ""
 
 
-async def _render_status(message: Message, acct: str) -> None:
-    """Показать статистику КОНКРЕТНОГО аккаунта за 30 дн. (read-only). acct уже прошёл замок чтения
-    (пикер/резолв). Draft без живых данных → подсказка выбрать живой аккаунт (§8 F)."""
+async def _render_status(message: Message, acct: str, period=None) -> None:
+    """Показать статистику КОНКРЕТНОГО аккаунта за период (read-only). acct уже прошёл замок чтения
+    (пикер/резолв). period=None → 30 дн. (прежний дефолт); окно — в TZ аккаунта (reports.tz, §8).
+    Draft без живых данных → подсказка выбрать живой аккаунт (§8 F)."""
+    from reports.period import from_preset, label_i18n
+
+    period = period or from_preset("30")
     try:
         from ads.client import build_client_async
         from ads.read import account_stats
+        from reports.tz import account_period
 
         client = await build_client_async(acct)  # холодная сборка (после /refresh) — вне loop
         async with ux.typing_action(message):  # «печатает…» пока идёт чтение SDK
-            st = await run_ads_read_call(account_stats, client, acct, 30, label="account_stats")
+            period = await account_period(
+                client, acct, period, label="status_tz"
+            )  # §8: TZ аккаунта
+            st = await run_ads_read_call(
+                account_stats,
+                client,
+                acct,
+                period.days,
+                date_from=period.date_from.isoformat(),
+                date_to=period.date_to.isoformat(),
+                label="account_stats",
+            )
             cur = await _read_currency(client, acct)  # §9: валюта в денежных строках
     except Exception as e:  # сеть/доступ/SDK
         await _capture_cmd_error(e, "cmd:status")  # A2: в /diag + алерт админам
@@ -958,7 +975,7 @@ async def _render_status(message: Message, acct: str) -> None:
     await message.answer(
         texts.fmt_stats(
             acct,
-            30,
+            period.days,
             {
                 "impressions": st.impressions,
                 "clicks": st.clicks,
@@ -968,6 +985,7 @@ async def _render_status(message: Message, acct: str) -> None:
             },
             cur,
             name=_account_name(acct),  # 2.1: «Башня · …2039» как в пикере
+            period_label=label_i18n(period, i18n.get_lang(message.chat.id)),
         ),
         parse_mode=ParseMode.HTML,
     )
@@ -977,13 +995,14 @@ async def _render_status(message: Message, acct: str) -> None:
 
 
 async def _send_status(message: Message) -> None:
-    """§6/§8: пикер аккаунта → статистика (30 дн.). Один доступный аккаунт → сразу его статистика
-    (без клика). Переиспользует пикер /report (report_accounts_kb, target='status')."""
+    """§6/§8: пикер аккаунта → выбор периода (3.1) → статистика. Один доступный аккаунт → сразу к
+    периоду (без клика по аккаунту). Переиспользует пикер /report (report_accounts_kb,
+    target='status')."""
     chat_id = message.chat.id
     rows = await _read_account_rows(chat_id)
     _REPORT_ACCT_CACHE[chat_id] = rows
-    if len(rows) <= 1:  # только Draft/один аккаунт — сразу статистика (пикер не нужен)
-        await _render_status(message, await _active_read_account(chat_id))
+    if len(rows) <= 1:  # только Draft/один аккаунт — сразу к выбору периода (пикер не нужен)
+        await _start_status_period(message, chat_id, await _active_read_account(chat_id))
         return
     await message.answer(
         i18n.t("status_pick_account"),
@@ -995,6 +1014,23 @@ async def _send_status(message: Message) -> None:
         ),
         parse_mode=ParseMode.HTML,
     )
+
+
+async def _ask_period(m: Message, target: str) -> None:
+    """3.1: показать клавиатуру периода команды target (PeriodCB; диспатч —
+    _dispatch_period_target). §UX-память: последний пресет — первой кнопкой «↻ как в прошлый раз»."""
+    await m.answer(
+        i18n.t(f"period_pick_{target}"),
+        reply_markup=period_kb(target, last=await _last_period(m.chat.id)),
+    )
+
+
+async def _start_status_period(m: Message, chat_id: int, acct: str) -> None:
+    """3.1: статистика — аккаунт известен → выбор периода (PeriodCB target='status'). Выбранный
+    аккаунт кладём в _REPORT_SEL (переживает тап; _report_target перепроверит замок чтения
+    fail-closed — по неразрешённому аккаунту статистика не построится)."""
+    _REPORT_SEL[chat_id] = {"account": acct, "campaign_id": None, "campaign_name": None}
+    await _ask_period(m, "status")
 
 
 async def _start_advise_picker(message: Message, *, topic: str | None = None) -> None:
@@ -2177,14 +2213,14 @@ async def _save_alert_threshold(chat_id: int, key: str, value: float | None) -> 
 
 
 async def _remember_period(chat_id: int, code: str) -> None:
-    """§UX-память: запомнить выбранный ПРЕСЕТ периода (7/30/90/MTD) для кнопки «↻ как в прошлый
-    раз». Произвольные диапазоны дат не запоминаем (разовые)."""
+    """§UX-память: запомнить выбранный ПРЕСЕТ периода (7/14/30/90/MTD/LM) для кнопки «↻ как в
+    прошлый раз». Произвольные диапазоны дат не запоминаем (разовые)."""
     from reports.period import PRESET_DAYS
 
     c = (code or "").strip()
-    if not (c in PRESET_DAYS or c.upper() == "MTD"):
+    if not (c in PRESET_DAYS or c.upper() in ("MTD", "LM")):
         return
-    c = c.upper() if c.upper() == "MTD" else c
+    c = c.upper() if c.upper() in ("MTD", "LM") else c
     _LAST_PERIOD_CODE[chat_id] = c
     await _save_ui_pref(chat_id, "last_report_period", c)
 
@@ -2277,8 +2313,8 @@ async def _save_report_recall(
     from reports.period import PRESET_DAYS
 
     code = (period_code or "").strip()
-    norm = code.upper() if code.upper() == "MTD" else code
-    if not (norm in PRESET_DAYS or norm == "MTD"):
+    norm = code.upper() if code.upper() in ("MTD", "LM") else code
+    if not (norm in PRESET_DAYS or norm in ("MTD", "LM")):
         return
     acct = normalize_customer_id(account)
     if not acct:
@@ -2879,12 +2915,14 @@ async def _read_currency(client, customer_id: str | None = None) -> str:
 
 
 def _period_from_arg(arg: str | None):
-    """Аргумент команды → Period (§9). Поддержка: пресет 7/30/90/MTD; произвольный диапазон или
-    день в ISO ГГГГ-ММ-ДД (одна дата → день, две → диапазон). По умолчанию 30 дн. Бросает ValueError."""
+    """Аргумент команды → Period (§9). Поддержка: пресет 7/14/30/90/MTD/LM; произвольный диапазон
+    или день в ISO ГГГГ-ММ-ДД (одна дата → день, две → диапазон); свободная фраза RU/EN («вчера»,
+    «прошлая неделя», «с 1 по 15 июня» — parse_period_text, 3.1). По умолчанию 30 дн.
+    Бросает ValueError."""
     import re
     from datetime import date
 
-    from reports.period import custom, from_preset
+    from reports.period import custom, from_preset, parse_period_text
 
     s = (arg or "").strip()
     if not s:
@@ -2896,6 +2934,9 @@ def _period_from_arg(arg: str | None):
         except ValueError as e:
             raise ValueError("дата в формате ГГГГ-ММ-ДД, напр. 2026-06-01") from e
         return custom(ds[0], ds[0]) if len(ds) == 1 else custom(min(ds), max(ds))
+    p = parse_period_text(s)  # 3.1: фраза («вчера», «прошлая неделя») — раньше только в /audit
+    if p is not None:
+        return p
     return from_preset(s)
 
 
@@ -2918,6 +2959,53 @@ def _audit_period_from_arg(arg: str | None):
         return _period_from_arg(s)
     except ValueError:
         return last_n_days(30)
+
+
+async def _dispatch_period_target(
+    msg: Message, chat_id: int, target: str, period, code: str | None, state=None
+) -> None:
+    """3.1: единый диспатч «период выбран» (пресет-кнопка PeriodCB ИЛИ произвольный текст из
+    PeriodCustom) → запуск отчётной команды target. code — пресет-код для §UX-памяти и TZ-фабрик;
+    произвольный диапазон → ISO-пара «date_from date_to» (_period_from_arg/_mcc_period_factory её
+    понимают: абсолютные даты, без TZ-пере-якоря). READ-ONLY: все ветки — чтение; мутаций здесь нет."""
+    if code:
+        await _remember_period(chat_id, code)  # §UX-память: «↻ … как в прошлый раз»
+    iso_code = code or f"{period.date_from.isoformat()} {period.date_to.isoformat()}"
+    if target == "report":
+        acct, campaign_id, campaign_name = await _report_target(chat_id)
+        await _run_report(msg, period, acct, campaign_id, campaign_name)
+        await _save_report_recall(chat_id, acct, campaign_id, campaign_name, iso_code)
+        return
+    if target == "export":
+        sel = _REPORT_SEL.get(chat_id) or {}
+        if sel.get("account") == MCC_ALL:  # 2.2: deep-xlsx по всем аккаунтам MCC
+            _REPORT_SEL.pop(chat_id, None)  # одноразовый сентинел (не липнет к след. отчёту)
+            await _run_mcc_deep_export(msg, period, iso_code)
+            return
+        acct, campaign_id, campaign_name = await _report_target(chat_id)
+        await _run_export(msg, period, acct, campaign_id, campaign_name)
+        return
+    if target == "sheets":
+        acct, campaign_id, campaign_name = await _report_target(chat_id)
+        await _run_sheets(msg, period, acct, campaign_id, campaign_name)
+        return
+    if target == "audit":
+        await _start_audit_picker(msg, period=period, state=state)
+        return
+    if target == "status":
+        acct, _cid, _cname = await _report_target(chat_id)
+        await _render_status(msg, acct, period=period)
+        return
+    if target == "bids":
+        await _bids_run(msg, period)
+        return
+    if target == "searchterms":
+        await _searchterms_run(msg, period)
+        return
+    if target == "mcc":
+        await _send_mcc(msg, iso_code)
+        return
+    await msg.answer(i18n.t("stale"))
 
 
 def _scope_note(campaign_name: str | None) -> str:
@@ -3203,7 +3291,7 @@ async def _run_audit_export(m: Message, fmt: str, chat_id: int) -> None:
 
 def _mcc_period_factory(arg: str | None):
     """§8: фабрика Period в таймзоне дочернего аккаунта — из ТОГО ЖЕ пресета, что запросил оператор
-    (7/30/90/MTD), но с локальным «сегодня». Для произвольных ISO-дат TZ-нормализация не применяется
+    (7/14/30/90/MTD/LM), но с локальным «сегодня». Для произвольных ISO-дат TZ-нормализация не применяется
     (абсолютные даты) → None (build_mcc_summary_async откатится на общий period). TZ здесь уже
     прочитана вызывающим (tz_of), поэтому берём чистый reanchor, а не reports.tz.account_period."""
     from reports.period import from_preset
@@ -6245,7 +6333,9 @@ async def _audit_run(
     if period is None:
         period = last_n_days(30)
     days = period.days
-    is_custom = getattr(period, "kind", "") == "custom"  # произвольный историч. период (не rolling)
+    # Исторический период (НЕ rolling: окно не кончается «вчера») — custom И last_month (3.1:
+    # «прошлый месяц» стал отдельным kind ради TZ-пере-якоря, но для снапшота/тренда он историчен).
+    is_custom = getattr(period, "kind", "") in ("custom", "last_month")
     plabel = label_i18n(period, lang)
     target_cpa = await _load_target_cpa(
         chat_id, acct
@@ -6270,7 +6360,7 @@ async def _audit_run(
         await target.answer(text + (("\n\n" + hint) if hint else ""), parse_mode=None)
         return
     # N1.1: снапшот health-score в ЛОКАЛЬНУЮ БД (fail-open) + честная Δ к прошлому прогону. Аудит за
-    # произвольный ИСТОРИЧЕСКИЙ период (kind=custom) НЕ пишем в снапшот и НЕ считаем тренд: ключ
+    # ИСТОРИЧЕСКИЙ период (kind=custom/last_month) НЕ пишем в снапшот и НЕ считаем тренд: ключ
     # (customer, сегодня, period_days) склобберил бы rolling-окно и дал ложную Δ (историч. vs скользящее
     # бессмысленно). Только rolling (last_n/mtd, кончаются вчера) идут в тренд.
     if is_custom:
@@ -6522,7 +6612,7 @@ async def _dispatch_command_result(
         await m.answer("❓ " + res["question"])
     elif t == "need_account":
         # §8: NL-чтение без аккаунта при нескольких живых — не угадываем и не показываем пустой
-        # Draft. Пикер target='status': после тапа сразу придёт статистика (_render_status).
+        # Draft. Пикер target='status': после тапа — выбор периода → статистика (3.1).
         rows = await _read_account_rows(m.chat.id)
         _REPORT_ACCT_CACHE[m.chat.id] = rows
         await m.answer(

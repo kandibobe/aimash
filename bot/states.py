@@ -148,6 +148,15 @@ class CompetitorsWizard(StatesGroup):
     awaiting_file = State()  # ждём .csv-выгрузку отчёта из интерфейса Google Ads
 
 
+class PeriodCustom(StatesGroup):
+    """3.1: «📅 Свой период…» в клавиатуре периода (PeriodCB code='CUST') — по клику ждём диапазон
+    текстом («вчера», «прошлая неделя», «с 1 по 15 июня», 14.06-30.06, ISO — parse_period_text).
+    Одноразовый (паттерн PickerSearch): показали результат/ошибку → state снят. target — в
+    state-data (period_target). Read-only: любой target ведёт в отчётную команду."""
+
+    awaiting = State()  # ждём период текстом; target — в state-data
+
+
 class AuditQA(StatesGroup):
     """Доп-вопросы по последнему /audit: после карточки бот включает режим Q&A — свободный текст =
     вопрос к READ-ONLY аналитику (run_analysis_agent, тот же fact-guard, БЕЗ мутаций). Контекст

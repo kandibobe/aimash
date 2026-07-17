@@ -102,6 +102,7 @@ def test_month_to_date_and_first_of_month_edge():
 
 def test_from_preset_and_custom():
     assert P.from_preset("90", today=date(2026, 6, 25)).days == 90
+    assert P.from_preset("14", today=date(2026, 6, 25)).days == 14  # 3.1: новый пресет
     assert P.from_preset("MTD", today=date(2026, 6, 25)).date_from == date(2026, 6, 1)
     assert P.custom(date(2026, 1, 1), date(2026, 1, 31)).days == 31
     for bad in ("5", "year", ""):
@@ -115,6 +116,25 @@ def test_from_preset_and_custom():
         raise AssertionError("date_to < date_from должно падать")
     except ValueError:
         pass
+
+
+def test_last_month_preset_and_reanchor():
+    """3.1: пресет LM = прошлый КАЛЕНДАРНЫЙ месяц; kind='last_month' — окно относительное, поэтому
+    reports.tz.reanchor пере-якорит его на «сегодня» аккаунта (граница месяца зависит от TZ)."""
+    lm = P.from_preset("LM", today=date(2026, 6, 25))
+    assert lm.kind == "last_month"
+    assert lm.date_from == date(2026, 5, 1) and lm.date_to == date(2026, 5, 31)
+    # январь → прошлый месяц = декабрь ПРОШЛОГО года (граница года)
+    jan = P.last_month(today=date(2026, 1, 5))
+    assert jan.date_from == date(2025, 12, 1) and jan.date_to == date(2025, 12, 31)
+    # reanchor: «сегодня» аккаунта в другом месяце → окно съезжает на ЕГО прошлый месяц
+    from reports.tz import reanchor
+
+    re_lm = reanchor(lm, today=date(2026, 7, 2))
+    assert re_lm.date_from == date(2026, 6, 1) and re_lm.date_to == date(2026, 6, 30)
+    # custom остаётся как есть (абсолютные даты не пере-якорим)
+    cust = P.custom(date(2026, 1, 1), date(2026, 1, 31))
+    assert reanchor(cust, today=date(2026, 7, 2)) is cust
 
 
 # ── Метрики (производные считает КОД) ────────────────────────────────────────────
