@@ -1,6 +1,7 @@
 """Ф5б: срезы «Статистики аукционов» → ЛОКАЛЬНАЯ таблица auction_insight_row (субстрат сравнения).
 
-Данные приносит человек файлом (/competitors) — через API Google имён конкурентов не отдаёт вовсе.
+Данные приносит человек файлом (/competitors): метрики auction_insight_* в API есть, но доступ к ним
+закрыт вайтлистом Google (подробнее — docstring reports/auction_insights.py).
 Здесь только хранение и выдача: парсит reports/auction_insights.py, рисует bot/texts.py.
 
 Идемпотентно per (customer_id, snapshot_date): повторный импорт за ту же дату перезаписывает срез
@@ -109,3 +110,52 @@ async def latest_snapshot(customer_id: str, *, before_date: str | None = None) -
     )
     label = next((r.period_label for r in rows if r.period_label), "")
     return Snapshot(snapshot_date=date, period_label=label, you=you, competitors=tuple(rivals))
+
+
+async def snapshot_series(customer_id: str, *, limit: int = 4) -> list[Snapshot]:
+    """Последние `limit` срезов аккаунта ПО ВОЗРАСТАНИЮ даты — для мини-тренда в карточке.
+
+    Два запроса на всю серию (даты → строки одним IN), не по запросу на срез: срезов у
+    аккаунта может накопиться много, а карточке нужен только хвост."""
+    async with Session() as s:
+        dates = (
+            (
+                await s.execute(
+                    select(AuctionInsightRow.snapshot_date)
+                    .where(AuctionInsightRow.customer_id == str(customer_id))
+                    .distinct()
+                    .order_by(AuctionInsightRow.snapshot_date.desc())
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not dates:
+            return []
+        rows = (
+            (
+                await s.execute(
+                    select(AuctionInsightRow).where(
+                        AuctionInsightRow.customer_id == str(customer_id),
+                        AuctionInsightRow.snapshot_date.in_(dates),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    out: list[Snapshot] = []
+    for date in sorted(dates):
+        day = [r for r in rows if r.snapshot_date == date]
+        you = next((_to_row(r) for r in day if r.is_you), None)
+        rivals = sorted(
+            (_to_row(r) for r in day if not r.is_you),
+            key=lambda r: (r.impression_share or 0.0),
+            reverse=True,
+        )
+        label = next((r.period_label for r in day if r.period_label), "")
+        out.append(
+            Snapshot(snapshot_date=date, period_label=label, you=you, competitors=tuple(rivals))
+        )
+    return out

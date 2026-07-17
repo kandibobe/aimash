@@ -907,6 +907,10 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "⚡ Можно применить сейчас (кнопка откроет подтверждение «было → станет»):",
         "en": "⚡ Ready to apply (the button opens a “was → will be” confirmation):",
     },
+    "sched_digest_auction_stale": {
+        "ru": "🥊 Срезу аукционов уже {d} дн. — обнови выгрузку: /competitors",
+        "en": "🥊 Auction insights snapshot is {d} days old — refresh it: /competitors",
+    },
     "bizdigest_on": {
         "ru": "📈 Недельный бизнес-дайджест ВКЛючён — пришлю сводку по всем аккаунтам "
         "(расход/конверсии/CPA неделя к неделе + топ-3 совета) по расписанию. Выключить: /bizdigest.",

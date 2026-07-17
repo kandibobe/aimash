@@ -186,3 +186,26 @@ def test_pressure_adds_top_of_page_facts_only_when_that_layer_was_read():
     blind = [_kw("ноутбук", impressions=8000, cost=100.0, bid=1.0, top_cpc=2.5)]
     g = _find(build_audit(report, is_rows=is_rows, bid_landscape=blind), "competitive_pressure")
     assert "top_is" not in g.facts and g.facts["paying"] == 1
+
+
+def test_pressure_names_rivals_only_when_bot_layer_added_them():
+    """3.4: имена давящих доменов подмешивает СЛОЙ БОТА из локального среза /competitors
+    (bot.main._augment_competition_finding) — движок сам их не знает (метрики auction_insight_* в
+    API за закрытым вайтлистом Google). Рендер: с facts['rivals'] называет и домен, и дату среза;
+    без них — прежний текст без имён."""
+    report = _report([("Search", 9000, 400.0, 20.0)])
+    f = _find(
+        build_audit(report, is_rows=[_is_row("Search", share=0.30, budget=0.20, rank=0.50)]),
+        "competitive_pressure",
+    )
+    assert "давят" not in finding_text(f, "ru", "USD")  # движок имён не кладёт
+    f.facts["rivals"] = [
+        {"domain": "beforward.jp", "impression_share_pct": 61.0},
+        {"domain": "autocom.jp", "impression_share_pct": None},  # «--» из файла → без процента
+    ]
+    f.facts["rivals_date"] = "2026-07-10"
+    ru = finding_text(f, "ru", "USD")
+    assert "Сильнее всего давят: beforward.jp (61%), autocom.jp" in ru  # 61.0 → «61%», не «61.0%»
+    assert "срез /competitors от 2026-07-10" in ru
+    en = finding_text(f, "en", "USD")
+    assert "Top rivals: beforward.jp (61%), autocom.jp" in en and "2026-07-10" in en

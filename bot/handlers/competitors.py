@@ -1,6 +1,7 @@
 """Ф5б: /competitors — импорт CSV «Статистика аукционов» (Auction Insights) + карточка конкурентов.
 
-Имён конкурентов Google через API не отдаёт вовсе (ресурса `auction_insight` в GAQL нет) — файл из
+Метрики аукционов (`metrics.auction_insight_*`) в API ЕСТЬ, но доступ к ним закрыт вайтлистом
+Google (программа набора закрыта; источник — docstring reports/auction_insights.py) — файл из
 веб-интерфейса это ЕДИНСТВЕННЫЙ легальный путь. Суррогат по своим данным («давят или нет») уже даёт
 чек competitive_pressure в /audit (Ф5а); здесь — «кто именно».
 
@@ -30,10 +31,21 @@ async def _card(m: bm.Message, acct: str) -> bool:
         return False
     prev = await latest_snapshot(acct, before_date=snap.snapshot_date)
     await m.answer(
-        bm.texts.fmt_competitors(snap, prev, customer_id=acct),
+        bm.texts.fmt_competitors(snap, prev, customer_id=acct, series=await _series(acct)),
         parse_mode=bm.ParseMode.HTML,
     )
     return True
+
+
+async def _series(acct: str):
+    """Хвост срезов для мини-тренда. Best-effort: тренд — довесок, карточка важнее сбоя БД."""
+    try:
+        from db.competitors import snapshot_series
+
+        return await snapshot_series(acct, limit=4)
+    except Exception as e:  # noqa: BLE001
+        bm.log.warning("competitors: серия срезов не прочитана: %s", type(e).__name__)
+        return []
 
 
 @bm.dp.message(bm.Command("competitors"))
@@ -105,7 +117,7 @@ async def competitors_file(m: bm.Message, state: bm.FSMContext, bot: bm.Bot) -> 
         competitors=ins.competitors,
     )
     await m.answer(
-        bm.texts.fmt_competitors(card, prev, customer_id=acct),
+        bm.texts.fmt_competitors(card, prev, customer_id=acct, series=await _series(acct)),
         parse_mode=bm.ParseMode.HTML,
     )
     if not saved:

@@ -123,6 +123,45 @@ async def test_seed_survives_competitor_db_failure(monkeypatch):
     assert facts["findings"]  # находки на месте
 
 
+# ── 3.4: имена доменов в находку competitive_pressure (bot-слой; движок чист от БД) ───────
+async def test_augment_injects_top_rivals_into_pressure_finding(monkeypatch):
+    async def _snap_fn(cid, **k):
+        assert cid == "1234567890"  # аккаунт берётся из result, не из чата
+        return _snap()
+
+    monkeypatch.setattr("db.competitors.latest_snapshot", _snap_fn)
+    f = _f("competitive_pressure", "competition", "medium", 0.0, share=30)
+    await bm._augment_competition_finding(_result([f]))
+    assert f.facts["rivals"] == [
+        {"domain": "beforward.jp", "impression_share_pct": 61.0},
+        {"domain": "autocom.jp", "impression_share_pct": 28.0},
+    ]
+    assert f.facts["rivals_date"] == "2026-07-10"
+
+
+async def test_augment_skips_db_entirely_without_pressure_finding(monkeypatch):
+    called = False
+
+    async def _snap_fn(cid, **k):
+        nonlocal called
+        called = True
+        return _snap()
+
+    monkeypatch.setattr("db.competitors.latest_snapshot", _snap_fn)
+    await bm._augment_competition_finding(_result([_f("x", "waste", "high", 1.0)]))
+    assert called is False  # находки нет — в БД даже не ходим
+
+
+async def test_augment_survives_db_failure(monkeypatch):
+    async def _boom(cid, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("db.competitors.latest_snapshot", _boom)
+    f = _f("competitive_pressure", "competition", "medium", 0.0, share=30)
+    await bm._augment_competition_finding(_result([f]))
+    assert "rivals" not in f.facts  # сбой ЛОКАЛЬНОЙ БД → находка как была, аудит жив
+
+
 # ── drill: get_competitors ───────────────────────────────────────────────────────────────
 async def test_drill_get_competitors(monkeypatch):
     async def _snap_fn(cid, **k):

@@ -514,6 +514,56 @@ async def test_digest_applied_line_unquiets_and_counts_only_visible(monkeypatch)
     assert "102" not in body  # C2: чужой счёт не суммирован
 
 
+async def test_digest_auction_stale_nudge(monkeypatch):
+    """3.4: срез /competitors старше 30 дн. → нудж «обнови» в блоке аккаунта. Свежий срез и
+    отсутствие импортов — тишины не нарушаем (кто фичей не пользуется, того не спамим);
+    тихий аккаунт нудж НЕ будит — это не событие."""
+    from datetime import date, timedelta
+
+    from scheduler import jobs
+
+    A, B = "5551112223", "5552223334"
+    reports = {A: _rep(A, _mm(100, 1)), B: _rep(B, _mm(0, 0, clicks=0))}
+    _wire_sched(monkeypatch, jobs, reports, {91011})
+    monkeypatch.setattr(jobs, "_account_health", lambda r: None)
+
+    async def _no_applied(_days):
+        return {}
+
+    monkeypatch.setattr("confirm.store.audit_applied_by_account_since", _no_applied)
+
+    stale = (date.today() - timedelta(days=45)).isoformat()
+
+    async def _stale_snap(cid, **k):
+        return SimpleNamespace(snapshot_date=stale)
+
+    monkeypatch.setattr("db.competitors.latest_snapshot", _stale_snap)
+    bot = _SentBot()
+    await jobs.run_scheduled_report(bot)
+    body = bot.sent[0][1]
+    assert "Срезу аукционов уже 45 дн." in body and "/competitors" in body
+    assert body.count("Срезу аукционов") == 1  # тихий B нудж не разбудил (его блока нет)
+    assert "Без событий: 1" in body
+
+    fresh = (date.today() - timedelta(days=5)).isoformat()
+
+    async def _fresh_snap(cid, **k):
+        return SimpleNamespace(snapshot_date=fresh)
+
+    monkeypatch.setattr("db.competitors.latest_snapshot", _fresh_snap)
+    bot2 = _SentBot()
+    await jobs.run_scheduled_report(bot2)
+    assert "Срезу аукционов" not in bot2.sent[0][1]
+
+    async def _no_snap(cid, **k):
+        return None
+
+    monkeypatch.setattr("db.competitors.latest_snapshot", _no_snap)
+    bot3 = _SentBot()
+    await jobs.run_scheduled_report(bot3)
+    assert "Срезу аукционов" not in bot3.sent[0][1]
+
+
 async def test_digest_all_quiet_single_short_message(monkeypatch):
     """3.3: тишина везде — одно короткое сообщение вместо простыни блоков."""
     from scheduler import jobs

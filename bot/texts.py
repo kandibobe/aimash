@@ -3239,13 +3239,16 @@ def fmt_competitors(
     customer_id: str = "",
     top_n: int = 8,
     lang: str | None = None,
+    series=None,
 ) -> str:
     """Ф5б: карточка «Статистики аукционов» из импортированного CSV (db.competitors.Snapshot).
 
     Показывает РОВНО то, что было в файле: «--» (нет данных) остаётся прочерком, а не превращается
     в 0% — иначе клиент прочитает «конкурент нигде не показывался» там, где Google просто промолчал.
     prev — предыдущий импорт: дельта доли показов в ПУНКТАХ (п.п.), новые/ушедшие домены. Дельта
-    честна только при одинаковом окне выгрузки, поэтому окно каждого среза печатается рядом."""
+    честна только при одинаковом окне выгрузки, поэтому окно каждого среза печатается рядом.
+    series — последние срезы по возрастанию даты (db.competitors.snapshot_series): мини-тренд
+    СВОЕЙ доли показов, рисуется от 3 точек (2 покрывает дельта prev)."""
     lng = _lang(lang)
 
     def pct(v: float | None) -> str:
@@ -3271,6 +3274,16 @@ def fmt_competitors(
                 f"верх страницы {pct(y.top_of_page_rate)} · самый верх {pct(y.abs_top_of_page_rate)}"
             )
         )
+
+    points = [
+        (s.snapshot_date, s.you.impression_share)
+        for s in (series or ())
+        if s.you is not None and s.you.impression_share is not None
+    ]
+    if len(points) >= 3:
+        trail = " → ".join(f"{pct(v)} ({esc(d[5:])})" for d, v in points)
+        label = "📈 Your impression share" if lng == "en" else "📈 Твоя доля показов"
+        lines.append(f"{label}: {trail}")
 
     prev_by_domain = {c.domain: c for c in (prev.competitors if prev else ())}
     lines.append("")
@@ -3308,8 +3321,10 @@ def fmt_competitors(
         lines.append(f"<i>{cmp_} {esc(prev.snapshot_date)}{win}</i>")
 
     lines.append(
-        "<i>Competitor names come only from this report — Google's API doesn't return them.</i>"
+        "<i>Competitor names come only from this report — API access to auction insight "
+        "metrics is gated by a closed Google allowlist.</i>"
         if lng == "en"
-        else "<i>Имена конкурентов даёт только этот отчёт — через API Google их не отдаёт.</i>"
+        else "<i>Имена конкурентов даёт только этот отчёт — доступ к метрикам аукционов "
+        "в API закрыт вайтлистом Google.</i>"
     )
     return "\n".join(lines)

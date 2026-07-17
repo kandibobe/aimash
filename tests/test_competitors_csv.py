@@ -165,6 +165,72 @@ async def test_snapshot_overwrites_same_date_and_finds_previous():
     assert await latest_snapshot(cid, before_date="2026-01-01") is None  # раньше первого — нет
 
 
+async def test_snapshot_series_returns_ascending_tail():
+    """3.4: series — последние N срезов ПО ВОЗРАСТАНИЮ даты (хвост для мини-тренда карточки);
+    лишние старые отброшены, пустая история → []."""
+    from db.competitors import save_snapshot, snapshot_series
+    from db.session import init_db
+    from reports.auction_insights import AuctionInsights, CompetitorRow
+
+    await init_db()
+    cid = "9999000222"
+
+    def ins(share_you: float) -> AuctionInsights:
+        return AuctionInsights(
+            you=CompetitorRow(domain="You", is_you=True, impression_share=share_you),
+            competitors=(CompetitorRow(domain="rival.com", is_you=False, impression_share=0.5),),
+            period_label="",
+        )
+
+    for d, share in [
+        ("2026-03-01", 0.10),
+        ("2026-04-01", 0.15),
+        ("2026-05-01", 0.22),
+        ("2026-06-01", 0.20),
+        ("2026-07-01", 0.18),
+    ]:
+        await save_snapshot(cid, d, ins(share))
+
+    tail = await snapshot_series(cid, limit=4)
+    assert [s.snapshot_date for s in tail] == [
+        "2026-04-01",
+        "2026-05-01",
+        "2026-06-01",
+        "2026-07-01",
+    ]  # март (старейший) отброшен, порядок — по возрастанию
+    assert [round(s.you.impression_share, 2) for s in tail] == [0.15, 0.22, 0.20, 0.18]
+    assert tail[-1].competitors[0].domain == "rival.com"
+    assert await snapshot_series("0000000000", limit=4) == []  # импортов не было
+
+
+def test_card_mini_trend_needs_three_you_points():
+    """3.4: мини-тренд СВОЕЙ доли — от 3 точек (2 и так покрывает дельта prev); срез без «You»
+    точкой не считается. Плюс честный футер: метрики в API есть, но за вайтлистом Google."""
+    from reports.auction_insights import CompetitorRow
+
+    def s(d: str, share: float | None) -> Snapshot:
+        you = (
+            CompetitorRow(domain="You", is_you=True, impression_share=share)
+            if share is not None
+            else None
+        )
+        return Snapshot(d, "", you, ())
+
+    series3 = [s("2026-05-01", 0.22), s("2026-06-01", 0.20), s("2026-07-13", 0.18)]
+    card = fmt_competitors(series3[-1], None, customer_id="123", lang="ru", series=series3)
+    assert "📈 Твоя доля показов" in card
+    assert "22% (05-01) → 20% (06-01) → 18% (07-13)" in card
+    assert "вайтлистом Google" in card
+
+    two = fmt_competitors(series3[-1], None, customer_id="123", lang="ru", series=series3[1:])
+    assert "📈" not in two
+    holey = [s("2026-05-01", 0.22), s("2026-06-01", None), s("2026-07-13", 0.18)]
+    assert "📈" not in fmt_competitors(holey[-1], None, customer_id="123", lang="ru", series=holey)
+
+    en = fmt_competitors(series3[-1], None, customer_id="123", lang="en", series=series3)
+    assert "📈 Your impression share" in en
+
+
 def test_handler_module_registered_before_fallback():
     """Документ ловится ПО СОСТОЯНИЮ раньше catch-all on_document — иначе CSV конкурентов уедет
     в ИИ (ровно то, чего мы избегаем). Порядок = порядок HANDLER_MODULES."""

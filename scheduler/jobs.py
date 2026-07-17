@@ -10,7 +10,7 @@ execute_confirmed / apply_* — планировщик не меняет акк�
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
@@ -35,6 +35,9 @@ ANOMALY_WINDOW_DAYS = int(settings.anomaly_window_days)  # окно сравне
 # 2.6: TTL черновика — из core.config (env PROPOSAL_TTL_HOURS); имя-алиас сохранён для тестов.
 PROPOSAL_TTL_HOURS = int(settings.proposal_ttl_hours)
 _DIGEST_MAX = 3800  # потолок длины дайджеста для Telegram (лимит 4096, оставляем запас)
+# 3.4: срез /competitors старше стольких дней → нудж «обнови» в дайджесте. Только для аккаунтов,
+# где импорт уже был (кто фичей не пользуется — не спамим), и только в блоке НЕтихого аккаунта.
+_AUCTION_STALE_DAYS = 30
 
 # Анти-спам аномалий. Джоба крутится каждые anomaly_interval_hours (дефолт 6), а окно сравнения —
 # anomaly_window_days (дефолт 7): ОДНА и та же аномалия («расход +60% к прошлой неделе») попадала в
@@ -208,6 +211,21 @@ def _quiet_account(info: dict | None, fresh_alerts, applied_n: int) -> bool:
     return health is None or not getattr(health, "findings", None)
 
 
+async def _auction_snapshot_age(acct: str) -> int | None:
+    """3.4: возраст (дни) последнего среза /competitors; None — импортов не было или БД недоступна
+    (нудж не показываем — кто фичей не пользуется, того не спамим). Дата хоста, не TZ аккаунта:
+    нуджу с порогом «месяц» точная граница суток не нужна."""
+    try:
+        from db.competitors import latest_snapshot
+
+        snap = await latest_snapshot(acct)
+        if snap is None:
+            return None
+        return (date.today() - date.fromisoformat(snap.snapshot_date)).days
+    except Exception:  # noqa: BLE001 — нудж — довесок, отчёт важнее
+        return None
+
+
 async def _digest_action(chat_id: int, lang: str, accts: list[str], acct_info: dict):
     """3.3: одна actionable-секция в плановом дайджесте — топ-рекомендация с ИСПОЛНИМОЙ неденежной
     операцией (тот же двойной гейт, что в /advise: allow-list _ADVISE_APPLY_OPS + исполнимость
@@ -351,6 +369,7 @@ async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
                     "cost": cost,
                     "clicks": clicks,
                 }
+                auction_age = await _auction_snapshot_age(acct)  # 3.4: нудж про старый срез
                 for lang in langs:
                     hl = _health_line(health, lang)
                     parts = [summary_text(report, lang)]
@@ -360,6 +379,8 @@ async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
                     tf = _top_findings_block(health, lang)
                     if tf:
                         parts.append(tf)
+                    if auction_age is not None and auction_age > _AUCTION_STALE_DAYS:
+                        parts.append(i18n.t("sched_digest_auction_stale", lang, d=auction_age))
                     blocks[lang][acct] = (hl + "\n\n" if hl else "") + "\n".join(parts)
             except Exception as e:  # сеть/доступ/SDK — фиксируем (§15), остальные аккаунты живут
                 if is_account_access_error(e):

@@ -6134,6 +6134,29 @@ async def _audit_facts(result, days: int) -> dict:
     return facts
 
 
+async def _augment_competition_finding(result) -> None:
+    """3.4: подмешать ИМЕНА топ-давящих доменов из ЛОКАЛЬНОГО среза /competitors в facts находки
+    competitive_pressure — рендер (audit/render.py) допишет «Сильнее всего давят: …». Здесь, а не в
+    движке: движок чист от БД, а балл/эпоху это не трогает (display-only, score_intensity=0).
+    Best-effort: нет среза/сбой БД → находка остаётся как была."""
+    try:
+        f = next((x for x in result.findings if x.check_id == "competitive_pressure"), None)
+        if f is None:
+            return
+        from db.competitors import latest_snapshot
+
+        snap = await latest_snapshot(result.customer_id)
+        if snap is None or not snap.competitors:
+            return
+        f.facts["rivals"] = [
+            {"domain": r.domain, "impression_share_pct": _audit_pct(r.impression_share)}
+            for r in snap.competitors[:3]
+        ]
+        f.facts["rivals_date"] = snap.snapshot_date
+    except Exception as e:  # noqa: BLE001 — имена конкурентов — довесок, аудит важнее
+        log.warning("домены конкурентов в находку не подмешаны: %s", type(e).__name__)
+
+
 def _campaign_cfg_facts(cfg) -> dict:
     """CampaignConfig → компактный dict для drill get_campaign_detail (бюджет/группы/ключи/RSA). Числа
     (дневной бюджет из micros) попадают в множество дозволенных для fact-guard (это КОД-чтение)."""
@@ -6201,8 +6224,9 @@ def _make_audit_drill(client, acct: str, period):
                 )
             return {"search_terms": out}
         if name == "get_competitors":
-            # ЛОКАЛЬНАЯ БД (/competitors), не Google Ads: cid=acct (залочен). Google имён соперников
-            # через API не отдаёт — источник только загруженный человеком отчёт «Статистики аукционов».
+            # ЛОКАЛЬНАЯ БД (/competitors), не Google Ads: cid=acct (залочен). Метрики аукционов в API
+            # за закрытым вайтлистом Google — источник только загруженный человеком отчёт
+            # «Статистики аукционов».
             from db.competitors import latest_snapshot
 
             snap = await latest_snapshot(acct)
@@ -6374,6 +6398,7 @@ async def _audit_run(
         except Exception as e:  # сеть/доступ/SDK — не роняем денежный путь, показываем ошибку
             await target.answer(i18n.t("advise_error", err=ux.err_text(e)))
             return
+    await _augment_competition_finding(result)  # 3.4: имена доменов из /competitors (best-effort)
     # Нет активности → карточка «—» + подсказка про живой аккаунт (как раньше). parse_mode=None:
     # карточка — чистый текст (имена кампаний от клиента), HTML-парсер не нужен.
     if not result.has_activity:
