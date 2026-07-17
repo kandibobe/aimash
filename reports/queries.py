@@ -437,15 +437,11 @@ class RecommendationRow:
 def _recs_query(limit: int, with_impact: bool) -> str:
     fields = ["recommendation.type", "recommendation.dismissed", "recommendation.campaign"]
     if with_impact:
-        fields += [
-            "recommendation.impact.base_metrics.conversions",
-            "recommendation.impact.base_metrics.cost_micros",
-            "recommendation.impact.base_metrics.clicks",
-            "recommendation.impact.potential_metrics.conversions",
-            "recommendation.impact.potential_metrics.cost_micros",
-            "recommendation.impact.potential_metrics.clicks",
-            "campaign.name",
-        ]
+        # В GAQL v24 selectable — КОМПОЗИТ recommendation.impact (метаданные GoogleAdsFieldService);
+        # leaf-пути impact.{base,potential}_metrics.* — «Unrecognized fields» (живая проба
+        # 2026-07-17: молчаливая деградация в except выкидывала impact на КАЖДОМ прогоне).
+        # Протобуф ответа несёт вложенные метрики целиком — парсер ниже читает их как раньше.
+        fields += ["recommendation.impact", "campaign.name"]
     return f"SELECT {', '.join(fields)} FROM recommendation LIMIT {int(limit)}"
 
 
@@ -453,10 +449,11 @@ def fetch_recommendations(client, customer_id: str, limit: int = 50) -> list[Rec
     """Ф2: активные Google-рекомендации ВМЕСТЕ с их impact-метриками. READ-ONLY — только показ;
     применение (ApplyRecommendation) — отдельной мутацией через confirm-гейт, не отсюда.
 
-    `recommendation.impact.{base,potential}_metrics` в v24 существуют (проверено по протобуфу
-    RecommendationImpact/RecommendationMetrics) — это готовый ответ Google на «что оптимизировать»
-    с цифрами. Деградация: если сервер отвергнет impact/джойн кампании, повторяем БЕЗ них — типы
-    рекомендаций важнее и не должны падать заодно (прирост тогда 0.0 = «не оценено», gr8)."""
+    В SELECT идёт композит `recommendation.impact` (в GAQL v24 selectable именно он; leaf-пути
+    impact.*_metrics.* сервер отвергает как Unrecognized — живая проба 2026-07-17), протобуф ответа
+    несёт RecommendationImpact/RecommendationMetrics целиком. Деградация: если сервер отвергнет
+    impact/джойн кампании, повторяем БЕЗ них — типы рекомендаций важнее и не должны падать заодно
+    (прирост тогда 0.0 = «не оценено», gr8)."""
     ensure_read_allowed(customer_id)
     try:
         rows = list(_search(client, customer_id, _recs_query(limit, True)))
@@ -881,8 +878,11 @@ def fetch_geo_waste(client, customer_id: str, period, limit: int = 200) -> list[
     региона резолвим best-effort. campaign.name → target_campaign (для дедупа: cost региона ⊂ cost
     кампании). Поля публичны (сверить на TEST MCC). READ-ONLY."""
     ensure_read_allowed(customer_id)
+    # campaign.status в SELECT обязателен: v24 для geographic_view требует фильтруемый атрибут
+    # кампании в SELECT («must be present in SELECT clause», живая проба 2026-07-17) — view-специфично
+    # (ad_group_ad/keyword_view так не требуют).
     q = (
-        "SELECT campaign.name, segments.geo_target_region, "
+        "SELECT campaign.name, campaign.status, segments.geo_target_region, "
         f"{_METRICS_SELECT} FROM geographic_view "
         f"WHERE {_where(period, None)} AND geographic_view.location_type = 'LOCATION_OF_PRESENCE' "
         f"AND campaign.status = 'ENABLED' ORDER BY metrics.cost_micros DESC LIMIT {int(limit)}"
@@ -1317,8 +1317,9 @@ def fetch_campaign_assets(client, customer_id: str) -> list[CampaignAssetsRow]:
 
     counts: dict[str, dict[str, int]] = {}
     for res, link in (("campaign_asset", "campaign_asset"), ("ad_group_asset", "ad_group_asset")):
+        # campaign.status в SELECT — требование v24 для *_asset (живая проба 2026-07-17).
         q = (
-            f"SELECT campaign.id, {link}.field_type FROM {res} "
+            f"SELECT campaign.id, campaign.status, {link}.field_type FROM {res} "
             f"WHERE {link}.status = 'ENABLED' AND {link}.field_type IN {ft_filter} "
             "AND campaign.status = 'ENABLED'"
         )
@@ -1411,9 +1412,10 @@ def fetch_campaign_settings(client, customer_id: str, period) -> list[CampaignSe
     outside = _sum_by_campaign(
         client,
         customer_id,
-        "SELECT campaign.id, user_location_view.targeting_location, metrics.cost_micros, "
-        f"metrics.conversions FROM user_location_view WHERE {_where(period, None)} "
-        "AND campaign.status = 'ENABLED'",
+        # campaign.status в SELECT — требование v24 для user_location_view (живая проба 2026-07-17).
+        "SELECT campaign.id, campaign.status, user_location_view.targeting_location, "
+        f"metrics.cost_micros, metrics.conversions FROM user_location_view "
+        f"WHERE {_where(period, None)} AND campaign.status = 'ENABLED'",
         lambda r: not bool(r.user_location_view.targeting_location),
     )
 
@@ -1650,9 +1652,12 @@ def fetch_pmax_asset_groups(client, customer_id: str, period) -> list[PmaxAssetG
     ensure_read_allowed(customer_id)
 
     rows: dict[str, PmaxAssetGroupRow] = {}
+    # Композит asset_group.asset_coverage в v24 не selectable («may not be used in SELECT clause»),
+    # selectable — лист .ad_strength_action_items (метаданные GoogleAdsFieldService + живая проба
+    # 2026-07-17); campaign.status в SELECT — то же view-требование, что у geographic_view.
     q = (
-        "SELECT campaign.id, campaign.name, asset_group.id, asset_group.name, "
-        "asset_group.ad_strength, asset_group.asset_coverage "
+        "SELECT campaign.id, campaign.name, campaign.status, asset_group.id, asset_group.name, "
+        "asset_group.ad_strength, asset_group.asset_coverage.ad_strength_action_items "
         f"FROM asset_group WHERE {_PMAX_CHANNEL} AND campaign.status = 'ENABLED' "
         "AND asset_group.status = 'ENABLED'"
     )

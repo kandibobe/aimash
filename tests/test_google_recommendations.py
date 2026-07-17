@@ -125,7 +125,10 @@ def test_fetch_recommendations_reads_impact_metrics():
     assert r.type == "KEYWORD" and r.campaign == "Search" and not r.dismissed
     assert r.add_conversions == 12.0 and r.add_cost == 40.0 and r.add_clicks == 60.0
     q = client.seen[0]
-    assert "recommendation.impact.potential_metrics.conversions" in q
+    # В SELECT — КОМПОЗИТ recommendation.impact: leaf-пути impact.*_metrics.* в v24 —
+    # «Unrecognized field» (живая проба 2026-07-17), деградация тихо выкидывала impact всегда.
+    assert "recommendation.impact" in q
+    assert "recommendation.impact." not in q
     assert "FROM recommendation" in q
 
 
