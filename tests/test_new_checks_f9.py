@@ -282,6 +282,36 @@ def test_negative_conflicts_silent_without_either_side():
     assert "negative_keyword_conflicts" not in _ids(res)
 
 
+def test_negative_conflict_campaign_scope_is_one_tap():
+    """3.2в: КАМПАНИЙНЫЙ минус бот снимает сам (remove_negative_keywords) — точный текст+тип в
+    evidence, операция неденежная и обратимая. bot._advise_apply_params читает evidence."""
+    negs = [NegativeKeywordRow("campaign", "Camp", "", "ноутбук", "BROAD")]
+    res = _conflict_res(negs, [_kw("Camp", "G1", "купить ноутбук")])
+    f = _one(res, "negative_keyword_conflicts")
+    assert f.suggested_operation == "remove_negative_keywords"
+    assert f.one_tap
+    assert f.evidence["negative"] == "ноутбук"
+    assert f.evidence["match_type"] == "broad"  # нормализован под Literal схемы мутации
+
+
+def test_negative_conflict_group_and_shared_scopes_stay_prose():
+    """Уровень группы/shared-список: схема RemoveNegativeKeywords кампанийная — «сняли хоть где-то»
+    выглядело бы как «готово». Кнопки нет, совет прозой."""
+    group_negs = [NegativeKeywordRow("ad_group", "Camp", "G1", "ноутбук", "BROAD")]
+    res = _conflict_res(group_negs, [_kw("Camp", "G1", "купить ноутбук")])
+    f = _one(res, "negative_keyword_conflicts")
+    assert f.facts["scope"] == "ad_group"
+    assert f.suggested_operation is None and not f.one_tap
+
+    shared = [NegativeKeywordRow("shared", "", "", "ноутбук", "BROAD", list_name="Мусор")]
+    res = _conflict_res(
+        shared, [_kw("Camp", "G1", "купить ноутбук")], attachments={"Мусор": frozenset({"Camp"})}
+    )
+    f = _one(res, "negative_keyword_conflicts")
+    assert f.facts["scope"] == "shared"
+    assert f.suggested_operation is None and not f.one_tap
+
+
 # ── 4. no_conversion_value ──
 
 

@@ -6046,8 +6046,9 @@ async def _advise_run(
     )
     for r in rec_set.recs:
         # §advisor #1: «применить» показываем ТОЛЬКО для не-денежных советов (pause/минус-слова);
-        # деньги/ставки — вне one-tap (golden rule #3), advise_feedback_kb сам отфильтрует.
-        apply_op = r.suggested_operation if r.suggested_operation in _ADVISE_APPLY_OPS else None
+        # деньги/ставки — вне one-tap (golden rule #3). Гейт двойной (_advise_apply_op): allow-list
+        # И исполнимость params — иначе метки outcome (ngram_waste) рисовали бы мёртвую кнопку.
+        apply_op = _advise_apply_op(r)
         await target.answer(
             r.body or "", reply_markup=advise_feedback_kb(r.rec_uid, lang, apply_op=apply_op)
         )
@@ -6457,8 +6458,9 @@ async def _audit_run(
             log.warning("персист находок /audit не удался: %s", type(e).__name__)
         for f, r in zip(findings, recs):
             # Кнопку рисует allow-list бота, а НЕ метка в rec: advice_operation (update_bid/…) сюда
-            # не пролезет — деньги только прямой командой (golden rule #3).
-            apply_op = f.suggested_operation if f.suggested_operation in _ADVISE_APPLY_OPS else None
+            # не пролезет — деньги только прямой командой (golden rule #3). Гейт по НАХОДКЕ
+            # (f.suggested_operation, advice-меток не содержит) + исполнимость params.
+            apply_op = _advise_apply_op(f)
             await target.answer(
                 r.body,
                 reply_markup=(
@@ -6512,7 +6514,29 @@ def _advise_apply_params(rec) -> dict | None:
         # дефолт 'broad' (advisor wasteful_keyword — как раньше). Схема add_negative_keywords ревалидирует.
         mt = (rec.evidence or {}).get("match_type") or "broad"
         return {"campaign": campaign, "keywords": [kw], "match_type": mt}
+    if rec.suggested_operation == "remove_negative_keywords":
+        # 3.2в: negative_keyword_conflicts — снять КАМПАНИЙНЫЙ минус, блокирующий свой ключ.
+        # Текст и тип берём из находки как есть (снимаем ровно тот минус, что конфликтует).
+        neg = (rec.evidence or {}).get("negative")
+        mt = (rec.evidence or {}).get("match_type")
+        if not neg or not mt:
+            return None
+        return {"campaign": campaign, "keywords": [neg], "match_type": mt}
     return None
+
+
+def _advise_apply_op(rec) -> str | None:
+    """Операция для кнопки «применить» под советом/находкой, либо None (кнопки нет).
+
+    Два гейта: (1) allow-list _ADVISE_APPLY_OPS — деньги/ставки не в один тап (golden rule #3);
+    (2) ИСПОЛНИМОСТЬ — params реально собираются из evidence. Второй нужен потому, что
+    advisor.from_findings сливает advice_operation (метку для outcome-линковки) в
+    rec.suggested_operation: у ngram_waste метка add_negative_keywords, но исполнимого ключа в
+    evidence нет — гейт только по allow-list рисовал бы кнопку, вечно отвечающую «совет устарел»."""
+    op = getattr(rec, "suggested_operation", None)
+    if op not in _ADVISE_APPLY_OPS:
+        return None
+    return op if _advise_apply_params(rec) is not None else None
 
 
 async def _advise_apply(cq: CallbackQuery, rec_uid: str) -> None:

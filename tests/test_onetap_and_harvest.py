@@ -59,6 +59,58 @@ def test_one_tap_params_are_pinned_to_the_safe_direction():
     assert bm._advise_apply_params(rec) is None
 
 
+def test_advise_apply_never_money():
+    """3.2в, гард плана: деньги/ставки НИКОГДА в advise-apply — независимо от равенства с
+    ONE_TAP_OPS (проверка выше), чтобы правка одного множества не открыла деньги в другом."""
+    assert not ({"update_budget", "update_bid", "update_keyword_bid"} & set(ADVISE_APPLY_OPS))
+    assert not (set(ADVISE_APPLY_OPS) & set(MONEY_OPS))
+
+
+def test_advise_apply_params_remove_negative_matches_schema():
+    """3.2в: снятие конфликтующего КАМПАНИЙНОГО минуса (negative_keyword_conflicts) — параметры
+    из evidence и валидны для схемы RemoveNegativeKeywords; неполные evidence → None (не гадаем)."""
+    from agent.tools.schemas import SCHEMAS
+
+    rec = SimpleNamespace(
+        target_campaign="Бренд",
+        suggested_operation="remove_negative_keywords",
+        evidence={"negative": "ноутбук", "match_type": "broad"},
+    )
+    params = bm._advise_apply_params(rec)
+    assert params == {"campaign": "Бренд", "keywords": ["ноутбук"], "match_type": "broad"}
+    SCHEMAS["remove_negative_keywords"](**params)  # схема мутации принимает как есть
+
+    rec.evidence = {"negative": "ноутбук", "match_type": None}  # тип не распознан движком
+    assert bm._advise_apply_params(rec) is None
+    rec.evidence = {"blocked": 1}  # старый формат evidence без текста минуса
+    assert bm._advise_apply_params(rec) is None
+
+
+def test_advise_apply_op_gates_on_executability():
+    """Кнопка «применить» = allow-list И исполнимость params. from_findings сливает
+    advice_operation (метку outcome) в rec.suggested_operation: у ngram_waste метка
+    add_negative_keywords без исполнимого ключа — гейт только по allow-list рисовал бы
+    кнопку, вечно отвечающую «совет устарел»."""
+    ngram_like = SimpleNamespace(
+        target_campaign=None,
+        suggested_operation="add_negative_keywords",
+        evidence={"ngrams": ["бесплатно"], "cost": 10.0},
+    )
+    assert bm._advise_apply_op(ngram_like) is None
+
+    real = SimpleNamespace(
+        target_campaign="Бренд",
+        suggested_operation="add_negative_keywords",
+        evidence={"keyword": "бесплатно", "match_type": "exact"},
+    )
+    assert bm._advise_apply_op(real) == "add_negative_keywords"
+
+    money = SimpleNamespace(
+        target_campaign="Бренд", suggested_operation="update_budget", evidence={}
+    )
+    assert bm._advise_apply_op(money) is None  # деньги не проходят даже с «исполнимыми» params
+
+
 def test_geo_and_display_checks_carry_a_one_tap_operation():
     """Ф6.2 нашла G11/G12, но чинить их приходилось руками через карточку кампании. Прогоняем оба
     чека на синтетике, где условие срабатывания выполнено, и проверяем: находка несёт

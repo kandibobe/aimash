@@ -630,7 +630,13 @@ async def run_recommendations_digest(bot) -> None:
         from advisor import store as advisor_store
         from advisor.rules import _magnitude, rank_cross_account
         from bot import i18n
-        from bot.keyboards import ADVISE_APPLY_OPS, advise_feedback_kb
+        from bot.keyboards import advise_feedback_kb
+
+        # 3.2в: гейт кнопки «применить» — тот же, что в /advise (allow-list не-денежных операций +
+        # исполнимость params). Кнопка лишь СТАРТУЕТ confirm-гейт по тапу пользователя — proposal
+        # из scheduler НЕ создаётся (golden rule #3 цел). Поздний импорт: в живом процессе bot.main
+        # уже загружен, на module-level он дал бы цикл bot.main ↔ scheduler.jobs.
+        from bot.main import _advise_apply_op
 
         top_n = max(1, int(getattr(settings, "advise_digest_top_n", 5)))
         pause = max(0.0, float(getattr(settings, "advise_digest_send_pause", 0.7)))
@@ -711,9 +717,7 @@ async def run_recommendations_digest(bot) -> None:
                     account=_digest_account_label(acct) + share,
                     body=r.body or "",
                 )
-                apply_op = (
-                    r.suggested_operation if r.suggested_operation in ADVISE_APPLY_OPS else None
-                )
+                apply_op = _advise_apply_op(r)
                 try:
                     await asyncio.sleep(pause)
                     await bot.send_message(

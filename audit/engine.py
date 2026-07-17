@@ -45,10 +45,15 @@ from audit.thresholds import (
 # кликом и чинятся строго в БЕЗОПАСНУЮ сторону — КМС выключаем, гео сужаем до PRESENCE. Обратное
 # (включить КМС / расширить гео) бот одним тапом не предлагает никогда: параметры зашиты константами
 # в bot.main._advise_apply_params, а не берутся из находки.
+# 3.2в (2026-07-17): remove_negative_keywords — снять КАМПАНИЙНЫЙ минус, блокирующий свой же ключ
+# (negative_keyword_conflicts). Неденежная, точечная (текст+тип известны из находки) и обратимая
+# (минус возвращается той же командой). Группа/shared-список остаются прозой: схема мутации работает
+# на уровне кампании, «сняли хоть где-то» выглядело бы как «готово», не будучи им.
 ONE_TAP_OPS = frozenset(
     {
         "pause_campaign",
         "add_negative_keywords",
+        "remove_negative_keywords",
         "set_campaign_display_network",
         "set_campaign_geo_target_type",
     }
@@ -2965,6 +2970,11 @@ def check_negative_conflicts(report, thr: dict, ctx: _Ctx) -> list[Finding]:
         if not blocked:
             continue
         where = f"{camp} / {group}" if scope == "ad_group" else (camp or list_name)
+        # 3.2в: кампанийный минус бот умеет снять сам (remove_negative_keywords — точный текст+тип из
+        # находки, неденежно, обратимо) → one-tap. Группа/shared — прозой: схема мутации кампанийная.
+        # Скоринг/детекция НЕ тронуты (кнопка не входит в score) — эпоха модели та же.
+        mt_norm = _norm_match_type(mt)
+        one_tap = scope == "campaign" and bool(camp) and mt_norm is not None
         out.append(
             Finding(
                 check_id="negative_keyword_conflicts",
@@ -2973,7 +2983,7 @@ def check_negative_conflicts(report, thr: dict, ctx: _Ctx) -> list[Finding]:
                 at_risk=0.0,  # заблокированный ключ не тратит — он ТЕРЯЕТ трафик
                 spend_segment=None,
                 target_campaign=camp or (blocked[0][0] if blocked else None),
-                suggested_operation=None,  # снятие минуса — курация, не one-tap
+                suggested_operation="remove_negative_keywords" if one_tap else None,
                 facts={
                     "negative": getattr(ng, "text", ""),
                     "match_type": mt.lower(),
@@ -2982,7 +2992,12 @@ def check_negative_conflicts(report, thr: dict, ctx: _Ctx) -> list[Finding]:
                     "blocked_count": len(blocked),
                     "examples": [k[2] for k in blocked[:3]],
                 },
-                evidence={"blocked": len(blocked)},
+                evidence={
+                    "blocked": len(blocked),
+                    # для one-tap применения (bot._advise_apply_params) и outcome-линковки
+                    "negative": getattr(ng, "text", ""),
+                    "match_type": mt_norm,
+                },
             )
         )
     out.sort(key=lambda f: -int(f.facts.get("blocked_count", 0)))

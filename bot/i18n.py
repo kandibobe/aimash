@@ -712,8 +712,16 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "💡 Recommendations · account {account} · {period}",
     },
     "advise_disclaimer": {
-        "ru": "Это подсказки — сам я ничего не меняю. Реши и дай команду.",
-        "en": "These are suggestions — I don't change anything myself. Decide and give a command.",
+        # 3.2в: под частью советов ЕСТЬ кнопка «применить» — старый текст «сам я ничего не меняю,
+        # дай команду» противоречил ей. Честно: кнопка лишь открывает подтверждение (confirm-гейт).
+        "ru": (
+            "Это подсказки — без твоего «да» ничего не меняется. Где есть кнопка «применить», "
+            "она откроет подтверждение «было → станет»; остальное делается командой."
+        ),
+        "en": (
+            "These are suggestions — nothing changes without your “yes”. Where there's an apply "
+            "button, it opens a before → after confirmation; the rest is done by command."
+        ),
     },
     "advise_empty": {
         "ru": "✅ Рекомендаций нет — по ключевым метрикам всё в норме за выбранный период.",
@@ -906,6 +914,10 @@ CATALOG: dict[str, dict[str, str]] = {
     "advise_apply_btn_negatives": {"ru": "➖ В минус-слова", "en": "➖ Add as negatives"},
     "advise_apply_btn_display_off": {"ru": "🚫 Выключить КМС", "en": "🚫 Turn off Display"},
     "advise_apply_btn_geo_presence": {"ru": "📍 Только присутствие", "en": "📍 Presence only"},
+    "advise_apply_btn_remove_negative": {
+        "ru": "🧹 Снять минус-слово",
+        "en": "🧹 Remove the negative",
+    },
     "advise_apply_stale": {
         "ru": "Рекомендация устарела — запусти /advise заново.",
         "en": "Recommendation expired — run /advise again.",

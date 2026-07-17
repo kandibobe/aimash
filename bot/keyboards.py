@@ -854,6 +854,8 @@ _ADVISE_APPLY_LABELS = {
     # Направление зашито (КМС→off, гео→PRESENCE) в bot.main._advise_apply_params — не из находки.
     "set_campaign_display_network": "advise_apply_btn_display_off",
     "set_campaign_geo_target_type": "advise_apply_btn_geo_presence",
+    # 3.2в (2026-07-17): снять кампанийный минус, блокирующий свой ключ (negative_keyword_conflicts).
+    "remove_negative_keywords": "advise_apply_btn_remove_negative",
 }
 # ЕДИНЫЙ источник множества one-tap операций: bot.main (интерактивный /advise) и scheduler-дайджест
 # импортируют ЭТО множество — дублирование списков разъехалось бы молча (гард денег #3).
