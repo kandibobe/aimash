@@ -159,6 +159,7 @@ from bot.keyboards import (
     campaign_actions_kb,
     campaign_network_kb,
     campaigns_kb,
+    campaigns_switch_kb,
     cc_accounts_kb,
     client_card_kb,
     client_input_kb,
@@ -1277,8 +1278,18 @@ async def _send_campaigns_for(message: Message, chat_id: int, acct: str) -> None
         await _capture_cmd_error(e, "cmd:campaigns")  # A2: в /diag + алерт админам
         await message.answer(i18n.t("err_campaigns", err=ux.err_text(e)))
         return
+    # Замечание 4 (2026-07-17): Draft (в т.ч. авто-пин _heal_if_stuck_global) при живых
+    # аккаунтах — не тупик: баннер + кнопка открывают пикер (target='campaigns', read-only).
+    hint = _live_account_hint(acct)
     if not camps:
-        await message.answer(i18n.t("no_campaigns"))
+        if hint:
+            await message.answer(
+                i18n.t("no_campaigns") + "\n\n" + hint,
+                reply_markup=campaigns_switch_kb(),
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await message.answer(i18n.t("no_campaigns"))
         return
     gen = _camp_store(chat_id, camps, acct)
     await message.answer(
@@ -1286,6 +1297,8 @@ async def _send_campaigns_for(message: Message, chat_id: int, acct: str) -> None
         reply_markup=campaigns_kb(camps, gen=gen),
         parse_mode=ParseMode.HTML,
     )
+    if hint:
+        await message.answer(hint, reply_markup=campaigns_switch_kb(), parse_mode=ParseMode.HTML)
 
 
 # ── D1: поиск кампании по названию в пикерах (/campaigns, отчёт, /rsa) ────────────
@@ -2330,8 +2343,14 @@ async def _require_read_account(m: Message, flow: str, *, chat_id: int | None = 
     acct = await _active_read_account(cid)
     if acct != DRAFT_ACCOUNT_ID:
         return acct
+    from ads.client import ensure_read_children_discovered
     from core.access import account_choice_pending
 
+    # Замечание 4 (2026-07-17): «Кампании залочены на Draft». Решение «показывать ли пикер»
+    # принималось по набору discovery, который на fail-quiet старте пуст, а само-починка жила
+    # только ВНУТРИ пикера (_read_account_rows) — замкнутый круг. Прогреваем discovery ДО
+    # account_choice_pending: no-op при непустом наборе и в тестах, кулдаун — в ads.client.
+    await ensure_read_children_discovered()
     if not await account_choice_pending(cid):  # внутри fail-closed к False (Draft, как раньше)
         return acct
     await m.answer(i18n.t("pick_live_account_first"), parse_mode=ParseMode.HTML)

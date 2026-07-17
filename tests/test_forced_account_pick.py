@@ -387,3 +387,111 @@ def test_gdn_entry_points_ask_account():
         assert "prompt_account_if_ambiguous" in inspect.getsource(fn), (
             f"{fn.__name__}: GDN-ветка стартует визард без пикера аккаунта (AD.3)"
         )
+
+
+# ── Замечание 4 (2026-07-17): «Кампании залочены на Draft» — прогрев discovery + выход ──
+async def test_require_draft_warms_discovery_before_pending(monkeypatch):
+    """Фикс B: решение «показывать ли пикер» (account_choice_pending) принималось по набору
+    discovery, который на fail-quiet старте ПУСТ, а само-починка жила только ВНУТРИ пикера —
+    замкнутый круг (пикер не показан → починка не вызвана). Прогрев обязан идти ПЕРЕД pending."""
+    import ads.client as ac
+    import core.access as ca
+
+    order: list[str] = []
+
+    async def _fake_active(_chat):
+        return bm.DRAFT_ACCOUNT_ID
+
+    async def _fake_discover(*a, **kw):
+        order.append("discover")
+
+    async def _fake_pending(_chat):
+        order.append("pending")
+        return False
+
+    monkeypatch.setattr(bm, "_active_read_account", _fake_active)
+    monkeypatch.setattr(ac, "ensure_read_children_discovered", _fake_discover)
+    monkeypatch.setattr(ca, "account_choice_pending", _fake_pending)
+    msg = _FakeMsg()
+    assert await bm._require_read_account(msg, "campaigns") == bm.DRAFT_ACCOUNT_ID
+    assert order == ["discover", "pending"], "прогрев discovery обязан идти ДО решения о пикере"
+
+
+def _patch_campaign_read(monkeypatch, camps: list[dict]) -> None:
+    """Заглушки SDK-чтения для _send_campaigns_for: клиент не строится, список — заданный."""
+    import ads.client as ac
+
+    async def _fake_client(_acct):
+        return object()
+
+    async def _fake_read(*a, **kw):
+        return camps
+
+    monkeypatch.setattr(ac, "build_client_async", _fake_client)
+    monkeypatch.setattr(bm, "run_ads_read_call", _fake_read)
+
+
+async def test_send_campaigns_draft_with_live_offers_switch(monkeypatch):
+    """Фикс A: Draft (в т.ч. авто-пин _heal_if_stuck_global) при живых аккаунтах — не тупик:
+    после списка уходит баннер + кнопка «Сменить аккаунт» (MoreCB action='campaigns_pick')."""
+    chat = 778003
+    _patch_campaign_read(monkeypatch, [{"id": 1, "name": "Test", "status": "ENABLED"}])
+    monkeypatch.setattr(bm, "_live_account_hint", lambda _a: "есть живые аккаунты")
+    msg = _FakeMsg(chat)
+    try:
+        await bm._send_campaigns_for(msg, chat, bm.DRAFT_ACCOUNT_ID)
+        assert len(msg.answers) == 2  # список + баннер
+        text, kw = msg.answers[1]
+        assert "есть живые аккаунты" in text
+        assert "campaigns_pick" in str(kw.get("reply_markup"))
+    finally:
+        bm._CAMP_CACHE.pop(chat, None)
+        bm._CAMP_ACCT.pop(chat, None)
+
+
+async def test_send_campaigns_draft_empty_merges_hint_with_switch(monkeypatch):
+    """Пустой Draft: подсказка и кнопка «Сменить аккаунт» в ОДНОМ сообщении с «нет кампаний»."""
+    chat = 778004
+    _patch_campaign_read(monkeypatch, [])
+    monkeypatch.setattr(bm, "_live_account_hint", lambda _a: "есть живые аккаунты")
+    msg = _FakeMsg(chat)
+    await bm._send_campaigns_for(msg, chat, bm.DRAFT_ACCOUNT_ID)
+    assert len(msg.answers) == 1
+    text, kw = msg.answers[0]
+    assert "есть живые аккаунты" in text
+    assert "campaigns_pick" in str(kw.get("reply_markup"))
+
+
+async def test_send_campaigns_live_account_no_banner(monkeypatch):
+    """На живом аккаунте баннера нет (_live_account_hint='' для не-Draft) — не шумим."""
+    chat = 778005
+    _patch_campaign_read(monkeypatch, [{"id": 1, "name": "Test", "status": "ENABLED"}])
+    msg = _FakeMsg(chat)
+    try:
+        await bm._send_campaigns_for(msg, chat, "5437782039")
+        assert len(msg.answers) == 1  # только список, без баннера
+    finally:
+        bm._CAMP_CACHE.pop(chat, None)
+        bm._CAMP_ACCT.pop(chat, None)
+
+
+async def test_more_campaigns_pick_routes_to_picker(monkeypatch):
+    """Кнопка «🔄 Сменить аккаунт» (campaigns_switch_kb) маршрутизируется в _start_campaigns_picker:
+    вне хаб-клавиатур test_hub_buttons_have_on_more_route её не покрывает — гардим точечно."""
+    from bot.handlers import commands as cmd
+
+    started: list = []
+
+    async def _fake_picker(_m):
+        started.append("campaigns")
+
+    monkeypatch.setattr(bm, "_start_campaigns_picker", _fake_picker)
+    msg = _FakeMsg(778006)
+    cq = SimpleNamespace(message=msg, from_user=SimpleNamespace(id=778006, username="t"))
+
+    async def _cq_answer(*a, **kw):
+        return None
+
+    cq.answer = _cq_answer
+    await cmd.on_more(cq, bm.MoreCB(action="campaigns_pick"), None)
+    assert started == ["campaigns"]

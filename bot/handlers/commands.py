@@ -979,6 +979,8 @@ async def on_more(cq: bm.CallbackQuery, callback_data: bm.MoreCB, state: bm.FSMC
         await msg.answer(bm.i18n.t("tpl_save_hint"))  # 💾 подсказка по /savetemplate (нужно имя)
     elif action == "svc_diag":
         await bm.diag(msg)  # 🩺 диагностика: последние перехваченные ошибки (§15)
+    elif action == "campaigns_pick":  # замечание 4: выход из «залипшего» Draft под /campaigns
+        await bm._start_campaigns_picker(msg)
 
 
 # ── advisor: /advise — рекомендации по улучшению активного аккаунта (advisory, read-only) ─

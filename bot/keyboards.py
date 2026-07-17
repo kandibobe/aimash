@@ -745,6 +745,19 @@ def service_menu_kb(lang: str | None = None) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def campaigns_switch_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    """Замечание 4 (2026-07-17): под списком кампаний на Draft при живых аккаунтах — быстрый
+    выход из «залипшего» черновика (авто-пин _heal_if_stuck_global / пустой discovery). Кнопка
+    лишь открывает пикер аккаунта (target='campaigns', read-only), мутаций не создаёт."""
+    en = _lang(lang) == "en"
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="🔄 Switch account" if en else "🔄 Сменить аккаунт",
+        callback_data=MoreCB(action="campaigns_pick"),
+    )
+    return kb.as_markup()
+
+
 def advise_header_kb(proactive_on: bool, lang: str | None = None) -> InlineKeyboardMarkup:
     """advisor: под заголовком /advise — тумблер проактивной подачи (ui_prefs.advise_proactive).
     Кнопка лишь меняет НАСТРОЙКУ БОТА (как /alerts), Google Ads/proposal не трогает. rec несёт
