@@ -64,6 +64,48 @@ async def record_snapshot(result, *, snapshot_date: str, period_days: int) -> bo
         return False
 
 
+async def latest_snapshots(customer_ids, *, period_days: int = 30) -> dict:
+    """3.5: ПОСЛЕДНИЙ снапшот КАЖДОГО аккаунта с окном period_days (дефолт 30 — окно /audit по
+    умолчанию) ОДНИМ SELECT — для сводки /mcc, где N аккаунтов × по запросу было бы N round-trip
+    в БД. Возвращает {customer_id: AccountHealthSnapshot}; аккаунты без снапшотов в словарь не
+    попадают («аудит не прогонялся» решает вызывающий). Сверку score_model_version делает
+    вызывающий (bot-слой). Сбой БД/пустой вход → {} (fail-open, сводка важнее скоров)."""
+    cids = sorted({str(c) for c in customer_ids if c})
+    if not cids:
+        return {}
+    try:
+        from sqlalchemy import select
+
+        from db.models import AccountHealthSnapshot
+        from db.session import Session
+
+        async with Session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(AccountHealthSnapshot)
+                        .where(
+                            AccountHealthSnapshot.customer_id.in_(cids),
+                            AccountHealthSnapshot.period_days == int(period_days),
+                        )
+                        .order_by(
+                            AccountHealthSnapshot.customer_id,
+                            AccountHealthSnapshot.snapshot_date.desc(),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        out: dict = {}
+        for row in rows:  # строки на аккаунт идут date desc → первая и есть свежайшая
+            out.setdefault(str(row.customer_id), row)
+        return out
+    except Exception as e:  # noqa: BLE001 — скоры в сводке best-effort
+        log.warning("health-снапшоты (bulk) не прочитаны: %s", type(e).__name__)
+        return {}
+
+
 async def previous_snapshot(customer_id: str, *, before_date: str, period_days: int):
     """Последний снапшот аккаунта СТРОГО раньше даты и с ТЕМ ЖЕ окном period_days (сравнивать
     7-дневный score с 30-дневным нечестно). None → базы для тренда нет (или сбой БД — fail-open).

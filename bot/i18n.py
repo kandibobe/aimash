@@ -2011,6 +2011,30 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "⚠️ Не удалось построить сводку по MCC: {err}",
         "en": "⚠️ Couldn't build the MCC summary: {err}",
     },
+    # 3.5: действия под сводкой /mcc
+    "mcc_actions": {
+        "ru": (
+            "⚙️ Тап по аккаунту — сделать его активным (все команды пойдут по нему). "
+            "«▶️ Аудит по всем» пересчитает скоры 🩺 — займёт несколько минут."
+        ),
+        "en": (
+            "⚙️ Tap an account to make it active (commands will target it). "
+            "“▶️ Audit all” recomputes the 🩺 scores — takes a few minutes."
+        ),
+    },
+    "mcc_audit_all_btn": {"ru": "▶️ Аудит по всем", "en": "▶️ Audit all"},
+    "mcc_audit_running": {
+        "ru": "⏳ Прогон аудита уже идёт — дождись завершения.",
+        "en": "⏳ An audit run is already in progress — wait for it to finish.",
+    },
+    "mcc_audit_progress": {
+        "ru": "⏳ Аудит по аккаунтам: {done}/{total}{last}",
+        "en": "⏳ Auditing accounts: {done}/{total}{last}",
+    },
+    "mcc_audit_done": {
+        "ru": "✅ Аудит прогнан: {ok}/{total} (сбоев: {fail}). Свежие скоры — в /mcc.",
+        "en": "✅ Audit finished: {ok}/{total} (failures: {fail}). Fresh scores — in /mcc.",
+    },
     "err_report_make": {
         "ru": "⚠️ Не удалось сформировать отчёт: {err}",
         "en": "⚠️ Couldn't generate the report: {err}",

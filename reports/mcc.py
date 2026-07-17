@@ -35,6 +35,14 @@ class ChildReport:
     # §8: РАЗБИВКА кампаний по статусу ({ENABLED: n, PAUSED: m, …}); None = не прочитано. active_campaigns
     # — производное (ENABLED-счётчик) для обратной совместимости рендера/xlsx.
     campaign_status: dict[str, int] | None = None
+    # 3.5: скор здоровья из ЛОКАЛЬНОГО кэша снапшотов /audit (audit.snapshot). Подмешивает bot-слой
+    # (bot.main._augment_mcc_health) best-effort ПОСЛЕ сборки: reports/ остаётся Google-only, без БД.
+    # None/пустые = аудит не прогонялся. at_risk — в валюте аккаунта (сравним только внутри валюты).
+    health_score: int | None = None
+    health_grade: str = ""
+    health_at_risk: float | None = None
+    health_date: str = ""  # дата снапшота (день аккаунта)
+    health_stale: bool = False  # снапшот старой score_model_version → скор несравним с текущим
 
 
 @dataclass

@@ -884,3 +884,52 @@ async def on_audit_qa_exit(cq: bm.CallbackQuery, state: bm.FSMContext) -> None:
     msg = bm._cq_msg(cq)
     if msg is not None:
         await msg.answer(bm.i18n.t("audit_qa_exited", bm.i18n.get_lang(chat_id)))
+
+
+# ── 3.5: действия под сводкой /mcc ─────────────────────────────────────────────────
+@bm.dp.callback_query(bm.MccAcctCB.filter())
+async def on_mcc_account(cq: bm.CallbackQuery, callback_data: bm.MccAcctCB) -> None:
+    """Тап по аккаунту под /mcc → закрепить его АКТИВНЫМ аккаунтом чтения (персист). Зеркало ветки
+    target='setacct' в on_report_account, но id — из самой кнопки (не из кэша-индекса): кнопка
+    переживает рестарт и перезапись _REPORT_ACCT_CACHE другим пикером. Замок перепроверяется
+    fail-closed: read-замок × пер-юзер грант. Мутационный замок не затрагивается (GR9)."""
+    await cq.answer()
+    msg = bm._cq_msg(cq)
+    if msg is None:
+        return
+    chat_id = bm._cq_chat_id(cq)
+    acct = bm.normalize_customer_id(callback_data.cid)
+    try:
+        bm.ensure_read_allowed(acct)
+        from core.access import ensure_account_allowed_for_user
+
+        await ensure_account_allowed_for_user(chat_id, acct)
+    except PermissionError:
+        await msg.answer(
+            bm.i18n.t("account_denied", cid=bm.texts.esc(acct)), parse_mode=bm.ParseMode.HTML
+        )
+        return
+    await bm._save_selected_account(chat_id, acct)  # персист выбора (переживает рестарт)
+    await msg.answer(bm.i18n.t("account_set", cid=acct), parse_mode=bm.ParseMode.HTML)
+
+
+@bm.dp.callback_query(bm.MccAuditCB.filter())
+async def on_mcc_audit_all(cq: bm.CallbackQuery, callback_data: bm.MccAuditCB) -> None:
+    """«▶️ Аудит по всем» под /mcc → фоновый score-прогон дочерних (_mcc_audit_all). READ-ONLY:
+    чтение + снапшот в локальную БД, мутаций/proposal нет — confirm-гейт не нужен. Один прогон
+    на чат (двойной тап → алерт); кэш списка потерян (рестарт) → stale-алерт."""
+    chat_id = bm._cq_chat_id(cq)
+    msg = bm._cq_msg(cq)
+    cids = bm._MCC_AUDIT_CACHE.get(chat_id)
+    if msg is None or not cids:
+        await cq.answer(bm.i18n.t("stale"), show_alert=True)
+        return
+    if chat_id in bm._MCC_AUDIT_RUNNING:
+        await cq.answer(bm.i18n.t("mcc_audit_running"), show_alert=True)
+        return
+    await cq.answer()
+    bm._MCC_AUDIT_RUNNING.add(chat_id)
+    try:
+        await bm._mcc_audit_all(msg, chat_id, list(cids))
+    finally:
+        bm._MCC_AUDIT_RUNNING.discard(chat_id)

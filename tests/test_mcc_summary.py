@@ -174,3 +174,116 @@ def test_campaign_status_counts_query_and_count():
         counts = campaign_status_counts(_Client(), "1112223334")
     assert counts == {"ENABLED": 2, "PAUSED": 1}
     assert "!= 'REMOVED'" in captured["q"] and "FROM campaign" in captured["q"]
+
+
+# ── 3.5: скор /audit в сводке — рендер + bulk-чтение снапшотов ─────────────────────
+def _summ(children):
+    from reports.mcc import MccSummary, aggregate_by_currency
+    from reports.period import last_n_days
+
+    s = MccSummary(manager_id="555", period=last_n_days(7), children=children)
+    s.subtotals = aggregate_by_currency(children)
+    return s
+
+
+def test_summary_text_mcc_health_scores_sort_and_risk():
+    """Скор из кэша в строке аккаунта; внутри валюты сперва деньги «под риском», потом расход;
+    сумма риска — в подытоге валюты; без снапшота — честное «н/д»; старая эпоха — «*»."""
+    from reports.service import summary_text_mcc
+
+    a = ChildReport(_child("1111111111", "USD"), _m(cost_micros=9_000_000, clicks=90))
+    b = ChildReport(_child("2222222222", "USD"), _m(cost_micros=5_000_000, clicks=50))
+    b.health_score, b.health_grade, b.health_at_risk = 43, "D", 120.0
+    c = ChildReport(_child("3333333333", "USD"), _m(cost_micros=1_000_000, clicks=10))
+    c.health_score, c.health_grade, c.health_at_risk, c.health_stale = 88, "A", 0.0, True
+
+    txt = summary_text_mcc(_summ([a, b, c]), lang="ru")
+    # b (риск 120) выше a (расход 9) выше c (расход 1) — at_risk доминирует, дальше расход
+    assert txt.index("2222222222") < txt.index("1111111111") < txt.index("3333333333")
+    assert "🩺 <b>43</b> (D)" in txt
+    assert "🩺 н/д" in txt  # a — аудит не прогонялся
+    assert "🩺 <b>88</b> (A)*" in txt  # c — модель оценки обновилась
+    assert "под риском" in txt and "120" in txt  # суммарный риск в подытоге USD
+    assert "скор /audit" in txt  # сноска-легенда
+
+    en = summary_text_mcc(_summ([a, b, c]), lang="en")
+    assert "🩺 n/a" in en and "at risk" in en
+
+
+def test_summary_text_mcc_flags_only_on_spending_accounts():
+    """Флаги из УЖЕ собранного: «конверсий нет» (расход>0, конв==0) и «активных кампаний нет»
+    (расход>0, ENABLED==0). Здоровый и не тративший аккаунты — без флагов."""
+    from reports.service import summary_text_mcc
+
+    burn = ChildReport(
+        _child("1111111111", "USD"),
+        _m(cost_micros=5_000_000, clicks=10),
+        campaign_status={"PAUSED": 2},
+    )
+    healthy = ChildReport(
+        _child("2222222222", "USD"),
+        Metrics(clicks=10, cost_micros=3_000_000, conversions=4.0),
+        campaign_status={"ENABLED": 1},
+    )
+    idle = ChildReport(_child("3333333333", "USD"), _m(cost_micros=0), campaign_status={})
+
+    txt = summary_text_mcc(_summ([burn, healthy, idle]), lang="ru")
+    lines = {
+        cid: next(ln for ln in txt.splitlines() if f"acct-{cid}" in ln)
+        for cid in ("1111111111", "2222222222", "3333333333")
+    }
+    assert "конверсий нет" in lines["1111111111"]
+    assert "активных кампаний нет" in lines["1111111111"]
+    assert "конверсий нет" not in lines["2222222222"]
+    assert "активных кампаний нет" not in lines["2222222222"]
+    assert "конверсий нет" not in lines["3333333333"]  # не тратил — не пугаем
+
+
+def test_summary_text_mcc_without_snapshots_stays_clean():
+    """Ни одного снапшота ⇒ ни «🩺 н/д» в строках, ни сноски — сводка как раньше."""
+    from reports.service import summary_text_mcc
+
+    cr = ChildReport(_child("1112223334", "USD"), _m(cost_micros=5_000_000, clicks=10))
+    txt = summary_text_mcc(_summ([cr]), lang="ru")
+    assert "🩺" not in txt and "скор /audit" not in txt
+
+
+async def test_latest_snapshots_bulk_freshest_per_account_one_window():
+    """audit.snapshot.latest_snapshots: ОДИН запрос → свежайший снапшот КАЖДОГО аккаунта своего
+    окна (чужое period_days не подмешивается); без снапшотов — аккаунт отсутствует в словаре."""
+    from types import SimpleNamespace
+
+    from audit.snapshot import latest_snapshots, record_snapshot
+    from db.session import init_db
+
+    await init_db()
+
+    def res(cid, score, ar=0.0, ver="e6:abc"):
+        return SimpleNamespace(
+            customer_id=cid,
+            has_activity=True,
+            score=score,
+            grade="B",
+            total_spend=100.0,
+            at_risk=ar,
+            currency="USD",
+            families={},
+            score_model_version=ver,
+        )
+
+    a, b = "9999000333", "9999000444"
+    assert await record_snapshot(res(a, 50), snapshot_date="2026-07-01", period_days=30)
+    assert await record_snapshot(res(a, 72, ar=40.0), snapshot_date="2026-07-15", period_days=30)
+    assert await record_snapshot(
+        res(a, 99), snapshot_date="2026-07-16", period_days=7
+    )  # чужое окно
+    assert await record_snapshot(
+        res(b, 61, ver="e5:old"), snapshot_date="2026-07-10", period_days=30
+    )
+
+    snaps = await latest_snapshots([a, b, "0000000001"])
+    assert snaps[a].score == 72 and snaps[a].snapshot_date == "2026-07-15"  # свежайший 30-дневный
+    assert snaps[a].at_risk == 40.0
+    assert snaps[b].score_model_version == "e5:old"  # сверку эпохи делает bot-слой
+    assert "0000000001" not in snaps  # аудит не прогонялся — честно нет ключа
+    assert await latest_snapshots([]) == {}

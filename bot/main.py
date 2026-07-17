@@ -101,6 +101,8 @@ from bot.callbacks import (
     KwAddCB,
     KwCfgCB,
     LangCB,
+    MccAcctCB,
+    MccAuditCB,
     ModelCB,
     MoreCB,
     MySchedCB,
@@ -192,6 +194,7 @@ from bot.keyboards import (
     kw_lang_kb,
     kw_params_kb,
     lang_kb,
+    mcc_kb,
     create_menu_kb,
     main_menu,
     more_menu_kb,
@@ -3361,6 +3364,95 @@ def is_export_all_accounts(text: str) -> tuple[bool, str | None]:
     return (True, days)
 
 
+async def _augment_mcc_health(summary) -> None:
+    """3.5: подмешать в строки дочерних скор /audit из ЛОКАЛЬНОГО кэша снапшотов (audit.snapshot,
+    один SELECT на всю сводку) — БЕЗ нового прогона аудита. Снапшот старой score_model_version
+    помечается stale (рендер ставит «*», как «н/д» у _audit_trend_line). Best-effort: сбой БД →
+    сводка без скоров, Google Ads не трогаем."""
+    try:
+        from audit.engine import SCORE_MODEL_VERSION
+        from audit.snapshot import latest_snapshots
+
+        snaps = await latest_snapshots([cr.account.id for cr in summary.children])
+        for cr in summary.children:
+            row = snaps.get(str(cr.account.id))
+            if row is None:
+                continue
+            cr.health_score = int(row.score)
+            cr.health_grade = str(row.grade or "")
+            cr.health_at_risk = float(row.at_risk or 0.0)
+            cr.health_date = str(row.snapshot_date or "")
+            cr.health_stale = str(row.score_model_version or "") != SCORE_MODEL_VERSION
+    except Exception as e:  # noqa: BLE001 — скоры — довесок, сводка важнее
+        log.warning("mcc: скоры аудита не подмешаны: %s", type(e).__name__)
+
+
+# 3.5: список дочерних последнего /mcc (worst-first) — для «▶️ Аудит по всем»; замок не здесь:
+# каждый аккаунт ПЕРЕ-проверяется ensure_read_allowed в момент прогона (fail-closed).
+_MCC_AUDIT_CACHE: dict[int, list[str]] = {}
+_MCC_AUDIT_RUNNING: set[int] = set()  # один прогон на чат (защита от двойного тапа)
+_MCC_AUDIT_MAX = 25  # кап прогона: ~30 GAQL/аккаунт — не даём одному тапу съесть квоту
+_MCC_KB_MAX = 6  # кнопок-аккаунтов под сводкой (worst-first) — шорткат, не полный список
+
+
+async def _mcc_audit_all(m: Message, chat_id: int, cids: list[str]) -> None:
+    """3.5: фоновый score-прогон по дочерним MCC (кнопка «▶️ Аудит по всем»). READ-ONLY: gather_audit
+    (чтение) + снапшот в ЛОКАЛЬНУЮ БД — та же семантика записи, что /audit (день аккаунта, окно 30,
+    слепой прогон с непрочитанной семьёй в baseline не пишем). Мутаций и proposal НЕТ. Прогресс —
+    редактированием одного сообщения; сбой аккаунта не роняет остальные."""
+    from ads.client import build_client_async
+    from audit.collect import gather_audit
+    from audit.render import score_affecting_gaps
+    from audit.snapshot import record_snapshot
+    from reports.period import last_n_days
+    from reports.tz import account_period
+
+    lang = i18n.get_lang(chat_id)
+    dropped = len(cids) - _MCC_AUDIT_MAX
+    if dropped > 0:  # без тихого капа: говорим, сколько не влезло (worst-first — режем хвост)
+        log.info("mcc audit-all: кап %d, отброшено %d аккаунтов", _MCC_AUDIT_MAX, dropped)
+        cids = cids[:_MCC_AUDIT_MAX]
+    total = len(cids)
+    progress = await m.answer(
+        i18n.t("mcc_audit_progress", lang, done=0, total=total, last=""), parse_mode=None
+    )
+    ok = fail = 0
+    for i, cid in enumerate(cids, 1):
+        last = ""
+        try:
+            ensure_read_allowed(cid)  # TOCTOU: список из кэша, замок — на момент прогона
+            client = await build_client_async(cid)
+            period = await account_period(client, cid, last_n_days(30), label="mcc_audit_tz")
+            target_cpa = await _load_target_cpa(chat_id, cid)
+            result = await gather_audit(client, cid, period, target_cpa=target_cpa)
+            if (
+                getattr(result, "has_activity", False)
+                and result.score is not None
+                and not score_affecting_gaps(result)
+            ):
+                snap_date = await _account_local_date(client, cid)
+                await record_snapshot(result, snapshot_date=snap_date, period_days=period.days)
+            ok += 1
+            score_s = f" {result.score}/100" if result.score is not None else ""
+            last = f" · {cid}:{score_s or ' —'}"
+        except Exception as e:  # noqa: BLE001 — один аккаунт не валит прогон (текст не наружу)
+            fail += 1
+            log.warning("mcc audit-all %s: %s", cid, type(e).__name__)
+            last = f" · {cid}: ⚠️"
+        try:
+            await progress.edit_text(
+                i18n.t("mcc_audit_progress", lang, done=i, total=total, last=last),
+                parse_mode=None,
+            )
+        except Exception:  # noqa: BLE001 — flood-control/старое сообщение: прогон важнее прогресса
+            pass
+    done = i18n.t("mcc_audit_done", lang, ok=ok, total=total, fail=fail)
+    try:
+        await progress.edit_text(done, parse_mode=None)
+    except Exception:  # noqa: BLE001
+        await m.answer(done, parse_mode=None)
+
+
 async def _send_mcc(m: Message, arg: str | None) -> None:
     """§8: сводный отчёт по ВСЕМ дочерним аккаунтам ВСЕХ настроенных MCC (2F: раньше — только
     основной login_customer_id; вторичные из GOOGLE_ADS_LOGIN_CUSTOMER_IDS не попадали в /mcc,
@@ -3395,6 +3487,7 @@ async def _send_mcc(m: Message, arg: str | None) -> None:
                     tz_of=account_timezone,
                     period_for=_mcc_period_factory(arg),
                 )
+                await _augment_mcc_health(summary)  # 3.5: скор /audit из кэша (best-effort)
                 parts.append(summary_text_mcc(summary))
                 summaries.append((manager_id, summary))
             except Exception as e:  # сеть/доступ/SDK — один MCC не валит остальные
@@ -3408,6 +3501,21 @@ async def _send_mcc(m: Message, arg: str | None) -> None:
     # P1-8: полная таблица по ВСЕМ дочерним аккаунтам — .xlsx-вложением (раньше был только текст;
     # build_mcc_workbook/write_mcc_xlsx существовали, но не вызывались ни из одной команды).
     await _send_mcc_xlsx(m, summaries, period)
+    # 3.5: действия под сводкой — тап по аккаунту (worst-first: at_risk → расход) закрепляет его
+    # активным; «▶️ Аудит по всем» пересчитывает скоры фоном. Кнопки несут сам customer_id.
+    children = [cr for _, s in summaries for cr in s.children]
+    if children:
+        worst = sorted(
+            children,
+            key=lambda c: (-(getattr(c, "health_at_risk", None) or 0.0), -c.totals.cost_micros),
+        )
+        _MCC_AUDIT_CACHE[m.chat.id] = [str(cr.account.id) for cr in worst]
+        buttons = []
+        for cr in worst[:_MCC_KB_MAX]:
+            name = (getattr(cr.account, "name", "") or str(cr.account.id))[:24]
+            hs = getattr(cr, "health_score", None)
+            buttons.append((str(cr.account.id), f"{name} · 🩺 {hs if hs is not None else '—'}"))
+        await m.answer(i18n.t("mcc_actions"), reply_markup=mcc_kb(buttons), parse_mode=None)
 
 
 async def _send_mcc_xlsx(m: Message, summaries: list, period) -> None:

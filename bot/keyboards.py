@@ -31,6 +31,8 @@ from bot.callbacks import (
     KwAddCB,
     KwCfgCB,
     LangCB,
+    MccAcctCB,
+    MccAuditCB,
     ModelCB,
     MoreCB,
     MySchedCB,
@@ -893,6 +895,20 @@ def advise_feedback_kb(
         kb.adjust(1, 3)
     else:
         kb.adjust(3)
+    return kb.as_markup()
+
+
+def mcc_kb(worst: list[tuple[str, str]], lang: str | None = None) -> InlineKeyboardMarkup:
+    """3.5: действия под сводкой /mcc. worst — [(customer_id, готовая подпись)] уже worst-first
+    (at_risk → расход): тап закрепляет аккаунт активным (MccAcctCB несёт сам id — без кэша).
+    Последней строкой — «▶️ Аудит по всем» (фоновый score-прогон, READ-ONLY). Чистая функция."""
+    from bot import i18n
+
+    kb = InlineKeyboardBuilder()
+    for cid, label in worst:
+        kb.button(text=label, callback_data=MccAcctCB(cid=str(cid)))
+    kb.button(text=i18n.t("mcc_audit_all_btn", lang), callback_data=MccAuditCB(action="run"))
+    kb.adjust(1)
     return kb.as_markup()
 
 

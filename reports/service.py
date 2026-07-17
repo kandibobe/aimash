@@ -254,6 +254,16 @@ def summary_text_mcc(summary, lang: str | None = None) -> str:
         f"{L['with_data']}: <b>{n_children}</b>",
     ]
 
+    # 3.5: скоры /audit из локального кэша снапшотов (подмешал bot-слой). Если их нет НИ У КОГО —
+    # секции рендерятся как раньше (ни «н/д» в каждой строке, ни сноски: объяснять нечего).
+    any_health = any(getattr(c, "health_score", None) is not None for c in summary.children)
+    risk_by_cur: dict[str, float] = {}
+    for cr in summary.children:
+        ar = getattr(cr, "health_at_risk", None) or 0.0
+        if ar > 0:
+            cur = cr.account.currency or "?"
+            risk_by_cur[cur] = risk_by_cur.get(cur, 0.0) + ar
+
     # Подытоги по валюте (отсортированы по расходу убыв. в aggregate_by_currency). FX НЕ делаем.
     if summary.subtotals:
         lines.append("")
@@ -261,10 +271,12 @@ def summary_text_mcc(summary, lang: str | None = None) -> str:
         for sub in summary.subtotals:
             t = sub.totals
             cur = sub.currency
+            risk = risk_by_cur.get(cur, 0.0)
+            risk_s = f" · ⚠️ {L['at_risk']} <b>{_money(risk, cur)}</b>" if risk > 0 else ""
             lines.append(
                 f"• {cur} — {sub.accounts} {L['acct']}: {L['cost']} <b>{_money(t.cost, cur)}</b> · "
                 f"{L['clicks']} {_thou(t.clicks)} · {L['conv']} {t.conversions:.1f} · "
-                f"CPA {_money(t.cpa, cur)} · ROAS {t.roas:.2f}"
+                f"CPA {_money(t.cpa, cur)} · ROAS {t.roas:.2f}{risk_s}"
             )
 
     # Список аккаунтов ПО ВАЛЮТНЫМ СЕКЦИЯМ (3H: кросс-валютное ранжирование по сырым cost_micros
@@ -279,7 +291,12 @@ def summary_text_mcc(summary, lang: str | None = None) -> str:
         cur_order = [s.currency for s in summary.subtotals] or sorted(by_cur)
         shown = 0
         for cur in cur_order:
-            group = sorted(by_cur.get(cur, []), key=lambda c: c.totals.cost_micros, reverse=True)
+            # 3.5: внутри валюты — сперва по деньгам «под риском» (из /audit), затем по расходу.
+            # Без снапшотов (at_risk None→0 у всех) порядок прежний — чисто по расходу.
+            group = sorted(
+                by_cur.get(cur, []),
+                key=lambda c: (-(getattr(c, "health_at_risk", None) or 0.0), -c.totals.cost_micros),
+            )
             if not group or shown >= MCC_MAX_ACCT_LINES:
                 continue
             if len(by_cur) > 1:
@@ -296,15 +313,41 @@ def summary_text_mcc(summary, lang: str | None = None) -> str:
                 if not camps_s:
                     camps = getattr(cr, "active_campaigns", None)
                     camps_s = f" · {camps} {L['camps']}" if camps is not None else ""
+                # 3.5: скор /audit (кэш) — «🩺 72 (C)», «*» = модель оценки обновилась; н/д = не
+                # прогонялся. Деньги под риском — при ненулевом значении. Показываем только если
+                # скор есть хоть у кого-то (any_health) — иначе «н/д» в каждой строке = шум.
+                health_s = ""
+                hs = getattr(cr, "health_score", None)
+                if hs is not None:
+                    stale = "*" if getattr(cr, "health_stale", False) else ""
+                    grade = getattr(cr, "health_grade", "") or ""
+                    grade_s = f" ({_esc(grade)})" if grade else ""
+                    health_s = f" · 🩺 <b>{int(hs)}</b>{grade_s}{stale}"
+                    ar = getattr(cr, "health_at_risk", None) or 0.0
+                    if ar > 0:
+                        health_s += f" · ⚠️ {_money(ar, cur)}"
+                elif any_health:
+                    health_s = f" · {L['score_na']}"
+                # 3.5: флаги из УЖЕ собранного (0 новых чтений), только на тратившем аккаунте:
+                # расход есть, а конверсий ноль / все кампании стоят — это стоит увидеть в сводке.
+                flags_s = ""
+                if m.cost_micros > 0:
+                    if (m.conversions or 0) == 0:
+                        flags_s += f" · {L['no_conv']}"
+                    st = getattr(cr, "campaign_status", None)
+                    if isinstance(st, dict) and not st.get("ENABLED"):
+                        flags_s += f" · {L['no_active']}"
                 lines.append(
                     f"• <b>{name}</b> ({cur}): {L['cost']} <b>{_money(m.cost, cur)}</b> · "
                     f"{L['clicks']} {_thou(m.clicks)} · {L['conv']} {m.conversions:.1f} · "
-                    f"CTR {m.ctr * 100:.1f}%{camps_s}"
+                    f"CTR {m.ctr * 100:.1f}%{camps_s}{health_s}{flags_s}"
                 )
                 shown += 1
         rest = len(summary.children) - shown
         if rest > 0:
             lines.append(f"  <i>{L['more'].format(n=rest)}</i>")
+        if any_health:
+            lines.append(f"<i>{L['health_note']}</i>")
 
     # Неактивные (не ENABLED) — ИМЕНАМИ + статус (это и есть большинство прежних «ошибок чтения»).
     inactive = getattr(summary, "inactive", [])
@@ -348,6 +391,14 @@ _MCC_LABELS_RU = {
     "no_access": "Нет доступа на чтение",
     "errors": "Ошибки чтения",
     "full_export": "Полная таблица по всем аккаунтам приложена ниже (.xlsx)",
+    "at_risk": "под риском",
+    "score_na": "🩺 н/д",
+    "no_conv": "❗ конверсий нет",
+    "no_active": "⏸ активных кампаний нет",
+    "health_note": (
+        "🩺 — скор /audit из последнего прогона; н/д — аудит не прогонялся; "
+        "* — модель оценки обновилась, скор устарел"
+    ),
 }
 _MCC_LABELS_EN = {
     "with_data": "Accounts with data",
@@ -363,4 +414,12 @@ _MCC_LABELS_EN = {
     "no_access": "No read access",
     "errors": "Read errors",
     "full_export": "Full per-account table is attached below (.xlsx)",
+    "at_risk": "at risk",
+    "score_na": "🩺 n/a",
+    "no_conv": "❗ no conversions",
+    "no_active": "⏸ no active campaigns",
+    "health_note": (
+        "🩺 — /audit score from the last run; n/a — never audited; "
+        "* — scoring model updated, score is stale"
+    ),
 }

@@ -382,3 +382,20 @@ class SearchTermsCB(CallbackData, prefix="sterm"):
     action: str  # "toggle"|"mt"|"lvl"|"ss_open"|"ss_pick"|"ss_back"|"apply"|"add"|"cancel"|"neg"
     idx: int = -1
     gen: int = 0
+
+
+class MccAcctCB(CallbackData, prefix="mccacct"):
+    """3.5: тап по аккаунту под сводкой /mcc → закрепить его АКТИВНЫМ аккаунтом чтения (персист,
+    как target='setacct' в пикере отчёта). Несёт САМ customer_id, а не индекс кэша: кнопка
+    переживает рестарт и не съезжает, когда другой пикер перезапишет _REPORT_ACCT_CACHE.
+    Замок перепроверяется в хендлере (ensure_read_allowed × пер-юзер грант, fail-closed)."""
+
+    cid: str
+
+
+class MccAuditCB(CallbackData, prefix="mccau"):
+    """3.5: «Прогнать аудит по всем» под сводкой /mcc — ФОНОВЫЙ score-прогон читаемых дочерних
+    (~30 GAQL/аккаунт — инлайн нельзя). READ-ONLY: только чтение + снапшот в локальную БД,
+    мутаций/proposal нет. Список аккаунтов — в _MCC_AUDIT_CACHE (кэш потерян → stale-alert)."""
+
+    action: str = "run"
