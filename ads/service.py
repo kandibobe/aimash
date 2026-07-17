@@ -689,6 +689,20 @@ async def _apply_confirmed(store, confirmation_id: str) -> dict:
         )
         if ref is None:
             raise ValueError(f"кампания '{params['campaign']}' не найдена")
+        # 3.2б: params['ad_group'] (опц.) СУЖАЕТ уровень до одной группы (негативный
+        # ad_group_criterion). Имя группы не совпало → ОТКАЗ (fail-closed) ДО claim,
+        # а не тихий откат на уровень кампании — это разные последствия, не деталь.
+        ad_group_id = None
+        want = str(params.get("ad_group") or "").strip()
+        if want:
+            ag = await asyncio.to_thread(
+                resolve.find_ad_group_by_name, client, customer_id, params["campaign"], want
+            )
+            if ag is None:
+                raise ValueError(
+                    f"в кампании '{params['campaign']}' нет группы объявлений '{want}'"
+                )
+            ad_group_id = ag.id
         return await mutations.apply_add_negative_keywords(
             customer_id=customer_id,
             campaign_id=ref.id,
@@ -697,6 +711,7 @@ async def _apply_confirmed(store, confirmation_id: str) -> dict:
             confirmation_id=confirmation_id,
             confirm_store=store,
             ads_client=client,
+            ad_group_id=ad_group_id,
         )
 
     if op == "remove_negative_keywords":

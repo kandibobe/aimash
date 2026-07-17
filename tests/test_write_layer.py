@@ -420,6 +420,105 @@ async def test_apply_add_negative_keywords_happy_path():
     assert store.finalized is True
 
 
+# ── 3.2б: ad_group_id сужает уровень до ОДНОЙ группы (негативный ad_group_criterion) ──
+async def test_apply_add_negative_keywords_adgroup_level():
+    """ad_group_id задан → вызывается ГРУППОВОЙ SDK-исполнитель, campaign-level НЕ трогается."""
+    called = {}
+    campaign_level = {"n": 0}
+
+    def fake_adgroup(client, customer_id, campaign_id, ad_group_id, keywords, match_type):
+        called.update(campaign_id=campaign_id, ad_group_id=ad_group_id, keywords=list(keywords))
+        return {"applied": True, "count": len(keywords)}
+
+    def fake_campaign(*a, **k):
+        campaign_level["n"] += 1
+        return {"applied": True}
+
+    store = FakeStore(FakeProposal("add_negative_keywords", "confirmed", user_initiated=True))
+    with (
+        patched(mut, "_add_negative_keywords_adgroup_via_sdk", fake_adgroup),
+        patched(mut, "_add_negative_keywords_via_sdk", fake_campaign),
+        allowed_ids(DRAFT_ACCOUNT_ID),
+    ):
+        res = await mut.apply_add_negative_keywords(
+            customer_id=DRAFT_ACCOUNT_ID,
+            campaign_id="23",
+            keywords=["  бесплатно  "],
+            match_type="phrase",
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+            ad_group_id="42",
+        )
+    assert res["applied"] is True
+    assert called["ad_group_id"] == "42" and called["campaign_id"] == "23"
+    assert called["keywords"] == ["бесплатно"]  # код обрезал пробелы (golden rule #4)
+    assert campaign_level["n"] == 0  # уровень кампании НЕ вызывался
+    assert store.finalized is True
+
+
+async def test_apply_add_negative_keywords_adgroup_replay_is_one_shot():
+    """Тот же confirmation_id второй раз → PermissionError, групповой SDK вызван РОВНО один раз."""
+    calls = {"n": 0}
+
+    def fake(client, customer_id, campaign_id, ad_group_id, keywords, match_type):
+        calls["n"] += 1
+        return {"applied": True}
+
+    store = FakeStore(FakeProposal("add_negative_keywords", "confirmed", user_initiated=True))
+    kw = {
+        "customer_id": DRAFT_ACCOUNT_ID,
+        "campaign_id": "23",
+        "keywords": ["бесплатно"],
+        "match_type": "broad",
+        "confirmation_id": "ok",
+        "ads_client": object(),
+        "ad_group_id": "42",
+    }
+    with (
+        patched(mut, "_add_negative_keywords_adgroup_via_sdk", fake),
+        allowed_ids(DRAFT_ACCOUNT_ID),
+    ):
+        await mut.apply_add_negative_keywords(confirm_store=store, **kw)
+        try:
+            await mut.apply_add_negative_keywords(confirm_store=store, **kw)
+            raise AssertionError("replay должен падать PermissionError")
+        except PermissionError:
+            pass
+    assert calls["n"] == 1
+
+
+async def test_apply_add_negative_keywords_adgroup_foreign_account_blocked():
+    """Замок аккаунта срабатывает ДО диспатча уровня: чужой customer_id — отказ, claim не съеден."""
+    calls = {"n": 0}
+
+    def fake(*a, **k):
+        calls["n"] += 1
+        return {"applied": True}
+
+    store = FakeStore(FakeProposal("add_negative_keywords", "confirmed", user_initiated=True))
+    with (
+        patched(mut, "_add_negative_keywords_adgroup_via_sdk", fake),
+        allowed_ids(DRAFT_ACCOUNT_ID),
+    ):
+        try:
+            await mut.apply_add_negative_keywords(
+                customer_id="1234567890",  # НЕ Draft
+                campaign_id="23",
+                keywords=["бесплатно"],
+                match_type="broad",
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=object(),
+                ad_group_id="42",
+            )
+            raise AssertionError("чужой аккаунт должен отвергаться PermissionError")
+        except PermissionError:
+            pass
+    assert calls["n"] == 0
+    assert store._claimed is False and store.finalized is False
+
+
 # ── apply_remove_negative_keywords: симметрично add (по тексту+типу), НЕ деньги ───
 async def test_apply_remove_negative_keywords_happy_path():
     called = {}

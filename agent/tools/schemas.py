@@ -299,8 +299,14 @@ class RemoveKeywords(BaseModel):
 
 
 class AddNegativeKeywords(BaseModel):
-    # campaign обязателен: минус-слова добавляются на уровне кампании.
+    """Минус-слова кампании. ad_group (опц., 3.2б 2026-07-17, зеркало Ф4 в AddKeywords) СУЖАЕТ
+    уровень до одной группы: минус-слово ляжет негативным AdGroupCriterion этой группы, а не
+    CampaignCriterion. Группы нет в кампании → отказ в execute_confirmed (fail-closed), не тихий
+    откат на уровень кампании."""
+
+    # campaign обязателен: минус-слова добавляются на уровне кампании (или её группы — ad_group).
     campaign: str
+    ad_group: str | None = None  # опц.: минус-слово только в этой группе (не вся кампания)
     keywords: list[str] = Field(min_length=1, max_length=ADD_KEYWORDS_MAX)
     match_type: MatchType = "broad"
 
@@ -1324,7 +1330,9 @@ TOOLS: list[dict] = [
     ),
     _tool(
         "add_negative_keywords",
-        "Добавить минус-слова на уровне указанной кампании. Всегда указывай campaign.",
+        "Добавить минус-слова на уровне указанной кампании. Всегда указывай campaign. "
+        "ad_group — ТОЛЬКО если пользователь явно назвал группу («добавь минус-слова в группу X»): "
+        "тогда минус-слова лягут на уровень этой группы, а не кампании.",
         AddNegativeKeywords,
     ),
     _tool(

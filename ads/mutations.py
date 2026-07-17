@@ -627,7 +627,7 @@ async def apply_add_keywords(
     return result
 
 
-# ── Добавление минус-слов (на уровне кампании) ──────────────────────────────────
+# ── Добавление минус-слов (уровень кампании; ad_group_id сужает до одной группы) ──
 async def apply_add_negative_keywords(
     *,
     customer_id: str,
@@ -637,19 +637,35 @@ async def apply_add_negative_keywords(
     confirmation_id: str,
     confirm_store: ConfirmStore,
     ads_client: object,
+    ad_group_id: str | None = None,
 ) -> dict:
     ensure_allowed(customer_id)
     clean = normalize_keywords(keywords)  # длину/дубли считает КОД — ДО claim
     await _require_confirmation(confirm_store, confirmation_id, "add_negative_keywords")
-    result = await run_ads_call(
-        _add_negative_keywords_via_sdk,
-        ads_client,
-        customer_id,
-        campaign_id,
-        clean,
-        match_type,
-        op_count=len(clean),  # квота §3: каждая mutate-операция батча
-    )
+    # 3.2б: ad_group_id задан ⇒ негативный ad_group_criterion ОДНОЙ группы (не campaign_criterion).
+    # Выбор уровня — по уже отрезолвленному id из execute_confirmed (имя группы не совпало → отказ
+    # ТАМ, до claim), здесь только диспатч на нужный SDK-исполнитель.
+    if ad_group_id:
+        result = await run_ads_call(
+            _add_negative_keywords_adgroup_via_sdk,
+            ads_client,
+            customer_id,
+            campaign_id,
+            ad_group_id,
+            clean,
+            match_type,
+            op_count=len(clean),  # квота §3: каждая mutate-операция батча
+        )
+    else:
+        result = await run_ads_call(
+            _add_negative_keywords_via_sdk,
+            ads_client,
+            customer_id,
+            campaign_id,
+            clean,
+            match_type,
+            op_count=len(clean),  # квота §3: каждая mutate-операция батча
+        )
     await confirm_store.finalize(confirmation_id, result=result)
     return result
 
@@ -1966,6 +1982,52 @@ def _add_negative_keywords_via_sdk(
     result = {
         "customer_id": customer_id,
         "campaign_id": str(campaign_id),
+        "match_type": str(match_type),
+        "resource_names": created,
+        "count": len(created),
+        "applied": True,
+    }
+    if rejected:
+        result["rejected"] = rejected
+        result["rejected_count"] = len(rejected)
+    return result
+
+
+def _add_negative_keywords_adgroup_via_sdk(
+    client, customer_id: str, campaign_id: str, ad_group_id: str, keywords: list, match_type: str
+) -> dict:
+    """Минус-слова НА УРОВНЕ ГРУППЫ (ad_group_criterion, negative=True — обязателен, immutable).
+    CREATE — БЕЗ update_mask; status НЕ ставится (в отличие от позитивных ключей: негативный
+    критерий не обслуживается, зеркало campaign-level варианта выше). partial_failure=True —
+    тот же контракт rejected, что у остальных пользовательских батчей ключей."""
+    ag_svc = client.get_service("AdGroupService")
+    svc = client.get_service("AdGroupCriterionService")
+    ag_rn = ag_svc.ad_group_path(str(customer_id), str(ad_group_id))
+    mt = getattr(client.enums.KeywordMatchTypeEnum, str(match_type).upper())
+    ops = []
+    meta: list[tuple[str, str]] = []  # (ad_group_id, text) операции i — атрибуция отказов
+    for text in keywords:
+        op = client.get_type("AdGroupCriterionOperation")
+        op.create.ad_group = ag_rn
+        op.create.negative = True  # ОБЯЗАТЕЛЬНО: это исключение (минус-слово)
+        op.create.keyword.text = text
+        op.create.keyword.match_type = mt
+        ops.append(op)
+        meta.append((str(ad_group_id), str(text)))
+    req = client.get_type("MutateAdGroupCriteriaRequest")
+    req.customer_id = str(customer_id)
+    req.operations.extend(ops)
+    req.partial_failure = True
+    resp = svc.mutate_ad_group_criteria(request=req)
+    created = [r.resource_name for r in resp.results if getattr(r, "resource_name", "")]
+    rejected = _rejected_from_partial_failure(client, resp, meta, key="keyword")
+    if rejected and not created:
+        reasons = "; ".join(r["reason"] for r in rejected[:3])
+        raise ValueError(f"Google Ads отклонил все минус-слова ({len(rejected)}): {reasons}")
+    result = {
+        "customer_id": customer_id,
+        "campaign_id": str(campaign_id),
+        "ad_group_id": str(ad_group_id),
         "match_type": str(match_type),
         "resource_names": created,
         "count": len(created),

@@ -153,6 +153,27 @@ def test_add_negative_keywords_partial_failure_mirror():
     assert captured["request"].partial_failure is True
 
 
+def test_add_negative_keywords_adgroup_partial_failure_mirror():
+    """3.2б: групповой вариант — negative=True на ad_group_criterion, тот же контракт rejected."""
+    captured: dict = {}
+    resp = SimpleNamespace(
+        results=_results("neg0", ""),
+        partial_failure_error=_pfe((1, "KEYWORD_HAS_INVALID_CHARS", "invalid chars")),
+    )
+    client = _client(resp, captured)
+    res = mut._add_negative_keywords_adgroup_via_sdk(
+        client, DRAFT, "555", "42", ["ok", "плох@й"], "broad"
+    )
+    assert res["count"] == 1 and res["resource_names"] == ["neg0"]
+    assert res["ad_group_id"] == "42" and res["campaign_id"] == "555"
+    assert res["rejected"][0]["keyword"] == "плох@й"
+    assert res["rejected"][0]["ad_group_id"] == "42"  # атрибуция отказа к группе
+    req = captured["request"]
+    assert req.partial_failure is True
+    assert req.operations[0].create.negative is True  # исключение, не таргетинг
+    assert req.operations[0].create.ad_group == f"customers/{DRAFT}/adGroups/42"
+
+
 # ── B3: ключи визарда §19 идут тем же контрактом, что /addkeys ───────────────────
 def _composite_client(kw_resp, captured: dict):
     """Дакт-фейк SDK для _create_search_campaign_via_sdk: бюджет/кампания/группа/RSA — успех,
