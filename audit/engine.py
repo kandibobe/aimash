@@ -206,6 +206,15 @@ class _Ctx:
     # семья молчит. [] → PMax в аккаунте НЕТ: это не пробел данных, а факт (в data_gaps не идёт).
     pmax_campaigns: list | None = None
     pmax_asset_groups: list | None = None
+    # Ф9: расход campaign × устройство (DevicePerformanceRow). None → не читано ⇒ чек молчит.
+    device_performance: list | None = None
+    # Ф9: минус-слова с текстами (NegativeKeywordsInfo: 3 уровня + привязка shared-списков).
+    # None → не читано; конфликт-чек работает в паре с keyword_inventory.
+    negative_keywords: object | None = None
+    # Ф9: подписки авто-применения рекомендаций Google (RecommendationSubscriptionRow).
+    recommendation_subscriptions: list | None = None
+    # Ф9: режим ротации объявлений ENABLED-групп (AdRotationRow). None → не читано.
+    ad_rotation: list | None = None
 
     def target_for(self, campaign_name: str) -> float | None:
         """Цель CPA для кампании: пер-кампанийная стратегия (tCPA) побеждает глобальный /target."""
@@ -2805,6 +2814,300 @@ def check_pmax_insufficient_conversions(report, thr: dict, ctx: _Ctx) -> list[Fi
     ]
 
 
+# ── Ф9: волна индустриальных чек-листов (2026-07-17) ──────────────────────────────────
+def check_device_waste(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф9: разрыв эффективности по устройствам внутри кампании. Две ветки: (а) устройство с расходом
+    ≥ порога, кликами и 0 конверсий, пока ОСТАЛЬНЫЕ устройства кампании конвертят — деньги в риске
+    (at_risk = расход устройства, сегмент ⊂ кампания, дедуп не задваивает spend_no_conv);
+    (б) устройство конвертит, но его CPA ≥ factor × CPA остальных — прозой (at_risk=0: деньги
+    работают, но переплата; сумма переплаты в facts). Лечится bid adjustment по устройству → семья
+    bidding. Не one-tap (корректировка ставок — денежная, только по прямой команде).
+    Нет данных (ctx.device_performance=None) → молчим (fail-safe)."""
+    rows = ctx.device_performance
+    if not rows:
+        return []
+    floor = float(thr.get("device_min_spend", 20.0))
+    factor = float(thr.get("device_cpa_factor", 2.0))
+    cur = getattr(report, "currency", "")
+    by_camp: dict[str, list] = {}
+    for r in rows:
+        by_camp.setdefault(getattr(r, "campaign", ""), []).append(r)
+    out: list[Finding] = []
+    for camp, devs in by_camp.items():
+        if len(devs) < 2:
+            continue  # одно устройство — сравнивать не с чем
+        for d in devs:
+            m = getattr(d, "metrics", None)
+            cost = float(getattr(m, "cost", 0.0) or 0.0)
+            if cost < floor:
+                continue
+            clicks = float(getattr(m, "clicks", 0) or 0)
+            conv = float(getattr(m, "conversions", 0.0) or 0.0)
+            rest = [o for o in devs if o is not d]
+            rest_conv = sum(
+                float(getattr(getattr(o, "metrics", None), "conversions", 0.0) or 0.0) for o in rest
+            )
+            rest_cost = sum(
+                float(getattr(getattr(o, "metrics", None), "cost", 0.0) or 0.0) for o in rest
+            )
+            if rest_conv <= 0:
+                continue  # остальные не конвертят — это не разрыв устройства, а проблема кампании
+            device = getattr(d, "device", "")
+            rest_cpa = rest_cost / rest_conv
+            if clicks > 0 and conv == 0:
+                out.append(
+                    Finding(
+                        check_id="device_performance_gap",
+                        family="bidding",
+                        severity="warning",
+                        at_risk=round(cost, 2),
+                        spend_segment=f"device::{camp}::{device}",
+                        target_campaign=camp,
+                        suggested_operation=None,
+                        facts={
+                            "campaign": camp,
+                            "device": device,
+                            "cost": round(cost, 2),
+                            "clicks": int(clicks),
+                            "currency": cur,
+                            "reason": "zero_conv",
+                        },
+                        evidence={"cost": round(cost, 2), "rest_conv": round(rest_conv, 1)},
+                    )
+                )
+            elif conv > 0 and cost / conv >= factor * rest_cpa:
+                out.append(
+                    Finding(
+                        check_id="device_performance_gap",
+                        family="bidding",
+                        severity="warning",
+                        at_risk=0.0,  # конверсии есть — деньги работают; переплата в facts
+                        spend_segment=None,
+                        target_campaign=camp,
+                        suggested_operation=None,
+                        facts={
+                            "campaign": camp,
+                            "device": device,
+                            "cost": round(cost, 2),
+                            "cpa": round(cost / conv, 2),
+                            "rest_cpa": round(rest_cpa, 2),
+                            "overpay": round(cost - conv * rest_cpa, 2),
+                            "currency": cur,
+                            "reason": "cpa_gap",
+                        },
+                        evidence={"cpa": round(cost / conv, 2), "rest_cpa": round(rest_cpa, 2)},
+                    )
+                )
+    out.sort(key=lambda f: -(f.at_risk or float(f.facts.get("overpay", 0.0))))
+    return out[: int(thr.get("kw_top_n", 5))]
+
+
+def _tokens_contain(hay: list[str], needle: list[str]) -> bool:
+    """Входит ли последовательность needle в hay ПОДРЯД (семантика PHRASE-минуса)."""
+    n = len(needle)
+    if not n or n > len(hay):
+        return False
+    return any(hay[i : i + n] == needle for i in range(len(hay) - n + 1))
+
+
+def check_negative_conflicts(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф9: минус-слово блокирует СВОЙ ЖЕ активный ключ. Семантика минусов (у негативов НЕТ близких
+    вариантов, только буквальный текст): EXACT — тексты равны; PHRASE — минус входит в ключ подряд;
+    BROAD — все токены минуса есть в ключе (порядок неважен). Область действия: минус кампании бьёт
+    по её ключам, минус группы — по группе, shared-список — по всем ПРИВЯЗАННЫМ кампаниям.
+
+    Усечённый инвентарь тут НЕ глушит чек (в отличие от harvest/ngram): найденный конфликт —
+    позитивный факт, полнота списка на его истинность не влияет (неполнота = недосчёт находок,
+    не ложь). Нет данных (минусы или инвентарь не читаны) → молчим."""
+    info = ctx.negative_keywords
+    inv = ctx.keyword_inventory
+    if info is None or inv is None:
+        return []
+    negs = list(getattr(info, "rows", None) or [])
+    attach = dict(getattr(info, "shared_attachments", None) or {})
+    if not negs or not inv:
+        return []
+    kws = []  # (campaign, ad_group, text, norm, tokens)
+    for k in inv:
+        text = getattr(k, "keyword", "") or ""
+        nrm = t_norm(text)
+        if nrm:
+            kws.append(
+                (getattr(k, "campaign", ""), getattr(k, "ad_group", ""), text, nrm, nrm.split())
+            )
+    out: list[Finding] = []
+    for ng in negs:
+        n_norm = t_norm(getattr(ng, "text", "") or "")
+        if not n_norm:
+            continue
+        n_tokens = n_norm.split()
+        n_tokset = set(n_tokens)
+        mt = str(getattr(ng, "match_type", "") or "").upper()
+        scope = getattr(ng, "scope", "")
+        camp = getattr(ng, "campaign", "")
+        group = getattr(ng, "ad_group", "")
+        list_name = getattr(ng, "list_name", "")
+        if scope == "campaign":
+            in_scope = [k for k in kws if k[0] == camp]
+        elif scope == "ad_group":
+            in_scope = [k for k in kws if k[0] == camp and k[1] == group]
+        elif scope == "shared":
+            camps = attach.get(list_name, frozenset())
+            in_scope = [k for k in kws if k[0] in camps]
+        else:
+            continue
+        if mt == "EXACT":
+            blocked = [k for k in in_scope if k[3] == n_norm]
+        elif mt == "PHRASE":
+            blocked = [k for k in in_scope if _tokens_contain(k[4], n_tokens)]
+        else:  # BROAD (и неизвестный тип судим по самой широкой семантике)
+            blocked = [k for k in in_scope if n_tokset <= set(k[4])]
+        if not blocked:
+            continue
+        where = f"{camp} / {group}" if scope == "ad_group" else (camp or list_name)
+        out.append(
+            Finding(
+                check_id="negative_keyword_conflicts",
+                family="keywords",
+                severity="warning",
+                at_risk=0.0,  # заблокированный ключ не тратит — он ТЕРЯЕТ трафик
+                spend_segment=None,
+                target_campaign=camp or (blocked[0][0] if blocked else None),
+                suggested_operation=None,  # снятие минуса — курация, не one-tap
+                facts={
+                    "negative": getattr(ng, "text", ""),
+                    "match_type": mt.lower(),
+                    "scope": scope,
+                    "where": where,
+                    "blocked_count": len(blocked),
+                    "examples": [k[2] for k in blocked[:3]],
+                },
+                evidence={"blocked": len(blocked)},
+            )
+        )
+    out.sort(key=lambda f: -int(f.facts.get("blocked_count", 0)))
+    return out[: int(thr.get("kw_top_n", 5))]
+
+
+def check_no_conversion_value(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф9: конверсии считаются, а их ЦЕННОСТЬ — нет (conversions ≥ порога, conversions_value = 0).
+    Без value невозможны tROAS и сравнение кампаний по выручке — оптимизация слепа на один глаз.
+    Только при ЖИВЫХ действиях-конверсиях (ctx.conversion_actions подан и ENABLED есть): без
+    верификации это гадание, а «трекинга нет вовсе» кричит critical-чек. Порог отсекает шум:
+    на 2-3 конверсиях нулевое value — рано судить."""
+    cas = ctx.conversion_actions
+    if cas is None:
+        return []
+    if not any(getattr(c, "status", "") == "ENABLED" for c in cas):
+        return []
+    t = report.totals
+    conv = float(getattr(t, "conversions", 0.0) or 0.0)
+    value = float(getattr(t, "conv_value", 0.0) or 0.0)
+    if conv < float(thr.get("no_value_min_conv", 10.0)) or value > 0:
+        return []
+    return [
+        Finding(
+            check_id="no_conversion_value",
+            family="conversion_tracking",
+            severity="info",
+            at_risk=0.0,
+            spend_segment=None,
+            facts={"conversions": round(conv, 1)},
+            evidence={"conversions": round(conv, 1), "conv_value": 0},
+        )
+    ]
+
+
+def check_auto_apply_recommendations(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф9: включённые подписки авто-применения рекомендаций — Google меняет аккаунт САМ (ставки/
+    ключи/тексты), без подтверждения владельца. Прямое противоречие философии бота (правило 1:
+    никаких изменений без «да»). Семья recommendations — вне score (показываем, не штрафуем:
+    это выбор владельца, а не дефект кампаний). Нет данных → молчим."""
+    subs = ctx.recommendation_subscriptions
+    if not subs:
+        return []
+    enabled = sorted(
+        {str(getattr(s, "type", "") or "") for s in subs if getattr(s, "status", "") == "ENABLED"}
+        - {""}
+    )
+    if not enabled:
+        return []
+    return [
+        Finding(
+            check_id="auto_apply_recommendations_on",
+            family="recommendations",
+            severity="info",
+            at_risk=0.0,
+            spend_segment=None,
+            facts={"count": len(enabled), "types": enabled[:5]},
+            evidence={"enabled_subscriptions": len(enabled)},
+        )
+    ]
+
+
+def check_attribution_last_click(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф9: primary-действия на атрибуции «последний клик» — вся ценность пути присваивается
+    последнему клику, верхние ключи выглядят «неработающими», и Smart Bidding недоплачивает за них.
+    Google сам мигрирует аккаунты на data-driven; last click сегодня — осознанный шаг назад.
+    Судим только primary ENABLED (вспомогательные действия на последнем клике — норма).
+    getattr-гейт: у стабов/старых строк поля нет → молчим, не гадаем."""
+    cas = ctx.conversion_actions
+    if cas is None:
+        return []
+    last = [
+        c
+        for c in cas
+        if getattr(c, "status", "") == "ENABLED"
+        and getattr(c, "primary_for_goal", False)
+        and getattr(c, "attribution_model", "") == "GOOGLE_ADS_LAST_CLICK"
+    ]
+    if not last:
+        return []
+    return [
+        Finding(
+            check_id="attribution_model_last_click",
+            family="conversion_tracking",
+            severity="info",
+            at_risk=0.0,
+            spend_segment=None,
+            facts={
+                "count": len(last),
+                "names": [getattr(c, "name", "") for c in last[:3]],
+            },
+            evidence={"last_click_actions": len(last)},
+        )
+    ]
+
+
+def check_ad_rotation(report, thr: dict, ctx: _Ctx) -> list[Finding]:
+    """Ф9: группы с ротацией ROTATE_FOREVER — «показывать по кругу, не оптимизировать»: лучшее
+    объявление не выигрывает чаще, CTR группы ниже возможного. Почти всегда наследие A/B-теста,
+    который забыли закрыть. Один агрегат (сколько групп + пример). Нет данных → молчим."""
+    rows = ctx.ad_rotation
+    if not rows:
+        return []
+    bad = [r for r in rows if getattr(r, "rotation_mode", "") == "ROTATE_FOREVER"]
+    if not bad:
+        return []
+    worst = bad[0]
+    return [
+        Finding(
+            check_id="ad_rotation_rotate_forever",
+            family="rsa",
+            severity="info",
+            at_risk=0.0,
+            spend_segment=None,
+            target_campaign=getattr(worst, "campaign", "") or None,
+            facts={
+                "count": len(bad),
+                "campaign": getattr(worst, "campaign", ""),
+                "ad_group": getattr(worst, "ad_group", ""),
+            },
+            evidence={"rotate_forever_groups": len(bad)},
+        )
+    ]
+
+
 # Порядок проверок = порядок запуска (на рендер не влияет — там сортировка по важности).
 _CHECKS = (
     check_no_conversion_tracking,
@@ -2859,6 +3162,12 @@ _CHECKS = (
     check_pmax_no_signals,
     check_pmax_no_negatives,
     check_pmax_insufficient_conversions,
+    check_device_waste,
+    check_negative_conflicts,
+    check_no_conversion_value,
+    check_auto_apply_recommendations,
+    check_attribution_last_click,
+    check_ad_rotation,
 )
 
 # N1.0a: полный реестр эмитируемых проверок check_id → (family, severity) — входит в версию
@@ -2946,6 +3255,18 @@ CHECK_REGISTRY: dict[str, tuple[str, str]] = {
     "pmax_no_signals": ("pmax", "info"),
     "pmax_no_negatives": ("pmax", "info"),
     "pmax_insufficient_conversions": ("pmax", "info"),
+    # Ф9 (2026-07-17, индустриальные чек-листы). Двое — warning: разрыв по устройствам жжёт
+    # реальные деньги (ветка zero_conv кладёт расход устройства в at_risk), конфликт минусов
+    # молча душит собственный трафик. Остальные — info-конфигурация. Авто-применение — семья
+    # recommendations (вне score: выбор владельца, не дефект кампаний). SCORE_MODEL_EPOCH не
+    # бампаем: новые check_id в этом реестре + новые пороги хэш видит сам (версия ротируется,
+    # тренд честно «н/д» один раз — ровно как Ф8).
+    "device_performance_gap": ("bidding", "warning"),
+    "negative_keyword_conflicts": ("keywords", "warning"),
+    "no_conversion_value": ("conversion_tracking", "info"),
+    "auto_apply_recommendations_on": ("recommendations", "info"),
+    "attribution_model_last_click": ("conversion_tracking", "info"),
+    "ad_rotation_rotate_forever": ("rsa", "info"),
 }
 CHECK_IDS = frozenset(CHECK_REGISTRY)
 
@@ -3054,6 +3375,10 @@ def build_audit(
     campaign_settings: list | None = None,
     pmax_campaigns: list | None = None,
     pmax_asset_groups: list | None = None,
+    device_performance: list | None = None,
+    negative_keywords: object | None = None,
+    recommendation_subscriptions: list | None = None,
+    ad_rotation: list | None = None,
 ) -> AuditResult:
     """Собрать аудит по УЖЕ прочитанным данным. Чистая функция (без сети/SDK). Опц. живые данные
     (is_rows / conversion_actions / bidding / optimization_score / recommendations) — duck-typed,
@@ -3106,6 +3431,10 @@ def build_audit(
             ("keyword_inventory", keyword_inventory),
             ("campaign_assets", campaign_assets),
             ("campaign_settings", campaign_settings),
+            ("device_performance", device_performance),
+            ("negative_keywords", negative_keywords),
+            ("recommendation_subscriptions", recommendation_subscriptions),
+            ("ad_rotation", ad_rotation),
         )
         if val is not None
     )
@@ -3164,6 +3493,10 @@ def build_audit(
         campaign_settings=campaign_settings,
         pmax_campaigns=pmax_campaigns,
         pmax_asset_groups=pmax_asset_groups,
+        device_performance=device_performance,
+        negative_keywords=negative_keywords,
+        recommendation_subscriptions=recommendation_subscriptions,
+        ad_rotation=ad_rotation,
     )
 
     # N1.3 (ревью): IS-строки прочитаны, но НИ ОДНА не прошла tolerance-гейт (proto3-нули) —

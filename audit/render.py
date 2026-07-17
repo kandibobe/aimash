@@ -73,6 +73,11 @@ _SIGNAL_LABEL = {
         "campaign_assets": "расширения объявлений",
         "campaign_settings": "настройки кампаний (сети/гео)",
         "rsa_age": "возраст объявлений",
+        # Ф9: сигналы волны новых чеков.
+        "device_performance": "разбивка по устройствам",
+        "negative_keywords": "тексты минус-слов",
+        "recommendation_subscriptions": "авто-применение рекомендаций",
+        "ad_rotation": "ротация объявлений",
     },
     "en": {
         "impression_share": "impression share",
@@ -94,6 +99,10 @@ _SIGNAL_LABEL = {
         "campaign_assets": "ad assets",
         "campaign_settings": "campaign settings (networks/geo)",
         "rsa_age": "ad age",
+        "device_performance": "device breakdown",
+        "negative_keywords": "negative keyword texts",
+        "recommendation_subscriptions": "recommendation auto-apply",
+        "ad_rotation": "ad rotation",
     },
 }
 
@@ -107,15 +116,24 @@ _SIGNAL_LABEL = {
 _FAMILY_SIGNALS = {
     # display_on_search_campaign читает campaign_settings, pmax_asset_group_no_conv — pmax.
     "waste": ("campaign_settings", "pmax"),
-    "keywords": ("search_terms", "negative_lists", "keyword_inventory", "pmax"),
+    # Ф9: negative_keyword_conflicts живёт на текстах минусов (negative_keywords) + инвентаре ключей.
+    "keywords": (
+        "search_terms",
+        "negative_lists",
+        "keyword_inventory",
+        "pmax",
+        "negative_keywords",
+    ),
     "budget": ("impression_share",),
     # rsa_* судят по самим объявлениям. rsa_age здесь НЕ живёт: это постоянное ограничение API
     # (_PERMANENT_GAPS), а не сбой чтения — держать его тут значило бы вечно блокировать снапшот/тренд.
-    "rsa": ("impression_share", "adgroup_structure", "keyword_quality", "rsa_ads"),
+    # Ф9: ad_rotation — режим ротации групп (ROTATE_FOREVER).
+    "rsa": ("impression_share", "adgroup_structure", "keyword_quality", "rsa_ads", "ad_rotation"),
     "conversion_tracking": ("conversion_actions",),
     # Ф1: без слоя ставок/позиций (bid_landscape) «ставки в норме» утверждать нечестно — именно там
     # живут «ставка ниже оценки Google» и «верх потерян по рангу». negative_lists — broad_unmanaged.
-    "bidding": ("bidding", "bid_landscape", "negative_lists"),
+    # Ф9: device_performance — разрывы CPA по устройствам (лечатся bid adjustment ⇒ семья bidding).
+    "bidding": ("bidding", "bid_landscape", "negative_lists", "device_performance"),
     "delivery": (
         "ad_policy",
     ),  # упал ad_policy → delivery не «в норме» (zero_impressions — из отчёта)
@@ -610,6 +628,62 @@ def _finding_line(f: Finding, lang: str, cur: str) -> str:
         if lang == "en":
             return f"{fa.get('campaigns', 0)} PMax campaigns, and each gets fewer than {fa.get('need', 30)} conversions per 30 days (best {fa.get('best', 0)}) — the signal is split, none of them learns. Merge them into one."
         return f"{fa.get('campaigns', 0)} PMax-кампании, и каждая набирает меньше {fa.get('need', 30)} конверсий за 30 дней (лучшая — {fa.get('best', 0)}) — сигнал делится, не учится ни одна. Объедини их в одну."
+    # ── Ф9: устройства / конфликты минусов / value / авто-применение / атрибуция / ротация ──
+    if f.check_id == "device_performance_gap":
+        cur_ = fa.get("currency") or cur
+        dev = fa.get("device", "")
+        if fa.get("reason") == "zero_conv":
+            if lang == "en":
+                return f"«{camp}» / {dev}: {_money(fa.get('cost', 0), cur_)}, {fa.get('clicks', 0)} clicks, 0 conversions while other devices do convert — bid down this device (bid adjustments only on your direct command)."
+            return f"«{camp}» / {dev}: {_money(fa.get('cost', 0), cur_)}, {fa.get('clicks', 0)} кликов, 0 конверсий, хотя остальные устройства конвертят — срежь ставку по устройству (корректировки — только по твоей прямой команде)."
+        cpa = _money(fa.get("cpa", 0), cur_)
+        rest = _money(fa.get("rest_cpa", 0), cur_)
+        over = _money(fa.get("overpay", 0), cur_)
+        if lang == "en":
+            return f"«{camp}» / {dev}: CPA {cpa} vs {rest} on the other devices (~{over} overpaid) — set a negative device bid adjustment (only on your direct command)."
+        return f"«{camp}» / {dev}: CPA {cpa} против {rest} на остальных устройствах (~{over} переплаты) — задай понижающую корректировку по устройству (только по твоей прямой команде)."
+    if f.check_id == "negative_keyword_conflicts":
+        ex = ", ".join(f"«{k}»" for k in (fa.get("examples") or [])[:3])
+        neg = fa.get("negative", "")
+        mt = fa.get("match_type", "")
+        where = fa.get("where", "")
+        scope = fa.get("scope", "")
+        n = fa.get("blocked_count", 0)
+        if lang == "en":
+            scope_en = {
+                "campaign": "campaign",
+                "ad_group": "ad group",
+                "shared": "shared list",
+            }.get(scope, scope)
+            return f"Negative «{neg}» ({mt}, {scope_en} level: {where}) blocks {n} of your own active keyword(s): {ex} — they silently get no traffic. Remove the negative or narrow its match type."
+        scope_ru = {"campaign": "кампания", "ad_group": "группа", "shared": "общий список"}.get(
+            scope, scope
+        )
+        return f"Минус-слово «{neg}» ({mt}, уровень: {scope_ru} {where}) блокирует {n} твоих же активных ключей: {ex} — они молча не получают трафик. Убери минус или сузь его тип соответствия."
+    if f.check_id == "no_conversion_value":
+        n = fa.get("conversions", 0)
+        if lang == "en":
+            return f"{n} conversions recorded, but their value is zero — without conversion value, tROAS and revenue comparison across campaigns are impossible. Assign values to your conversion actions (even approximate ones)."
+        return f"{n} конверсий записано, но их ценность — ноль: без value невозможны tROAS и сравнение кампаний по выручке. Задай ценность действиям-конверсиям (хотя бы приблизительную)."
+    if f.check_id == "auto_apply_recommendations_on":
+        n = fa.get("count", 0)
+        names = ", ".join(_rec_type_human(t) for t in (fa.get("types") or [])[:5])
+        if lang == "en":
+            return f"Auto-apply is ON for {n} Google recommendation type(s) ({names}) — Google changes the account by itself, without your confirmation. Turn it off if you want to approve every change."
+        return f"Авто-применение включено для {n} типов рекомендаций Google ({names}) — Google меняет аккаунт САМ, без твоего подтверждения. Выключи, если хочешь подтверждать каждое изменение."
+    if f.check_id == "attribution_model_last_click":
+        n = fa.get("count", 0)
+        names = ", ".join(f"«{x}»" for x in (fa.get("names") or [])[:3])
+        if lang == "en":
+            return f"{n} primary conversion action(s) still use last-click attribution ({names}) — upper-funnel keywords look worthless and Smart Bidding underpays for them. Switch to data-driven attribution."
+        return f"{n} primary-действий всё ещё на атрибуции «последний клик» ({names}) — верхние ключи воронки выглядят бесполезными, и Smart Bidding за них недоплачивает. Переключи на data-driven."
+    if f.check_id == "ad_rotation_rotate_forever":
+        n = fa.get("count", 0)
+        ag = fa.get("ad_group", "")
+        where = f"«{camp}» / {ag}" if ag else f"«{camp}»"
+        if lang == "en":
+            return f"{n} ad group(s) rotate ads indefinitely (ROTATE_FOREVER, e.g. {where}) — the best ad never gets shown more often; usually a forgotten A/B test. Switch rotation to «Optimize»."
+        return f"{n} групп крутят объявления по кругу (ROTATE_FOREVER, напр. {where}) — лучшее объявление не выигрывает чаще; обычно это забытый A/B-тест. Переключи ротацию на «Оптимизация»."
     return camp or f.check_id
 
 

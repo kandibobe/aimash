@@ -482,6 +482,32 @@ def fetch_recommendations(client, customer_id: str, limit: int = 50) -> list[Rec
 
 
 @dataclass
+class RecommendationSubscriptionRow:
+    type: str  # тип авто-применяемой рекомендации (recommendation_subscription.type)
+    status: str  # ENABLED = Google применяет сам, без подтверждения
+
+
+def fetch_recommendation_subscriptions(
+    client, customer_id: str
+) -> list[RecommendationSubscriptionRow]:
+    """Ф9: подписки авто-применения рекомендаций. ENABLED-подписка = Google меняет аккаунт САМ
+    (ставки/ключи/тексты) — прямое противоречие философии бота «никаких изменений без подтверждения».
+    Запрос сверен живой пробой на Draft (v24, 2026-07-17). READ-ONLY."""
+    ensure_read_allowed(customer_id)
+    q = (
+        "SELECT recommendation_subscription.type, recommendation_subscription.status "
+        "FROM recommendation_subscription"
+    )
+    return [
+        RecommendationSubscriptionRow(
+            type=_enum_name(r.recommendation_subscription.type_),
+            status=_enum_name(r.recommendation_subscription.status),
+        )
+        for r in _search(client, customer_id, q)
+    ]
+
+
+@dataclass
 class SearchTermRow:
     search_term: str
     campaign: str
@@ -523,15 +549,20 @@ class ConversionActionRow:
     type: str
     category: str
     primary_for_goal: bool
+    # Ф9: модель атрибуции действия (GOOGLE_ADS_LAST_CLICK / _DATA_DRIVEN / …). Дефолт "" —
+    # обратная совместимость со стабами в тестах (движок гейтит через getattr).
+    attribution_model: str = ""
 
 
 def fetch_conversion_health(client, customer_id: str) -> list[ConversionActionRow]:
-    """Действия-конверсии аккаунта (статус/тип/категория/primary_for_goal). Пусто / нет ENABLED
-    primary → трекинг под подозрением (решает движок аудита, крит-фикс #3). READ-ONLY."""
+    """Действия-конверсии аккаунта (статус/тип/категория/primary_for_goal + модель атрибуции).
+    Пусто / нет ENABLED primary → трекинг под подозрением (решает движок аудита, крит-фикс #3).
+    Поля сверены живой пробой на Draft (v24, 2026-07-17). READ-ONLY."""
     ensure_read_allowed(customer_id)
     q = (
         "SELECT conversion_action.name, conversion_action.status, conversion_action.type, "
-        "conversion_action.category, conversion_action.primary_for_goal FROM conversion_action"
+        "conversion_action.category, conversion_action.primary_for_goal, "
+        "conversion_action.attribution_model_settings.attribution_model FROM conversion_action"
     )
     out: list[ConversionActionRow] = []
     for r in _search(client, customer_id, q):
@@ -543,6 +574,7 @@ def fetch_conversion_health(client, customer_id: str) -> list[ConversionActionRo
                 type=_enum_name(ca.type_),
                 category=_enum_name(ca.category),
                 primary_for_goal=bool(ca.primary_for_goal),
+                attribution_model=_enum_name(ca.attribution_model_settings.attribution_model),
             )
         )
     return out
@@ -748,6 +780,110 @@ def fetch_negative_lists(client, customer_id: str) -> NegativeListsInfo:
 
 
 @dataclass
+class NegativeKeywordRow:
+    """Ф9: один минус-ключ С ТЕКСТОМ (в отличие от NegativeListsInfo, где только счётчики).
+    scope: "campaign" (минус прямо на кампании) | "ad_group" | "shared" (в shared-списке;
+    campaign тогда пуст, имя списка — в list_name)."""
+
+    scope: str
+    campaign: str
+    ad_group: str
+    text: str
+    match_type: str
+    list_name: str = ""
+
+
+NEGATIVE_KEYWORDS_LIMIT = 5000
+"""Потолок строк ПО КАЖДОМУ уровню минусов. Упор в него режет только полноту конфликт-чека
+(пропущенный конфликт = пропущенная находка, не ложная — в отличие от keyword_inventory)."""
+
+
+@dataclass
+class NegativeKeywordsInfo:
+    """Ф9: минус-слова трёх уровней + карта привязки shared-списков к кампаниям (имя списка →
+    имена кампаний). Пустые списки ≠ None: «прочитали, минусов нет» — валидный факт."""
+
+    rows: list[NegativeKeywordRow] = field(default_factory=list)
+    shared_attachments: dict[str, frozenset] = field(default_factory=dict)
+
+
+def fetch_negative_keywords(
+    client, customer_id: str, limit: int = NEGATIVE_KEYWORDS_LIMIT
+) -> NegativeKeywordsInfo:
+    """Ф9 (конфликты минусов): тексты минус-ключей всех трёх уровней — прямо на кампании, на группе,
+    в shared-списках (+ какая кампания к какому списку привязана). Запросы сверены живой пробой на
+    Draft (v24, 2026-07-17): `ad_group_criterion.negative` фильтруем в WHERE (принят живым API —
+    без него пришлось бы тянуть ВСЕ ключи аккаунта); `campaign_criterion.negative` — в КОДЕ
+    (как в fetch_negative_lists). READ-ONLY."""
+    ensure_read_allowed(customer_id)
+    lim = int(limit)
+    rows: list[NegativeKeywordRow] = []
+    q_camp = (
+        "SELECT campaign.name, campaign_criterion.negative, campaign_criterion.keyword.text, "
+        "campaign_criterion.keyword.match_type FROM campaign_criterion "
+        "WHERE campaign_criterion.type = 'KEYWORD' AND campaign_criterion.status != 'REMOVED' "
+        f"LIMIT {lim}"
+    )
+    for r in _search(client, customer_id, q_camp):
+        if r.campaign_criterion.negative:
+            rows.append(
+                NegativeKeywordRow(
+                    scope="campaign",
+                    campaign=r.campaign.name,
+                    ad_group="",
+                    text=r.campaign_criterion.keyword.text,
+                    match_type=_enum_name(r.campaign_criterion.keyword.match_type),
+                )
+            )
+    q_ag = (
+        "SELECT campaign.name, ad_group.name, ad_group_criterion.keyword.text, "
+        "ad_group_criterion.keyword.match_type FROM ad_group_criterion "
+        "WHERE ad_group_criterion.type = 'KEYWORD' AND ad_group_criterion.status != 'REMOVED' "
+        f"AND ad_group_criterion.negative = TRUE LIMIT {lim}"
+    )
+    for r in _search(client, customer_id, q_ag):
+        rows.append(
+            NegativeKeywordRow(
+                scope="ad_group",
+                campaign=r.campaign.name,
+                ad_group=r.ad_group.name,
+                text=r.ad_group_criterion.keyword.text,
+                match_type=_enum_name(r.ad_group_criterion.keyword.match_type),
+            )
+        )
+    q_shared = (
+        "SELECT shared_set.name, shared_criterion.keyword.text, "
+        "shared_criterion.keyword.match_type FROM shared_criterion "
+        f"WHERE shared_criterion.type = 'KEYWORD' LIMIT {lim}"
+    )
+    for r in _search(client, customer_id, q_shared):
+        rows.append(
+            NegativeKeywordRow(
+                scope="shared",
+                campaign="",
+                ad_group="",
+                text=r.shared_criterion.keyword.text,
+                match_type=_enum_name(r.shared_criterion.keyword.match_type),
+                list_name=r.shared_set.name,
+            )
+        )
+    # Привязка списков: тип фильтруем В КОДЕ (PLACEMENT_EXCLUSION-сеты — не минус-слова),
+    # как в fetch_negative_lists.
+    q_att = (
+        "SELECT campaign.name, shared_set.name, shared_set.type FROM campaign_shared_set "
+        "WHERE campaign_shared_set.status = 'ENABLED'"
+    )
+    attach: dict[str, set] = {}
+    for r in _search(client, customer_id, q_att):
+        if _enum_name(r.shared_set.type_) == "NEGATIVE_KEYWORDS":
+            attach.setdefault(r.shared_set.name, set()).add(r.campaign.name)
+    return NegativeKeywordsInfo(
+        rows=rows,
+        shared_attachments={k: frozenset(v) for k, v in attach.items()},
+    )
+
+
+@dataclass
 class KeywordQualityRow:
     campaign: str
     ad_group: str
@@ -929,6 +1065,62 @@ def fetch_schedule(client, customer_id: str, period, limit: int = 500) -> list[S
             day_of_week=_enum_name(r.segments.day_of_week),
             hour=int(getattr(r.segments, "hour", 0) or 0),
             metrics=_metrics(r.metrics),
+        )
+        for r in _search(client, customer_id, q)
+    ]
+
+
+@dataclass
+class DevicePerformanceRow:
+    campaign: str
+    device: str  # MOBILE / DESKTOP / TABLET / CONNECTED_TV / OTHER (segments.device)
+    metrics: Metrics
+
+
+def fetch_device_performance(
+    client, customer_id: str, period, limit: int = 500
+) -> list[DevicePerformanceRow]:
+    """Ф9: расход campaign × segments.device — разрыв CPA между устройствами (слив на mobile при
+    конвертящем desktop и наоборот). Запрос сверен живой пробой на Draft (v24, 2026-07-17).
+    READ-ONLY."""
+    ensure_read_allowed(customer_id)
+    q = (
+        "SELECT campaign.name, campaign.status, segments.device, "
+        f"{_METRICS_SELECT} FROM campaign "
+        f"WHERE {_where(period, None)} AND campaign.status = 'ENABLED' "
+        f"ORDER BY metrics.cost_micros DESC LIMIT {int(limit)}"
+    )
+    return [
+        DevicePerformanceRow(
+            campaign=r.campaign.name,
+            device=_enum_name(r.segments.device),
+            metrics=_metrics(r.metrics),
+        )
+        for r in _search(client, customer_id, q)
+    ]
+
+
+@dataclass
+class AdRotationRow:
+    campaign: str
+    ad_group: str
+    rotation_mode: str  # OPTIMIZE / ROTATE_FOREVER (ad_group.ad_rotation_mode)
+
+
+def fetch_ad_rotation(client, customer_id: str) -> list[AdRotationRow]:
+    """Ф9: режим ротации объявлений ENABLED-групп. ROTATE_FOREVER выключает оптимизацию показа
+    Google (лучшее объявление не выигрывает чаще) — почти всегда наследие A/B-теста, который забыли
+    закрыть. Запрос сверен живой пробой на Draft (v24, 2026-07-17). READ-ONLY."""
+    ensure_read_allowed(customer_id)
+    q = (
+        "SELECT campaign.name, ad_group.name, ad_group.ad_rotation_mode FROM ad_group "
+        "WHERE ad_group.status = 'ENABLED' AND campaign.status = 'ENABLED'"
+    )
+    return [
+        AdRotationRow(
+            campaign=r.campaign.name,
+            ad_group=r.ad_group.name,
+            rotation_mode=_enum_name(r.ad_group.ad_rotation_mode),
         )
         for r in _search(client, customer_id, q)
     ]

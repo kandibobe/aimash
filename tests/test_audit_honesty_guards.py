@@ -56,6 +56,12 @@ _CTX_TO_SIGNAL = {
     "campaign_settings": "campaign_settings",
     "pmax_campaigns": "pmax",
     "pmax_asset_groups": "pmax",
+    # Ф9: сигналы волны новых чеков. recommendation_subscriptions ведёт в семью recommendations —
+    # она вне _IMPLEMENTED_FAMILIES (второе мнение, не «здоровье»), но сигнал в data_gaps настоящий.
+    "device_performance": "device_performance",
+    "negative_keywords": "negative_keywords",
+    "recommendation_subscriptions": "recommendation_subscriptions",
+    "ad_rotation": "ad_rotation",
     "target_for": None,
     "brand_terms": None,
     "bid_simulations": None,
@@ -166,6 +172,10 @@ def test_engine_ctx_signals_speak_the_same_vocabulary_as_collect():
         campaign_settings=[],
         pmax_campaigns=[],
         pmax_asset_groups=[],
+        device_performance=[],
+        negative_keywords=SimpleNamespace(rows=[], shared_attachments={}),  # объект, не список
+        recommendation_subscriptions=[],
+        ad_rotation=[],
     )
     assert set(full.ctx_signals) == _collect_signal_vocabulary()
     # Пустой список — ПОДАННЫЙ сигнал («прочитано, строк нет» ≠ «не прочитано»), как и в collect.
@@ -288,10 +298,17 @@ def test_keyword_inventory_readers_honor_truncation():
                 out |= ctx_attrs(n.func.id, seen)
         return out
 
+    # Ф9: единственное осознанное исключение. check_negative_conflicts использует инвентарь как
+    # ПОЗИТИВНЫЙ источник (найденный конфликт истинен независимо от полноты списка; усечение =
+    # недосчёт находок, не ложь) — в отличие от доли/фильтра/дедупа, где обрезок систематически врёт.
+    # Глушить его на усечении = прятать реальные конфликты; новые чеки в этот набор — только с
+    # таким же обоснованием в докстринге чека.
+    positive_source_ok = {"check_negative_conflicts"}
     offenders = [
         name
         for name in funcs
         if name.startswith("check_")
+        and name not in positive_source_ok
         and "keyword_inventory" in (used := ctx_attrs(name, set()))
         and "keyword_inventory_truncated" not in used
     ]

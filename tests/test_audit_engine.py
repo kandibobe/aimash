@@ -962,6 +962,9 @@ def test_weight_vector_snapshot_pins_full_model():
         "pmax_brand_conv_share": 0.30,
         "pmax_learn_min_conv": 30.0,
         "pmax_min_days": 14,
+        "device_min_spend": 20.0,  # Ф9: волна новых чеков
+        "device_cpa_factor": 2.0,
+        "no_value_min_conv": 10.0,
     }
     # Ф3: порог релевантности НЕ отдельное число аудита — он ОДИН с генератором текстов.
     assert DEFAULT_AUDIT_THRESHOLDS["rsa_kw_coverage_min"] == MIN_KEYWORD_COVERAGE

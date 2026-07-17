@@ -111,6 +111,7 @@ async def gather_audit(
         KEYWORD_INVENTORY_LIMIT,
         fetch_account_status,
         fetch_ad_policy_health,
+        fetch_ad_rotation,
         fetch_adgroup_structure,
         fetch_bid_landscape,
         fetch_bid_simulations,
@@ -118,14 +119,17 @@ async def gather_audit(
         fetch_campaign_assets,
         fetch_campaign_settings,
         fetch_conversion_health,
+        fetch_device_performance,
         fetch_geo_waste,
         fetch_impression_share,
         fetch_keyword_inventory,
         fetch_keyword_quality,
+        fetch_negative_keywords,
         fetch_negative_lists,
         fetch_optimization_score,
         fetch_pmax_asset_groups,
         fetch_pmax_campaigns,
+        fetch_recommendation_subscriptions,
         fetch_recommendations,
         fetch_rsa_assets,
         fetch_schedule,
@@ -177,6 +181,10 @@ async def gather_audit(
         campaign_settings,
         pmax_campaigns,
         pmax_asset_groups,
+        device_perf,
+        negative_kw,
+        rec_subs,
+        ad_rotation,
     ) = await asyncio.gather(
         build_account_report_async(client, cid, period, with_comparison=False, currency=currency),
         _safe(fetch_impression_share, client, cid, period, label="audit_is"),
@@ -201,6 +209,10 @@ async def gather_audit(
         _safe(fetch_campaign_settings, client, cid, period, label="audit_campaign_settings"),
         _safe(fetch_pmax_campaigns, client, cid, period, label="audit_pmax_campaigns"),
         _safe(fetch_pmax_asset_groups, client, cid, period, label="audit_pmax_asset_groups"),
+        _safe(fetch_device_performance, client, cid, period, label="audit_device_perf"),
+        _safe(fetch_negative_keywords, client, cid, label="audit_negative_keywords"),
+        _safe(fetch_recommendation_subscriptions, client, cid, label="audit_rec_subscriptions"),
+        _safe(fetch_ad_rotation, client, cid, label="audit_ad_rotation"),
     )
 
     # Ф6 (G05): бренд-токены из профиля клиента (§20) — локальная БД, не Google Ads (в gather выше
@@ -236,6 +248,10 @@ async def gather_audit(
             ("keyword_inventory", kw_inventory),
             ("campaign_assets", campaign_assets),
             ("campaign_settings", campaign_settings),
+            ("device_performance", device_perf),
+            ("negative_keywords", negative_kw),
+            ("recommendation_subscriptions", rec_subs),
+            ("ad_rotation", ad_rotation),
         )
         if val is None
     ]
@@ -287,6 +303,10 @@ async def gather_audit(
         campaign_settings=campaign_settings,
         pmax_campaigns=pmax_campaigns,
         pmax_asset_groups=pmax_asset_groups,
+        device_performance=device_perf,
+        negative_keywords=negative_kw,
+        recommendation_subscriptions=rec_subs,
+        ad_rotation=ad_rotation,
     )
     # Обогащённая выгрузка (bot._run_audit_export → reports.xlsx/sheets): прицепляем сырьё, которое
     # УЖЕ собрано выше и после build_audit обычно отбрасывается — чтобы книга/Sheets несли ДАННЫЕ
