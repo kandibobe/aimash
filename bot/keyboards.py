@@ -614,10 +614,16 @@ def diag_kb(rows, *, today: bool, is_admin: bool, lang: str | None = None) -> In
         n = 0
         for e in rows or []:
             rid = getattr(e, "request_id", "") or ""
-            if not rid or rid in seen:
+            # Замечание 9: «-» — сентинел пустого контекста (core.context, джобы вне апдейта),
+            # не код инцидента: кнопка «🔍 -» выглядела мусором. rows reverse-chron ⇒ дедуп по rid
+            # оставляет СВЕЖАЙШИЙ; eid (PK) адресует именно его — rid не уникален между рядами.
+            if not rid or rid == "-" or rid in seen:
                 continue
             seen.add(rid)
-            kb.button(text=f"🔍 {rid}", callback_data=DiagCB(action="detail", rid=rid))
+            kb.button(
+                text=f"🔍 {rid}",
+                callback_data=DiagCB(action="detail", rid=rid, eid=int(getattr(e, "id", 0) or 0)),
+            )
             n += 1
             if n >= 5:
                 break

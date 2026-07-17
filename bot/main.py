@@ -804,15 +804,19 @@ async def _load_error_events(today: bool = False, limit: int = 15) -> list:
     return list(rows[:limit])
 
 
-async def _load_error_detail(rid: str):
-    """A3 (§15): один error_event по request_id (свежайший) — для detail-кнопки /diag (полный
-    редактированный traceback). Read-only. None — если инцидент устарел/не найден."""
+async def _load_error_detail(rid: str, eid: int = 0):
+    """A3 (§15): один error_event для detail-кнопки /diag. Замечание 9 (2026-07-17): request_id
+    НЕ уникален (несколько ошибок одного апдейта/джобы) — свежайший-по-rid открывал НЕ ТОТ
+    инцидент. Адресуем по PK (eid из DiagCB); rid — фолбэк для кнопок, отрисованных до апдейта.
+    Read-only. None — инцидент устарел/не найден."""
     from sqlalchemy import desc, select
 
     from db.models import ErrorEvent as _EE
     from db.session import Session
 
     async with Session() as s:
+        if eid:
+            return (await s.execute(select(_EE).where(_EE.id == int(eid)))).scalar_one_or_none()
         return (
             await s.execute(
                 select(_EE).where(_EE.request_id == rid).order_by(desc(_EE.id)).limit(1)

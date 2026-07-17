@@ -2322,22 +2322,37 @@ def fmt_error_alert(rows, lang: str | None = None) -> str:
 
 
 def fmt_error_detail(row, lang: str | None = None) -> str:
-    """A3 (§15): полная карточка одного инцидента для detail-кнопки /diag (админ). traceback/message
-    УЖЕ редактированы (golden rule #5) — секретов нет. Усекаем под лимит Telegram (4096) с запасом."""
+    """A3 (§15): карточка одного инцидента для detail-кнопки /diag (админ). Замечание 9
+    (2026-07-17): сырой traceback в чат — нечитаемо и лишний рубеж риска; теперь карточка
+    (тип · где · аккаунт · когда · редактированное сообщение), полный трейсбек — только в
+    «📎 Экспорт» (.txt, та же admin-ветка). message редактирован на записи; redact_text на
+    выдаче — второй рубеж (идемпотентно) для рядов, записанных до ужесточения правил редакции."""
+    from core.logging import redact_text
+
     en = _lang(lang) == "en"
     when = row.created_at.strftime("%d.%m %H:%M") if getattr(row, "created_at", None) else "—"
-    head = (
-        "🔍 <b>Incident</b> " if en else "🔍 <b>Инцидент</b> "
-    ) + f"<code>{esc(row.request_id)}</code>"
-    meta = f"{esc(row.where)} · <b>{esc(row.exc_type)}</b> · {when} UTC"
-    tb = (getattr(row, "traceback", "") or getattr(row, "message", "") or "").strip()
-    if len(tb) > 3500:  # Telegram лимит 4096 — оставляем запас на разметку/эскейп
-        tb = tb[:3500] + ("\n…(truncated)" if en else "\n…(усечено)")
-    if tb:
-        body = f"<pre>{esc(tb)}</pre>"
-    else:
-        body = "<i>no traceback</i>" if en else "<i>трейсбека нет</i>"
-    return f"{head}\n{meta}\n\n{body}"
+    L = [
+        ("🔍 <b>Incident</b> " if en else "🔍 <b>Инцидент</b> ")
+        + f"<code>{esc(getattr(row, 'request_id', '') or '—')}</code>",
+        ("Type: " if en else "Тип: ") + f"<b>{esc(row.exc_type)}</b>",
+        ("Where: " if en else "Где: ") + esc(row.where),
+    ]
+    cid = getattr(row, "customer_id", None)
+    if cid:
+        L.append(("Account: " if en else "Аккаунт: ") + f"<code>{esc(str(cid))}</code>")
+    L.append(("When: " if en else "Когда: ") + f"{when} UTC")
+    msg = redact_text((getattr(row, "message", "") or "").strip())
+    if len(msg) > 1500:  # Telegram лимит 4096 — карточке хватает начала сообщения
+        msg = msg[:1500] + ("…(truncated)" if en else "…(усечено)")
+    if msg:
+        L += ["", f"<pre>{esc(msg)}</pre>"]
+    L += [
+        "",
+        "📎 Full traceback — the Export button."
+        if en
+        else "📎 Полный трейсбек — кнопка «Экспорт».",
+    ]
+    return "\n".join(L)
 
 
 _BUG_STATUS_EMOJI = {"new": "🆕", "triaged": "🛠", "closed": "🗄"}

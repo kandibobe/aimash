@@ -823,7 +823,7 @@ async def on_diag_cb(cq: bm.CallbackQuery, callback_data: bm.DiagCB) -> None:
         ):  # traceback — операционная деталь (диаг открыт всем WL)
             await cq.answer(bm.i18n.t("admin_only"), show_alert=True)
             return
-        row = await bm._load_error_detail(callback_data.rid)
+        row = await bm._load_error_detail(callback_data.rid, callback_data.eid)
         await cq.answer()
         if row is None:
             await bm._safe_edit(cq, bm.i18n.t("diag_detail_not_found"))

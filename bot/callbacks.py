@@ -325,11 +325,13 @@ class ThrTuneCB(CallbackData, prefix="thr"):
 class DiagCB(CallbackData, prefix="diag"):
     """A3 (§15): кнопки под /diag (последние error_events). Read-only навигация — БД/Ads не мутирует.
     action: refresh (перечитать) | today (только за сегодня UTC) | all (снять фильтр) |
-    detail (полный редактированный traceback по request_id — ТОЛЬКО админ) | export (журнал файлом).
-    rid — request_id (≤16 симв., влезает в 64-байт callback_data)."""
+    detail (карточка инцидента — ТОЛЬКО админ) | export (журнал файлом).
+    rid — request_id (≤16 симв., влезает в 64-байт callback_data) — подпись кнопки и фолбэк;
+    eid — PK error_events (замечание 9: request_id НЕ уникален, detail открывал не тот инцидент)."""
 
     action: str  # "refresh" | "today" | "all" | "detail" | "export"
     rid: str = ""  # request_id (для detail)
+    eid: int = 0  # error_events.id (0 — кнопка отрисована до апдейта, фолбэк по rid)
 
 
 class BugCB(CallbackData, prefix="bug"):

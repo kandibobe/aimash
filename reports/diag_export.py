@@ -1,11 +1,14 @@
 """Плейн-текстовые дампы диагностики для вложений (.txt): экспорт журнала ошибок (/diag «Экспорт»)
 и детальная часть еженедельного дайджеста (scheduler.jobs.run_weekly_digest).
 
-message/traceback в error_events УЖЕ редактированы на записи (core.errors._persist → redact_text),
-поэтому дамп безопасен (секретов нет). Здесь только форматирование строк — без БД-доступа.
+message/traceback в error_events УЖЕ редактированы на записи (core.errors._persist → redact_text);
+redact_text повторяется на выдаче (идемпотентно) — второй рубеж для рядов, записанных до
+ужесточения правил редакции (замечание 9, 2026-07-17). Форматирование строк — без БД-доступа.
 """
 
 from __future__ import annotations
+
+from core.logging import redact_text
 
 
 def _when(dt) -> str:
@@ -26,10 +29,10 @@ def build_error_events_text(rows) -> str:
         cid = getattr(e, "customer_id", None)
         if cid:
             lines.append(f"  account: {cid}")
-        msg = (getattr(e, "message", "") or "").strip()
+        msg = redact_text((getattr(e, "message", "") or "").strip())
         if msg:
             lines.append(f"  message: {msg}")
-        tb = (getattr(e, "traceback", "") or "").strip()
+        tb = redact_text((getattr(e, "traceback", "") or "").strip())
         if tb:
             lines.append("  traceback:")
             lines.extend("    " + ln for ln in tb.splitlines())
