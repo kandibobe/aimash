@@ -143,28 +143,90 @@ def contact_key(c: dict) -> tuple[str, str]:
     return (kind, v.strip().casefold())
 
 
+# 3.6б: двуязычный сайт/менеджер дают «Sedans» и «Седаны» — casefold-ключ их не схлопнет (разные
+# алфавиты). Детерминированная алиас-карта ЧАСТЫХ услуг (образец _MARKET_ALIASES в dossier_merge):
+# неизвестная услуга проходит как есть (identity), перевод свободного текста — забота
+# LLM-нормализации досье; здесь только КОДОВЫЙ дедуп, работающий всегда (даже когда LLM выключен).
+# Ключ-уровень: названия услуг НЕ переписываются (как contact_key — нормализация только для ключа).
+_SVC_ALIASES: dict[str, tuple[str, ...]] = {
+    "седаны": ("sedans", "sedan cars", "седан"),
+    "внедорожники": ("suv", "suvs", "джипы", "кроссоверы"),
+    "пикапы": ("pickups", "pickup trucks", "пикап"),
+    "грузовики": ("trucks", "грузовик"),
+    "мотоциклы": ("motorcycles", "motorbikes", "мотоцикл"),
+    "запчасти": ("spare parts", "auto parts", "parts", "автозапчасти"),
+    "аренда авто": ("car rental", "car hire", "rent a car", "прокат авто", "прокат автомобилей"),
+    "импорт авто": ("car import", "vehicle import", "импорт автомобилей"),
+    "доставка": ("delivery", "shipping", "доставка товаров"),
+    "ремонт": ("repair", "repairs", "ремонтные работы"),
+    "клининг": ("cleaning", "cleaning services", "уборка"),
+    "страхование": ("insurance",),
+    "консультация": ("consultation", "consulting", "консультации", "консалтинг"),
+    "обучение": ("training", "courses", "курсы"),
+    "установка": ("installation", "монтаж"),
+    "техобслуживание": ("maintenance", "servicing", "то"),
+}
+_SVC_CANON: dict[str, str] = {
+    svc_key(alias): canon for canon, aliases in _SVC_ALIASES.items() for alias in (canon, *aliases)
+}
+
+
+def _svc_canon_key(k: str) -> str:
+    """Канонический ключ услуги: алиас частой услуги → общий ключ, иначе как есть."""
+    return _SVC_CANON.get(k, k)
+
+
+def _svc_find(by_key: dict[str, dict], k: str) -> str | None:
+    """Найти существующий ключ для услуги k: точное совпадение, иначе схлоп подстрок-дублей —
+    «ремонт квартир» ≡ «ремонт квартир под ключ» (короткий ключ входит в длинный по границе слов).
+    Два fail-safe guard'а (лучше дубль, чем ложный мердж чужой услуги): короткий ключ ≥5 символов
+    И сам ≥2 слов — «голое слово + уточнённое» («Запчасти» ⊂ «Запчасти Toyota») это РАЗНЫЕ услуги,
+    не дубль; однословные кросс-язычные дубли закрывает алиас-карта, не подстрока."""
+    if k in by_key:
+        return k
+    for ek in by_key:
+        a, b = (k, ek) if len(k) <= len(ek) else (ek, k)
+        if len(a) >= 5 and " " in a and f" {a} " in f" {b} ":
+            return ek
+    return None
+
+
 def merge_services(
     existing: list[dict], incoming: list[dict], *, replace: bool = False
 ) -> list[dict]:
-    """Мердж услуг ПО ИМЕНИ: существующие сохраняются (и их порядок), совпавшее по svc_key
-    обновляется непустыми полями incoming, новое добавляется в конец. replace=True → только
-    нормализованный incoming (явная замена по прямой просьбе менеджера)."""
+    """Мердж услуг ПО ИМЕНИ: существующие сохраняются (и их порядок), совпавшее обновляется
+    непустыми полями incoming, новое добавляется в конец. replace=True → только нормализованный
+    incoming (явная замена по прямой просьбе менеджера).
+
+    3.6б: совпадение — не только точный svc_key, но и RU/EN-алиас частой услуги (_SVC_ALIASES) и
+    подстрока-дубль по границе слов (_svc_find). Существующие прогоняются тем же фолдом — дубли,
+    накопленные ДО этого фикса, само-чинятся при следующем апдейте: пустые поля цели заполняются,
+    при конфликте двух НЕпустых побеждает более поздняя запись (порядок детерминирован — _to_dict
+    читает services с ORDER BY id; до фикса поздний дубль затирал ранний ЦЕЛИКОМ, теперь — по полям).
+    preview_merge и apply_upsert зовут эту функцию — «было→станет» не разойдётся с записью."""
     if replace:
         return list(incoming)
-    by_key = {svc_key(sv.get("name")): dict(sv) for sv in existing}
-    order = [svc_key(sv.get("name")) for sv in existing]
-    for inc in incoming:
-        k = svc_key(inc.get("name"))
+    by_key: dict[str, dict] = {}
+    order: list[str] = []
+
+    def _fold(sv: dict) -> None:
+        k = _svc_canon_key(svc_key(sv.get("name")))
         if not k:
-            continue
-        if k in by_key:  # обновить непустыми полями, ничего не потеряв
-            cur = by_key[k]
-            for f in ("description", "price", "category"):
-                if inc.get(f):
-                    cur[f] = inc[f]
-        else:
-            by_key[k] = dict(inc)
+            return
+        ek = _svc_find(by_key, k)
+        if ek is None:
+            by_key[k] = dict(sv)
             order.append(k)
+            return
+        cur = by_key[ek]  # обновить непустыми полями, ничего не потеряв (имя — существующее)
+        for f in ("description", "price", "category"):
+            if sv.get(f):
+                cur[f] = sv[f]
+
+    for sv in existing:
+        _fold(sv)
+    for inc in incoming:
+        _fold(inc)
     return [by_key[k] for k in order]
 
 
@@ -601,11 +663,13 @@ class ClientProfileStore:
 
     @staticmethod
     async def _to_dict(s, p: ClientProfile) -> dict:
+        # ORDER BY id: без него порядок строк недетерминирован между чтениями, а от порядка
+        # зависит победитель схлопа дублей в merge_services/merge_contacts (3.6б) и порядок в UI.
         contacts = (
             await s.execute(
-                select(ClientContact.kind, ClientContact.value).where(
-                    ClientContact.profile_id == p.id
-                )
+                select(ClientContact.kind, ClientContact.value)
+                .where(ClientContact.profile_id == p.id)
+                .order_by(ClientContact.id)
             )
         ).all()
         services = (
@@ -615,7 +679,9 @@ class ClientProfileStore:
                     ClientService.description,
                     ClientService.price,
                     ClientService.category,
-                ).where(ClientService.profile_id == p.id)
+                )
+                .where(ClientService.profile_id == p.id)
+                .order_by(ClientService.id)
             )
         ).all()
         pages_count = (

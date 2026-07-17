@@ -3018,9 +3018,21 @@ def fmt_crawl_summary(
     return "\n".join(lines)
 
 
-def fmt_client_card(profile: dict | None, customer_id: str, lang: str | None = None) -> str:
-    """§20.2 «Карточка клиента»: сохранённый профиль (бренд/бизнес/услуги/цены/контакты/сайт).
-    profile=None → пустая карточка с приглашением добавить инфу. HTML, всё через esc()."""
+_CARD_BODY_MAX = 250  # длинные тела (business_desc/notes) на карточке; полный текст — в 📄 Досье
+
+
+def fmt_client_card(
+    profile: dict | None,
+    customer_id: str,
+    lang: str | None = None,
+    *,
+    has_dossier: bool = False,
+) -> str:
+    """§20.2 «Карточка клиента»: сохранённый профиль СЕКЦИЯМИ (3.6а — вместо плоской простыни):
+    бизнес → услуги списком по одной на строку → контакты → заметки → служебный подвал.
+    profile=None → пустая карточка с приглашением добавить инфу. HTML, всё через esc().
+    Длинные тела режутся _clip(_CARD_BODY_MAX); подсказка «полный текст — в Досье» выводится
+    только когда что-то реально обрезано И досье существует (has_dossier)."""
     lng = _lang(lang)
     cid = esc(str(customer_id))
     if not profile:
@@ -3035,56 +3047,77 @@ def fmt_client_card(profile: dict | None, customer_id: str, lang: str | None = N
             "Профиль пуст. Пришлите информацию о клиенте обычным текстом — бизнес, сайт, услуги, "
             "цены, телефоны."
         )
-    brand_fallback = "Client" if lng == "en" else "Клиент"
+    en = lng == "en"
+    brand_fallback = "Client" if en else "Клиент"
     lines: list[str] = [
         f"ℹ️ <b>{esc(profile.get('brand') or brand_fallback)}</b> · <code>{cid}</code>"
     ]
+    clipped = False
+
+    def _body(v: object) -> str:
+        nonlocal clipped
+        full = str(v or "").strip().replace("\n", " ")
+        if len(full) > _CARD_BODY_MAX:
+            clipped = True
+        return esc(_clip(full, _CARD_BODY_MAX))
+
     if profile.get("business_desc"):
-        lines.append(("Business: " if lng == "en" else "Бизнес: ") + esc(profile["business_desc"]))
+        lines += ["", "🏢 <b>" + ("Business" if en else "О бизнесе") + "</b>"]
+        lines.append(_body(profile["business_desc"]))
     if profile.get("geo"):
-        lines.append(("Geo: " if lng == "en" else "Гео: ") + esc(profile["geo"]))
+        lines.append(("🌍 Geo: " if en else "🌍 Гео: ") + esc(profile["geo"]))
     if profile.get("language"):
-        lines.append(("Language: " if lng == "en" else "Язык: ") + esc(profile["language"]))
+        lines.append(("🗣 Language: " if en else "🗣 Язык: ") + esc(profile["language"]))
     services = profile.get("services") or []
     if services:
-        svc = []
+        lines += ["", "🛠 <b>" + ("Services" if en else "Услуги") + "</b>"]
+        shown = 0
         for it in services[:10]:
             s = esc(it.get("name", ""))
+            if not s:
+                continue
+            shown += 1
             if it.get("price"):
-                s += f" ({esc(it['price'])})"
+                s += f" — {esc(it['price'])}"
             if it.get("category"):  # 2.10 (§20.6): категория видна менеджеру, а не «мёртвые данные»
                 s += f" [{esc(it['category'])}]"
-            svc.append(s)
-        lines.append(("Services: " if lng == "en" else "Услуги: ") + "; ".join(x for x in svc if x))
+            lines.append("• " + s)
+        if len(services) > 10:
+            lines.append(("… and %d more" if en else "… и ещё %d") % (len(services) - 10))
         cats = sorted({str(it.get("category") or "").strip() for it in services} - {""})
         if cats:
-            lines.append(
-                ("Categories: " if lng == "en" else "Категории: ") + esc(", ".join(cats[:12]))
-            )
+            lines.append(("Categories: " if en else "Категории: ") + esc(", ".join(cats[:12])))
     contacts = profile.get("contacts") or []
-    if contacts:
+    socials = profile.get("socials") or {}
+    if contacts or profile.get("website") or socials:
+        lines += ["", "📞 <b>" + ("Contacts" if en else "Контакты") + "</b>"]
         cs = "; ".join(esc(c.get("value", "")) for c in contacts[:6] if c.get("value"))
         if cs:
-            lines.append(("Contacts: " if lng == "en" else "Контакты: ") + cs)
-    if profile.get("website"):
-        lines.append(("Site: " if lng == "en" else "Сайт: ") + esc(profile["website"]))
-    socials = profile.get("socials") or {}
-    if socials:
-        ss = "; ".join(f"{esc(k)}: {esc(v)}" for k, v in list(socials.items())[:6])
-        lines.append(("Socials: " if lng == "en" else "Соцсети: ") + ss)
+            lines.append(cs)
+        if profile.get("website"):
+            lines.append(("Site: " if en else "Сайт: ") + esc(profile["website"]))
+        if socials:
+            lines.append("; ".join(f"{esc(k)}: {esc(v)}" for k, v in list(socials.items())[:6]))
     if profile.get("notes"):
-        lines.append(("Notes: " if lng == "en" else "Заметки: ") + esc(profile["notes"]))
+        lines += ["", "📝 <b>" + ("Notes" if en else "Заметки") + "</b>"]
+        lines.append(_body(profile["notes"]))
+    # §20.2: служебный подвал — краул-факты (persist был, в UI не выводился — P1-D).
+    meta_bits: list[str] = []
     pages = int(profile.get("site_pages_count") or 0)
     if pages:
-        lines.append(("Crawled pages: " if lng == "en" else "Страниц с сайта: ") + str(pages))
-    # §20.2: дата последнего краула (требование карточки; persist был, в UI не выводился — P1-D).
+        meta_bits.append(("pages crawled: %d" if en else "страниц с сайта: %d") % pages)
     lc = profile.get("last_crawled_at")
     if lc is not None:
         try:
             lc_s = lc.strftime("%Y-%m-%d %H:%M") if hasattr(lc, "strftime") else str(lc)
         except Exception:  # noqa: BLE001 — дата необязательна, не роняем карточку
             lc_s = str(lc)
-        lines.append(("Last crawl: " if lng == "en" else "Последний краул: ") + esc(lc_s))
+        meta_bits.append(("last crawl: " if en else "последний краул: ") + esc(lc_s))
+    if meta_bits:
+        lines += ["", "<i>" + " · ".join(meta_bits) + "</i>"]
+    if clipped and has_dossier:
+        hint = "Full text — in 📄 Dossier" if en else "Полный текст — в 📄 Досье"
+        lines.append(f"<i>{hint}</i>")
     return "\n".join(lines)
 
 

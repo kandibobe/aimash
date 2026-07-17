@@ -103,6 +103,11 @@ async def fetch_account_facts(customer_id: str, *, brand_hint: str = "") -> dict
     if brand:
         patch["brand"] = brand
     if geo_set:
+        # 3.6в: имена НАМЕРЕННО не прогоняются через ads.geo.country_iso — у GAQL-имён есть
+        # омонимы стран («Georgia»-штат стал бы «Грузией» и уехал в гео-таргетинг §19). Источник
+        # доверенный (geo constants, одна локаль на аккаунт) и geo — скаляр с wholesale-заменой,
+        # так что кросс-язычные дубли тут не копятся; гейт стран стоит в clients.dossier
+        # (dossier_patch), где вход — краулёный свободный текст.
         patch["geo"] = ", ".join(geo_set[:10])
     if lang_set:
         patch["language"] = ", ".join(lang_set[:5])

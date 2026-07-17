@@ -1090,12 +1090,14 @@ def client_card_kb(
     en = _lang(lang) == "en"
     sub = str(customer_id or "")
     kb = InlineKeyboardBuilder()
+    rows: list[int] = []  # 3.6г: ряды считаются по ходу сборки — adjust(*rows) вместо простыни по 1
     # P1-11: подтянуть ФАКТЫ из Google Ads аккаунта (валюта/таймзона/гео/языки/домен) — без выдумок,
     # через тот же confirm-гейт. Доступно и для нового, и для существующего профиля.
     kb.button(
         text="🔎 Fill from account" if en else "🔎 Подтянуть из аккаунта",
         callback_data=ClientCB(action="autofill", sub=sub),
     )
+    n = 1
     if (
         has_dossier
     ):  # §20: досье (map-reduce по сайту) отдаётся .md-файлом — кнопка только если есть
@@ -1103,12 +1105,15 @@ def client_card_kb(
             text="📄 Dossier" if en else "📄 Досье",
             callback_data=ClientCB(action="dossier", sub=sub),
         )
+        n += 1
+    rows.append(n)
     if has_profile:
         kb.button(
             text="✏️ Update info" if en else "✏️ Обновить инфу",
             callback_data=ClientCB(action="update", sub=sub),
         )
         if has_website:
+            rows.append(1)
             kb.button(
                 text="🔄 Re-crawl (full)" if en else "🔄 Перекраулить полностью",
                 callback_data=ClientCB(action="recrawl"),
@@ -1117,6 +1122,7 @@ def client_card_kb(
                 text="🆕 Re-crawl (new only)" if en else "🆕 Перекраулить только новое",
                 callback_data=ClientCB(action="recrawl", sub="incr"),
             )
+            rows.append(2)
         else:
             # Профиль есть, а сайта нет → видимый путь «добавить сайт + краулить»: ведёт в приём
             # текста (action=add), где после вставки URL появится «🕷 Сохранить и краулить». Операцию
@@ -1125,17 +1131,23 @@ def client_card_kb(
                 text="🕷 Add site & crawl" if en else "🕷 Добавить сайт и краулить",
                 callback_data=ClientCB(action="add", sub=sub),
             )
+            rows.append(2)
+        # clear ведёт в confirm-гейт памяти («было→станет»), мис-тап не разрушителен — можно в ряд с Back
         kb.button(
             text="🗑 Clear profile" if en else "🗑 Очистить профиль",
             callback_data=ClientCB(action="clear"),
         )
+        kb.button(text="‹ Back" if en else "‹ Назад", callback_data=ClientCB(action="back"))
+        rows.append(2)
     else:
         kb.button(
             text="➕ Add info" if en else "➕ Добавить информацию",
             callback_data=ClientCB(action="add", sub=sub),
         )
-    kb.button(text="‹ Back" if en else "‹ Назад", callback_data=ClientCB(action="back"))
-    kb.adjust(1)
+        rows.append(1)
+        kb.button(text="‹ Back" if en else "‹ Назад", callback_data=ClientCB(action="back"))
+        rows.append(1)
+    kb.adjust(*rows)
     return kb.as_markup()
 
 

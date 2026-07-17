@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from ads.geo import country_iso, country_name
 from clients.dossier_map import map_pages
 from clients.dossier_merge import merge_extracts, normalize_ru, synthesize
 from clients.dossier_schema import Dossier
@@ -120,8 +121,23 @@ def dossier_patch(d: Dossier) -> dict:
         desc = f"{desc}\n\n{d.positioning}" if desc else d.positioning
     if desc:
         patch["business_desc"] = desc
+    # 3.6в: в geo — только СТРАНЫ (валидация ads.geo.country_iso). Краулёный текст даёт и «Африка»,
+    # и «более 100 стран» — это ОХВАТ, а не гео: поле geo дальше подставляется в гео-таргетинг
+    # кампаний (§19), регион там не отрезолвится. Регионы/worldwide/неизвестное → строка «Охват: …»
+    # в notes (append-only через merge_notes — ручные заметки менеджера не затираются).
+    coverage: list[str] = []
     if d.markets:
-        patch["geo"] = ", ".join(d.markets[:10])
+        countries: list[str] = []
+        for m in d.markets:
+            iso = country_iso(m)
+            nm = (country_name(iso) or m) if iso else None
+            if nm is not None:
+                if nm not in countries:
+                    countries.append(nm)
+            elif m not in coverage:
+                coverage.append(m)
+        if countries:
+            patch["geo"] = ", ".join(countries[:10])
     if d.website:
         patch["website"] = d.website
     if d.services:
@@ -135,6 +151,10 @@ def dossier_patch(d: Dossier) -> dict:
             for s in d.services
         ]
     notes = _notes_from(d)
+    if coverage:
+        cov_line = "Охват: " + ", ".join(coverage[:10])
+        notes = f"{notes}\n{cov_line}" if notes else cov_line
+        notes = notes[:_NOTES_MAX]
     if notes:
         patch["notes"] = notes
     return patch

@@ -324,6 +324,33 @@ def test_merge_markets_canonicalizes_cross_language_and_regions():
     assert got == ["Танзания", "Япония", "Великобритания", "более 100 стран", "Африка", "Neverland"]
 
 
+def test_dossier_patch_geo_only_countries_regions_go_to_notes():
+    """3.6в: в geo карточки — только СТРАНЫ (валидация ads.geo.country_iso). «Африка» и «более
+    100 стран» — это ОХВАТ, а не гео: поле geo дальше подставляется в гео-таргетинг кампаний
+    (§19), регион там не отрезолвится. Охват не теряется — уходит строкой «Охват: …» в notes
+    (append-only merge_notes). Канон «более 100 стран» из _MARKET_ALIASES при этом ЖИВ — без
+    него кросс-язычный дедуп рынков развалился бы; гейт стоит НИЖЕ, в dossier_patch."""
+    from clients.dossier import dossier_patch
+
+    d = merge_extracts(
+        [
+            DossierExtract(
+                company=Company(legal_name="Darial Co., Ltd."),
+                markets=["Kenya", "Кения", "Africa", "over 100 countries", "Neverland"],
+            )
+        ],
+        domain="darial.co.jp",
+        website="https://darial.co.jp",
+        contacts=[],
+        socials={},
+        pages_count=3,
+        map_calls=1,
+    )
+    patch = dossier_patch(d)
+    assert patch["geo"] == "Кения"  # только валидная страна; EN/RU-дубль схлопнут
+    assert "Охват: Африка, более 100 стран, Neverland" in (patch.get("notes") or "")
+
+
 @pytest.mark.asyncio
 async def test_normalize_ru_translates_and_dedups(monkeypatch):
     """reduce-шаг перед синтезом: EN+RU дубли услуг/УТП/фактов схлопываются в одну русскую запись, а

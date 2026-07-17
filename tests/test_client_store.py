@@ -142,6 +142,65 @@ async def test_replace_flag_with_empty_list_is_ignored():
     assert len(prof["services"]) == 2  # ничего не удалено
 
 
+# ── 3.6б: кодовый дедуп RU/EN-алиасов и подстрок-дублей (merge_services) ──────────────────
+def test_services_merge_collapses_en_ru_aliases_and_substring_dupes():
+    """Двуязычный сайт даёт «Sedans» и «Седаны» — casefold-ключ их НЕ схлопнул бы (разные
+    алфавиты). Алиас-карта _SVC_ALIASES сводит их в одну запись (имя существующей выживает,
+    непустые поля обновляются); «ремонт квартир под ключ» дописывается в «Ремонт квартир»
+    (подстрока по границе слов)."""
+    from clients.store import merge_services
+
+    existing = [
+        {"name": "Седаны", "price": "от $4000", "category": "авто"},
+        {"name": "Ремонт квартир", "price": None, "category": None},
+    ]
+    incoming = [
+        {"name": "Sedans", "price": "from $4500"},  # EN-алиас → апдейт «Седаны», не дубль
+        {"name": "Ремонт квартир под ключ", "price": "от 10 000"},  # подстрока → апдейт
+        {"name": "Пикапы"},  # новое → добавится
+    ]
+    got = merge_services(existing, incoming)
+    assert [s["name"] for s in got] == ["Седаны", "Ремонт квартир", "Пикапы"]
+    by = {s["name"]: s for s in got}
+    assert by["Седаны"]["price"] == "from $4500"  # цена обновлена
+    assert by["Седаны"]["category"] == "авто"  # непереданное поле сохранено
+    assert by["Ремонт квартир"]["price"] == "от 10 000"
+
+
+def test_services_merge_selfheals_preexisting_bilingual_dupes():
+    """Дубли, накопленные в БД ДО фикса («Sedans» и «Седаны» уже лежат рядом), схлопываются при
+    следующем апдейте: поля сливаются, а не теряются (existing идёт через тот же фолд)."""
+    from clients.store import merge_services
+
+    existing = [
+        {"name": "Седаны", "price": "от $4000", "category": "авто"},
+        {"name": "Sedans", "price": None, "description": "japan imports", "category": None},
+    ]
+    got = merge_services(existing, [])
+    assert [s["name"] for s in got] == ["Седаны"]
+    assert got[0]["description"] == "japan imports"  # поле дубля не потеряно
+    assert got[0]["price"] == "от $4000"  # пустое поле дубля НЕ затёрло цену
+
+    # конфликт двух НЕпустых полей: побеждает более поздняя строка (порядок детерминирован —
+    # _to_dict читает с ORDER BY id; до фикса поздний дубль затирал ранний ЦЕЛИКОМ, теперь по полям)
+    got2 = merge_services(
+        [{"name": "Седаны", "price": "от $4000"}, {"name": "Sedans", "price": "от $4500"}], []
+    )
+    assert got2 == [{"name": "Седаны", "price": "от $4500"}]
+
+
+def test_services_merge_distinct_services_never_collapse():
+    """Fail-safe guard'ы подстроки: «голое слово + уточнённое» — это РАЗНЫЕ услуги, не дубль
+    («Запчасти» ≠ «Запчасти Toyota»); схлоп разрешён только когда короткий ключ сам ≥2 слов
+    И ≥5 симв. («СТО» не втягивается в «СТО двигателей»). Лучше дубль, чем ложный мердж."""
+    from clients.store import merge_services
+
+    existing = [{"name": "Запчасти", "description": "оригинал"}, {"name": "СТО двигателей"}]
+    got = merge_services(existing, [{"name": "Запчасти Toyota"}, {"name": "СТО"}])
+    assert [s["name"] for s in got] == ["Запчасти", "СТО двигателей", "Запчасти Toyota", "СТО"]
+    assert got[0]["description"] == "оригинал"  # ничего не затёрто соседней услугой
+
+
 @pytest.mark.asyncio
 async def test_notes_append_idempotent_and_capped():
     from clients.store import merge_notes

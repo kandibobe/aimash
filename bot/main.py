@@ -4860,7 +4860,7 @@ async def _cli_show_card(target: Message, chat_id: int, customer_id: str) -> Non
     has_website = bool(profile and profile.get("website"))
     has_dossier = await DOSSIERS.get_current(customer_id) is not None
     await target.answer(
-        texts.fmt_client_card(profile, customer_id),
+        texts.fmt_client_card(profile, customer_id, has_dossier=has_dossier),
         # C4: customer_id в кнопки add/update → приём текста профиля restart-safe (не зависит от FSM)
         reply_markup=client_card_kb(
             profile is not None,
