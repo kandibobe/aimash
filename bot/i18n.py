@@ -162,8 +162,8 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "🏢 Which account's campaigns?",
     },
     "service_menu_title": {
-        "ru": "⚙️ <b>Сервис / Аккаунты</b> — команды без отдельной кнопки:",
-        "en": "⚙️ <b>Service / Accounts</b> — commands without a dedicated button:",
+        "ru": "⚙️ <b>Сервис / Аккаунты</b> — смена аккаунта, доступы и диагностика:",
+        "en": "⚙️ <b>Service / Accounts</b> — switch account, access and diagnostics:",
     },
     "live_account_hint": {
         "ru": "💡 Сейчас активен тестовый аккаунт (черновик) — данных мало. Выбери живой: "
@@ -871,16 +871,16 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "Doesn't look like a valid number (percent 1–1000). Try again.",
     },
     "more_menu_title": {
-        "ru": "⚙️ <b>Ещё</b> — настройки, сводки и служебное:",
-        "en": "⚙️ <b>More</b> — settings, summaries and service:",
+        "ru": "⚙️ <b>Ещё</b> — модель ИИ, сводки, конкуренты, квоты и справка:",
+        "en": "⚙️ <b>More</b> — AI model, summaries, competitors, quotas and help:",
     },
     "create_menu_title": {
-        "ru": "➕ <b>Создать</b> — новые кампании и объекты:",
-        "en": "➕ <b>Create</b> — new campaigns and assets:",
+        "ru": "➕ <b>Создать</b> — кампании, тексты RSA, подбор ключей, шаблоны:",
+        "en": "➕ <b>Create</b> — campaigns, RSA copy, keyword research, templates:",
     },
     "reports_menu_title": {
-        "ru": "📄 <b>Отчёты</b> — статистика и выгрузки:",
-        "en": "📄 <b>Reports</b> — stats and exports:",
+        "ru": "📄 <b>Отчёты</b> — статистика и выгрузки в Excel / Google Sheets:",
+        "en": "📄 <b>Reports</b> — stats and exports to Excel / Google Sheets:",
     },
     "cc_edit_not_understood": {
         "ru": (

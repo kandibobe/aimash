@@ -872,19 +872,31 @@ async def btn_bids(m: bm.Message) -> None:
 @bm.dp.message(bm.F.text.in_(bm.BTN_CREATE_ALL))
 async def btn_create(m: bm.Message) -> None:
     """Кнопка «➕ Создать» — inline-хаб создания (кампании/тексты/ключи/шаблоны)."""
-    await m.answer(bm.i18n.t("create_menu_title"), reply_markup=bm.create_menu_kb())
+    await m.answer(
+        bm.i18n.t("create_menu_title"),
+        reply_markup=bm.create_menu_kb(),
+        parse_mode=bm.ParseMode.HTML,
+    )
 
 
 @bm.dp.message(bm.F.text.in_(bm.BTN_REPORTS_ALL))
 async def btn_reports(m: bm.Message) -> None:
     """Кнопка «📄 Отчёты» — inline-хаб выгрузок (отчёт/экспорт/Sheets/мои таблицы)."""
-    await m.answer(bm.i18n.t("reports_menu_title"), reply_markup=bm.reports_menu_kb())
+    await m.answer(
+        bm.i18n.t("reports_menu_title"),
+        reply_markup=bm.reports_menu_kb(),
+        parse_mode=bm.ParseMode.HTML,
+    )
 
 
 # ── 3E: «⚙️ Ещё» — inline-хаб вторичных/служебных флоу (обнаружимость без ручного ввода команд) ─
 @bm.dp.message(bm.F.text.in_(bm.BTN_MORE_ALL))
 async def btn_more(m: bm.Message) -> None:
-    await m.answer(bm.i18n.t("more_menu_title"), reply_markup=bm.more_menu_kb())
+    await m.answer(
+        bm.i18n.t("more_menu_title"),
+        reply_markup=bm.more_menu_kb(),
+        parse_mode=bm.ParseMode.HTML,
+    )
 
 
 @bm.dp.callback_query(bm.MoreCB.filter())
@@ -950,7 +962,11 @@ async def on_more(cq: bm.CallbackQuery, callback_data: bm.MoreCB, state: bm.FSMC
     elif action == "reportbug":
         await bm.reportbug_start(msg, state)  # 🐞 сообщить об ошибке (§6)
     elif action == "service":  # E: открыть суб-хаб «⚙️ Сервис/Аккаунты»
-        await msg.answer(bm.i18n.t("service_menu_title"), reply_markup=bm.service_menu_kb())
+        await msg.answer(
+            bm.i18n.t("service_menu_title"),
+            reply_markup=bm.service_menu_kb(),
+            parse_mode=bm.ParseMode.HTML,
+        )
     elif action == "svc_accounts":
         await bm.accounts_cmd(msg)  # 🏢 мои доступные аккаунты (read-замок × грант)
     elif action == "svc_account":

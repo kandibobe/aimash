@@ -105,9 +105,11 @@ class FakeMessage:
         self.text = text
         self.bot = FakeBot()
         self.answers: list = []
+        self.answer_kwargs: list[dict] = []
 
     async def answer(self, text: str = "", **kw):
         self.answers.append(text)
+        self.answer_kwargs.append(kw)
         return self
 
 
@@ -251,3 +253,46 @@ async def test_no_state_peaceful_path(monkeypatch):
         await bm.btn_guard_menu(m, state)
     assert called["n"] == 1
     assert m.answers == []  # никаких «черновик сохранён» на мирном пути
+
+
+class FakeCQ:
+    """Дакт-фейк CallbackQuery: _cq_msg пропускает не-InaccessibleMessage (см. его docstring)."""
+
+    def __init__(self, m: FakeMessage):
+        self.message = m
+        self.from_user = SimpleNamespace(id=m.chat.id, username="t")
+
+    async def answer(self, *a, **kw):
+        return None
+
+
+async def test_hub_titles_sent_as_html():
+    """Замечания 1/8 (скриншоты 2026-07-17): Bot создан БЕЗ DefaultBotProperties ⇒ parse_mode=None
+    по умолчанию, и заголовок хаба с <b> уходил в чат литеральным «</b>». Гард класса: каждый
+    хаб-хендлер (Создать/Отчёты/Ещё/Сервис), чей заголовок содержит HTML, обязан явно передать
+    parse_mode=HTML — на обоих языках."""
+    from bot.handlers import commands as cmd
+
+    async def run_service_hub(m: FakeMessage) -> None:
+        await cmd.on_more(FakeCQ(m), bm.MoreCB(action="service"), FakeState())
+
+    for lang in ("ru", "en"):
+        token = bm.i18n.set_current_lang(lang)
+        try:
+            for run, key in (
+                (cmd.btn_create, "create_menu_title"),
+                (cmd.btn_reports, "reports_menu_title"),
+                (cmd.btn_more, "more_menu_title"),
+                (run_service_hub, "service_menu_title"),
+            ):
+                m = FakeMessage(91_006, "x")
+                await run(m)
+                assert m.answers, f"{key} ({lang}): хаб ничего не отправил"
+                sent = m.answers[-1]
+                if "<" in sent:
+                    assert m.answer_kwargs[-1].get("parse_mode") == bm.ParseMode.HTML, (
+                        f"{key} ({lang}): HTML-заголовок без parse_mode=HTML — "
+                        "в чате будет литеральный тег"
+                    )
+        finally:
+            bm.i18n.reset_current_lang(token)
