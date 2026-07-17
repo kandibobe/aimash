@@ -349,6 +349,310 @@ async def test_scheduled_report_enforced_filters_recipient_accounts(monkeypatch)
     assert f"R:{B}" not in sent[0][1]  # чужой (без гранта) — отфильтрован
 
 
+# ── 3.3 (замечание 7): дайджест — дельты CPA/ROAS, «что горит», тихий режим, кнопка ─
+def _mm(cost: float, conv: float, value: float = 0.0, clicks: int = 100):
+    """Полные Metrics для отчётов дайджеста (в отличие от _m — там только cost/conversions)."""
+    from reports.queries import Metrics
+
+    return Metrics(
+        impressions=clicks * 10,
+        clicks=clicks,
+        cost_micros=int(cost * 1_000_000),
+        conversions=conv,
+        conv_value=value,
+    )
+
+
+def _rep(acct: str, m, prev=None, currency: str = "USD"):
+    """Минимальный отчёт под run_scheduled_report: totals/prev_totals/период/валюта/брейкдаун."""
+    from reports.queries import Breakdown
+
+    camp = Breakdown("campaign", "Кампании", ["Кампания", "Статус"], [(("Поиск", "ENABLED"), m)])
+    return SimpleNamespace(
+        customer_id=acct,
+        totals=m,
+        prev_totals=prev,
+        period=SimpleNamespace(date_from="2026-07-09", date_to="2026-07-15"),
+        currency=currency,
+        breakdowns=[camp],
+    )
+
+
+class _SentBot:
+    def __init__(self):
+        self.sent: list[tuple[int, str, object]] = []
+
+    async def send_message(self, chat_id, text="", **kw):
+        self.sent.append((chat_id, text, kw.get("reply_markup")))
+
+
+def _wire_sched(monkeypatch, jobs, reports: dict, recipients: set[int]):
+    """Общая обвязка run_scheduled_report: фейк-клиент, отчёты по словарю, стаб summary_text."""
+    monkeypatch.setattr(jobs, "_scheduled_accounts", lambda: list(reports))
+    monkeypatch.setattr(jobs, "build_client_async", _fake_client_async)
+
+    async def fake_report(_client, acct, _period, **k):
+        return reports[acct]
+
+    monkeypatch.setattr(jobs, "build_account_report_async", fake_report)
+    monkeypatch.setattr(jobs, "summary_text", lambda r, lang=None: f"R:{r.customer_id}")
+    monkeypatch.setattr(jobs, "_recipients", _arecipients(recipients))
+
+
+def test_digest_delta_line_unit():
+    """3.3: дельту CPA/ROAS считает КОД (golden rule #4); нет сравнения/конверсий → '' (не мусор),
+    строковый фейк-отчёт соседних тестов переживается молча."""
+    from scheduler.jobs import _report_delta_line
+
+    t, p = _mm(500, 5, value=1000.0), _mm(400, 4, value=600.0)
+    line = _report_delta_line(SimpleNamespace(totals=t, prev_totals=p), "USD", "ru")
+    assert "CPA 100.00 → 100.00 USD" in line
+    assert "ROAS 1.50 → 2.00" in line
+    assert "к пред. периоду" in line
+    assert _report_delta_line(SimpleNamespace(totals=t, prev_totals=None), "USD", "ru") == ""
+    z = _mm(500, 0)
+    assert _report_delta_line(SimpleNamespace(totals=z, prev_totals=z), "USD", "ru") == ""
+    assert _report_delta_line("R:строка-не-отчёт", "USD", "ru") == ""
+
+
+async def test_digest_delta_and_findings_in_body(monkeypatch):
+    """3.3: в теле дайджеста — строка дельты CPA/ROAS (prev_totals уже в отчёте) и топ-находки
+    аудита из уже посчитанного _account_health (0 доп. чтений Google Ads)."""
+    from scheduler import jobs
+
+    A, B = "1112223334", "2223334445"
+    reports = {
+        A: _rep(A, _mm(500, 5, value=1000.0), prev=_mm(400, 4, value=600.0)),
+        B: _rep(B, _mm(500, 0)),  # расход без конверсий → у аудита есть что сказать
+    }
+    _wire_sched(monkeypatch, jobs, reports, {91001})
+
+    bot = _SentBot()
+    await jobs.run_scheduled_report(bot)
+    assert len(bot.sent) == 1
+    body = bot.sent[0][1]
+    # валюта в дайджесте дочитывается живым account_currency (здесь фейк-клиент → без кода)
+    assert "CPA 100.00 → 100.00" in body and "ROAS 1.50 → 2.00" in body
+    assert "Главное из аудита:" in body  # топ-находки под цифрами
+    assert "Что горит" not in body  # +25% расхода ниже дефолтного порога — не аномалия
+
+
+async def test_digest_hot_anomalies_and_dedup(monkeypatch):
+    """3.3: «🔥 Что горит» по detect_anomalies прямо в дайджесте; повтор той же аномалии НЕ шлётся —
+    дедуп через тот же блоб _ANOMALY_SEEN_KEY, что у 6-часовой run_anomaly_check."""
+    from sqlalchemy import delete
+
+    from db.models import UserSettings
+    from db.session import Session, init_db
+    from scheduler import jobs
+
+    await init_db()
+    chat = 91003
+    async with Session() as s:  # временный SQLite переживает прогоны → чистим блоб дедупа
+        await s.execute(delete(UserSettings).where(UserSettings.chat_id == chat))
+        await s.commit()
+
+    A = "1112223334"
+    reports = {A: _rep(A, _mm(300, 3), prev=_mm(100, 3))}  # +200% расход > дефолтных 50%
+    _wire_sched(monkeypatch, jobs, reports, {chat})
+
+    bot1 = _SentBot()
+    await jobs.run_scheduled_report(bot1)
+    assert "Что горит" in bot1.sent[0][1]
+
+    bot2 = _SentBot()
+    await jobs.run_scheduled_report(bot2)
+    body2 = bot2.sent[0][1]
+    assert "Что горит" not in body2  # аномалия уже доставлена — второй раз не шумим
+    assert f"R:{A}" in body2  # сам блок цифр никуда не делся
+
+
+async def test_digest_quiet_accounts_collapse(monkeypatch):
+    """3.3 (решение владельца 2026-07-17): аккаунты без расходов/кликов/аномалий/наших мутаций и
+    находок схлопываются в строку «Без событий: N» — их блоки цифр в дайджест не попадают."""
+    from scheduler import jobs
+
+    A, B = "8881112220", "8882223330"
+    reports = {A: _rep(A, _mm(100, 1)), B: _rep(B, _mm(0, 0, clicks=0))}
+    _wire_sched(monkeypatch, jobs, reports, {91004})
+    monkeypatch.setattr(jobs, "_account_health", lambda r: None)  # детерминизм: аудит молчит
+
+    async def _no_applied(_days):
+        return {}
+
+    monkeypatch.setattr("confirm.store.audit_applied_by_account_since", _no_applied)
+
+    bot = _SentBot()
+    await jobs.run_scheduled_report(bot)
+    assert len(bot.sent) == 1
+    body = bot.sent[0][1]
+    assert f"R:{A}" in body
+    assert f"R:{B}" not in body  # тихий аккаунт — без блока цифр
+    assert "Без событий: 1" in body
+
+
+async def test_digest_applied_line_unquiets_and_counts_only_visible(monkeypatch):
+    """3.3: применённые нами мутации будят «тихий» аккаунт и дают строку «применено: N»;
+    C2 — счётчик суммируется ТОЛЬКО по видимым в дайджесте аккаунтам (чужие 100 не текут)."""
+    from scheduler import jobs
+
+    A, B = "8881112220", "8882223330"
+    reports = {A: _rep(A, _mm(100, 1)), B: _rep(B, _mm(0, 0, clicks=0))}
+    _wire_sched(monkeypatch, jobs, reports, {91005})
+    monkeypatch.setattr(jobs, "_account_health", lambda r: None)
+
+    async def _applied(_days):
+        return {B: 2, "9998887776": 100}  # 100 — аккаунт вне дайджеста, утечь не должен
+
+    monkeypatch.setattr("confirm.store.audit_applied_by_account_since", _applied)
+
+    bot = _SentBot()
+    await jobs.run_scheduled_report(bot)
+    body = bot.sent[0][1]
+    assert f"R:{B}" in body  # мутации были → аккаунт НЕ тихий
+    assert "применено изменений: 2" in body
+    assert "102" not in body  # C2: чужой счёт не суммирован
+
+
+async def test_digest_all_quiet_single_short_message(monkeypatch):
+    """3.3: тишина везде — одно короткое сообщение вместо простыни блоков."""
+    from scheduler import jobs
+
+    B = "8882223330"
+    reports = {B: _rep(B, _mm(0, 0, clicks=0))}
+    _wire_sched(monkeypatch, jobs, reports, {91006})
+    monkeypatch.setattr(jobs, "_account_health", lambda r: None)
+
+    async def _no_applied(_days):
+        return {}
+
+    monkeypatch.setattr("confirm.store.audit_applied_by_account_since", _no_applied)
+
+    bot = _SentBot()
+    await jobs.run_scheduled_report(bot)
+    assert len(bot.sent) == 1
+    body = bot.sent[0][1]
+    assert "Тишина" in body
+    assert f"R:{B}" not in body and "———" not in body
+
+
+async def test_digest_blocks_sorted_by_at_risk(monkeypatch):
+    """3.3: блоки отсортированы по деньгам-под-риском, не по порядку обхода и не по расходу:
+    A тратит больше (1000 > 200), но под риском только B — B выше."""
+    from scheduler import jobs
+
+    A, B = "1112223334", "2223334445"
+    reports = {A: _rep(A, _mm(1000, 5)), B: _rep(B, _mm(200, 0))}
+    _wire_sched(monkeypatch, jobs, reports, {91007})
+
+    def fake_health(report):
+        return SimpleNamespace(
+            at_risk=200.0 if report.customer_id == B else 0.0, findings=[], currency="USD"
+        )
+
+    monkeypatch.setattr(jobs, "_account_health", fake_health)
+
+    bot = _SentBot()
+    await jobs.run_scheduled_report(bot)
+    body = bot.sent[0][1]
+    assert body.index(f"R:{B}") < body.index(f"R:{A}")
+
+
+async def test_digest_action_button_and_proactive_antidup(monkeypatch):
+    """3.3: одна actionable-секция — топ-совет с ИСПОЛНИМОЙ неденежной операцией (двойной гейт
+    /advise: allow-list + params); кнопка лишь СТАРТУЕТ confirm-гейт по тапу — из scheduler
+    proposal не создаётся. Операторам с advise_proactive кнопку не кладём (анти-дубль:
+    им карточки шлёт run_recommendations_digest). Персистнется ТОЛЬКО показанная рекомендация."""
+    from sqlalchemy import delete
+
+    from db.models import UserSettings
+    from db.session import Session, init_db
+    from scheduler import jobs
+
+    await init_db()
+    chat_btn, chat_pro = 91009, 91010
+    async with Session() as s:
+        await s.execute(delete(UserSettings).where(UserSettings.chat_id.in_([chat_btn, chat_pro])))
+        s.add(UserSettings(chat_id=chat_pro, ui_prefs={"advise_proactive": "on"}))
+        await s.commit()
+
+    A = "1112223334"
+    reports = {A: _rep(A, _mm(100, 1))}
+    _wire_sched(monkeypatch, jobs, reports, {chat_btn, chat_pro})
+
+    rec = SimpleNamespace(
+        suggested_operation="pause_campaign",  # в _ADVISE_APPLY_OPS, params собираются
+        target_campaign="Поиск",
+        evidence={},
+        at_risk=100.0,
+        severity="warn",
+        priority=1.0,
+        kind="spend_no_conv",
+        body="Кампания «Поиск»: расход без конверсий — поставить на паузу",
+        rec_uid="RUTEST331",
+    )
+
+    async def fake_build(_chat, _acct, **_kw):
+        return SimpleNamespace(recs=[rec])
+
+    recorded: list[tuple[int, str]] = []
+
+    async def fake_record(chat_id, acct, recs, source=""):
+        recorded.append((chat_id, acct))
+        return recs
+
+    monkeypatch.setattr("advisor.service.build_recommendations", fake_build)
+    monkeypatch.setattr("advisor.store.record_recommendations", fake_record)
+
+    bot = _SentBot()
+    await jobs.run_scheduled_report(bot)
+    by_chat = {cid: (text, markup) for cid, text, markup in bot.sent}
+    text_btn, markup_btn = by_chat[chat_btn]
+    assert "Можно применить" in text_btn and markup_btn is not None
+    assert rec.body[:40] in text_btn  # текст совета в секции
+    text_pro, markup_pro = by_chat[chat_pro]
+    assert "Можно применить" not in text_pro and markup_pro is None
+    assert recorded == [(chat_btn, A)]  # только показанная, только кнопочному чату
+
+
+async def test_audit_applied_by_account_since_counts_fresh_applied_only():
+    """3.3: audit_applied_by_account_since — только status='applied' и только внутри окна
+    (rejected и applied 3-дневной давности не считаются); GROUP BY per customer_id."""
+    from datetime import timedelta, timezone
+
+    from sqlalchemy import delete
+
+    from confirm.store import audit_applied_by_account_since
+    from db.models import AuditLog
+    from db.session import Session, init_db
+
+    await init_db()
+    X = "9911223344"
+    now = datetime.now(timezone.utc)
+    async with Session() as s:
+        await s.execute(delete(AuditLog).where(AuditLog.customer_id == X))  # идемпотентность
+        for status, dt in (
+            ("applied", now),
+            ("applied", now),
+            ("rejected", now),
+            ("applied", now - timedelta(days=3)),
+        ):
+            s.add(
+                AuditLog(
+                    confirmation_id=uuid.uuid4().hex,
+                    operation="update_status",
+                    customer_id=X,
+                    chat_id=1,
+                    status=status,
+                    created_at=dt,
+                )
+            )
+        await s.commit()
+
+    res = await audit_applied_by_account_since(1)
+    assert res.get(X) == 2
+
+
 # ── КОД-ГАРД (golden rule #3): планировщик НЕ может менять аккаунт ────────────────
 def test_scheduler_never_imports_mutations():
     """Структурный гард по AST (не по тексту — докстринги/комментарии не считаются): scheduler

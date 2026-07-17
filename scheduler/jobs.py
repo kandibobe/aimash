@@ -129,6 +129,141 @@ def _health_line(result, lang: str) -> str:
         return ""
 
 
+def _report_delta_line(report, currency: str, lang: str) -> str:
+    """3.3: дельта CPA/ROAS к предыдущему периоду — КОД считает (golden rule #4), без FX.
+    summary_text уже даёт ▲/▼ по расходу/кликам/конверсиям; здесь — юнит-экономика, которой в
+    сводке нет. Нет сравнения (prev_totals=None) или нечего считать → '' (косметика)."""
+    t, p = getattr(report, "totals", None), getattr(report, "prev_totals", None)
+    if t is None or p is None:
+        return ""
+
+    def _cpa(m) -> float | None:
+        try:
+            conv = float(getattr(m, "conversions", 0.0) or 0.0)
+            cost = float(getattr(m, "cost_micros", 0) or 0) / 1_000_000
+        except (TypeError, ValueError):
+            return None
+        return (cost / conv) if conv > 0 else None
+
+    def _roas(m) -> float | None:
+        try:
+            val = float(getattr(m, "conv_value", 0.0) or 0.0)
+            cost = float(getattr(m, "cost_micros", 0) or 0) / 1_000_000
+        except (TypeError, ValueError):
+            return None
+        return (val / cost) if cost > 0 and val > 0 else None
+
+    code = f" {currency}" if currency else ""
+    parts: list[str] = []
+    cur_cpa, prev_cpa = _cpa(t), _cpa(p)
+    if cur_cpa is not None or prev_cpa is not None:
+        left = f"{prev_cpa:.2f}" if prev_cpa is not None else "—"
+        right = f"{cur_cpa:.2f}{code}" if cur_cpa is not None else "—"
+        parts.append(f"CPA {left} → {right}")
+    cur_roas, prev_roas = _roas(t), _roas(p)
+    if cur_roas is not None or prev_roas is not None:
+        left = f"{prev_roas:.2f}" if prev_roas is not None else "—"
+        right = f"{cur_roas:.2f}" if cur_roas is not None else "—"
+        parts.append(f"ROAS {left} → {right}")
+    if not parts:
+        return ""
+    suffix = "vs prev. period" if lang == "en" else "к пред. периоду"
+    return " · ".join(parts) + f" ({suffix})"
+
+
+def _top_findings_block(health, lang: str) -> str:
+    """3.3: топ-2 находки аудита из УЖЕ посчитанного AuditResult (0 доп. чтений Google Ads) — тот
+    же текст, что в карточке /audit (audit.render.finding_text: находки ранжированы worst-first).
+    Пусто/сбой → '' (косметика: дайджест важнее)."""
+    findings = getattr(health, "findings", None) if health is not None else None
+    if not findings:
+        return ""
+    try:
+        from audit.render import finding_text
+        from bot import i18n
+
+        cur = getattr(health, "currency", "") or ""
+        lines = [ln for f in findings[:2] if (ln := finding_text(f, lang, cur))]
+        if not lines:
+            return ""
+        title = i18n.t("sched_digest_findings_title", lang)
+        return title + "\n" + "\n".join(f"• {ln}" for ln in lines)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _quiet_account(info: dict | None, fresh_alerts, applied_n: int) -> bool:
+    """3.3 (тихий режим, решение владельца 2026-07-17): аккаунт «без событий» — нет расходов И
+    кликов И свежих аномалий И применённых нами мутаций за сутки И аудиту нечего сказать. Такие
+    схлопываются в одну строку-счётчик вместо блока цифр. Неизвестные цифры (сломанный/фейковый
+    отчёт) — НЕ тихий: блок (в т.ч. «⚠️ отчёт недоступен») обязан дойти."""
+    if not info:
+        return False
+    cost, clicks = info.get("cost"), info.get("clicks")
+    if cost is None or clicks is None or cost > 0 or clicks > 0:
+        return False
+    if fresh_alerts or applied_n:
+        return False
+    health = info.get("health")
+    return health is None or not getattr(health, "findings", None)
+
+
+async def _digest_action(chat_id: int, lang: str, accts: list[str], acct_info: dict):
+    """3.3: одна actionable-секция в плановом дайджесте — топ-рекомендация с ИСПОЛНИМОЙ неденежной
+    операцией (тот же двойной гейт, что в /advise: allow-list _ADVISE_APPLY_OPS + исполнимость
+    params, bot.main._advise_apply_op). Кнопка лишь СТАРТУЕТ confirm-гейт по тапу пользователя —
+    proposal из scheduler НЕ создаётся (golden rule #1/#3). Анти-дубль: операторам с
+    advise_proactive карточки уже шлёт run_recommendations_digest — им кнопку не кладём.
+    Всё best-effort: любой сбой → ('', None), дайджест уходит без кнопки."""
+    try:
+        if chat_id in await _advise_proactive_chats({chat_id}):
+            return "", None
+        from advisor import service as advisor_service
+        from advisor import store as advisor_store
+        from advisor.rules import rank_cross_account
+        from bot import i18n
+        from bot.keyboards import advise_feedback_kb
+        from bot.main import _advise_apply_op  # поздний импорт: цикл bot.main ↔ scheduler.jobs
+
+        items: list[tuple] = []  # (acct, currency, total_cost, rec) — формат rank_cross_account
+        for acct in accts:
+            info = acct_info.get(acct) or {}
+            report = info.get("report")
+            if report is None:
+                continue
+            try:
+                rec_set = await advisor_service.build_recommendations(
+                    chat_id,
+                    acct,
+                    source="scheduler",
+                    lang=lang,
+                    use_llm=False,
+                    persist=False,
+                    report=report,
+                )
+            except Exception:  # noqa: BLE001 — совет-довесок по одному аккаунту, не критичен
+                continue
+            total = float(info.get("cost") or 0.0)
+            items.extend(
+                (acct, info.get("currency", ""), total, r)
+                for r in rec_set.recs
+                if _advise_apply_op(r) is not None
+            )
+        top = rank_cross_account(items, top_n=1)
+        if not top:
+            return "", None
+        acct, _cur, _total, rec = top[0]
+        # Персист ТОЛЬКО показанной (rec_uid для кнопок 👍/👎/🙈/apply — как в advise-дайджесте).
+        await advisor_store.record_recommendations(chat_id, acct, [rec], source="scheduler")
+        body = (rec.body or "").strip()
+        if len(body) > 400:
+            body = body[:400] + "…"
+        text = i18n.t("sched_digest_apply_now", lang) + "\n• " + body
+        return text, advise_feedback_kb(rec.rec_uid, lang, apply_op=_advise_apply_op(rec))
+    except Exception:  # noqa: BLE001 — кнопка-довесок, дайджест важнее
+        return "", None
+
+
 async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
     """Плановый отчёт (последние N дн.) по ВСЕМ разрешённым на чтение аккаунтам (§8) — ОДИН дайджест
     на оператора (анти-спам, не N сообщений). READ-ONLY. Сбой одного аккаунта не валит остальные
@@ -136,7 +271,15 @@ async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
 
     §14 (P1-I): only_chat — персональная джоба оператора с СОБСТВЕННЫМ расписанием
     (register_user_report_schedules): шлём только ему. only_chat=None — ГЛОБАЛЬНАЯ джоба: шлём всем
-    операторам БЕЗ персонального расписания (те получают отчёт своей per-chat джобой — без дубля)."""
+    операторам БЕЗ персонального расписания (те получают отчёт своей per-chat джобой — без дубля).
+
+    3.3 (2026-07-17, замечание 7 «дайджест — простыня цифр»): поверх health+summary добавлены
+    дельты CPA/ROAS, «🔥 что горит» (detect_anomalies по per-chat порогам /alerts, дедуп с
+    run_anomaly_check через общий блоб _ANOMALY_SEEN_KEY), топ-2 находки аудита (из уже посчитанного
+    _account_health — 0 доп. чтений), строка «применено изменений за сутки», сортировка блоков по
+    деньгам-под-риском, тихий режим (пустые аккаунты — одной строкой) и одна actionable-кнопка
+    (_digest_action; кнопка лишь стартует confirm-гейт по тапу — мутаций из scheduler нет).
+    Дайджест стал per-chat (пороги/кулдаун/кнопка персональны) — кэш (lang, accounts) снят."""
     with request_scope("scheduler:report"):  # §15: корреляция логов джобы по request_id
         if only_chat is not None:
             recipients = {only_chat} if only_chat in await _recipients() else set()
@@ -156,9 +299,21 @@ async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
         from bot import i18n
 
         langs = {i18n.get_lang(chat_id) for chat_id in recipients} or {"ru"}
+        # 3.3: пороги аномалий и применённые за сутки мутации — best-effort (сбой БД не валит отчёт).
+        try:
+            thr_by_chat = await _thresholds_by_chat(recipients)
+        except Exception:  # noqa: BLE001
+            thr_by_chat = {}
+        try:
+            from confirm.store import audit_applied_by_account_since
+
+            applied_by_acct = await audit_applied_by_account_since(1)
+        except Exception:  # noqa: BLE001
+            applied_by_acct = {}
         # C2: блоки per-АККАУНТ (не плоским списком) — дайджест собирается ПОД получателя из
         # аккаунтов, доступных именно ему (enforced-режим: метрики чужого клиента не утекают).
         blocks: dict[str, dict[str, str]] = {lang: {} for lang in langs}
+        acct_info: dict[str, dict] = {}  # 3.3: report/currency/health/at_risk/cost для сборки
         for acct in accounts:
             tok = set_context(customer_id=acct)  # §8: ошибки/логи этого аккаунта атрибутируются
             try:
@@ -178,9 +333,34 @@ async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
                 # Здоровье считаем ОДИН раз на аккаунт (движок — чистая функция, ctx не зависит от
                 # языка), рендерим per-lang. Как в /report: сначала «что горит», потом цифры.
                 health = _account_health(report)
+                cost = clicks = None
+                t = getattr(report, "totals", None)
+                if t is not None:
+                    try:  # цифры для тихого режима/сортировки; кривой отчёт → None (не тихий)
+                        cost = float(getattr(t, "cost_micros", 0) or 0) / 1_000_000
+                        clicks = int(getattr(t, "clicks", 0) or 0)
+                    except (TypeError, ValueError):
+                        cost = clicks = None
+                acct_info[acct] = {
+                    "report": report,
+                    "currency": currency,
+                    "health": health,
+                    "at_risk": (
+                        float(getattr(health, "at_risk", 0.0) or 0.0) if health is not None else 0.0
+                    ),
+                    "cost": cost,
+                    "clicks": clicks,
+                }
                 for lang in langs:
                     hl = _health_line(health, lang)
-                    blocks[lang][acct] = (hl + "\n\n" if hl else "") + summary_text(report, lang)
+                    parts = [summary_text(report, lang)]
+                    delta = _report_delta_line(report, currency, lang)
+                    if delta:
+                        parts.append(delta)
+                    tf = _top_findings_block(health, lang)
+                    if tf:
+                        parts.append(tf)
+                    blocks[lang][acct] = (hl + "\n\n" if hl else "") + "\n".join(parts)
             except Exception as e:  # сеть/доступ/SDK — фиксируем (§15), остальные аккаунты живут
                 if is_account_access_error(e):
                     # A3: аккаунт деактивирован/нет прав — ОЖИДАЕМО (не дефект). Не пишем в /diag
@@ -200,27 +380,108 @@ async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
             return
         from core.access import accessible_accounts_for_user
 
-        digest_cache: dict[tuple, str] = {}  # (lang, доступные аккаунты) → готовый дайджест
+        now = datetime.now(timezone.utc)
+        cooldown_h = float(settings.anomaly_cooldown_hours)
         for chat_id in recipients:
             lang = i18n.get_lang(chat_id)
             allowed = await accessible_accounts_for_user(chat_id, accounts)
             visible = [a for a in allowed if a in blocks.get(lang, {})]
             if not visible:
                 continue  # получателю нечего показать — не шлём пустой заголовок
-            key = (lang, tuple(visible))
-            digest = digest_cache.get(key)
-            if digest is None:
-                header = "🗓 Scheduled report" if lang == "en" else "🗓 Плановый отчёт"
-                digest = header + "\n\n" + "\n\n———\n\n".join(blocks[lang][a] for a in visible)
-                if len(digest) > _DIGEST_MAX:  # анти-спам: не дробим на N сообщений, усечём
-                    digest = (
-                        digest[:_DIGEST_MAX] + "\n\n…(усечено — полный отчёт по аккаунту: /report)"
-                    )
-                digest_cache[key] = digest
+            # 3.3: «что горит» per-chat (пороги /alerts) + дедуп против 6-часовой run_anomaly_check:
+            # общий блоб «что уже доставлено» (acct:kind → время), кулдаун и TTL те же.
             try:
-                await bot.send_message(chat_id, digest)
+                seen = await _ui_pref_blob(chat_id, _ANOMALY_SEEN_KEY)
+            except Exception:  # noqa: BLE001
+                seen = None
+            fresh_by_acct: dict[str, list] = {}
+            for acct in visible:
+                info = acct_info.get(acct)
+                if info is None:
+                    continue
+                try:
+                    alerts = detect_anomalies(
+                        info["report"].totals,
+                        info["report"].prev_totals,
+                        _effective_thresholds(thr_by_chat.get(chat_id), acct),
+                        currency=info["currency"],
+                    )
+                except Exception:  # noqa: BLE001 — аномалии-довесок, отчёт важнее
+                    alerts = []
+                fresh = _anomaly_fresh(seen, acct, alerts, now, cooldown_h)
+                if fresh:
+                    fresh_by_acct[acct] = fresh
+            # 3.3 тихий режим: пустые аккаунты — одной строкой-счётчиком, не блоком цифр.
+            loud: list[str] = []
+            quiet_n = 0
+            for acct in visible:
+                if _quiet_account(
+                    acct_info.get(acct), fresh_by_acct.get(acct), applied_by_acct.get(acct, 0)
+                ):
+                    quiet_n += 1
+                else:
+                    loud.append(acct)
+            header = "🗓 Scheduled report" if lang == "en" else "🗓 Плановый отчёт"
+            if not loud:  # тишина везде — одно короткое сообщение вместо простыни
+                try:
+                    await bot.send_message(
+                        chat_id, header + "\n" + i18n.t("sched_digest_all_quiet", lang, n=quiet_n)
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log.warning(
+                        "scheduler: не доставлено в %s: %s: %s", chat_id, type(e).__name__, e
+                    )
+                continue
+            # 3.3: сортировка по деньгам-под-риском (fallback — расход): горящее сверху.
+            loud.sort(
+                key=lambda a: (
+                    -float((acct_info.get(a) or {}).get("at_risk") or 0.0),
+                    -float((acct_info.get(a) or {}).get("cost") or 0.0),
+                )
+            )
+            body_blocks: list[str] = []
+            for acct in loud:
+                b = blocks[lang][acct]
+                fresh = fresh_by_acct.get(acct)
+                if fresh:
+                    b = (
+                        i18n.t("sched_digest_hot_title", lang)
+                        + "\n"
+                        + "\n".join(f"• {_alert_line(a, lang)}" for a in fresh)
+                        + "\n\n"
+                        + b
+                    )
+                body_blocks.append(b)
+            # C2: счётчик «применено» — только по ВИДИМЫМ этому оператору аккаунтам (не глобальный).
+            applied_n = sum(applied_by_acct.get(a, 0) for a in visible)
+            digest = header
+            if applied_n:
+                digest += "\n" + i18n.t("sched_digest_applied", lang, n=applied_n)
+            digest += "\n\n" + "\n\n———\n\n".join(body_blocks)
+            if quiet_n:
+                digest += "\n\n" + i18n.t("sched_digest_quiet", lang, n=quiet_n)
+            # 3.3: actionable-секция считается ДО усечения — резервируем ей место, иначе клавиатура
+            # приезжала бы без своего текста (или сообщение пробивало телеграм-лимит 4096).
+            action_txt, markup = await _digest_action(chat_id, lang, loud, acct_info)
+            limit = _DIGEST_MAX - (len(action_txt) + 2 if action_txt else 0)
+            if len(digest) > limit:  # анти-спам: не дробим на N сообщений, усечём
+                digest = digest[:limit] + "\n\n…(усечено — полный отчёт по аккаунту: /report)"
+            if action_txt:
+                digest += "\n\n" + action_txt
+            try:
+                await bot.send_message(chat_id, digest, reply_markup=markup)
             except Exception as e:  # один недоступный чат не должен ронять рассылку
                 log.warning("scheduler: не доставлено в %s: %s: %s", chat_id, type(e).__name__, e)
+                continue  # не доставили → не отмечаем аномалии как показанные
+            if fresh_by_acct:
+                try:
+                    await _save_ui_pref_blob(
+                        chat_id,
+                        _ANOMALY_SEEN_KEY,
+                        _anomaly_seen_updated(seen, list(fresh_by_acct.items()), now),
+                    )
+                except Exception as e:  # noqa: BLE001 — БД-сбой не роняет рассылку (в худшем повтор)
+                    log.warning("scheduler: анти-спам аномалий не сохранён (%s)", type(e).__name__)
 
 
 async def _thresholds_by_chat(chat_ids: set[int]) -> dict[int, dict | None]:

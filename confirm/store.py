@@ -547,3 +547,21 @@ async def audit_activity_since(days: int) -> dict:
         ):
             created_campaigns += 1
     return {"statuses": statuses, "created_campaigns": created_campaigns}
+
+
+async def audit_applied_by_account_since(days: int) -> dict[str, int]:
+    """3.3: число ПРИМЕНЁННЫХ мутаций per customer_id за последние `days` дней — для строки
+    «за сутки применено: N» и тихого режима планового дайджеста (C2: вызывающий суммирует только
+    по видимым оператору аккаунтам). Read-only, один GROUP BY, секретов нет."""
+    from datetime import timedelta, timezone
+
+    start = datetime.now(timezone.utc) - timedelta(days=int(days))
+    async with Session() as s:
+        rows = (
+            await s.execute(
+                select(AuditLog.customer_id, func.count())
+                .where(AuditLog.created_at >= db_dt(start), AuditLog.status == "applied")
+                .group_by(AuditLog.customer_id)
+            )
+        ).all()
+    return {str(cid): int(n) for cid, n in rows}

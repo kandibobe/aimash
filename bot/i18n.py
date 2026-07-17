@@ -882,6 +882,31 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "Аномалии недели:",
         "en": "This week's anomalies:",
     },
+    # 3.3 (2026-07-17): плановый дайджест — «что горит»/находки/применено/тихий режим/кнопка.
+    "sched_digest_hot_title": {
+        "ru": "🔥 Что горит:",
+        "en": "🔥 Needs attention:",
+    },
+    "sched_digest_findings_title": {
+        "ru": "Главное из аудита:",
+        "en": "Top audit findings:",
+    },
+    "sched_digest_applied": {
+        "ru": "🛠 За сутки применено изменений: {n}",
+        "en": "🛠 Changes applied in the last 24h: {n}",
+    },
+    "sched_digest_quiet": {
+        "ru": "😴 Без событий: {n} акк. — нет расходов, аномалий и изменений",
+        "en": "😴 No events: {n} account(s) — no spend, anomalies, or changes",
+    },
+    "sched_digest_all_quiet": {
+        "ru": "Тишина: {n} акк. без расходов, аномалий и изменений — показывать нечего.",
+        "en": "All quiet: {n} account(s) with no spend, anomalies, or changes — nothing to show.",
+    },
+    "sched_digest_apply_now": {
+        "ru": "⚡ Можно применить сейчас (кнопка откроет подтверждение «было → станет»):",
+        "en": "⚡ Ready to apply (the button opens a “was → will be” confirmation):",
+    },
     "bizdigest_on": {
         "ru": "📈 Недельный бизнес-дайджест ВКЛючён — пришлю сводку по всем аккаунтам "
         "(расход/конверсии/CPA неделя к неделе + топ-3 совета) по расписанию. Выключить: /bizdigest.",
