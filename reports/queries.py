@@ -1472,6 +1472,45 @@ def fetch_budget_simulations(client, customer_id: str, limit: int = 50) -> list[
 
 
 @dataclass
+class CampaignBudgetRow:
+    """Одна строка «дневной бюджет кампании» для MCP-обёртки get_budgets (Hermes-контур A).
+    budget — amount_micros/1e6 в валюте аккаунта (делит КОД, не модель)."""
+
+    campaign_id: str
+    campaign: str
+    channel_type: str
+    status: str
+    budget: float
+
+
+def fetch_budgets(client, customer_id: str, limit: int = 500) -> list[CampaignBudgetRow]:
+    """Дневные бюджеты кампаний аккаунта (campaign_budget.amount_micros → валюта). READ-ONLY.
+
+    Лёгкий отдельный ридер (без симуляторов, в отличие от fetch_budget_simulations): просто «какой
+    дневной бюджет задан по кампаниям», отсортировано по убыванию. REMOVED исключаем (мусор для
+    оператора). Замок ЧТЕНИЯ — первой строкой (§8, как остальные fetch_*)."""
+    ensure_read_allowed(customer_id)
+    q = (
+        "SELECT campaign.id, campaign.name, campaign.advertising_channel_type, "
+        "campaign.status, campaign_budget.amount_micros FROM campaign "
+        f"WHERE campaign.status != 'REMOVED' ORDER BY campaign_budget.amount_micros DESC "
+        f"LIMIT {int(limit)}"
+    )
+    out: list[CampaignBudgetRow] = []
+    for r in _search(client, customer_id, q):
+        out.append(
+            CampaignBudgetRow(
+                campaign_id=str(r.campaign.id),
+                campaign=r.campaign.name,
+                channel_type=_enum_name(r.campaign.advertising_channel_type),
+                status=_enum_name(r.campaign.status),
+                budget=int(getattr(r.campaign_budget, "amount_micros", 0) or 0) / 1_000_000,
+            )
+        )
+    return out
+
+
+@dataclass
 class CampaignAssetsRow:
     """Ф6 (G50/G51/G52): сколько расширений ДЕЙСТВУЕТ на кампании. Счётчик — сумма трёх уровней
     привязки (кампания + аккаунт + группы): ассет, привязанный на аккаунт, показывается во всех

@@ -17,6 +17,14 @@
         "GOOGLE_ADS_LOGIN_CUSTOMER_ID": "${GOOGLE_ADS_LOGIN_CUSTOMER_ID}"
       }
     },
+    "aimash": {
+      "command": "python",
+      "args": ["-m", "mcp_server"],
+      "env": {
+        "ENV": "dev",
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
     "context7": {
       "command": "npx",
       "args": ["-y", "@upstash/context7-mcp"]

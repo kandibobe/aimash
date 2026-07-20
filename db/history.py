@@ -57,6 +57,34 @@ async def list_recent_applied(
     ]
 
 
+async def list_recent_applied_by_customer(
+    customer_id: str, operation: str | None = None, limit: int = 5
+) -> list[RecentAction]:
+    """Как list_recent_applied, но по customer_id, а не chat_id — для Hermes-контура A (MCP), где
+    аккаунт задаётся аргументом инструмента, а не привязан к Telegram-чату. Это НАШ audit-trail из
+    proposals (applied), НЕ Google Ads change-history. Обёртка всё равно первой строкой зовёт
+    ensure_read_allowed(customer_id) — защита от кросс-клиентного чтения (И6). Порядок — по id
+    убыванию (монотонный, как в list_recent_applied). customer_id нормализуем в str (в БД — String)."""
+    async with Session() as s:
+        q = select(Proposal).where(
+            Proposal.customer_id == str(customer_id), Proposal.status == "applied"
+        )
+        if operation:
+            q = q.where(Proposal.operation == operation)
+        q = q.order_by(Proposal.id.desc()).limit(max(1, limit))
+        rows = (await s.execute(q)).scalars().all()
+    return [
+        RecentAction(
+            confirmation_id=r.confirmation_id,
+            operation=r.operation,
+            params=_clean(r.params),
+            summary=r.summary,
+            decided_at=r.decided_at,
+        )
+        for r in rows
+    ]
+
+
 async def last_applied(chat_id: int, operation: str) -> RecentAction | None:
     """Самое свежее применённое действие данного типа (для дефолтов визардов). None — нет такого."""
     rows = await list_recent_applied(chat_id, operation, limit=1)
