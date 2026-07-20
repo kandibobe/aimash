@@ -12,6 +12,10 @@ MCP-сервера. Hermes ставится рядом отдельным system
 **Артефакты рядом:** `config.yaml` (эталон `~/.hermes/config.yaml`), `hermes.env.example` (шаблон
 `~/.hermes/.env`).
 
+**Этот файл — только установка (RB-0…RB-3).** День-2 эксплуатация (что применяется вживую vs требует
+restart, редеплой↔MCP-reconnect, логи, обновление/откат, бэкап, kill-switch, траблшутинг) — в
+[`OPERATIONS.md`](OPERATIONS.md).
+
 ---
 
 ## RB-0. Зайти на VPS
@@ -33,7 +37,7 @@ docker compose ps          # aimash-bot / aimash-pg должны быть Up
 ```bash
 # 1. Установка с жёстким пином версии (0.x релизится часто; на проде автообновление НЕ включаем).
 curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-hermes --version
+hermes version                     # версия = субкоманда, НЕ `--version`
 
 # 2. Секреты → ~/.hermes/.env (шаблон — deploy/hermes/hermes.env.example).
 hermes config env-path             # путь ~/.hermes/.env
@@ -63,8 +67,11 @@ hermes config edit
 #   (альтернатива «с нуля из файла»: cp /opt/aimash/deploy/hermes/config.yaml ~/.hermes/config.yaml,
 #    затем hermes model — мастер перезапишет только model-блок.)
 
-# 5. Конфиг-линт К10 (обязательно, до старта). Hermes молча игнорирует неизвестные ключи.
+# 5. Проверка конфига до старта. ВАЖНО: `hermes config check` про «missing/stale», он НЕ ловит
+#    неизвестные/опечатанные ключи — Hermes их молча игнорирует (К10). Единственный надёжный контроль:
 hermes config check
+hermes config show                 # убедиться, что КАЖДЫЙ наш ключ реально распознан (model — mapping,
+                                   #   mcp_servers.aimash, approvals: manual присутствуют)
 #   + вручную сверить каждый ключ config.yaml с cli-config.yaml.example пиновой версии.
 
 # 6. systemd user-сервис (переживает выход из SSH).
@@ -72,7 +79,10 @@ hermes -p aimash gateway install
 sudo loginctl enable-linger $USER  # ОБЯЗАТЕЛЬНО: иначе сервис умрёт при logout
 hermes -p aimash gateway start
 hermes -p aimash gateway status    # active; в логах — коннект MCP aimash + список 12 tools
-#   логи:  journalctl --user -u hermes-gateway -f   (имя юнита сверить `gateway status`)
+#   логи:  hermes -p aimash gateway list  → имя юнита (hermes-gateway-aimash.service);
+#          journalctl над root-SSH требует user-шины:
+#          export XDG_RUNTIME_DIR=/run/user/0 && journalctl --user -u hermes-gateway-aimash.service -f
+#          (подробнее про логи/linger — OPERATIONS.md §0/§3)
 
 # 7. Быстрая проверка MCP-коннекта до Telegram.
 hermes mcp test aimash             # должен отдать 12 инструментов
