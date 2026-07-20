@@ -16,11 +16,27 @@
 
 # Дефолтная модель диалога/research (§15, слаг проверен 20.07). Ролевой сплит
 # (аудит → gpt-5.6-sol, фон → gemini-3.1-flash-lite, парсинг → luna) — отдельным шагом.
-model: openai/gpt-5.6-terra
+# ⚠️ Форма ОБЯЗАТЕЛЬНО mapping (`provider` + `default`), НЕ скаляр `model: <slug>` — так пишет мастер
+#    `hermes model` и так показывают доки v0.17; скаляр по К10 молча игнорится → откат на Nous Portal,
+#    ключ OpenRouter не задействуется. base_url/api_mode проставляет мастер — здесь не дублируем.
+model:
+  provider: openrouter
+  default: openai/gpt-5.6-terra
 
 agent:
-  # Пилот: агент только отвечает и зовёт MCP READ-инструменты. Никакого shell/веба/памяти.
-  disabled_toolsets: [terminal, web, memory]
+  # ЭТАЛОН = ОДОБРЕННЫЙ минимум Контура A: агент только отвечает и зовёт MCP READ-инструменты.
+  # Включёнными остаются лишь безопасные тулсеты (skills — привязка топик→скил, todo, session_search,
+  # clarify) + наш MCP `aimash` (он НЕ в этом списке — приходит из mcp_servers ниже).
+  # Гасим ВСЁ host-мощное и внешнее — иначе на боевом VPS (там же денежный бот) агент получил бы
+  # терминал/ФС/выполнение кода/управление рабочим столом. Схема «два контура, ноль общих секретов»
+  # (Meta Rule of Two): такие возможности живут в Контуре B (билдер-песочница), не в проде.
+  # Слаги сверены с docs v0.17 (toolsets-reference) 20.07 — К10.
+  # ⚠️ Оператор вправе РАСШИРИТЬ набор на своём инстансе (мастер + approvals: manual) — тогда этот
+  #    `agent:`-блок из эталона НЕ мёржить, иначе он снова погасит выбранное. Репо-эталон при этом
+  #    остаётся источником истины по одобренной архитектуре.
+  disabled_toolsets:
+    [terminal, browser, file, code_execution, computer_use, cronjob, delegation,
+     web, memory, vision, image_gen, tts, x_search, kanban]
   tool_use_enforcement: auto
 
 approvals:

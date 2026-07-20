@@ -40,23 +40,41 @@ hermes config env-path             # путь ~/.hermes/.env
 #   заполнить: OPENROUTER_API_KEY, TELEGRAM_BOT_TOKEN (новый бот, RB-2),
 #              TELEGRAM_ALLOWED_USERS, TELEGRAM_GROUP_ALLOWED_CHATS
 
-# 3. Конфиг → ~/.hermes/config.yaml из эталона репо; подставить REPLACE_* (user id, id группы,
-#    thread_id топиков). Эталон: /opt/aimash/deploy/hermes/config.yaml
-cp /opt/aimash/deploy/hermes/config.yaml ~/.hermes/config.yaml
-#   отредактировать REPLACE_* :  hermes config edit
+# 3. Провайдер модели — через интерактивный мастер (он же запускается при первом старте):
+hermes model
+#   Select provider   → OpenRouter (НЕ подсвеченный Nous Portal: у нас рабочий ключ OpenRouter
+#                       и слаги §15 — openai/gpt-5.6-*). Далее: ключ sk-or-… (или подхватит
+#                       OPENROUTER_API_KEY из ~/.hermes/.env), затем модель openai/gpt-5.6-terra.
+#   Мастер пишет в config.yaml ТОЛЬКО блок  model: {provider: openrouter, default: <slug>}
+#   (форма mapping, не скаляр — иначе К10 молча откатит на Nous Portal).
+#   Select terminal backend → Keep current (local): терминал у Контура A и так гасится (см. тулсеты).
+#   Select platforms        → только Telegram (SPACE, ENTER).
+#   Tools for CLI (тулсеты) → эталон = минимум (skills/todo/session_search/clarify + наш MCP).
+#     Снять ОБЯЗАТЕЛЬНО: Computer Use (контроль рабочего стола VPS) и Cron Jobs (автономный запуск,
+#     против золотого правила №3). Terminal/Code/File/Browser держать под approvals: manual и
+#     вычитывать каждую команду; обкатка — только на Draft 7753643025.
 
-# 4. Конфиг-линт К10 (обязательно, до старта). Hermes молча игнорирует неизвестные ключи.
+# 4. Долить НЕ-модельные блоки из эталона репо (мастер их не трогает):
+#    mcp_servers.aimash (без него нет доступа к Google Ads), gateway…group_topics (топик→скил),
+#    approvals: manual. Эталон: /opt/aimash/deploy/hermes/config.yaml — подставить REPLACE_* (user
+#    id, id супергруппы, thread_id топиков). НЕ мёржить agent.disabled_toolsets из эталона, если на
+#    экране тулсетов выбрал более широкий набор — иначе он снова погасит выбранное.
+hermes config edit
+#   (альтернатива «с нуля из файла»: cp /opt/aimash/deploy/hermes/config.yaml ~/.hermes/config.yaml,
+#    затем hermes model — мастер перезапишет только model-блок.)
+
+# 5. Конфиг-линт К10 (обязательно, до старта). Hermes молча игнорирует неизвестные ключи.
 hermes config check
 #   + вручную сверить каждый ключ config.yaml с cli-config.yaml.example пиновой версии.
 
-# 5. systemd user-сервис (переживает выход из SSH).
+# 6. systemd user-сервис (переживает выход из SSH).
 hermes -p aimash gateway install
 sudo loginctl enable-linger $USER  # ОБЯЗАТЕЛЬНО: иначе сервис умрёт при logout
 hermes -p aimash gateway start
 hermes -p aimash gateway status    # active; в логах — коннект MCP aimash + список 12 tools
 #   логи:  journalctl --user -u hermes-gateway -f   (имя юнита сверить `gateway status`)
 
-# 6. Быстрая проверка MCP-коннекта до Telegram.
+# 7. Быстрая проверка MCP-коннекта до Telegram.
 hermes mcp test aimash             # должен отдать 12 инструментов
 ```
 
