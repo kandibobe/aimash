@@ -47,6 +47,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # Стабильный тег образа: его переиспользует сервис `mcp` (profiles: [mcp]), чтобы не пересобирать
+    # второй раз. Health-check смотрит на container_name, не на имя образа, — поведение не меняется.
+    image: aimash-bot
     container_name: aimash-bot
     depends_on:
       postgres:
@@ -82,6 +85,34 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+
+  # Контур A (Hermes): READ-only MCP-сервер по stdio. НЕ поднимается штатным `up` (profiles) — только
+  # по требованию Hermes: `docker compose --profile mcp run --rm --no-deps -T mcp`. Тот же образ и env,
+  # что у бота (OAuth-кэш в БД, DATABASE_URL, GOOGLE_ADS_*, SECRETS_ENCRYPTION_KEY) — паритет окружения
+  # без host-venv. docker-entrypoint.sh для не-`bot.main` команды миграции НЕ гоняет (exec "$@").
+  # Дефолтный путь MCP — `docker exec` в aimash-bot (см. deploy/hermes/README.md); этот сервис —
+  # durable-вариант с изоляцией OAuth-процесса от Telegram-поллера (§20), включается сменой args в
+  # ~/.hermes/config.yaml на `docker compose … run … mcp`.
+  mcp:
+    profiles: ["mcp"]
+    image: aimash-bot            # переиспользовать образ, что уже собрал сервис bot (без второй сборки)
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Тот же порядок и файлы, что у бота: .env.defaults базой, серверный .env (untracked) последним.
+    env_file:
+      - .env.defaults
+      - .env
+    environment:
+      # Как у бота: внутри compose-сети — postgres:5432 (НЕ хостовый 5433); пароль той же переменной.
+      DATABASE_URL: postgresql+asyncpg://aimash:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD обязателен — задай в .env}@postgres:5432/aimash
+      TZ: UTC
+      PYTHONIOENCODING: utf-8    # Windows/utf8 не при чём здесь, но stdout MCP — строго utf-8
+    command: ["python", "-m", "mcp_server"]
+    restart: "no"               # запускается через `run --rm` на сессию Hermes, не long-running
 
   # C1: АВТОБЭКАП БД. Раньше scripts/backup_db.sh надо было ставить в host-cron ВРУЧНУЮ — по факту он
   # часто НЕ был запущен, а в БД oauth_tokens (шифр. refresh-токены) + audit_log (денежный реестр).

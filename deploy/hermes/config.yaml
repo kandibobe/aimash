@@ -1,0 +1,85 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Hermes Agent — ЭТАЛОН конфига Контура A (профиль `aimash`), READ-пилот.
+#
+# Копируется на VPS в ~/.hermes/config.yaml, плейсхолдеры REPLACE_* заменяются на
+# реальные id (см. deploy/hermes/README.md, RB-1 шаг 3 / RB-2). СЕКРЕТОВ ЗДЕСЬ НЕТ:
+# токены/ключи — только в ~/.hermes/.env (правило 5), сюда попадают как ${VAR}.
+#
+# ⚠️ К10 (конфиг-линт): Hermes МОЛЧА игнорирует неизвестные ключи — опечатка = «конфиг
+#    рабочий на вид, но не работает». Все ключи ниже сверены с docs v0.17
+#    (NousResearch/hermes-agent). ПЕРЕД правкой сверяй каждый ключ с
+#    `cli-config.yaml.example` пиновой версии: `hermes config check` + ручная сверка.
+#
+# Пилот READ-only BY CONSTRUCTION: в MCP-сервере зарегистрированы только 12 READ-
+# инструментов, WRITE-инструментов физически нет. Терминал/веб/память у агента выключены.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Дефолтная модель диалога/research (§15, слаг проверен 20.07). Ролевой сплит
+# (аудит → gpt-5.6-sol, фон → gemini-3.1-flash-lite, парсинг → luna) — отдельным шагом.
+model: openai/gpt-5.6-terra
+
+agent:
+  # Пилот: агент только отвечает и зовёт MCP READ-инструменты. Никакого shell/веба/памяти.
+  disabled_toolsets: [terminal, web, memory]
+  tool_use_enforcement: auto
+
+approvals:
+  mode: manual
+  # deny — fnmatch-глобы КОМАНД (не имена тулсетов!). Defense-in-depth: терминал и так выключен.
+  deny: ["rm -rf *", "sudo *", "docker *", "git push*"]
+  cron_mode: manual
+
+memory:
+  memory_enabled: false   # проверенный ключ (НЕ spec-`provider: none`)
+
+skills:
+  write_approval: true    # по умолчанию false — включаем: агент не пишет скилы без ревью
+  guard_agent_created: true
+
+mcp_servers:
+  aimash:
+    # Окружение берём из уже работающего контейнера бота: docker exec наследует env
+    # (DATABASE_URL=@postgres:5432, GOOGLE_ADS_*, SECRETS_ENCRYPTION_KEY, ENV), deps и
+    # OAuth-кэш в БД. Паритет окружения без host-venv. Durable-вариант (compose-сервис
+    # `mcp`) — см. README, раздел «MCP-интеграция».
+    command: docker
+    args: ["exec", "-i", "aimash-bot", "python", "-m", "mcp_server"]
+    timeout: 120           # bootstrap (init_db + обход MCC) занимает секунды
+    connect_timeout: 30
+    tools:
+      include:             # ровно 12 READ; PLAN/WRITE добавляются шагом перед автономией
+        - list_accounts
+        - get_campaign_stats
+        - get_adgroup_stats
+        - get_keywords
+        - get_ads
+        - get_search_terms
+        - get_negatives
+        - get_budgets
+        - get_auction_insights
+        - get_account_audit
+        - get_change_history
+        - keyword_ideas
+
+gateway:
+  platforms:
+    telegram:
+      extra:
+        allow_from: ["REPLACE_USER_ID"]              # ваш user id (@userinfobot)
+        group_allowed_chats: ["REPLACE_SUPERGROUP_ID"]  # id супергруппы, отрицательный (-100…)
+        require_mention: true                        # в группе бот отвечает только на упоминание
+        guest_mode: false
+        group_topics:                                # привязка форум-топик → скил (как на скриншоте)
+          - chat_id: "REPLACE_SUPERGROUP_ID"
+            topics:
+              - { name: "Настройка рекламы", thread_id: 0, skill: paid-growth }
+              - { name: "Оптимизация ТикТок", thread_id: 0, skill: wash24-miyki24-agent }
+              # thread_id узнать из URL топика в Telegram Web: t.me/c/<id>/<thread_id>
+
+# ── Опционально (НЕ включать без сверки ключей с cli-config.yaml.example — К10) ──
+# Фоновые расходы Hermes на дешёвую модель. Ключи `auxiliary.*` по живым докам не
+# верифицированы в этом заходе — раскомментировать только после `hermes config check` и
+# ручной сверки, иначе молча игнорируется.
+# auxiliary:
+#   compression:
+#     model: google/gemini-3.1-flash-lite
