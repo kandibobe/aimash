@@ -78,9 +78,11 @@ def test_breakdown_rows_shape():
 
 # ── Редакция ошибок наружу (без aiogram) ────────────────────────────────────────────
 def test_redact_error_scrubs_secret_and_returns_str():
-    out = redact_error(RuntimeError("oauth failed: refresh_token=1//0abcSECRETxyz"))
+    # Синтетический refresh-token (форма '1//', не реальный); тест доказывает редакцию.
+    secret = "1//0abcSECRETxyz"  # gitleaks:allow
+    out = redact_error(RuntimeError(f"oauth failed: refresh_token={secret}"))
     assert isinstance(out, str)
-    assert "1//0abcSECRETxyz" not in out and "Traceback" not in out
+    assert secret not in out and "Traceback" not in out
 
 
 # ── Полный путь обёртки офлайн (SDK подменён) ───────────────────────────────────────
