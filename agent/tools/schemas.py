@@ -23,6 +23,7 @@ from adcopy.validate import (
 from adcopy.validate import validate as _rsa_validate
 from ads.keyword_plan import MAX_SEEDS  # жёсткий лимит Google на число сид-ключей
 from ads.validation import assert_keyword_ok, dedup_keyword_pairs, normalize_keywords
+from core.guards import require_no_mutations
 from core.limits import MONEY_MAX_MICROS, MONEY_MAX_UNITS
 
 
@@ -1635,7 +1636,5 @@ ANALYSIS_TOOL_NAMES = frozenset(t["function"]["name"] for t in ANALYSIS_TOOLS)
 
 # S4 (construction-time): ни один аналитический инструмент не является мутацией. Провал = баг
 # конфигурации → роняем импорт немедленно (лучше, чем тихо открыть денежный путь в read-only цикле).
-assert ANALYSIS_TOOL_NAMES.isdisjoint(MUTATION_TOOLS), (
-    "ANALYSIS_TOOLS содержит мутационный инструмент (нарушение S4/GR6): "
-    f"{ANALYSIS_TOOL_NAMES & MUTATION_TOOLS}"
-)
+# Не `assert`: под `-O` он вырезается из байткода, и гард исчезает молча — см. `core/guards.py`.
+require_no_mutations(ANALYSIS_TOOL_NAMES, MUTATION_TOOLS, rule="S4/GR6", subject="ANALYSIS_TOOLS")

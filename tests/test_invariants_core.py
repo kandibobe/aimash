@@ -20,8 +20,10 @@
 from __future__ import annotations
 
 import ast
+import os
 import pathlib
 import re
+import subprocess
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -362,4 +364,119 @@ def test_polling_drops_pending_updates():
     assert drop_pos != -1, "drop_pending_updates(True) пропал из bot/main.py (1F7)"
     assert poll_pos != -1 and drop_pos < poll_pos, (
         "drop_pending_updates должен идти ДО start_polling"
+    )
+
+
+# ── Construction-time гарды не должны быть `assert` (вырезается под -O) ────────────
+# Класс бага, а не два экземпляра: `assert` на уровне модуля читается как гард, но `python -O`
+# выбрасывает его из байткода целиком. И4 (MCP READ без мутаций) и S4 (аналитический цикл без
+# мутаций) стояли именно так. Ниже — два теста: механизм переживает -O, и в продовых пакетах
+# module-level `assert` больше нет ни одного. Подробности — `core/guards.py`.
+
+# Пакеты рантайма (tests/scripts/migrations сознательно вне: там assert — рабочий инструмент).
+_PROD_PACKAGES = (
+    "adcopy",
+    "ads",
+    "agent",
+    "app",
+    "bot",
+    "clients",
+    "confirm",
+    "core",
+    "db",
+    "keywords",
+    "mcp_server",
+    "reports",
+    "scheduler",
+)
+
+
+def _run_probe(code: str, *, optimized: bool) -> subprocess.CompletedProcess[str]:
+    """Прогнать код в чистом интерпретаторе; optimized=True → `-O` (assert'ы вырезаны)."""
+    args = [sys.executable] + (["-O"] if optimized else []) + ["-c", code]
+    return subprocess.run(
+        args,
+        cwd=str(_REPO_ROOT),
+        env={
+            **os.environ,
+            "PYTHONPATH": str(_REPO_ROOT),
+            "ENV": "dev",  # prod fail-fast на пустом whitelist уронил бы зонд не по делу
+            "PYTHONIOENCODING": "utf-8",
+        },
+        capture_output=True,
+        text=True,
+        encoding="utf-8",  # Windows: cp1251 ломает кириллицу в тексте ошибки
+        timeout=180,
+    )
+
+
+_I4_PROBE = """
+import mcp_server.tools_read as tr
+# Подсаживаем мутацию в read-реестр ДО импорта server.py: он читает атрибут модуля на импорте.
+tr.READ_MCP_TOOLS = frozenset(tr.READ_MCP_TOOLS) | {"update_budget"}
+import mcp_server.server  # обязан упасть RuntimeError'ом (И4), а не собраться
+print("ГАРД НЕ СРАБОТАЛ")
+"""
+
+
+def test_i4_guard_survives_python_O():
+    """Мутация, просочившаяся в READ_MCP_TOOLS, роняет импорт `mcp_server.server` И ПОД `-O`.
+
+    Пока гард был `assert`, этот же зонд под `-O` собирался молча: MCP-сервер поднялся бы с
+    мутационным инструментом, выставленным агенту как чтение."""
+    for optimized in (False, True):
+        proc = _run_probe(_I4_PROBE, optimized=optimized)
+        flag = "-O" if optimized else "без -O"
+        assert proc.returncode != 0, (
+            f"И4-гард не сработал ({flag}): импорт прошёл.\n{proc.stdout}\n{proc.stderr}"
+        )
+        assert "И4" in proc.stderr, f"({flag}) упало не на И4:\n{proc.stderr}"
+        assert "update_budget" in proc.stderr, (
+            f"({flag}) сообщение не называет просочившийся инструмент:\n{proc.stderr}"
+        )
+
+
+_S4_PROBE = """
+from core.guards import require_no_mutations
+require_no_mutations({"get_ads", "update_budget"}, {"update_budget"}, rule="S4/GR6", subject="X")
+print("ГАРД НЕ СРАБОТАЛ")
+"""
+
+
+def test_guard_mechanism_itself_survives_python_O():
+    """Сам механизм `core.guards.require_no_mutations` — не assert: под `-O` тоже бросает.
+
+    Отдельно от И4 потому, что S4 (`agent/tools/schemas.py`) вычисляется из наборов того же модуля
+    и подсадить туда мутацию до импорта нельзя — проверяем механизм, а его использование на месте
+    S4 держит тест ниже (module-level assert запрещён)."""
+    for optimized in (False, True):
+        proc = _run_probe(_S4_PROBE, optimized=optimized)
+        flag = "-O" if optimized else "без -O"
+        assert proc.returncode != 0, (
+            f"механизм гарда не сработал ({flag}).\n{proc.stdout}\n{proc.stderr}"
+        )
+        assert "S4/GR6" in proc.stderr, f"({flag}) упало не на S4:\n{proc.stderr}"
+
+
+def test_no_module_level_assert_in_production_packages():
+    """Ни один продовый модуль не держит гард на module-level `assert`.
+
+    Это и есть закрытие класса: конкретные И4/S4 уже переписаны, а тест не даёт вернуть форму —
+    новый construction-time гард обязан звать `core.guards` (или свой `if ...: raise`), иначе
+    красный. `assert` ВНУТРИ функций не трогаем: там он документирует внутренний инвариант, а не
+    охраняет денежный путь, и запрет дал бы шум без пользы."""
+    offenders: list[str] = []
+    for pkg in _PROD_PACKAGES:
+        root = _REPO_ROOT / pkg
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in tree.body:  # ТОЛЬКО верхний уровень модуля
+                if isinstance(node, ast.Assert):
+                    rel = path.relative_to(_REPO_ROOT).as_posix()
+                    offenders.append(f"{rel}:{node.lineno}")
+    assert not offenders, (
+        "module-level `assert` в продовом коде — под `python -O` он исчезает вместе с гардом: "
+        f"{offenders}. Используй `core.guards.require_no_mutations` или явный `if ...: raise`."
     )

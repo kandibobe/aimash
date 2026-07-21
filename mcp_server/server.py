@@ -11,16 +11,15 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from agent.tools.schemas import MUTATION_TOOLS
+from core.guards import require_no_mutations
 from mcp_server.tools_read import READ_MCP_TOOLS, READ_TOOL_FUNCS
 
 # ── И4 (зерно): READ-инструменты НЕ пересекаются с 39 мутационными ──────────────────
 # Провал роняет импорт — лучше, чем тихо открыть мутацию в read-фазе. Полные И1–И8 + injection-корпус
 # — шаг ПЕРЕД WRITE; здесь только read-релевантное зерно (construction-time, как S4 для ANALYSIS_TOOLS).
-_overlap = READ_MCP_TOOLS & MUTATION_TOOLS
-assert not _overlap, (
-    "И4 нарушен: READ-инструменты MCP пересекаются с мутационными "
-    f"(agent.tools.schemas.MUTATION_TOOLS): {sorted(_overlap)}. "
-    "MCP READ-слой не смеет содержать мутации — это денежный путь."
+# Не `assert`: под `-O` он вырезается из байткода, и гард исчезает молча — см. `core/guards.py`.
+require_no_mutations(
+    READ_MCP_TOOLS, MUTATION_TOOLS, rule="И4", subject="READ-инструменты MCP (READ_MCP_TOOLS)"
 )
 
 
