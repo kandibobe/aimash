@@ -10,9 +10,12 @@ pause/resume, гео, стратегии, аудитории, RSA/кампани
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
+from enum import Enum
 
 from ads import mutations, resolve
 from ads.client import DRAFT_ACCOUNT_ID, build_client_async, ensure_allowed
+from ads.freshness import FreshnessMissing, Tier, compare, tier_of
 from ads.read import (  # D6: «было» для гео-мутаций; валюта → биллинг-единица округления денег
     account_currency,
     read_campaign_targeting,
@@ -105,26 +108,59 @@ async def _currency(client, customer_id: str) -> str | None:
         return None
 
 
-async def read_before(operation: str, params: dict, customer_id: str | None = None) -> dict | None:
-    """READ-ONLY снимок ТЕКУЩЕГО значения для показа реального «было→станет» (§5) и как база
-    оптимистичной сверки при исполнении (TOCTOU). None — операция без diff (создание/ключи),
-    кампания не найдена или чтение не удалось (вызывающий честно покажет diff без «было»).
+class SnapshotKind(str, Enum):
+    """Почему снимка нет — Волна 1.1. Три разных причины, которые `read_before` схлопывал в один
+    `None`: «читать нечего по природе операции», «прочитали» и «не смогли прочитать». Первое и
+    третье обязаны различаться — их слипание и есть fail-open: freshness-гард не может отличить
+    «сверять нечего» от «сверка не состоялась»."""
+
+    OK = "ok"
+    NO_DIFF = "no_diff"
+    UNREADABLE = "unreadable"
+
+
+@dataclass(frozen=True, slots=True)
+class Snapshot:
+    """Результат чтения состояния. `data` заполнен только при `kind is OK`."""
+
+    kind: SnapshotKind
+    data: dict | None = None
+    reason: str = ""
+
+
+def _not_found(reason: str = "not_found") -> Snapshot:
+    """Сущность (кампания/группа/объявление/ключ) по имени не нашлась. Это UNREADABLE, а не NO_DIFF:
+    состояние существует, мы его просто не получили. Для STRICT-операции — отказ, и это честно:
+    мутировать то, чего не видно, нельзя (исполнение всё равно упало бы, но уже ПОСЛЕ ✅)."""
+    return Snapshot(SnapshotKind.UNREADABLE, reason=reason)
+
+
+async def read_state(operation: str, params: dict, customer_id: str | None = None) -> Snapshot:
+    """READ-ONLY снимок ТЕКУЩЕГО значения — для показа реального «было→станет» (§5) и как база
+    оптимистичной сверки при исполнении (TOCTOU, `ads.freshness`).
+
+    Та же лестница, что была в `read_before`, но с КЛАССИФИКАЦИЕЙ исхода: отсутствие снимка теперь
+    несёт причину, а не тонет в `None`. Четыре выхода мимо OK:
+      · `not_diffable` / `no_campaign_key` — NO_DIFF, сверять нечего по построению;
+      · имя исключения — UNREADABLE, чтение сорвалось (сеть/доступ/SDK);
+      · `no_branch` — UNREADABLE, а НЕ NO_DIFF: операция объявлена диффабельной, но ветки в лестнице
+        для неё нет. Молча выдать «сверять нечего» здесь значило бы, что новая STRICT-операция,
+        забытая в лестнице, проезжает freshness-гейт как заведомо свежая.
 
     customer_id — аккаунт черновика (дефолт Draft: сегодня мутации только на нём; при будущем
-    расширении потолка вызывающий передаёт активный мутационный аккаунт — см. ads/client.py:28).
-    Возвращаемый dict кладётся в proposals.params['_before'] и сверяется в execute_confirmed."""
+    расширении потолка вызывающий передаёт активный мутационный аккаунт — см. ads/client.py:28)."""
     if operation not in _DIFFABLE_OPS:
-        return None
+        return Snapshot(SnapshotKind.NO_DIFF, reason="not_diffable")
     name = params.get("campaign")
     if not name:
-        return None
+        return Snapshot(SnapshotKind.NO_DIFF, reason="no_campaign_key")
     try:
         cid = normalize_customer_id(customer_id) if customer_id else DRAFT_ACCOUNT_ID
         client = await build_client_async(cid)  # холодная сборка (после /refresh) — вне loop
         if operation == "update_budget":
             ref = await asyncio.to_thread(resolve.find_campaign_by_name, client, cid, name)
             if ref is None:
-                return None
+                return _not_found()
             cur = await _currency(client, cid)
             after = resolve.compute_new_micros(
                 ref.budget_micros, params["mode"], params["value"], currency=cur
@@ -147,51 +183,60 @@ async def read_before(operation: str, params: dict, customer_id: str | None = No
                 if names:
                     snap["shared"] = True
                     snap["shared_campaigns"] = names
-            return snap
+            return Snapshot(SnapshotKind.OK, snap)
         if operation in ("pause_campaign", "resume_campaign", "launch_campaign"):
             ref = await asyncio.to_thread(resolve.find_campaign_by_name, client, cid, name)
             if ref is None:
-                return None
-            return {"kind": "status", "before_status": ref.status}
+                return _not_found()
+            return Snapshot(SnapshotKind.OK, {"kind": "status", "before_status": ref.status})
         if operation == "update_campaign":
             ref = await asyncio.to_thread(resolve.find_campaign_by_name, client, cid, name)
             if ref is None:
-                return None
-            return {"kind": "name", "before_name": ref.name}
+                return _not_found()
+            return Snapshot(SnapshotKind.OK, {"kind": "name", "before_name": ref.name})
         if operation == "set_campaign_network":
             info = await asyncio.to_thread(resolve.campaign_network_settings, client, cid, name)
             if info is None:
-                return None
-            return {
-                "kind": "network",
-                "before_search_partners": bool(info["search_partners"]),
-                "after_search_partners": bool(params.get("search_partners")),
-            }
+                return _not_found()
+            return Snapshot(
+                SnapshotKind.OK,
+                {
+                    "kind": "network",
+                    "before_search_partners": bool(info["search_partners"]),
+                    "after_search_partners": bool(params.get("search_partners")),
+                },
+            )
         if operation == "set_campaign_display_network":
             info = await asyncio.to_thread(resolve.campaign_display_network, client, cid, name)
             if info is None:
-                return None
-            return {
-                "kind": "display_network",
-                "before_display_network": bool(info["display_network"]),
-                "after_display_network": bool(params.get("display_network")),
-            }
+                return _not_found()
+            return Snapshot(
+                SnapshotKind.OK,
+                {
+                    "kind": "display_network",
+                    "before_display_network": bool(info["display_network"]),
+                    "after_display_network": bool(params.get("display_network")),
+                },
+            )
         if operation == "set_campaign_geo_target_type":
             info = await asyncio.to_thread(resolve.campaign_geo_target_type, client, cid, name)
             if info is None:
-                return None
-            return {
-                "kind": "geo_target_type",
-                "before_geo_target_type": str(info["geo_target_type"] or ""),
-                "after_geo_target_type": str(params.get("geo_target_type") or ""),
-            }
+                return _not_found()
+            return Snapshot(
+                SnapshotKind.OK,
+                {
+                    "kind": "geo_target_type",
+                    "before_geo_target_type": str(info["geo_target_type"] or ""),
+                    "after_geo_target_type": str(params.get("geo_target_type") or ""),
+                },
+            )
         if operation in ("pause_ad_group", "resume_ad_group"):
             ag = await asyncio.to_thread(
                 resolve.find_ad_group_by_name, client, cid, name, params.get("ad_group", "")
             )
             if ag is None:
-                return None
-            return {"kind": "status", "before_status": ag.status}
+                return _not_found()
+            return Snapshot(SnapshotKind.OK, {"kind": "status", "before_status": ag.status})
         if operation in ("pause_ad", "resume_ad"):
             ads_found = await asyncio.to_thread(
                 resolve.find_ads_in_group,
@@ -202,12 +247,14 @@ async def read_before(operation: str, params: dict, customer_id: str | None = No
                 params.get("ad", ""),
             )
             if len(ads_found) != 1:  # не найдено/неоднозначно — честно без «было»
-                return None
-            return {"kind": "status", "before_status": ads_found[0].status}
+                return _not_found("ambiguous" if ads_found else "not_found")
+            return Snapshot(
+                SnapshotKind.OK, {"kind": "status", "before_status": ads_found[0].status}
+            )
         if operation == "update_bid":
             ad_groups = await asyncio.to_thread(resolve.find_ad_groups, client, cid, name)
             if not ad_groups:
-                return None
+                return _not_found()
             cur = await _currency(client, cid)
             before_list = [int(ag.cpc_bid_micros) for ag in ad_groups]
             after_list = [
@@ -218,13 +265,16 @@ async def read_before(operation: str, params: dict, customer_id: str | None = No
                 )
                 for ag in ad_groups
             ]
-            return {
-                "kind": "bid",
-                "before_micros": before_list,
-                "after_micros": after_list,
-                "n_groups": len(ad_groups),
-                "currency": cur or "",
-            }
+            return Snapshot(
+                SnapshotKind.OK,
+                {
+                    "kind": "bid",
+                    "before_micros": before_list,
+                    "after_micros": after_list,
+                    "n_groups": len(ad_groups),
+                    "currency": cur or "",
+                },
+            )
         if operation == "update_keyword_bid":
             # Ф1: ставка на уровне КЛЮЧА. База «было» — effective-ставка критерия (своя или
             # унаследованная от группы): именно она играет на аукционе, от неё честен процент.
@@ -238,54 +288,93 @@ async def read_before(operation: str, params: dict, customer_id: str | None = No
                 params.get("match_type") or None,
             )
             if not kws:
-                return None
+                return _not_found()
             cur = await _currency(client, cid)
-            return {
-                "kind": "keyword_bid",
-                "before_micros": [int(k.bid_micros) for k in kws],
-                # СВОЯ ли была ставка у критерия. Нужно откату (ревизия волны): у ключа без своей
-                # ставки «было» — это ставка ГРУППЫ, и set_to вернул бы не прежнее состояние, а НОВУЮ
-                # собственную ставку — наследование от группы молча оборвалось бы. Такой откат
-                # `_reverse_spec` не предлагает вовсе.
-                "own_bid": [bool(k.own_bid) for k in kws],
-                "after_micros": [
-                    int(
-                        resolve.compute_new_micros(
-                            k.bid_micros, params["mode"], params["value"], currency=cur
+            return Snapshot(
+                SnapshotKind.OK,
+                {
+                    "kind": "keyword_bid",
+                    "before_micros": [int(k.bid_micros) for k in kws],
+                    # СВОЯ ли была ставка у критерия. Нужно откату (ревизия волны): у ключа без своей
+                    # ставки «было» — это ставка ГРУППЫ, и set_to вернул бы не прежнее состояние, а
+                    # НОВУЮ собственную ставку — наследование от группы молча оборвалось бы. Такой
+                    # откат `_reverse_spec` не предлагает вовсе.
+                    "own_bid": [bool(k.own_bid) for k in kws],
+                    "after_micros": [
+                        int(
+                            resolve.compute_new_micros(
+                                k.bid_micros, params["mode"], params["value"], currency=cur
+                            )
                         )
-                    )
-                    for k in kws
-                ],
-                "n_keywords": len(kws),
-                "keyword": kws[0].text,
-                "ad_groups": [k.ad_group for k in kws],
-                "currency": cur or "",
-            }
+                        for k in kws
+                    ],
+                    "n_keywords": len(kws),
+                    "keyword": kws[0].text,
+                    "ad_groups": [k.ad_group for k in kws],
+                    "currency": cur or "",
+                },
+            )
         if operation in ("set_geo_location", "set_geo_proximity"):
             # D6: текущее ГЕО (локации/радиусы) для «было→станет». Резолвим кампанию по имени → id,
             # затем read_campaign_targeting. Снимок только для показа (дрейф гео не проверяем).
             ref = await asyncio.to_thread(resolve.find_campaign_by_name, client, cid, name)
             if ref is None:
-                return None
+                return _not_found()
             t = await asyncio.to_thread(read_campaign_targeting, client, cid, ref.id)
-            return {
-                "kind": "geo",
-                "before_locations": list(t.locations),
-                "before_proximity": list(t.proximity),
-            }
+            return Snapshot(
+                SnapshotKind.OK,
+                {
+                    "kind": "geo",
+                    "before_locations": list(t.locations),
+                    "before_proximity": list(t.proximity),
+                },
+            )
         if operation == "set_bidding_strategy":
             info = await asyncio.to_thread(resolve.campaign_bidding_strategy, client, cid, name)
             if info is None:
-                return None
-            return {"kind": "bidding", "before_strategy": info["strategy"]}
+                return _not_found()
+            return Snapshot(
+                SnapshotKind.OK, {"kind": "bidding", "before_strategy": info["strategy"]}
+            )
     except resolve.DecreaseBelowZero:
         # НЕ сбой чтения, а невыполнимая команда («снизь бюджет на 200» при бюджете 100). Пробрасываем:
         # вызывающий откажет ДО кнопок ✅. Проглотить её здесь = показать карточку без «было» и упасть
         # уже ПОСЛЕ подтверждения (claim сожжён, операция не применена).
         raise
-    except Exception:  # сеть/доступ/SDK — не блокируем показ черновика, просто без «было»
-        return None
-    return None
+    except Exception as e:  # noqa: BLE001 — сеть/доступ/SDK: показ черновика не блокируем…
+        # …но и не выдаём это за «сверять нечего»: причина уезжает в Snapshot, а freshness-гейт
+        # решает по тиру, что с ней делать. Имя класса исключения — безопасный ярлык (текст
+        # исключения может нести токен, правило 5).
+        return Snapshot(SnapshotKind.UNREADABLE, reason=type(e).__name__)
+    # Терминальный путь: операция объявлена в _DIFFABLE_OPS, но ветки для неё в лестнице нет.
+    # UNREADABLE, а не NO_DIFF — иначе новая STRICT-операция, забытая здесь, тихо получила бы
+    # аттестацию «сверять нечего» и проехала бы гейт как заведомо свежая.
+    return Snapshot(SnapshotKind.UNREADABLE, reason="no_branch")
+
+
+async def read_before(operation: str, params: dict, customer_id: str | None = None) -> dict | None:
+    """Совместимый адаптер над `read_state`: снимок при успехе, иначе None (контракт не менялся).
+
+    Остаётся для путей показа карточки, которым причина не нужна. Всё, что ПРИНИМАЕТ РЕШЕНИЕ по
+    свежести, обязано звать `read_state` — здесь причина отказа уже потеряна."""
+    snap = await read_state(operation, params, customer_id=customer_id)
+    return snap.data if snap.kind is SnapshotKind.OK else None
+
+
+def attach_freshness(params: dict, snap: Snapshot) -> dict:
+    """Прикрепить к черновику снимок И аттестацию того, ЧЕМ он является.
+
+    `_before` кладётся как раньше — только при успешном чтении. Новое здесь `_freshness`: он есть
+    ВСЕГДА, в том числе когда снимка нет. Черновик без маркера freshness-гейт обязан считать
+    непрочитанным (fail-closed), поэтому «забыли прикрепить» и «не смогли прочитать» дают один и тот
+    же исход — отказ на STRICT-операции, а не тихий пропуск.
+
+    Оба ключа инертны для исполнения: `apply_*` читают свои ключи, а `db/history.py:_INERT_KEYS`
+    вычищает служебные из повтора `/recent`."""
+    out = {**params, "_freshness": {"kind": snap.kind.value, "reason": snap.reason}}
+    if snap.kind is SnapshotKind.OK and snap.data is not None:
+        out["_before"] = snap.data  # инертно для execute (apply_* читают свои ключи)
+    return out
 
 
 def _assert_no_drift(params: dict, current) -> None:
@@ -318,6 +407,58 @@ def _assert_no_drift(params: dict, current) -> None:
         )
 
 
+async def _verify_freshness(operation: str, params: dict, customer_id: str) -> None:
+    """Гейт B: перечитать состояние ЖИВЬЁМ и сверить с тем, что человек видел на карточке.
+
+    Один вызов на все 41 операцию — вместо трёх точечных `_assert_no_drift`. Порядок здесь
+    существенный: гейт стоит ПОСЛЕ `ensure_allowed` (чужой аккаунт не читаем даже ради сверки) и ДО
+    `claim` внутри `apply_*` — отказ по свежести НЕ сжигает одноразовое подтверждение, человек может
+    пересоздать черновик и подтвердить заново.
+
+    Тир решает, чем является отсутствие данных:
+      · STRICT — «не читали»/«не перечитали» ⇒ ОТКАЗ. Именно этого не хватало: `_assert_no_drift`
+        молча выходил и на отсутствии снимка, и на сбое чтения;
+      · ADVISORY — признанный долг (`ads.freshness.ADVISORY_DEBT`): сверяем, когда можем, иначе
+        пишем в лог. WARN — только когда чтение реально сорвалось; структурное «снимка у этой
+        операции пока нет» идёт INFO, иначе полезный сигнал утонет в шуме;
+      · NO_DIFF — сверять нечего по природе операции, выходим сразу.
+
+    `DecreaseBelowZero` из перечитывания намеренно НЕ конвертируем: её текст (код, golden rule #4)
+    точнее нашего — он называет текущее значение и что с ним делать."""
+    tier = tier_of(operation)  # неизвестная операция ⇒ FreshnessMissing (deny-by-default)
+    if tier is Tier.NO_DIFF:
+        return
+    marker = params.get("_freshness")
+    marker = marker if isinstance(marker, dict) else {}
+    stored = params.get("_before")
+    if marker.get("kind") != SnapshotKind.OK.value or not isinstance(stored, dict):
+        why = marker.get("reason") or marker.get("kind") or "no_marker"
+        if tier is Tier.STRICT:
+            raise FreshnessMissing(
+                f"состояние для '{operation}' не читалось при показе черновика ({why}) — "
+                "выполнение отклонено; создай черновик заново"
+            )
+        (log.warning if marker.get("kind") == SnapshotKind.UNREADABLE.value else log.info)(
+            "freshness: сверка пропущена op=%s tier=advisory cause=%s", operation, why
+        )
+        return
+    live = await read_state(operation, params, customer_id=customer_id)
+    if live.kind is not SnapshotKind.OK or live.data is None:
+        if tier is Tier.STRICT:
+            raise FreshnessMissing(
+                f"не удалось перечитать состояние перед исполнением '{operation}' "
+                f"({live.kind.value}/{live.reason}) — выполнение отклонено; повтори команду"
+            )
+        log.warning(
+            "freshness: перечитать не удалось op=%s tier=advisory kind=%s cause=%s",
+            operation,
+            live.kind.value,
+            live.reason,
+        )
+        return
+    compare(operation, params, stored, live.data)
+
+
 async def _apply_confirmed(store, confirmation_id: str) -> dict:
     """Внутреннее ядро исполнения: резолв → gated apply_*. store — ConfirmStore. Возвращает result
     операции или бросает ошибку. Публичный вход — execute_confirmed (оборачивает окном пост-
@@ -344,6 +485,11 @@ async def _apply_confirmed(store, confirmation_id: str) -> dict:
     # решение владельца 2026-07); повторный ensure_allowed гарантирует, что аккаунт всё ещё в потолке.
     customer_id = normalize_customer_id(p.customer_id)
     ensure_allowed(customer_id)
+    # Гейт B (Волна 1.1): состояние перечитывается живьём и сверяется со снимком карточки — ЗДЕСЬ,
+    # после замка и до claim/SDK. Точечные `_assert_no_drift` в лестнице ниже остаются: они сверяют
+    # ровно ту величину, от которой считается относительный режим (та же выборка, без окна между
+    # сверкой и расчётом), тогда как гейт B даёт общий контракт на все операции.
+    await _verify_freshness(op, params, customer_id)
     client = await build_client_async(customer_id)
 
     if op == "update_budget":

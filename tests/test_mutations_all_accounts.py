@@ -29,6 +29,7 @@ import ads.mutations as mut  # noqa: E402
 import ads.service as svc  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID, ensure_allowed  # noqa: E402
 from confirm.store import ConfirmStore  # noqa: E402
+from conftest import attested  # noqa: E402
 from core.config import settings  # noqa: E402
 from db.session import init_db  # noqa: E402
 
@@ -97,7 +98,11 @@ async def _mk_confirmed(
         confirmation_id=cid,
         operation=operation,
         customer_id=customer_id,
-        params=params or {"campaign": "X"},
+        # Аттестация свежести (Волна 1.1): pause_campaign — STRICT, без снимка гейт B откажет ДО
+        # ensure_allowed-ассертов, ради которых написан файл. Снимок = статус _Ref в тестах.
+        params=attested(
+            params or {"campaign": "X"}, {"kind": "status", "before_status": "ENABLED"}
+        ),
         summary="s",
         chat_id=chat_id,
         user_initiated=user_initiated,
@@ -131,7 +136,9 @@ async def test_full_gate_executes_on_confirmed_child_proposal(monkeypatch):
     with _allowed("all"), _visible_child():
         cid = await _mk_confirmed(store, customer_id=CHILD)
         result = await svc.execute_confirmed(store, cid)
-    assert result == {"applied": True}
+    # Точное равенство больше не годится: со снимком `_before` включается пост-проверка Доп.2A и
+    # дописывает в результат ключ `verification` (SDK замокан — сверка честно говорит verified=False).
+    assert result["applied"] is True
     assert seen["customer_id"] == CHILD  # исполнено на боевом штампе черновика, не на Draft
 
 

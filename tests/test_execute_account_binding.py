@@ -21,6 +21,7 @@ import ads.mutations as mut  # noqa: E402
 import ads.service as svc  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
 from confirm.store import ConfirmStore  # noqa: E402
+from conftest import attested  # noqa: E402
 from core.config import settings  # noqa: E402
 from db.session import init_db  # noqa: E402
 
@@ -31,7 +32,9 @@ async def _mk_confirmed(store: ConfirmStore, *, customer_id: str, chat_id: int =
         confirmation_id=cid,
         operation="pause_campaign",
         customer_id=customer_id,
-        params={"campaign": "X"},
+        # pause_campaign — STRICT: черновик без аттестации свежести гейт B не пропустит (Волна 1.1).
+        # Снимок совпадает со статусом _Ref в тестах ниже — сверка проходит, дрейфа нет.
+        params=attested({"campaign": "X"}, {"kind": "status", "before_status": "ENABLED"}),
         summary="s",
         chat_id=chat_id,
         user_initiated=True,
@@ -69,7 +72,9 @@ async def test_execute_confirmed_uses_proposal_customer_id(monkeypatch):
     monkeypatch.setattr(svc, "build_client_async", _fake_client)
 
     result = await svc.execute_confirmed(store, cid)
-    assert result == {"applied": True}
+    # Со снимком `_before` включается пост-проверка Доп.2A и дописывает `verification` (SDK замокан →
+    # verified=False, это честно). Тест про штамп аккаунта, а не про форму результата.
+    assert result["applied"] is True
     assert seen["customer_id"] == DRAFT_ACCOUNT_ID  # штамп черновика, не константа в обход
 
 

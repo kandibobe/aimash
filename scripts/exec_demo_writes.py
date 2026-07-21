@@ -23,7 +23,7 @@ from sqlalchemy import select  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID, build_client  # noqa: E402
 from ads.read import list_campaigns  # noqa: E402
 from ads.resolve import find_ad_groups, find_campaign_by_name  # noqa: E402
-from ads.service import execute_confirmed  # noqa: E402
+from ads.service import attach_freshness, execute_confirmed, read_state  # noqa: E402
 from confirm.gate import Proposal  # noqa: E402
 from confirm.store import ConfirmStore  # noqa: E402
 from core.config import require_dev_env  # noqa: E402
@@ -34,6 +34,9 @@ from db.session import Session, init_db  # noqa: E402
 async def run_op(store: ConfirmStore, operation: str, params: dict, summary: str) -> None:
     """Полный путь одной операции: save → (без «да» блок) → confirm → execute."""
     print(f"\n── {operation} ──")
+    # Аттестация свежести тем же хелпером, что и карточка бота: демо обязано ПРОХОДИТЬ гейт,
+    # а не обходить его — dev-байпаса у freshness нет (Волна 1.1).
+    params = attach_freshness(params, await read_state(operation, params))
     p = Proposal(
         operation=operation, summary=summary, params=params, chat_id=0, user_initiated=True
     )

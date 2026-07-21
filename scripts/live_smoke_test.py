@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ads.client import DRAFT_ACCOUNT_ID, build_client, ensure_allowed  # noqa: E402
 from ads.read import account_currency, account_stats, list_campaigns  # noqa: E402
-from ads.service import execute_confirmed, read_before  # noqa: E402
+from ads.service import attach_freshness, execute_confirmed, read_state  # noqa: E402
 from agent.tools.schemas import SCHEMAS  # noqa: E402
 from confirm.store import ConfirmStore, list_recent_audit  # noqa: E402
 from db.session import init_db  # noqa: E402
@@ -48,9 +48,9 @@ async def _gated_op(store: ConfirmStore, operation: str, campaign: str) -> dict:
     """Один проход полного confirm-гейта (как бот на «да»): валидация схемой → proposal
     (user_initiated) → confirm → execute_confirmed → apply_* → finalize + audit."""
     params = SCHEMAS[operation](campaign=campaign).model_dump()
-    before = await read_before(operation, params)  # снимок статуса для «было→станет» и сверки
-    if before is not None:
-        params = {**params, "_before": before}
+    # Снимок + аттестация свежести ровно тем же хелпером, что и боевой путь карточки: смоук обязан
+    # проходить freshness-гейт, а не обходить его (dev-байпаса нет — Волна 1.1).
+    params = attach_freshness(params, await read_state(operation, params))
     cid = uuid.uuid4().hex
     await store.save_proposal(
         confirmation_id=cid,

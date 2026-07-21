@@ -51,6 +51,23 @@ os.environ["GOOGLE_ADS_LOGIN_CUSTOMER_IDS"] = ""
 import bot.main  # noqa: E402,F401
 
 
+def attested(params: dict, before: dict | None = None) -> dict:
+    """params с аттестацией свежести — как их кладёт карточка бота (Волна 1.1).
+
+    Тест, который строит черновик руками и зовёт `execute_confirmed`, обязан пройти гейт B, а не
+    обойти его. Собираем аттестацию ТЕМ ЖЕ хелпером (`ads.service.attach_freshness`), а не литералом:
+    изменится форма маркера — тесты поедут за кодом, а не начнут врать. `before=None` даёт честное
+    «прочитать не смогли» (UNREADABLE) — для проверок отказа STRICT-операции."""
+    from ads.service import Snapshot, SnapshotKind, attach_freshness
+
+    snap = (
+        Snapshot(SnapshotKind.OK, before)
+        if before is not None
+        else Snapshot(SnapshotKind.UNREADABLE, reason="test")
+    )
+    return attach_freshness(params, snap)
+
+
 @pytest.fixture(autouse=True)
 def _reset_discovered_children_cache():
     """Изоляция: набор обнаруженных дочерних MCC (`ads.client._READ_DISCOVERED`/`_READ_CHILDREN_META`)

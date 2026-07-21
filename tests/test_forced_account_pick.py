@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+import ads.service as svc  # noqa: E402
 import bot.main as bm  # noqa: E402
 
 
@@ -267,13 +268,15 @@ async def _capture_present_summary(monkeypatch, customer_id):
     """Прогнать _present_proposal с заглушками, вернуть summary, ушедший в save_proposal."""
     captured: dict = {}
 
-    async def _fake_before(*a, **kw):
-        return None
+    async def _fake_state(*a, **kw):
+        # Волна 1.1: карточка строится из Snapshot, а не из голого dict. «Не прочитали» —
+        # это UNREADABLE, а не None: тест баннера не должен подсовывать несуществующий класс.
+        return svc.Snapshot(svc.SnapshotKind.UNREADABLE, reason="test")
 
     async def _fake_save(**kw):
         captured.update(kw)
 
-    monkeypatch.setattr(bm, "read_before", _fake_before)
+    monkeypatch.setattr(bm, "read_state", _fake_state)
     monkeypatch.setattr(bm.STORE, "save_proposal", _fake_save)
     monkeypatch.setattr(bm, "ensure_allowed", lambda cid: None)  # не-Draft проходит замок
     monkeypatch.setattr(bm.ux, "proposal_fits", lambda *_a, **_k: True)

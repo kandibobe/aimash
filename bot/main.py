@@ -52,6 +52,7 @@ from ads.assets import (
     save_pending_media,
 )
 from ads.client import DRAFT_ACCOUNT_ID, ensure_allowed, ensure_read_allowed
+from ads.freshness import strip_attestation
 from ads.mutations import GDN_BUSINESS_NAME_MAX, VIDEO_DESCRIPTION_MAX
 from ads.resolve import (
     MONEY_OPS,
@@ -60,7 +61,7 @@ from ads.resolve import (
     detect_currency_token,
     find_ad_groups,
 )
-from ads.service import execute_confirmed, read_before
+from ads.service import attach_freshness, execute_confirmed, read_state
 from clients import crawl_jobs, crawler
 from clients.dossier import build_dossier, dossier_patch
 from clients.dossier_render import render_llm_context, render_markdown
@@ -1699,10 +1700,12 @@ async def _present_proposal(
             )
             return
     # §5: читаем ТЕКУЩЕЕ значение (бюджет/ставку/статус) ДО показа → реальный diff «было → станет»
-    # и снимок-база для оптимистичной сверки при исполнении (TOCTOU). read_before fail-safe (None).
+    # и снимок-база для оптимистичной сверки при исполнении (TOCTOU). Волна 1.1: берём Snapshot, а не
+    # голый dict — исполнению нужна не только сама база, но и КЛАССИФИКАЦИЯ («не прочитали» ≠ «нечего
+    # сверять»), иначе freshness-гейт на исполнении не отличит одно от другого.
     async with ux.typing_action(message):
         try:
-            before = await read_before(operation, params, customer_id=customer_id)
+            snap = await read_state(operation, params, customer_id=customer_id)
         except DecreaseBelowZero as e:
             # §5: «снизь бюджет на 200» при бюджете 100 — невыполнимо. Отказ ДО кнопок; текст
             # сформирован КОДОМ (не SDK/не модель) → редактировать нечего.
@@ -1738,8 +1741,9 @@ async def _present_proposal(
             if mismatch:
                 await message.answer("⚠️ " + mismatch)
                 return
-    if before is not None:
-        params = {**params, "_before": before}  # инертно для execute (apply_* читают свои ключи)
+    # Снимок + аттестация свежести в одном месте: `_before` как раньше (только при успехе),
+    # `_freshness` — всегда. Без маркера черновик считается непрочитанным (fail-closed).
+    params = attach_freshness(params, snap)
     # Человекочитаемая сводка по operation+params (деньги — реальное «40.00 → 48.00 (+20%)»).
     # Для create_rsa/create_gdn у вызывающего свой богатый summary → fmt вернёт "".
     display = texts.fmt_mutation_summary(operation, params) or summary
@@ -1772,9 +1776,10 @@ async def _present_proposal(
         chat_id, campaign=_campaign_name_from_params(operation, params), customer_id=customer_id
     )
     # §2B: запоминаем params последнего create_search_campaign (клон/новая кампания) — для
-    # /savetemplate «сохранить как шаблон». _before инертен для шаблона → исключаем.
+    # /savetemplate «сохранить как шаблон». Снимок и аттестация свежести привязаны к ЭТОМУ ходу:
+    # шаблон, унёсший `_freshness` с собой, дал бы будущему черновику ЧУЖОЕ «прочитано» (Волна 1.1).
     if operation == "create_search_campaign":
-        _LAST_SEARCH_PARAMS[chat_id] = {k: v for k, v in params.items() if k != "_before"}
+        _LAST_SEARCH_PARAMS[chat_id] = strip_attestation(params)
     # Большой список ключей/минус-слов (ТЗ §5) → полный список .xlsx-вложением, кнопки на коротком
     # сообщении; в самой сводке список усечён до KW_INLINE_MAX с пометкой «…ещё N во вложении».
     # P1-6: необратимые удаления → двойное подтверждение (первый шаг), остальное — обычная ✅/❌.

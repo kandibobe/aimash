@@ -18,7 +18,7 @@ from sqlalchemy import select  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID, build_client  # noqa: E402
 from ads.read import list_campaigns  # noqa: E402
 from ads.resolve import find_campaign_by_name  # noqa: E402
-from ads.service import execute_confirmed  # noqa: E402
+from ads.service import attach_freshness, execute_confirmed, read_state  # noqa: E402
 from confirm.gate import Proposal  # noqa: E402
 from confirm.store import ConfirmStore  # noqa: E402
 from core.config import require_dev_env  # noqa: E402
@@ -41,10 +41,14 @@ async def main() -> None:
 
     store = ConfirmStore()
     target = (ref.budget_micros // 1_000_000) + 2  # +2 единицы валюты аккаунта — видимая смена
+    raw = {"campaign": name, "mode": "set_to", "value": target, "currency": "AUD"}
+    # update_budget — STRICT: без аттестации свежести исполнение откажет. Демо проходит гейт тем же
+    # хелпером, что и карточка бота; dev-байпаса нет (Волна 1.1).
+    raw = attach_freshness(raw, await read_state("update_budget", raw))
     p = Proposal(
         operation="update_budget",
         summary=f"бюджет '{name}': {ref.budget_micros / 1e6:.2f} → {target:.2f}",
-        params={"campaign": name, "mode": "set_to", "value": target, "currency": "AUD"},
+        params=raw,
         chat_id=0,
         user_initiated=True,
     )

@@ -24,7 +24,7 @@ from sqlalchemy import select  # noqa: E402
 
 from ads.client import DRAFT_ACCOUNT_ID, build_client  # noqa: E402
 from ads.read import list_campaigns  # noqa: E402
-from ads.service import execute_confirmed  # noqa: E402
+from ads.service import attach_freshness, execute_confirmed, read_state  # noqa: E402
 from confirm.gate import Proposal  # noqa: E402
 from confirm.store import ConfirmStore  # noqa: E402
 from core.config import require_dev_env  # noqa: E402
@@ -56,6 +56,8 @@ async def main() -> None:
         "country_code": _COUNTRY,
     }
     summary = f"set_geo_proximity '{name}': радиус {_RADIUS_KM} км вокруг {_CITY} ({_COUNTRY})"
+    # Аттестация свежести тем же хелпером, что и карточка бота (Волна 1.1); dev-байпаса нет.
+    params = attach_freshness(params, await read_state("set_geo_proximity", params))
     p = Proposal(
         operation="set_geo_proximity",
         summary=summary,

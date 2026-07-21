@@ -12,13 +12,17 @@ from datetime import datetime
 
 from sqlalchemy import select
 
+from ads.freshness import ATTESTATION_KEYS
 from db.models import Proposal
 from db.session import Session
 
 # Ключи, инертные для повтора (служебные снимки/резолвы/метки) — не показываем и не повторяем.
 # _rec_uid кладёт bot._advise_apply (привязка замера эффекта к рекомендации) — повтору он не нужен и,
 # если схемы когда-нибудь ужесточат до extra="forbid", лишний ключ уронил бы повтор из /recent.
-_INERT_KEYS = frozenset({"_before", "_audience_names", "_rec_uid"})
+# ATTESTATION_KEYS (_before/_freshness, Волна 1.1) — снимок и аттестация ТОГО хода; повтор обязан
+# получить СВОЮ, свежую, иначе унаследовал бы чужое «прочитано» и проехал бы гейт на устаревшем
+# состоянии. Берём общей константой, а не литералом: новый ключ аттестации добавляется в одном месте.
+_INERT_KEYS = ATTESTATION_KEYS | {"_audience_names", "_rec_uid"}
 
 
 @dataclass
