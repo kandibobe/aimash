@@ -250,6 +250,7 @@ from core.errors import capture_exception
 from core.limits import MONEY_MAX_UNITS  # единый источник денежного потолка (defense-in-depth)
 from core.logging import log, redact_text, setup_logging
 from core.observability import init_observability
+from core.provenance import human_turn  # Волна 1.4: человеческий бит поднимает только whitelist
 from core.resilience import run_ads_read_call
 from db.session import (
     acquire_single_instance_lock,
@@ -529,6 +530,15 @@ def _event_chat_id(event: object) -> int | None:
     return None
 
 
+def _event_user_id(event: object) -> int | None:
+    """Telegram user_id автора события (Message.from_user / CallbackQuery.from_user) — «кто», а не
+    «где». В private-чате совпадает с chat_id, но провенанс черновика (proposals.author_user_id)
+    пишем именно отсюда: доверенный слой должен фиксировать человека, а не контейнер разговора.
+    None (событие без автора) допустим — бит человеческого хода от него не зависит."""
+    u = getattr(event, "from_user", None)
+    return getattr(u, "id", None) if u is not None else None
+
+
 def _event_chat_type(event: object) -> str | None:
     """Тип чата ('private'|'group'|'supergroup'|'channel') из Message- или CallbackQuery-события."""
     chat = getattr(event, "chat", None)  # Message-like
@@ -627,7 +637,15 @@ class WhitelistMiddleware(BaseMiddleware):
         if ctype is not None and ctype != "private":
             log.warning("заблокирован не-private чат %s (тип %s)", uid, ctype)
             return
-        return await handler(event, data)
+        # ЕДИНСТВЕННАЯ точка, где поднимается человеческий бит провенанса (Волна 1.4, И3). Здесь и
+        # только здесь установлено всё, чего он требует: апдейт приехал по доверенному каналу
+        # (Telegram-поллинг), от id из whitelist, в private-чате (где chat_id == человек). Бит живёт
+        # в contextvar, аргументом никуда не передаётся и наверх не всплывает: ConfirmStore
+        # .save_proposal снимет его сам в момент СОЗДАНИЯ черновика. Ставим внутри middleware, а не
+        # отдельной мидлварью после неё, — чтобы «человеческий ход» нельзя было получить, не пройдя
+        # whitelist: перестановка регистрации не отвязала бы одно от другого.
+        with human_turn(actor_user_id=_event_user_id(event)):
+            return await handler(event, data)
 
 
 class LangMiddleware(BaseMiddleware):

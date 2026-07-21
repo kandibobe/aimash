@@ -46,6 +46,7 @@ class FakeProposal:
         self.operation = "create_search_campaign"
         self.status = "confirmed"
         self.user_initiated = True
+        self.origin_human_turn = True  # Волна 1.4: карточку создал человеческий ход
 
 
 class FakeStore:

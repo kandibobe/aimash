@@ -41,6 +41,13 @@ class FakeProposal:
     operation: str
     status: str
     user_initiated: bool
+    # Волна 1.4: второй бит провенанса. None ⇒ зеркалим user_initiated — здесь проверяется SDK-путь,
+    # а не провенанс, и расщепление битов у настоящего ConfirmStore живёт в test_provenance_gate.py.
+    origin_human_turn: bool | None = None
+
+    def __post_init__(self) -> None:
+        if self.origin_human_turn is None:
+            self.origin_human_turn = self.user_initiated
 
 
 class FakeStore:

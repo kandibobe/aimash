@@ -18,6 +18,11 @@ TTL — тоже в CAS, а не в фоновой джобе (Волна 1.2). 
 гардом она больше не является. Это не заменяет freshness-recheck (сверку снимка с живым Google Ads,
 Волна 1.1): TTL ограничивает ВОЗРАСТ подтверждения, freshness — РАСХОЖДЕНИЕ данных.
 
+Провенанс хода штампует САМ стор (Волна 1.4): `origin_human_turn`/`author_user_id`/`run_id` берутся
+из `core.provenance`, аргументов для них у `save_proposal` нет. `user_initiated` — по-прежнему
+аргумент, и в headless-контуре его напишет вызывающий (MCP-инструмент, cron, self-improvement-форк);
+второй бит писать некому — его поднимает только доверенный вход. Денежные `apply_*` требуют оба.
+
 Хранилище — db.models (Proposal/AuditLog) на движке из DATABASE_URL (dev: SQLite). Секретов тут нет.
 """
 
@@ -32,6 +37,7 @@ from sqlalchemy import CursorResult, func, select, update
 
 from core.config import settings
 from core.logging import log, redact_text
+from core.provenance import get_provenance
 from db.models import AuditLog, Proposal
 from db.session import Session, db_dt
 
@@ -92,6 +98,10 @@ class ConfirmedProposal:
     customer_id: str
     summary: str
     chat_id: int
+    # Волна 1.4 — второй, независимый бит провенанса (см. save_proposal). Дефолт False, потому что
+    # позиционное конструирование в старом коде/тестах не должно молча выдавать «это был человек»:
+    # отсутствие сведений о провенансе = машинный ход = отказ на денежной операции (правило 10).
+    origin_human_turn: bool = False
 
 
 class ConfirmStore:
@@ -108,6 +118,16 @@ class ConfirmStore:
         chat_id: int,
         user_initiated: bool = False,
     ) -> None:
+        """Создать черновик (pending). Провенанс хода — `origin_human_turn`/`author_user_id`/`run_id`
+        — стор берёт САМ из `core.provenance`, и параметра для него нет намеренно (Волна 1.4).
+
+        `user_initiated` остаётся аргументом ради обратной совместимости вызывающих, но одного его
+        мало: аргумент — это то, что напишет вызывающий, а в headless-контуре вызывающим станет
+        MCP-инструмент, cron-джоба или self-improvement-форк. Второй бит подделать нечем: поднять
+        его может только вход в `human_turn(...)`, а его открывает единственное место — доверенный
+        слой Telegram (`bot.main.WhitelistMiddleware`), уже установивший, что апдейт пришёл от
+        живого человека из whitelist в private-чате. Денежные `apply_*` требуют ОБА бита."""
+        prov = get_provenance()
         async with Session() as s:
             s.add(
                 Proposal(
@@ -118,6 +138,9 @@ class ConfirmStore:
                     params=params,
                     chat_id=chat_id,
                     user_initiated=user_initiated,
+                    origin_human_turn=prov.human_turn,
+                    author_user_id=prov.actor_user_id,
+                    run_id=prov.run_id[:16],  # 8 hex; срез — страховка от чужого длинного id
                     status="pending",
                 )
             )
@@ -138,6 +161,7 @@ class ConfirmStore:
                 customer_id=p.customer_id,
                 summary=p.summary,
                 chat_id=p.chat_id,
+                origin_human_turn=p.origin_human_turn,
             )
 
     async def load_proposals(self, confirmation_ids: list[str]) -> dict[str, ConfirmedProposal]:
@@ -162,6 +186,7 @@ class ConfirmStore:
                 customer_id=p.customer_id,
                 summary=p.summary,
                 chat_id=p.chat_id,
+                origin_human_turn=p.origin_human_turn,
             )
             for p in rows
         }
@@ -207,6 +232,7 @@ class ConfirmStore:
                 customer_id=p.customer_id,
                 summary=p.summary,
                 chat_id=p.chat_id,
+                origin_human_turn=p.origin_human_turn,
             )
             await s.commit()
             return snap

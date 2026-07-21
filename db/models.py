@@ -41,6 +41,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -140,6 +141,24 @@ class Proposal(Base):
     # автоматический создатель (scheduler/anomaly), забывший флаг, получит False → бюджет/ставка
     # будут заблокированы гейтом (golden rule #3). Дефолт True был бы fail-open.
     user_initiated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Волна 1.4 — ВТОРОЙ, независимый бит провенанса. Отличие от user_initiated принципиальное:
+    # тот приходит АРГУМЕНТОМ save_proposal (в headless-контуре его напишет вызывающий — MCP-тул,
+    # cron, self-improvement-форк), а этот аргументом не задаётся вовсе: store читает его из
+    # core.provenance, поднять который может только доверенный вход. Денежные apply_* требуют ОБА.
+    origin_human_turn: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
+    # «Кто заказал» — Telegram user_id человека, отдавшего команду. Не дублирует chat_id: в группе
+    # chat_id — это чат, а не человек, и §8.4 №3 («подтвердил автор») по нему не проверяется.
+    # ⚠️ Отклонение от план-файла, где колонка названа author_chat_id: чат уже есть выше (chat_id),
+    # второй колонкой с тем же смыслом провенанс не усилить.
+    author_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    # Корреляция с логами хода, в котором черновик родился (core.context.request_id, 8 hex, НЕ секрет).
+    run_id: Mapped[str | None] = mapped_column(String(16))
+    # message_id опубликованной карточки «было→станет». Заполняет ТРАНСПОРТ подтверждения (Волна 2.6),
+    # сегодня NULL. Любая будущая проверка «ответ именно на эту карточку» обязана считать NULL
+    # отказом, а не «проверять нечего» — иначе гард самоотключится на старых строках (fail-closed).
+    tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
     status: Mapped[str] = mapped_column(
         String(16), default="pending", nullable=False
     )  # pending|confirmed|executing|applied|failed|rejected|needs_review

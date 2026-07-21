@@ -33,7 +33,12 @@ import ads.mutations as mut  # noqa: E402
 # ── Каркасные knobs (правятся при переносе) ──────────────────────────────────────
 _ACCOUNT_LOCK_GATE = "ensure_allowed"  # золотое правило #9 — замок аккаунта
 _CONFIRM_GATE = "_require_confirmation"  # золотое правило #1 — confirm-гейт (одноразовый claim)
-_MONEY_MARKER = "user_initiated"  # золотое правило #3 — деньги только по прямой команде
+_MONEY_GATE = "_require_user_command"  # золотое правило #3 — деньги только по прямой команде
+# Внутри этого гейта — ДВА независимых бита (Волна 1.4): подделываемый аргумент `user_initiated` и
+# contextvar-бит `origin_human_turn`, который аргументом не задаётся. Марке́р структурный (вызов
+# функции), а не «ссылка на атрибут»: инлайн-проверка, размазанная по 8 телам, позволяла снять один
+# из битов в одном месте и остаться в реестре.
+_MONEY_BITS = ("user_initiated", "origin_human_turn")
 # Денежные операции: те apply_*, что ОБЯЗАНЫ проверять user_initiated. Добавил денежную мутацию —
 # внеси сюда И поставь гард (иначе тест ниже красный). Убрал гард — тоже красный.
 # create_*_campaign — тоже деньги: создание кампании задаёт дневной бюджет.
@@ -118,17 +123,41 @@ def test_all_apply_functions_call_require_confirmation():
 
 # ── #3: набор денежных apply_* == ожидаемый реестр (дрейф → красный тест) ─────────
 def test_money_apply_functions_match_registry_and_guard_user_initiated():
-    """Денежные мутации определяем структурно — по ссылке на `user_initiated` (тот самый гард).
+    """Денежные мутации определяем структурно — по вызову `_require_user_command` (тот самый гард).
     Набор ДОЛЖЕН совпадать с _EXPECTED_MONEY_OPS. Расхождение ловит два класса ошибок:
     - гард сняли с денежной операции → она выпадает из набора → mismatch;
     - гард появился там, где его быть не должно → лишний элемент → mismatch.
     (Новую денежную операцию БЕЗ гарда этот тест не увидит как «денежную» — поэтому реестр ведём
     вручную: добавляя её сюда, ты обязан поставить гард, и тест это подтвердит.)"""
-    guarded = {f.name for f in _apply_functions() if _references_attr(f, _MONEY_MARKER)}
+    guarded = {f.name for f in _apply_functions() if _first_call_line(f, _MONEY_GATE) is not None}
     assert guarded == _EXPECTED_MONEY_OPS, (
-        f"набор денежных apply_* (ссылаются на {_MONEY_MARKER}) = {sorted(guarded)}, "
+        f"набор денежных apply_* (зовут {_MONEY_GATE}) = {sorted(guarded)}, "
         f"ожидалось {sorted(_EXPECTED_MONEY_OPS)}. Golden rule #3: деньги — только прямой командой. "
         "Обнови реестр _EXPECTED_MONEY_OPS осознанно вместе с гардом."
+    )
+
+
+def test_money_gate_requires_both_provenance_bits():
+    """Волна 1.4: сам гейт обязан требовать ОБА бита. Проверка структурная — в теле
+    `_require_user_command` есть ссылка и на `user_initiated`, и на `origin_human_turn`.
+
+    Без неё предыдущий тест деградирует до проверки имени: гейт можно было бы выпотрошить до
+    одного бита, оставив вызовы на месте, и реестр сошёлся бы. Разница между битами в том, что
+    первый — аргумент `save_proposal` (в headless-контуре его пишет вызывающий), а второй берётся
+    из `core.provenance` и аргументом не задаётся вовсе."""
+    gate = next(
+        (
+            n
+            for n in ast.walk(_MUT_TREE)
+            if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name == _MONEY_GATE
+        ),
+        None,
+    )
+    assert gate is not None, f"{_MONEY_GATE} не найден в ads/mutations.py — гард денег снят?"
+    missing = [bit for bit in _MONEY_BITS if not _references_attr(gate, bit)]
+    assert not missing, (
+        f"{_MONEY_GATE} не проверяет биты провенанса: {missing}. Golden rule #3 держится на двух "
+        "независимых битах — подделываемом аргументе и contextvar-бите доверенного слоя (И3)."
     )
 
 

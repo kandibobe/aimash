@@ -101,11 +101,22 @@ def request_scope(
     Telegram-middleware (scheduler-джобы, скрипты). Возвращает request_id. Сброс в finally.
 
     contextvar.set держится сквозь await внутри блока (та же asyncio-таска), поэтому корректно
-    оборачивает и асинхронное тело: `with request_scope('job'): await do()`."""
+    оборачивает и асинхронное тело: `with request_scope('job'): await do()`.
+
+    Заодно объявляет ход МАШИННЫМ (`core.provenance.machine_turn`, Волна 1.4). Это ровно тот
+    периметр, который нужен: `request_scope` открывают ТОЛЬКО фоновые входы — 10+ scheduler-джоб,
+    краул сайта, dev-скрипты; Telegram-путь человека идёт через `TraceMiddleware.set_context` и
+    сюда не заходит. Без этого фоновая работа, порождённая из человеческого хода
+    (`asyncio.create_task` копирует contextvars — bot/main.py:5306 `_run_client_crawl`), унаследовала
+    бы человеческий бит и смогла бы «от имени человека» создать денежный черновик. Опустить бит
+    здесь дешевле и надёжнее, чем помнить про него в каждой новой джобе."""
+    from core.provenance import machine_turn
+
     token = set_context(
         request_id=new_request_id(), chat_id=chat_id, operation=operation, customer_id=customer_id
     )
     try:
-        yield _CTX.get().request_id
+        with machine_turn():
+            yield _CTX.get().request_id
     finally:
         reset_context(token)

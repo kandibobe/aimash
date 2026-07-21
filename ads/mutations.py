@@ -90,6 +90,33 @@ class ConfirmedProposal(Protocol):
     operation: str
     status: str  # "confirmed" | "executing" | "applied" | "failed" | "rejected" | "pending"
     user_initiated: bool  # True только если изменение пришло прямой командой пользователя
+    # Волна 1.4: второй, НЕЗАВИСИМЫЙ бит — ход был человеческим. Штампует стор из core.provenance,
+    # аргументом save_proposal не задаётся (в отличие от user_initiated выше).
+    origin_human_turn: bool
+
+
+def _require_user_command(proposal: ConfirmedProposal, what: str) -> None:
+    """Правило 3: денежное изменение — ТОЛЬКО по прямой команде живого человека. Требует ДВА
+    независимых бита, потому что один из них подделываем.
+
+    `user_initiated` — аргумент `save_proposal`. Сегодня он верен по построению (три точки создания
+    лежат в aiogram-хендлерах за whitelist), но в headless-контуре создание черновика становится
+    вызываемым из MCP-инструмента, cron-джобы и self-improvement-форка — и там значение аргумента
+    пишет вызывающий. `origin_human_turn` аргументом не задаётся вовсе: стор берёт его из
+    `core.provenance`, поднять который может только `human_turn(...)` доверенного слоя.
+
+    Ключевое свойство — бит ставится в момент СОЗДАНИЯ черновика и подтверждением НЕ повышается:
+    cron предлагает поднять бюджет, человек жмёт ✅ — черновик всё равно машинный, и здесь отказ
+    (И3). Вывод провенанса из факта подтверждения сделал бы проверку тождественно истинной.
+
+    Оба бита читаются напрямую (не через getattr-дефолт): сторонний стор, забывший поле, обязан
+    упасть громко на денежном пути, а не тихо получить трактовку по умолчанию."""
+    if not proposal.user_initiated:
+        raise PermissionError(f"{what} должно быть прямой командой пользователя")
+    if not proposal.origin_human_turn:
+        raise PermissionError(
+            f"{what} создано не человеческим ходом (cron/агент/скрипт) — отклонено"
+        )
 
 
 async def _require_confirmation(
@@ -131,8 +158,7 @@ async def apply_update_budget(
     proposal = await _require_confirmation(confirm_store, confirmation_id, "update_budget")
 
     # Бюджет — ТОЛЬКО по прямой команде пользователя (никогда из scheduler/anomaly)
-    if not proposal.user_initiated:
-        raise PermissionError("изменение бюджета должно быть прямой командой пользователя")
+    _require_user_command(proposal, "изменение бюджета")
 
     # Реальный вызов SDK (google-ads синхронный → в потоке). _apply_budget_via_sdk вынесен
     # отдельно, чтобы юнит-тест мог подменить его (офлайн, без живого аккаунта). disclosed_shared_scope
@@ -487,8 +513,7 @@ async def apply_update_bid(
 
     # Ставки — деньги: меняем только прямой командой пользователя (defense-in-depth,
     # сверх golden rule #3 о бюджете). Scheduler/anomaly ставки не двигают.
-    if not proposal.user_initiated:
-        raise PermissionError("изменение ставки должно быть прямой командой пользователя")
+    _require_user_command(proposal, "изменение ставки")
 
     result = await run_ads_call(
         _apply_bid_via_sdk,
@@ -530,9 +555,8 @@ async def apply_update_keyword_bid(
     proposal = await _require_confirmation(confirm_store, confirmation_id, "update_keyword_bid")
 
     # Ставки — деньги: только прямая команда человека. Scheduler/anomaly ставки не двигают
-    # (golden rule #3); флаг по умолчанию False (fail-closed) — ставит его лишь bot.main.on_text.
-    if not proposal.user_initiated:
-        raise PermissionError("изменение ставки должно быть прямой командой пользователя")
+    # (golden rule #3); оба бита по умолчанию False (fail-closed) — см. _require_user_command.
+    _require_user_command(proposal, "изменение ставки")
 
     result = await run_ads_call(
         _apply_keyword_bid_via_sdk,
@@ -1344,8 +1368,7 @@ async def apply_set_bidding_strategy(
         raise ValueError("target_roas — доля в (0, 1000] (напр. 4.0 = 400%)")
 
     proposal = await _require_confirmation(confirm_store, confirmation_id, "set_bidding_strategy")
-    if not proposal.user_initiated:  # деньги: только прямая команда пользователя
-        raise PermissionError("смена стратегии ставок должна быть прямой командой пользователя")
+    _require_user_command(proposal, "смена стратегии ставок")  # деньги
 
     result = await run_ads_call(
         _set_bidding_strategy_via_sdk,
@@ -2597,8 +2620,7 @@ async def apply_create_search_campaign(
         else:
             clean_kw = normalize_keywords(keywords)
     proposal = await _require_confirmation(confirm_store, confirmation_id, "create_search_campaign")
-    if not proposal.user_initiated:
-        raise PermissionError("создание кампании должно быть прямой командой пользователя")
+    _require_user_command(proposal, "создание кампании")
     # Честный op_count composite-цепочки (§3): бюджет+кампания+группа+RSA + ключи + гео + языки
     # + блоки расписания (+страна, если задана кодом). Google тарифицирует КАЖДУЮ операцию.
     _search_ops = (
@@ -3291,9 +3313,8 @@ async def apply_create_gdn_campaign(
     if not landscape_bytes or not square_bytes:
         raise ValueError("нужны подготовленные изображения (landscape + square)")
     proposal = await _require_confirmation(confirm_store, confirmation_id, "create_gdn_campaign")
-    # Создание кампании — ТОЛЬКО прямой командой пользователя (как бюджет): bot ставит флаг, агент нет.
-    if not proposal.user_initiated:
-        raise PermissionError("создание кампании должно быть прямой командой пользователя")
+    # Создание кампании — ТОЛЬКО прямой командой пользователя (как бюджет): bot ставит биты, агент нет.
+    _require_user_command(proposal, "создание кампании")
     result = await run_ads_create_call(
         _create_gdn_campaign_via_sdk,
         ads_client,
@@ -3586,8 +3607,7 @@ async def apply_create_demand_gen_campaign(
         confirm_store, confirmation_id, "create_demand_gen_campaign"
     )
     # Создание кампании — ТОЛЬКО прямой командой пользователя (как бюджет/GDN).
-    if not proposal.user_initiated:
-        raise PermissionError("создание кампании должно быть прямой командой пользователя")
+    _require_user_command(proposal, "создание кампании")
     result = await run_ads_create_call(
         _create_demand_gen_campaign_via_sdk,
         ads_client,
@@ -3845,8 +3865,7 @@ async def apply_create_video_campaign(
         description_max=VIDEO_DESCRIPTION_MAX,  # Video: описания ≤70 (консервативно)
     )
     proposal = await _require_confirmation(confirm_store, confirmation_id, "create_video_campaign")
-    if not proposal.user_initiated:
-        raise PermissionError("создание кампании должно быть прямой командой пользователя")
+    _require_user_command(proposal, "создание кампании")
     result = await run_ads_create_call(
         _create_video_campaign_via_sdk,
         ads_client,

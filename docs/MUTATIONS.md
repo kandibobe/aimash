@@ -38,10 +38,23 @@ Google Ads, где она объявлена и какими гейтами за
   (`None` → `PermissionError`), даже если `cleanup_stale_proposals` не отработал.
   Это **не** freshness-recheck: TTL ограничивает возраст подтверждения, freshness —
   расхождение снимка с живым Google Ads. Инварианты — `tests/test_confirm_ttl_cas.py`.
-- **Деньги — только по прямой команде пользователя** (`user_initiated`). Проверяется
-  внутри денежных `apply_*` (см. столбец «деньги?» ниже). Провенанс
-  «прямая команда» агент себе НЕ проставляет — `user_initiated` в `agent/loop.py`
-  не выставляется (`agent/loop.py:164-166`), его ставит только доверенный вход бота.
+- **Деньги — только по прямой команде пользователя, ДВА независимых бита** (Волна 1.4).
+  Единая проверка `_require_user_command` внутри денежных `apply_*` (см. столбец
+  «деньги?» ниже) требует **обоих**:
+  - `user_initiated` — **аргумент** `save_proposal`. Сегодня верен по построению (черновик
+    рождается внутри aiogram-хендлера за whitelist), но в headless-контуре его пишет
+    вызывающий: MCP-инструмент, cron-джоба, self-improvement-форк. Бит, который можно
+    передать аргументом, охраняет только аккуратных.
+  - `origin_human_turn` — **аргументом не задаётся вовсе**: `ConfirmStore.save_proposal`
+    берёт его из `core.provenance` (ContextVar). Поднять может только `human_turn(...)`, и
+    единственный прод-call-site — `WhitelistMiddleware` (`bot/main.py`); `request_scope`
+    (все scheduler-джобы, краул, dev-скрипты) наоборот **опускает** бит в `machine_turn`.
+    Allow-list call-site'ов стережёт AST-тест.
+  Бит штампуется в момент **СОЗДАНИЯ** черновика и **не повышается подтверждением** — иначе
+  cron предлагает поднять бюджет, человек жмёт ✅, и проверка становится тождественно
+  истинной. Выпускной гейт: `tests/test_provenance_gate.py::test_machine_draft_confirmed_by_human_still_refused`.
+  Оба поля читаются напрямую, без `getattr(..., default)`: сторонний стор, забывший поле,
+  обязан упасть на денежном пути, а не получить трактовку по умолчанию.
 
 ## Таблица покрытия
 
@@ -100,13 +113,15 @@ MUTATION_TOOLS?» отмечает членство в наборе, разре�
 | `remove_asset_link` | `apply_remove_asset_link` (:1201) | Открепляет связь campaign_asset (не сам ассет) | Нет | Да |
 
 **Примечание по «деньги?».** Денежными помечены операции, где внутри `apply_*`
-стоит явная проверка `if not proposal.user_initiated: raise PermissionError`: это
+стоит вызов `_require_user_command(proposal, ...)` (оба бита провенанса, см. выше): это
 `update_budget`, `update_bid`, `update_keyword_bid`, `set_bidding_strategy` и все
 четыре `create_*_campaign` (они несут бюджет). Остальные (статусы, переименование,
 ключи, минус-слова, гео, сети, аудитории, ассеты-расширения, `create_rsa`) деньгами
-не управляют → `user_initiated` не требуют. Инвариант
-`test_money_apply_functions_match_registry_and_guard_user_initiated`
-(`tests/test_invariants_core.py`) держит этот список в синхроне с кодом.
+не управляют → провенанса не требуют. Инварианты
+`test_money_apply_functions_match_registry_and_guard_user_initiated` (реестр денежных
+операций ⇔ call-site'ы гейта) и `test_money_gate_requires_both_provenance_bits` (тело
+гейта ссылается на **оба** бита — иначе гард выхолащивается до одного, а call-site'ы
+остаются на месте и первый тест этого не заметит) — `tests/test_invariants_core.py`.
 
 **Примечание по общему бюджету (П1).** `update_budget` меняет `CampaignBudget`, а он
 может быть ОБЩИМ (`explicitly_shared` / `reference_count > 1`) — тогда изменение затронет

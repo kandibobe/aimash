@@ -70,20 +70,26 @@ Confirm-гейт разделяет предложение (proposal, тольк
 
 **Статус: ✅**
 
-- Бюджет меняется только прямой командой пользователя: `ads/mutations.py:108` — после `claim`
-  проверяется `proposal.user_initiated`, иначе `PermissionError` («изменение бюджета должно быть
-  прямой командой пользователя», `ads/mutations.py:109`).
-- Флаг `user_initiated` fail-closed: дефолт `False` в `Proposal` (`confirm/gate.py:24`); `True`
-  ставит только доверенный слой при показе кнопок человеку (`bot/main.py:580` в
-  `_present_proposal`), а не агент про себя.
+- Бюджет меняется только прямой командой пользователя: после `claim` вызывается
+  `_require_user_command`, иначе `PermissionError` («изменение бюджета должно быть прямой командой
+  пользователя»).
+- Гард требует **двух** независимых битов провенанса (Волна 1.4), оба fail-closed по дефолту `False`:
+  `user_initiated` — аргумент, `True` ставит только доверенный слой при показе кнопок человеку
+  (`_present_proposal`), а не агент про себя; `origin_human_turn` — аргументом не задаётся вовсе,
+  `ConfirmStore.save_proposal` берёт его из `core.provenance`, поднимает единственный call-site
+  `WhitelistMiddleware`, а `request_scope` фоновых входов опускает. Бит ставится при **создании**
+  черновика и не повышается подтверждением — иначе cron предложил бы поднять бюджет, человек нажал
+  бы ✅, и проверка стала бы тождественно истинной.
 - Тот же денежный гард продублирован на ставке CPC (`ads/mutations.py:222`) и смене стратегии
   ставок (`ads/mutations.py:759`) — defense-in-depth сверх золотого правила о бюджете.
 - Показ реального «было → станет» с суммой и % до подтверждения — `bot/main.py:552`
   (`read_before`); валюта команды ≠ валюте аккаунта → отказ без FX (`bot/main.py:564`,
   `currency_mismatch`).
 - **Тесты:** `tests/test_safety_core.py`, `tests/test_write_layer.py`,
-  `tests/test_invariants_core.py` (мета-гард: новая денежная мутация без `user_initiated` валит
-  тест), `tests/test_before_diff.py`, `tests/test_period_currency.py`.
+  `tests/test_invariants_core.py` (мета-гард: новая денежная мутация без гейта валит тест + тело
+  гейта обязано ссылаться на оба бита), `tests/test_provenance_gate.py` (выпускной гейт И3:
+  машинный черновик, подтверждённый человеком, всё равно `PermissionError`),
+  `tests/test_before_diff.py`, `tests/test_period_currency.py`.
 
 ---
 
@@ -311,7 +317,7 @@ GDN / Video / Demand Gen, а UAC не реализуется намеренно.
 |---|---|---|
 | Мутации только на Draft `7753643025` | `ads/client.py:212` (`ensure_allowed`); потолок в коде `ALLOWED_CEILING` — `ads/client.py:25`; fail-closed при пустом allow-list — `ads/client.py:223` | `tests/test_safety_core.py`, `tests/test_invariants_core.py` |
 | Confirm-гейт с `confirmation_id` в каждом `apply_*` | `ads/mutations.py:70` (`_require_confirmation`) → атомарный `claim` `confirm/store.py:119` | `tests/test_write_layer.py`, `tests/test_invariants_core.py` |
-| Бюджет/деньги только при `user_initiated` | `ads/mutations.py:108` (бюджет), `ads/mutations.py:222` (ставка), `ads/mutations.py:759` (стратегия); дефолт `False` — `confirm/gate.py:24` | `tests/test_safety_core.py`, `tests/test_invariants_core.py` |
+| Бюджет/деньги только по прямой команде: 2 бита провенанса | `ads/mutations.py::_require_user_command` (8 call-site'ов: бюджет, ставка, ставка ключа, стратегия, 4 создания кампаний); `user_initiated` дефолт `False` (`confirm/gate.py`), `origin_human_turn` штампует `ConfirmStore.save_proposal` из `core.provenance` | `tests/test_safety_core.py`, `tests/test_invariants_core.py`, `tests/test_provenance_gate.py` |
 | Секреты не утекают (логи/audit/чат) | `redact_text` в audit — `confirm/store.py:280`; whitelist fail-closed (env ∪ БД, рантайм `/adduser`) — `bot.main.WhitelistMiddleware` → `core.access.is_whitelisted` | `tests/test_logging_redaction.py`, `tests/test_whitelist.py`, `tests/test_runtime_whitelist.py` |
 
 ---

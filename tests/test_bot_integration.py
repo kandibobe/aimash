@@ -26,6 +26,7 @@ from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
 from bot.callbacks import ConfirmCB  # noqa: E402
 from confirm.store import ConfirmStore  # noqa: E402
 from core.config import settings  # noqa: E402
+from core.provenance import human_turn  # noqa: E402
 from db.models import AuditLog  # noqa: E402
 from db.session import Session, init_db  # noqa: E402
 
@@ -462,16 +463,20 @@ async def test_on_confirm_runs_real_execute_confirmed_gates():
     await init_db()
     cid = uuid.uuid4().hex
     store = ConfirmStore()
-    # Сохраняем подтверждаемый черновик так же, как доверенный _present_proposal (user_initiated=True).
-    await store.save_proposal(
-        confirmation_id=cid,
-        operation="update_budget",
-        customer_id=DRAFT_ACCOUNT_ID,
-        params={"campaign": "Search", "mode": "set_to", "value": 50},
-        summary="бюджет Search → 50",
-        chat_id=300,
-        user_initiated=True,
-    )
+    # Сохраняем подтверждаемый черновик так же, как доверенный _present_proposal: user_initiated
+    # аргументом, а второй бит провенанса (Волна 1.4) — из human_turn, который в проде открывает
+    # WhitelistMiddleware. Без него денежная операция отклоняется — это и проверяет
+    # test_provenance_gate.test_machine_draft_confirmed_by_human_still_refused.
+    with human_turn(actor_user_id=300):
+        await store.save_proposal(
+            confirmation_id=cid,
+            operation="update_budget",
+            customer_id=DRAFT_ACCOUNT_ID,
+            params={"campaign": "Search", "mode": "set_to", "value": 50},
+            summary="бюджет Search → 50",
+            chat_id=300,
+            user_initiated=True,
+        )
 
     fake_ref = SimpleNamespace(id="77", budget_micros=40_000_000, status="ENABLED")
     sdk: dict = {"n": 0}

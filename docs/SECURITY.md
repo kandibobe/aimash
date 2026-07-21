@@ -21,7 +21,11 @@
 2. **Потолок видимости** — мутировать можно ТОЛЬКО аккаунт, который бот РЕАЛЬНО видит под своим MCC;
    чужой боевой id вне MCC невидим ⇒ немутируем даже при `all` (`allowed_ceiling()`, защита от
    опечатки). Сбой discovery ⇒ деградация до пола потолка `{Draft}`, не эскалация.
-3. **`user_initiated`** — деньги (бюджет/ставка/стратегия/создание) требуют прямой команды человека.
+3. **Провенанс хода, два независимых бита** — деньги (бюджет/ставка/стратегия/создание) требуют
+   прямой команды человека: `user_initiated` (аргумент `save_proposal`) **и** `origin_human_turn`
+   (аргументом не задаётся, стор берёт из `core.provenance`; поднимает только `WhitelistMiddleware`,
+   `request_scope` фоновых входов — опускает). Бит ставится при **создании** черновика и не
+   повышается подтверждением. Подробности — правило 3 в таблице ниже и `docs/MUTATIONS.md`.
 4. **Whitelist + 2FA** — доступ к боту закрыт (`TELEGRAM_WHITELIST_CHAT_IDS` ∪ БД, fail-closed); при
    мутабельных боевых аккаунтах **настоятельно** рекомендуется 2FA операторам (см. ниже, раздел
    «2FA и захват Telegram»), чтобы захват аккаунта оператора не давал right-away денежных изменений.
@@ -44,7 +48,7 @@
 |---|---|---|---|
 | 1 | **Confirm-гейт**: мутация только после «да»; proposal отделён от исполнения | `confirm/store.py::ConfirmStore.claim` (атомарный compare-and-set), `ads/mutations.py::_require_confirmation` | `test_write_layer` (`test_all_apply_reject_without_confirmation`, replay), `test_safety_core` |
 | 2 | **`confirmation_id` обязателен** в каждой мутации | каждая `ads/mutations.py::apply_*` принимает `confirmation_id`; `claim` сверяет `status='confirmed'` **и** операцию | `test_write_layer` (`test_apply_rejects_wrong_operation_confirmation`, single-use/replay) |
-| 3 | **Бюджет/ставка — только по прямой команде** (`user_initiated`) | `apply_update_budget` / `apply_update_bid` проверяют `proposal.user_initiated`; дефолт `False`; `agent/loop.py` никогда не ставит `True`; `scheduler/*` не мутирует | `test_safety_core` (`test_budget_blocked_when_not_user_initiated`), `test_write_layer` |
+| 3 | **Бюджет/ставка — только по прямой команде**, ДВА бита провенанса | `ads/mutations.py::_require_user_command` требует `proposal.user_initiated` **и** `proposal.origin_human_turn`; оба дефолтят `False`; второй бит штампует `ConfirmStore.save_proposal` из `core.provenance` (аргументом не задаётся — тест на сигнатуру), поднимает только `bot/main.py::WhitelistMiddleware`, `core.context.request_scope` фоновых входов опускает; `agent/loop.py` никогда не ставит `True`; `scheduler/*` не мутирует | `test_provenance_gate` (выпускной гейт И3: машинный черновик + ✅ человека ⇒ `PermissionError`; allow-list call-site'ов `human_turn`), `test_safety_core` (`test_budget_blocked_when_not_user_initiated`), `test_invariants_core` (`test_money_gate_requires_both_provenance_bits`), `test_write_layer` |
 | 4 | **Длину RSA считает КОД** (кириллица = 1, CJK = 2; по code points) | `adcopy/validate.py::char_width` / `rsa_len` / `validate`; валидация **до** `claim` | `test_safety_core` (`test_cyrillic_counts_as_one`, `test_cjk_counts_as_two`), `test_write_layer` |
 | 5 | **Секреты — никогда в логи/Telegram/гит** | `core/logging.py::redact_text` + `RedactionFilter`; `bot/ux.py::err_text`; `core/config.py` (`SecretStr`, `database_url`); `core/secrets.py` (шифрование at-rest); глобальный `dp.errors`-хендлер логирует редактированно | `test_logging_redaction`, `test_ux_helpers` |
 | 6 | **Модель не трогает SDK напрямую** (Pydantic → валидация → diff → «да» → SDK) | `agent/tools/schemas.py` (типизированные схемы) → `ads/mutations.py` (валидация диапазонов) → confirm → SDK; capability-guard `ads/service.py` | `test_write_layer` (capability-guard), `test_bot_integration` |

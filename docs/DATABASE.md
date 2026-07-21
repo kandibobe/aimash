@@ -13,7 +13,7 @@ Alembic-миграцией (см. колонку «Миграция»). Коло
 |---|---|---|---|---|
 | `whitelist` | рантайм-allow-list доступа к БОТУ (§12); объединяется с env `TELEGRAM_WHITELIST_CHAT_IDS` | `chat_id` (unique), `added_by`, `note` | `0001` (drop `0016` → возврат `0017`) | **ACTIVE** — читается гейтом (см. ниже) |
 | `user_settings` | язык, пороги алертов (`/alerts`), override модели, активный аккаунт, per-user расписание отчётов, ui_prefs | `chat_id` (unique), `report_schedule` (crontab-строка; **читается** планировщиком — `scheduler.service.register_user_report_schedules` заводит per-chat cron-джобу; UI-сеттера пока нет, заполняется в БД), `alert_thresholds` (JSON, пишет `/alerts`), `model_override`, `language`, `selected_customer_id`, `ui_prefs` (JSON) | `0001` (+`0005`,`0007`,`0015`) | ACTIVE |
-| `proposals` | очередь черновиков изменений Google Ads (diff «было→станет») | `confirmation_id` (unique), `operation`, `customer_id`, `summary`, `params` (JSON), `user_initiated`, `status` | `0001` (+индекс `0003`) | ACTIVE |
+| `proposals` | очередь черновиков изменений Google Ads (diff «было→станет») | `confirmation_id` (unique), `operation`, `customer_id`, `summary`, `params` (JSON), `user_initiated`, `status`, **провенанс хода**: `origin_human_turn`, `author_user_id`, `run_id`, `tg_message_id` | `0001` (+индекс `0003`, +`0030` провенанс) | ACTIVE |
 | `audit_log` | журнал всех операций (кто/когда/что/результат), по `confirmation_id` | `confirmation_id`, `operation`, `customer_id`, `chat_id`, `actor_user_id`, `status`, `result` (JSON) | `0001` (+`0004` актор) | ACTIVE |
 | `oauth_tokens` | per-account refresh-токены (§8), **зашифрованы at-rest** | `account` (unique), `refresh_token_enc`, `login_customer_id` | `0001` (+`0008`) | **ACTIVE** — загружается на старте (см. ниже) |
 | `error_events` | перехваченные исключения для триажа (§15), текст **редактирован** | `request_id`, `chat_id`, `customer_id`, `where`, `exc_type`, `message`, `traceback` | `0006` (+`0011`) | ACTIVE |
@@ -30,7 +30,7 @@ Alembic-миграцией (см. колонку «Миграция»). Коло
 | `account_health_snapshot` | агрегаты health-score `/audit` на дату в TZ аккаунта (субстрат трендов, N1.1); без PII/имён кампаний | `customer_id` + `snapshot_date` + `period_days` (unique тройка), `score`, `grade`, `at_risk`, `family_penalty` (JSON), `score_model_version` | `0022` | ACTIVE |
 | `sheet_exports` | реестр созданных ботом Google-таблиц (`/sheets`, ключи визарда §19.4.2) → выдача в `/mysheets`; секретов нет (url уже уходил в чат) | `chat_id` (+ индекс `chat_id, id`), `customer_id`, `kind` (keywords\|report), `spreadsheet_id`, `url`, `title`, `share` (роль\|off\|failed) | `0025` | ACTIVE |
 
-> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0029`
+> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0030`
 > (`op.create_table(...)`). Инициалка `0001` создаёт базовые таблицы
 > (`whitelist`, `user_settings`, `proposals`, `audit_log`, `oauth_tokens`;
 > [`migrations/versions/0001_initial.py:22-92`](../migrations/versions/0001_initial.py)), остальные —
@@ -123,7 +123,11 @@ alembic history                          # список ревизий
 `0028` (`client_site_pages.text`: текст страницы после вычитания шаблона — досье §20 пересобирается
 без повторного обхода чужого сайта; ретеншн `site_page_text_retain_days`, 90 дней) →
 `0029` (`client_dossiers`: досье по сайту клиента — `markdown` владельцу, PII-free `llm_context`
-генераторам; `draft` → `current` только внутри атомарного `claim` confirm-гейта) — **head**.
+генераторам; `draft` → `current` только внутри атомарного `claim` confirm-гейта) →
+`0030` (провенанс хода в `proposals`: `origin_human_turn`, `author_user_id`, `run_id`, `tg_message_id`
+— второй, неподделываемый бит денежного гейта, Волна 1.4; `server_default=false` объявляет **все**
+существующие строки машинными: это осознанный отказ по правилу 10, а не «пропустить старое») —
+**head**.
 
 ### Добавить миграцию
 ```bash
