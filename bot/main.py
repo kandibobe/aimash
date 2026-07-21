@@ -80,6 +80,7 @@ from agent.campaign_settings import (
 )
 from agent.loop import handle_command
 from agent.tools.schemas import MAX_CAMPAIGN_KEYWORDS, SCHEMAS
+from app.bootstrap import bootstrap_ads_layer  # общий с MCP старт ads-слоя (одна копия, не две)
 from bot import i18n, texts, ux
 from bot.campaign_wizard.store import CampaignDraftStore
 from bot.callbacks import (
@@ -253,7 +254,6 @@ from core.resilience import run_ads_read_call
 from db.session import (
     acquire_single_instance_lock,
     dispose_engine,
-    init_db,
     release_single_instance_lock,
 )
 
@@ -7243,14 +7243,11 @@ async def main() -> None:
             "whitelist пуст — бот НИКОМУ не ответит (fail-closed). "
             "Добавь TELEGRAM_WHITELIST_CHAT_IDS в .env (хотя бы свой chat_id)."
         )
-    try:
-        await init_db()
-    except Exception as e:  # БД недоступна: НЕ даём дефолтному excepthook напечатать DSN с паролем
-        log.error("init_db не удалось — бот не стартует: %s", type(e).__name__, exc_info=e)
-        return
     # B2: гард одного polling-инстанса (Postgres advisory lock; на SQLite no-op). Занят другим
     # инстансом → чисто выходим, НЕ лезем polling'ом (иначе Telegram 409 Conflict у обоих). Сбой
     # самого захвата (БД мигнула) не должен ронять старт — тогда работаем как раньше (без гарда).
+    # Стоит ДО bootstrap: дублю незачем расшифровывать OAuth и обходить MCC, чтобы затем выйти.
+    # Захват не требует накатанной схемы — только соединения.
     try:
         if not await acquire_single_instance_lock():
             log.warning(
@@ -7260,14 +7257,16 @@ async def main() -> None:
             return
     except Exception as e:  # noqa: BLE001 — сбой захвата lock не критичен (деградируем без гарда)
         log.warning("single-instance lock не захвачен (%s) — стартую без гарда", type(e).__name__)
-    try:  # §8/мультиаккаунт: расшифровать per-account OAuth-токены (oauth_tokens) в рантайм-кэш,
-        # чтобы build_client(child) для дочерних под другими MCC брал их refresh-токен/login_customer_id.
-        # Сбой не критичен — Draft/тест-MCC покрыт единым .env-токеном (см. ads.client._cfg_for).
-        from ads.client import load_oauth_cache
-
-        await load_oauth_cache()
-    except Exception as e:  # noqa: BLE001 — per-account креды опциональны (Draft работает на .env)
-        log.warning("oauth: per-account токены не загружены: %s", type(e).__name__)
+    # Ads-слой поднимает ОБЩИЙ headless-bootstrap — ровно тот же, что у MCP-сервера. Раньше эти
+    # четыре шага (init_db + сидеры OAuth/клиента/дочерних) лежали здесь второй копией, и копии уже
+    # разошлись: `app/bootstrap.py` на сбое init_db делал raise, здесь — return. Две копии старта
+    # ads-слоя = два разных набора глобалов `ads/client.py` в двух контурах, и увидеть расхождение
+    # можно только на боевом мультиаккаунте (на Draft оба пути выглядят одинаково).
+    try:
+        await bootstrap_ads_layer()
+    except Exception as e:  # noqa: BLE001 — детали bootstrap уже залогировал санитизированно (пр. 5)
+        log.error("ads-слой не поднят — бот не стартует: %s", type(e).__name__)
+        return
     try:  # §4: восстановить сохранённые языки интерфейса (user_settings.language), переживает рестарт
         await i18n.load_langs()
     except Exception as e:  # настройка не критична — стартуем на дефолтах (RU)
@@ -7279,21 +7278,6 @@ async def main() -> None:
             log.info("модель ИИ: активна %s (из user_settings)", saved_model)
     except Exception as e:  # настройка не критична — стартуем на дефолтах из .env
         log.warning("model_override не загружен из БД: %s", type(e).__name__)
-    try:  # прогрев Google Ads клиента: тяжёлый импорт SDK + OAuth выполняем на старте off-loop,
-        # а не на первом /status — иначе первый интерактивный read морозит event loop на ~0.5-2с.
-        from ads.client import build_client
-
-        await asyncio.to_thread(build_client)  # @lru_cache → все последующие вызовы мгновенны
-    except Exception as e:  # cred-сбой на старте не валит бота — реальные вызовы всё равно проверят
-        log.warning("прогрев build_client не удался: %s", type(e).__name__)
-    try:  # §8: обойти настроенные MCC и запомнить дочерние как read-allow-list (полный мульти-
-        # аккаунт ЧТЕНИЕ). READ-ONLY, под замком ensure_manager_allowed; сбой не критичен для старта
-        # (без обхода читаем только мутационный аккаунт + env read-list). Мутации не затрагиваются.
-        from ads.client import discover_read_children
-
-        await discover_read_children()
-    except Exception as e:  # noqa: BLE001 — обход дочерних опционален (Draft читается и без него)
-        log.warning("mcc discover: обход дочерних не выполнен: %s", type(e).__name__)
     # Корреляция (§15): request_id ДО whitelist — даже отказ доступа логируется с request_id.
     dp.message.outer_middleware(TraceMiddleware())
     dp.callback_query.outer_middleware(TraceMiddleware())

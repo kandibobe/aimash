@@ -8,6 +8,7 @@ C3 (пер-юзер дневной потолок LLM, fail-closed). Всё оф
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -309,3 +310,83 @@ async def test_single_instance_lock_noop_on_sqlite():
     assert await acquire_single_instance_lock() is True  # SQLite (dev/test) → no-op True
     await release_single_instance_lock()
     await release_single_instance_lock()  # идемпотентно
+
+
+def test_lock_keys_are_per_role_and_bot_key_is_frozen():
+    """Роли берут РАЗНЫЕ ключи, иначе бот и MCP (один контейнер, одна БД) глушат друг друга: кто
+    стартовал вторым — не стартовал вовсе. Ключ роли `bot` заморожен: смена = один редеплой с двумя
+    живыми polling-инстансами и 409 от Telegram."""
+    from db.session import _ROLE_LOCK_KEYS
+
+    assert _ROLE_LOCK_KEYS["bot"] == 0x41494D415348  # исторический ключ, не менять
+    assert len(set(_ROLE_LOCK_KEYS.values())) == len(_ROLE_LOCK_KEYS)  # ни одного совпадения
+
+
+async def test_unknown_lock_role_raises_instead_of_borrowing_a_key():
+    """Опечатка в роли обязана падать. Молчаливый выбор дефолтного ключа означал бы, что новый
+    процесс отберёт lock у бота или тихо не возьмёт свой — оба исхода обнаруживаются на проде."""
+    from db.session import acquire_single_instance_lock
+
+    with pytest.raises(KeyError):
+        await acquire_single_instance_lock("mcp-server")  # верное имя — "mcp"
+
+
+# ── Схема-гейт headless-входа (MCP мимо docker-entrypoint.sh) ──────────────────────
+async def test_schema_gate_is_noop_on_sqlite():
+    from db.session import assert_schema_at_head
+
+    assert await assert_schema_at_head() is None  # dev/test: alembic_version не штампуется
+
+
+async def test_schema_gate_rejects_drifted_and_unreadable_version(monkeypatch, caplog):
+    """Гейт сверяет `alembic_version` в БД с деревом ревизий В КОДЕ. Отстала — отказ, обогнала —
+    warning.
+
+    `init_db` ловит только отсутствие ТАБЛИЦ — отставание на одну миграцию проходит мимо него, и
+    процесс работает по устаревшей схеме до первого `UndefinedColumn` в рантайме. Обгон — это
+    ОТКАТ образа после неудачного релиза; отказ стартовать превратил бы штатный аварийный манёвр в
+    продолжение аварии, поэтому там warning. Ветка Postgres включается подменой `_db_url`: сама
+    проверка диалекта не требует (запрос — обычный SELECT).
+    """
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import text as sa_text
+
+    from db import session as dbs
+
+    monkeypatch.setattr(dbs, "_db_url", "postgresql+asyncpg://x/y")
+
+    # (1) таблицы alembic_version нет вовсе → отказ, а не «продолжим как-нибудь» (правило 10).
+    with pytest.raises(RuntimeError, match="alembic_version"):
+        await dbs.assert_schema_at_head()
+
+    ini = Path(dbs.__file__).resolve().parents[1] / "alembic.ini"
+    script = ScriptDirectory.from_config(Config(str(ini)))
+    head = script.get_heads()[0]
+    ancestor = list(script.walk_revisions())[-1].revision  # база дерева — заведомо НЕ head
+
+    async with dbs.engine.begin() as conn:
+        await conn.execute(sa_text("CREATE TABLE alembic_version (version_num VARCHAR(32))"))
+        await conn.execute(sa_text("INSERT INTO alembic_version VALUES (:v)"), {"v": ancestor})
+
+    try:
+        # (2) схема отстала → отказ, и в тексте видно ОБА номера (иначе дежурному нечего делать).
+        with pytest.raises(RuntimeError, match="отстала") as ei:
+            await dbs.assert_schema_at_head()
+        assert head in str(ei.value) and ancestor in str(ei.value)
+
+        # (3) в БД ревизия, которой в этом коде нет (откат образа) → стартуем, но громко.
+        async with dbs.engine.begin() as conn:
+            await conn.execute(sa_text("UPDATE alembic_version SET version_num = 'zz_from_future'"))
+        with caplog.at_level("WARNING"):
+            assert await dbs.assert_schema_at_head() is None
+        assert "обогнала" in caplog.text
+
+        # (4) версия совпала с head → проходит молча.
+        async with dbs.engine.begin() as conn:
+            await conn.execute(sa_text("UPDATE alembic_version SET version_num = :v"), {"v": head})
+        assert await dbs.assert_schema_at_head() is None
+    finally:
+        # Таблица чужая для моделей — снимаем даже при падении, иначе следующий тест видит мусор.
+        async with dbs.engine.begin() as conn:
+            await conn.execute(sa_text("DROP TABLE alembic_version"))

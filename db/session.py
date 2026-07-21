@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from sqlalchemy import inspect as sa_inspect, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from core.config import settings
@@ -65,47 +65,64 @@ async def dispose_engine() -> None:
 # B2: гард одного polling-инстанса. Ключ — произвольное стабильное 64-битное число ("AIMASH" в hex):
 # одинаков между рестартами, уникален для этого приложения (маловероятно совпасть с чужим advisory-
 # lock в общей БД). Соединение, удерживающее lock, держим живым весь рантайм.
-_SINGLE_INSTANCE_LOCK_KEY = 0x41494D415348  # "AIMASH"
-_lock_conn = None  # type: ignore[var-annotated]
+#
+# Ключ РАЗНЫЙ по ролям. Причина конкретная: бот и MCP-сервер живут в одном контейнере и смотрят в
+# одну БД, поэтому общий ключ на двоих означает «кто стартовал вторым — не стартовал вовсе». Спека
+# (`HERMES_SPEC.md` C1) предлагает перенести захват lock в общий `app/bootstrap.py`; с ОДНИМ ключом
+# этот перенос уронит MCP на каждом старте, потому что бот ключ уже держит.
+#
+# Сегодня lock берёт ТОЛЬКО бот (`bot/main.py`), и MCP брать его НЕ ДОЛЖЕН, пока V14
+# (`deploy/hermes/OPERATIONS.md` §12) не покажет, что Hermes держит один долгоживущий MCP-процесс:
+# если процесс поднимается на сессию/вызов, single-instance lock убьёт вторую сессию. Ключ `mcp`
+# заведён и покрыт тестом именно для того, чтобы перенос по C1 нельзя было сделать «одним ключом»
+# молча. Роль `bot` СОХРАНЯЕТ исторический ключ: сменить его — значит на время одного редеплоя
+# пустить два polling-инстанса и получить 409.
+# Планировщика в списке нет намеренно: APScheduler крутится в event loop бота, отдельного процесса
+# у него не существует (`bot/main.py`), а ключ без владельца — приглашение занять его по ошибке.
+_ROLE_LOCK_KEYS: dict[str, int] = {
+    "bot": 0x41494D415348,  # "AIMASH" — исторический, не менять
+    "mcp": 0x41494D415349,
+}
+_lock_conns: dict[str, AsyncConnection] = {}
 
 
-async def acquire_single_instance_lock() -> bool:
-    """B2: не дать двум polling-инстансам работать одновременно (Telegram отдаёт 409 Conflict дублю —
-    повторяющаяся боль, особенно перекрытие старого/нового контейнера при `compose up --build`).
+async def acquire_single_instance_lock(role: str = "bot") -> bool:
+    """B2: не дать двум инстансам ОДНОЙ роли работать одновременно (Telegram отдаёт 409 Conflict
+    дублю polling'а — повторяющаяся боль, особенно перекрытие старого/нового контейнера при
+    `compose up --build`).
     Берём session-level Postgres advisory lock НЕблокирующе (pg_try_advisory_lock): занят → False,
     вызывающий чисто выходит (не лезем polling'ом → 409 не возникает). Соединение держим открытым
     весь рантайм — lock снимается автоматически при его закрытии/падении процесса (session-level, не
-    транзакционный, откат/commit его не трогают). На SQLite (dev/test) advisory-lock нет → no-op=True."""
-    global _lock_conn
+    транзакционный, откат/commit его не трогают). На SQLite (dev/test) advisory-lock нет → no-op=True.
+
+    Args:
+        role: чей это инстанс (`_ROLE_LOCK_KEYS`). Разные роли берут РАЗНЫЕ ключи и друг друга не
+            блокируют; неизвестная роль — `KeyError`, а не тихий выбор чужого ключа."""
+    key = _ROLE_LOCK_KEYS[role]
     if _db_url.startswith("sqlite"):
         return True
     conn = await engine.connect()
     try:
-        got = (
-            await conn.execute(
-                text("SELECT pg_try_advisory_lock(:k)"), {"k": _SINGLE_INSTANCE_LOCK_KEY}
-            )
-        ).scalar()
+        got = (await conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": key})).scalar()
     except Exception:
         await conn.close()
         raise
     if not got:
         await conn.close()
         return False
-    _lock_conn = conn  # держим соединение открытым → держим lock весь рантайм
+    _lock_conns[role] = conn  # держим соединение открытым → держим lock весь рантайм
     return True
 
 
-async def release_single_instance_lock() -> None:
+async def release_single_instance_lock(role: str = "bot") -> None:
     """B2: отпустить advisory lock (закрыть удерживающее соединение). Вызывать в finally teardown.
-    Идемпотентно; no-op если lock не брался (SQLite/второй инстанс)."""
-    global _lock_conn
-    if _lock_conn is not None:
+    Идемпотентно; no-op если lock этой ролью не брался (SQLite/второй инстанс)."""
+    conn = _lock_conns.pop(role, None)
+    if conn is not None:
         try:
-            await _lock_conn.close()  # session-level lock снимется вместе с закрытием соединения
+            await conn.close()  # session-level lock снимется вместе с закрытием соединения
         except Exception:  # noqa: BLE001 — освобождение lock не должно ронять teardown
             pass
-        _lock_conn = None
 
 
 def heal_sqlite_schema(sync_conn) -> list[str]:
@@ -174,3 +191,77 @@ async def init_db() -> None:
             + ", ".join(sorted(missing))
             + ". Выполните `alembic upgrade head` (на проде это делает docker-entrypoint.sh)."
         )
+
+
+async def assert_schema_at_head() -> None:
+    """Postgres: схема БД не ОТСТАЁТ от миграций этого кода. Отстала — raise, обогнала — warning.
+
+    Зачем отдельно от `init_db`. `init_db` ловит только отсутствие ТАБЛИЦ — то есть совсем не
+    накатанную схему. Дрейф на одну миграцию (таблицы есть, новой колонки нет) он пропускает молча,
+    и процесс работает по устаревшей схеме до первого `UndefinedColumn` в рантайме.
+
+    Кому это нужно на практике: у бота гейт сильнее и стоит раньше — `docker-entrypoint.sh` гоняет
+    `alembic upgrade head` ДО старта и не поднимает контейнер на ошибке миграции. Но гейт заведён
+    по КОМАНДЕ контейнера (`python -m bot.main`), а MCP-сервер стартует `python -m mcp_server` —
+    мимо него. Поднятый раньше бота (или на образе новее, чем накатанная схема), MCP сегодня
+    молча работает по чужой схеме. Отсюда fail-fast здесь: не подняться честнее, чем отдавать
+    агенту данные из БД, форму которой код понимает неправильно (правило 10).
+
+    Почему НЕ голое `current == head`, а два разных исхода. Отставание БД («в коде есть миграция,
+    которой в БД нет») — это гарантированный `UndefinedColumn` в рантайме, единственный честный
+    ответ — не стартовать. Обгон БД («в БД ревизия, которой в этом коде нет») бывает ровно в одном
+    сценарии: ОТКАТ на предыдущий образ после неудачного релиза. Миграции аддитивны, старый код с
+    новой схемой обычно работает, а отказ стартовать превратил бы откат — штатный аварийный
+    манёвр — в продолжение аварии. Поэтому здесь громкий warning, а не raise.
+
+    Реализация читает только `alembic.ini` и каталог `migrations/` (`ScriptDirectory`), НЕ исполняя
+    `env.py`: нам нужен список ревизий, а не подключение alembic к своей БД.
+
+    Raises:
+        RuntimeError: схема отстала от кода; таблицы `alembic_version` нет/не читается; либо
+            `alembic.ini` недоступен (значит образ собран неправильно — гадать не будем).
+    """
+    if _db_url.startswith("sqlite"):
+        return  # dev/test: схему держит create_all + heal_sqlite_schema, alembic_version не штампуется
+
+    from pathlib import Path
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    ini = Path(__file__).resolve().parents[1] / "alembic.ini"
+    if not ini.is_file():
+        raise RuntimeError(f"схема-гейт: не найден {ini} — проверить состав образа")
+    script = ScriptDirectory.from_config(Config(str(ini)))
+    heads = set(script.get_heads())
+
+    try:
+        async with engine.connect() as conn:
+            current = set(
+                (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalars()
+            )
+    except Exception as e:  # noqa: BLE001 — правило 5: наружу тип, не str(e) (в DSN пароль)
+        raise RuntimeError(
+            f"схема-гейт: не прочитать alembic_version ({type(e).__name__}). "
+            "Выполните `alembic upgrade head`."
+        ) from None
+
+    if current == heads:
+        return
+
+    known = {rev.revision for rev in script.walk_revisions()}  # все ревизии, известные ЭТОМУ коду
+    if current - known:
+        # В БД ревизия, которой в этом коде нет → откат на старый образ. Стартуем, но громко.
+        log.warning(
+            "схема БД обогнала код: alembic_version=%s, head этого кода=%s. "
+            "Похоже на откат образа. Работаем, но проверьте, что ничего не сломано откатом.",
+            sorted(current),
+            sorted(heads),
+        )
+        return
+
+    raise RuntimeError(
+        f"схема БД отстала от кода: alembic_version={sorted(current) or '(пусто)'}, "
+        f"head миграций={sorted(heads)}. Выполните `alembic upgrade head` "
+        "(на проде это делает docker-entrypoint.sh при старте бота — MCP мимо него)."
+    )
