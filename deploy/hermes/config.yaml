@@ -25,8 +25,8 @@ model:
 
 agent:
   # ЭТАЛОН = ОДОБРЕННЫЙ минимум Контура A: агент только отвечает и зовёт MCP READ-инструменты.
-  # Включёнными остаются лишь безопасные тулсеты (skills — привязка топик→скил, todo, session_search,
-  # clarify) + наш MCP `aimash` (он НЕ в этом списке — приходит из mcp_servers ниже).
+  # Включёнными остаются лишь безопасные тулсеты (skills — привязка топик→скил, todo, clarify)
+  # + наш MCP `aimash` (он НЕ в этом списке — приходит из mcp_servers ниже).
   # Гасим ВСЁ host-мощное и внешнее — иначе на боевом VPS (там же денежный бот) агент получил бы
   # терминал/ФС/выполнение кода/управление рабочим столом. Схема «два контура, ноль общих секретов»
   # (Meta Rule of Two): такие возможности живут в Контуре B (билдер-песочница), не в проде.
@@ -39,9 +39,17 @@ agent:
   # image_gen, memory, session_search, skills, terminal, todo, tts, video, vision, web.
   # `computer_use`/`x_search`/`kanban` из прежней редакции в этом списке ОТСУТСТВУЮТ (К10 —
   # молча игнорируются), зато были пропущены `context_engine` (индексация ФС) и `video`.
+  #
+  # ⚠️ `session_search` ОТКЛЮЧЁН осознанно (К9/И6, добавлен 21.07). Он ищет по ВСЕЙ
+  #    `~/.hermes/state.db`, то есть по истории всех топиков инстанса — а топик у нас = клиент
+  #    (`gateway…group_topics` ниже). Оставленный включённым, он даёт агенту кросс-клиентное
+  #    чтение переписки в обход нашего замка: `ensure_read_allowed` защищает данные Google Ads,
+  #    но не state.db Hermes. Изоляция по client_id (И6) в НАШИХ ридерах — отдельная работа;
+  #    пока её нет, единственный контроль над чужим инструментом — не включать его.
+  #    Цена: агент не помнит прошлые сессии — по замыслу пилота (memory_enabled: false ниже).
   disabled_toolsets:
     [terminal, browser, file, code_execution, context_engine, cronjob, delegation,
-     web, memory, vision, image_gen, tts, video]
+     web, memory, vision, image_gen, tts, video, session_search]
   tool_use_enforcement: auto
 
 approvals:

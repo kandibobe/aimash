@@ -108,6 +108,69 @@ def test_read_lock_allows_draft_but_still_denies_foreign():
             pass
 
 
+# ── Диагностический прибор `mcp_server.probe` не смеет стать частью боевого реестра ──
+# Прибор (§12 OPERATIONS.md, прогон V1–V19) регистрируется ОТДЕЛЬНЫМ сервером `aimash-probe`.
+# Соблазн «добавить probe_echo 13-м инструментом» ломает сразу два свойства: измеряемая система
+# перестаёт быть измеряемой (прибор виден агенту и в бою), а прибор наследует доступ боевого
+# сервера. Оба перекрываем тестом, а не комментарием.
+def test_probe_is_not_registered_in_production_server():
+    from mcp_server.probe import build_probe_server
+    from mcp_server.server import build_server
+    from mcp_server.tools_read import READ_MCP_TOOLS, READ_TOOL_FUNCS
+
+    assert "probe_echo" not in READ_MCP_TOOLS
+    assert "probe_echo" not in READ_TOOL_FUNCS
+    prod = {t.name for t in asyncio.run(build_server().list_tools())}
+    assert "probe_echo" not in prod, "прибор просочился в боевой MCP-реестр"
+    probe = {t.name for t in asyncio.run(build_probe_server().list_tools())}
+    assert probe == {"probe_echo"}, f"в приборе появилось лишнее: {sorted(probe)}"
+
+
+def test_probe_has_no_access_to_money_path():
+    """Прибор возвращает эхо аргументов и не более: ни Ads, ни БД, ни confirm-гейта он не тянет.
+    Проверяем в ПОДПРОЦЕССЕ по факту загруженных модулей — импорт-граф врать не умеет, в отличие от
+    докстринга. Гарантия нужна затем, что плагин-времянка какое-то время висит на живом gateway'е."""
+    import json
+    import subprocess
+
+    # Голый `google` — namespace-пакет, который тянет сам интерпретатор через .pth в site-packages
+    # (виден и в `python -c "import sys"`), поэтому ловим именно `google.ads`, а не префикс `google`.
+    code = (
+        "import json,sys;import mcp_server.probe;"
+        "print(json.dumps(sorted(m for m in sys.modules "
+        "if m.split('.')[0] in ('ads','db','confirm','bot','agent') "
+        "or m.startswith('google.ads'))))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=str(Path(__file__).resolve().parents[1]),
+    )
+    assert out.returncode == 0, f"импорт mcp_server.probe упал: {out.stderr[-500:]}"
+    leaked = json.loads(out.stdout.strip().splitlines()[-1])
+    assert leaked == [], f"прибор притащил денежный/БД-слой: {leaked}"
+
+
+def test_probe_echo_redacts_and_clamps():
+    import json
+
+    from mcp_server.probe import _MAX_DELAY_SECONDS, _clamp_delay, probe_echo
+
+    env = asyncio.run(probe_echo(note="refresh_token=1//0gSECRETVALUE", actor_chat_id="123"))
+    # Правило 5: в аргументы может прилететь что угодно, включая подставленное хуком из окружения.
+    dumped = json.dumps(env, ensure_ascii=False, default=repr)
+    assert "SECRETVALUE" not in dumped, f"эхо вынесло секрет наружу: {env}"
+    assert env["received"]["actor_chat_id"] == "123"
+    # `filled_fields` отличает «хук не подставил ничего» от «подставил пустое» — иначе дефолты
+    # аргументов затирают разницу, а это разные исходы V8/V9.
+    assert env["filled_fields"] == ["actor_chat_id", "note"]
+    # Потолок задержки — через `_clamp_delay`, а не через живой вызов: иначе тест сам спал бы 5 минут.
+    assert _clamp_delay(10**6) == _MAX_DELAY_SECONDS, "потолок снят — прибор подвесит gateway"
+    assert _clamp_delay("мусор") == 0
+    assert _clamp_delay(-5) == 0
+
+
 # ── Каркас полных инвариантов И1–И8 (наполняется шагом ПЕРЕД WRITE) ──────────────────
 # Формулировки — дословно из docs/HERMES_SPEC.md §4. Корпус атак (client_site_pages, скилы в
 # shell/HTTP/файлы, страницы конкурентов) — инлайн, как в существующих injection-тестах.
