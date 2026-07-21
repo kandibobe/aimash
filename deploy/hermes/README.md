@@ -124,6 +124,16 @@ hermes mcp test aimash             # должен отдать 12 инструм
 4. **id и thread_id** (в `config.yaml`): id супергруппы отрицательный (`-100…`, @get_id_bot);
    `thread_id` топика — из URL `https://t.me/c/<id>/<thread_id>`; свой user id — @userinfobot.
 5. **Перечитать конфиг:** `hermes gateway restart`.
+6. **Короткий алиас вместо длинного `@username`** — `gateway.platforms.telegram.extra.mention_patterns`,
+   список **регулярок** (эталон из тестов сборки: `["^\s*гермес\b"]`), работает вместе с
+   `require_mention: true`, не вместо него.
+   ⚠️ **На VPS 21.07 алиас не сработал** — ни «гермес», ни «бот» бота не будили. Ключ адаптеру известен
+   (`plugins/platforms/telegram/adapter.py:7419` читает `config.extra["mention_patterns"]`), причина не
+   установлена: в `_message_matches_mention_patterns` (:7631) соседствуют `_mention_patterns` и
+   `_mention_pattern` — похоже на опечатку сборки, тогда wake-word падает в `AttributeError`.
+   Рабочие обходные пути: **reply** на сообщение бота считается обращением; в группе с одним ботом
+   слэш-команды идут без `@суффикса`. Сам `@username` BotFather менять не даёт — только новый бот
+   (новый токен, заново privacy off, заново добавить в группу).
 
 **Проверка П1:** в топик без упоминания — тишина; с упоминанием «покажи статистику за неделю по
 <аккаунт>» — ответ с живыми цифрами (числа из `code_numbers`, не из головы модели).
