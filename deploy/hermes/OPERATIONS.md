@@ -254,12 +254,54 @@ hermes gateway restart
 
 `/root/.hermes` вне `/opt/aimash` → то же свойство, что даёт выживание при редеплое, **исключает** его из
 Compose-бэкап-сервиса. Внутри — секреты (`.env`: `OPENROUTER_API_KEY`, `TELEGRAM_BOT_TOKEN`), `cron/jobs.json`,
-`sessions/`. Потеря невосстановима. Заведи отдельный бэкап (шифрованный — там секреты, правило 5):
+`sessions/` и **`state.db`** — история топиков и сессий, то есть фактическая история решений агента. В Postgres
+её нет: наш `audit_log` знает про выполненные операции Google Ads, но не про диалог, который к ним привёл.
+Потеря невосстановима.
+
+Скрипт: [`scripts/backup_hermes.sh`](../../scripts/backup_hermes.sh) — host-скрипт, **не** сервис Compose
+(примонтировать `/root/.hermes` в сайдкар = положить `.env` Hermes в `./backups` рядом с репозиторием,
+правило 5). Берёт консистентный снимок `state.db` через `sqlite3 .backup`; **поставь `sqlite3`**, иначе скрипт
+громко предупредит и скопирует базу как есть, без гарантии целостности:
 
 ```bash
-tar czf /root/hermes-backup-$(date +%F).tgz -C /root .hermes
-#  и вывези с хоста в защищённое хранилище; НЕ коммить, НЕ в общие логи.
+apt-get install -y sqlite3
+sh /opt/aimash/scripts/backup_hermes.sh          # → /root/hermes-backups/hermes-<ts>.tgz, права 600
 ```
+
+**Ставить таймером, а не в host-crontab.** Ровно на этом хосте бэкап Postgres переехал в Compose-сайдкар
+потому, что host-cron «часто НЕ был запущен» (`docker-compose.yml`, комментарий C1) — тот же провал повторится
+здесь. systemd-таймер работает независимо от crontab:
+
+```bash
+cat >/etc/systemd/system/hermes-backup.service <<'EOF'
+[Unit]
+Description=Backup /root/.hermes (config + secrets + state.db)
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /opt/aimash/scripts/backup_hermes.sh
+EOF
+cat >/etc/systemd/system/hermes-backup.timer <<'EOF'
+[Unit]
+Description=Daily backup of /root/.hermes
+[Timer]
+OnCalendar=daily
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload && systemctl enable --now hermes-backup.timer
+systemctl list-timers hermes-backup.timer      # NEXT/LEFT — проверить, что таймер реально взведён
+```
+
+**Проверка, что бэкап живой** (без неё это папка с файлами, а не бэкап):
+
+```bash
+tar tzf "$(ls -1t /root/hermes-backups/*.tgz | head -1)" | grep -E 'state\.db|\.env'   # оба должны быть
+```
+
+⚠️ Архив несёт секреты в открытом виде: права 600, каталог `/root/hermes-backups` — 700. Выгрузка с хоста —
+**только шифрованной** (`gpg`/`age`, заготовка в хвосте скрипта). НЕ коммитить, НЕ в общие логи. Локальные
+архивы гибнут вместе с сервером — вывоз в отдельное хранилище остаётся за владельцем.
 
 ---
 
