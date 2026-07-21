@@ -9,6 +9,15 @@
 confirmed→executing идёт одним атомарным UPDATE … WHERE status='confirmed' (compare-and-set),
 поэтому второй вызов (ретрай, гонка, второй воркер) получит rowcount=0 и НЕ выполнит мутацию.
 
+TTL — тоже в CAS, а не в фоновой джобе (Волна 1.2). Раньше срок жизни черновика энфорсил ровно
+один энфорсер — `scheduler.jobs.cleanup_stale_proposals`; джоба не поднялась/упала/отстала на час
+(интервал `CLEANUP_INTERVAL_MINUTES`) ⇒ вчерашний черновик оставался исполним бессрочно, и человек
+подтверждал «было→станет», снятое неизвестно когда. Возраст теперь стоит в `WHERE` у `confirm` и
+`claim`: просроченный черновик не совпадает по условию → rowcount=0 → False/None, без audit-строки
+и без вызова SDK. Джоба осталась уборщиком (перевести в `rejected`, освободить временные медиа) —
+гардом она больше не является. Это не заменяет freshness-recheck (сверку снимка с живым Google Ads,
+Волна 1.1): TTL ограничивает ВОЗРАСТ подтверждения, freshness — РАСХОЖДЕНИЕ данных.
+
 Хранилище — db.models (Proposal/AuditLog) на движке из DATABASE_URL (dev: SQLite). Секретов тут нет.
 """
 
@@ -16,11 +25,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import cast
 
 from sqlalchemy import CursorResult, func, select, update
 
+from core.config import settings
 from core.logging import log, redact_text
 from db.models import AuditLog, Proposal
 from db.session import Session, db_dt
@@ -55,6 +65,20 @@ def _cap_result(result: object) -> object:
         capped["_truncated"] = True
         return capped
     return {"_truncated": True, "preview": s[:_RESULT_MAX]}
+
+
+def _ttl_boundary() -> datetime:
+    """Граница возраста черновика для CAS-условий `confirm`/`claim`: созданные РАНЬШЕ неё мертвы.
+
+    Значение живое (`settings.proposal_ttl_hours`, env `PROPOSAL_TTL_HOURS`) — тот же источник, что
+    у джобы-уборщика и у текста карточки (`{ttl_h}`), иначе человек видел бы один срок, а код
+    применял другой. `db_dt` приводит границу к диалекту (SQLite хранит наивный UTC, Postgres —
+    timestamptz); сравнение naive-колонки с tz-aware границей на SQLite молча даёт мусор.
+
+    `ttl_hours <= 0` НЕ означает «TTL выключен»: граница уезжает в будущее и подтверждать становится
+    нечего — отказ, а не проход (правило 10). Выключателя тут нет намеренно: «отключить срок жизни
+    подтверждения» — это и есть та дыра, ради которой эпик заведён."""
+    return datetime.now(timezone.utc) - timedelta(hours=int(settings.proposal_ttl_hours))
 
 
 @dataclass
@@ -149,7 +173,14 @@ class ConfirmStore:
         Это authoritative-гейт исполнения: один UPDATE … WHERE status='confirmed' AND operation=…
         (compare-and-set). Второй вызов с тем же confirmation_id (повтор/гонка/второй воркер)
         не совпадёт по WHERE → rowcount=0 → None → мутация не выполнится (защита от double-spend).
-        Несовпадение operation тоже даёт None — confirmation_id привязан к КОНКРЕТНОЙ операции."""
+        Несовпадение operation тоже даёт None — confirmation_id привязан к КОНКРЕТНОЙ операции.
+
+        Возраст (`created_at >= TTL-граница`) — часть того же WHERE, а не отдельная проверка после
+        выборки: между «прочитали и увидели, что свежий» и «застолбили» проходит время, и на
+        Postgres в него влезает параллельный воркер. Второй рубеж после `confirm` нужен затем, что
+        подтверждение и исполнение — разные моменты: процесс мог упасть между ними и подняться
+        назавтра, найдя черновик в статусе 'confirmed'. Просрочка ⇒ None ⇒ `PermissionError` в
+        `ads.mutations._require_confirmation` — SDK не вызывается вовсе."""
         async with Session() as s:
             res = await s.execute(
                 update(Proposal)
@@ -157,6 +188,7 @@ class ConfirmStore:
                     Proposal.confirmation_id == confirmation_id,
                     Proposal.operation == operation,
                     Proposal.status == "confirmed",
+                    Proposal.created_at >= db_dt(_ttl_boundary()),  # TTL в CAS, не в джобе
                 )
                 .values(status="executing", decided_at=func.now())
             )
@@ -198,7 +230,12 @@ class ConfirmStore:
         Гард ВЛАДЕНИЯ (мультиоператор): в WHERE добавлен `chat_id == proposal.chat_id` — подтвердить
         черновик может ТОЛЬКО его владелец. Чужой chat_id (утёкший/угаданный confirmation_id) не
         совпадёт по WHERE → False, неотличимо от устаревшего (безопасный generic-UX). В одно-
-        операторном режиме chat_id всегда совпадает → поведение не меняется (fail-closed, аддитивно)."""
+        операторном режиме chat_id всегда совпадает → поведение не меняется (fail-closed, аддитивно).
+
+        Гард ВОЗРАСТА (Волна 1.2): `created_at >= TTL-граница` в том же WHERE. Просроченная карточка
+        (кнопки в Telegram живут вечно, даже когда джоба-уборщик не отработала) даёт False —
+        и вызывающий уже показывает на него текст «Черновик не найден или устарел» (i18n `stale`),
+        менять UX не нужно."""
         async with Session() as s:
             res = await s.execute(
                 update(Proposal)
@@ -206,6 +243,7 @@ class ConfirmStore:
                     Proposal.confirmation_id == confirmation_id,
                     Proposal.status == "pending",
                     Proposal.chat_id == chat_id,  # владение: только владелец черновика
+                    Proposal.created_at >= db_dt(_ttl_boundary()),  # TTL в CAS, не в джобе
                 )
                 .values(status="confirmed", decided_at=func.now())
             )

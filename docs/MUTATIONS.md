@@ -31,6 +31,13 @@ Google Ads, где она объявлена и какими гейтами за
 - **`confirmation_id` обязателен в каждой `apply_*`.** Без валидного одноразового
   подтверждения `_require_confirmation` бросает `PermissionError`
   (`ads/mutations.py:76-80`).
+- **Подтверждение не живёт вечно.** Возраст черновика (`PROPOSAL_TTL_HOURS`, дефолт
+  24 ч) стоит условием в `WHERE` у `ConfirmStore.confirm` **и** `claim` — то есть
+  внутри самого CAS, а не проверкой после выборки (TOCTOU) и не в фоновой джобе
+  (Волна 1.2). Просроченный черновик не подтверждается (`False`) и не столбится
+  (`None` → `PermissionError`), даже если `cleanup_stale_proposals` не отработал.
+  Это **не** freshness-recheck: TTL ограничивает возраст подтверждения, freshness —
+  расхождение снимка с живым Google Ads. Инварианты — `tests/test_confirm_ttl_cas.py`.
 - **Деньги — только по прямой команде пользователя** (`user_initiated`). Проверяется
   внутри денежных `apply_*` (см. столбец «деньги?» ниже). Провенанс
   «прямая команда» агент себе НЕ проставляет — `user_initiated` в `agent/loop.py`
