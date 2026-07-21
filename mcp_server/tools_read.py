@@ -1,13 +1,22 @@
 """12 READ-обёрток MCP-слоя над существующими ридерами (Контур A, инкремент «MCP READ»).
 
 Каждая обёртка:
-  1) строит клиент `build_client_async(account)` и период из `date_from/date_to|period_days`;
-  2) зовёт ридер через `core.resilience.run_ads_read_call` (таймаут/ретрай/квота/to_thread) — как
-     это уже делают `_do_read`/`gather_audit`; замок ЧТЕНИЯ (`ensure_read_allowed`/
-     `ensure_manager_allowed`) живёт ВНУТРИ ридера — слой его не дублирует и не ослабляет;
-  3) сериализует результат (`mcp_server.serialize`) в единый конверт (`mcp_server.envelope.ok`);
-  4) ловит ЛЮБОЕ исключение (`_guarded`) → редактированный error-конверт (`envelope.err`), наружу
+  1) проходит замок ЧТЕНИЯ на ГРАНИЦЕ слоя — `_guarded` требует `account=` и зовёт
+     `ensure_read_allowed`/`ensure_manager_allowed` ДО тела инструмента (см. ниже);
+  2) строит клиент `build_client_async(account)` и период из `date_from/date_to|period_days`;
+  3) зовёт ридер через `core.resilience.run_ads_read_call` (таймаут/ретрай/квота/to_thread) — как
+     это уже делают `_do_read`/`gather_audit`;
+  4) сериализует результат (`mcp_server.serialize`) в единый конверт (`mcp_server.envelope.ok`);
+  5) ловит ЛЮБОЕ исключение (`_guarded`) → редактированный error-конверт (`envelope.err`), наружу
      сырой `str(e)` не пускает (правило 5; FastMCP иначе кладёт его в ToolError).
+
+Замок на границе, а не только внутри ридера. Ридеры Google Ads держат `ensure_read_allowed` первой
+строкой, и обёртка над таким ридером наследовала бы его сама. Но ридеры НАШЕЙ БД (`db/history.py`,
+`clients/store.py`, `audit/*`) не имеют замка ни одного — обёртка над ними без явной проверки читает
+чужой аккаунт. Раньше это лечилось вручную (`get_change_history`), то есть по памяти автора. Теперь
+замок неотделим от `_guarded`: `account` — обязательный keyword-аргумент, обёртку без него нельзя
+даже вызвать. Дублирование с ридером сознательное (defense in depth): проверка in-memory, стоит
+наносекунды, а снимает целый класс «новая обёртка забыла замок».
 
 Кросс-аккаунтность: у бот-схем `ANALYSIS_TOOLS` намеренно НЕТ `account` (бот залочен на один
 аккаунт); MCP кросс-аккаунтный → `account` обязателен у всех, кроме `list_accounts` (там `manager_id`).
@@ -19,7 +28,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Awaitable, Callable
 
-from ads.client import build_client_async, ensure_read_allowed
+from ads.client import build_client_async, ensure_manager_allowed, ensure_read_allowed
 from ads.keyword_plan import generate_keyword_ideas
 from ads.read import list_child_accounts
 from audit.collect import gather_audit
@@ -52,10 +61,29 @@ from reports.queries import (
 )
 
 
-async def _guarded(work: Callable[[], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
-    """Выполнить тело инструмента, ЛЮБОЙ сбой → редактированный error-конверт (правило 5, fail-closed).
-    В лог — только `type(e).__name__` (не str(e): исключение google-ads/OpenRouter может нести токен)."""
+async def _guarded(
+    work: Callable[[], Awaitable[dict[str, Any]]],
+    *,
+    account: str,
+    manager: bool = False,
+) -> dict[str, Any]:
+    """Замок ЧТЕНИЯ на границе + выполнение тела; ЛЮБОЙ сбой → редактированный error-конверт
+    (правило 5, fail-closed). В лог — только `type(e).__name__` (не str(e): исключение
+    google-ads/OpenRouter может нести токен).
+
+    `account` обязателен и keyword-only НАМЕРЕННО: обёртку, забывшую объявить читаемый аккаунт,
+    нельзя вызвать вовсе — TypeError на первом же обращении, а не тихое чтение без замка.
+    `manager=True` — адресация менеджерским id (обход MCC): другой чокпойнт, шире по смыслу
+    (`ensure_manager_allowed`), пустой id там тоже отказ.
+
+    Отказ замка приезжает как `error_code == "forbidden_account"` (`envelope.classify_error`) —
+    инвариант `tests/test_hermes_isolation.py` ассертит именно код, а не текст.
+    """
     try:
+        if manager:
+            ensure_manager_allowed(str(account))
+        else:
+            ensure_read_allowed(str(account))
         return await work()
     except Exception as e:  # noqa: BLE001 — граница слоя: наружу только редактированное
         log.warning("mcp read tool failed: %s", type(e).__name__)
@@ -86,16 +114,17 @@ async def list_accounts(
 ) -> dict[str, Any]:
     """Дочерние аккаунты MCC (id/имя/валюта/статус/уровень). manager_id пуст ⇒ настроенный MCC.
     Замок: ensure_manager_allowed (перечисление чужого менеджера запрещено, GR#9)."""
+    # mid считаем ДО `_guarded`: замок обхода MCC применяется к тому же id, что уйдёт в ридер.
+    mid = str(manager_id) if manager_id else _default_manager()
 
     async def _work() -> dict[str, Any]:
-        mid = str(manager_id) if manager_id else _default_manager()
         client = await build_client_async(mid)
         rows = await run_ads_read_call(
             list_child_accounts, client, mid, account=mid, label="mcp.list_accounts"
         )
         return ok([child_account_dict(c) for c in rows], offset=offset, limit=limit)
 
-    return await _guarded(_work)
+    return await _guarded(_work, account=mid, manager=True)
 
 
 async def get_campaign_stats(
@@ -123,7 +152,7 @@ async def get_campaign_stats(
         )
         return ok(breakdown_rows(bd), offset=offset, limit=limit, extra=breakdown_extra(bd))
 
-    return await _guarded(_work)
+    return await _guarded(_work, account=str(account))
 
 
 async def get_adgroup_stats(
@@ -151,7 +180,7 @@ async def get_adgroup_stats(
         )
         return ok(breakdown_rows(bd), offset=offset, limit=limit, extra=breakdown_extra(bd))
 
-    return await _guarded(_work)
+    return await _guarded(_work, account=str(account))
 
 
 async def get_keywords(
@@ -179,7 +208,7 @@ async def get_keywords(
         )
         return ok(breakdown_rows(bd), offset=offset, limit=limit, extra=breakdown_extra(bd))
 
-    return await _guarded(_work)
+    return await _guarded(_work, account=str(account))
 
 
 async def get_ads(
@@ -207,7 +236,7 @@ async def get_ads(
         )
         return ok(breakdown_rows(bd), offset=offset, limit=limit, extra=breakdown_extra(bd))
 
-    return await _guarded(_work)
+    return await _guarded(_work, account=str(account))
 
 
 async def get_search_terms(
@@ -237,7 +266,7 @@ async def get_search_terms(
         )
         return ok([search_term_dict(r) for r in rows], offset=offset, limit=limit)
 
-    return await _guarded(_work)
+    return await _guarded(_work, account=str(account))
 
 
 async def get_negatives(
@@ -262,7 +291,7 @@ async def get_negatives(
         rows, extra = negatives_payload(info)
         return ok(rows, offset=offset, limit=limit, extra=extra)
 
-    return await _guarded(_work)
+    return await _guarded(_work, account=str(account))
 
 
 async def get_budgets(
@@ -283,7 +312,7 @@ async def get_budgets(
         )
         return ok([budget_dict(b) for b in rows], offset=offset, limit=limit)
 
-    return await _guarded(_work)
+    return await _guarded(_work, account=str(account))
 
 
 async def get_auction_insights(
@@ -312,7 +341,7 @@ async def get_auction_insights(
         )
         return ok([impression_share_dict(r) for r in rows], offset=offset, limit=limit)
 
-    return await _guarded(_work)
+    return await _guarded(_work, account=str(account))
 
 
 async def get_account_audit(
@@ -335,7 +364,7 @@ async def get_account_audit(
         rows, extra = audit_payload(result)
         return ok(rows, offset=offset, limit=limit, extra=extra)
 
-    return await _guarded(_work)
+    return await _guarded(_work, account=str(account))
 
 
 async def get_change_history(
@@ -346,17 +375,16 @@ async def get_change_history(
     limit: int = DEFAULT_LIMIT,
 ) -> dict[str, Any]:
     """История ПРИМЕНЁННЫХ ботом операций по аккаунту (наш audit-trail из proposals, НЕ Google Ads
-    change-history). operation сужает по типу. Первой строкой — ensure_read_allowed (И6: защита от
-    кросс-клиентного чтения)."""
+    change-history). operation сужает по типу. Замок: ensure_read_allowed на границе `_guarded`
+    (И6 — ридер НАШЕЙ БД своего замка не имеет, граница здесь единственная защита)."""
 
     async def _work() -> dict[str, Any]:
-        ensure_read_allowed(str(account))  # И6: замок ЧТЕНИЯ и на нашем audit-trail
         actions = await list_recent_applied_by_customer(
             str(account), operation=operation, limit=int(reader_limit)
         )
         return ok([recent_action_dict(a) for a in actions], offset=offset, limit=limit)
 
-    return await _guarded(_work)
+    return await _guarded(_work, account=str(account))
 
 
 async def keyword_ideas(
@@ -399,7 +427,7 @@ async def keyword_ideas(
         )
         return ok([keyword_idea_dict(k) for k in ideas], offset=offset, limit=limit)
 
-    return await _guarded(_work)
+    return await _guarded(_work, account=str(account))
 
 
 # Реестр: имя инструмента → функция. server.py регистрирует по нему в FastMCP и проверяет И4

@@ -6,9 +6,10 @@
   • **И4 (зерно)** — construction-time assert в `mcp_server.server`: READ-инструменты физически не
     пересекаются с мутационными (`agent.tools.schemas.MUTATION_TOOLS`). Импорт роняет процесс, если
     мутация просочилась в read-фазу. Тот же паттерн S4, что защищает `ANALYSIS_TOOLS`.
-  • **read-lock на границе MCP** — READ-инструмент на аккаунте вне allow-list возвращает
-    редактированный error-конверт (fail-closed, правило 5), НЕ сырое исключение и НЕ данные;
-    на Draft (в потолке) замок ЧТЕНИЯ проходит.
+  • **read-lock на границе MCP** — параметризованно по ВСЕМ обёрткам: инструмент на аккаунте вне
+    allow-list отказывает ДО первого обращения наружу (все ридеры застаблены взрывом), отдаёт
+    редактированный error-конверт с `error_code == "forbidden_account"` — не сырое исключение и не
+    данные; обратная половина доказывает, что замок пропускает разрешённый аккаунт.
 
 Остальные И1–И3/И5–И8 — каркас со `skip("шаг перед WRITE")` с ДОСЛОВНОЙ формулировкой инварианта,
 чтобы файл рос, а не переписывался, и следующий шаг наполнил их корпусом атак (инлайн, как
@@ -37,20 +38,25 @@ _FOREIGN_ID = "9999999999"
 
 
 @contextmanager
-def _allow_lists(*, mutate: str = "", read: str = ""):
-    """Задать mutation- и read-allow-list поверх settings (перебивает значения из .env) — чтобы
+def _allow_lists(*, mutate: str = "", read: str = "", manager: str = ""):
+    """Задать mutation-, read- и MCC-allow-list поверх settings (перебивает значения из .env) — чтобы
     доступ был детерминирован независимо от локального окружения. Пустые оба ⇒ чтение запрещено
     даже Draft'у: замок ЧТЕНИЯ (ads.client.ensure_read_allowed) смотрит allowed∪read∪_READ_DISCOVERED,
-    а НЕ мутационный ALLOWED_CEILING — Draft читается, лишь если он в одном из списков (в dev — есть)."""
+    а НЕ мутационный ALLOWED_CEILING — Draft читается, лишь если он в одном из списков (в dev — есть).
+    `manager` правит login_customer_id: обход MCC (`list_accounts`) замыкается ДРУГИМ чокпойнтом
+    (ensure_manager_allowed), и его набор из этих двух списков не строится."""
     prev_mut = settings.google_ads_allowed_customer_ids
     prev_read = settings.google_ads_read_customer_ids
+    prev_mgr = settings.google_ads_login_customer_id
     settings.google_ads_allowed_customer_ids = mutate
     settings.google_ads_read_customer_ids = read
+    settings.google_ads_login_customer_id = manager
     try:
         yield
     finally:
         settings.google_ads_allowed_customer_ids = prev_mut
         settings.google_ads_read_customer_ids = prev_read
+        settings.google_ads_login_customer_id = prev_mgr
 
 
 # ── И4 (зерно): READ-инструменты физически не пересекаются с мутационными ────────────
@@ -80,20 +86,168 @@ def test_i4_seed_server_builds_and_registers_only_read():
     assert names == set(READ_MCP_TOOLS), f"реестр FastMCP разошёлся с READ_MCP_TOOLS: {names}"
 
 
-# ── read-lock на границе MCP: отказ приходит редактированным конвертом, не данными ───
-def test_read_tool_denies_foreign_account_via_error_envelope():
-    # get_change_history зовёт ensure_read_allowed ПЕРВОЙ строкой (до SDK/БД) — поэтому тест офлайн
-    # и детерминирован. Аккаунт вне allow-list ⇒ PermissionError внутри → _guarded → error-конверт.
+# ── read-lock на границе MCP: параметризованный инвариант по ВСЕМ обёрткам ───────────
+# Прошлая версия проверяла ОДИН инструмент и лишь факт непустого `error`. Это тавтология: конверт
+# отдавал байт-в-байт одну форму на любое исключение, поэтому тест оставался зелёным и при полностью
+# снятом замке — падал бы разве что на опечатке. Теперь проверяются три разных утверждения:
+#   (а) отказ классифицирован МАШИНОЙ — `error_code == "forbidden_account"`, а не «текст непуст»;
+#   (б) отказ случился ДО выхода наружу — все ридеры застаблены взрывом, и он не прилетел;
+#   (в) замок не «отказывает всем» — обратная половина доводит разрешённый аккаунт до ридера.
+# Список ниже ведётся вручную НАМЕРЕННО: новая обёртка без записи роняет
+# `test_every_read_tool_declares_account_arg`, то есть выставить ридер наружу, не сказав, каким
+# аргументом он адресует аккаунт, нельзя.
+_ACCOUNT_ARG: dict[str, str] = {
+    "list_accounts": "manager_id",  # другой чокпойнт — ensure_manager_allowed
+    "get_campaign_stats": "account",
+    "get_adgroup_stats": "account",
+    "get_keywords": "account",
+    "get_ads": "account",
+    "get_search_terms": "account",
+    "get_negatives": "account",
+    "get_budgets": "account",
+    "get_auction_insights": "account",
+    "get_account_audit": "account",
+    "get_change_history": "account",
+    "keyword_ideas": "account",
+}
+
+
+class _ReaderCalled(RuntimeError):
+    """Стаб выхода наружу (SDK/БД). Прилетел ⇒ тело инструмента исполнилось, замок пропустил."""
+
+
+@contextmanager
+def _readers_explode():
+    """Заменить ВСЕ выходы `tools_read` наружу на взрыв. Замок обязан сработать раньше любого из них;
+    заодно тест офлайн и детерминирован (ни SDK, ни БД не поднимаются)."""
     from mcp_server import tools_read as tr
 
-    with _allow_lists(mutate="", read=""):  # оба пусты ⇒ любой аккаунт запрещён к чтению
-        env = asyncio.run(tr.get_change_history(account=_FOREIGN_ID))
+    names = (
+        "build_client_async",
+        "run_ads_read_call",
+        "gather_audit",
+        "list_recent_applied_by_customer",
+    )
+    saved = {n: getattr(tr, n) for n in names}
 
-    assert env["rows"] == [], "fail-closed нарушен: отказ вернул данные"
-    assert env["total_rows"] == 0
-    assert env["error"], "ожидался редактированный текст отказа в error"
+    def _boom(*_a, **_kw):
+        raise _ReaderCalled("ридер вызван — замок не отработал до выхода наружу")
+
+    for n in names:
+        setattr(tr, n, _boom)
+    try:
+        yield
+    finally:
+        for n, fn in saved.items():
+            setattr(tr, n, fn)
+
+
+def test_every_read_tool_declares_account_arg():
+    from mcp_server.tools_read import READ_MCP_TOOLS
+
+    assert set(_ACCOUNT_ARG) == set(READ_MCP_TOOLS), (
+        "READ-обёртка не объявила, каким аргументом адресуется аккаунт (или исчезла); "
+        f"расхождение: {sorted(set(_ACCOUNT_ARG) ^ set(READ_MCP_TOOLS))}"
+    )
+
+
+@pytest.mark.parametrize("tool_name", sorted(_ACCOUNT_ARG))
+def test_read_lock_denies_foreign_account_before_any_reader(tool_name):
+    from mcp_server import tools_read as tr
+
+    fn = tr.READ_TOOL_FUNCS[tool_name]
+    with _allow_lists(mutate="", read="", manager=""), _readers_explode():
+        env = asyncio.run(fn(**{_ACCOUNT_ARG[tool_name]: _FOREIGN_ID}))
+
+    assert env["error_code"] == "forbidden_account", (
+        f"{tool_name}: отказ не классифицирован как замок (получено {env['error_code']!r}). "
+        "internal ⇒ до замка успел выполниться ридер; None ⇒ чужой аккаунт прочитан — fail-open"
+    )
+    assert env["rows"] == [] and env["total_rows"] == 0, "fail-closed нарушен: отказ вернул данные"
     # Правило 5: наружу только редактированный текст — не трасса и не сырой repr исключения.
+    assert env["error"], "ожидался редактированный текст отказа в error"
     assert "Traceback" not in env["error"]
+
+
+@pytest.mark.parametrize("tool_name", sorted(_ACCOUNT_ARG))
+def test_read_lock_admits_allowed_account_and_reaches_reader(tool_name):
+    """Обратная половина: без неё инвариант выше проходил бы и на реализации «отказывать всегда».
+    Разрешённый аккаунт обязан дойти до ридера — там его встречает взрыв стаба (`internal`)."""
+    from mcp_server import tools_read as tr
+
+    fn = tr.READ_TOOL_FUNCS[tool_name]
+    with (
+        _allow_lists(mutate=DRAFT_ACCOUNT_ID, read="", manager=DRAFT_ACCOUNT_ID),
+        _readers_explode(),
+    ):
+        env = asyncio.run(fn(**{_ACCOUNT_ARG[tool_name]: DRAFT_ACCOUNT_ID}))
+
+    assert env["error_code"] == "internal", (
+        f"{tool_name}: разрешённый аккаунт не дошёл до ридера (код {env['error_code']!r}) — "
+        "замок отказывает всем, инвариант отказа выше это не поймал бы"
+    )
+
+
+def test_reference_hermes_config_exposes_exactly_the_read_registry():
+    """Четвёртое место lock-step: `tools.include` в `~/.hermes/config.yaml`.
+
+    Это ВТОРОЙ allow-list, живущий вне репозитория: инструмент, зарегистрированный в FastMCP, но не
+    вписанный туда, агенту НЕВИДИМ — то есть работа сделана, а функции у профессионала нет. Тест
+    держит эталон `deploy/hermes/config.yaml` синхронным с реестром; копию на VPS он не видит, но
+    расхождение эталона ловит до деплоя, а список для ручной правки печатает в сообщении.
+    (`yaml` берём из транзитивной зависимости `google-ads` — новой зависимости не заводим.)
+    """
+    import yaml
+
+    from mcp_server.tools_read import READ_MCP_TOOLS
+
+    cfg_path = Path(__file__).resolve().parents[1] / "deploy" / "hermes" / "config.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    servers = cfg.get("mcp_servers") or cfg.get("mcp") or {}
+    include = None
+    for srv in servers.values() if isinstance(servers, dict) else []:
+        inc = ((srv or {}).get("tools") or {}).get("include")
+        if inc is not None:
+            include = set(inc)
+            break
+    assert include is not None, f"в {cfg_path.name} не нашёлся tools.include — эталон разошёлся"
+    missing, extra = sorted(set(READ_MCP_TOOLS) - include), sorted(include - set(READ_MCP_TOOLS))
+    assert not missing and not extra, (
+        f"tools.include эталона разошёлся с реестром. Дописать: {missing}; лишние: {extra}. "
+        "Не забыть ту же правку в ~/.hermes/config.yaml на VPS — иначе инструмент невидим агенту."
+    )
+
+
+def test_error_code_distinguishes_our_lock_from_google_refusal():
+    """`forbidden_account` обязан означать «отказал НАШ замок». Отказ Google (`USER_PERMISSION_DENIED`)
+    — другой инцидент и другое действие оператора: код `upstream_denied`. Схлопни их — и инвариант
+    замка снова станет тавтологичным, теперь уже через ошибку доступа со стороны Google."""
+    from mcp_server.envelope import classify_error, err
+
+    class _FakeCode:
+        name = "USER_PERMISSION_DENIED"
+
+    class _FakeErr:
+        error_code = _FakeCode()
+
+    class _FakeFailure:
+        errors = [_FakeErr()]
+
+    class _FakeGoogleAdsException(Exception):
+        failure = _FakeFailure()
+
+    assert classify_error(PermissionError("замок")) == "forbidden_account"
+    assert classify_error(_FakeGoogleAdsException()) == "upstream_denied"
+    assert classify_error(ValueError("кривая дата")) == "invalid_argument"
+    assert classify_error(RuntimeError("что-то")) == "internal"
+
+    # Классификатор не смеет ронять инструмент: исключение, взрывающееся при интроспекции, — internal.
+    class _Hostile(Exception):
+        @property
+        def failure(self):
+            raise RuntimeError("интроспекция исключения сама бросает")
+
+    assert err(_Hostile())["error_code"] == "internal"
 
 
 def test_read_lock_allows_draft_but_still_denies_foreign():
@@ -191,9 +345,20 @@ def test_i2_injection_text_creates_no_proposal_and_no_user_initiated():
 
 
 @pytest.mark.skip(reason=_WRITE_STEP)
-def test_i3_user_initiated_only_from_human_whitelist_reply():
-    """И3: user_initiated выставляется только по реплай-подтверждению живого человека из whitelist;
-    ни скил, ни cron, ни self-improvement fork его не выставляют."""
+def test_i3_user_initiated_stamped_at_creation_never_by_confirmation():
+    """И3: бит провенанса `user_initiated` штампует доверенный слой в момент СОЗДАНИЯ черновика —
+    и только если ход триггернуло входящее сообщение человека из whitelist по доверенному каналу.
+    Ни скил, ни cron, ни self-improvement fork его не выставляют; аргументом инструмента он не
+    задаётся. Подтверждение человеком бит НЕ повышает.
+
+    ⚠️ Формулировка правится намеренно (было: «выставляется по реплай-подтверждению живого
+    человека»). Та редакция описывала ДЫРУ: она выводила провенанс из факта подтверждения и делала
+    проверку тождественно истинной — cron-аудит предлагает поднять бюджет, человек жмёт ✅,
+    `user_initiated` становится True, и `PermissionError` в `ads/mutations.py:134` не срабатывает
+    никогда, то есть золотое правило 3 обнуляется. В коде сегодня правильно: бит ставит
+    `bot/main.py:1748` при создании, `agent/loop.py:330` его намеренно не трогает. Та же правка
+    нужна в §4 `HERMES_SPEC.md` — там инвариант записан в старой (дырявой) редакции.
+    """
 
 
 @pytest.mark.skip(reason=_WRITE_STEP)

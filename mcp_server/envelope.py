@@ -12,11 +12,30 @@ list[float] (JSON-сериализуемо; set — нет).
 
 `error` — редактированный текст при сбое (`mcp_server.redact.redact_error`), НИКОГДА сырой `str(e)`.
 На успехе `error=None`; при ошибке rows пуст (fail-closed: инструмент не отдаёт частичных данных).
+
+`error_code` — машиночитаемая ПРИЧИНА отказа. Появился затем, что редактированный `error` разбирать
+нельзя (текст локализуем и намеренно обеднён), а без причины конверт байт-в-байт одинаков для любого
+исключения: тест «чужой customer_id ⇒ отказ» тогда тавтологичен и остаётся зелёным при полностью
+снятом замке чтения. Код различает «отказал НАШ замок» (`forbidden_account`) и «отказал Google»
+(`upstream_denied`) — на живом аккаунте это два разных инцидента с разными действиями оператора.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+# Стабильный контракт кодов. Расширять можно, ПЕРЕИМЕНОВЫВАТЬ — нет: на них ассертят инварианты.
+ERROR_CODES: frozenset[str] = frozenset(
+    {
+        "forbidden_account",  # наш замок (ensure_read_allowed/ensure_manager_allowed/ensure_allowed)
+        "quota_exhausted",  # core.quota — суточный потолок операций
+        "timeout",  # таймаут вызова Google Ads
+        "invalid_argument",  # кривой вход инструмента (даты, типы) — вина вызывающего
+        "upstream_denied",  # Google отказал в доступе к аккаунту (нет линковки/токен без прав)
+        "upstream_error",  # прочая ошибка Google Ads API
+        "internal",  # всё остальное, включая сбой самой классификации
+    }
+)
 
 # Дефолтный размер страницы конверта. Отдельный от GAQL-LIMIT ридеров: конверт не убирает их лимиты,
 # а нормализует сигнал усечения/пагинации поверх уже полученного результата.
@@ -56,13 +75,43 @@ def ok(
         "truncated": truncated,
         "code_numbers": sorted(collect_numbers(payload)),
         "error": None,
+        "error_code": None,
     }
     return env
 
 
+def classify_error(exc: BaseException) -> str:
+    """Исключение → код из `ERROR_CODES`. Никогда не бросает: сбой самой классификации ⇒ `internal`.
+
+    Порядок веток значим. `PermissionError` идёт первой: в read-слое её источник ровно один — наши
+    замки (`ads.client.ensure_*`), и именно эту ветку ассертят инварианты замка. Ветка Google
+    (`upstream_denied`) — ПОСЛЕ неё, иначе отказ Google маскировался бы под отказ замка и тест замка
+    снова стал бы тавтологичным.
+    """
+    try:
+        from core.ads_errors import error_code_names, is_account_access_error
+        from core.quota import QuotaExceededError
+
+        if isinstance(exc, PermissionError):
+            return "forbidden_account"
+        if isinstance(exc, QuotaExceededError):
+            return "quota_exhausted"
+        if isinstance(exc, TimeoutError):  # 3.11+: asyncio.TimeoutError — это он же
+            return "timeout"
+        if isinstance(exc, ValueError | TypeError | KeyError):
+            return "invalid_argument"
+        if is_account_access_error(exc):
+            return "upstream_denied"
+        if error_code_names(exc):  # непусто ⇒ это GoogleAdsException с разобранными кодами
+            return "upstream_error"
+    except Exception:  # noqa: BLE001 — классификатор не смеет ронять инструмент (fail-closed)
+        return "internal"
+    return "internal"
+
+
 def err(exc: BaseException) -> dict[str, Any]:
-    """Ошибочный конверт: пустые rows + редактированный текст (правило 5). Форма совпадает с ok()
-    по ключам-скелету, чтобы клиент не различал ветки структурно."""
+    """Ошибочный конверт: пустые rows + редактированный текст (правило 5) + машиночитаемый код.
+    Форма совпадает с ok() по ключам-скелету, чтобы клиент не различал ветки структурно."""
     from mcp_server.redact import redact_error
 
     return {
@@ -73,4 +122,5 @@ def err(exc: BaseException) -> dict[str, Any]:
         "truncated": False,
         "code_numbers": [],
         "error": redact_error(exc),
+        "error_code": classify_error(exc),
     }

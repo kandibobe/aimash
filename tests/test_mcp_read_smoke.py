@@ -12,14 +12,31 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
+from core.config import settings  # noqa: E402
 from mcp_server import envelope, serialize  # noqa: E402
 from mcp_server import tools_read as tr  # noqa: E402
 from mcp_server.redact import redact_error  # noqa: E402
 from reports.queries import Breakdown, Metrics  # noqa: E402
+
+
+@contextmanager
+def _read_allowed():
+    """Замок ЧТЕНИЯ стоит на ГРАНИЦЕ слоя (`tools_read._guarded`), а не только внутри ридера, поэтому
+    офлайн-смоук обязан звать инструмент на РАЗРЕШЁННОМ аккаунте. Иначе он молча проверял бы отказ
+    замка вместо конверта — и остался бы зелёным при сломанной сериализации (сам замок покрыт
+    параметризованным инвариантом в tests/test_hermes_isolation.py)."""
+    prev = settings.google_ads_allowed_customer_ids
+    settings.google_ads_allowed_customer_ids = DRAFT_ACCOUNT_ID
+    try:
+        yield
+    finally:
+        settings.google_ads_allowed_customer_ids = prev
 
 
 def _sample_breakdown() -> Breakdown:
@@ -96,8 +113,11 @@ def test_get_campaign_stats_envelope_offline(monkeypatch):
     monkeypatch.setattr(tr, "build_client_async", fake_client)
     monkeypatch.setattr(tr, "run_ads_read_call", fake_read)
 
-    env = asyncio.run(tr.get_campaign_stats(account="123", period_days=7, limit=1, offset=0))
-    assert env["error"] is None
+    with _read_allowed():
+        env = asyncio.run(
+            tr.get_campaign_stats(account=DRAFT_ACCOUNT_ID, period_days=7, limit=1, offset=0)
+        )
+    assert env["error"] is None and env["error_code"] is None
     assert env["total_rows"] == 2 and env["returned"] == 1 and env["truncated"] is True
     assert env["title"] == "Кампании"
     assert env["rows"][0]["dimensions"]["Кампания"] == "Camp A"
@@ -114,9 +134,12 @@ def test_wrapper_catches_reader_failure_into_envelope(monkeypatch):
     monkeypatch.setattr(tr, "build_client_async", fake_client)
     monkeypatch.setattr(tr, "run_ads_read_call", boom)
 
-    env = asyncio.run(tr.get_campaign_stats(account="123"))
+    with _read_allowed():
+        env = asyncio.run(tr.get_campaign_stats(account=DRAFT_ACCOUNT_ID))
     assert env["rows"] == [] and env["error"]  # fail-closed: сбой → error-конверт, не исключение
     assert "SECRET_TOKEN_ABC" not in env["error"]  # правило 5
+    # Код доказывает, что поймали сбой РИДЕРА, а не отказ замка — иначе тест зелёный по другой причине.
+    assert env["error_code"] == "internal"
 
 
 def test_keyword_ideas_forwards_only_set_kwargs(monkeypatch):
@@ -132,11 +155,16 @@ def test_keyword_ideas_forwards_only_set_kwargs(monkeypatch):
     monkeypatch.setattr(tr, "build_client_async", fake_client)
     monkeypatch.setattr(tr, "run_ads_read_call", capture)
 
-    asyncio.run(tr.keyword_ideas(account="1", seeds=["a", "b"], geo_ids=[2840], reader_limit=10))
+    with _read_allowed():
+        asyncio.run(
+            tr.keyword_ideas(
+                account=DRAFT_ACCOUNT_ID, seeds=["a", "b"], geo_ids=[2840], reader_limit=10
+            )
+        )
     # заданные — проброшены (geo_ids → tuple, reader_limit → limit); незаданные (url/language/network) — нет
     assert captured["seeds"] == ["a", "b"]
     assert captured["geo_ids"] == (2840,)
     assert captured["limit"] == 10
     assert "url" not in captured and "language" not in captured and "network" not in captured
     # служебные метки run_ads_read_call (account/label) не в счёт — это не kwargs ридера
-    assert captured.get("account") == "1"
+    assert captured.get("account") == DRAFT_ACCOUNT_ID
