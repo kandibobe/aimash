@@ -32,7 +32,13 @@ docker compose ps          # aimash-bot / aimash-pg должны быть Up
 
 ---
 
-## RB-1. Установить и запустить Hermes (профиль `aimash`)
+## RB-1. Установить и запустить Hermes (ДЕФОЛТНЫЙ профиль)
+
+> ⚠️ **Профиль `aimash` не создавать.** Профиль в Hermes — это отдельный home-каталог
+> `~/.hermes/profiles/<имя>/` со своими `config.yaml`, `.env`, `SOUL.md`, памятью и gateway-юнитом.
+> `hermes profile create aimash` заводит **пустой** профиль и наш конфиг из `~/.hermes/` туда не
+> попадает; а `hermes -p aimash …` без создания падает с `Profile 'aimash' does not exist`
+> **[Проверено на VPS 21.07]**. Весь ранбук — на дефолтном профиле, команды **без `-p`**.
 
 ```bash
 # 1. Установка с жёстким пином версии (0.x релизится часто; на проде автообновление НЕ включаем).
@@ -41,8 +47,12 @@ hermes version                     # версия = субкоманда, НЕ `
 
 # 2. Секреты → ~/.hermes/.env (шаблон — deploy/hermes/hermes.env.example).
 hermes config env-path             # путь ~/.hermes/.env
-#   заполнить: OPENROUTER_API_KEY, TELEGRAM_BOT_TOKEN (новый бот, RB-2),
-#              TELEGRAM_ALLOWED_USERS, TELEGRAM_GROUP_ALLOWED_CHATS
+#   заполнить: OPENROUTER_API_KEY, TELEGRAM_BOT_TOKEN (новый бот, RB-2), TELEGRAM_ALLOWED_USERS.
+#   ⚠️ TELEGRAM_GROUP_ALLOWED_CHATS установленная версия НЕ знает (нет в списке `hermes config
+#      check`) — гейт группы задаётся ТОЛЬКО в config.yaml: gateway.platforms.telegram.extra
+#      .group_allowed_chats. Строка в .env безвредна, но ни на что не влияет [Проверено 21.07].
+#   ⚠️ Тулсет `web` без ключа поискового провайдера (EXA/TAVILY/BRAVE/FIRECRAWL/SEARXNG) мёртв —
+#      либо ключ, либо `web` в disabled_toolsets, иначе агент дёргает нерабочий инструмент.
 
 # 3. Провайдер модели — через интерактивный мастер (он же запускается при первом старте):
 hermes model
@@ -69,29 +79,32 @@ hermes config edit
 
 # 5. Проверка конфига до старта. ВАЖНО: `hermes config check` про «missing/stale», он НЕ ловит
 #    неизвестные/опечатанные ключи — Hermes их молча игнорирует (К10). Единственный надёжный контроль:
-hermes config check
-hermes config show                 # убедиться, что КАЖДЫЙ наш ключ реально распознан (model — mapping,
-                                   #   mcp_servers.aimash, approvals: manual присутствуют)
+hermes config check                # ключи .env: OPENROUTER_API_KEY / TELEGRAM_BOT_TOKEN /
+                                   #   TELEGRAM_ALLOWED_USERS должны быть ✓, а не ○
+#   ⚠️ `hermes config show` печатает ФОРМАТИРОВАННЫЙ вид, а не сырой YAML: `config show | grep
+#      mcp_servers` даёт пусто даже на рабочем конфиге. Проверять сам файл:
+grep -n -E "gpt-5.6|group_allowed_chats|disabled_toolsets|allow_from" ~/.hermes/config.yaml
 #   + вручную сверить каждый ключ config.yaml с cli-config.yaml.example пиновой версии.
 
-# 6. systemd user-сервис (переживает выход из SSH).
-hermes -p aimash gateway install
+# 6. systemd user-сервис (переживает выход из SSH). БЕЗ `-p` — см. врезку про профили выше.
+hermes gateway install
 sudo loginctl enable-linger $USER  # ОБЯЗАТЕЛЬНО: иначе сервис умрёт при logout
-hermes -p aimash gateway start
-hermes -p aimash gateway status    # active; в логах — коннект MCP aimash + список 12 tools
-#   логи:  hermes -p aimash gateway list  → имя юнита (hermes-gateway-aimash.service);
+hermes gateway start
+hermes gateway status              # active; в логах — коннект MCP aimash + список 12 tools
+#   логи:  hermes gateway list  → имя юнита дефолтного профиля;
 #          journalctl над root-SSH требует user-шины:
-#          export XDG_RUNTIME_DIR=/run/user/0 && journalctl --user -u hermes-gateway-aimash.service -f
+#          export XDG_RUNTIME_DIR=/run/user/0 && journalctl --user -u <имя-юнита> -f
 #          (подробнее про логи/linger — OPERATIONS.md §0/§3)
 
 # 7. Быстрая проверка MCP-коннекта до Telegram.
 hermes mcp test aimash             # должен отдать 12 инструментов
+#   (`aimash` здесь — имя MCP-сервера из config.yaml, НЕ профиля)
 ```
 
 > Юзер systemd-сервиса Hermes должен иметь доступ к `docker` (группа `docker` или root) — иначе
 > `docker exec aimash-bot …` из MCP-конфига упадёт с правами.
 
-**Откат:** `hermes -p aimash gateway stop`. Текущий бот продолжает работать (разные процессы).
+**Откат:** `hermes gateway stop`. Текущий бот продолжает работать (разные процессы).
 
 ---
 
@@ -110,7 +123,7 @@ hermes mcp test aimash             # должен отдать 12 инструм
    добавить заново** (Telegram кэширует настройку). Альтернатива — сделать бота админом.
 4. **id и thread_id** (в `config.yaml`): id супергруппы отрицательный (`-100…`, @get_id_bot);
    `thread_id` топика — из URL `https://t.me/c/<id>/<thread_id>`; свой user id — @userinfobot.
-5. **Перечитать конфиг:** `hermes -p aimash gateway restart`.
+5. **Перечитать конфиг:** `hermes gateway restart`.
 
 **Проверка П1:** в топик без упоминания — тишина; с упоминанием «покажи статистику за неделю по
 <аккаунт>» — ответ с живыми цифрами (числа из `code_numbers`, не из головы модели).

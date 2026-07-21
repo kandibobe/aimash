@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Hermes Agent — ЭТАЛОН конфига Контура A (профиль `aimash`), READ-пилот.
+# Hermes Agent — ЭТАЛОН конфига Контура A (ДЕФОЛТНЫЙ профиль), READ-пилот.
 #
 # Копируется на VPS в ~/.hermes/config.yaml, плейсхолдеры REPLACE_* заменяются на
 # реальные id (см. deploy/hermes/README.md, RB-1 шаг 3 / RB-2). СЕКРЕТОВ ЗДЕСЬ НЕТ:
@@ -34,16 +34,21 @@ agent:
   # ⚠️ Оператор вправе РАСШИРИТЬ набор на своём инстансе (мастер + approvals: manual) — тогда этот
   #    `agent:`-блок из эталона НЕ мёржить, иначе он снова погасит выбранное. Репо-эталон при этом
   #    остаётся источником истины по одобренной архитектуре.
+  # Слаги сверены со списком установленной версии (`platform_toolsets.cli` в живом конфиге,
+  # 21.07): browser, clarify, code_execution, context_engine, cronjob, delegation, file,
+  # image_gen, memory, session_search, skills, terminal, todo, tts, video, vision, web.
+  # `computer_use`/`x_search`/`kanban` из прежней редакции в этом списке ОТСУТСТВУЮТ (К10 —
+  # молча игнорируются), зато были пропущены `context_engine` (индексация ФС) и `video`.
   disabled_toolsets:
-    [terminal, browser, file, code_execution, computer_use, cronjob, delegation,
-     web, memory, vision, image_gen, tts, x_search, kanban]
+    [terminal, browser, file, code_execution, context_engine, cronjob, delegation,
+     web, memory, vision, image_gen, tts, video]
   tool_use_enforcement: auto
 
 approvals:
   mode: manual
   # deny — fnmatch-глобы КОМАНД (не имена тулсетов!). Defense-in-depth: терминал и так выключен.
   deny: ["rm -rf *", "sudo *", "docker *", "git push*"]
-  cron_mode: manual
+  cron_mode: deny        # допустимы deny | approve — `manual` (было) невалидно, К10 съест молча
 
 memory:
   memory_enabled: false   # проверенный ключ (НЕ spec-`provider: none`)
