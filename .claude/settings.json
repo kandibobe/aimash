@@ -51,7 +51,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/money_path_guard.py",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/money_path_guard.py\"",
             "timeout": 10,
             "statusMessage": "Строгий режим: проверка денежного пути"
           }
@@ -64,7 +64,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/money_path_guard.py",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/money_path_guard.py\"",
             "timeout": 10
           }
         ]
