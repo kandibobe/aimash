@@ -28,6 +28,7 @@ enable_utf8()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from _operator_turn import operator_turn  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID, build_client, ensure_allowed  # noqa: E402
 from ads.read import account_currency, account_stats, list_campaigns  # noqa: E402
 from ads.service import attach_freshness, execute_confirmed, read_state  # noqa: E402
@@ -52,15 +53,19 @@ async def _gated_op(store: ConfirmStore, operation: str, campaign: str) -> dict:
     # проходить freshness-гейт, а не обходить его (dev-байпаса нет — Волна 1.1).
     params = attach_freshness(params, await read_state(operation, params))
     cid = uuid.uuid4().hex
-    await store.save_proposal(
-        confirmation_id=cid,
-        operation=operation,
-        customer_id=DRAFT_ACCOUNT_ID,
-        params=params,
-        summary=f"[smoke] {operation} «{campaign}»",
-        chat_id=0,
-        user_initiated=True,  # как прямая команда человека (иначе денежный гейт бы заблокировал)
-    )
+    # Оба бита провенанса, как у боевой карточки: `user_initiated` аргументом, `origin_human_turn` —
+    # из контекста хода (Волна 1.4). Смоук запустил живой оператор, и это единственное место, где
+    # скрипт вправе так сказать: см. scripts/_operator_turn.py.
+    with operator_turn():
+        await store.save_proposal(
+            confirmation_id=cid,
+            operation=operation,
+            customer_id=DRAFT_ACCOUNT_ID,
+            params=params,
+            summary=f"[smoke] {operation} «{campaign}»",
+            chat_id=0,
+            user_initiated=True,
+        )
     ok = await store.confirm(cid, chat_id=0, actor_username="smoke")
     if not ok:
         raise RuntimeError(f"confirm не прошёл для {operation} (cid={cid})")

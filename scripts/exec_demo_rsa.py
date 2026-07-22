@@ -28,6 +28,7 @@ from ads.resolve import find_ad_groups  # noqa: E402
 from ads.service import execute_confirmed  # noqa: E402
 from confirm.gate import Proposal  # noqa: E402
 from confirm.store import ConfirmStore  # noqa: E402
+from _operator_turn import operator_turn  # noqa: E402
 from core.config import require_dev_env  # noqa: E402
 from db.models import AuditLog  # noqa: E402
 from db.session import Session, init_db  # noqa: E402
@@ -77,15 +78,18 @@ async def main() -> None:
     p = Proposal(
         operation="create_rsa", summary=summary, params=params, chat_id=0, user_initiated=True
     )
-    await store.save_proposal(
-        confirmation_id=p.confirmation_id,
-        operation="create_rsa",
-        customer_id=DRAFT_ACCOUNT_ID,
-        params=params,
-        summary=summary,
-        chat_id=0,
-        user_initiated=True,
-    )
+    # RSA деньгами не считается, но провенанс объявляем честно везде, где скрипт создаёт черновик:
+    # иначе следующая денежная операция в демо сломается молча (Волна 1.4).
+    with operator_turn():
+        await store.save_proposal(
+            confirmation_id=p.confirmation_id,
+            operation="create_rsa",
+            customer_id=DRAFT_ACCOUNT_ID,
+            params=params,
+            summary=summary,
+            chat_id=0,
+            user_initiated=True,
+        )
 
     print("\n── create_rsa ──")
     # 1) Без подтверждения — должно блокироваться (confirm-гейт).

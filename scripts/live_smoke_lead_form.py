@@ -33,6 +33,7 @@ enable_utf8()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from _operator_turn import operator_turn  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID, build_client, ensure_allowed  # noqa: E402
 from ads.service import execute_confirmed  # noqa: E402
 from confirm.store import ConfirmStore  # noqa: E402
@@ -103,15 +104,18 @@ async def main() -> int:
     }
 
     cid = uuid.uuid4().hex
-    await store.save_proposal(
-        confirmation_id=cid,
-        operation="create_search_campaign",
-        customer_id=DRAFT_ACCOUNT_ID,
-        params=params,
-        summary=name,
-        chat_id=1,
-        user_initiated=True,  # деньги/создание — прямая команда (smoke имитирует «да» человека)
-    )
+    # Деньги/создание → нужны ОБА бита провенанса (Волна 1.4): `user_initiated` аргументом,
+    # `origin_human_turn` — из контекста хода живого оператора.
+    with operator_turn():
+        await store.save_proposal(
+            confirmation_id=cid,
+            operation="create_search_campaign",
+            customer_id=DRAFT_ACCOUNT_ID,
+            params=params,
+            summary=name,
+            chat_id=1,
+            user_initiated=True,
+        )
     assert await store.confirm(cid, chat_id=1), "confirm не прошёл"
     print(f"→ создаю Search-кампанию с лид-формой: {name}")
     result = await execute_confirmed(store, cid)

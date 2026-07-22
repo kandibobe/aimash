@@ -31,6 +31,7 @@ from ads.client import DRAFT_ACCOUNT_ID, build_client  # noqa: E402
 from ads.service import execute_confirmed  # noqa: E402
 from confirm.gate import Proposal  # noqa: E402
 from confirm.store import ConfirmStore  # noqa: E402
+from _operator_turn import operator_turn  # noqa: E402
 from core.config import require_dev_env  # noqa: E402
 from db.models import AuditLog  # noqa: E402
 from db.session import Session, init_db  # noqa: E402
@@ -74,15 +75,18 @@ async def main() -> None:
         chat_id=0,
         user_initiated=True,
     )
-    await store.save_proposal(
-        confirmation_id=p.confirmation_id,
-        operation="create_gdn_campaign",
-        customer_id=DRAFT_ACCOUNT_ID,
-        params=params,
-        summary=summary,
-        chat_id=0,
-        user_initiated=True,
-    )
+    # Создание кампании = деньги → нужны ОБА бита провенанса (Волна 1.4): `user_initiated`
+    # аргументом, `origin_human_turn` — из контекста хода живого оператора.
+    with operator_turn():
+        await store.save_proposal(
+            confirmation_id=p.confirmation_id,
+            operation="create_gdn_campaign",
+            customer_id=DRAFT_ACCOUNT_ID,
+            params=params,
+            summary=summary,
+            chat_id=0,
+            user_initiated=True,
+        )
 
     print("\n── create_gdn_campaign ──")
     # 1) Без подтверждения — блок (confirm-гейт).

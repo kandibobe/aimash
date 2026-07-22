@@ -24,6 +24,7 @@ from sqlalchemy import select  # noqa: E402
 
 from ads.client import DRAFT_ACCOUNT_ID, build_client  # noqa: E402
 from ads.read import list_campaigns  # noqa: E402
+from _operator_turn import operator_turn  # noqa: E402
 from ads.service import attach_freshness, execute_confirmed, read_state  # noqa: E402
 from confirm.gate import Proposal  # noqa: E402
 from confirm.store import ConfirmStore  # noqa: E402
@@ -65,15 +66,18 @@ async def main() -> None:
         chat_id=0,
         user_initiated=True,
     )
-    await store.save_proposal(
-        confirmation_id=p.confirmation_id,
-        operation="set_geo_proximity",
-        customer_id=DRAFT_ACCOUNT_ID,
-        params=params,
-        summary=summary,
-        chat_id=0,
-        user_initiated=True,
-    )
+    # Гео деньгами не считается, но провенанс объявляем честно везде, где скрипт создаёт черновик:
+    # иначе следующая денежная операция в демо сломается молча (Волна 1.4).
+    with operator_turn():
+        await store.save_proposal(
+            confirmation_id=p.confirmation_id,
+            operation="set_geo_proximity",
+            customer_id=DRAFT_ACCOUNT_ID,
+            params=params,
+            summary=summary,
+            chat_id=0,
+            user_initiated=True,
+        )
 
     print("\n── set_geo_proximity ──")
     # 1) Без подтверждения — должно блокироваться (confirm-гейт).

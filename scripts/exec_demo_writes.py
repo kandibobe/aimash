@@ -23,6 +23,7 @@ from sqlalchemy import select  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID, build_client  # noqa: E402
 from ads.read import list_campaigns  # noqa: E402
 from ads.resolve import find_ad_groups, find_campaign_by_name  # noqa: E402
+from _operator_turn import operator_turn  # noqa: E402
 from ads.service import attach_freshness, execute_confirmed, read_state  # noqa: E402
 from confirm.gate import Proposal  # noqa: E402
 from confirm.store import ConfirmStore  # noqa: E402
@@ -40,15 +41,18 @@ async def run_op(store: ConfirmStore, operation: str, params: dict, summary: str
     p = Proposal(
         operation=operation, summary=summary, params=params, chat_id=0, user_initiated=True
     )
-    await store.save_proposal(
-        confirmation_id=p.confirmation_id,
-        operation=operation,
-        customer_id=DRAFT_ACCOUNT_ID,
-        params=params,
-        summary=summary,
-        chat_id=0,
-        user_initiated=True,
-    )
+    # Ставки/стратегия = деньги → нужны ОБА бита провенанса (Волна 1.4): `user_initiated`
+    # аргументом, `origin_human_turn` — из контекста хода живого оператора.
+    with operator_turn():
+        await store.save_proposal(
+            confirmation_id=p.confirmation_id,
+            operation=operation,
+            customer_id=DRAFT_ACCOUNT_ID,
+            params=params,
+            summary=summary,
+            chat_id=0,
+            user_initiated=True,
+        )
     # 1) Без подтверждения — должно блокироваться (confirm-гейт).
     try:
         await execute_confirmed(store, p.confirmation_id)

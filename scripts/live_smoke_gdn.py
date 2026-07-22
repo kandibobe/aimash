@@ -33,6 +33,7 @@ enable_utf8()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from _operator_turn import operator_turn  # noqa: E402
 from ads.assets import clear_pending_media, save_pending_media  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID, build_client, ensure_allowed  # noqa: E402
 from ads.service import execute_confirmed  # noqa: E402
@@ -86,15 +87,18 @@ async def _gated_create(store: ConfirmStore, params_in: dict) -> dict:
     apply_create_gdn_campaign → finalize + audit."""
     params = SCHEMAS["create_gdn_campaign"](**params_in).model_dump()
     cid = uuid.uuid4().hex
-    await store.save_proposal(
-        confirmation_id=cid,
-        operation="create_gdn_campaign",
-        customer_id=DRAFT_ACCOUNT_ID,
-        params=params,
-        summary=f"[smoke] GDN «{params_in.get('campaign_name')}»",
-        chat_id=0,
-        user_initiated=True,  # создание кампании = деньги → требуется прямая команда
-    )
+    # Создание кампании = деньги → нужны ОБА бита провенанса (Волна 1.4): `user_initiated`
+    # аргументом, `origin_human_turn` — из контекста хода живого оператора.
+    with operator_turn():
+        await store.save_proposal(
+            confirmation_id=cid,
+            operation="create_gdn_campaign",
+            customer_id=DRAFT_ACCOUNT_ID,
+            params=params,
+            summary=f"[smoke] GDN «{params_in.get('campaign_name')}»",
+            chat_id=0,
+            user_initiated=True,
+        )
     if not await store.confirm(cid, chat_id=0, actor_username="smoke"):
         raise RuntimeError(f"confirm не прошёл для GDN (cid={cid})")
     result = await execute_confirmed(store, cid)

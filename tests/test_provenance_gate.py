@@ -192,12 +192,18 @@ def test_save_proposal_has_no_provenance_kwargs():
 
 
 def test_human_turn_call_sites_are_allow_listed():
-    """`human_turn(` в проде — ровно один call-site: доверенный слой Telegram. Мета-гард на класс:
-    новый вход, поднимающий человеческий бит (MCP-инструмент, скрипт, self-improvement-форк),
-    ломает тест и требует осознанного решения, а не проходит ревью незамеченным."""
+    """`human_turn(` в проде — ровно два call-site'а: доверенный слой Telegram и одна точка в
+    `scripts/`. Мета-гард на класс: новый вход, поднимающий человеческий бит (MCP-инструмент,
+    скрипт, self-improvement-форк), ломает тест и требует осознанного решения, а не проходит ревью
+    незамеченным.
+
+    `scripts/` из `skip` УБРАН намеренно: там была слепая зона, и не гипотетическая — девять
+    скриптов создают черновики (`exec_demo*`, `live_smoke_*`), в том числе денежные, и ни один не
+    поднимал бит, то есть с Волны 1.4 молча упирался в `_require_user_command`."""
     root = pathlib.Path(__file__).resolve().parents[1]
-    allowed = {"core/provenance.py", "bot/main.py"}  # определение + доверенный вход
-    skip = ("tests", "migrations", ".git", "__pycache__", "deploy", "docs", "scripts", "venv")
+    # определение + доверенный вход Telegram + единственная точка для запуска руками из консоли
+    allowed = {"core/provenance.py", "bot/main.py", "scripts/_operator_turn.py"}
+    skip = ("tests", "migrations", ".git", "__pycache__", "deploy", "docs", "venv")
     found: set[str] = set()
     for py in root.rglob("*.py"):
         rel = py.relative_to(root).as_posix()
@@ -219,6 +225,68 @@ def test_human_turn_call_sites_are_allow_listed():
         "поднимает ТОЛЬКО слой, который сам установил, что апдейт пришёл от живого человека из "
         "whitelist по доверенному каналу."
     )
+
+
+def test_scripts_declare_provenance_where_they_create_proposals():
+    """Каждый `save_proposal` в `scripts/` обязан лежать внутри `with operator_turn()`.
+
+    Тест выше сторожит, КТО вправе поднять бит; этот — что скрипт, создающий черновик, его вообще
+    поднимает. Без второго ассерта класс не закрыт: allow-list остаётся зелёным ровно тогда, когда
+    новый скрипт бит не трогает, — то есть в точности в сломанном состоянии, из которого мы вышли
+    (девять скриптов молча отказывали на денежном пути с Волны 1.4)."""
+    scripts = pathlib.Path(__file__).resolve().parents[1] / "scripts"
+    offenders: list[str] = []
+    for py in sorted(scripts.glob("*.py")):
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+        except SyntaxError:
+            continue
+        # Диапазоны строк всех `with ... operator_turn(...) ...` в файле.
+        guarded: list[tuple[int, int]] = []
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.With, ast.AsyncWith)) and any(
+                isinstance(it.context_expr, ast.Call)
+                and getattr(it.context_expr.func, "id", None) == "operator_turn"
+                for it in n.items
+            ):
+                guarded.append((n.lineno, n.end_lineno or n.lineno))
+        for n in ast.walk(tree):
+            if (
+                isinstance(n, ast.Call)
+                and getattr(n.func, "attr", None) == "save_proposal"
+                and not any(lo <= n.lineno <= hi for lo, hi in guarded)
+            ):
+                offenders.append(f"{py.name}:{n.lineno}")
+    assert not offenders, (
+        f"save_proposal вне operator_turn: {offenders}. Черновик без второго бита провенанса "
+        "исполнится только для не-денежных операций, и обнаружится это на живом аккаунте."
+    )
+
+
+def test_operator_turn_refuses_outside_scripts():
+    """Тот же контекст-менеджер, вызванный ИЗ СЕРВЕРА (хендлер, MCP-инструмент, джоба), обязан
+    отказать: точка входа процесса лежит не в `scripts/`. Под pytest это выполняется само —
+    `sys.argv[0]` указывает на раннер, — поэтому проверка бесплатна и не требует подделки."""
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
+    from _operator_turn import operator_turn  # noqa: PLC0415 — модуль вне пакета, импорт по месту
+
+    with pytest.raises(RuntimeError, match="scripts"):
+        with operator_turn():
+            pass  # pragma: no cover — сюда не доходим
+
+
+def test_operator_turn_raises_the_bit_for_a_real_script(monkeypatch):
+    """Обратная половина: из скрипта бит поднимается — иначе «отказывать всем» удовлетворило бы
+    тест выше, и смоуки остались бы сломанными при зелёном прогоне."""
+    root = pathlib.Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root / "scripts"))
+    from _operator_turn import operator_turn  # noqa: PLC0415
+
+    monkeypatch.setattr(sys, "argv", [str(root / "scripts" / "live_smoke_test.py")])
+    with operator_turn(actor_user_id=ACTOR):
+        prov = get_provenance()
+    assert prov.human_turn is True and prov.actor_user_id == ACTOR
+    assert get_provenance().human_turn is False, "бит не опущен на выходе из scope"
 
 
 # ── Фон не наследует человеческий бит ─────────────────────────────────────────────
