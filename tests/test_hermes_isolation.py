@@ -1,7 +1,7 @@
 """Гарды изоляции разрешений от памяти/скилов/external-контента (пивот Hermes, §4 — И1…И8).
 
 Инкремент «MCP READ» несёт ТОЛЬКО read-релевантное зерно инвариантов; полные И1–И8 + injection-корпус
-— шаг ПЕРЕД WRITE (docs/HERMES_SPEC.md §4, дорожная карта шаги 2/15). Здесь живыми проверяются:
+— шаг ПЕРЕД WRITE (deploy/hermes/HERMES_SPEC.md §4, дорожная карта шаги 2/15). Здесь живыми проверяются:
 
   • **И4 (зерно)** — construction-time assert в `mcp_server.server`: READ-инструменты физически не
     пересекаются с мутационными (`agent.tools.schemas.MUTATION_TOOLS`). Импорт роняет процесс, если
@@ -326,10 +326,10 @@ def test_probe_echo_redacts_and_clamps():
 
 
 # ── Каркас полных инвариантов И1–И8 (наполняется шагом ПЕРЕД WRITE) ──────────────────
-# Формулировки — дословно из docs/HERMES_SPEC.md §4. Корпус атак (client_site_pages, скилы в
+# Формулировки — дословно из deploy/hermes/HERMES_SPEC.md §4. Корпус атак (client_site_pages, скилы в
 # shell/HTTP/файлы, страницы конкурентов) — инлайн, как в существующих injection-тестах.
 
-_WRITE_STEP = "наполняется шагом ПЕРЕД WRITE (docs/HERMES_SPEC.md §4, дорожная карта шаги 2/15)"
+_WRITE_STEP = "наполняется шагом ПЕРЕД WRITE (deploy/hermes/HERMES_SPEC.md §4, дорожная карта шаги 2/15)"
 
 
 @pytest.mark.skip(reason=_WRITE_STEP)

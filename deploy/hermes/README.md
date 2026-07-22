@@ -1,6 +1,6 @@
 # Ранбук: поднять Hermes (Контур A) рядом с боевым ботом на VPS
 
-READ-пилот пивота Aimash → Hermes (`docs/HERMES_SPEC.md`). Hermes-агент отвечает в Telegram и через
+READ-пилот пивота Aimash → Hermes ([`HERMES_SPEC.md`](HERMES_SPEC.md)). Hermes-агент отвечает в Telegram и через
 MCP-сервер `aimash` (пакет `mcp_server/`, 12 READ-инструментов) читает Google Ads. Денежное ядро не
 затрагивается: слой **READ-only by construction** — WRITE-инструментов физически нет.
 
