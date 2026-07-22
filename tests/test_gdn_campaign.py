@@ -10,7 +10,6 @@ from __future__ import annotations
 import io
 import sys
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import ads.mutations as mut  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
+from conftest import FakeConfirmStore, FakeProposal  # noqa: E402
 from core.config import settings  # noqa: E402
 
 
@@ -42,37 +42,6 @@ def patched(obj, name, value):
         yield
     finally:
         setattr(obj, name, orig)
-
-
-@dataclass
-class FakeProposal:
-    operation: str
-    status: str
-    user_initiated: bool
-    # Волна 1.4: второй бит провенанса. None ⇒ зеркалим user_initiated — здесь проверяется SDK-путь,
-    # а не провенанс, и расщепление битов у настоящего ConfirmStore живёт в test_provenance_gate.py.
-    origin_human_turn: bool | None = None
-
-    def __post_init__(self) -> None:
-        if self.origin_human_turn is None:
-            self.origin_human_turn = self.user_initiated
-
-
-class FakeStore:
-    def __init__(self, proposal=None):
-        self._p = proposal
-        self.finalized = False
-        self._claimed = False
-
-    async def claim(self, confirmation_id, *, operation):
-        p = self._p
-        if p is None or p.status != "confirmed" or p.operation != operation or self._claimed:
-            return None
-        self._claimed = True
-        return p
-
-    async def finalize(self, confirmation_id, *, result):
-        self.finalized = True
 
 
 _VALID = dict(
@@ -102,7 +71,7 @@ async def test_apply_create_gdn_happy_path():
         called.update(customer_id=customer_id, **kw)
         return {"applied": True, "status": "PAUSED", "campaign": "customers/x/campaigns/1"}
 
-    store = FakeStore(FakeProposal("create_gdn_campaign", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("create_gdn_campaign", "confirmed", user_initiated=True))
     with patched(mut, "_create_gdn_campaign_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_create_gdn_campaign(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -130,7 +99,7 @@ async def test_apply_create_gdn_passes_geo_to_sdk():
             "geo": len(kw.get("geo_locations") or []),
         }
 
-    store = FakeStore(FakeProposal("create_gdn_campaign", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("create_gdn_campaign", "confirmed", user_initiated=True))
     with patched(mut, "_create_gdn_campaign_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_create_gdn_campaign(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -237,7 +206,7 @@ def test_create_gdn_via_sdk_invokes_geo_helper_when_provided():
 
 
 async def test_apply_create_gdn_blocked_when_not_user_initiated():
-    store = FakeStore(FakeProposal("create_gdn_campaign", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("create_gdn_campaign", "confirmed", user_initiated=False))
     with (
         patched(mut, "_create_gdn_campaign_via_sdk", lambda *a, **k: {"applied": True}),
         allowed_ids(DRAFT_ACCOUNT_ID),
@@ -260,7 +229,7 @@ async def test_apply_create_gdn_rejects_foreign_account():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("create_gdn_campaign", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("create_gdn_campaign", "confirmed", user_initiated=True))
     with patched(mut, "_create_gdn_campaign_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         with pytest.raises(PermissionError):
             await mut.apply_create_gdn_campaign(
@@ -328,7 +297,7 @@ async def test_apply_create_gdn_validates_before_claim():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("create_gdn_campaign", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("create_gdn_campaign", "confirmed", user_initiated=True))
     with patched(mut, "_create_gdn_campaign_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         with pytest.raises(ValueError):
             await mut.apply_create_gdn_campaign(

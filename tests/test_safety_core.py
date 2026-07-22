@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import sys
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -26,6 +25,7 @@ from ads.client import (  # noqa: E402
     ensure_read_allowed,
 )
 from ads.mutations import apply_update_budget  # noqa: E402
+from conftest import FakeConfirmStore, FakeProposal  # noqa: E402
 from core.config import settings  # noqa: E402
 
 
@@ -247,36 +247,10 @@ def test_ensure_manager_allowed_rejects_unconfigured():
 
 
 # ── Confirm-гейт ───────────────────────────────────────────────────────────────
-@dataclass
-class FakeProposal:
-    operation: str
-    status: str
-    user_initiated: bool
-    # Волна 1.4: второй бит провенанса. None ⇒ зеркалим user_initiated — здесь проверяется SDK-путь,
-    # а не провенанс, и расщепление битов у настоящего ConfirmStore живёт в test_provenance_gate.py.
-    origin_human_turn: bool | None = None
-
-    def __post_init__(self) -> None:
-        if self.origin_human_turn is None:
-            self.origin_human_turn = self.user_initiated
-
-
-class FakeStore:
-    def __init__(self, proposal=None):
-        self._p = proposal
-        self.finalized = False
-        self._claimed = False
-
-    async def claim(self, confirmation_id, *, operation):
-        # Зеркало ConfirmStore.claim: confirmed + совпавшая операция, одноразово.
-        p = self._p
-        if p is None or p.status != "confirmed" or p.operation != operation or self._claimed:
-            return None
-        self._claimed = True
-        return p
-
-    async def finalize(self, confirmation_id, *, result):
-        self.finalized = True
+# Дублёры стора/черновика — общие (tests/conftest.py). Своих копий тут больше нет: этому файлу от
+# протокола нужны ровно `claim` + флаг `finalized`, ничего сверх общего контракта. Тесты ниже — про
+# замок аккаунта и confirm-гейт, поэтому черновик берёт дефолтный (аттестованный) `params`: гейт
+# свежести здесь не предмет проверки, он живёт в tests/test_freshness_gate_a.py.
 
 
 def _run(coro):
@@ -284,7 +258,7 @@ def _run(coro):
 
 
 def test_mutation_rejected_without_confirmation():
-    store = FakeStore(proposal=None)  # нет подтверждённого proposal
+    store = FakeConfirmStore(proposal=None)  # нет подтверждённого proposal
     with allowed_ids(DRAFT_ACCOUNT_ID):  # аккаунт ок → проверяем именно confirm-гейт
         try:
             _run(
@@ -304,7 +278,7 @@ def test_mutation_rejected_without_confirmation():
 
 def test_mutation_rejected_for_foreign_account():
     # Даже с валидным confirmed proposal — мутация чужого аккаунта отклоняется замком.
-    store = FakeStore(FakeProposal("update_budget", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("update_budget", "confirmed", user_initiated=True))
     with allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             _run(
@@ -325,7 +299,7 @@ def test_mutation_rejected_for_foreign_account():
 
 def test_budget_blocked_when_not_user_initiated():
     # подтверждение есть, но не прямая команда пользователя (напр. scheduler) → отказ
-    store = FakeStore(FakeProposal("update_budget", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("update_budget", "confirmed", user_initiated=False))
     with allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             _run(
@@ -356,7 +330,7 @@ def test_budget_applies_when_confirmed_and_user_initiated():
             "applied": True,
         }
 
-    store = FakeStore(FakeProposal("update_budget", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("update_budget", "confirmed", user_initiated=True))
     orig = mut._apply_budget_via_sdk
     mut._apply_budget_via_sdk = fake_sdk
     try:

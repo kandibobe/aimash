@@ -16,7 +16,6 @@ import json
 import sys
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,6 +25,12 @@ from sqlalchemy import select  # noqa: E402
 
 import ads.mutations as mut  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
+
+# Дублёр confirm-стора — ОДИН на репо (tests/conftest.py). Локальная копия здесь знала только
+# `claim`/`finalize`, а гейт A (Волна 1.1) читает черновик через `get_confirmed` — копия молча
+# превращала каждую STRICT-операцию в «снимка нет ⇒ отказ». Ничего сверх общего контракта этому
+# файлу не нужно, поэтому подкласса нет.
+from conftest import FakeConfirmStore, FakeProposal, attested  # noqa: E402
 from core.config import settings  # noqa: E402
 
 
@@ -38,38 +43,6 @@ def allowed_ids(value: str):
         yield
     finally:
         settings.google_ads_allowed_customer_ids = prev
-
-
-@dataclass
-class FakeProposal:
-    operation: str
-    status: str
-    user_initiated: bool
-    # Волна 1.4: второй бит провенанса. None ⇒ зеркалим user_initiated — здесь проверяется SDK-путь,
-    # а не провенанс, и расщепление битов у настоящего ConfirmStore живёт в test_provenance_gate.py.
-    origin_human_turn: bool | None = None
-
-    def __post_init__(self) -> None:
-        if self.origin_human_turn is None:
-            self.origin_human_turn = self.user_initiated
-
-
-class FakeStore:
-    def __init__(self, proposal=None):
-        self._p = proposal
-        self.finalized = False
-        self._claimed = False
-
-    async def claim(self, confirmation_id, *, operation):
-        # Зеркало ConfirmStore.claim: атомарно/одноразово, только confirmed + совпавшая операция.
-        p = self._p
-        if p is None or p.status != "confirmed" or p.operation != operation or self._claimed:
-            return None
-        self._claimed = True
-        return p
-
-    async def finalize(self, confirmation_id, *, result):
-        self.finalized = True
 
 
 class _FakeEnums:
@@ -108,7 +81,7 @@ async def test_apply_update_bid_happy_path():
         called["args"] = (customer_id, campaign_id, list(bids))
         return {"customer_id": customer_id, "campaign_id": campaign_id, "applied": True}
 
-    store = FakeStore(FakeProposal("update_bid", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("update_bid", "confirmed", user_initiated=True))
     with patched(mut, "_apply_bid_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_update_bid(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -124,7 +97,7 @@ async def test_apply_update_bid_happy_path():
 
 
 async def test_apply_update_bid_blocked_when_not_user_initiated():
-    store = FakeStore(FakeProposal("update_bid", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("update_bid", "confirmed", user_initiated=False))
     with allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await mut.apply_update_bid(
@@ -142,7 +115,7 @@ async def test_apply_update_bid_blocked_when_not_user_initiated():
 
 
 async def test_apply_update_bid_rejects_foreign_account():
-    store = FakeStore(FakeProposal("update_bid", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("update_bid", "confirmed", user_initiated=True))
     with allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await mut.apply_update_bid(
@@ -160,7 +133,7 @@ async def test_apply_update_bid_rejects_foreign_account():
 
 
 async def test_apply_update_bid_rejected_without_confirmation():
-    store = FakeStore(proposal=None)
+    store = FakeConfirmStore(proposal=None)
     with allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await mut.apply_update_bid(
@@ -178,7 +151,9 @@ async def test_apply_update_bid_rejected_without_confirmation():
 
 # ── Ф1: apply_update_keyword_bid — ставка на уровне КЛЮЧА (те же гейты, что и у группы) ──
 def _kw_bid_store(user_initiated=True, status="confirmed"):
-    return FakeStore(FakeProposal("update_keyword_bid", status, user_initiated=user_initiated))
+    return FakeConfirmStore(
+        FakeProposal("update_keyword_bid", status, user_initiated=user_initiated)
+    )
 
 
 async def test_apply_update_keyword_bid_happy_path():
@@ -361,7 +336,7 @@ async def test_apply_add_keywords_happy_path():
         )
         return {"applied": True, "count": len(ad_group_ids) * len(keywords)}
 
-    store = FakeStore(FakeProposal("add_keywords", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("add_keywords", "confirmed", user_initiated=True))
     with patched(mut, "_add_keywords_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_add_keywords(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -385,7 +360,7 @@ async def test_apply_add_keywords_validates_length_before_sdk():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("add_keywords", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("add_keywords", "confirmed", user_initiated=True))
     with patched(mut, "_add_keywords_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await mut.apply_add_keywords(
@@ -411,7 +386,9 @@ async def test_apply_add_negative_keywords_happy_path():
         called.update(campaign_id=campaign_id, keywords=list(keywords), match_type=match_type)
         return {"applied": True, "count": len(keywords)}
 
-    store = FakeStore(FakeProposal("add_negative_keywords", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(
+        FakeProposal("add_negative_keywords", "confirmed", user_initiated=True)
+    )
     with patched(mut, "_add_negative_keywords_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_add_negative_keywords(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -441,7 +418,9 @@ async def test_apply_add_negative_keywords_adgroup_level():
         campaign_level["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("add_negative_keywords", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(
+        FakeProposal("add_negative_keywords", "confirmed", user_initiated=True)
+    )
     with (
         patched(mut, "_add_negative_keywords_adgroup_via_sdk", fake_adgroup),
         patched(mut, "_add_negative_keywords_via_sdk", fake_campaign),
@@ -472,7 +451,9 @@ async def test_apply_add_negative_keywords_adgroup_replay_is_one_shot():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("add_negative_keywords", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(
+        FakeProposal("add_negative_keywords", "confirmed", user_initiated=True)
+    )
     kw = {
         "customer_id": DRAFT_ACCOUNT_ID,
         "campaign_id": "23",
@@ -503,7 +484,9 @@ async def test_apply_add_negative_keywords_adgroup_foreign_account_blocked():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("add_negative_keywords", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(
+        FakeProposal("add_negative_keywords", "confirmed", user_initiated=True)
+    )
     with (
         patched(mut, "_add_negative_keywords_adgroup_via_sdk", fake),
         allowed_ids(DRAFT_ACCOUNT_ID),
@@ -536,7 +519,7 @@ async def test_apply_add_negatives_to_shared_set_happy_path():
         return {"applied": True, "count": len(keywords)}
 
     # user_initiated=False: минус-слова — не деньги, гейтом user_initiated не блокируются.
-    store = FakeStore(
+    store = FakeConfirmStore(
         FakeProposal("add_negatives_to_shared_set", "confirmed", user_initiated=False)
     )
     with patched(mut, "_add_negatives_to_shared_set_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
@@ -565,7 +548,7 @@ async def test_apply_add_negatives_to_shared_set_creates_missing_list():
         called.update(shared_set_id=shared_set_id, name=name)
         return {"applied": True, "shared_set_created": True}
 
-    store = FakeStore(
+    store = FakeConfirmStore(
         FakeProposal("add_negatives_to_shared_set", "confirmed", user_initiated=False)
     )
     with patched(mut, "_add_negatives_to_shared_set_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
@@ -592,7 +575,7 @@ async def test_apply_add_negatives_to_shared_set_bad_name_before_claim():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(
+    store = FakeConfirmStore(
         FakeProposal("add_negatives_to_shared_set", "confirmed", user_initiated=False)
     )
     with patched(mut, "_add_negatives_to_shared_set_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
@@ -623,7 +606,7 @@ async def test_apply_add_negatives_to_shared_set_replay_is_one_shot():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(
+    store = FakeConfirmStore(
         FakeProposal("add_negatives_to_shared_set", "confirmed", user_initiated=False)
     )
     kw = {
@@ -652,7 +635,7 @@ async def test_apply_attach_shared_set_happy_path():
         called.update(campaign_id=campaign_id, shared_set_id=shared_set_id)
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("attach_shared_set", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("attach_shared_set", "confirmed", user_initiated=False))
     with patched(mut, "_attach_shared_set_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_attach_shared_set(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -670,7 +653,7 @@ async def test_apply_attach_shared_set_happy_path():
 async def test_apply_attach_shared_set_requires_resolved_id():
     """Пустой shared_set_id — ошибка оркестрации, НЕ «создай сам»: отказ ДО claim (fail-closed;
     резолв имени → id и отказ на несуществующем списке живут в execute_confirmed)."""
-    store = FakeStore(FakeProposal("attach_shared_set", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("attach_shared_set", "confirmed", user_initiated=False))
     with allowed_ids(DRAFT_ACCOUNT_ID):
         for bad in ("", "  ", None):
             try:
@@ -695,7 +678,7 @@ async def test_apply_attach_shared_set_replay_is_one_shot():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("attach_shared_set", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("attach_shared_set", "confirmed", user_initiated=False))
     kw = {
         "customer_id": DRAFT_ACCOUNT_ID,
         "campaign_id": "23",
@@ -722,7 +705,9 @@ async def test_apply_remove_negative_keywords_happy_path():
         return {"applied": True, "removed": ["rn1"], "count": 1, "not_found": []}
 
     # user_initiated=False: снятие минус-слова — не деньги, гейтом не блокируется.
-    store = FakeStore(FakeProposal("remove_negative_keywords", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(
+        FakeProposal("remove_negative_keywords", "confirmed", user_initiated=False)
+    )
     with patched(mut, "_remove_negative_keywords_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_remove_negative_keywords(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -793,7 +778,7 @@ async def test_apply_detach_audience_happy_path():
         called.update(campaign_id=campaign_id, rns=list(audience_resource_names))
         return {"applied": True, "detached": ["crit1"], "count": 1, "not_found": []}
 
-    store = FakeStore(FakeProposal("detach_audience", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("detach_audience", "confirmed", user_initiated=False))
     with patched(mut, "_detach_audience_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_detach_audience(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -815,7 +800,7 @@ async def test_apply_detach_audience_validates_rns_before_claim():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("detach_audience", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("detach_audience", "confirmed", user_initiated=True))
     with patched(mut, "_detach_audience_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await mut.apply_detach_audience(
@@ -892,7 +877,7 @@ async def test_apply_remove_keywords_happy_path():
         )
         return {"applied": True, "removed": ["rn1"], "count": 1, "not_found": []}
 
-    store = FakeStore(FakeProposal("remove_keywords", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("remove_keywords", "confirmed", user_initiated=True))
     with patched(mut, "_remove_keywords_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_remove_keywords(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -1030,7 +1015,7 @@ async def test_apply_resume_campaign_happy_path():
         called.update(customer_id=customer_id, campaign_id=campaign_id, status=status)
         return {"applied": True, "status": status}
 
-    store = FakeStore(FakeProposal("resume_campaign", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("resume_campaign", "confirmed", user_initiated=True))
     with patched(mut, "_set_campaign_status_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_resume_campaign(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -1053,7 +1038,7 @@ async def test_apply_update_campaign_happy_path():
         return {"applied": True, "new_name": new_name}
 
     # user_initiated=False намеренно: переименование — не деньги, гейтом user_initiated НЕ блокируется.
-    store = FakeStore(FakeProposal("update_campaign", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("update_campaign", "confirmed", user_initiated=False))
     with patched(mut, "_update_campaign_name_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_update_campaign(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -1076,7 +1061,7 @@ async def test_apply_update_campaign_validates_empty_name_before_claim():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("update_campaign", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("update_campaign", "confirmed", user_initiated=True))
     with patched(mut, "_update_campaign_name_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await mut.apply_update_campaign(
@@ -1104,7 +1089,9 @@ async def test_apply_set_campaign_network_happy_path():
         return {"applied": True, "search_partners": search_partners}
 
     # user_initiated=False намеренно: сети — не деньги, гейтом user_initiated НЕ блокируются.
-    store = FakeStore(FakeProposal("set_campaign_network", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(
+        FakeProposal("set_campaign_network", "confirmed", user_initiated=False)
+    )
     with patched(mut, "_set_campaign_network_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_set_campaign_network(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -1146,7 +1133,7 @@ async def test_apply_set_campaign_display_network_happy_path():
         return {"applied": True, "display_network": display_network}
 
     # user_initiated=False намеренно: сети — не деньги (как и у тумблера партнёров).
-    store = FakeStore(FakeProposal("set_campaign_display_network", "confirmed", False))
+    store = FakeConfirmStore(FakeProposal("set_campaign_display_network", "confirmed", False))
     with patched(mut, "_set_campaign_display_network_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_set_campaign_display_network(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -1180,7 +1167,7 @@ async def test_apply_set_campaign_display_network_replay_is_one_shot():
             ads_client=object(),
         )
 
-    store = FakeStore(FakeProposal("set_campaign_display_network", "confirmed", False))
+    store = FakeConfirmStore(FakeProposal("set_campaign_display_network", "confirmed", False))
     with patched(mut, "_set_campaign_display_network_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         await call(store)
         try:
@@ -1214,7 +1201,7 @@ async def test_apply_set_campaign_geo_target_type_happy_path():
         called.update(campaign_id=campaign_id, geo_target_type=geo_target_type)
         return {"applied": True, "geo_target_type": geo_target_type}
 
-    store = FakeStore(FakeProposal("set_campaign_geo_target_type", "confirmed", False))
+    store = FakeConfirmStore(FakeProposal("set_campaign_geo_target_type", "confirmed", False))
     with (
         patched(mut, "_set_campaign_geo_target_type_via_sdk", fake),
         allowed_ids(DRAFT_ACCOUNT_ID),
@@ -1241,7 +1228,7 @@ async def test_apply_set_campaign_geo_target_type_rejects_unknown_value_before_c
         return {"applied": True}
 
     for bad in ("SEARCH_INTEREST", "", "DROP TABLE"):
-        store = FakeStore(FakeProposal("set_campaign_geo_target_type", "confirmed", False))
+        store = FakeConfirmStore(FakeProposal("set_campaign_geo_target_type", "confirmed", False))
         with (
             patched(mut, "_set_campaign_geo_target_type_via_sdk", fake),
             allowed_ids(DRAFT_ACCOUNT_ID),
@@ -1281,7 +1268,7 @@ async def test_apply_set_campaign_geo_target_type_replay_is_one_shot():
             ads_client=object(),
         )
 
-    store = FakeStore(FakeProposal("set_campaign_geo_target_type", "confirmed", False))
+    store = FakeConfirmStore(FakeProposal("set_campaign_geo_target_type", "confirmed", False))
     with (
         patched(mut, "_set_campaign_geo_target_type_via_sdk", fake),
         allowed_ids(DRAFT_ACCOUNT_ID),
@@ -1324,7 +1311,7 @@ async def test_apply_pause_ad_happy_path():
         called.update(ad_group_id=ad_group_id, ad_id=ad_id, status=status)
         return {"applied": True, "status": status}
 
-    store = FakeStore(FakeProposal("pause_ad", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("pause_ad", "confirmed", user_initiated=False))
     with patched(mut, "_set_ad_status_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_pause_ad(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -1345,7 +1332,7 @@ async def test_apply_remove_ad_happy_path():
         called.update(ad_group_id=ad_group_id, ad_id=ad_id)
         return {"removed": True, "applied": True}
 
-    store = FakeStore(FakeProposal("remove_ad", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("remove_ad", "confirmed", user_initiated=False))
     with patched(mut, "_remove_ad_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_remove_ad(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -1408,7 +1395,7 @@ async def test_apply_pause_ad_group_happy_path():
         called.update(ad_group_id=ad_group_id, status=status)
         return {"applied": True, "status": status}
 
-    store = FakeStore(FakeProposal("pause_ad_group", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("pause_ad_group", "confirmed", user_initiated=True))
     with patched(mut, "_set_ad_group_status_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_pause_ad_group(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -1429,7 +1416,7 @@ async def test_apply_resume_ad_group_happy_path():
         called.update(status=status)
         return {"applied": True, "status": status}
 
-    store = FakeStore(FakeProposal("resume_ad_group", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("resume_ad_group", "confirmed", user_initiated=True))
     with patched(mut, "_set_ad_group_status_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_resume_ad_group(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -1451,7 +1438,7 @@ async def test_apply_pause_ad_group_replay_one_shot():
         calls["n"] += 1
         return {"applied": True, "status": status}
 
-    store = FakeStore(FakeProposal("pause_ad_group", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("pause_ad_group", "confirmed", user_initiated=True))
     with patched(mut, "_set_ad_group_status_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         await mut.apply_pause_ad_group(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -1482,7 +1469,7 @@ async def test_apply_set_geo_proximity_happy_path():
         called.update(campaign_id=campaign_id, radius_km=radius_km, address=dict(address))
         return {"applied": True, "radius_km": radius_km}
 
-    store = FakeStore(FakeProposal("set_geo_proximity", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("set_geo_proximity", "confirmed", user_initiated=True))
     with patched(mut, "_set_geo_proximity_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_set_geo_proximity(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -1506,7 +1493,7 @@ async def test_apply_set_geo_proximity_rejects_zero_radius_before_sdk():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("set_geo_proximity", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("set_geo_proximity", "confirmed", user_initiated=True))
     with patched(mut, "_set_geo_proximity_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await mut.apply_set_geo_proximity(
@@ -1526,7 +1513,7 @@ async def test_apply_set_geo_proximity_rejects_zero_radius_before_sdk():
 
 
 async def test_apply_set_geo_proximity_rejects_foreign_account():
-    store = FakeStore(FakeProposal("set_geo_proximity", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("set_geo_proximity", "confirmed", user_initiated=True))
     with (
         patched(mut, "_set_geo_proximity_via_sdk", lambda *a, **k: {"applied": True}),
         allowed_ids(DRAFT_ACCOUNT_ID),
@@ -1554,7 +1541,7 @@ async def test_apply_set_geo_proximity_validates_address_before_claim():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("set_geo_proximity", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("set_geo_proximity", "confirmed", user_initiated=True))
     with patched(mut, "_set_geo_proximity_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await mut.apply_set_geo_proximity(
@@ -1583,7 +1570,7 @@ async def test_apply_set_geo_location_happy_path():
         )
         return {"applied": True, "count": len(locations)}
 
-    store = FakeStore(FakeProposal("set_geo_location", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("set_geo_location", "confirmed", user_initiated=True))
     with patched(mut, "_set_geo_location_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_set_geo_location(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -1607,7 +1594,7 @@ async def test_apply_set_geo_location_validates_empty_before_claim():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("set_geo_location", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("set_geo_location", "confirmed", user_initiated=True))
     with patched(mut, "_set_geo_location_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await mut.apply_set_geo_location(
@@ -1829,7 +1816,7 @@ async def test_apply_set_bidding_strategy_happy_path():
         )
         return {"applied": True, "strategy": strategy}
 
-    store = FakeStore(FakeProposal("set_bidding_strategy", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("set_bidding_strategy", "confirmed", user_initiated=True))
     with patched(mut, "_set_bidding_strategy_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_set_bidding_strategy(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -1846,7 +1833,9 @@ async def test_apply_set_bidding_strategy_happy_path():
 
 
 async def test_apply_set_bidding_strategy_blocked_when_not_user_initiated():
-    store = FakeStore(FakeProposal("set_bidding_strategy", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(
+        FakeProposal("set_bidding_strategy", "confirmed", user_initiated=False)
+    )
     with allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await mut.apply_set_bidding_strategy(
@@ -1870,7 +1859,7 @@ async def test_apply_set_bidding_strategy_validates_target_cpa_before_claim():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("set_bidding_strategy", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("set_bidding_strategy", "confirmed", user_initiated=True))
     with patched(mut, "_set_bidding_strategy_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await mut.apply_set_bidding_strategy(
@@ -2295,7 +2284,10 @@ async def test_real_store_apply_is_single_use_replay_blocked():
         confirmation_id=cid,
         operation="resume_campaign",
         customer_id=DRAFT_ACCOUNT_ID,
-        params={"campaign": "X"},
+        # resume_campaign — STRICT (Волна 1.1): черновик без аттестации свежести гейт A не пропустит.
+        # Здесь проверяется одноразовость claim, а не свежесть, поэтому снимок кладём такой же, какой
+        # положила бы карточка бота (`attach_freshness` через хелпер conftest).
+        params=attested({"campaign": "X"}, {"kind": "status", "before_status": "PAUSED"}),
         summary="resume X",
         chat_id=1,
         user_initiated=True,
@@ -2415,7 +2407,7 @@ async def test_record_failure_redacts_secret_in_audit():
 
 # ── FIX 1: confirmation_id одной операции нельзя «переиграть» в другую (wrong-op) ─
 async def test_apply_rejects_wrong_operation_confirmation():
-    store = FakeStore(FakeProposal("add_keywords", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("add_keywords", "confirmed", user_initiated=True))
     with allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await mut.apply_update_bid(  # confirmation_id подтверждён для add_keywords, не bid
@@ -2454,7 +2446,7 @@ async def test_save_proposal_defaults_user_initiated_false():
 
 async def test_budget_blocked_when_default_user_initiated():
     # Полный путь: proposal без user_initiated (default False) → бюджет заблокирован гейтом.
-    store = FakeStore(FakeProposal("update_budget", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("update_budget", "confirmed", user_initiated=False))
     with allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await mut.apply_update_budget(
@@ -2473,7 +2465,7 @@ async def test_budget_blocked_when_default_user_initiated():
 
 # ── FIX 6: абсолютный потолок суммы у границы SDK (defense-in-depth поверх схемы) ─
 async def test_apply_update_budget_rejects_absurd_amount():
-    store = FakeStore(FakeProposal("update_budget", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("update_budget", "confirmed", user_initiated=True))
     with allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await mut.apply_update_budget(
@@ -2567,7 +2559,7 @@ async def test_apply_pause_campaign_happy_path():
         called.update(customer_id=customer_id, campaign_id=campaign_id, status=status)
         return {"applied": True, "status": status}
 
-    store = FakeStore(FakeProposal("pause_campaign", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("pause_campaign", "confirmed", user_initiated=True))
     with patched(mut, "_set_campaign_status_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_pause_campaign(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -2589,7 +2581,7 @@ async def test_apply_remove_campaign_happy_path():
         called.update(customer_id=customer_id, campaign_id=campaign_id)
         return {"customer_id": customer_id, "campaign_id": campaign_id, "removed": True}
 
-    store = FakeStore(FakeProposal("remove_campaign", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("remove_campaign", "confirmed", user_initiated=True))
     with patched(mut, "_remove_campaign_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_remove_campaign(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -2609,7 +2601,7 @@ async def test_apply_remove_campaign_replay_one_shot():
         calls["n"] += 1
         return {"removed": True}
 
-    store = FakeStore(FakeProposal("remove_campaign", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("remove_campaign", "confirmed", user_initiated=True))
     with patched(mut, "_remove_campaign_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         await mut.apply_remove_campaign(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -2639,7 +2631,7 @@ async def test_apply_remove_ad_group_happy_path():
         called.update(customer_id=customer_id, ad_group_id=ad_group_id)
         return {"removed": True}
 
-    store = FakeStore(FakeProposal("remove_ad_group", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("remove_ad_group", "confirmed", user_initiated=True))
     with patched(mut, "_remove_ad_group_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_remove_ad_group(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -2921,7 +2913,7 @@ async def test_all_apply_reject_foreign_account():
     какого-либо SDK/finalize."""
     for op in _ALL_OPS:
         fn, kw = _apply_case(op)
-        store = FakeStore(FakeProposal(op, "confirmed", user_initiated=True))
+        store = FakeConfirmStore(FakeProposal(op, "confirmed", user_initiated=True))
         with allowed_ids(DRAFT_ACCOUNT_ID):
             try:
                 await fn(customer_id="1234567890", confirm_store=store, **kw)
@@ -2936,7 +2928,7 @@ async def test_all_apply_reject_without_confirmation():
     PermissionError, finalize не вызван (golden rule 2)."""
     for op in _ALL_OPS:
         fn, kw = _apply_case(op)
-        store = FakeStore(proposal=None)  # нет подтверждённого черновика
+        store = FakeConfirmStore(proposal=None)  # нет подтверждённого черновика
         with allowed_ids(DRAFT_ACCOUNT_ID):
             try:
                 await fn(customer_id=DRAFT_ACCOUNT_ID, confirm_store=store, **kw)

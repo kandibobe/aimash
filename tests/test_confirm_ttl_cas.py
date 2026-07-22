@@ -28,6 +28,7 @@ from sqlalchemy import select, update  # noqa: E402
 
 from ads.mutations import _require_confirmation  # noqa: E402
 from confirm.store import ConfirmStore  # noqa: E402
+from conftest import attested  # noqa: E402
 from core.config import settings  # noqa: E402
 from db.models import AuditLog, Proposal  # noqa: E402
 from db.session import Session, db_dt, init_db  # noqa: E402
@@ -43,7 +44,10 @@ async def _mk(store: ConfirmStore, *, chat_id: int = OWNER) -> str:
         confirmation_id=cid,
         operation=OP,
         customer_id=DRAFT,
-        params={"campaign": "X"},
+        # Аттестация свежести — как её кладёт карточка бота (Волна 1.1). Предмет этих тестов TTL, а
+        # не свежесть: черновик без снимка отбил бы гейт A (`update_budget` — STRICT) раньше, чем
+        # дело дошло бы до CAS, и «отказ» перестал бы что-либо говорить про срок жизни.
+        params=attested({"campaign": "X"}, {"kind": "budget"}),
         summary="s",
         chat_id=chat_id,
         user_initiated=True,

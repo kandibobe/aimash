@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 
 # ── Тиры ──────────────────────────────────────────────────────────────────────────
@@ -181,6 +182,33 @@ _FIELD_LABELS = {
 }
 
 
+# ── Снимок и аттестация ───────────────────────────────────────────────────────────
+#
+# Словарь снимка живёт ЗДЕСЬ, а не рядом с ридером (`ads.service.read_state`), потому что читает
+# маркер не только ридер: гейт A (`ads.mutations._require_freshness`) обязан понимать форму `_freshness`
+# без импорта `ads.service` — тот сам импортирует `ads.mutations`, и обратная зависимость дала бы цикл.
+
+
+class SnapshotKind(str, Enum):
+    """Почему снимка нет — Волна 1.1. Три разных причины, которые `read_before` схлопывал в один
+    `None`: «читать нечего по природе операции», «прочитали» и «не смогли прочитать». Первое и
+    третье обязаны различаться — их слипание и есть fail-open: freshness-гард не может отличить
+    «сверять нечего» от «сверка не состоялась»."""
+
+    OK = "ok"
+    NO_DIFF = "no_diff"
+    UNREADABLE = "unreadable"
+
+
+@dataclass(frozen=True, slots=True)
+class Snapshot:
+    """Результат чтения состояния. `data` заполнен только при `kind is OK`."""
+
+    kind: SnapshotKind
+    data: dict | None = None
+    reason: str = ""
+
+
 # Снимок и его аттестация. Пара служебная и ХОД-СПЕЦИФИЧНАЯ: она описывает состояние аккаунта в
 # момент показа ЭТОЙ карточки. Любой путь, который переиспользует params позже (шаблон, повтор из
 # /recent, клон), обязан её снять — иначе новый черновик унаследует чужое «прочитано» и проедет гейт
@@ -189,9 +217,61 @@ _FIELD_LABELS = {
 ATTESTATION_KEYS: frozenset[str] = frozenset({"_before", "_freshness"})
 
 
+def attach_freshness(params: dict, snap: Snapshot) -> dict:
+    """Прикрепить к черновику снимок И аттестацию того, ЧЕМ он является.
+
+    `_before` кладётся как раньше — только при успешном чтении. Новое здесь `_freshness`: он есть
+    ВСЕГДА, в том числе когда снимка нет. Черновик без маркера freshness-гейт обязан считать
+    непрочитанным (fail-closed), поэтому «забыли прикрепить» и «не смогли прочитать» дают один и тот
+    же исход — отказ на STRICT-операции, а не тихий пропуск.
+
+    Оба ключа инертны для исполнения: `apply_*` читают свои ключи, а `db/history.py:_INERT_KEYS`
+    вычищает служебные из повтора `/recent`."""
+    out = {**params, "_freshness": {"kind": snap.kind.value, "reason": snap.reason}}
+    if snap.kind is SnapshotKind.OK and snap.data is not None:
+        out["_before"] = snap.data  # инертно для execute (apply_* читают свои ключи)
+    return out
+
+
 def strip_attestation(params: dict) -> dict:
     """params без снимка и аттестации свежести — для переиспользования в ДРУГОМ ходе."""
     return {k: v for k, v in (params or {}).items() if k not in ATTESTATION_KEYS}
+
+
+def attested_snapshot(params: dict) -> dict | None:
+    """Снимок карточки, если он ДОКАЗАН аттестацией; иначе None — единственный способ прочитать
+    `_before`, которым пользуются оба гейта.
+
+    Раздельное чтение `_before` и `_freshness` — это две трактовки одних данных в двух местах, и
+    расходятся они молча: `_before` без маркера (или с маркером `unreadable`) выглядит как валидный
+    снимок ровно до тех пор, пока кто-то не забудет проверить второй ключ. Здесь пара читается
+    атомарно: снимок засчитывается, только если аттестация говорит `ok` и данные действительно есть."""
+    if not isinstance(params, dict):
+        return None
+    marker = params.get("_freshness")
+    before = params.get("_before")
+    if not isinstance(marker, dict) or marker.get("kind") != SnapshotKind.OK.value:
+        return None
+    return before if isinstance(before, dict) else None
+
+
+def _marker(params: dict) -> dict:
+    m = params.get("_freshness") if isinstance(params, dict) else None
+    return m if isinstance(m, dict) else {}
+
+
+def marker_kind(params: dict) -> str:
+    """`kind` аттестации (`ok`/`no_diff`/`unreadable`) или `""`, если маркера нет вовсе. Нужен там,
+    где важно ОТЛИЧИТЬ сорвавшееся чтение от структурного «сверять нечего»: первое — сигнал (WARN),
+    второе — норма (INFO)."""
+    return str(_marker(params).get("kind") or "")
+
+
+def absence_reason(params: dict) -> str:
+    """Почему снимка нет — для текста отказа и лога. Строка ТЕХНИЧЕСКАЯ (`no_marker`, `not_diffable`,
+    имя исключения ридера): значений снимка в ней нет, наружу идёт только она (правило 5)."""
+    m = _marker(params)
+    return str(m.get("reason") or m.get("kind") or "no_marker")
 
 
 def tier_of(operation: str) -> Tier:

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import sys
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +20,11 @@ import ads.extensions as ext  # noqa: E402
 import ads.mutations as mut  # noqa: E402
 from ads import read  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
+
+# Дублёры стора/черновика — общие (tests/conftest.py). Своя копия здесь была байт-в-байт такой же и
+# уже отстала от контракта: Волна 1.1 добавила `get_confirmed` (гейт A читает снимок из стора), и без
+# него любая STRICT-операция получала «снимка нет ⇒ отказ». Предмет этого файла — ассеты, не свежесть.
+from conftest import FakeConfirmStore, FakeProposal  # noqa: E402
 from core.config import settings  # noqa: E402
 
 
@@ -42,37 +46,6 @@ def patched(obj, name, value):
         yield
     finally:
         setattr(obj, name, orig)
-
-
-@dataclass
-class FakeProposal:
-    operation: str
-    status: str
-    user_initiated: bool
-    # Волна 1.4: второй бит провенанса. None ⇒ зеркалим user_initiated — здесь проверяется SDK-путь,
-    # а не провенанс, и расщепление битов у настоящего ConfirmStore живёт в test_provenance_gate.py.
-    origin_human_turn: bool | None = None
-
-    def __post_init__(self) -> None:
-        if self.origin_human_turn is None:
-            self.origin_human_turn = self.user_initiated
-
-
-class FakeStore:
-    def __init__(self, proposal=None):
-        self._p = proposal
-        self.finalized = False
-        self._claimed = False
-
-    async def claim(self, confirmation_id, *, operation):
-        p = self._p
-        if p is None or p.status != "confirmed" or p.operation != operation or self._claimed:
-            return None
-        self._claimed = True
-        return p
-
-    async def finalize(self, confirmation_id, *, result):
-        self.finalized = True
 
 
 # ── длины ассетов ─────────────────────────────────────────────────────────────────
@@ -148,7 +121,7 @@ async def test_apply_add_sitelinks_happy_path():
         called.update(campaign_id=campaign_id, n=len(sitelinks))
         return {"applied": True, "count": len(sitelinks)}
 
-    store = FakeStore(FakeProposal("add_sitelinks", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("add_sitelinks", "confirmed", user_initiated=False))
     with patched(ext, "_add_sitelinks_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_add_sitelinks(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -169,7 +142,7 @@ async def test_apply_add_sitelinks_validate_before_claim():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("add_sitelinks", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("add_sitelinks", "confirmed", user_initiated=False))
     bad = [{"link_text": "А" * 26, "final_url": "https://shop.ua"}]  # >25 кириллицей
     with patched(ext, "_add_sitelinks_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         with pytest.raises(ValueError):
@@ -185,7 +158,7 @@ async def test_apply_add_sitelinks_validate_before_claim():
 
 
 async def test_apply_add_sitelinks_foreign_and_no_confirmation():
-    store = FakeStore(FakeProposal("add_sitelinks", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("add_sitelinks", "confirmed", user_initiated=False))
     with allowed_ids(DRAFT_ACCOUNT_ID):
         with pytest.raises(PermissionError):  # чужой аккаунт
             await mut.apply_add_sitelinks(
@@ -197,7 +170,7 @@ async def test_apply_add_sitelinks_foreign_and_no_confirmation():
                 ads_client=object(),
             )
     assert store.finalized is False
-    store2 = FakeStore(proposal=None)
+    store2 = FakeConfirmStore(proposal=None)
     with allowed_ids(DRAFT_ACCOUNT_ID):
         with pytest.raises(PermissionError):  # без подтверждения
             await mut.apply_add_sitelinks(
@@ -218,7 +191,7 @@ async def test_apply_add_sitelinks_replay_one_shot():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("add_sitelinks", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("add_sitelinks", "confirmed", user_initiated=False))
     with patched(ext, "_add_sitelinks_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         await mut.apply_add_sitelinks(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -617,7 +590,7 @@ async def test_apply_add_call_asset_gates():
         calls["n"] += 1
         return {"applied": True, "count": 1}
 
-    store = FakeStore(FakeProposal("add_call_asset", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("add_call_asset", "confirmed", user_initiated=False))
     with patched(ext, "_add_call_asset_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_add_call_asset(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -630,7 +603,7 @@ async def test_apply_add_call_asset_gates():
         )
     assert res["applied"] and calls["n"] == 1 and store.finalized is True
     # без подтверждения → PermissionError, SDK не зван
-    store2 = FakeStore(proposal=None)
+    store2 = FakeConfirmStore(proposal=None)
     with patched(ext, "_add_call_asset_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         with pytest.raises(PermissionError):
             await mut.apply_add_call_asset(
@@ -652,7 +625,7 @@ async def test_apply_add_promotion_validate_before_claim():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("add_promotion", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("add_promotion", "confirmed", user_initiated=False))
     with patched(ext, "_add_promotion_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         with pytest.raises(ValueError):  # ни одной скидки → отказ ДО claim
             await mut.apply_add_promotion(
@@ -668,7 +641,7 @@ async def test_apply_add_promotion_validate_before_claim():
 
 
 async def test_apply_add_price_foreign_account():
-    store = FakeStore(FakeProposal("add_price_asset", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("add_price_asset", "confirmed", user_initiated=False))
     with allowed_ids(DRAFT_ACCOUNT_ID):
         with pytest.raises(PermissionError):  # чужой аккаунт → замок до всего
             await mut.apply_add_price_asset(
@@ -701,7 +674,7 @@ async def test_apply_attach_image_asset_happy_and_gates():
         called.update(campaign_id=campaign_id, name=name, n=len(image_bytes))
         return {"applied": True, "count": 1}
 
-    store = FakeStore(FakeProposal("attach_image_asset", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("attach_image_asset", "confirmed", user_initiated=False))
     with patched(ext, "_attach_image_asset_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_attach_image_asset(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -723,7 +696,7 @@ async def test_apply_attach_image_asset_empty_bytes_before_claim():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("attach_image_asset", "confirmed", user_initiated=False))
+    store = FakeConfirmStore(FakeProposal("attach_image_asset", "confirmed", user_initiated=False))
     with patched(ext, "_attach_image_asset_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         with pytest.raises(ValueError):
             await mut.apply_attach_image_asset(

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import sys
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import ads.mutations as mut  # noqa: E402
 import ads.service as svc  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
+from conftest import FakeConfirmStore, FakeProposal  # noqa: E402
 from core.config import settings  # noqa: E402
 
 _H3 = ["Заголовок один", "Заголовок два", "Заголовок три"]
@@ -34,37 +34,6 @@ def allowed_ids(value: str):
         yield
     finally:
         settings.google_ads_allowed_customer_ids = prev
-
-
-@dataclass
-class FakeProposal:
-    operation: str
-    status: str
-    user_initiated: bool
-    # Волна 1.4: второй бит провенанса. None ⇒ зеркалим user_initiated — здесь проверяется SDK-путь,
-    # а не провенанс, и расщепление битов у настоящего ConfirmStore живёт в test_provenance_gate.py.
-    origin_human_turn: bool | None = None
-
-    def __post_init__(self) -> None:
-        if self.origin_human_turn is None:
-            self.origin_human_turn = self.user_initiated
-
-
-class FakeStore:
-    def __init__(self, proposal=None):
-        self._p = proposal
-        self.finalized = False
-        self._claimed = False
-
-    async def claim(self, confirmation_id, *, operation):
-        p = self._p
-        if p is None or p.status != "confirmed" or p.operation != operation or self._claimed:
-            return None
-        self._claimed = True
-        return p
-
-    async def finalize(self, confirmation_id, *, result):
-        self.finalized = True
 
 
 @contextmanager
@@ -121,7 +90,7 @@ async def test_apply_create_rsa_happy_path():
         )
         return {"applied": True, "status": "PAUSED", "resource_name": "rn/1"}
 
-    store = FakeStore(FakeProposal("create_rsa", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("create_rsa", "confirmed", user_initiated=True))
     with patched(mut, "_create_rsa_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await _call(store)
     assert res["applied"] is True and res["status"] == "PAUSED"
@@ -131,7 +100,7 @@ async def test_apply_create_rsa_happy_path():
 
 
 async def test_apply_create_rsa_rejects_foreign_account():
-    store = FakeStore(FakeProposal("create_rsa", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("create_rsa", "confirmed", user_initiated=True))
     with allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await _call(store, customer_id="1234567890")
@@ -142,7 +111,7 @@ async def test_apply_create_rsa_rejects_foreign_account():
 
 
 async def test_apply_create_rsa_rejected_without_confirmation():
-    store = FakeStore(proposal=None)
+    store = FakeConfirmStore(proposal=None)
     with allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await _call(store, cid="bogus")
@@ -153,7 +122,7 @@ async def test_apply_create_rsa_rejected_without_confirmation():
 
 
 async def test_apply_create_rsa_rejects_wrong_operation():
-    store = FakeStore(FakeProposal("add_keywords", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("add_keywords", "confirmed", user_initiated=True))
     with allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await _call(store)
@@ -171,7 +140,7 @@ async def test_below_min_headlines_blocked_before_sdk():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("create_rsa", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("create_rsa", "confirmed", user_initiated=True))
     with patched(mut, "_create_rsa_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await _call(store, headlines=_H3[:2])  # 2 заголовка < 3
@@ -182,7 +151,7 @@ async def test_below_min_headlines_blocked_before_sdk():
 
 
 async def test_below_min_descriptions_blocked_before_sdk():
-    store = FakeStore(FakeProposal("create_rsa", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("create_rsa", "confirmed", user_initiated=True))
     with allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await _call(store, descriptions=_D2[:1])  # 1 описание < 2
@@ -193,7 +162,7 @@ async def test_below_min_descriptions_blocked_before_sdk():
 
 
 async def test_too_many_headlines_blocked():
-    store = FakeStore(FakeProposal("create_rsa", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("create_rsa", "confirmed", user_initiated=True))
     with allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await _call(store, headlines=[f"H{i}" for i in range(16)])  # 16 > 15
@@ -210,7 +179,7 @@ async def test_overlong_headline_blocked_before_sdk():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("create_rsa", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("create_rsa", "confirmed", user_initiated=True))
     with patched(mut, "_create_rsa_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await _call(store, headlines=["я" * 31, "ok2", "ok3"])  # 31 кир. символ > 30
@@ -221,7 +190,7 @@ async def test_overlong_headline_blocked_before_sdk():
 
 
 async def test_missing_or_bad_final_url_blocked():
-    store = FakeStore(FakeProposal("create_rsa", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("create_rsa", "confirmed", user_initiated=True))
     with allowed_ids(DRAFT_ACCOUNT_ID):
         for bad in ("", "ftp://x", "example.com"):
             try:
@@ -233,7 +202,7 @@ async def test_missing_or_bad_final_url_blocked():
 
 
 async def test_path2_without_path1_blocked():
-    store = FakeStore(FakeProposal("create_rsa", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("create_rsa", "confirmed", user_initiated=True))
     with allowed_ids(DRAFT_ACCOUNT_ID):
         try:
             await _call(store, path1=None, path2="акция")

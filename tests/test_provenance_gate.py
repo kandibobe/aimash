@@ -32,6 +32,7 @@ from sqlalchemy import select  # noqa: E402
 
 import ads.mutations as mut  # noqa: E402
 from confirm.store import ConfirmStore  # noqa: E402
+from conftest import attested  # noqa: E402
 from core.config import settings  # noqa: E402
 from core.context import request_scope  # noqa: E402
 from core.provenance import get_provenance, human_turn, machine_turn  # noqa: E402
@@ -64,7 +65,10 @@ async def _mk(store: ConfirmStore, *, operation: str = "update_budget") -> str:
         confirmation_id=cid,
         operation=operation,
         customer_id=DRAFT,
-        params={"campaign": "X"},
+        # Аттестация свежести — как её кладёт карточка бота: предмет этих тестов провенанс, а не
+        # свежесть, и черновик без снимка отбил бы гейт A (`update_budget` — STRICT) раньше, чем
+        # дело дошло бы до проверки битов.
+        params=attested({"campaign": "X"}, {"kind": "budget"}),
         summary="s",
         chat_id=OWNER,
         user_initiated=True,

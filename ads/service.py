@@ -10,12 +10,25 @@ pause/resume, гео, стратегии, аудитории, RSA/кампани
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from enum import Enum
 
 from ads import mutations, resolve
 from ads.client import DRAFT_ACCOUNT_ID, build_client_async, ensure_allowed
-from ads.freshness import FreshnessMissing, Tier, compare, tier_of
+
+# Словарь снимка (Snapshot/SnapshotKind/attach_freshness) переехал в ads.freshness — его обязан
+# читать и гейт A внутри ads.mutations, а импортировать оттуда ads.service нельзя (цикл). Имена
+# ре-экспортируются этим модулем: вызывающие (bot.main, scripts/*, тесты) не менялись.
+from ads.freshness import (
+    Snapshot,
+    SnapshotKind,
+    FreshnessMissing,
+    Tier,
+    absence_reason,
+    attach_freshness,  # noqa: F401 — ре-экспорт: bot.main/scripts импортируют его отсюда
+    attested_snapshot,
+    compare,
+    marker_kind,
+    tier_of,
+)
 from ads.read import (  # D6: «было» для гео-мутаций; валюта → биллинг-единица округления денег
     account_currency,
     read_campaign_targeting,
@@ -106,26 +119,6 @@ async def _currency(client, customer_id: str) -> str | None:
         return (await asyncio.to_thread(account_currency, client, str(customer_id))) or None
     except Exception:  # noqa: BLE001 — справочное чтение не должно ронять показ/исполнение
         return None
-
-
-class SnapshotKind(str, Enum):
-    """Почему снимка нет — Волна 1.1. Три разных причины, которые `read_before` схлопывал в один
-    `None`: «читать нечего по природе операции», «прочитали» и «не смогли прочитать». Первое и
-    третье обязаны различаться — их слипание и есть fail-open: freshness-гард не может отличить
-    «сверять нечего» от «сверка не состоялась»."""
-
-    OK = "ok"
-    NO_DIFF = "no_diff"
-    UNREADABLE = "unreadable"
-
-
-@dataclass(frozen=True, slots=True)
-class Snapshot:
-    """Результат чтения состояния. `data` заполнен только при `kind is OK`."""
-
-    kind: SnapshotKind
-    data: dict | None = None
-    reason: str = ""
 
 
 def _not_found(reason: str = "not_found") -> Snapshot:
@@ -361,22 +354,6 @@ async def read_before(operation: str, params: dict, customer_id: str | None = No
     return snap.data if snap.kind is SnapshotKind.OK else None
 
 
-def attach_freshness(params: dict, snap: Snapshot) -> dict:
-    """Прикрепить к черновику снимок И аттестацию того, ЧЕМ он является.
-
-    `_before` кладётся как раньше — только при успешном чтении. Новое здесь `_freshness`: он есть
-    ВСЕГДА, в том числе когда снимка нет. Черновик без маркера freshness-гейт обязан считать
-    непрочитанным (fail-closed), поэтому «забыли прикрепить» и «не смогли прочитать» дают один и тот
-    же исход — отказ на STRICT-операции, а не тихий пропуск.
-
-    Оба ключа инертны для исполнения: `apply_*` читают свои ключи, а `db/history.py:_INERT_KEYS`
-    вычищает служебные из повтора `/recent`."""
-    out = {**params, "_freshness": {"kind": snap.kind.value, "reason": snap.reason}}
-    if snap.kind is SnapshotKind.OK and snap.data is not None:
-        out["_before"] = snap.data  # инертно для execute (apply_* читают свои ключи)
-    return out
-
-
 def _assert_no_drift(params: dict, current) -> None:
     """Оптимистичная блокировка (§5/TOCTOU): если текущее значение изменилось с момента показа
     черновика — НЕ применяем (для относительного режима пересчёт шёл бы от другой базы). Требуем
@@ -428,17 +405,19 @@ async def _verify_freshness(operation: str, params: dict, customer_id: str) -> N
     tier = tier_of(operation)  # неизвестная операция ⇒ FreshnessMissing (deny-by-default)
     if tier is Tier.NO_DIFF:
         return
-    marker = params.get("_freshness")
-    marker = marker if isinstance(marker, dict) else {}
-    stored = params.get("_before")
-    if marker.get("kind") != SnapshotKind.OK.value or not isinstance(stored, dict):
-        why = marker.get("reason") or marker.get("kind") or "no_marker"
+    # Пара (`_before`, `_freshness`) читается ОДНИМ хелпером, общим с гейтом A: снимок без аттестации
+    # (или с аттестацией «не прочитали») не является снимком, и трактовать это в двух местах порознь —
+    # значит однажды разойтись.
+    stored = attested_snapshot(params)
+    if stored is None:
+        why = absence_reason(params)
         if tier is Tier.STRICT:
             raise FreshnessMissing(
                 f"состояние для '{operation}' не читалось при показе черновика ({why}) — "
                 "выполнение отклонено; создай черновик заново"
             )
-        (log.warning if marker.get("kind") == SnapshotKind.UNREADABLE.value else log.info)(
+        failed = marker_kind(params) == SnapshotKind.UNREADABLE.value
+        (log.warning if failed else log.info)(
             "freshness: сверка пропущена op=%s tier=advisory cause=%s", operation, why
         )
         return

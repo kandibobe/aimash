@@ -250,6 +250,28 @@ _GATED_SCRIPT_ALLOWLIST = {
     "live_smoke_gdn.py",  # §11 GDN-смоук: создаёт через confirm-гейт, cleanup только при ENV=dev
 }
 
+# Второй allow-list — скрипты, которые НЕ ПИШУТ ВООБЩЕ: Mutate зовётся с `validate_only=True`,
+# сервер только валидирует запрос. `require_dev_env()` им не просто не нужен, а противопоказан:
+# `verify_readonly_ceiling.py` работает на Хосте A, где ENV=test, и сам роняет запуск при ENV=dev
+# (`hygiene_host_a`) — dev открывает demo-скрипты прямой записи, ровно то, чего на том хосте быть
+# не должно.
+#
+# Исключение НЕ по имени: для каждого файла отсюда проверяется САМО СВОЙСТВО, ради которого он
+# исключён. Уберут `validate_only` или fail-closed гард — тест снова покраснеет, а не промолчит.
+_VALIDATE_ONLY_SCRIPTS = {"verify_readonly_ceiling.py"}
+
+
+def _assert_writes_nothing(name: str, text: str) -> None:
+    """Свойство, оправдывающее исключение: запрос помечен validate_only И это проверено кодом."""
+    assert re.search(r"\.validate_only\s*=\s*True", text), (
+        f"{name} в _VALIDATE_ONLY_SCRIPTS, но `validate_only = True` в нём не найден — "
+        "исключение из гарда прямой записи больше не обосновано"
+    )
+    assert re.search(r"validate_only\s+is\s+not\s+True", text), (
+        f"{name} не проверяет validate_only явным fail-closed условием — под `python -O` "
+        "ассерт вырезается, и зонд начнёт писать по-настоящему"
+    )
+
 
 def test_direct_write_scripts_call_require_dev_env():
     scripts_dir = _REPO_ROOT / "scripts"
@@ -259,6 +281,9 @@ def test_direct_write_scripts_call_require_dev_env():
         if py.name in _GATED_SCRIPT_ALLOWLIST:
             continue
         text = py.read_text(encoding="utf-8", errors="ignore")
+        if py.name in _VALIDATE_ONLY_SCRIPTS:
+            _assert_writes_nothing(py.name, text)
+            continue
         if direct_write.search(text) and "require_dev_env()" not in text:
             offenders.append(py.name)
     assert not offenders, (

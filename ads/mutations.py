@@ -29,6 +29,13 @@ from adcopy.validate import (
 from adcopy.validate import validate as _rsa_validate
 from ads import extensions, geo
 from ads.client import ensure_allowed
+from ads.freshness import (  # freshness-контракт (Волна 1.1); модуль чистый — цикла нет
+    FreshnessMissing,
+    Tier,
+    absence_reason,
+    attested_snapshot,
+    tier_of,
+)
 from ads.keyword_plan import LANGUAGE_IDS  # ISO → languageConstant id (полная таблица Google)
 from ads.read import account_currency  # валюта аккаунта → биллинг-единица округления (кэш, 1 GAQL)
 from ads.resolve import (  # единый GAQL-эскейп для literal-WHERE (defense-in-depth) + shared-budget
@@ -84,6 +91,10 @@ class ConfirmStore(Protocol):
         self, confirmation_id: str, *, operation: str
     ) -> "ConfirmedProposal | None": ...
     async def finalize(self, confirmation_id: str, *, result: object) -> None: ...
+    # Волна 1.1 (гейт A): чтение черновика БЕЗ его столбления — снимок нужен ДО claim, чтобы отказ
+    # по свежести не сжигал одноразовое подтверждение. Отдельный метод, а не поле claim: claim уже
+    # необратим, а решение «исполнять ли» принимается раньше.
+    async def get_confirmed(self, confirmation_id: str) -> "ConfirmedProposal | None": ...
 
 
 class ConfirmedProposal(Protocol):
@@ -93,6 +104,9 @@ class ConfirmedProposal(Protocol):
     # Волна 1.4: второй, НЕЗАВИСИМЫЙ бит — ход был человеческим. Штампует стор из core.provenance,
     # аргументом save_proposal не задаётся (в отличие от user_initiated выше).
     origin_human_turn: bool
+    # Волна 1.1: params черновика — там лежат `_before`/`_freshness` (аттестация свежести). Гейт A
+    # берёт их ОТСЮДА, а не из аргументов apply_* (см. _require_freshness).
+    params: dict
 
 
 def _require_user_command(proposal: ConfirmedProposal, what: str) -> None:
@@ -119,12 +133,73 @@ def _require_user_command(proposal: ConfirmedProposal, what: str) -> None:
         )
 
 
+async def _require_freshness(
+    confirm_store: ConfirmStore, confirmation_id: str, operation: str
+) -> None:
+    """Гейт свежести, ВЕРТИКАЛЬНЫЙ рубеж (Волна 1.1, «гейт A»): черновик исполним, только если
+    состояние аккаунта РЕАЛЬНО читали в момент показа карточки.
+
+    Зачем здесь, если гейт B уже стоит в оркестраторе. `ads.service._apply_confirmed` — не
+    единственный мыслимый вызывающий `apply_*`: headless-WRITE, dev-скрипт, будущий MCP-инструмент
+    зовут вертикаль напрямую, и оркестраторный гейт при этом не выполняется вовсе. Гард денежного
+    пути обязан жить в том же файле, что и сама мутация, — как `ensure_allowed` и `claim`.
+
+    Разделение труда двух гейтов честно НЕРАВНОЕ, и переоценивать этот не нужно:
+      · гейт B (`ads.service._verify_freshness`) перечитывает аккаунт живьём и ловит ДРЕЙФ;
+      · гейт A (здесь) к Google Ads не ходит и дрейф поймать не может — он проверяет ПРОИСХОЖДЕНИЕ:
+        что снимок вообще снимался и человеку показали прочитанное, а не пустоту.
+    Живое чтение сюда не переносится намеренно: `read_state` живёт в `ads.service`, который импортирует
+    этот модуль (цикл), а второй round-trip на каждой мутации — плата дважды за одну гарантию.
+
+    Снимок берётся ИЗ СТОРА по `confirmation_id` и приехать аргументом не может. Аргумент — это то,
+    что напишет вызывающий: новый код его просто не передаст, и по правилу «нет снимка ⇒ сверять
+    нечего» гард самоотключится — ровно тот fail-open, ради которого заведён эпик, этажом ниже.
+    Инвариант на отсутствие такого аргумента — `tests/test_freshness_gate_a.py`.
+
+    Порядок: ДО `claim` (потому и вызывается первой строкой `_require_confirmation`, а не 41 раз по
+    телам). Отказ по свежести не должен сжигать одноразовое подтверждение: человек пересоздаёт
+    черновик той же командой, а не остаётся и без операции, и без карточки."""
+    tier = tier_of(operation)  # незнакомая операция ⇒ FreshnessMissing (deny-by-default)
+    if tier is Tier.NO_DIFF:
+        return  # создание с нуля: прежнего состояния не существует, стор дёргать незачем
+    getter = getattr(confirm_store, "get_confirmed", None)
+    if getter is None:
+        # Стор не умеет отдать черновик — снимок взять неоткуда. Это то же самое «снимка нет», что и
+        # пустая аттестация: STRICT отказывает, признанный долг проходит с записью в лог.
+        why = "store_without_get_confirmed"
+    else:
+        proposal = await getter(confirmation_id)
+        if proposal is None or getattr(proposal, "operation", None) != operation:
+            # Черновика нет / он под другую операцию — застолбить его не выйдет в любом случае.
+            # Авторитетный (и точный по тексту) отказ даст `claim` строкой ниже; подменять его здесь
+            # сообщением про свежесть значит врать о причине отказа.
+            return
+        params = getattr(proposal, "params", None) or {}
+        if attested_snapshot(params) is not None:
+            return
+        why = absence_reason(params)
+    if tier is Tier.STRICT:
+        raise FreshnessMissing(
+            f"состояние для '{operation}' не читалось при показе черновика ({why}) — "
+            "выполнение отклонено; создай черновик заново"
+        )
+    # Признанный долг (`ads.freshness.ADVISORY_DEBT`). Пишем ФАКТ, а не мнение: для вызывающего мимо
+    # оркестратора это единственный след, что мутация ушла в SDK без единого сверенного байта.
+    log.info("freshness(A): снимка нет op=%s tier=advisory cause=%s", operation, why)
+
+
 async def _require_confirmation(
     confirm_store: ConfirmStore, confirmation_id: str, operation: str
 ) -> ConfirmedProposal:
     """Authoritative-гейт исполнения: АТОМАРНО столбит подтверждённый черновик (confirmed →
     executing) под эту операцию. None ⇒ нет/не подтверждён/чужая операция/уже выполнялся
-    (replay) ⇒ PermissionError. Один confirmation_id исполняется не более одного раза."""
+    (replay) ⇒ PermissionError. Один confirmation_id исполняется не более одного раза.
+
+    Гейт свежести (Волна 1.1) вызывается ОТСЮДА, до claim, а не 41 раз по телам `apply_*`. Так он
+    структурно неотключаем: новая мутация обязана пройти confirm-гейт (инвариант
+    `test_all_apply_functions_call_require_confirmation`) — значит проходит и freshness, и забыть
+    его в новой операции физически негде. Список из 41 строки давал бы 41 место, где можно не дописать."""
+    await _require_freshness(confirm_store, confirmation_id, operation)
     proposal = await confirm_store.claim(confirmation_id, operation=operation)
     if proposal is None:
         raise PermissionError(

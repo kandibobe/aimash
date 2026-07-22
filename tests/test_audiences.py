@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import sys
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import ads.mutations as mut  # noqa: E402
 from ads import read  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
+from conftest import FakeConfirmStore, FakeProposal  # noqa: E402
 from core.config import settings  # noqa: E402
 
 
@@ -39,37 +39,6 @@ def patched(obj, name, value):
         yield
     finally:
         setattr(obj, name, orig)
-
-
-@dataclass
-class FakeProposal:
-    operation: str
-    status: str
-    user_initiated: bool
-    # Волна 1.4: второй бит провенанса. None ⇒ зеркалим user_initiated — здесь проверяется SDK-путь,
-    # а не провенанс, и расщепление битов у настоящего ConfirmStore живёт в test_provenance_gate.py.
-    origin_human_turn: bool | None = None
-
-    def __post_init__(self) -> None:
-        if self.origin_human_turn is None:
-            self.origin_human_turn = self.user_initiated
-
-
-class FakeStore:
-    def __init__(self, proposal=None):
-        self._p = proposal
-        self.finalized = False
-        self._claimed = False
-
-    async def claim(self, confirmation_id, *, operation):
-        p = self._p
-        if p is None or p.status != "confirmed" or p.operation != operation or self._claimed:
-            return None
-        self._claimed = True
-        return p
-
-    async def finalize(self, confirmation_id, *, result):
-        self.finalized = True
 
 
 _UL = "customers/1/userLists/55"
@@ -180,7 +149,7 @@ async def test_apply_attach_audience_happy_path():
         called.update(campaign_id=campaign_id, rns=list(rns))
         return {"applied": True, "count": len(rns)}
 
-    store = FakeStore(FakeProposal("attach_audience", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("attach_audience", "confirmed", user_initiated=True))
     with patched(mut, "_attach_audience_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         res = await mut.apply_attach_audience(
             customer_id=DRAFT_ACCOUNT_ID,
@@ -201,7 +170,7 @@ async def test_apply_attach_audience_validates_before_claim():
         calls["n"] += 1
         return {"applied": True}
 
-    store = FakeStore(FakeProposal("attach_audience", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("attach_audience", "confirmed", user_initiated=True))
     with patched(mut, "_attach_audience_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
         with pytest.raises(ValueError):
             await mut.apply_attach_audience(
@@ -217,7 +186,7 @@ async def test_apply_attach_audience_validates_before_claim():
 
 async def test_apply_attach_audience_rejects_foreign_and_no_confirmation():
     # чужой аккаунт
-    store = FakeStore(FakeProposal("attach_audience", "confirmed", user_initiated=True))
+    store = FakeConfirmStore(FakeProposal("attach_audience", "confirmed", user_initiated=True))
     with allowed_ids(DRAFT_ACCOUNT_ID):
         with pytest.raises(PermissionError):
             await mut.apply_attach_audience(
@@ -230,7 +199,7 @@ async def test_apply_attach_audience_rejects_foreign_and_no_confirmation():
             )
     assert store.finalized is False
     # без подтверждения
-    store2 = FakeStore(proposal=None)
+    store2 = FakeConfirmStore(proposal=None)
     with allowed_ids(DRAFT_ACCOUNT_ID):
         with pytest.raises(PermissionError):
             await mut.apply_attach_audience(

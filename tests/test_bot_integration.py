@@ -463,27 +463,24 @@ async def test_on_confirm_runs_real_execute_confirmed_gates():
     await init_db()
     cid = uuid.uuid4().hex
     store = ConfirmStore()
-    # Сохраняем подтверждаемый черновик так же, как доверенный _present_proposal: user_initiated
-    # аргументом, а второй бит провенанса (Волна 1.4) — из human_turn, который в проде открывает
-    # WhitelistMiddleware. Без него денежная операция отклоняется — это и проверяет
-    # test_provenance_gate.test_machine_draft_confirmed_by_human_still_refused.
-    with human_turn(actor_user_id=300):
-        await store.save_proposal(
-            confirmation_id=cid,
-            operation="update_budget",
-            customer_id=DRAFT_ACCOUNT_ID,
-            params={"campaign": "Search", "mode": "set_to", "value": 50},
-            summary="бюджет Search → 50",
-            chat_id=300,
-            user_initiated=True,
-        )
-
-    fake_ref = SimpleNamespace(id="77", budget_micros=40_000_000, status="ENABLED")
+    fake_ref = SimpleNamespace(
+        id="77",
+        budget_micros=40_000_000,
+        status="ENABLED",
+        # Поля общего бюджета читает read_state (П1: раскрытие радиуса) — без них снимок сорвался бы
+        # с AttributeError и стал бы UNREADABLE, т.е. отказом гейта B ещё до SDK.
+        budget_explicitly_shared=False,
+        budget_reference_count=1,
+    )
     sdk: dict = {"n": 0}
 
     def fake_sdk(client, customer_id, campaign_id, micros, disclosed_shared_scope=False):
         sdk["n"] += 1
         sdk["args"] = (customer_id, campaign_id, micros)
+        # Мутация ВИДНА последующему чтению — как у настоящего SDK. Без этого окно пост-проверки
+        # (Доп.2A) честно перечитывает аккаунт, видит прежние 40.00 и переводит черновик в
+        # needs_review: с аттестованным снимком сверке наконец есть что сравнивать.
+        fake_ref.budget_micros = micros
         return {"customer_id": customer_id, "campaign_id": campaign_id, "applied": True}
 
     cq = FakeCallbackQuery(FakeMessage(chat_id=300, bot=FakeBot()))
@@ -493,6 +490,24 @@ async def test_on_confirm_runs_real_execute_confirmed_gates():
         patched(resolve, "find_campaign_by_name", lambda *a, **k: fake_ref),
         patched(mut, "_apply_budget_via_sdk", fake_sdk),
     ):
+        # Черновик рождается ВНУТРИ патчей и ровно так, как его делает доверенный _present_proposal:
+        # user_initiated аргументом, второй бит провенанса (Волна 1.4) — из human_turn (в проде его
+        # открывает WhitelistMiddleware; см. test_provenance_gate), снимок состояния — тем же
+        # read_state + attach_freshness (Волна 1.1). Литеральные params здесь означали бы черновик
+        # без аттестации: гейт B отверг бы его как «состояние не читалось», и шов ниже не проверялся
+        # бы вовсе.
+        params = {"campaign": "Search", "mode": "set_to", "value": 50}
+        params = svc.attach_freshness(params, await svc.read_state("update_budget", params))
+        with human_turn(actor_user_id=300):
+            await store.save_proposal(
+                confirmation_id=cid,
+                operation="update_budget",
+                customer_id=DRAFT_ACCOUNT_ID,
+                params=params,
+                summary="бюджет Search → 50",
+                chat_id=300,
+                user_initiated=True,
+            )
         await bm.on_confirm(cq, ConfirmCB(action="ok", cid=cid))
 
     assert sdk["n"] == 1  # реальный нижний SDK-исполнитель вызван ровно раз (replay/гонки нет)

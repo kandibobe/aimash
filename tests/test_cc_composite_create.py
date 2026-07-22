@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import ads.extensions as ext  # noqa: E402
 import ads.mutations as mut  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
+from conftest import FakeConfirmStore, FakeProposal  # noqa: E402
 from core.config import settings  # noqa: E402
 
 
@@ -41,24 +42,15 @@ def allowed_ids(value: str):
         settings.google_ads_allowed_customer_ids = prev
 
 
-class FakeProposal:
-    def __init__(self):
-        self.operation = "create_search_campaign"
-        self.status = "confirmed"
-        self.user_initiated = True
-        self.origin_human_turn = True  # Волна 1.4: карточку создал человеческий ход
-
-
-class FakeStore:
-    def __init__(self):
-        self.finalized = False
-
-    async def claim(self, cid, *, operation):
-        return FakeProposal()
-
-    async def finalize(self, cid, *, result):
-        self.finalized = True
-        self.result = result
+# Дублёр стора — общий (`tests/conftest.py`), локальных копий здесь нет: контракт
+# `confirm.store.ConfirmStore` зеркалится в одном месте. Черновик — `user_initiated=True`
+# (создание кампании требует прямой команды, `_require_user_command`); `origin_human_turn`
+# зеркалит его по умолчанию. Свежесть не задаём: `create_search_campaign` — Tier.NO_DIFF
+# (создание с нуля, прежнего состояния нет), гейт A до стора не доходит.
+def _store() -> FakeConfirmStore:
+    return FakeConfirmStore(
+        FakeProposal("create_search_campaign", "confirmed", user_initiated=True)
+    )
 
 
 # ── _resolve_language_ids: имя/код → languageConstant id, неизвестное пропускаем ──
@@ -414,7 +406,7 @@ async def test_apply_create_attaches_assets_after_campaign():
         captured["specs"] = specs
         return (["callouts"], [{"family": "lead_form", "reason": "config"}])
 
-    store = FakeStore()
+    store = _store()
     with (
         patched(mut, "_create_search_campaign_via_sdk", fake_sdk),
         patched(mut, "_attach_asset_specs_via_sdk", fake_attach),
@@ -451,7 +443,7 @@ async def test_apply_create_survives_asset_step_failure():
     def boom(*a, **k):
         raise TimeoutError("ads call timed out")
 
-    store = FakeStore()
+    store = _store()
     with (
         patched(mut, "_create_search_campaign_via_sdk", fake_sdk),
         patched(mut, "_attach_asset_specs_via_sdk", boom),
