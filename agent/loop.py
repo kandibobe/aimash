@@ -326,7 +326,12 @@ async def _classify_tool_call(
         # C2: «измени гео ЭТОЙ кампании» → подставить реальное имя из контекста ДО показа карточки
         # (раньше в черновике фигурировало буквальное «этой кампании» — скрин из живого теста).
         _resolve_pronoun_campaign(after, context)
-        summary = build_summary(name, before="[текущее значение из Google Ads]", after=after)
+        summary = build_summary(
+            name,
+            before="[текущее значение из Google Ads]",
+            after=after,
+            lang=i18n.current_lang(),
+        )
         # user_initiated НЕ выставляем здесь: провенанс «прямая команда человека» проставляет
         # ТОЛЬКО доверенный вход (bot.main.on_text), а не агент про самого себя (fail-closed).
         proposal = Proposal(operation=name, summary=summary, params=after, chat_id=chat_id)

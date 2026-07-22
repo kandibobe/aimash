@@ -1494,7 +1494,12 @@ def _build_proposal(operation: str, **args) -> tuple[str, str, dict, str]:
     Валидация схемой обязательна. Возвращает (confirmation_id, operation, params, summary)."""
     validated = SCHEMAS[operation](**args)
     params = validated.model_dump()
-    summary = build_summary(operation, before="[текущее значение из Google Ads]", after=params)
+    summary = build_summary(
+        operation,
+        before="[текущее значение из Google Ads]",
+        after=params,
+        lang=i18n.current_lang(),
+    )
     p = Proposal(operation=operation, summary=summary, params=params, chat_id=0)
     return p.confirmation_id, operation, params, summary
 

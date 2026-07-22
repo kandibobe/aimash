@@ -108,7 +108,7 @@ def test_ugx_wizard_default_is_sane():
 
 # ── 4. Форматирование карточки «было→станет» ─────────────────────────────────────
 def test_fmt_micros_zero_decimal_currency():
-    from bot.texts import _fmt_micros
+    from confirm.render import _fmt_micros  # Ш1: рендер денег уехал из bot/texts.py
 
     assert _fmt_micros(1_500_000_000, "UGX") == "1 500"  # zero-decimal → без копеек
     assert _fmt_micros(75_000_000, "JPY") == "75"
