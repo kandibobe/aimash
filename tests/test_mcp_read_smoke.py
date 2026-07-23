@@ -13,10 +13,12 @@ from __future__ import annotations
 import asyncio
 import sys
 from contextlib import contextmanager
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import reports.tz as rtz  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
 from core.config import settings  # noqa: E402
 from mcp_server import envelope, serialize  # noqa: E402
@@ -168,3 +170,106 @@ def test_keyword_ideas_forwards_only_set_kwargs(monkeypatch):
     assert "url" not in captured and "language" not in captured and "network" not in captured
     # служебные метки run_ads_read_call (account/label) не в счёт — это не kwargs ридера
     assert captured.get("account") == DRAFT_ACCOUNT_ID
+
+
+# ── §8: окно пере-якорено на TZ АККАУНТА, а не хоста ────────────────────────────────
+def _capture_period(monkeypatch, tz_returns: date | None):
+    """Общий каркас: фейк-клиент, ловим period, дошедший до ридера; account_today (источник даты
+    аккаунта) фиксируем или помечаем вызов. Возвращает (captured, called)."""
+    captured: dict = {}
+    called = {"tz": False}
+
+    async def fake_client(customer_id=None):
+        return object()
+
+    async def capture(fn, *args, **kwargs):
+        captured["period"] = args[2]  # (client, account, period, campaign_id, ...)
+        return _sample_breakdown()
+
+    async def fake_account_today(client, customer_id, *, label="acct_tz"):
+        called["tz"] = True
+        return tz_returns
+
+    monkeypatch.setattr(tr, "build_client_async", fake_client)
+    monkeypatch.setattr(tr, "run_ads_read_call", capture)
+    monkeypatch.setattr(rtz, "account_today", fake_account_today)
+    return captured, called
+
+
+def test_relative_period_reanchored_to_account_today(monkeypatch):
+    """Относительное окно («последние 7 дн.») строится от «сегодня» АККАУНТА. Без этого для аккаунта
+    в чужой TZ (UG при прогоне из Европы) последний полный день выпадал из окна и цифры MCP
+    расходились с интерфейсом Google Ads. account_today фиксирован 2020-06-15 (≠ host date.today())."""
+    captured, called = _capture_period(monkeypatch, tz_returns=date(2020, 6, 15))
+    with _read_allowed():
+        asyncio.run(tr.get_campaign_stats(account=DRAFT_ACCOUNT_ID, period_days=7))
+    p = captured["period"]
+    # last 7 дней от 15 июня: [08 июня .. 14 июня] — «вчера» аккаунта, без неполного сегодня
+    assert p.date_from == date(2020, 6, 8) and p.date_to == date(2020, 6, 14) and p.days == 7
+    assert called["tz"] is True  # относительное окно ⇒ TZ аккаунта прочитана
+
+
+def test_custom_period_not_reanchored_and_skips_tz_read(monkeypatch):
+    """custom-диапазон (обе ISO-даты названы менеджером явно) account_period НЕ трогает, и TZ
+    аккаунта не читает вовсе (незачем тратить запрос) — иначе явно заказанный «за январь 2019» уехал
+    бы на день."""
+    captured, called = _capture_period(monkeypatch, tz_returns=date(2020, 6, 15))
+    with _read_allowed():
+        asyncio.run(
+            tr.get_campaign_stats(
+                account=DRAFT_ACCOUNT_ID, date_from="2019-01-01", date_to="2019-01-31"
+            )
+        )
+    p = captured["period"]
+    assert p.date_from == date(2019, 1, 1) and p.date_to == date(2019, 1, 31)
+    assert called["tz"] is False  # custom ⇒ TZ не читается
+
+
+# ── reader_capped: GAQL-усечение ≠ пагинация конверта ───────────────────────────────
+def test_envelope_reader_capped_when_total_reaches_reader_limit():
+    """total достиг GAQL-LIMIT ридера ⇒ reader_capped=true + эхо reader_limit. Отдельно от truncated:
+    полный набор БОЛЬШЕ total_rows и следующим offset НЕ добирается."""
+    rows = [{"n": i} for i in range(200)]
+    env = envelope.ok(rows, offset=0, limit=50, reader_limit=200)
+    assert env["reader_capped"] is True and env["reader_limit"] == 200
+    assert env["total_rows"] == 200 and env["truncated"] is True  # ещё и пагинация конверта
+
+
+def test_envelope_not_reader_capped_below_limit():
+    """total < reader_limit ⇒ ридер вернул всё, reader_capped=false, ключа reader_limit нет."""
+    env = envelope.ok([{"n": i} for i in range(3)], offset=0, limit=50, reader_limit=200)
+    assert env["reader_capped"] is False and "reader_limit" not in env
+
+
+def test_get_search_terms_signals_reader_cap_offline(monkeypatch):
+    """Кейс аудита: аккаунт с 5000 запросов, ридер тянет топ-N по расходу. get_search_terms не должен
+    отдавать total_rows как полный счёт — reader_capped=true говорит модели «запросов ≥ N, не ровно
+    N» (иначе минус-слова строятся на ложном «ровно N»)."""
+    from reports.queries import Metrics, SearchTermRow
+
+    n = 5  # ридер вернул ровно reader_limit — упёрся в потолок
+
+    async def fake_client(customer_id=None):
+        return object()
+
+    async def fake_read(*args, **kwargs):
+        return [
+            SearchTermRow(
+                f"term{i}", "Camp", "AdGroup", "kw", "BROAD", Metrics(10, 1, 1_000_000, 0, 0)
+            )
+            for i in range(n)
+        ]
+
+    async def fake_account_today(client, customer_id, *, label="acct_tz"):
+        return date(2020, 6, 15)
+
+    monkeypatch.setattr(tr, "build_client_async", fake_client)
+    monkeypatch.setattr(tr, "run_ads_read_call", fake_read)
+    monkeypatch.setattr(rtz, "account_today", fake_account_today)
+
+    with _read_allowed():
+        env = asyncio.run(
+            tr.get_search_terms(account=DRAFT_ACCOUNT_ID, period_days=7, reader_limit=n, limit=50)
+        )
+    assert env["error"] is None
+    assert env["reader_capped"] is True and env["reader_limit"] == n

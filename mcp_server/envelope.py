@@ -3,7 +3,17 @@
 Ни один существующий ридер не отдаёт `offset`/`total_rows` единообразно (усечение сигналят лишь
 некоторые). MCP-слой нормализует это поверх результата ридера — форма конверта одна на все READ:
 
-    {rows, total_rows, returned, offset, truncated, code_numbers, error}
+    {rows, total_rows, returned, offset, truncated, reader_capped, code_numbers, error}
+
+Два РАЗНЫХ усечения, их нельзя путать:
+  • `truncated` — пагинация КОНВЕРТА: в списке, что вернул ридер, есть строки за пределами этой
+    страницы (offset/limit). Обходится следующим offset — данные не потеряны.
+  • `reader_capped` — ридер упёрся в СВОЙ GAQL-LIMIT (search_terms LIMIT 200, top-N по расходу):
+    истинный размер набора БОЛЬШЕ `total_rows` и следующим offset НЕ добирается. Без этого сигнала
+    `get_search_terms` на аккаунте с 5000 запросов отдавал `total_rows=200, truncated=false`, и
+    модель читала это как «поисковых запросов ровно 200» и строила на этом минус-слова. Когда
+    `reader_capped=true`, конверт добавляет `reader_limit` (значение кэпа). Breakdown-ридеры сигналят
+    то же усечение текстом в `note` (top-N по расходу) — там `reader_capped` не дублируем.
 
 `code_numbers` наполняется `audit.factguard.collect_numbers` по ВСЕЙ отдаваемой полезной нагрузке
 (rows + extra: score/итоги) — это множество чисел, которые агент вправе процитировать в нарративе;
@@ -58,12 +68,20 @@ def ok(
     offset: int = 0,
     limit: int = DEFAULT_LIMIT,
     extra: dict[str, Any] | None = None,
+    reader_limit: int | None = None,
 ) -> dict[str, Any]:
     """Успешный конверт. `extra` — доп. поля верхнего уровня (score/grade/currency для аудита);
-    его числа тоже попадают в `code_numbers`."""
+    его числа тоже попадают в `code_numbers`.
+
+    `reader_limit` — GAQL-LIMIT ридера, если он есть (search_terms 200, negatives 5000, budgets 500,
+    change_history 20). Когда `total >= reader_limit`, ридер упёрся в свой потолок → `reader_capped=
+    true` и конверт эхо-несёт `reader_limit`: истинный размер набора БОЛЬШЕ `total_rows`, следующим
+    offset НЕ добирается (в отличие от `truncated`). None ⇒ у ридера нет потолка либо он выражен
+    текстом в `note` (Breakdown) ⇒ `reader_capped=false`, без дублирования сигнала."""
     from audit.factguard import collect_numbers
 
     page, total, truncated = paginate(rows, offset=offset, limit=limit)
+    reader_capped = reader_limit is not None and total >= int(reader_limit)
     payload: dict[str, Any] = {"rows": page}
     if extra:
         payload.update(extra)
@@ -73,10 +91,13 @@ def ok(
         "returned": len(page),
         "offset": max(0, int(offset)),
         "truncated": truncated,
+        "reader_capped": reader_capped,
         "code_numbers": sorted(collect_numbers(payload)),
         "error": None,
         "error_code": None,
     }
+    if reader_capped:
+        env["reader_limit"] = int(reader_limit)  # сколько строк тянул ридер — модель видит потолок
     return env
 
 
@@ -120,6 +141,7 @@ def err(exc: BaseException) -> dict[str, Any]:
         "returned": 0,
         "offset": 0,
         "truncated": False,
+        "reader_capped": False,
         "code_numbers": [],
         "error": redact_error(exc),
         "error_code": classify_error(exc),

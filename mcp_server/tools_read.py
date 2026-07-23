@@ -49,6 +49,7 @@ from mcp_server.serialize import (
     search_term_dict,
 )
 from reports import period as pperiod
+from reports.tz import account_period
 from reports.queries import (
     fetch_budgets,
     fetch_by_ad,
@@ -98,6 +99,17 @@ def _period(date_from: str | None, date_to: str | None, period_days: int | None)
     return pperiod.last_n_days(max(1, int(period_days or 30)))
 
 
+async def _account_period(client, account: str, date_from, date_to, period_days):
+    """Окно, пере-якоренное на «сегодня» АККАУНТА (§8, `reports.tz.account_period`).
+
+    Без этого относительное окно строилось от даты ХОСТА: для аккаунта в чужой TZ (UG при вечернем
+    прогоне из Европы — `DEFAULT_GEO_COUNTRY_CODE=UG`) последний полный день выпадал из окна, и цифры
+    MCP расходились и с интерфейсом Google Ads, и с bot-путём на тех же данных. custom-диапазон (обе
+    ISO-даты названы менеджером явно) `account_period` НЕ трогает; относительный (last_n) — пере-
+    якоряет. Best-effort: TZ не прочитана → дата хоста (деградирует как раньше, отчёт не роняем)."""
+    return await account_period(client, str(account), _period(date_from, date_to, period_days))
+
+
 def _default_manager() -> str:
     """MCC по умолчанию для list_accounts — первый из настроенных (login_customer_id ∪ доп.). Пусто ⇒
     "" (ensure_manager_allowed отвергнет — fail-closed, не гадаем чужой MCC)."""
@@ -141,11 +153,12 @@ async def get_campaign_stats(
 
     async def _work() -> dict[str, Any]:
         client = await build_client_async(account)
+        period = await _account_period(client, account, date_from, date_to, period_days)
         bd = await run_ads_read_call(
             fetch_by_campaign,
             client,
             str(account),
-            _period(date_from, date_to, period_days),
+            period,
             campaign_id,
             account=str(account),
             label="mcp.get_campaign_stats",
@@ -169,11 +182,12 @@ async def get_adgroup_stats(
 
     async def _work() -> dict[str, Any]:
         client = await build_client_async(account)
+        period = await _account_period(client, account, date_from, date_to, period_days)
         bd = await run_ads_read_call(
             fetch_by_ad_group,
             client,
             str(account),
-            _period(date_from, date_to, period_days),
+            period,
             campaign_id,
             account=str(account),
             label="mcp.get_adgroup_stats",
@@ -197,11 +211,12 @@ async def get_keywords(
 
     async def _work() -> dict[str, Any]:
         client = await build_client_async(account)
+        period = await _account_period(client, account, date_from, date_to, period_days)
         bd = await run_ads_read_call(
             fetch_by_keyword,
             client,
             str(account),
-            _period(date_from, date_to, period_days),
+            period,
             campaign_id,
             account=str(account),
             label="mcp.get_keywords",
@@ -225,11 +240,12 @@ async def get_ads(
 
     async def _work() -> dict[str, Any]:
         client = await build_client_async(account)
+        period = await _account_period(client, account, date_from, date_to, period_days)
         bd = await run_ads_read_call(
             fetch_by_ad,
             client,
             str(account),
-            _period(date_from, date_to, period_days),
+            period,
             campaign_id,
             account=str(account),
             label="mcp.get_ads",
@@ -254,17 +270,23 @@ async def get_search_terms(
 
     async def _work() -> dict[str, Any]:
         client = await build_client_async(account)
+        period = await _account_period(client, account, date_from, date_to, period_days)
         rows = await run_ads_read_call(
             fetch_search_terms,
             client,
             str(account),
-            _period(date_from, date_to, period_days),
+            period,
             campaign_id,
             int(reader_limit),
             account=str(account),
             label="mcp.get_search_terms",
         )
-        return ok([search_term_dict(r) for r in rows], offset=offset, limit=limit)
+        return ok(
+            [search_term_dict(r) for r in rows],
+            offset=offset,
+            limit=limit,
+            reader_limit=int(reader_limit),  # LIMIT 200 в GAQL: усечение видно как reader_capped
+        )
 
     return await _guarded(_work, account=str(account))
 
@@ -289,7 +311,7 @@ async def get_negatives(
             label="mcp.get_negatives",
         )
         rows, extra = negatives_payload(info)
-        return ok(rows, offset=offset, limit=limit, extra=extra)
+        return ok(rows, offset=offset, limit=limit, extra=extra, reader_limit=int(reader_limit))
 
     return await _guarded(_work, account=str(account))
 
@@ -310,7 +332,12 @@ async def get_budgets(
             account=str(account),
             label="mcp.get_budgets",
         )
-        return ok([budget_dict(b) for b in rows], offset=offset, limit=limit)
+        return ok(
+            [budget_dict(b) for b in rows],
+            offset=offset,
+            limit=limit,
+            reader_limit=int(reader_limit),
+        )
 
     return await _guarded(_work, account=str(account))
 
@@ -330,11 +357,12 @@ async def get_auction_insights(
 
     async def _work() -> dict[str, Any]:
         client = await build_client_async(account)
+        period = await _account_period(client, account, date_from, date_to, period_days)
         rows = await run_ads_read_call(
             fetch_impression_share,
             client,
             str(account),
-            _period(date_from, date_to, period_days),
+            period,
             campaign_id,
             account=str(account),
             label="mcp.get_auction_insights",
@@ -358,9 +386,8 @@ async def get_account_audit(
 
     async def _work() -> dict[str, Any]:
         client = await build_client_async(account)
-        result = await gather_audit(
-            client, str(account), _period(date_from, date_to, period_days), target_cpa=target_cpa
-        )
+        period = await _account_period(client, account, date_from, date_to, period_days)
+        result = await gather_audit(client, str(account), period, target_cpa=target_cpa)
         rows, extra = audit_payload(result)
         return ok(rows, offset=offset, limit=limit, extra=extra)
 
@@ -382,7 +409,12 @@ async def get_change_history(
         actions = await list_recent_applied_by_customer(
             str(account), operation=operation, limit=int(reader_limit)
         )
-        return ok([recent_action_dict(a) for a in actions], offset=offset, limit=limit)
+        return ok(
+            [recent_action_dict(a) for a in actions],
+            offset=offset,
+            limit=limit,
+            reader_limit=int(reader_limit),
+        )
 
     return await _guarded(_work, account=str(account))
 
@@ -425,7 +457,14 @@ async def keyword_ideas(
             label="mcp.keyword_ideas",
             **kw,
         )
-        return ok([keyword_idea_dict(k) for k in ideas], offset=offset, limit=limit)
+        # reader_limit объявляем только если вызывающий его задал — иначе кэп у ридера свой (дефолт),
+        # и мы его не знаем, а гадать нельзя (ложный reader_capped хуже отсутствия сигнала).
+        return ok(
+            [keyword_idea_dict(k) for k in ideas],
+            offset=offset,
+            limit=limit,
+            reader_limit=int(reader_limit) if reader_limit else None,
+        )
 
     return await _guarded(_work, account=str(account))
 
