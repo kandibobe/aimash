@@ -98,10 +98,14 @@ docker compose up -d --force-recreate bot
 ### Шаг 5 — убедиться, что бот поднялся
 
 ```bash
-docker compose ps                                                     # aimash-bot = Up (healthy)
-docker inspect -f '{{.State.Status}} {{.RestartCount}}' aimash-bot    # RestartCount не растёт
+docker compose ps                                                     # aimash-bot + aimash-scheduler = Up (healthy)
+docker inspect -f '{{.State.Status}} {{.RestartCount}}' aimash-bot aimash-scheduler   # RestartCount не растёт
 docker compose logs --tail=60 bot     # «миграции применены» + «Aimash bot запущен (polling)»
+docker compose logs --tail=20 scheduler   # «планировщик запущен отдельным процессом»
 ```
+⚠️ C4: контейнеров ДВА. `aimash-scheduler` в крэш-лупе (`RestartCount` растёт, в логе «advisory-lock
+роли `scheduler` уже занят») означает, что джобы забрал бот — проверить `SCHEDULER_IN_BOT=false` у
+сервиса `bot`. Молча мёртвый планировщик = зависшие в `executing` черновики никто не поднимет.
 В Telegram: пришёл readiness-пинг «✅ Aimash запущен…» (он же доказывает, что `ADMIN_CHAT_IDS`
 прочитан), `/diag` без инцидентов, `/whoami` отвечает.
 

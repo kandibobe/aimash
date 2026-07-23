@@ -68,6 +68,11 @@ services:
       # UTC. Явный TZ=UTC делает cron детерминированным независимо от хоста: REPORT_SCHEDULE
       # '0 1 * * *' = 01:00 UTC = 10:00 JST (10 утра по Японии).
       TZ: UTC
+      # C4: джобы переехали в сервис `scheduler` (отдельный процесс, топология «три процесса»).
+      # Флаг выражает НАМЕРЕНИЕ; энфорсмент — advisory-lock роли `scheduler` в БД, поэтому забытый
+      # флаг не даст двойных дайджестов/двойного reconcile, а даст громкий отказ у проигравшего.
+      # Дефолт в коде — `true` (историческое поведение), здесь снимаем осознанно.
+      SCHEDULER_IN_BOT: "false"
     restart: unless-stopped
     # Потолок ресурсов одного инстанса (long-poll бот лёгкий; лимит ловит утечку/раздувание).
     # docker compose v2 (не-swarm) применяет deploy.resources.limits для memory/cpus.
@@ -80,6 +85,59 @@ services:
           memory: 1200M
           cpus: "1.0"
     # Ротация логов: без неё json-file растёт безгранично и забивает диск VPS.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # C4 (§5.3): ДОМ ПРОЦЕССА ПЛАНИРОВЩИКА. Раньше APScheduler крутился внутри aiogram-петли бота —
+  # значит архивация кнопочного слоя унесла бы с собой все 15 джоб, включая `reconcile_stale_executing`
+  # (зависшие мутации → needs_review). Это денежный путь, а не дайджесты. Топология «три процесса»
+  # даёт джобам собственный контейнер: «БД + тонкий Bot-клиент для отправки».
+  # Владение — advisory-lock роли `scheduler`: занято ⇒ этот процесс выходит ненулевым кодом
+  # (restart подхватит, когда бот отпустит), а НЕ уходит в тихий standby.
+  # ⚠️ Кнопочного слоя здесь нет по построению: порт `scheduler/delivery.py` не заполняется ⇒
+  #    дайджесты уходят текстом, а thr-tune молчит (его сообщение целиком — предложение под тап).
+  scheduler:
+    image: aimash-bot            # тот же образ, что собрал сервис bot (как у `mcp`) — без второй сборки
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aimash-scheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # Промежуточный ответ на C6: `docker-entrypoint.sh` гоняет `alembic upgrade head` только для
+      # команды `python -m bot.main`, поэтому одновременного апгрейда двумя сервисами не возникает
+      # по построению — планировщик стартует уже после того, как бот довёл схему до head. Свою
+      # проверку он всё равно делает сам (`assert_schema_at_head` в `bootstrap_ads_layer`).
+      bot:
+        condition: service_healthy
+    # Тот же порядок и файлы, что у бота: .env.defaults базой, .env (untracked) последним.
+    env_file:
+      - .env.defaults
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://aimash:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD обязателен — задай в .env}@postgres:5432/aimash
+      # Как у бота: APScheduler берёт локальную TZ контейнера, код трактует naive datetime как UTC.
+      TZ: UTC
+      # Здесь джобы и живут — флаг относится к боту, но пишем явно, чтобы `env_file` не переключил
+      # роли молча: этот процесс владеет джобами независимо от значения (энфорсмент — lock).
+      SCHEDULER_IN_BOT: "true"
+      PYTHONIOENCODING: utf-8
+    command: ["python", "-m", "scheduler"]
+    restart: unless-stopped
+    # Тот же HEALTHCHECK из образа (свежесть heartbeat) — энтрипоинт планировщика поднимает
+    # `heartbeat_loop()` на своём loop, иначе контейнер был бы вечно unhealthy. Файл heartbeat — в
+    # temp КОНТЕЙНЕРА (HEARTBEAT_FILE не задан), у бота свой: файловые системы разные.
+    # Пик памяти — плановый xlsx-отчёт (openpyxl держит объектный граф); интерактивный deep-MCC
+    # `/export` остаётся у бота, поэтому потолок ниже ботовского.
+    deploy:
+      resources:
+        limits:
+          memory: 900M
+          cpus: "0.5"
     logging:
       driver: json-file
       options:

@@ -112,17 +112,37 @@ jobs:
             # «зелёным», даже если бот крэш-лупит (битая миграция / плохой рантайм-конфиг / 409).
             # Семплируем состояние контейнера 3× за ~35с: крэш-луп не удержит status=running на всех
             # проверках. Не running → script_stop=true валит job (красный деплой видно сразу).
-            echo "⏳ Пост-деплой проверка здоровья aimash-bot..."
+            #
+            # C4 (§5.3): контейнеров ДВА, и проверять надо оба. Планировщик — не косметика: в нём
+            # живёт `reconcile_stale_executing` (зависшие мутации → needs_review). Мёртвый
+            # aimash-scheduler = денежные черновики молча остаются в `executing`, никого не уведомив,
+            # а деплой при этом зелёный — ровно тот класс ошибки, который проект уже ловил.
+            echo "⏳ Пост-деплой проверка здоровья контейнеров..."
             sleep 20
-            for i in 1 2 3; do
-              STATE=$(docker inspect -f '{{.State.Status}}' aimash-bot 2>/dev/null || echo missing)
-              RESTARTS=$(docker inspect -f '{{.RestartCount}}' aimash-bot 2>/dev/null || echo "?")
-              echo "check $i: state=$STATE restarts=$RESTARTS"
-              if [ "$STATE" != "running" ]; then
-                echo "::error::aimash-bot не running после деплоя (state=$STATE) — вероятно крэш-луп"
-                docker compose logs --tail=80 bot || true
-                exit 1
-              fi
-              sleep 5
+            for PAIR in aimash-bot:bot aimash-scheduler:scheduler; do
+              CNT=${PAIR%%:*}
+              SVC=${PAIR##*:}
+              PREV=""
+              for i in 1 2 3; do
+                STATE=$(docker inspect -f '{{.State.Status}}' "$CNT" 2>/dev/null || echo missing)
+                RESTARTS=$(docker inspect -f '{{.RestartCount}}' "$CNT" 2>/dev/null || echo "?")
+                echo "check $i [$CNT]: state=$STATE restarts=$RESTARTS"
+                if [ "$STATE" != "running" ]; then
+                  echo "::error::$CNT не running после деплоя (state=$STATE) — вероятно крэш-луп"
+                  docker compose logs --tail=80 "$SVC" || true
+                  exit 1
+                fi
+                # Рестарт МЕЖДУ семплами: контейнер бывает running в каждый момент замера и при этом
+                # перезапускается между ними. Планировщик ведёт себя ровно так, когда advisory-lock
+                # роли `scheduler` держит бот (забыли SCHEDULER_IN_BOT=false): выход кодом 3 →
+                # restart → снова выход. Растущий счётчик — единственный признак, который это ловит.
+                if [ -n "$PREV" ] && [ "$RESTARTS" != "$PREV" ]; then
+                  echo "::error::$CNT перезапускался во время проверки ($PREV → $RESTARTS)"
+                  docker compose logs --tail=80 "$SVC" || true
+                  exit 1
+                fi
+                PREV=$RESTARTS
+                sleep 5
+              done
+              echo "✅ $CNT running (деплой здоров)"
             done
-            echo "✅ aimash-bot running (деплой здоров)"

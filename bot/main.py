@@ -7297,21 +7297,44 @@ async def main() -> None:
         from scheduler.service import register_user_report_schedules, setup_scheduler
 
         # C4: планировщик кнопочного слоя НЕ импортирует — он спрашивает клавиатуру у порта.
-        # Заполняем порт здесь: в bot-процессе кнопки есть, в standalone-планировщике их нет и
-        # дайджесты уходят текстом (thr-tune — молчит целиком, см. scheduler/delivery.py).
+        # Заполняем порт здесь ВСЕГДА, даже когда джобы у отдельного процесса: порт живёт в памяти
+        # процесса, и bot-процессу он нужен для собственных путей. В standalone-планировщике кнопок
+        # нет и дайджесты уходят текстом (thr-tune — молчит целиком, см. scheduler/delivery.py).
         # Забыть эту проводку = карточки без кнопок; гард — tests/test_scheduler_decoupled.py.
         sched_delivery.register(sched_delivery.ADVISE_FEEDBACK, advise_feedback_kb)
         sched_delivery.register(sched_delivery.THRESHOLD_TUNE, thr_tune_kb)
-        # Плановые отчёты/аномалии/очистка просроченных черновиков. READ-ONLY: планировщик
-        # НИКОГДА не меняет аккаунт (golden rule #3) — только чтение и уведомления.
-        sched = setup_scheduler(bot)
-        SCHED = sched  # 2.11: /myschedule применяет персональное расписание БЕЗ рестарта
-        # §14 (P1-I): персональные расписания отчёта операторов (UserSettings.report_schedule) —
-        # per-chat cron поверх глобального (оживляет ранее «мёртвую» колонку). Опционально, не роняем.
-        try:
-            await register_user_report_schedules(sched, bot)
-        except Exception as e:  # noqa: BLE001 — персональные расписания опциональны
-            log.warning("per-user report schedules не зарегистрированы: %s", type(e).__name__)
+        # C4: владелец джоб — либо этот процесс (исторически), либо `python -m scheduler`. Намерение
+        # в env, ЭНФОРСМЕНТ — advisory-lock роли `scheduler`: иначе при поднятом контейнере
+        # планировщика и незанулённом флаге каждая джоба идёт дважды (два дайджеста, два алерта,
+        # два reconcile одного черновика). Не взяли lock — джобы НЕ регистрируем.
+        _own_sched = settings.scheduler_in_bot
+        if _own_sched:
+            try:
+                _own_sched = await acquire_single_instance_lock("scheduler")
+                if not _own_sched:
+                    log.info(
+                        "джобы планировщика уже кто-то держит (`python -m scheduler`) — "
+                        "этот процесс их не регистрирует"
+                    )
+            except Exception as e:  # noqa: BLE001 — сбой захвата: не планируем (лучше пусто, чем 2×)
+                log.warning(
+                    "lock роли `scheduler` не захвачен (%s) — джобы не регистрирую",
+                    type(e).__name__,
+                )
+                _own_sched = False
+        else:
+            log.info("SCHEDULER_IN_BOT=false — джобы у отдельного процесса `python -m scheduler`")
+        if _own_sched:
+            # Плановые отчёты/аномалии/очистка просроченных черновиков. READ-ONLY: планировщик
+            # НИКОГДА не меняет аккаунт (golden rule #3) — только чтение и уведомления.
+            sched = setup_scheduler(bot)
+            SCHED = sched  # 2.11: /myschedule применяет персональное расписание БЕЗ рестарта
+            # §14 (P1-I): персональные расписания отчёта операторов (UserSettings.report_schedule) —
+            # per-chat cron поверх глобального (оживляет «мёртвую» колонку). Опционально, не роняем.
+            try:
+                await register_user_report_schedules(sched, bot)
+            except Exception as e:  # noqa: BLE001 — персональные расписания опциональны
+                log.warning("per-user report schedules не зарегистрированы: %s", type(e).__name__)
     except Exception as e:  # планировщик опционален — бот работает и без него
         log.warning("scheduler не запущен: %s: %s", type(e).__name__, e)
     # Fail-fast против double-import gotcha (см. алиас sys.modules у dp и блок __main__): поллить
@@ -7362,6 +7385,9 @@ async def main() -> None:
             except Exception as e:  # noqa: BLE001 — выключение не должно ронять teardown
                 log.warning("scheduler.shutdown(wait=True) сбой: %s", type(e).__name__)
         await release_single_instance_lock()  # B2: отпустить polling-lock (до закрытия пула)
+        # C4: и lock владения джобами — иначе после остановки бота standalone-планировщик не смог
+        # бы его взять до истечения соединения. Идемпотентно: no-op, если роль не бралась.
+        await release_single_instance_lock("scheduler")
         await (
             dispose_engine()
         )  # закрыть пул соединений БД (иначе на остановке висят коннекты asyncpg)

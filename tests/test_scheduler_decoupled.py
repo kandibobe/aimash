@@ -51,10 +51,11 @@ BOT_FREE_PACKAGES = (
 
 # Два РАЗНЫХ запрета, и путать их нельзя. `bot/` — архивируемый кнопочный слой, исключений нет
 # ни одного. `aiogram` — библиотека транспорта, и планировщику она положена по топологии («БД +
-# тонкий Bot-клиент для отправки»): вложение недельного дайджеста без `InputFile` не собрать.
-# Поэтому ровно один файл вправе её импортировать, и он вынесен сюда списком, а не «ну там же
-# scheduler» — чтобы следующий aiogram-импорт в фоновом контуре пришлось ДОБАВИТЬ осознанно.
-AIOGRAM_ALLOWED = frozenset({"scheduler/transport.py"})
+# тонкий Bot-клиент для отправки»): вложение недельного дайджеста без `InputFile` не собрать, а
+# сам `Bot` кто-то обязан создать. Поэтому ровно два файла вправе её импортировать, и они вынесены
+# сюда списком, а не «ну там же scheduler» — чтобы следующий aiogram-импорт в фоновом контуре
+# пришлось ДОБАВИТЬ осознанно.
+AIOGRAM_ALLOWED = frozenset({"scheduler/transport.py", "scheduler/__main__.py"})
 
 
 def _forbidden_imports(path: Path, *, aiogram_ok: bool) -> list[tuple[int, str]]:
@@ -130,6 +131,79 @@ def test_bot_process_fills_the_delivery_port() -> None:
     )
     # Имена констант — не выдумка теста: они обязаны существовать в самом порту.
     assert {getattr(delivery, name) for name in expected} == set(delivery.KNOWN)
+
+
+def test_bot_registers_jobs_only_when_it_owns_the_lock() -> None:
+    """Владение джобами — не env-флаг, а advisory-lock. `SCHEDULER_IN_BOT` выражает НАМЕРЕНИЕ и
+    живёт в `.env`, где его легко забыть снять; забыли — и при поднятом контейнере планировщика
+    каждая джоба идёт дважды (два дайджеста, два алерта, два reconcile ОДНОГО денежного черновика).
+    Поэтому `setup_scheduler(...)` обязан стоять под захватом lock, а не под одним лишь флагом.
+    Проверяем по AST: запустить `bot.main.main()` в тесте нельзя — это polling-энтрипоинт."""
+    src = (REPO_ROOT / "bot" / "main.py").read_text(encoding="utf-8")
+    tree = ast.parse(src, filename="bot/main.py")
+
+    parents: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+
+    calls = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id == "setup_scheduler"
+    ]
+    assert len(calls) == 1, f"ожидался ровно один старт планировщика в боте, найдено {len(calls)}"
+
+    guards: list[str] = []
+    node: ast.AST | None = calls[0]
+    while node is not None:
+        if isinstance(node, ast.If):
+            guards.append(ast.unparse(node.test))
+        node = parents.get(node)
+    assert any("_own_sched" in g for g in guards), (
+        "setup_scheduler() в bot/main.py не под флагом владения джобами: "
+        f"объемлющие условия — {guards}. Без него флаг `SCHEDULER_IN_BOT` остаётся единственным "
+        "разделителем, а он в env — забыли снять ⇒ каждая джоба дважды."
+    )
+
+    lock_roles = {
+        n.args[0].value
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id == "acquire_single_instance_lock"
+        and n.args
+        and isinstance(n.args[0], ast.Constant)
+    }
+    assert "scheduler" in lock_roles, (
+        "bot/main.py не берёт advisory-lock роли `scheduler` — значит standalone-планировщик "
+        "и бот могут планировать одновременно, и никто этого не заметит"
+    )
+
+
+def test_standalone_scheduler_writes_heartbeat() -> None:
+    """HEALTHCHECK в образе один на все сервисы и смотрит на свежесть heartbeat-файла. Писал его
+    только `bot/main.py`, поэтому энтрипоинт планировщика без `heartbeat_loop()` дал бы вечно
+    unhealthy контейнер — то есть сломанный `depends_on: service_healthy` и красный пост-деплойный
+    гейт CI при полностью рабочих джобах."""
+    src = (REPO_ROOT / "scheduler" / "__main__.py").read_text(encoding="utf-8")
+    tree = ast.parse(src, filename="scheduler/__main__.py")
+    called = {
+        n.func.id
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    assert "heartbeat_loop" in called, (
+        "scheduler/__main__.py не поднимает heartbeat_loop() — контейнер будет вечно unhealthy"
+    )
+
+    from scheduler.__main__ import _ROLE
+
+    from db.session import _ROLE_LOCK_KEYS
+
+    assert _ROLE == "scheduler" and _ROLE in _ROLE_LOCK_KEYS
 
 
 def test_delivery_port_is_text_only_until_filled() -> None:
