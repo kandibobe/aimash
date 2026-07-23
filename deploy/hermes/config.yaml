@@ -93,11 +93,28 @@ mcp_servers:
 gateway:
   platforms:
     telegram:
+      # Три ОРТОГОНАЛЬНЫХ гейта [дословно из апстрим-доков messaging/telegram.md]:
+      #   allow_from          — «Global access (DMs + groups). Users here can always invoke the bot»
+      #   group_allow_from    — «Sender IDs allowed in groups/forums only. Does NOT grant DM access»
+      #   group_allowed_chats — «Entire groups/forums — **any member is authorized**»
+      #
+      # ⛔ ДВА ФАКТА, СВЕРЕННЫЕ ПО ИСХОДНИКУ АПСТРИМА (не по докам), 21.07. Полный разбор со
+      #    ссылками на строки — в deploy/hermes/host-a/config.yaml, блок `gateway:`; коротко:
+      #    1) гейты доступа читаются С УРОВНЯ БЛОКА, а не из `extra:` (adapter.py:9391/9396/9401
+      #       → env, и только env смотрит gateway/authz_mixin.py::_is_user_authorized).
+      #       В `extra:` (как в апстрим-доках и в прошлой редакции этого файла) `group_allow_from`
+      #       не читает никто — К10 в чистом виде;
+      #    2) `group_allowed_chats` авторизует чат ЦЕЛИКОМ и делает это ПЕРВЫМ, до проверки лица
+      #       (authz_mixin.py:344-358), то есть отменяет `group_allow_from`, а не дополняет его.
+      #    Поэтому чат-лист снят, а К4 (HERMES_SPEC.md:315) выполняется перечислением людей.
+      allow_from: ["REPLACE_USER_ID"]        # ваш user id (@userinfobot) → TELEGRAM_ALLOWED_USERS
+      group_allow_from: ["REPLACE_USER_ID"]  # КТО командует в группе (fail-closed, К4)
+      # group_allowed_chats: ["REPLACE_SUPERGROUP_ID"]   # НЕ включать: см. п.2 выше
+      require_mention: true                  # в группе бот отвечает только на упоминание
+      guest_mode: false
       extra:
-        allow_from: ["REPLACE_USER_ID"]              # ваш user id (@userinfobot)
-        group_allowed_chats: ["REPLACE_SUPERGROUP_ID"]  # id супергруппы, отрицательный (-100…)
-        require_mention: true                        # в группе бот отвечает только на упоминание
-        guest_mode: false
+        # `group_topics` — наоборот, только в `extra`: единственный потребитель читает
+        # `self.config.extra.get("group_topics", [])` (adapter.py:9023).
         group_topics:                                # привязка форум-топик → скил (как на скриншоте)
           - chat_id: "REPLACE_SUPERGROUP_ID"
             topics:

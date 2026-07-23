@@ -48,9 +48,14 @@ hermes version                     # версия = субкоманда, НЕ `
 # 2. Секреты → ~/.hermes/.env (шаблон — deploy/hermes/hermes.env.example).
 hermes config env-path             # путь ~/.hermes/.env
 #   заполнить: OPENROUTER_API_KEY, TELEGRAM_BOT_TOKEN (новый бот, RB-2), TELEGRAM_ALLOWED_USERS.
-#   ⚠️ TELEGRAM_GROUP_ALLOWED_CHATS установленная версия НЕ знает (нет в списке `hermes config
-#      check`) — гейт группы задаётся ТОЛЬКО в config.yaml: gateway.platforms.telegram.extra
-#      .group_allowed_chats. Строка в .env безвредна, но ни на что не влияет [Проверено 21.07].
+#   ⚠️ TELEGRAM_GROUP_ALLOWED_CHATS не заполнять — ни здесь, ни в config.yaml. Прошлая редакция
+#      этой строки отправляла его в `gateway.platforms.telegram.extra.group_allowed_chats`, и это
+#      было неверно дважды: (1) из `extra` гейты доступа не читает никто, решение принимает
+#      `gateway/authz_mixin.py::_is_user_authorized` и только по env; (2) сам чат-лист авторизует
+#      группу ЦЕЛИКОМ и проверяется ПЕРВЫМ (authz_mixin.py:344-358, `return True` до проверки
+#      личности) — то есть отменяет перечисление людей, а не дополняет его.
+#      Гейт группы = `gateway.platforms.telegram.group_allow_from` НА УРОВНЕ БЛОКА (не в `extra`),
+#      он же → TELEGRAM_GROUP_ALLOWED_USERS. Разбор со ссылками: deploy/hermes/host-a/config.yaml.
 #   ⚠️ Тулсет `web` без ключа поискового провайдера (EXA/TAVILY/BRAVE/FIRECRAWL/SEARXNG) мёртв —
 #      либо ключ, либо `web` в disabled_toolsets, иначе агент дёргает нерабочий инструмент.
 
@@ -63,7 +68,9 @@ hermes model
 #   (форма mapping, не скаляр — иначе К10 молча откатит на Nous Portal).
 #   Select terminal backend → Keep current (local): терминал у Контура A и так гасится (см. тулсеты).
 #   Select platforms        → только Telegram (SPACE, ENTER).
-#   Tools for CLI (тулсеты) → эталон = минимум (skills/todo/session_search/clarify + наш MCP).
+#   Tools for CLI (тулсеты) → эталон = минимум (skills/todo/clarify + наш MCP). `session_search`
+#     в эталоне ПОГАШЕН (К9/И6): он ищет по всей ~/.hermes/state.db, то есть по всем топикам, а
+#     топик у нас = клиент — кросс-клиентное чтение переписки в обход нашего замка.
 #     Снять ОБЯЗАТЕЛЬНО: Computer Use (контроль рабочего стола VPS) и Cron Jobs (автономный запуск,
 #     против золотого правила №3). Terminal/Code/File/Browser держать под approvals: manual и
 #     вычитывать каждую команду; обкатка — только на Draft 7753643025.
