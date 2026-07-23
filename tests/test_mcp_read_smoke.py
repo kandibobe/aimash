@@ -13,8 +13,9 @@ from __future__ import annotations
 import asyncio
 import sys
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -39,6 +40,20 @@ def _read_allowed():
         yield
     finally:
         settings.google_ads_allowed_customer_ids = prev
+
+
+@contextmanager
+def _manager_allowed(mid: str):
+    """Замок ОБХОДА MCC (`ensure_manager_allowed`) — иной чокпойнт, чем чтение: разрешает ТОЛЬКО
+    настроенные MCC (`settings.login_customer_id_set`, вывод из `google_ads_login_customer_id`).
+    Чтобы офлайн-смоук `list_accounts` проверял конверт, а не отказ замка, менеджерский id должен
+    быть среди настроенных."""
+    prev = settings.google_ads_login_customer_id
+    settings.google_ads_login_customer_id = mid
+    try:
+        yield
+    finally:
+        settings.google_ads_login_customer_id = prev
 
 
 def _sample_breakdown() -> Breakdown:
@@ -273,3 +288,98 @@ def test_get_search_terms_signals_reader_cap_offline(monkeypatch):
         )
     assert env["error"] is None
     assert env["reader_capped"] is True and env["reader_limit"] == n
+
+
+# ── list_accounts: перечисление дочерних MCC через обёртку (П15) ─────────────────────
+def test_list_accounts_enumerates_children_offline(monkeypatch):
+    """П15 «видит все дочерние MCC»: happy-path САМОЙ MCP-обёртки. Перечисление доказано на ads-слое
+    (test_mcc_discovery), но конверт `list_accounts` (manager-замок + child_account_dict + пагинация)
+    офлайн не прогонялся — форма ответа могла сломаться незамеченной. Замок ОБХОДА (не чтения) ⇒
+    менеджерский id должен быть настроен."""
+
+    async def fake_client(customer_id=None):
+        return object()
+
+    async def fake_read(*args, **kwargs):
+        return [
+            SimpleNamespace(
+                id="111", name="Client A", currency="USD", manager=False, level=1, status="ENABLED"
+            ),
+            SimpleNamespace(
+                id="222", name="Client B", currency="EUR", manager=False, level=1, status="ENABLED"
+            ),
+        ]
+
+    monkeypatch.setattr(tr, "build_client_async", fake_client)
+    monkeypatch.setattr(tr, "run_ads_read_call", fake_read)
+
+    with _manager_allowed(DRAFT_ACCOUNT_ID):
+        env = asyncio.run(tr.list_accounts(manager_id=DRAFT_ACCOUNT_ID, limit=50))
+    assert env["error"] is None and env["error_code"] is None  # замок обхода пройден
+    assert env["total_rows"] == 2 and env["returned"] == 2 and env["truncated"] is False
+    assert env["reader_capped"] is False  # у list_accounts нет GAQL-кэпа → сигнала нет
+    assert [r["id"] for r in env["rows"]] == ["111", "222"]  # ОБА дочерних, ничего не потеряно
+    assert env["rows"][0]["currency"] == "USD" and env["rows"][1]["name"] == "Client B"
+    assert env["rows"][0]["manager"] is False and env["rows"][0]["level"] == 1
+
+
+def test_list_accounts_denies_foreign_manager_offline(monkeypatch):
+    """Обратный контроль к предыдущему: чужой (ненастроенный) менеджер ⇒ отказ замка ОБХОДА, а не
+    перечисление. Без него happy-path остался бы зелёным при полностью снятом manager-замке."""
+
+    async def fake_read(*args, **kwargs):  # не должен вызваться — замок раньше
+        raise AssertionError("ридер не должен исполниться при отказе manager-замка")
+
+    monkeypatch.setattr(tr, "run_ads_read_call", fake_read)
+
+    with _manager_allowed("628-373-8601"):  # настроен ДРУГОЙ MCC
+        env = asyncio.run(tr.list_accounts(manager_id="999-999-9999", limit=50))
+    assert env["rows"] == [] and env["error_code"] == "forbidden_account"
+
+
+# ── get_change_history: обёртка над НАШЕЙ БД (не SDK) ────────────────────────────────
+def test_get_change_history_envelope_over_db_offline(monkeypatch):
+    """Единственная READ-обёртка, не ходящая в Google Ads: `get_change_history` зовёт нашу БД
+    (`list_recent_applied_by_customer`) и сериализует `recent_action_dict`. Проверяем, что замок
+    ЧТЕНИЯ на границе (`_guarded`, И6 — у БД-ридера своего нет) пройден, аккаунт/operation/limit
+    проброшены в ридер, а `decided_at` ушёл ISO-строкой в конверт."""
+    captured: dict = {}
+
+    async def fake_history(customer_id, *, operation=None, limit=20):
+        captured.update(customer_id=customer_id, operation=operation, limit=limit)
+        return [
+            SimpleNamespace(
+                confirmation_id="c1",
+                operation="update_budget",
+                params={"amount": 500},
+                summary="поднять дневной бюджет",
+                decided_at=datetime(2020, 6, 15, 12, 0),
+            )
+        ]
+
+    monkeypatch.setattr(tr, "list_recent_applied_by_customer", fake_history)
+
+    with _read_allowed():
+        env = asyncio.run(
+            tr.get_change_history(account=DRAFT_ACCOUNT_ID, operation="update_budget")
+        )
+    # замок границы пропустил ридер БЕЗ собственного замка (И6) на разрешённый аккаунт
+    assert captured == {"customer_id": DRAFT_ACCOUNT_ID, "operation": "update_budget", "limit": 20}
+    assert env["error"] is None and env["error_code"] is None
+    assert env["total_rows"] == 1 and env["reader_capped"] is False  # 1 < reader_limit(20)
+    assert env["rows"][0]["confirmation_id"] == "c1"
+    assert env["rows"][0]["decided_at"] == "2020-06-15T12:00:00"  # datetime → ISO КОДОМ
+
+
+def test_get_change_history_denies_foreign_account_offline(monkeypatch):
+    """Обратный контроль: у БД-ридера замка нет — единственная защита — граница `_guarded`. Чужой
+    аккаунт ⇒ forbidden_account ДО обращения к БД (иначе читались бы чужие применённые операции)."""
+
+    async def fake_history(*args, **kwargs):  # не должен вызваться
+        raise AssertionError("ридер БД не должен исполниться при отказе замка чтения")
+
+    monkeypatch.setattr(tr, "list_recent_applied_by_customer", fake_history)
+
+    with _read_allowed():  # разрешён DRAFT, спрашиваем ДРУГОЙ
+        env = asyncio.run(tr.get_change_history(account="628-373-8601"))
+    assert env["rows"] == [] and env["error_code"] == "forbidden_account"
