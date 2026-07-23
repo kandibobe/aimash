@@ -279,14 +279,17 @@ research/scheduler), дополнения §8 read-MCC, §11 GDN/Video/Demand Ge
 помечена `[Guessing]` самой спекой и пересчитывать её не из чего; **V1 (`hermes version` на VPS —
 субкоманда, не `--version`) не снят**, а на нём висят три решения об объёме (`SPEC.md:225`, `:661`,
 `:785`) — пин заявлен `v0.19.0`, `OPERATIONS.md:9` и шапка `config.yaml` говорят `v0.17`.
-⛔ **Замеры физически невозможны, пока владелец не сделает `push`:** `origin/master` отстаёт на 24
-коммита и не содержит ни `mcp_server/probe.py`, ни `deploy/hermes/plugins/aimash_probe/`, ни
-`deploy/hermes/lint_config.py`, ни §12 ранбука, а деплой на VPS идёт `git reset --hard origin/master`
-([.github/workflows/ci.yml:101](.github/workflows/ci.yml#L101)) — на сервере прибора просто нет.
+⛔ **Замеры блокирует не отсутствие кода на сервере, а исполнение на VPS руками владельца/оператора.**
+`origin/master` = `46f0492` (сверено `git ls-remote` 23.07.2026) и **уже содержит** `mcp_server/probe.py`,
+`deploy/hermes/plugins/aimash_probe/`, `deploy/hermes/lint_config.py` и §12-ранбук — прибор на сервере
+есть. Не снято другое: V1 (`hermes version` на VPS), загрузка плагина, доставка метаданных транспорта,
+обратимость cron — это живые действия на хосте, разработкой не сокращаются. Три коммита этой сессии
+(`5a9777e` TZ+reader_capped, `fb47250` честный skip-reason И3, `bb8db53` правило 1 agent-first) ждут
+`push` владельцем (среда пуш блокирует).
 **Следующее — Волна 1, шаги 1–10** (`SPEC.md` §12): bot-free bootstrap → **гарды И1–И5 до появления
-мутаций** (сегодня 7 из 8 инвариантов — `@pytest.mark.skip`-заглушки в
-`tests/test_hermes_isolation.py`) → READ → память → мутации с реплай-гейтом → скилы → самонаписание →
-обучение на отказах → обучение на цифрах → наблюдаемость.
+мутаций** (в `tests/test_hermes_isolation.py` 7 `@pytest.mark.skip`-заглушек; из них И3 уже покрыт
+живьём в `tests/test_provenance_gate.py`, заглушка держит лишь формулировку) → READ → память → мутации
+с реплай-гейтом → скилы → самонаписание → обучение на отказах → обучение на цифрах → наблюдаемость.
 **App/UAC — ИСКЛЮЧЕНО** (нет приложения у клиента).
 Статус сверять по `git log` и [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md), **не** по план-файлам — отстают.
 
