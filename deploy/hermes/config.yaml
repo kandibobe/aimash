@@ -93,7 +93,7 @@ agent:
   #       cron'ом и детекторами аномалий (правило 3, §3.9.5 SPEC — `user_initiated=False` по
   #       умолчанию). Иначе cron + WRITE = трата без команды человека.
   #    `kanban` в списке установленной версии ОТСУТСТВУЕТ — вслепую не включаем:
-  #       сначала `hermes --version` и живой список тулсетов.
+  #       сначала `hermes version` (субкоманда, НЕ `--version`) и живой список тулсетов — это V1.
   disabled_toolsets:
     [terminal, browser, file, code_execution, context_engine, cronjob, delegation,
      web, memory, vision, image_gen, tts, video, session_search]
@@ -187,6 +187,28 @@ security:
   # алфавитно-цифровая строка, безопасного регекса под неё нет. Наши три рубежа редакции —
   # `core.logging.redact_text` / `bot.ux.err_text` / docs/SECURITY.md.
   redact_secrets: true
+
+# ── Плагины: в ЭТАЛОНЕ ни один не включён, и это правильное состояние ──────────
+# Дефолт апстрима здесь fail-closed сам по себе: «General plugins and user-installed backends
+# are disabled by default» [features/plugins.md, тег v2026.7.20]. Плагин — это код, который
+# грузится В ПРОЦЕСС gateway, то есть рядом с `OPENROUTER_API_KEY`; включать по одному и с
+# обоснованием.
+#
+# ⛔ СКОПИРОВАТЬ КАТАЛОГ — НЕ ЗНАЧИТ ВКЛЮЧИТЬ. `~/.hermes/plugins/<name>/` без имени в
+#    `enabled` обнаружением ВИДИТСЯ (`hermes plugins` покажет), а хуки и инструменты не
+#    грузятся. Для диагностического прогона это ловушка ценой всего замера: лог остаётся
+#    пустым, и пустота читается как «метаданные до хука не доходят» — ложный отрицательный
+#    вывод ровно по вопросу, ради которого прогон затевается (лестница чтения — OPERATIONS.md §12).
+#
+# ⚠️ Хуки фейлятся OPEN («errors in any hook are caught and logged, never crashing the agent»),
+#    поэтому плагин может быть только ПОСТАВЩИКОМ метаданных. Решение отказать выносит наш слой:
+#    `execute_confirmed` обязан отказать при отсутствии доверенной записи, а не полагаться на то,
+#    что хук отработал (правило 10, CLAUDE.md).
+#
+# ВРЕМЕННО, только на прогон V1–V22 (OPERATIONS.md §12, блоки B–C), снимается в V18:
+# plugins:
+#   enabled:
+#     - aimash_probe
 
 mcp_servers:
   aimash:

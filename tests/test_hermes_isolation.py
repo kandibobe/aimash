@@ -263,7 +263,7 @@ def test_read_lock_allows_draft_but_still_denies_foreign():
 
 
 # ── Диагностический прибор `mcp_server.probe` не смеет стать частью боевого реестра ──
-# Прибор (§12 OPERATIONS.md, прогон V1–V19) регистрируется ОТДЕЛЬНЫМ сервером `aimash-probe`.
+# Прибор (§12 OPERATIONS.md, прогон V1–V22) регистрируется ОТДЕЛЬНЫМ сервером `aimash-probe`.
 # Соблазн «добавить probe_echo 13-м инструментом» ломает сразу два свойства: измеряемая система
 # перестаёт быть измеряемой (прибор виден агенту и в бою), а прибор наследует доступ боевого
 # сервера. Оба перекрываем тестом, а не комментарием.
@@ -329,7 +329,9 @@ def test_probe_echo_redacts_and_clamps():
 # Формулировки — дословно из deploy/hermes/HERMES_SPEC.md §4. Корпус атак (client_site_pages, скилы в
 # shell/HTTP/файлы, страницы конкурентов) — инлайн, как в существующих injection-тестах.
 
-_WRITE_STEP = "наполняется шагом ПЕРЕД WRITE (deploy/hermes/HERMES_SPEC.md §4, дорожная карта шаги 2/15)"
+_WRITE_STEP = (
+    "наполняется шагом ПЕРЕД WRITE (deploy/hermes/HERMES_SPEC.md §4, дорожная карта шаги 2/15)"
+)
 
 
 @pytest.mark.skip(reason=_WRITE_STEP)

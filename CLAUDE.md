@@ -247,12 +247,16 @@ research/scheduler), дополнения §8 read-MCC, §11 GDN/Video/Demand Ge
 **Сейчас — пивот на Hermes.** MCP READ ✅ (12 инструментов из 37 по реестру §6.1).
 ⚠️ **Волна 0 НЕ закрыта, вопреки прежней записи здесь.** Прототипы 0.1/0.4 написаны
 (`mcp_server/probe.py`, `deploy/hermes/plugins/aimash_probe/`), но **ни один замер не снят**: таблица
-результатов V1–V19 ([`deploy/hermes/OPERATIONS.md`](deploy/hermes/OPERATIONS.md)) пуста во всех 19
+результатов V1–V22 ([`deploy/hermes/OPERATIONS.md`](deploy/hermes/OPERATIONS.md)) пуста во всех
 строках. Галочка приехала по совпадению номеров: коммиты `4188cc8`/`b5b1f39` закрывали **свой**
 список 0.5–0.7, а в `SPEC.md` §12 под теми же номерами — семь живых замеров. Следствия: смета
-помечена `[Guessing]` самой спекой и пересчитывать её не из чего; **V1 (`hermes --version` на VPS) не
-снят**, а на нём висят три решения об объёме (`SPEC.md:225`, `:661`, `:785`) — пин заявлен `v0.19.0`,
-`OPERATIONS.md:9` и шапка `config.yaml` говорят `v0.17`.
+помечена `[Guessing]` самой спекой и пересчитывать её не из чего; **V1 (`hermes version` на VPS —
+субкоманда, не `--version`) не снят**, а на нём висят три решения об объёме (`SPEC.md:225`, `:661`,
+`:785`) — пин заявлен `v0.19.0`, `OPERATIONS.md:9` и шапка `config.yaml` говорят `v0.17`.
+⛔ **Замеры физически невозможны, пока владелец не сделает `push`:** `origin/master` отстаёт на 24
+коммита и не содержит ни `mcp_server/probe.py`, ни `deploy/hermes/plugins/aimash_probe/`, ни
+`deploy/hermes/lint_config.py`, ни §12 ранбука, а деплой на VPS идёт `git reset --hard origin/master`
+([.github/workflows/ci.yml:101](.github/workflows/ci.yml#L101)) — на сервере прибора просто нет.
 **Следующее — Волна 1, шаги 1–10** (`SPEC.md` §12): bot-free bootstrap → **гарды И1–И5 до появления
 мутаций** (сегодня 7 из 8 инвариантов — `@pytest.mark.skip`-заглушки в
 `tests/test_hermes_isolation.py`) → READ → память → мутации с реплай-гейтом → скилы → самонаписание →

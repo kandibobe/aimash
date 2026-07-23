@@ -140,6 +140,19 @@ _ATTESTED: dict[str, Attested] = {
         "user-guide/configuration.md:1592",
         "Valid platform keys: `telegram`, `discord`, `slack`, …",
     ),
+    # Каталог ~/.hermes/plugins/<name>/ — НЕ активация: «General plugins and user-installed
+    # backends are disabled by default». Пока имени нет в `enabled`, плагин виден в
+    # `hermes plugins` и не подписан НИ НА ЧТО — самая дорогая форма К10 (лог пуст, и пустота
+    # читается как «метаданные не доходят»). Аттестовано заранее: на время прогона V1–V22
+    # блок раскомментируется, и линт не должен краснеть на ожидаемом ключе.
+    "plugins.enabled": Attested(
+        "user-guide/features/plugins.md",
+        "plugins:\n  enabled:\n    - my-tool-plugin",
+    ),
+    "plugins.disabled": Attested(
+        "user-guide/features/plugins.md",
+        "plugins:\n  disabled:\n    - noisy-plugin",
+    ),
     "mcp_servers": Attested("user-guide/configuration.md", "mcp_servers:"),
     "gateway.platforms": Attested("user-guide/messaging/telegram.md", "gateway:\n  platforms:"),
     "auxiliary.compression": Attested(
