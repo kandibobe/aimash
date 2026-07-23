@@ -58,8 +58,14 @@ dev = [
 # Плоская раскладка с несколькими top-level пакетами → setuptools НЕ авто-определит их
 # (ошибка «Multiple top-level packages discovered»). Перечисляем явно; tests/scripts/migrations —
 # не пакеты (в образ всё равно COPY . . попадают, alembic/pytest находят их без установки).
+#
+# Список ОБЯЗАН покрывать все top-level каталоги с __init__.py — инвариант tests/test_packaging.py.
+# Прод этого не ловил: в Docker идёт `COPY . .`, а локальный pytest запускается из корня, поэтому
+# недостающий пакет импортируется из CWD и промах не виден. Бьёт он ровно там, где установка
+# честная: `pip install -e .` в отдельный venv + запуск из другой директории (хост A под Hermes) —
+# там `app` и `audit` отсутствовали, и MCP падал на импорте `app.bootstrap` / `audit.collect`.
 [tool.setuptools.packages.find]
-include = ["adcopy*", "ads*", "agent*", "bot*", "clients*", "confirm*", "core*", "db*", "keywords*", "mcp_server*", "reports*", "scheduler*"]
+include = ["adcopy*", "ads*", "advisor*", "agent*", "app*", "audit*", "bot*", "clients*", "confirm*", "core*", "db*", "keywords*", "mcp_server*", "reports*", "scheduler*"]
 
 [tool.ruff]
 line-length = 100
