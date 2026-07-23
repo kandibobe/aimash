@@ -29,10 +29,21 @@ repos:
       - id: check-added-large-files
       - id: detect-private-key
 
-  # Типы — manual-стадия (не блокирует обычный коммит из-за долга типов в bot/main.py).
-  # Запуск: `pre-commit run --hook-stage manual mypy` или `make typecheck`.
   - repo: local
     hooks:
+      # К10: Hermes МОЛЧА игнорирует неизвестные ключи, а неизвестные ЗНАЧЕНИЯ приводит к дефолту
+      # без записи в лог. Линт объявлен в CLAUDE.md частью деплой-процедуры, но не звался ниоткуда
+      # — и прожил сломанным (TypeError на втором из пяти правил), пока за ним копились четыре
+      # нарушения, включая отсутствие `skills.inline_shell: false` (правило 14 / К1).
+      # Профиль каждому файлу выводится из пути, поэтому `pass_filenames` оставлен включённым.
+      - id: hermes-config-lint
+        name: Hermes config lint (К10)
+        entry: python deploy/hermes/lint_config.py
+        language: system
+        files: ^deploy/hermes/(host-a/)?config\.yaml$
+
+      # Типы — manual-стадия (не блокирует обычный коммит из-за долга типов в bot/main.py).
+      # Запуск: `pre-commit run --hook-stage manual mypy` или `make typecheck`.
       - id: mypy
         name: mypy (manual)
         entry: mypy

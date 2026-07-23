@@ -18,12 +18,17 @@
 ошибка: «ключа нет в моей таблице» ≠ «ключа не существует». Один раз это чуть не стоило нам
 `skills.write_approval` и `security.redact_secrets`.
 
-Запуск::
+Запуск (для эталонов репо профиль выводится из пути, флаг не нужен)::
 
-    python deploy/hermes/lint_config.py deploy/hermes/host-a/config.yaml --profile host-a
+    python deploy/hermes/lint_config.py deploy/hermes/config.yaml            # → vps-read
+    python deploy/hermes/lint_config.py deploy/hermes/{config,host-a/config}.yaml   # оба разом
     python deploy/hermes/lint_config.py ~/.hermes/config.yaml --profile host-a   # на живой ВМ
 
-Код возврата: 1 — есть ERROR; 0 — только WARN или чисто.
+Код возврата: 1 — есть ERROR хотя бы в одном файле; 0 — только WARN или чисто.
+
+Автоматика (иначе линт снова умрёт незамеченным — именно так он и прожил сломанным):
+`tests/test_hermes_config_lint.py` в общем прогоне, хук `hermes-config-lint` в pre-commit,
+шаг «Hermes config lint (К10)» в `.github/workflows/ci.yml`.
 """
 
 from __future__ import annotations
@@ -256,6 +261,15 @@ def _as_list(value: Any) -> list:
     return list(value) if isinstance(value, (list, tuple, set)) else [value]
 
 
+def _as_dict(value: Any) -> dict:
+    """Парная к `_as_list` для mapping'ов. Заведена по той же причине и после того, как
+    `_get(...) or {}` на строке 300 уронил весь линт TypeError'ом на главном охраняемом файле:
+    `_MISSING` истинен ⇒ `or {}` его не подменяет, а итерация по `object()` падает. Крах шёл
+    ВТОРЫМ правилом из пяти, поэтому check_telegram_gates/check_toolsets/check_hardening не
+    исполнялись НИКОГДА — прибор К10 по прод-эталону не отрабатывал ни разу."""
+    return value if isinstance(value, dict) else {}
+
+
 def _flatten(cfg: Any, prefix: str = "") -> list[str]:
     out: list[str] = []
     if not isinstance(cfg, dict):
@@ -297,8 +311,7 @@ def check_enum_values(cfg: dict, rep: Report) -> None:
         "display.tool_progress",
         *(
             f"display.platforms.{name}.tool_progress"
-            for name in (_get(cfg, "display.platforms") or {})
-            if isinstance(_get(cfg, "display.platforms"), dict)
+            for name in _as_dict(_get(cfg, "display.platforms"))
         ),
     ):
         val = _get(cfg, path)
@@ -484,6 +497,23 @@ _PROFILE_CHECKS = {
 }
 
 
+def _infer_profile(path: Path) -> str | None:
+    """Профиль по пути — ТОЛЬКО для эталонов внутри `deploy/hermes/`, для остальных `None`.
+
+    Прежний дефолт «host-a для всего» давал на прод-эталоне три ЛОЖНЫЕ ошибки
+    `check_credential_boundary` (docker / `aimash-bot` / `get_change_history` запрещены на
+    Хосте A и штатны на Хосте B) — а линт, который врёт на главном охраняемом файле, перестают
+    читать. Угадывать по внешним путям нельзя в обратную сторону: `~/.hermes/config.yaml` на
+    живой ВМ Хоста A не содержит в пути `host-a`, и молчаливый откат на `vps-read` снял бы
+    ровно проверки границы креденшелов. Не вывелось ⇒ требуем `--profile` явно (fail-closed).
+    """
+    try:
+        rel = path.resolve().relative_to(_HERE)
+    except ValueError:
+        return None
+    return "host-a" if "host-a" in rel.parts else "vps-read"
+
+
 def lint(cfg: dict, raw_text: str = "", profile: str = "host-a") -> Report:
     """Единственная точка входа. `cfg` — уже разобранный YAML (тест кормит словарём напрямую,
     чтобы проверять правила без файлов на диске)."""
@@ -521,22 +551,46 @@ def _pin_banner() -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="К10-линт конфига Hermes")
-    ap.add_argument("config", type=Path, help="путь к config.yaml (эталон в репо или ~/.hermes/)")
-    ap.add_argument("--profile", choices=sorted(_PROFILE_CHECKS), default="host-a")
+    # `nargs="+"` — не удобство: pre-commit передаёт хуку СПИСОК затронутых файлов, а профиль у
+    # каждого свой (`_infer_profile`). Одиночный аргумент заставил бы либо звать линт дважды
+    # мимо списка от pre-commit, либо гонять оба эталона под одним профилем — а это ровно те
+    # три ложные ошибки `check_credential_boundary`, из-за которых линт и перестают читать.
+    ap.add_argument(
+        "config", type=Path, nargs="+", help="пути к config.yaml (эталоны или ~/.hermes/)"
+    )
+    ap.add_argument(
+        "--profile",
+        choices=sorted(_PROFILE_CHECKS),
+        default=None,
+        help="по умолчанию выводится из пути внутри deploy/hermes/ "
+        "(.../host-a/... → host-a, иначе vps-read); для путей вне репо обязателен",
+    )
     ap.add_argument("--strict", action="store_true", help="считать предупреждения ошибками")
     args = ap.parse_args(argv)
 
-    raw = args.config.read_text(encoding="utf-8")
-    rep = lint(yaml.safe_load(raw), raw_text=raw, profile=args.profile)
-
-    print(f"# {args.config} (профиль {args.profile})")
     print(f"# {_pin_banner()}")
-    for finding in sorted(rep.findings, key=lambda f: (_LEVELS.index(f.level), f.path)):
-        print(finding)
-    print(f"# итого: ошибок {len(rep.errors)}, предупреждений {len(rep.warnings)}")
-    if not rep.errors and not rep.warnings:
-        print("# чисто — но это значит «не разошлось с таблицей», а не «безопасно»")
-    return 1 if (rep.errors or (args.strict and rep.warnings)) else 0
+    rc = 0
+    for path in args.config:
+        profile = args.profile or _infer_profile(path)
+        if profile is None:
+            ap.error(
+                f"{path} лежит вне deploy/hermes/ — профиль не выводится, укажите --profile "
+                f"явно ({', '.join(sorted(_PROFILE_CHECKS))})"
+            )
+        origin = "задан явно" if args.profile else "выведен из пути"
+
+        raw = path.read_text(encoding="utf-8")
+        rep = lint(yaml.safe_load(raw), raw_text=raw, profile=profile)
+
+        print(f"# {path} (профиль {profile}, {origin})")
+        for finding in sorted(rep.findings, key=lambda f: (_LEVELS.index(f.level), f.path)):
+            print(finding)
+        print(f"# итого: ошибок {len(rep.errors)}, предупреждений {len(rep.warnings)}")
+        if not rep.errors and not rep.warnings:
+            print("# чисто — но это значит «не разошлось с таблицей», а не «безопасно»")
+        if rep.errors or (args.strict and rep.warnings):
+            rc = 1
+    return rc
 
 
 if __name__ == "__main__":  # pragma: no cover
