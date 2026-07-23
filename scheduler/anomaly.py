@@ -20,7 +20,7 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
 @dataclass
 class Alert:
     """C3 (аудит 2026-07): алерт СТРУКТУРНЫЙ — kind + отформатированные КОДОМ значения; текст
-    рендерится в точке доставки на языке получателя (bot/i18n, ключ anomaly_<kind>,
+    рендерится в точке доставки на языке получателя (core/i18n, ключ anomaly_<kind>,
     scheduler.jobs._alert_line). Раньше message был RU-литералом и утекал EN-операторам."""
 
     kind: str  # "spend_spike" | "conv_drop" | "spend_no_conv" — суффикс i18n-ключа

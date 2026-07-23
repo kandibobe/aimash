@@ -184,7 +184,11 @@ Telegram), delegation/субагенты, curator. **Что Hermes НЕ даёт
 - **WRITE/PLAN через Hermes НЕ подключены.** Мутации сегодня идут прежним путём.
 - ⛔ **`bot/` и `agent/` физически не двигать.** Архивация — после Волны 1 шаг 1 (bot-free энтрипоинт +
   перенос advisory-lock, §5.3 C1/C3), тогда же тег `pre-hermes`. Сегодня перенос убил бы развёрнутый
-  READ-путь, а `bot.i18n` утащил бы за собой ещё и `advisor/service.py`, `reports/service.py` (C4).
+  READ-путь.
+- ✅ **Пара i18n/texts из `bot/` уже вынесена** — `core/i18n.py` + `core/texts.py` (Волна 1 шаг 1).
+  Была половина мины C4: `advisor/service.py`, `reports/service.py`, `scheduler/jobs.py` тянули весь
+  пакет бота ради перевода. Вторая половина ЖИВА: `scheduler/jobs.py` всё ещё зовёт `bot.keyboards`,
+  `bot.ux` и `bot.main._advise_apply_op` — планировщик отдельным процессом пока не поднимается.
 
 ## Модель (СМЕНЯЕМАЯ — не зашивать одну)
 
@@ -217,7 +221,8 @@ Python 3.12 · Hermes v0.19.0 (ядро агента) · MCP-сервер (ту�
   [ads/service.py:1266](ads/service.py#L1266)).
 - `confirm/` — proposal (diff), gate, store (атомарный claim), render, audit.
 - `core/` — config, secrets (шифрование), logging (редакция), access (whitelist/гранты), provenance,
-  limits, quota, twofa, usage, resilience.
+  limits, quota, twofa, usage, resilience, **i18n + texts** (RU/EN каталог и форматтеры; переехали из
+  `bot/` — их зовут `advisor/`, `reports/`, `scheduler/` из фона, где aiogram нет).
 - `adcopy/` (генерация+валидация текстов; не `copy` — не затенять stdlib), `keywords/`, `clients/`
   (§20 профиль + краулер сайта), `reports/`, `advisor/`, `scheduler/`, `db/` + Alembic, `app/bootstrap.py`.
 
@@ -227,10 +232,10 @@ Python 3.12 · Hermes v0.19.0 (ядро агента) · MCP-сервер (ту�
 
 **Архивируется ПОСЛЕ Волны 1 шаг 1 (сегодня — живое, не трогать):**
 - `bot/` — `main.py` (dp, middleware, кэши, confirm-оркестрация) + `handlers/` (11 модулей, 151 хендлер) +
-  keyboards, i18n RU/EN, throttle. Порядок в `HANDLER_MODULES` = порядок диспатча aiogram, catch-all
-  `on_text` **строго последний** (инвариант `tests/test_handler_order.py`). Исключения: `bot/proposal.py`
-  (сборка черновика, транспорта не знает — переезжает в тул-слой) и `bot/i18n.py` (выносится ДО архивации,
-  его зовут `advisor/`, `reports/`, `scheduler/`).
+  keyboards, ux, throttle. Порядок в `HANDLER_MODULES` = порядок диспатча aiogram, catch-all
+  `on_text` **строго последний** (инвариант `tests/test_handler_order.py`). Исключение: `bot/proposal.py`
+  (сборка черновика, транспорта не знает — переезжает в тул-слой). Локализация здесь больше НЕ живёт —
+  `core/i18n.py` + `core/texts.py`.
 - `agent/` — свой цикл: `loop.py`, `router.py`, `system_prompt.py`, `tools.py`. Hermes несёт своё.
 - Что уносит с собой кнопочный слой (~30 функций с единственной точкой вызова в UI) и восемь
   инфраструктурных мин C1–C8 — `SPEC.md` §5.3.

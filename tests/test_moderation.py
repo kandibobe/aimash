@@ -11,7 +11,8 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from adcopy.validate import count_flagged, moderation_issues  # noqa: E402
-from bot import i18n, ux  # noqa: E402
+from bot import ux
+from core import i18n  # noqa: E402
 
 
 # ── чистые тексты — без замечаний ───────────────────────────────────────────────────

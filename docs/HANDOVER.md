@@ -99,7 +99,7 @@ docker compose logs -f bot      # убедиться: "alembic upgrade head" п�
 - [ ] **Autogenerate-дрейф = 0** на чистой Postgres (`alembic revision --autogenerate` ничего не
       предлагает — ни DROP, ни ADD).
 - [ ] Бэкап настроен и **restore протестирован**.
-- [ ] `/lang en` переключает **весь** интерфейс (EN-каталог `bot/i18n.py` полон; проверяемо).
+- [ ] `/lang en` переключает **весь** интерфейс (EN-каталог `core/i18n.py` полон; проверяемо).
 - [ ] **§19 визард** (`/newcampaign`) и **§20 «Клиенты»** (`/clients`) проверены по [UAT_PLAN.md](UAT_PLAN.md).
       §20 хранит **PII клиентов** (телефоны/e-mail) в БД — бэкапы БД содержат PII, храните защищённо.
 - [ ] Прод-чеклист [DEPLOYMENT.md §6](DEPLOYMENT.md#6-prod-чеклист) пройден полностью.

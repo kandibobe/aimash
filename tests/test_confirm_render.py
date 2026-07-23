@@ -22,7 +22,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ads.service import SUPPORTED_OPERATIONS  # noqa: E402
-from bot import texts  # noqa: E402
+from core import texts  # noqa: E402
 from confirm import render  # noqa: E402
 from confirm.gate import build_summary  # noqa: E402
 
@@ -96,7 +96,7 @@ def test_render_covers_every_supported_operation():
 
 
 def test_texts_wrapper_delegates_to_render():
-    """`bot.texts` остался тонкой обёрткой: тот же текст, что и в headless-контуре."""
+    """`core.texts` остался тонкой обёрткой: тот же текст, что и в headless-контуре."""
     params = {"campaign": "Search", "mode": "set_to", "value": 50}
     for lang in ("ru", "en"):
         assert texts.fmt_mutation_summary("update_budget", params, lang) == (

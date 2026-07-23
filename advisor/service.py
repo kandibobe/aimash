@@ -90,7 +90,7 @@ async def _negative_keywords_extra(
     if not kws:
         return []
     try:
-        from bot import i18n
+        from core import i18n
         from keywords.cluster import suggest_negative_keywords
 
         negs = await suggest_negative_keywords(
@@ -171,7 +171,7 @@ async def build_recommendations(
     с recs, у которых проставлены rec_uid + body (для кнопок 👍/👎)."""
     from audit.engine import build_audit
 
-    from bot import i18n
+    from core import i18n
 
     lang = lang or i18n.get_lang(chat_id)
     if report is None:

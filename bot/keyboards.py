@@ -1,7 +1,7 @@
 """Клавиатуры и меню-команды бота Aimash (aiogram 3.x).
 
 Чистый слой представления: НИКАКИХ обращений к Google Ads/БД. Тексты кнопок — здесь,
-шаблоны сообщений — в bot/texts.py. Confirm-гейт: кнопки лишь ФОРМИРУЮТ ввод/черновик,
+шаблоны сообщений — в core/texts.py. Confirm-гейт: кнопки лишь ФОРМИРУЮТ ввод/черновик,
 исполнение мутации — только после ✅ через ads.service (см. bot/main.py).
 """
 
@@ -68,7 +68,7 @@ def searchterms_kb(
     (кампания → группа → общий список; для общего — строка выбора списка). Тап по строке только
     перерисовывает markup; черновик минтит ТОЛЬКО «Минусовать выбранные» (confirm-гейт, сам SDK —
     после «да»). Имя запроса в callback_data НЕ кладём (idx резолвится по chat_id в bot.main)."""
-    from bot import i18n, texts
+    from core import i18n, texts
 
     sel = selected or set()
     o = opts or {}
@@ -113,7 +113,7 @@ def searchterms_sharedset_kb(choices: list[dict], gen: int) -> InlineKeyboardMar
     (из read.list_negative_shared_sets, кэш opts['ss_choices']) + «Новый» (idx=-1 — список с
     дефолтным именем СОЗДАСТ apply_add_negatives_to_shared_set ПОСЛЕ подтверждения, не пикер) +
     «Назад». Только перерисовка markup — ничего не мутирует."""
-    from bot import i18n
+    from core import i18n
 
     b = InlineKeyboardBuilder()
     for i, ch in enumerate(choices):
@@ -140,7 +140,7 @@ def harvest_kb(items: list[dict], gen: int) -> InlineKeyboardMarkup:
     """Ф4 «сбор урожая»: по кнопке «➕ <запрос>» на каждый конвертящий запрос без своего ключа.
     Клик минтит черновик add_keywords (EXACT, в ТУ группу, где запрос уже крутился) — исполнение
     только после «да». gen общий со списком «в минус»: обе клавиатуры живут одно поколение."""
-    from bot import i18n
+    from core import i18n
 
     b = InlineKeyboardBuilder()
     for i, it in enumerate(items):
@@ -159,9 +159,9 @@ def _ellipsize(s: str, limit: int = _NAME_LIMIT) -> str:
 
 def _lang(lang: str | None) -> str:
     """Язык клавиатуры: явный lang → он; None → язык текущего запроса (contextvar). i18n
-    импортируем ЛЕНИВО — bot.i18n тянет bot.texts, верхнеуровневый импорт ради цикла не нужен."""
+    импортируем ЛЕНИВО — core.i18n тянет core.texts, верхнеуровневый импорт ради цикла не нужен."""
     if lang is None:
-        from bot import i18n
+        from core import i18n
 
         return i18n.current_lang()
     return lang if lang in ("ru", "en") else "ru"
@@ -295,7 +295,7 @@ def adduser_access_kb(target_chat: int, lang: str | None = None) -> InlineKeyboa
     """P0-A: после /adduser — выбор объёма доступа ЧТЕНИЯ для нового оператора (решение заказчика:
     «Все аккаунты / Выбрать аккаунты»). Кнопки лишь маршрутизируют (AdminCB) — гранты выдаёт
     хендлер; мутации этим НЕ открываются. Чистая презентация: список аккаунтов тянет хендлер."""
-    from bot import i18n
+    from core import i18n
 
     kb = InlineKeyboardBuilder()
     kb.button(
@@ -325,7 +325,7 @@ def adduser_pick_kb(
     [(customer_id, name)] обнаруженных дочерних; granted — уже выданные оператору id. Постранично
     (защита от REPLY_MARKUP_TOO_LONG на больших MCC, как report_accounts_kb). Резолв — stateless:
     customer_id в самом callback_data (AdminCB.cid). «Готово» завершает."""
-    from bot import i18n
+    from core import i18n
 
     kb = InlineKeyboardBuilder()
     total = len(accounts)
@@ -874,7 +874,7 @@ def advise_feedback_kb(
     kb = InlineKeyboardBuilder()
     apply_key = _ADVISE_APPLY_LABELS.get(apply_op or "")
     if apply_key:
-        from bot import i18n
+        from core import i18n
 
         kb.button(text=i18n.t(apply_key, lang), callback_data=AdviseCB(action="apply", rec=rec_uid))
     kb.button(
@@ -902,7 +902,7 @@ def mcc_kb(worst: list[tuple[str, str]], lang: str | None = None) -> InlineKeybo
     """3.5: действия под сводкой /mcc. worst — [(customer_id, готовая подпись)] уже worst-first
     (at_risk → расход): тап закрепляет аккаунт активным (MccAcctCB несёт сам id — без кэша).
     Последней строкой — «▶️ Аудит по всем» (фоновый score-прогон, READ-ONLY). Чистая функция."""
-    from bot import i18n
+    from core import i18n
 
     kb = InlineKeyboardBuilder()
     for cid, label in worst:
@@ -917,7 +917,7 @@ def audit_export_kb(lang: str | None = None, *, with_xlsx: bool = True) -> Inlin
     «📊 Скачать .xlsx» (таблица) и «📝 Скачать .docx» (Word — читаемый отчёт для клиента). Клик
     читает УЖЕ посчитанный AuditResult из кэша (пере-собирать аудит не нужно) и строит бумагу —
     Google Ads НЕ мутирует (GR3). Чистая функция (только i18n)."""
-    from bot import i18n
+    from core import i18n
 
     kb = InlineKeyboardBuilder()
     kb.button(
@@ -941,7 +941,7 @@ def audit_qa_exit_kb(lang: str | None = None) -> InlineKeyboardMarkup:
     """#6: единственная кнопка «✖ Выйти» под подсказкой режима доп-вопросов по /audit — явный выход
     из FSM-режима Q&A. Пассивно из режима выводит и любая /команда, и кнопка меню (middleware);
     кнопка нужна для очевидного ручного выхода. Чистая функция (только i18n)."""
-    from bot import i18n
+    from core import i18n
 
     kb = InlineKeyboardBuilder()
     kb.button(text=i18n.t("audit_qa_exit_btn", lang), callback_data=AuditQaCB(action="exit"))

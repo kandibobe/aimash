@@ -1,7 +1,7 @@
 """Рендер «было → станет»: черновик мутации словами. Без Telegram, без БД, без google-ads.
 
 Один и тот же текст человек обязан увидеть в ЛЮБОМ контуре подтверждения — и в Telegram-карточке
-(`bot.texts`), и в headless-подтверждении (`confirm.gate.build_summary`, дальше MCP-WRITE). Пока
+(`core.texts`), и в headless-подтверждении (`confirm.gate.build_summary`, дальше MCP-WRITE). Пока
 рендер жил внутри `bot/texts.py`, headless-путь показывал на подтверждение сырой dict: человек
 подтверждал не то, что читал. Отсюда два правила модуля:
 
@@ -9,9 +9,9 @@
   `tests/test_confirm_render.py::test_render_is_headless`;
 * `lang` — ОБЯЗАТЕЛЬНЫЙ аргумент, а не contextvar: в контуре без Telegram-запроса язык брать
   неоткуда, а молчаливый «ru» на английской карточке — тихий дефект. Разрешение языка из
-  contextvar осталось в тонкой обёртке `bot.texts` (там же, где живёт `bot.i18n`).
+  contextvar осталось в тонкой обёртке `core.texts` (там же, где живёт `core.i18n`).
 
-Текст plain: HTML-экранирование — на вызывающем (`bot.texts.esc` при показе).
+Текст plain: HTML-экранирование — на вызывающем (`core.texts.esc` при показе).
 """
 
 from __future__ import annotations

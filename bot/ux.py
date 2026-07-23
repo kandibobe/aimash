@@ -20,7 +20,7 @@ from aiogram.enums import ChatAction
 from aiogram.types import FSInputFile
 
 from adcopy.validate import MIN_KEYWORD_COVERAGE, any_cta, count_flagged
-from bot import i18n
+from core import i18n
 from core.logging import redact_text
 
 ACTION_REFRESH_SEC = 4.0  # Telegram гасит chat action через ~5с → обновляем раньше

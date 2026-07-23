@@ -15,7 +15,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
-from bot import texts  # noqa: E402
+from core import texts  # noqa: E402
 from bot.main import _period_from_arg  # noqa: E402
 from core.config import settings  # noqa: E402
 from reports import queries as Q  # noqa: E402
@@ -139,7 +139,7 @@ def test_summary_text_shows_currency_and_thousands():
 def test_fmt_stats_currency_optional():
     st = {"impressions": 12480, "clicks": 512, "cost": 12480.5, "conversions": 4, "conv_value": 900}
     with_cur = texts.fmt_stats("7753643025", 30, st, "USD")
-    # разделитель тысяч в bot.texts — неразрывный пробел (\xa0); проверяем дробную часть + валюту
+    # разделитель тысяч в core.texts — неразрывный пробел (\xa0); проверяем дробную часть + валюту
     assert "USD" in with_cur and "480.50 USD" in with_cur
     assert "USD" not in texts.fmt_stats("7753643025", 30, st)  # без валюты — нет суффикса
 

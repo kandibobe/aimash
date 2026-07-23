@@ -315,7 +315,7 @@ def test_read_campaign_targeting_locked():
 
 def test_fmt_campaign_targeting_renders():
     from ads.read import CampaignTargeting
-    from bot import texts
+    from core import texts
 
     out = texts.fmt_campaign_targeting(
         CampaignTargeting(

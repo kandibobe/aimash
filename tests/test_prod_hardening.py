@@ -272,7 +272,7 @@ def test_diag_kb_today_toggle():
 
 
 def test_fmt_error_alert_dedup_counts():
-    from bot import texts
+    from core import texts
 
     rows = [
         SimpleNamespace(
@@ -288,7 +288,7 @@ def test_fmt_error_alert_dedup_counts():
 
 
 def test_fmt_error_detail_escapes_and_truncates():
-    from bot import texts
+    from core import texts
 
     row = SimpleNamespace(
         request_id="rid1",

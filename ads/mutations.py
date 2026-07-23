@@ -2892,7 +2892,7 @@ def _resolve_language_ids(languages: list[str] | None) -> list[int]:
 def _geo_result(geo_locations: list[str] | None, applied: int) -> dict:
     """§11: гео composite-медиа-кампаний (GDN/Demand Gen/Video) в result.
 
-    Ключ — `geo`: именно его читает `bot.texts.fmt_mutation_result`. Прежний `geo_count` не читал
+    Ключ — `geo`: именно его читает `core.texts.fmt_mutation_result`. Прежний `geo_count` не читал
     НИКТО → гео не показывалось ни на одной карточке этих трёх операций. Плюс явный warning
     частичного успеха: «кампания на Кению» без гео = глобальный показ при запуске, и менеджер обязан
     это увидеть (у create_search_campaign такой warning есть с 3C, у медиа-кампаний не было вовсе).

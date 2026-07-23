@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import core.usage as U  # noqa: E402
 from agent.openrouter_account import AccountStatus  # noqa: E402
-from bot import texts  # noqa: E402
+from core import texts  # noqa: E402
 
 
 def _usage(prompt: int, completion: int, *, cost: float = 0.0, cached: int = 0):

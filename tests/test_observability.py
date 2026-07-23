@@ -130,9 +130,9 @@ async def test_capture_exception_never_raises_on_persist_failure(monkeypatch):
     assert returned == rid
 
 
-# ── bot.texts.fmt_errors: вывод /diag ─────────────────────────────────────────────
+# ── core.texts.fmt_errors: вывод /diag ─────────────────────────────────────────────
 def test_fmt_errors_ru_en_and_empty():
-    from bot import texts
+    from core import texts
 
     rows = [
         SimpleNamespace(

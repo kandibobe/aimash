@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bot.main as bm  # noqa: E402
-from bot.texts import parse_rsa_paste  # noqa: E402
+from core.texts import parse_rsa_paste  # noqa: E402
 from db.session import init_db  # noqa: E402
 
 

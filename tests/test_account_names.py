@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from bot import texts  # noqa: E402
+from core import texts  # noqa: E402
 from reports.period import last_n_days  # noqa: E402
 from reports.queries import Metrics  # noqa: E402
 from reports.service import ReportData, summary_text  # noqa: E402

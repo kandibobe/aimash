@@ -173,7 +173,7 @@ class Dossier(BaseModel):
 
     def counts(self) -> dict[str, int]:
         """Сводка для карточки подтверждения («услуг 12, людей 4, фактов 17») — без неё пользователь
-        подтверждал бы невидимое (bot/texts.py перечисляет ИЗМЕНЁННЫЕ поля по именам)."""
+        подтверждал бы невидимое (core/texts.py перечисляет ИЗМЕНЁННЫЕ поля по именам)."""
         return {
             "services": len(self.services),
             "people": len(self.people),

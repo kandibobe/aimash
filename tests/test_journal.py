@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bot import texts  # noqa: E402
+from core import texts  # noqa: E402
 from confirm.store import AuditEvent, ConfirmStore, list_recent_audit  # noqa: E402
 from db.session import init_db  # noqa: E402
 

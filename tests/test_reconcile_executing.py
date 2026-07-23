@@ -180,7 +180,7 @@ async def test_needs_review_visible_in_journal():
     ev = next(e for e in events if e.confirmation_id == cid)
     assert ev.status == "needs_review"
 
-    from bot import texts
+    from core import texts
 
     out = texts.fmt_journal([ev])
     assert "требует проверки" in out

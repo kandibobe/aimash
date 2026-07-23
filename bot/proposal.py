@@ -31,7 +31,7 @@ from ads.resolve import (
     detect_currency_token,
 )
 from ads.service import read_state
-from bot import i18n
+from core import i18n
 from confirm import render
 from confirm.store import ConfirmStore
 from core.config import normalize_customer_id

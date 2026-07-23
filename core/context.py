@@ -1,7 +1,7 @@
 """Контекст наблюдаемости ОДНОГО запроса: корреляционный request_id (+ chat_id/operation),
 который сшивает все лог-строки одного апдейта/джобы в единую цепочку (§15).
 
-Зеркалит паттерн bot.i18n._LANG: единый contextvar + set/reset в middleware (TraceMiddleware на
+Зеркалит паттерн core.i18n._LANG: единый contextvar + set/reset в middleware (TraceMiddleware на
 Telegram-пути, request_scope в scheduler-джобах). core.logging.ContextFilter впрыскивает эти поля
 в КАЖДУЮ лог-запись — поэтому существующие log.* (resilience, router, хендлеры, on_error) получают
 request_id БЕЗ правок call-site. request_id — короткий (8 hex), НЕ секрет: его можно показать

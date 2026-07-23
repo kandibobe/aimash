@@ -25,20 +25,62 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+# Модули, которые обязаны подниматься БЕЗ Telegram-слоя. Порядок = порядок импорта в зонде;
+# виновника называем поимённо, поэтому импортируем ПО ОДНОМУ, а не одной строкой.
+#
+# `mcp_server.*` и `agent.tools.schemas` докстринг `mcp_server/server.py` объявляет
+# «приколоченными гардами» — до 23.07.2026 это было неправдой: в списке их не было, и цепочка
+# оставалась чистой по случайности (`agent/__init__.py` пуст). Одна строка `from bot import ux`
+# в `mcp_server/tools_read.py` — самое естественное место, там тексты ошибок — протащила бы
+# aiogram в MCP-процесс, и CI смолчал бы.
+#
+# `core.i18n` / `core.texts` — пара, переехавшая из `bot/` (Волна 1 шаг 1). Ради неё `advisor/`,
+# `reports/` и `scheduler/` тянули весь пакет бота (мина C4). Обратный дрейф («верну импорт
+# `bot.texts`, там же всё было») ловится здесь.
+#
+# ⚠️ `scheduler.jobs` в списке НЕТ, и добавлять его сюда БЕСПОЛЕЗНО: он зовёт `bot.keyboards` /
+# `bot.ux` / `bot.main._advise_apply_op` ЛЕНИВО, изнутри функций. Зонд меряет утечку на ИМПОРТЕ —
+# `import scheduler.jobs` в чистом процессе проходит зелёным, ничего не подтянув. Проверено
+# отрицательным контролем 23.07.2026: модуль добавлен в список → зонд всё равно печатает "clean".
+# Ленивая связность ловится не здесь, а разбором ИСХОДНИКА — гард развязки планировщика.
+_HEADLESS_MODULES = (
+    "app.bootstrap",
+    "db.session",
+    "ads.client",
+    "ads.read",
+    "ads.mutations",
+    "confirm.gate",
+    "confirm.store",
+    "core.i18n",
+    "core.texts",
+    "advisor.service",
+    "reports.service",
+    "agent.tools.schemas",
+    "mcp_server.server",
+    "mcp_server.tools_read",
+)
+
 # Тело зонда: импортируется в чистом процессе, падает assert'ом при утечке bot/aiogram.
 _PROBE = """
-import sys
-import app.bootstrap
-import db.session, ads.client, ads.read, ads.mutations, confirm.gate, confirm.store
+import importlib, sys
 
-leaked = sorted(
-    m for m in sys.modules
-    if m == "bot" or m.startswith("bot.") or m == "aiogram" or m.startswith("aiogram.")
-)
-assert not leaked, "headless-слой подтянул: " + ", ".join(leaked)
+MODULES = {modules!r}
+
+def _tg():
+    return sorted(
+        m for m in sys.modules
+        if m == "bot" or m.startswith("bot.") or m == "aiogram" or m.startswith("aiogram.")
+    )
+
+for name in MODULES:
+    importlib.import_module(name)
+    leaked = _tg()
+    assert not leaked, "%s подтянул Telegram-слой: %s" % (name, ", ".join(leaked))
+
+import app.bootstrap
 assert callable(app.bootstrap.bootstrap_ads_layer)
 print("clean")
-"""
+""".format(modules=list(_HEADLESS_MODULES))
 
 
 def test_headless_ads_layer_imports_without_bot() -> None:

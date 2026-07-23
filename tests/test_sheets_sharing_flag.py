@@ -13,7 +13,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import reports.sheets as sheets  # noqa: E402
-from bot import i18n  # noqa: E402
+from core import i18n  # noqa: E402
 from core.config import settings  # noqa: E402
 
 

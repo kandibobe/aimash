@@ -29,9 +29,9 @@ argument-hint: <имя команды или короткое описание, 
      `menu_guard` — строго первым, `fallback` (catch-all `on_text`) — строго ПОСЛЕДНИМ.
      Порядок импорта = порядок диспатча aiogram. Star-import (`from ... import *`) ЗАПРЕЩЁН.
 
-2. **Тексты** — строки ответа в [bot/texts.py](bot/texts.py).
+2. **Тексты** — строки ответа в [core/texts.py](core/texts.py).
 
-3. **i18n RU/EN** — ключи для ОБОИХ языков в [bot/i18n.py](bot/i18n.py). Не оставляй один язык.
+3. **i18n RU/EN** — ключи для ОБОИХ языков в [core/i18n.py](core/i18n.py). Не оставляй один язык.
 
 4. **Клавиатура** — если нужна inline-кнопка/пункт меню, добавь в [bot/keyboards.py](bot/keyboards.py).
 

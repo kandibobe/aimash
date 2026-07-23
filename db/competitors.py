@@ -2,7 +2,7 @@
 
 Данные приносит человек файлом (/competitors): метрики auction_insight_* в API есть, но доступ к ним
 закрыт вайтлистом Google (подробнее — docstring reports/auction_insights.py).
-Здесь только хранение и выдача: парсит reports/auction_insights.py, рисует bot/texts.py.
+Здесь только хранение и выдача: парсит reports/auction_insights.py, рисует core/texts.py.
 
 Идемпотентно per (customer_id, snapshot_date): повторный импорт за ту же дату перезаписывает срез
 ЦЕЛИКОМ (delete → insert), а не мержит. Домены между выгрузками появляются и исчезают; мерж оставил

@@ -183,7 +183,7 @@ def _top_findings_block(health, lang: str) -> str:
         return ""
     try:
         from audit.render import finding_text
-        from bot import i18n
+        from core import i18n
 
         cur = getattr(health, "currency", "") or ""
         lines = [ln for f in findings[:2] if (ln := finding_text(f, lang, cur))]
@@ -239,7 +239,7 @@ async def _digest_action(chat_id: int, lang: str, accts: list[str], acct_info: d
         from advisor import service as advisor_service
         from advisor import store as advisor_store
         from advisor.rules import rank_cross_account
-        from bot import i18n
+        from core import i18n
         from bot.keyboards import advise_feedback_kb
         from bot.main import _advise_apply_op  # поздний импорт: цикл bot.main ↔ scheduler.jobs
 
@@ -314,7 +314,7 @@ async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
             return
         # 3H: блоки собираем per-lang (у операторов может быть RU и EN): summary_text локализуется,
         # а валюта аккаунта дочитывается per-account (раньше суммы шли голыми числами без кода).
-        from bot import i18n
+        from core import i18n
 
         langs = {i18n.get_lang(chat_id) for chat_id in recipients} or {"ru"}
         # 3.3: пороги аномалий и применённые за сутки мутации — best-effort (сбой БД не валит отчёт).
@@ -539,9 +539,9 @@ def _effective_thresholds(thr: dict | None, acct: str) -> dict | None:
 
 def _alert_line(a, lang: str) -> str:
     """C3: рендер алерта НА ЯЗЫКЕ получателя — anomaly.Alert структурный (kind + params,
-    числа отформатированы кодом), тексты живут в bot/i18n (ключ anomaly_<kind>). Раньше
+    числа отформатированы кодом), тексты живут в core/i18n (ключ anomaly_<kind>). Раньше
     Alert.message был RU-литералом и уходил EN-операторам смешанным RU/EN."""
-    from bot import i18n
+    from core import i18n
 
     return i18n.t(f"anomaly_{a.kind}", lang, **a.params)
 
@@ -655,7 +655,7 @@ async def run_anomaly_check(bot) -> None:
                 reset_context(tok)
         if not metrics:
             return
-        from bot import i18n
+        from core import i18n
 
         thresholds = await _thresholds_by_chat(recipients)
         from core.access import accessible_accounts_for_user
@@ -749,7 +749,7 @@ async def run_error_alerts(bot) -> int:
         # Чек-поинт двигаем ДО рассылки (даже если доставка всем упадёт): иначе те же ошибки
         # переотправлялись бы каждый цикл. Они не теряются — доступны в /diag.
         _error_alert_last_id = int(rows[-1].id)
-        from bot import i18n, texts
+        from core import i18n, texts
 
         for chat_id in admins:
             try:
@@ -803,7 +803,8 @@ async def run_weekly_digest(bot) -> int:
     только чтение error_events/bug_reports/audit_log + рассылка. Нет админов ⇒ no-op (opt-in).
     Один недоступный админ не роняет остальных (НЕ capture — иначе петля наблюдаемости).
     Возвращает число обслуженных админов."""
-    from bot import i18n, texts, ux
+    from bot import ux
+    from core import i18n, texts
     from confirm.store import audit_activity_since
     from core import bugs
     from reports.diag_export import build_weekly_digest_file
@@ -876,7 +877,7 @@ def _digest_account_label(acct: str) -> str:
     B14: имя аккаунта из Google Ads может содержать «<»/«&» — все потребители шлют его с
     parse_mode=HTML (thr_tune_offer, recommendations digest), поэтому ЭКРАНИРУЕМ здесь (единый
     источник): без escape сообщение с «<» в имени молча НЕ доставлялось (Telegram отвергал разметку)."""
-    from bot.texts import esc
+    from core.texts import esc
 
     try:
         from ads.client import discovered_read_children_meta
@@ -911,7 +912,7 @@ async def run_recommendations_digest(bot) -> None:
         from advisor import service as advisor_service
         from advisor import store as advisor_store
         from advisor.rules import _magnitude, rank_cross_account
-        from bot import i18n
+        from core import i18n
         from bot.keyboards import advise_feedback_kb
 
         # 3.2в: гейт кнопки «применить» — тот же, что в /advise (allow-list не-денежных операций +
@@ -1090,7 +1091,7 @@ async def run_business_digest(bot) -> None:
         if not accounts:
             return
         from advisor import service as advisor_service
-        from bot import i18n
+        from core import i18n
 
         thr_by_chat = await _thresholds_by_chat(chats)
         # 1) Отчёты per-account — один раз на прогон (with_comparison=True: prev-период внутри).
@@ -1269,7 +1270,7 @@ async def run_threshold_tuning(bot) -> None:
     with request_scope("scheduler:thr-tune"):
         from uuid import uuid4
 
-        from bot import i18n
+        from core import i18n
         from bot.keyboards import thr_tune_kb
         from reports.period import custom as period_custom
         from reports.queries import fetch_by_day
@@ -1377,7 +1378,7 @@ async def _notify_outcome(bot, outcome, verdict: str) -> None:
     """§advisor #2: сообщить оператору исход применённого совета (improved/worse) — обучение видимо.
     READ-ONLY (только уведомление). chat_id берём из связанной рекомендации по rec_uid."""
     from advisor import store as advisor_store
-    from bot import i18n
+    from core import i18n
 
     rec = await advisor_store.get_recommendation(outcome.rec_uid)
     if rec is None:
@@ -1577,7 +1578,7 @@ async def cleanup_stale_campaign_drafts(
 
             clear_pending_media_ids(orphan_media)
         if bot is not None and (expired or expiring):
-            from bot import i18n
+            from core import i18n
 
             for chat_id, step, left_h in expiring:
                 try:

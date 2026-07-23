@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from openpyxl import load_workbook  # noqa: E402
 
-from bot import texts  # noqa: E402
+from core import texts  # noqa: E402
 from keywords.export import write_keyword_list_xlsx  # noqa: E402
 
 

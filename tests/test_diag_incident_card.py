@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bot.handlers.commands as cmds  # noqa: E402
 import bot.main as bm  # noqa: E402
-from bot import texts  # noqa: E402
+from core import texts  # noqa: E402
 from bot.callbacks import DiagCB  # noqa: E402
 from bot.keyboards import diag_kb  # noqa: E402
 from reports.diag_export import build_error_events_text  # noqa: E402

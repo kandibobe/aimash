@@ -15,7 +15,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import ads.service as service  # noqa: E402
-import bot.texts as texts  # noqa: E402
+import core.texts as texts  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
 from core.config import settings  # noqa: E402
 

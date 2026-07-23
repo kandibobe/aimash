@@ -199,7 +199,7 @@ def test_create_gdn_via_sdk_invokes_geo_helper_when_provided():
         )
     assert geo_calls["campaign_id"] == "55"  # из campaign resource_name
     assert geo_calls["locations"] == ["Кения"]
-    # B2: ключ `geo` (его читает bot.texts), а не мёртвый `geo_count` — гео обязано быть на карточке.
+    # B2: ключ `geo` (его читает core.texts), а не мёртвый `geo_count` — гео обязано быть на карточке.
     assert res["geo"] == 1
     assert "geo_count" not in res
     assert not res.get("warnings")  # всё гео применено → warning не порождаем

@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ads import mutations as M  # noqa: E402
 from ads.read import ACCOUNT_LEVEL_FIELD_TYPES  # noqa: E402
-from bot import texts  # noqa: E402
+from core import texts  # noqa: E402
 from bot.keyboards import cc_assets_reuse_kb  # noqa: E402
 
 SPECS = [

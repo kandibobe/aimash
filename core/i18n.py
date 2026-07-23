@@ -1,21 +1,27 @@
-"""Каркас локализации RU/EN (ТЗ §4). Инкрементальная миграция: bot/texts.py продолжает
+"""Каркас локализации RU/EN (ТЗ §4). Инкрементальная миграция: core/texts.py продолжает
 работать как есть; t() берёт перевод из CATALOG, а для НЕ-мигрированных ключей мостит к
 texts.<KEY>. Так можно переводить сообщения по одному, не ломая RU.
 
 Язык запроса — contextvar (_LANG), который ставит LangMiddleware на каждый апдейт по chat_id,
-чтобы форматтеры (bot.texts.fmt_*) сами брали язык без проброса lang через ~80 call-site'ов.
+чтобы форматтеры (core.texts.fmt_*) сами брали язык без проброса lang через ~80 call-site'ов.
 Дефолт RU; t()/форматтеры без явного lang читают current_lang().
 
 Хранилище языка — in-memory кэш (_CHAT_LANG) + персист в user_settings.language (load_langs на
 старте, save_lang после смены): выбор переживает рестарт. get_lang/set_lang — синхронные (кэш),
 а save_lang — async-upsert (как _save_model_override в bot.main).
+
+Живёт в `core/`, а не в `bot/`, потому что потребители — НЕ только Telegram-слой: `advisor/`,
+`reports/`, `scheduler/` зовут t()/форматтеры из фона, где aiogram нет и не будет. Пока пара
+лежала в `bot/`, любой из них тянул за собой весь пакет бота — ровно та мина C4, из-за которой
+планировщик нельзя было запустить отдельным процессом (SPEC.md §5.3). Транспорта эта пара не
+знает: HTML-разметка — это формат текста, а не зависимость от Telegram.
 """
 
 from __future__ import annotations
 
 import contextvars
 
-from bot import texts
+from core import texts
 
 LANGS = ("ru", "en")
 DEFAULT_LANG = "ru"

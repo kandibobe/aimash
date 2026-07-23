@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bot import texts  # noqa: E402
+from core import texts  # noqa: E402
 from db import sheets_registry  # noqa: E402
 from db.session import init_db  # noqa: E402
 

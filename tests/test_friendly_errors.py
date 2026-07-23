@@ -86,6 +86,6 @@ def test_no_exception_class_names_in_user_texts():
         if class_leak.search(src):
             offenders.append(f"{p.name}: type(e).__name__ в i18n.t")
     assert not offenders, offenders
-    from bot.i18n import CATALOG
+    from core.i18n import CATALOG
 
     assert "cb_error" not in CATALOG  # ключ удалён — «Ошибка: {kind}» больше не существует

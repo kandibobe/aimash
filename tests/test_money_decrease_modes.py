@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ads import service  # noqa: E402
 from ads.resolve import DecreaseBelowZero, compute_new_micros, currency_mismatch  # noqa: E402
 from agent.tools.schemas import UpdateBid, UpdateBudget  # noqa: E402
-from bot.texts import fmt_mutation_summary  # noqa: E402
+from core.texts import fmt_mutation_summary  # noqa: E402
 from core.limits import BILLING_UNIT_MICROS  # noqa: E402
 
 

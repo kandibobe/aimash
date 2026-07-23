@@ -69,9 +69,9 @@ class ThrottleMiddleware(BaseMiddleware):
                 self._warned[chat_id] = now
                 try:
                     # i18n лениво (LangMiddleware — outer ДО throttle → contextvar языка уже стоит);
-                    # импорт внутри метода во избежание цикла (bot.i18n → bot.texts). Фолбэк — RU.
+                    # импорт внутри метода во избежание цикла (core.i18n → core.texts). Фолбэк — RU.
                     try:
-                        from bot import i18n
+                        from core import i18n
 
                         warn_text = i18n.t("throttle_warn")
                     except Exception:  # noqa: BLE001 — i18n недоступен (тесты/цикл) → RU-литерал

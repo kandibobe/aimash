@@ -226,8 +226,8 @@ dict'ов. `agent/router.py`, `agent/system_prompt.py`, `agent/loop.py` — Herm
 | Редакция текста ошибки наружу | `bot/ux.py` `err_text` — **третий рубеж золотого правила 5** | сырой `str(e)` может уйти пользователю: это дыра в правиле 5, а не UX-мелочь |
 | Антифлуд / rate limiting | `bot/throttle.py` | нет ограничителя частоты вообще (§31.1) |
 | Ввод PIN 2FA | FSM aiogram | `core/twofa.py` fail-closed ⇒ **включённая 2FA = все мутации отказаны** (§31.2) |
-| Локализация RU/EN | `bot/i18n.py`, 3139 строк, 528 EN-ключей | фоновые тексты (алерты, сводки) теряют язык получателя (§31.7) |
-| Форматтеры сводок | `bot/texts.py` (`fmt_mutation_summary`, `fmt_cc_final_summary`) | это **логика**, не UI: формат «было→станет» придётся писать заново |
+| Локализация RU/EN | `core/i18n.py`, 3139 строк, 528 EN-ключей (переехал из `bot/` 23.07.2026) | фоновые тексты (алерты, сводки) теряют язык получателя (§31.7) |
+| Форматтеры сводок | `core/texts.py` (`fmt_mutation_summary`, `fmt_cc_final_summary`; переехал из `bot/`) | это **логика**, не UI: формат «было→станет» придётся писать заново |
 | Учёт стоимости LLM | `core/usage.py`+`core/llm_budget.py` висят на `agent/router.py` | Hermes зовёт OpenRouter мимо нас ⇒ П14 «стоимость видна» недоказуем (§31.4) |
 | Точки вызова генерации | `keywords/*`, `adcopy/*`, `reports/*`, `clients/` orchestration | функции живы, звать некому — см. реестр §8.1 |
 
@@ -236,7 +236,7 @@ dict'ов. `agent/router.py`, `agent/system_prompt.py`, `agent/loop.py` — Herm
 `adcopy/generate.py|refine.py|session.py|assets_gen.py|display_path.py`, `ads/extensions.py`,
 `clients/execute.py` (**второй исполнитель confirm-гейта**, §29.3), `clients/profile_assets.py`,
 `core/usage.py`, `core/llm_budget.py`, `core/twofa.py`, `core/quota.py`, `bot/throttle.py`,
-`bot/i18n.py`, `bot/ux.py`, `bot/texts.py` (форматтеры), `agent/campaign_settings.py`,
+`core/i18n.py`, `bot/ux.py`, `core/texts.py` (форматтеры), `agent/campaign_settings.py`,
 `agent/campaign_edit.py`.
 
 ### Переносится в MCP как есть (не переписывается)
@@ -374,10 +374,11 @@ curator:
 иначе они пишутся под уже написанный код и повторяют его ошибки.
 
 **Дом scheduler'а (закрыть в шагах 1/10, иначе тихо умрёт).** APScheduler сегодня живёт в event
-loop aiogram-бота, и все джобы шлют в Telegram через `bot.send_message` + `bot/i18n`. С архивацией
+loop aiogram-бота, и все джобы шлют в Telegram через `bot.send_message` (i18n из связки вынут в
+`core/` 23.07.2026). С архивацией
 `bot/` планировщик, дайджесты и автопрун `pending_expires_at` умирают вместе с ним. Решение:
 scheduler — отдельный процесс (или процесс MCP-сервера) с тонким Bot-клиентом для отправки в
-Telegram; `i18n` выносится из `bot/`. Замер outcome (шаг 9) и фоновые аудиты (E13) зависят от этого.
+Telegram. Замер outcome (шаг 9) и фоновые аудиты (E13) зависят от этого.
 
 **Про обучение на цифрах (шаг 9) — сказать заказчику вслух.** Конверсии в Google Ads
 дописываются 30–90 дней. Замер на 7-й день систематически покажет, что резать расходы хорошо:
@@ -721,7 +722,7 @@ credit cap на OpenRouter в первый же день.
 | `suggest_negatives` | `keywords/cluster.py:313` | минус-слова с брендозащитой `protected=` |
 | `parse_keywords_input` | `keywords/ingest.py` | текст / XLSX / CSV, включая **колонку типа соответствия** |
 | `read_keyword_sheet` | `reports/sheets.py:657` | чтение выверенной менеджером колонки (§25.7) |
-| `get_client_card` | `clients/store.py` + логика `bot/texts.py:3024` | полная карточка клиента **с PII** — `recall_client` её физически не отдаёт (§29.9) |
+| `get_client_card` | `clients/store.py` + логика `core/texts.py:3024` | полная карточка клиента **с PII** — `recall_client` её физически не отдаёт (§29.9) |
 | `list_site_pages` | `clients/store.py:324` | карта страниц под sitelinks |
 | `get_crawl_status` | `clients/crawl_jobs.py` | статус асинхронного краула |
 | `get_quota` | `core/quota.py:109` | остаток дневной квоты Google Ads |
@@ -767,7 +768,7 @@ credit cap на OpenRouter в первый же день.
 
 | Инструмент | Обёртка над | Назначение |
 |---|---|---|
-| `get_client_card` | `clients/store.py` + формат `bot/texts.py:3024` | карточка для **человека**: бренд, сайт, гео, услуги+цены, **контакты**, дата последнего краула |
+| `get_client_card` | `clients/store.py` + формат `core/texts.py:3024` | карточка для **человека**: бренд, сайт, гео, услуги+цены, **контакты**, дата последнего краула |
 | `list_client_facts_structured` | `client_services` / `client_contacts` | услуги, цены, категории **как структура**, а не текст — из этого код строит price/snippets/call-ассеты |
 | `start_crawl` | `clients/crawl.py` + `crawl_jobs` | асинхронный краул сайта клиента, `mode=full|incremental` |
 
@@ -1622,7 +1623,7 @@ proposal-create со штампом `user_initiated=True`. Гарды И1–И8 
 | C1 | Единственность процесса держат ДВА гарда, и оба умирают с `bot/`: Telegram 409 + Postgres advisory-lock `0x41494D415348` (`db.session.acquire_single_instance_lock`, захват только в `bot/main.py:7255`). После архивации ничто не мешает запустить N реплик MCP | Advisory-lock перенести в MCP-энтрипоинт / `app/bootstrap` (Часть 5, шаг 1) |
 | C2 | ≥6 групп in-memory синглтонов молча разъедутся при 2–3 процессах: `core/quota` (пер-процессная квота Ads), `core/llm_budget`, usage-счётчики, `core/resilience._ads_sem` (N процессов = N× нагрузка на API), read-allow-list и `_OAUTH_RUNTIME` из `ads/client` | Вынос в БД или единый ads-процесс — предпосылка пивота |
 | C3 | `app/bootstrap.py` уже существует (+`tests/test_headless_bootstrap.py`), но покрывает ТОЛЬКО ads-глобалы; quota / i18n / whitelist-энфорсмент — нет | Расширить bootstrap, не писать второй |
-| C4 | APScheduler: все джобы зовут `bot.send_message` (aiogram) и `bot/i18n` — при архивации `bot/` планировщик и дайджесты умирают | «Дом scheduler'а» (Часть 5): отдельный процесс + тонкий Bot-клиент, i18n вынести из `bot/` |
+| C4 | APScheduler: все джобы зовут `bot.send_message` (aiogram) — при архивации `bot/` планировщик и дайджесты умирают. i18n из связки **вынут** (`core/i18n.py`, 23.07.2026); держат ещё `bot.keyboards`, `bot.ux`, `bot.main._advise_apply_op` | «Дом scheduler'а» (Часть 5): отдельный процесс + тонкий Bot-клиент |
 | C5 | Создание proposal размазано по ≥3 хендлерам `bot/` | Сводить к одной точке (см. строку выше) |
 | C6 | Деплой: `docker-entrypoint.sh` накатывает alembic ТОЛЬКО при `argv == python -m bot.main` → новые сервисы стартуют на непромигрированной БД + гонка одновременного upgrade; `DATABASE_URL` в compose `environment:` БЬЁТ `env_file:`; heartbeat — один файл на контейнер (гонка last-writer); CI health-check захардкожен на контейнер `aimash-bot`; `TZ=UTC` только у bot-сервиса | Переписать entrypoint-гейт и compose под многосервисность до первого деплоя MCP |
 | C7 | `_OAUTH_RUNTIME` держит расшифрованные refresh-токены в RAM каждого процесса с ads-слоем | `SECRETS_ENCRYPTION_KEY` нужен и MCP-процессу; поверхность утечки шире (core dump / OOM) — учесть в §4 |
@@ -2076,7 +2077,7 @@ pending proposal) это решается разделением: этапы 0�
 **27.6 URL-опции** [Есть в коде]. Tracking template с обязательным `{lpurl}`; final URL suffix;
 до 8 custom parameters.
 
-**27.7 Финальная сводка** [Есть в коде — `fmt_cc_final_summary`, логика в `bot/texts.py`].
+**27.7 Финальная сводка** [Есть в коде — `fmt_cc_final_summary`, логика в `core/texts.py`].
 Настройки + Final URL + display path + утверждённые тексты **с длинами** + изображения + полный
 набор ассетов + URL-опции.
 
@@ -2268,7 +2269,7 @@ fail-closed ⇒ **включённая 2FA = все мутации отказа�
 **31.6 Топология деплоя** [Дизайн открыт]. Hermes (systemd + linger) + MCP-процесс +
 scheduler-процесс. CI health-check захардкожен на `aimash-bot` — чинить вместе с архивацией.
 
-**31.7 Двуязычность RU/EN** [Дизайн открыт]. `bot/i18n.py` — 3139 строк, 528 EN-ключей; ~20 точек
+**31.7 Двуязычность RU/EN** [Дизайн открыт]. `core/i18n.py` — 3139 строк, 528 EN-ключей; ~20 точек
 в scheduler локализуют текст под получателя. Для свободных ответов модели проблема мала, для
 **структурных текстов** (алерты, сводки, отчёты, карточки) — нет: их рендерит код.
 

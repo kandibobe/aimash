@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import agent.loop as L  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
 from ads.read import read_campaign_config  # noqa: E402
-from bot import texts  # noqa: E402
+from core import texts  # noqa: E402
 from core.config import settings  # noqa: E402
 
 

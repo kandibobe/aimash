@@ -1,4 +1,4 @@
-"""Офлайн-тесты bot/i18n.py: каталог/мост к texts, фолбэк языка, in-memory выбор языка."""
+"""Офлайн-тесты core/i18n.py: каталог/мост к texts, фолбэк языка, in-memory выбор языка."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import bot.i18n as i18n  # noqa: E402
-from bot import texts  # noqa: E402
+import core.i18n as i18n  # noqa: E402
+from core import texts  # noqa: E402
 
 
 def test_t_returns_lang_variant():

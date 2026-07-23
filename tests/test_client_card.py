@@ -20,7 +20,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from bot.callbacks import ClientCB  # noqa: E402
 from bot.keyboards import client_card_kb  # noqa: E402
-from bot.texts import fmt_client_card  # noqa: E402
+from core.texts import fmt_client_card  # noqa: E402
 
 CID = "7753643025"
 

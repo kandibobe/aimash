@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bot import texts  # noqa: E402
+from core import texts  # noqa: E402
 
 
 def test_create_campaign_result_humanized_with_warnings():

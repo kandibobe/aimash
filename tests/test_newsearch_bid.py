@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bot.handlers.search_media as sm  # noqa: E402
 import bot.main as bm  # noqa: E402
-from bot import texts  # noqa: E402
+from core import texts  # noqa: E402
 from bot.callbacks import SearchBidCB  # noqa: E402
 from core.limits import wizard_default_money_units  # noqa: E402
 from db.session import init_db  # noqa: E402

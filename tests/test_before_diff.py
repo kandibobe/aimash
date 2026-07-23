@@ -15,7 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ads.service import _assert_no_drift  # noqa: E402
-from bot import texts  # noqa: E402
+from core import texts  # noqa: E402
 
 
 # ── Рендер реального «было → станет» ─────────────────────────────────────────────

@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bot.texts import fmt_competitors  # noqa: E402
+from core.texts import fmt_competitors  # noqa: E402
 from db.competitors import Snapshot  # noqa: E402
 from reports.auction_insights import (  # noqa: E402
     AuctionInsightsError,

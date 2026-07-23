@@ -531,7 +531,7 @@ def test_board_caps_top_n():
 def test_bids_card_shows_google_numbers_and_no_button_hint():
     """Карточка /bids: цифры Google + ГОТОВАЯ ФРАЗА команды вместо кнопки — ставка меняется только
     прямой командой через подтверждение (golden rule #3)."""
-    from bot import texts
+    from core import texts
 
     items = _board(
         [_bl("окна", bid=0.5, fpc=1.0, cost=10.0)], [BidSimulation("11", "22", _BID_POINTS)]

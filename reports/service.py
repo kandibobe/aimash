@@ -139,10 +139,10 @@ def _delta_pct(now: float, prev: float) -> str:
 
 
 def _resolve_lang(lang: str | None) -> str:
-    """Язык сводки: явный lang → он; None → язык текущего запроса (contextvar bot.i18n,
+    """Язык сводки: явный lang → он; None → язык текущего запроса (contextvar core.i18n,
     ставит LangMiddleware). i18n импортируем ЛЕНИВО — reports не должен жёстко зависеть от bot."""
     if lang is None:
-        from bot import i18n
+        from core import i18n
 
         return i18n.current_lang()
     return lang if lang in ("ru", "en") else "ru"

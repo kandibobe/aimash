@@ -298,7 +298,7 @@ def test_assemble_networks_schedule_dates():
 
 # ── §B.3: честный показ пустых денежных метрик в сводке настроек ──────────────────
 def test_settings_summary_shows_no_data_for_zero_cpc():
-    from bot.texts import fmt_cc_settings_summary
+    from core.texts import fmt_cc_settings_summary
 
     s = {
         "campaign_name": "Тест",
@@ -395,7 +395,7 @@ def test_assemble_unknown_currency_falls_back_to_legacy_defaults():
 
 
 def test_settings_summary_zero_decimal_currency_and_user_set_cpc_label():
-    from bot.texts import fmt_cc_settings_summary
+    from core.texts import fmt_cc_settings_summary
 
     s = {
         "campaign_name": "Тест",
@@ -433,7 +433,7 @@ def test_wizard_default_money_units_table_consistency():
 
 def test_final_summary_zero_decimal_currency():
     """Ревью 2026-07-07: финальная сводка (Этап 7) тоже без копеек у zero-decimal валют."""
-    from bot.texts import fmt_cc_final_summary
+    from core.texts import fmt_cc_final_summary
 
     state = {
         "settings": {

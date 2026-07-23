@@ -82,7 +82,8 @@ from agent.campaign_settings import (
 from agent.loop import handle_command
 from agent.tools.schemas import MAX_CAMPAIGN_KEYWORDS, SCHEMAS
 from app.bootstrap import bootstrap_ads_layer  # общий с MCP старт ads-слоя (одна копия, не две)
-from bot import i18n, texts, ux
+from bot import ux
+from core import i18n, texts
 from bot.campaign_wizard.store import CampaignDraftStore
 from bot.callbacks import (
     AdminCB,
@@ -650,7 +651,7 @@ class WhitelistMiddleware(BaseMiddleware):
 
 
 class LangMiddleware(BaseMiddleware):
-    """Ставит язык интерфейса (§4) в contextvar bot.i18n на время обработки апдейта — форматтеры
+    """Ставит язык интерфейса (§4) в contextvar core.i18n на время обработки апдейта — форматтеры
     (texts.fmt_*, summary_text, клавиатуры) сами берут язык, без проброса lang через ~80 call-site.
     Резолв по chat_id (как whitelist); сброс в finally, чтобы язык не «протёк» в следующий апдейт
     (один event loop под APScheduler). Дефолт RU при отсутствии выбора (i18n.get_lang)."""

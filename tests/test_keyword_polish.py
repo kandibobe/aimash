@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import bot.texts as texts  # noqa: E402
+import core.texts as texts  # noqa: E402
 from ads.keyword_plan import KeywordIdea  # noqa: E402
 from keywords.cluster import Cluster  # noqa: E402
 from keywords.export import HEADERS, _headers, write_keywords_csv, write_keywords_xlsx  # noqa: E402

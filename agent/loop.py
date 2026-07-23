@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from agent.router import chat
 from agent.tools.schemas import MUTATION_TOOLS, READ_TOOLS, SCHEMAS, TOOLS
-from bot import i18n
+from core import i18n
 from confirm.gate import Proposal, build_summary
 from core.logging import redact_text
 

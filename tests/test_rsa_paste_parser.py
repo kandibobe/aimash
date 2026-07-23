@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from bot.texts import fmt_rsa_list_block, parse_rsa_paste
+from core.texts import fmt_rsa_list_block, parse_rsa_paste
 
 
 def _sess(headlines: list[str], descriptions: list[str]):
