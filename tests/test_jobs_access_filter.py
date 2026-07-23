@@ -57,9 +57,15 @@ async def test_threshold_tuning_enforced_skips_unauthorized_account(monkeypatch)
     import reports.queries as rq
     import scheduler.threshold_tuner as tuner
     from ads import read as ads_read
+    from bot.keyboards import thr_tune_kb
     from core.access import grant_account_access, revoke_account_access
     from core.config import settings as cfg
     from db.session import init_db
+    from scheduler import delivery
+
+    # Порт доставки (развязка C4): без заполненного порта thr-tune молчит ПО ВСЕМ аккаунтам, и тест
+    # про грант проходил бы вхолостую — «не пришло по B» выполнялось бы по неверной причине.
+    monkeypatch.setitem(delivery._BUILDERS, delivery.THRESHOLD_TUNE, thr_tune_kb)
 
     A, B = "1112223334", "2223334445"
     monkeypatch.setattr(jobs, "_scheduled_accounts", lambda: [A, B])

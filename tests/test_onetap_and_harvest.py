@@ -22,8 +22,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import bot.main as bm  # noqa: E402
 from ads.resolve import MONEY_OPS  # noqa: E402
 from ads.service import SUPPORTED_OPERATIONS  # noqa: E402
+from advisor.apply import one_tap_op, one_tap_params  # noqa: E402
 from audit.engine import ONE_TAP_OPS  # noqa: E402
-from bot.keyboards import ADVISE_APPLY_OPS  # noqa: E402
+from bot.keyboards import _ADVISE_APPLY_LABELS  # noqa: E402
 
 
 # ── One-tap: инварианты денег ────────────────────────────────────────────────────
@@ -37,8 +38,11 @@ def test_one_tap_ops_never_touch_money():
         SUPPORTED_OPERATIONS
     )  # кнопка на неподдержанную op = падение ПОСЛЕ ✅
     # Движок и бот обязаны считать one-tap одинаково: разъезд = кнопка, которая ничего не делает,
-    # либо находка, которая молча теряет кнопку.
-    assert ONE_TAP_OPS == set(ADVISE_APPLY_OPS)
+    # либо находка, которая молча теряет кнопку. Направление истины ПЕРЕВЁРНУТО (2026-07-23):
+    # боевой allow-list — это ONE_TAP_OPS (bot-free), а `_ADVISE_APPLY_LABELS` обязан его покрывать.
+    # Раньше было наоборот — множество операций выводилось из словаря ПОДПИСЕЙ КНОПОК, то есть
+    # денежный гард зависел от UI-строк и уехал бы вместе с архивацией кнопочного слоя.
+    assert ONE_TAP_OPS == set(_ADVISE_APPLY_LABELS)
 
 
 def test_one_tap_params_are_pinned_to_the_safe_direction():
@@ -49,21 +53,25 @@ def test_one_tap_params_are_pinned_to_the_safe_direction():
         suggested_operation="set_campaign_display_network",
         evidence={"display_network": True, "geo_target_type": "PRESENCE_OR_INTEREST"},
     )
-    assert bm._advise_apply_params(rec) == {"campaign": "Бренд", "display_network": False}
+    assert one_tap_params(rec) == {"campaign": "Бренд", "display_network": False}
 
     rec.suggested_operation = "set_campaign_geo_target_type"
-    assert bm._advise_apply_params(rec) == {"campaign": "Бренд", "geo_target_type": "PRESENCE"}
+    assert one_tap_params(rec) == {"campaign": "Бренд", "geo_target_type": "PRESENCE"}
 
     # Нет кампании → нечего адресовать: черновик не минтим (не гадаем).
     rec.target_campaign = None
-    assert bm._advise_apply_params(rec) is None
+    assert one_tap_params(rec) is None
 
 
 def test_advise_apply_never_money():
-    """3.2в, гард плана: деньги/ставки НИКОГДА в advise-apply — независимо от равенства с
-    ONE_TAP_OPS (проверка выше), чтобы правка одного множества не открыла деньги в другом."""
-    assert not ({"update_budget", "update_bid", "update_keyword_bid"} & set(ADVISE_APPLY_OPS))
-    assert not (set(ADVISE_APPLY_OPS) & set(MONEY_OPS))
+    """3.2в, гард плана: деньги/ставки НИКОГДА в advise-apply — НЕЗАВИСИМО от равенства выше.
+    Второй рубеж держат подписи: даже если бы ONE_TAP_OPS испортили денежной операцией, кнопки под
+    неё нет — `advise_feedback_kb` рисует её только по ключу из `_ADVISE_APPLY_LABELS`."""
+    money = {"update_budget", "update_bid", "update_keyword_bid"}
+    assert not (money & set(_ADVISE_APPLY_LABELS))
+    assert not (set(_ADVISE_APPLY_LABELS) & set(MONEY_OPS))
+    assert not (money & set(ONE_TAP_OPS))
+    assert not (set(ONE_TAP_OPS) & set(MONEY_OPS))
 
 
 def test_advise_apply_params_remove_negative_matches_schema():
@@ -76,14 +84,14 @@ def test_advise_apply_params_remove_negative_matches_schema():
         suggested_operation="remove_negative_keywords",
         evidence={"negative": "ноутбук", "match_type": "broad"},
     )
-    params = bm._advise_apply_params(rec)
+    params = one_tap_params(rec)
     assert params == {"campaign": "Бренд", "keywords": ["ноутбук"], "match_type": "broad"}
     SCHEMAS["remove_negative_keywords"](**params)  # схема мутации принимает как есть
 
     rec.evidence = {"negative": "ноутбук", "match_type": None}  # тип не распознан движком
-    assert bm._advise_apply_params(rec) is None
+    assert one_tap_params(rec) is None
     rec.evidence = {"blocked": 1}  # старый формат evidence без текста минуса
-    assert bm._advise_apply_params(rec) is None
+    assert one_tap_params(rec) is None
 
 
 def test_advise_apply_op_gates_on_executability():
@@ -96,19 +104,19 @@ def test_advise_apply_op_gates_on_executability():
         suggested_operation="add_negative_keywords",
         evidence={"ngrams": ["бесплатно"], "cost": 10.0},
     )
-    assert bm._advise_apply_op(ngram_like) is None
+    assert one_tap_op(ngram_like) is None
 
     real = SimpleNamespace(
         target_campaign="Бренд",
         suggested_operation="add_negative_keywords",
         evidence={"keyword": "бесплатно", "match_type": "exact"},
     )
-    assert bm._advise_apply_op(real) == "add_negative_keywords"
+    assert one_tap_op(real) == "add_negative_keywords"
 
     money = SimpleNamespace(
         target_campaign="Бренд", suggested_operation="update_budget", evidence={}
     )
-    assert bm._advise_apply_op(money) is None  # деньги не проходят даже с «исполнимыми» params
+    assert one_tap_op(money) is None  # деньги не проходят даже с «исполнимыми» params
 
 
 def test_geo_and_display_checks_carry_a_one_tap_operation():

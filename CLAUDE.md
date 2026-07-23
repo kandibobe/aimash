@@ -185,10 +185,17 @@ Telegram), delegation/субагенты, curator. **Что Hermes НЕ даёт
 - ⛔ **`bot/` и `agent/` физически не двигать.** Архивация — после Волны 1 шаг 1 (bot-free энтрипоинт +
   перенос advisory-lock, §5.3 C1/C3), тогда же тег `pre-hermes`. Сегодня перенос убил бы развёрнутый
   READ-путь.
-- ✅ **Пара i18n/texts из `bot/` уже вынесена** — `core/i18n.py` + `core/texts.py` (Волна 1 шаг 1).
-  Была половина мины C4: `advisor/service.py`, `reports/service.py`, `scheduler/jobs.py` тянули весь
-  пакет бота ради перевода. Вторая половина ЖИВА: `scheduler/jobs.py` всё ещё зовёт `bot.keyboards`,
-  `bot.ux` и `bot.main._advise_apply_op` — планировщик отдельным процессом пока не поднимается.
+- ✅ **Мина C4 снята по коду** (Волна 1 шаг 1): `core/i18n.py` + `core/texts.py` (локализация и
+  нарезка), `advisor/apply.py` (`one_tap_op`/`one_tap_params` — были в `bot/main.py`),
+  `scheduler/delivery.py` (**порт клавиатур**: заполняет bot-процесс, пустой порт = дайджест уходит
+  текстом, а thr-tune молчит целиком), `scheduler/transport.py` (отправка .txt — единственное место
+  в фоновом контуре, где aiogram разрешён). Ни один из 14 пакетов ядра не импортирует `bot/`.
+  **Денежный allow-list развёрнут:** `ONE_TAP_OPS` теперь задаёт bot-free `audit/engine.py`, а
+  подписи кнопок обязаны его покрывать (раньше было наоборот — множество выводилось из UI-строк).
+  Гард — `tests/test_scheduler_decoupled.py`, **разбором исходника (AST)**: зонд по `sys.modules`
+  (`tests/test_headless_bootstrap.py`) ленивый `from bot import ux` внутри функции не видит в
+  принципе (проверено отрицательным контролем 23.07.2026). **Дома у процесса ещё нет** —
+  `scheduler/__main__.py` и сервиса в compose не существует, старт по-прежнему из `bot/main.py`.
 
 ## Модель (СМЕНЯЕМАЯ — не зашивать одну)
 

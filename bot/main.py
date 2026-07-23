@@ -128,7 +128,6 @@ from bot.callbacks import (
 )
 from bot.keyboards import (
     _CAMP_PAGE,  # D1: размер страницы пикера (для «показано N из M» в поиске)
-    ADVISE_APPLY_OPS,
     ALL_MENU_BUTTONS,
     BOT_COMMANDS,
     BOT_COMMANDS_EN,
@@ -6118,9 +6117,13 @@ async def _clone_from_intent(m: Message, brief: dict) -> None:
 # §advisor #1: what a recommendation can apply in ONE TAP — ТОЛЬКО НЕ-денежные операции.
 # update_budget/update_bid НАМЕРЕННО исключены: деньги/ставки только прямой командой (golden rule #3),
 # никогда one-tap. Гард дублируется в _advise_apply (defense-in-depth) + тест test_advise_apply_*.
-# Единый источник — bot.keyboards.ADVISE_APPLY_OPS (его же импортирует scheduler-дайджест):
-# два списка one-tap операций разъехались бы молча (гард денег, golden rule #3).
-_ADVISE_APPLY_OPS = ADVISE_APPLY_OPS
+# Единый источник — bot-free `advisor.apply` (его же зовёт scheduler-дайджест, ему `bot/` не
+# положен). Раньше множество выводилось из подписей кнопок (bot.keyboards.ADVISE_APPLY_OPS =
+# frozenset(_ADVISE_APPLY_LABELS)): денежный allow-list зависел от UI-строк и исчез бы вместе с
+# кнопочным слоем при архивации. Теперь подписи обязаны покрывать операции, а не задавать их.
+from advisor.apply import ONE_TAP_OPS as _ADVISE_APPLY_OPS  # noqa: E402
+from advisor.apply import one_tap_op as _advise_apply_op  # noqa: E402
+from advisor.apply import one_tap_params as _advise_apply_params  # noqa: E402
 
 
 async def _advise_run(
@@ -6655,57 +6658,6 @@ async def _audit_run(
         _AUDIT_QA_CACHE[chat_id] = (audit_seed, acct, period)
         await state.set_state(AuditQA.active)
         await target.answer(i18n.t("audit_qa_hint", lang), reply_markup=audit_qa_exit_kb(lang))
-
-
-def _advise_apply_params(rec) -> dict | None:
-    """Собрать params мутации из рекомендации для one-tap «применить». None — нельзя собрать.
-    pause_campaign → {campaign}; add_negative_keywords → {campaign, keywords:[ключ], match_type};
-    set_campaign_display_network → {campaign, display_network: False};
-    set_campaign_geo_target_type → {campaign, geo_target_type: 'PRESENCE'}.
-
-    ⚠️ Направление у последних двух — КОНСТАНТА, а не поле находки: одним тапом бот только ЧИНИТ
-    (выключает КМС, сужает гео). Включить КМС или расширить гео до PRESENCE_OR_INTEREST можно лишь
-    прямой командой человека — иначе кнопка «применить совет» стала бы способом РАСШИРИТЬ показы."""
-    campaign = rec.target_campaign
-    if not campaign:
-        return None
-    if rec.suggested_operation == "pause_campaign":
-        return {"campaign": campaign}
-    if rec.suggested_operation == "set_campaign_display_network":
-        return {"campaign": campaign, "display_network": False}
-    if rec.suggested_operation == "set_campaign_geo_target_type":
-        return {"campaign": campaign, "geo_target_type": "PRESENCE"}
-    if rec.suggested_operation == "add_negative_keywords":
-        kw = (rec.evidence or {}).get("keyword")
-        if not kw:
-            return None
-        # match_type из evidence: audit search-terms → 'exact' (режет только этот запрос, не шире);
-        # дефолт 'broad' (advisor wasteful_keyword — как раньше). Схема add_negative_keywords ревалидирует.
-        mt = (rec.evidence or {}).get("match_type") or "broad"
-        return {"campaign": campaign, "keywords": [kw], "match_type": mt}
-    if rec.suggested_operation == "remove_negative_keywords":
-        # 3.2в: negative_keyword_conflicts — снять КАМПАНИЙНЫЙ минус, блокирующий свой ключ.
-        # Текст и тип берём из находки как есть (снимаем ровно тот минус, что конфликтует).
-        neg = (rec.evidence or {}).get("negative")
-        mt = (rec.evidence or {}).get("match_type")
-        if not neg or not mt:
-            return None
-        return {"campaign": campaign, "keywords": [neg], "match_type": mt}
-    return None
-
-
-def _advise_apply_op(rec) -> str | None:
-    """Операция для кнопки «применить» под советом/находкой, либо None (кнопки нет).
-
-    Два гейта: (1) allow-list _ADVISE_APPLY_OPS — деньги/ставки не в один тап (golden rule #3);
-    (2) ИСПОЛНИМОСТЬ — params реально собираются из evidence. Второй нужен потому, что
-    advisor.from_findings сливает advice_operation (метку для outcome-линковки) в
-    rec.suggested_operation: у ngram_waste метка add_negative_keywords, но исполнимого ключа в
-    evidence нет — гейт только по allow-list рисовал бы кнопку, вечно отвечающую «совет устарел»."""
-    op = getattr(rec, "suggested_operation", None)
-    if op not in _ADVISE_APPLY_OPS:
-        return None
-    return op if _advise_apply_params(rec) is not None else None
 
 
 async def _advise_apply(cq: CallbackQuery, rec_uid: str) -> None:
@@ -7341,8 +7293,15 @@ async def main() -> None:
     global SCHED
     sched = None
     try:
+        from scheduler import delivery as sched_delivery
         from scheduler.service import register_user_report_schedules, setup_scheduler
 
+        # C4: планировщик кнопочного слоя НЕ импортирует — он спрашивает клавиатуру у порта.
+        # Заполняем порт здесь: в bot-процессе кнопки есть, в standalone-планировщике их нет и
+        # дайджесты уходят текстом (thr-tune — молчит целиком, см. scheduler/delivery.py).
+        # Забыть эту проводку = карточки без кнопок; гард — tests/test_scheduler_decoupled.py.
+        sched_delivery.register(sched_delivery.ADVISE_FEEDBACK, advise_feedback_kb)
+        sched_delivery.register(sched_delivery.THRESHOLD_TUNE, thr_tune_kb)
         # Плановые отчёты/аномалии/очистка просроченных черновиков. READ-ONLY: планировщик
         # НИКОГДА не меняет аккаунт (golden rule #3) — только чтение и уведомления.
         sched = setup_scheduler(bot)

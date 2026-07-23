@@ -201,7 +201,7 @@ def test_weekly_digest_truncates_by_lines_not_raw_slice():
     src = (ROOT / "scheduler/jobs.py").read_text(encoding="utf-8")
     body = src[src.index("async def run_weekly_digest") : src.index("async def _advise_proactive")]
     assert "[:_DIGEST_MAX]" not in body, "сырой слайс рвёт HTML-тег → Telegram отбивает сообщение"
-    assert "ux.split_by_lines(" in body
+    assert "texts.split_by_lines(" in body  # нарезка переехала в `core/texts.py` (развязка C4)
     # файл с деталями шлётся ОТДЕЛЬНЫМ try: сбой текста не должен отменять вложение
     assert body.count("except Exception as e:") >= 2
 

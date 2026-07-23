@@ -40,6 +40,33 @@ def status_human(status: str, lang: str | None = None) -> str:
     return render.status_human(status, _lang(lang))
 
 
+# ── Нарезка длинного текста ──────────────────────────────────────────────────────
+# Жило в `bot/ux.py`; переехало сюда, потому что зовёт не только Telegram-слой: плановый дайджест
+# (`scheduler/jobs.py`) режет им своё сообщение, а планировщик обязан подниматься без `bot/`
+# (SPEC.md §5.3, мина C4). `bot/ux.py` реэкспортирует оба имени — вызывающие в боте не менялись.
+SAFE_LIMIT = 3500  # лимит Telegram 4096 минус запас под HTML-обёртку/esc-расширение
+
+
+def split_by_lines(text: str, limit: int = SAFE_LIMIT) -> list[str]:
+    """Разбить длинный текст на куски ≤limit по границам СТРОК (не рвём строку/HTML-тег посередине).
+    Для /mcc и подобных построчных сводок: каждый кусок — самостоятельное сообщение. Одиночная
+    строка длиннее limit (редко) отдаётся как есть (Telegram сам отклонит — но не рвём разметку)."""
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    buf = ""
+    for line in text.split("\n"):
+        candidate = f"{buf}\n{line}" if buf else line
+        if len(candidate) > limit and buf:
+            chunks.append(buf)
+            buf = line
+        else:
+            buf = candidate
+    if buf:
+        chunks.append(buf)
+    return chunks
+
+
 # ── Профиль бота (@BotFather) ────────────────────────────────────────────────────
 # Плейн-текст (Telegram НЕ парсит HTML в описаниях). Длина считается КОДОМ (golden rule #4):
 # short ≤120, description ≤512 символов-кодпойнтов. Ставятся при старте (bot.main.main →

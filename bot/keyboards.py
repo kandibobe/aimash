@@ -847,8 +847,12 @@ def advise_header_kb(proactive_on: bool, lang: str | None = None) -> InlineKeybo
     return kb.as_markup()
 
 
-# §advisor #1: какие советы можно применить в ОДИН ТАП (только НЕ-денежные — pause/минус-слова).
-# Деньги/ставки (update_budget/update_bid) НАМЕРЕННО не one-tap (golden rule #3) → нет метки → нет кнопки.
+# §advisor #1: ПОДПИСИ кнопок к one-tap операциям. Только подписи: само множество операций живёт в
+# bot-free `audit.engine.ONE_TAP_OPS` (через `advisor.apply`) — раньше боевым allow-list'ом был
+# `frozenset` ЭТОГО словаря, то есть денежный гард выводился из UI-строк и уехал бы вместе с
+# кнопочным слоем. Ключи обязаны покрывать ONE_TAP_OPS ровно — гард
+# tests/test_onetap_and_harvest.py; отсутствующий ключ = операция без кнопки, лишний = кнопка,
+# которую нечем применить.
 _ADVISE_APPLY_LABELS = {
     "pause_campaign": "advise_apply_btn_pause",
     "add_negative_keywords": "advise_apply_btn_negatives",
@@ -859,9 +863,6 @@ _ADVISE_APPLY_LABELS = {
     # 3.2в (2026-07-17): снять кампанийный минус, блокирующий свой ключ (negative_keyword_conflicts).
     "remove_negative_keywords": "advise_apply_btn_remove_negative",
 }
-# ЕДИНЫЙ источник множества one-tap операций: bot.main (интерактивный /advise) и scheduler-дайджест
-# импортируют ЭТО множество — дублирование списков разъехалось бы молча (гард денег #3).
-ADVISE_APPLY_OPS = frozenset(_ADVISE_APPLY_LABELS)
 
 
 def advise_feedback_kb(

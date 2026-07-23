@@ -61,10 +61,16 @@ async def test_digest_sends_cards_with_buttons_and_no_proposal(monkeypatch):
     from sqlalchemy import delete, func, select
 
     import advisor.service as advisor_service
+    from bot.keyboards import advise_feedback_kb
     from db.models import Proposal
     from db.models import Recommendation as RecRow
     from db.session import Session, init_db
-    from scheduler import jobs
+    from scheduler import delivery, jobs
+
+    # Планировщик кнопок больше не импортирует — он спрашивает их у порта (C4, развязка от `bot/`).
+    # В бою порт заполняет `bot/main.py` на старте; здесь — тест, тем же настоящим построителем.
+    # Не заполнить = карточки уйдут текстом, и это НЕ падение: см. test_scheduler_decoupled.py.
+    monkeypatch.setitem(delivery._BUILDERS, delivery.ADVISE_FEEDBACK, advise_feedback_kb)
 
     await init_db()
     chat = 6101

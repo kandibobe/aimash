@@ -228,8 +228,8 @@ async def _auction_snapshot_age(acct: str) -> int | None:
 
 async def _digest_action(chat_id: int, lang: str, accts: list[str], acct_info: dict):
     """3.3: одна actionable-секция в плановом дайджесте — топ-рекомендация с ИСПОЛНИМОЙ неденежной
-    операцией (тот же двойной гейт, что в /advise: allow-list _ADVISE_APPLY_OPS + исполнимость
-    params, bot.main._advise_apply_op). Кнопка лишь СТАРТУЕТ confirm-гейт по тапу пользователя —
+    операцией (тот же двойной гейт, что в /advise: allow-list ONE_TAP_OPS + исполнимость params,
+    advisor.apply.one_tap_op). Кнопка лишь СТАРТУЕТ confirm-гейт по тапу пользователя —
     proposal из scheduler НЕ создаётся (golden rule #1/#3). Анти-дубль: операторам с
     advise_proactive карточки уже шлёт run_recommendations_digest — им кнопку не кладём.
     Всё best-effort: любой сбой → ('', None), дайджест уходит без кнопки."""
@@ -238,10 +238,10 @@ async def _digest_action(chat_id: int, lang: str, accts: list[str], acct_info: d
             return "", None
         from advisor import service as advisor_service
         from advisor import store as advisor_store
+        from advisor.apply import one_tap_op
         from advisor.rules import rank_cross_account
         from core import i18n
-        from bot.keyboards import advise_feedback_kb
-        from bot.main import _advise_apply_op  # поздний импорт: цикл bot.main ↔ scheduler.jobs
+        from scheduler import delivery
 
         items: list[tuple] = []  # (acct, currency, total_cost, rec) — формат rank_cross_account
         for acct in accts:
@@ -265,7 +265,7 @@ async def _digest_action(chat_id: int, lang: str, accts: list[str], acct_info: d
             items.extend(
                 (acct, info.get("currency", ""), total, r)
                 for r in rec_set.recs
-                if _advise_apply_op(r) is not None
+                if one_tap_op(r) is not None
             )
         top = rank_cross_account(items, top_n=1)
         if not top:
@@ -277,7 +277,8 @@ async def _digest_action(chat_id: int, lang: str, accts: list[str], acct_info: d
         if len(body) > 400:
             body = body[:400] + "…"
         text = i18n.t("sched_digest_apply_now", lang) + "\n• " + body
-        return text, advise_feedback_kb(rec.rec_uid, lang, apply_op=_advise_apply_op(rec))
+        kb = delivery.markup(delivery.ADVISE_FEEDBACK, rec.rec_uid, lang, apply_op=one_tap_op(rec))
+        return text, kb
     except Exception:  # noqa: BLE001 — кнопка-довесок, дайджест важнее
         return "", None
 
@@ -803,11 +804,11 @@ async def run_weekly_digest(bot) -> int:
     только чтение error_events/bug_reports/audit_log + рассылка. Нет админов ⇒ no-op (opt-in).
     Один недоступный админ не роняет остальных (НЕ capture — иначе петля наблюдаемости).
     Возвращает число обслуженных админов."""
-    from bot import ux
     from core import i18n, texts
     from confirm.store import audit_activity_since
     from core import bugs
     from reports.diag_export import build_weekly_digest_file
+    from scheduler.transport import send_bot_document
 
     with request_scope("scheduler:weekly-digest"):  # §15: корреляция логов джобы по request_id
         from core.access import admin_ids_all
@@ -825,7 +826,7 @@ async def run_weekly_digest(bot) -> int:
             # Обрезаем ПО СТРОКАМ, а не сырым слайсом: `[:3800]` рвал HTML посреди тега/сущности →
             # Telegram отбивал сообщение ("can't parse entities"), исключение глоталось except ниже
             # → дайджест молча не доставлялся ВМЕСТЕ с файлом. Детали всё равно уходят вложением.
-            text = ux.split_by_lines(
+            text = texts.split_by_lines(
                 texts.fmt_weekly_digest(
                     errors, bug_rows, activity, days=WEEKLY_DIGEST_DAYS, lang=lang
                 ),
@@ -838,9 +839,7 @@ async def run_weekly_digest(bot) -> int:
                     "scheduler: недельный дайджест не доставлен в %s: %s", chat_id, type(e).__name__
                 )
             try:  # файл с деталями — отдельно: сбой текста не должен отменять вложение (и наоборот)
-                await ux.send_bot_document(
-                    bot, chat_id, text=file_text, filename="weekly_digest.txt"
-                )
+                await send_bot_document(bot, chat_id, text=file_text, filename="weekly_digest.txt")
                 served += 1
             except Exception as e:  # noqa: BLE001
                 log.warning(
@@ -913,13 +912,12 @@ async def run_recommendations_digest(bot) -> None:
         from advisor import store as advisor_store
         from advisor.rules import _magnitude, rank_cross_account
         from core import i18n
-        from bot.keyboards import advise_feedback_kb
+        from scheduler import delivery
 
         # 3.2в: гейт кнопки «применить» — тот же, что в /advise (allow-list не-денежных операций +
         # исполнимость params). Кнопка лишь СТАРТУЕТ confirm-гейт по тапу пользователя — proposal
-        # из scheduler НЕ создаётся (golden rule #3 цел). Поздний импорт: в живом процессе bot.main
-        # уже загружен, на module-level он дал бы цикл bot.main ↔ scheduler.jobs.
-        from bot.main import _advise_apply_op
+        # из scheduler НЕ создаётся (golden rule #3 цел).
+        from advisor.apply import one_tap_op
 
         top_n = max(1, int(getattr(settings, "advise_digest_top_n", 5)))
         pause = max(0.0, float(getattr(settings, "advise_digest_send_pause", 0.7)))
@@ -1000,13 +998,15 @@ async def run_recommendations_digest(bot) -> None:
                     account=_digest_account_label(acct) + share,
                     body=r.body or "",
                 )
-                apply_op = _advise_apply_op(r)
+                apply_op = one_tap_op(r)
                 try:
                     await asyncio.sleep(pause)
                     await bot.send_message(
                         chat_id,
                         text,
-                        reply_markup=advise_feedback_kb(r.rec_uid, lang, apply_op=apply_op),
+                        reply_markup=delivery.markup(
+                            delivery.ADVISE_FEEDBACK, r.rec_uid, lang, apply_op=apply_op
+                        ),
                     )
                 except Exception as e:  # недоставка одной карточки не роняет рассылку
                     log.warning(
@@ -1271,11 +1271,19 @@ async def run_threshold_tuning(bot) -> None:
         from uuid import uuid4
 
         from core import i18n
-        from bot.keyboards import thr_tune_kb
         from reports.period import custom as period_custom
         from reports.queries import fetch_by_day
+        from scheduler import delivery
         from scheduler.threshold_tuner import TRAILING_DAYS, suggest_thresholds, weekly_buckets
 
+        # Единственная джоба, которую БЕЗ кнопок слать нельзя: всё сообщение — это предложение,
+        # принять которое можно ТОЛЬКО тапом «✅ Принять». Без кнопочного слоя (standalone-
+        # планировщик) оно превратилось бы в неисполнимый текст + запись токена в ui_prefs,
+        # которую некому погасить. Молчим целиком, а не шлём половину. Дайджесты — наоборот:
+        # там цифры самоценны, кнопка довесок (см. scheduler/delivery.py).
+        if delivery.THRESHOLD_TUNE not in delivery.registered():
+            log.info("thr-tune: кнопочный слой не подключён — предложение порогов пропущено")
+            return
         recipients = await _recipients()
         if not recipients:
             return
@@ -1367,7 +1375,7 @@ async def run_threshold_tuning(bot) -> None:
                             cur_minspend=f"{cur_all.get('min_spend', 0):g}",
                             currency=currency or "",
                         ),
-                        reply_markup=thr_tune_kb(token, lang),
+                        reply_markup=delivery.markup(delivery.THRESHOLD_TUNE, token, lang),
                         parse_mode="HTML",
                     )
                 except Exception as e:  # один недоступный чат не роняет рассылку

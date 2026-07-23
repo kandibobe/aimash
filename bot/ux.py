@@ -23,9 +23,14 @@ from adcopy.validate import MIN_KEYWORD_COVERAGE, any_cta, count_flagged
 from core import i18n
 from core.logging import redact_text
 
+# Реэкспорт: сама нарезка живёт в `core/texts.py`, а отправка .txt из джобы — в
+# `scheduler/transport.py`. Обе зовёт планировщик, которому `bot/` не положен (C4). Здесь имена
+# остаются ради вызывающих в боте.
+from core.texts import SAFE_LIMIT, split_by_lines  # noqa: F401
+from scheduler.transport import send_bot_document  # noqa: F401
+
 ACTION_REFRESH_SEC = 4.0  # Telegram гасит chat action через ~5с → обновляем раньше
 TG_LIMIT = 4096  # лимит длины сообщения Telegram
-SAFE_LIMIT = 3500  # запас под HTML-обёртку/esc-расширение
 
 # ── single-flight: «этот долгий колбэк уже выполняется» ────────────────────────────
 # Колбэки НЕ троттлятся (bot/throttle.py лимитирует только сообщения — иначе ломался бы confirm-флоу),
@@ -271,26 +276,6 @@ def proposal_fits(rendered: str) -> bool:
     return len(rendered) <= SAFE_LIMIT
 
 
-def split_by_lines(text: str, limit: int = SAFE_LIMIT) -> list[str]:
-    """Разбить длинный текст на куски ≤limit по границам СТРОК (не рвём строку/HTML-тег посередине).
-    Для /mcc и подобных построчных сводок: каждый кусок — самостоятельное сообщение. Одиночная
-    строка длиннее limit (редко) отдаётся как есть (Telegram сам отклонит — но не рвём разметку)."""
-    if len(text) <= limit:
-        return [text]
-    chunks: list[str] = []
-    buf = ""
-    for line in text.split("\n"):
-        candidate = f"{buf}\n{line}" if buf else line
-        if len(candidate) > limit and buf:
-            chunks.append(buf)
-            buf = line
-        else:
-            buf = candidate
-    if buf:
-        chunks.append(buf)
-    return chunks
-
-
 # 2.8: пауза между чанками многосерийного сообщения (Telegram flood-limits ~1 msg/s на чат) и
 # потолок повторов на TelegramRetryAfter (не зависаем навсегда, если лимит держится).
 CHUNK_SEND_PAUSE_S = 0.35
@@ -361,23 +346,6 @@ async def send_text_document(message: object, *, text: str, filename: str) -> No
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
         await message.answer_document(FSInputFile(path, filename=filename))  # type: ignore[attr-defined]
-    finally:
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-
-
-async def send_bot_document(bot: object, chat_id: int, *, text: str, filename: str) -> None:
-    """Отправить ТЕКСТ .txt-вложением из SCHEDULER-контекста (нет message, только bot). Аналог
-    send_text_document для плановых джоб (еженедельный дайджест). Временный файл — в finally.
-    Вызывающий сам ловит исключения per-recipient (один недоступный чат не валит рассылку)."""
-    fd, path = tempfile.mkstemp(suffix=".txt", prefix="aimash_digest_")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-        await bot.send_document(chat_id, FSInputFile(path, filename=filename))  # type: ignore[attr-defined]
     finally:
         if os.path.exists(path):
             try:

@@ -615,9 +615,14 @@ async def test_digest_action_button_and_proactive_antidup(monkeypatch):
     им карточки шлёт run_recommendations_digest). Персистнется ТОЛЬКО показанная рекомендация."""
     from sqlalchemy import delete
 
+    from bot.keyboards import advise_feedback_kb
     from db.models import UserSettings
     from db.session import Session, init_db
-    from scheduler import jobs
+    from scheduler import delivery, jobs
+
+    # Кнопку планировщик берёт у порта (развязка C4), заполняет его bot-процесс. Без заполнения
+    # дайджест уходит ТЕКСТОМ — это штатная деградация, а не сбой, но тест здесь как раз про кнопку.
+    monkeypatch.setitem(delivery._BUILDERS, delivery.ADVISE_FEEDBACK, advise_feedback_kb)
 
     await init_db()
     chat_btn, chat_pro = 91009, 91010

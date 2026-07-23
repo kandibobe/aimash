@@ -69,10 +69,16 @@ async def test_tuner_job_offers_but_never_writes_thresholds(monkeypatch):
     from sqlalchemy import delete, select
 
     import core.access as acc
+    from bot.keyboards import thr_tune_kb
     from core.config import settings as cfg
     from db.models import UserSettings
     from db.session import Session, init_db
-    from scheduler import jobs
+    from scheduler import delivery, jobs
+
+    # Развязка C4: клавиатуру планировщик берёт у порта, заполняет его bot-процесс. thr-tune —
+    # единственная джоба, которая при пустом порте МОЛЧИТ целиком (принять предложение можно только
+    # тапом), поэтому здесь порт обязателен, иначе тест меряет тишину. Гард — test_scheduler_decoupled.
+    monkeypatch.setitem(delivery._BUILDERS, delivery.THRESHOLD_TUNE, thr_tune_kb)
 
     # A8: thr-tune теперь фильтрует получателей через accessible_accounts_for_user (как все
     # per-account рассылки). Этот тест проверяет ЛОГИКУ предложения, не доступ — фиксируем legacy
