@@ -1808,7 +1808,7 @@ async def purge_stale_rows(*, now: datetime | None = None) -> dict[str, int]:
     from sqlalchemy import delete as sa_delete
     from sqlalchemy import update as sa_update
 
-    from db.models import AccountHealthSnapshot, ClientSitePage, CrawlJob, ErrorEvent
+    from db.models import AccountHealthSnapshot, AdsQuotaOp, ClientSitePage, CrawlJob, ErrorEvent
 
     now = now or datetime.now(timezone.utc)
     result = {
@@ -1816,6 +1816,7 @@ async def purge_stale_rows(*, now: datetime | None = None) -> dict[str, int]:
         "crawl_jobs": 0,
         "account_health_snapshot": 0,
         "site_page_text": 0,
+        "ads_quota_ops": 0,
     }
     with request_scope("scheduler:purge"):  # §15: корреляция логов джобы по request_id
         async with Session() as s:
@@ -1877,15 +1878,25 @@ async def purge_stale_rows(*, now: datetime | None = None) -> dict[str, int]:
                         .values(text=None)
                     )
                 result["site_page_text"] = len(stale)
+            if settings.ads_quota_ops_retain_days > 0:  # C2: строки распределённого счётчика квоты
+                cutoff = now - timedelta(days=settings.ads_quota_ops_retain_days)
+                rows = (await s.execute(select(AdsQuotaOp.id, AdsQuotaOp.ts))).all()
+                stale = [rid for rid, ts in rows if _older_than(ts, cutoff)]
+                for i in range(0, len(stale), 500):
+                    await s.execute(
+                        sa_delete(AdsQuotaOp).where(AdsQuotaOp.id.in_(stale[i : i + 500]))
+                    )
+                result["ads_quota_ops"] = len(stale)
             if any(result.values()):
                 await s.commit()
         if any(result.values()):
             log.info(
                 "scheduler: purge — error_events удалено %d, crawl_jobs %d, health-снапшотов %d, "
-                "текстов страниц обнулено %d",
+                "текстов страниц обнулено %d, quota-строк удалено %d",
                 result["error_events"],
                 result["crawl_jobs"],
                 result["account_health_snapshot"],
                 result["site_page_text"],
+                result["ads_quota_ops"],
             )
         return result

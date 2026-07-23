@@ -662,7 +662,7 @@ async def quota_cmd(m: bm.Message) -> None:
     Read-only; сам гейт (warn 80% / блок мутаций 95%) живёт в core.quota."""
     from core import quota as q
 
-    snap = q.snapshot()
+    snap = await q.snapshot()
     lim, used = snap["limit"], snap["used"]
     pct = f"{snap['pct'] * 100:.0f}%"
     per = "\n".join(

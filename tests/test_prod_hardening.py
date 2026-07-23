@@ -180,6 +180,7 @@ async def test_purge_disabled_when_retain_zero(monkeypatch):
     monkeypatch.setattr(settings, "crawl_jobs_retain_days", 0)
     monkeypatch.setattr(settings, "account_health_retain_days", 0)  # N1.1: та же семантика
     monkeypatch.setattr(settings, "site_page_text_retain_days", 0)  # §20: тексты краула
+    monkeypatch.setattr(settings, "ads_quota_ops_retain_days", 0)  # C2: строки счётчика квоты
     async with Session() as s:
         await s.execute(delete(ErrorEvent))
         s.add(
@@ -197,10 +198,38 @@ async def test_purge_disabled_when_retain_zero(monkeypatch):
         "crawl_jobs": 0,
         "account_health_snapshot": 0,
         "site_page_text": 0,
+        "ads_quota_ops": 0,
     }
     async with Session() as s:
         cnt = (await s.execute(select(func.count()).select_from(ErrorEvent))).scalar()
     assert cnt >= 1  # ничего не удалено
+
+
+async def test_purge_removes_stale_quota_rows(monkeypatch):
+    """C2: purge_stale_rows чистит строки ads_quota_ops старше retain-порога; свежая строка (в окне
+    учёта) остаётся — распределённый счётчик продолжает считать верно."""
+    from datetime import timezone
+
+    from core.config import settings
+    from db.models import AdsQuotaOp
+    from db.session import Session, db_dt, init_db
+    from scheduler import jobs
+
+    await init_db()
+    monkeypatch.setattr(settings, "ads_quota_ops_retain_days", 1)
+    async with Session() as s:
+        await s.execute(delete(AdsQuotaOp))  # детерминизм на temp SQLite (переживает между тестами)
+        s.add(AdsQuotaOp(ts=datetime(2020, 1, 1), account="111", kind="mutate", op_count=5))  # old
+        s.add(  # свежая, в окне — не трогаем
+            AdsQuotaOp(ts=db_dt(datetime.now(timezone.utc)), account="111", kind="read", op_count=1)
+        )
+        await s.commit()
+
+    res = await jobs.purge_stale_rows()
+    assert res["ads_quota_ops"] == 1  # удалена только старая строка
+    async with Session() as s:
+        kinds = set((await s.execute(select(AdsQuotaOp.kind))).scalars().all())
+    assert kinds == {"read"}  # свежая (read) цела, старая (mutate) удалена
 
 
 # ── C3: пер-юзер дневной потолок LLM (fail-closed) ─────────────────────────────────

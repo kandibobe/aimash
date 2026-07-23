@@ -175,7 +175,7 @@ async def run_ads_call(
     from core import quota
 
     name = label or getattr(fn, "__name__", "ads_call")
-    quota.check_mutation_allowed(account)  # ДО семафора/SDK: не тратим слот на заведомо блок
+    await quota.check_mutation_allowed(account)  # ДО семафора/SDK: не тратим слот на заведомо блок
 
     async def _inner() -> T:
         async with asyncio.timeout(ADS_TIMEOUT_S):
@@ -195,7 +195,7 @@ async def run_ads_call(
     except Exception as e:
         log.warning("ads-call %s: %s за %dмс", name, _fail_cause(e), _ms(start))
         raise
-    quota.record(account, kind="mutate", count=op_count)  # учёт операций батча в квоте (§3)
+    await quota.record(account, kind="mutate", count=op_count)  # учёт операций батча в квоте (§3)
     log.info("ads-call %s: ok за %dмс", name, _ms(start))
     return result
 
@@ -217,7 +217,7 @@ async def run_ads_create_call(
     from core import quota
 
     name = label or getattr(fn, "__name__", "ads_create")
-    quota.check_mutation_allowed(account)  # ДО семафора/SDK: не тратим слот на заведомо блок
+    await quota.check_mutation_allowed(account)  # ДО семафора/SDK: не тратим слот на заведомо блок
 
     start = time.monotonic()
     try:
@@ -227,7 +227,7 @@ async def run_ads_create_call(
     except Exception as e:
         log.warning("ads-create %s: %s за %dмс", name, _fail_cause(e), _ms(start))
         raise
-    quota.record(account, kind="mutate", count=op_count)  # учёт операций батча в квоте (§3)
+    await quota.record(account, kind="mutate", count=op_count)  # учёт операций батча в квоте (§3)
     log.info("ads-create %s: ok за %dмс", name, _ms(start))
     return result
 
@@ -267,7 +267,7 @@ async def run_ads_read_call(
     except Exception as e:
         log.warning("ads-read %s: %s за %dмс", name, _fail_cause(e), _ms(start))
         raise
-    quota.record(account, kind="read")  # учёт чтения в дневной квоте (§3), без блокировки
+    await quota.record(account, kind="read")  # учёт чтения в дневной квоте (§3), без блокировки
     log.info("ads-read %s: ok за %dмс", name, _ms(start))
     return result
 

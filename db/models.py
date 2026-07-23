@@ -688,3 +688,40 @@ class AuctionInsightRow(Base):
     outranking_share: Mapped[float | None] = mapped_column(Float)
     period_label: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AdsQuotaOp(Base):
+    """§3 / C2: строка РАСПРЕДЕЛЁННОГО счётчика дневной квоты Google Ads API — общий стор вместо
+    per-process (SPEC §9.2 `ads_quota_ops`, §11.3; HERMES_SPEC §31.3).
+
+    Зачем таблица, а не модульный deque: bot, scheduler и per-session MCP-процесс — РАЗНЫЕ процессы
+    со слепыми друг к другу счётчиками. Особенно per-session MCP: процесс поднимается на сессию и
+    умирает на закрытии stdio — in-process счётчик для него структурно бесполезен. Общий стор —
+    единственное, что видит всю нагрузку контура.
+
+    Одна строка = один вызов `quota.record()` (НЕ операция): батч из 50 mutate-операций = одна
+    строка `op_count=50` (Google тарифицирует каждую операцию, нам достаточно суммы). Скользящее
+    24ч-окно считается в SQL: `SUM(op_count) WHERE ts > now-24h`. Ретеншн — purge_stale_rows.
+
+    Без PII/секретов: customer_id — идентификатор аккаунта, не секрет проекта. На SQLite (dev/test)
+    таблицу создаёт create_all; на Postgres (prod) — Alembic (0031)."""
+
+    __tablename__ = "ads_quota_ops"
+    __table_args__ = (
+        # Глобальный счёт окна + prune: WHERE ts > cutoff.
+        Index("ix_ads_quota_ops_ts", "ts"),
+        # Пер-аккаунтный счёт: WHERE account = ? AND ts > cutoff (composite покрывает оба условия).
+        Index("ix_ads_quota_ops_account_ts", "account", "ts"),
+    )
+
+    # Integer (как у всех сиблингов): на SQLite это INTEGER PRIMARY KEY → rowid-автоинкремент
+    # (BIGINT PRIMARY KEY им НЕ является — id остался бы NULL). Объём строк крошечный (≤ число
+    # API-вызовов/сутки < 15k, ретеншн 2 дня), 2.1млрд-потолка Integer хватает с гигантским запасом.
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Момент фиксации батча (wall-clock UTC). Пишется и сравнивается через db.session.db_dt():
+    # SQLite кладёт naive UTC, Postgres — tz-aware; окно фильтруется в SQL диалект-корректно.
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # customer_id или NULL (глобально-только запись, когда аккаунт вызывающему неизвестен).
+    account: Mapped[str | None] = mapped_column(String(32))
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)  # 'read' | 'mutate'
+    op_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

@@ -29,8 +29,9 @@ Alembic-миграцией (см. колонку «Миграция»). Коло
 | `client_dossiers` | досье по сайту клиента (§20, map-reduce): `.md`-файл владельцу + PII-free контекст генераторам. Своя таблица, а НЕ поля профиля: снапшоты `client_profile_history` переживают «🗑 Очистить профиль», и имена сотрудников клиента остались бы в БД после удаления — здесь каскад по `profile_id` их уносит | `customer_id`, `profile_id`, `version` (монотонная), `status` (draft\|current), `markdown` (с контактами), `llm_context` (без PII), `data` (JSON) | `0029` | ACTIVE |
 | `account_health_snapshot` | агрегаты health-score `/audit` на дату в TZ аккаунта (субстрат трендов, N1.1); без PII/имён кампаний | `customer_id` + `snapshot_date` + `period_days` (unique тройка), `score`, `grade`, `at_risk`, `family_penalty` (JSON), `score_model_version` | `0022` | ACTIVE |
 | `sheet_exports` | реестр созданных ботом Google-таблиц (`/sheets`, ключи визарда §19.4.2) → выдача в `/mysheets`; секретов нет (url уже уходил в чат) | `chat_id` (+ индекс `chat_id, id`), `customer_id`, `kind` (keywords\|report), `spreadsheet_id`, `url`, `title`, `share` (роль\|off\|failed) | `0025` | ACTIVE |
+| `ads_quota_ops` | распределённый счётчик дневной квоты Google Ads (§3, `core.quota`): общий стор вместо per-process deque — bot + scheduler + per-session MCP видят один потолок; PII/секретов нет (`account` = customer_id) | `ts` (индекс + `account,ts`), `account` (customer_id\|NULL), `kind` (read\|mutate), `op_count`; окно 24ч в SQL `SUM(op_count) WHERE ts>cutoff` (`db_dt`), ретеншн `ads_quota_ops_retain_days` | `0031` | ACTIVE |
 
-> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0030`
+> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0031`
 > (`op.create_table(...)`). Инициалка `0001` создаёт базовые таблицы
 > (`whitelist`, `user_settings`, `proposals`, `audit_log`, `oauth_tokens`;
 > [`migrations/versions/0001_initial.py:22-92`](../migrations/versions/0001_initial.py)), остальные —
@@ -126,8 +127,12 @@ alembic history                          # список ревизий
 генераторам; `draft` → `current` только внутри атомарного `claim` confirm-гейта) →
 `0030` (провенанс хода в `proposals`: `origin_human_turn`, `author_user_id`, `run_id`, `tg_message_id`
 — второй, неподделываемый бит денежного гейта, Волна 1.4; `server_default=false` объявляет **все**
-существующие строки машинными: это осознанный отказ по правилу 10, а не «пропустить старое») —
-**head**.
+существующие строки машинными: это осознанный отказ по правилу 10, а не «пропустить старое») →
+`0031` (`ads_quota_ops`: распределённый счётчик дневной квоты Google Ads — общий стор вместо
+per-process deque; с появлением scheduler-процесса и per-session MCP счётчики стали слепы друг к другу,
+и потолок Basic (15 000 операций/сутки) пробивался молча. Одна строка = один `quota.record()` с
+`op_count`; окно 24ч считается в SQL `SUM(op_count) WHERE ts > cutoff` через `db.session.db_dt`;
+ретеншн — `scheduler.jobs.purge_stale_rows`/`ads_quota_ops_retain_days`) — **head**.
 
 ### Добавить миграцию
 ```bash
