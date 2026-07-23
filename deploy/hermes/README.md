@@ -1,8 +1,12 @@
 # Ранбук: поднять Hermes (Контур A) рядом с боевым ботом на VPS
 
-READ-пилот пивота Aimash → Hermes ([`HERMES_SPEC.md`](HERMES_SPEC.md)). Hermes-агент отвечает в Telegram и через
+READ-пилот пивота Aimash → Hermes. Hermes-агент отвечает в Telegram и через
 MCP-сервер `aimash` (пакет `mcp_server/`, 12 READ-инструментов) читает Google Ads. Денежное ядро не
 затрагивается: слой **READ-only by construction** — WRITE-инструментов физически нет.
+
+**Где что написано:** требования и приёмка — [`/SPEC.md`](../../SPEC.md); архитектура (топология,
+И1–И8, К1–К10, реестр инструментов) — [`HERMES_SPEC.md`](HERMES_SPEC.md); почему так —
+[`AGENTIC_VS_TZ.md`](AGENTIC_VS_TZ.md). Этот файл — **как поставить**, а не что и почему.
 
 **Топология.** Текущий aiogram-бот (`aimash-bot` в Docker Compose) остаётся жив — он же окружение для
 MCP-сервера. Hermes ставится рядом отдельным systemd user-сервисом и зовёт MCP через `docker exec` в
@@ -10,7 +14,9 @@ MCP-сервера. Hermes ставится рядом отдельным system
 `SECRETS_ENCRYPTION_KEY`, OAuth-кэш — всё из контейнера, без host-venv).
 
 **Артефакты рядом:** `config.yaml` (эталон `~/.hermes/config.yaml`), `hermes.env.example` (шаблон
-`~/.hermes/.env`).
+`~/.hermes/.env`), `lint_config.py` (конфиг-линт К10 — **неизвестные ключи Hermes игнорирует молча**),
+`host-a/` (эталон живого хоста + RUNBOOK), `RISK_REGISTER.md`, `plugins/aimash_probe` (проб
+доверенного канала метаданных гейта).
 
 **Этот файл — только установка (RB-0…RB-3).** День-2 эксплуатация (что применяется вживую vs требует
 restart, редеплой↔MCP-reconnect, логи, обновление/откат, бэкап, kill-switch, траблшутинг) — в
