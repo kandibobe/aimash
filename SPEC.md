@@ -214,7 +214,7 @@
 8. Вызов [ads/mutations.py](ads/mutations.py) с `confirmation_id`;
 9. `audit_log` — строка с автором, черновиком, результатом.
 
-Провал любого пункта → отказ + запись попытки. **Пункты 7–8 не переписываются** — это существующий код ([ads/service.py:1141](ads/service.py#L1141)).
+Провал любого пункта → отказ + запись попытки. **Пункты 7–8 не переписываются** — это существующий код ([ads/service.py:1266](ads/service.py#L1266)).
 
 ### 2.3 Три инварианта транспорта
 
@@ -885,7 +885,7 @@ execute_confirmed(proposal_id, confirmation_id, actor_chat_id, reply_to_message_
 
 Девять проверок — §2.2. Инвариант транспорта — §2.3.
 
-**Два исполнителя, а не один.** Ads-домен исполняет [ads/service.py:1141](ads/service.py#L1141); memory-домен — [clients/execute.py:26](clients/execute.py#L26). Маршрутизация по имени операции, **cross-domain вызов — fail-closed отказ**.
+**Два исполнителя, а не один.** Ads-домен исполняет [ads/service.py:1266](ads/service.py#L1266); memory-домен — [clients/execute.py:26](clients/execute.py#L26). Маршрутизация по имени операции, **cross-domain вызов — fail-closed отказ**.
 
 **Батч.** При `operations[]` исполнение атомарно по шагам с частичным откатом — механика уже реализована в composite-создателях, переносится формулировкой, а не переписыванием.
 

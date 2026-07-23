@@ -861,7 +861,7 @@ execute_confirmed(proposal_id, confirmation_id, actor_chat_id, reply_to_message_
 Провал любого пункта → отказ + запись попытки. **Пункты 7 и 8 не переписываются** — это
 существующий код.
 
-**Пункты 6–9 уже собраны в `ads/service.py:1141` `execute_confirmed(store, confirmation_id)`
+**Пункты 6–9 уже собраны в `ads/service.py:1266` `execute_confirmed(store, confirmation_id)`
 [проверено 20.07]**: он атомарно `claim`-ит, через `_apply_confirmed` (`:321`) строит клиента,
 заново проходит `ensure_allowed(proposal.customer_id)`, зовёт `apply_*` и пишет audit — реальный
 порядок внутри `_apply_confirmed` немного отличается от списка выше; при реализации фасада сверять
@@ -873,7 +873,7 @@ execute_confirmed(proposal_id, confirmation_id, actor_chat_id, reply_to_message_
 
 **Уточнения 21.07 — четыре, каждое найдено сверкой с исходниками:**
 
-1. **Исполнителей два, а не один.** Ads-домен исполняет `ads/service.py:1141`; memory-домен
+1. **Исполнителей два, а не один.** Ads-домен исполняет `ads/service.py:1266`; memory-домен
    (`profile_save/update/clear`) — `clients/execute.py:26 execute_confirmed_memory` со своим
    `MEMORY_OPERATIONS`. Мутационный `ensure_allowed` к нему **намеренно** не применяется (это не
    деньги и не Google Ads), `ensure_read_allowed` перепроверяется. Реализованный буквально по
@@ -1602,7 +1602,7 @@ async-базы на httpx, bus-factor 1.
 | Проверка | Вердикт | Что меняет в смете/дизайне |
 |---|---|---|
 | Чистые сигнатуры `ads/`+`confirm/` | **✅ Чисто.** `ads.read/client/mutations`, `confirm.gate/store` не тянут `bot`/`aiogram` в `sys.modules` | Риск №1 (**±60–120 ч**) снят **вниз** до ~0 ч развязки |
-| `execute_confirmed` bot-free | **✅ УЖЕ ЕСТЬ** — `ads/service.py:1141` `execute_confirmed(store, confirmation_id)` + окно пост-проверки дрейфа (Доп.2A); `_apply_confirmed` строит клиента и зовёт `apply_*` | §8.4 MCP-WRITE = тонкая обёртка (инстанцировать `ConfirmStore` + 9 проверок + вызвать существующее), не переписывание |
+| `execute_confirmed` bot-free | **✅ УЖЕ ЕСТЬ** — `ads/service.py:1266` `execute_confirmed(store, confirmation_id)` + окно пост-проверки дрейфа (Доп.2A); `_apply_confirmed` строит клиента и зовёт `apply_*` | §8.4 MCP-WRITE = тонкая обёртка (инстанцировать `ConfirmStore` + 9 проверок + вызвать существующее), не переписывание |
 | `confirm/audit.py` / `confirm/proposal.py` | **❌ НЕ существуют.** Только `__init__/gate/store`. `Proposal`+`build_summary` в `gate.py`, весь audit — в `store.py` | Правка ссылок в Часть 3 / §9 / §23; MCP не импортирует несуществующее |
 | Блок 5 аудита (`ad_strength`) | **Частично, не «Новое».** `reports/queries.py:1335` (ad-strength) + `:1852` (asset_group + `ad_strength_action_items`) уже запрашиваются | E11 вниз: ново только `ad_group_ad_asset_view.performance_label` |
 | Bot-связанная половина гейта | `bot/main.py:1642` `_present_proposal` штампует `user_initiated=True` (`:1748`) и `customer_id`; **точек создания proposal ≥3** — ещё ≥2 прямых `save_proposal(user_initiated=True)` в `bot/main.py` (в т.ч. client-memory `:4680`) | Headless proposal-create дороже первоначальной оценки; при выносе — **сводить к одной точке** |
