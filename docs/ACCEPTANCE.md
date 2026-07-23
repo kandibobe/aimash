@@ -100,9 +100,9 @@ Confirm-гейт разделяет предложение (proposal, тольк
 - Подбор идей (KeywordPlanIdeaService, замок аккаунта до запроса): `ads/keyword_plan.py:105`
   (`generate_keyword_ideas`).
 - Кластеризация с интентом по таксономии ТЗ §7 (транзакционный/коммерческий/информационный/
-  навигационный): `keywords/cluster.py:49` (`normalize_intent`), `keywords/cluster.py:111`
-  (`cluster_keywords`), приоритезация — `keywords/cluster.py:150` (`rank_clusters`).
-- Предложение минус-слов (advisory, ничего не пишет в аккаунт): `keywords/cluster.py:197`
+  навигационный): `keywords/cluster.py:68` (`normalize_intent`), `keywords/cluster.py:187`
+  (`cluster_keywords`), приоритезация — `keywords/cluster.py:223` (`rank_clusters`).
+- Предложение минус-слов (advisory, ничего не пишет в аккаунт): `keywords/cluster.py:313`
   (`suggest_negative_keywords`).
 - Добавление ключей с **типом соответствия** через confirm-гейт: `ads/mutations.py:231`
   (`apply_add_keywords`), флоу «добавить в кампанию» — `bot/main.py:1836` (выбор match-type),

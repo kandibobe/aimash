@@ -185,8 +185,9 @@ scope `drive.file` / `spreadsheets.readonly`.
   (`suggest_negative_keywords`), но НЕ добавляются; добавление — отдельной командой агента за гейтом.
 - **Гео-радиус вне UI**: `extract_campaign_settings` поддерживает города/страны; радиус по
   координатам (proximity) в визарде не собирается.
-- **§19.7.1 Location / Affiliate / Lead form** — config-gated заглушки (нужны Business Profile /
-  реестр / privacy URL), пропускаются чисто. App-ассет вне объёма (UAC исключён).
+- **§19.7.1 Location / Affiliate** — config-gated заглушки (нужны Business Profile / реестр),
+  пропускаются чисто. **Lead form реализован** (`ads/extensions.py:328` `_add_lead_form_via_sdk`).
+  App-ассет вне объёма (UAC исключён).
 
 ## 8. Тесты
 
