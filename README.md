@@ -4,6 +4,8 @@ Telegram-агент, который по свободному тексту уп�
 
 **Источник истины — три слоя:** [`SPEC.md`](SPEC.md) — требования и приёмка · [`deploy/hermes/HERMES_SPEC.md`](deploy/hermes/HERMES_SPEC.md) — архитектура · [`deploy/hermes/AGENTIC_VS_TZ.md`](deploy/hermes/AGENTIC_VS_TZ.md) — обоснование. [`ТЗ.md`](ТЗ.md) — дословный текст трёх `.docx` заказчика.
 
+**START HERE — точка входа в пивот:** [`docs/TZ-Aimash-Hermes-Agent.md`](docs/TZ-Aimash-Hermes-Agent.md) — сводное ТЗ пивота (+ `docs/REUSE-MAP.md`, `docs/AUDIT-open-source.md`).
+
 ## Принцип безопасности
 Мутация и подтверждение **разделены**: агент создаёт черновик изменения (proposal), а выполняет его код — только после явного согласия человека, с записью в audit-журнал. Бюджет меняется только по прямой команде. См. 15 золотых правил в `CLAUDE.md`.
 

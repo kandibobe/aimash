@@ -13,6 +13,12 @@
 [`ТЗ.md`](ТЗ.md) — дословный текст трёх `.docx` заказчика, **аргумент в споре о том, что было заказано**
 (генерируется `scripts/docx_to_tz.py`, дрейф ловит `tests/test_tz_sync.py`).
 
+**START HERE — точка входа в пивот:** [`docs/TZ-Aimash-Hermes-Agent.md`](docs/TZ-Aimash-Hermes-Agent.md)
+(сводное ТЗ пивота) + `docs/AUDIT-open-source.md` (аудит открытых источников/библиотек/MCP) + `docs/REUSE-MAP.md`
+(что даёт фреймворк / что переиспользуем / что строим). Это **точка входа, не четвёртый источник истины**:
+глубина остаётся в `SPEC.md`/`HERMES_SPEC.md`/`AGENTIC_VS_TZ.md`, на которые они прямо ссылаются.
+(Ранее эти доки жили в соседней папке `Aimash Hermes Agent`; влиты в репозиторий 2026-07-24, папка архивна.)
+
 **Функциональный объём трёх ТЗ сохраняется целиком — меняется архитектура, не список возможностей.**
 Где сказано «архивируется» — речь о слое интерфейса (кнопки, FSM-визарды, свой агентский цикл),
 а не о функции: та переезжает в текстовую модель (`SPEC.md` §3.3–§3.8).
@@ -186,11 +192,14 @@ Telegram), delegation/субагенты, curator. **Что Hermes НЕ даёт
 
 - Старый бот жив и развёрнут: контейнер `aimash-bot` = `python -m bot.main`.
 - Hermes ходит в Google Ads **через него**: `docker exec -i aimash-bot python -m mcp_server`
-  ([deploy/hermes/config.yaml:68-76](deploy/hermes/config.yaml#L68-L76)). Только READ.
+  ([deploy/hermes/config.yaml:213-220](deploy/hermes/config.yaml#L213-L220)). Только READ.
 - **WRITE/PLAN через Hermes НЕ подключены.** Мутации сегодня идут прежним путём.
-- ⛔ **`bot/` и `agent/` физически не двигать.** Архивация — после Волны 1 шаг 1 (bot-free энтрипоинт +
-  перенос advisory-lock, §5.3 C1/C3), тогда же тег `pre-hermes`. Сегодня перенос убил бы развёрнутый
-  READ-путь.
+- ⛔ **`bot/` и `agent/` не удалять «в лоб» — только гейтированной процедурой архивации** (предусловия →
+  верификация прода → удаление; полный ранбук — [`deploy/hermes/OPERATIONS.md`](deploy/hermes/OPERATIONS.md),
+  раздел «Архивация bot/+agent/»). Сегодня перенос/удаление убил бы развёрнутый READ-путь (Hermes ходит в
+  Ads через `bot`-контейнер) и сбор всей тест-сессии (`tests/conftest.py` импортирует `bot.main`). Тег
+  `pre-hermes` — ДО удаления. **`agent/router.py` и `agent/tools/schemas.py` при этом не удаляются, а
+  переезжают** в bot-free пакет — они нужны ядру (`adcopy`/`keywords`/`clients`/`advisor`, `mcp_server`).
 - ✅ **Мина C4 снята по коду** (Волна 1 шаг 1): `core/i18n.py` + `core/texts.py` (локализация и
   нарезка), `advisor/apply.py` (`one_tap_op`/`one_tap_params` — были в `bot/main.py`),
   `scheduler/delivery.py` (**порт клавиатур**: заполняет bot-процесс, пустой порт = дайджест уходит
@@ -257,7 +266,12 @@ Python 3.12 · Hermes v0.19.0 (ядро агента) · MCP-сервер (ту�
   `on_text` **строго последний** (инвариант `tests/test_handler_order.py`). Исключение: `bot/proposal.py`
   (сборка черновика, транспорта не знает — переезжает в тул-слой). Локализация здесь больше НЕ живёт —
   `core/i18n.py` + `core/texts.py`.
-- `agent/` — свой цикл: `loop.py`, `router.py`, `system_prompt.py`, `tools.py`. Hermes несёт своё.
+- `agent/` — свой цикл (**архивируется**): `loop.py` (в нём же `SYSTEM`-промпт), `campaign_edit.py`,
+  `campaign_settings.py`, `openrouter_account.py`. Hermes несёт своё. **НЕ архивируются** (bot-free, нужны
+  ядру, переезжают в bot-free пакет): `agent/router.py` (обёртка вызова OpenRouter `chat`/`finish_reason`,
+  импортируют 10 модулей `adcopy`/`keywords`/`clients`/`advisor`) и `agent/tools/schemas.py` (реестр схем;
+  зовут `mcp_server/server.py`, `clients/`). Файлов `agent/system_prompt.py`/`agent/tools.py` **нет**
+  (в `agent/tools/` только `schemas.py`).
 - Что уносит с собой кнопочный слой (~30 функций с единственной точкой вызова в UI) и восемь
   инфраструктурных мин C1–C8 — `SPEC.md` §5.3.
 
@@ -323,7 +337,9 @@ research/scheduler), дополнения §8 read-MCC, §11 GDN/Video/Demand Ge
   `ads/client.py`, `ads/service.py`, `confirm/**`, `core/secrets.py`, `core/provenance.py` →
   прогони `pytest tests/test_safety_core.py tests/test_write_layer.py tests/test_invariants_core.py -q`
   и скил `confirm-gate-audit`. **Это и есть настоящий гард — не текст в этом файле.**
-- Не двигать `bot/` и `agent/` физически до Волны 1 шаг 1 — прод ходит в Ads через `bot`-контейнер.
+- Не удалять `bot/`/`agent/` «в лоб» — только гейтированной процедурой (прод ходит в Ads через
+  `bot`-контейнер; ранбук — [`deploy/hermes/OPERATIONS.md`](deploy/hermes/OPERATIONS.md)). `agent/router.py`
+  и `agent/tools/schemas.py` не удаляются, а переезжают (bot-free, нужны ядру).
 - Не писать логику в тул-слое (пр. 6) и не полагаться на approvals/deny-листы Hermes как на границу (пр. 8).
 - Не доверять готовым write-MCP как бэкенду (экспериментальны, без подтверждений) — write-слой пишем сами.
 - Не включать неизвестные ключи в `deploy/hermes/config.yaml` без сверки с эталоном пиновой версии (К10):

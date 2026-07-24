@@ -715,3 +715,56 @@ context7) описывают `MCPServer` из `mcp.server.mcpserver` — **та�
   precedence для Telegram-allowlist — сверить на месте (`hermes gateway list`, `--help`, эксперимент).
 - Имя MCP-сервера **везде одинаковое**: `aimash` (= ключ в `mcp_servers`, = аргумент `hermes mcp test`, = цель
   `/reload-mcp`). Рассинхрон имени → ошибка.
+
+---
+
+## 13. Архивация `bot/`+`agent/` — одноразовая гейтированная процедура (после V1, до/вместе с WRITE)
+
+> **Зачем гейт, а не `rm`.** Сегодня удаление `bot/` рвёт ДВЕ живые вещи: (1) READ-путь Hermes идёт
+> `docker exec -i aimash-bot python -m mcp_server` внутри контейнера бота ([config.yaml:213-220](config.yaml#L213-L220),
+> сопряжение — §5); (2) сбор всей тест-сессии — [`tests/conftest.py:52`](../../tests/conftest.py#L52)
+> импортирует `bot.main` на уровне модуля. Плюс `agent/` **нельзя** сносить целиком: `agent/router.py` и
+> `agent/tools/schemas.py` bot-free и нужны ядру. Процедура ниже снимает это по порядку; порядок задан
+> зависимостями, не вкусом. Всё — на ветке, тег `pre-hermes` ДО удаления, git-обратимо.
+
+### Гейт 0 — верификация прода (БЛОКИРУЮЩИЙ, снять первым)
+- Снять замер **V1** (§12: `hermes version` на VPS — субкоманда, не `--version`) и проверить, **жив ли
+  контейнер `aimash-bot`** (`docker ps | grep aimash-bot`; отвечает ли READ через него —
+  `hermes mcp test aimash`).
+- ⚠️ **Сведение «прод снесён 2026-07-24» репозиторием НЕ подтверждается**: `PIN.json` держит
+  `host_matches: null` (V1 не снят), а этот же ранбук (шапка, §5) и `CLAUDE.md` описывают бот как живой.
+  Пока READ реально идёт через `aimash-bot` — **`bot/` не удалять**. Разрешает противоречие только замер на
+  хосте (владелец/оператор), не рассуждение.
+
+### Предусловия (снять ДО удаления)
+1. **Вынести `agent/router.py` + `agent/tools/schemas.py`** в bot-free/agent-free пакет (напр. `tools/`).
+   Оба импортируют только `adcopy`/`ads`/`core` — изолируются чисто. Обновить импорт у потребителей:
+   [`mcp_server/server.py:13`](../../mcp_server/server.py#L13) (READ-путь!), `clients/profile_assets.py`,
+   `scripts/*` (`ab_test_models.py`, `live_smoke_*`), ~42 теста, `agent/loop.py`. Потребители `router.chat`
+   — 10 модулей `adcopy`/`keywords`/`clients`/`advisor` (grep `from agent.router import`).
+2. **Переключить READ-транспорт** с `docker exec -i aimash-bot …` на durable compose-сервис `mcp`
+   ([docker-compose.yml:154](../../docker-compose.yml#L154), `profiles: ["mcp"]`, `docker run --rm`) — ему
+   контейнер бота не нужен. Правка — блок `mcp_servers.aimash` в `~/.hermes/config.yaml` на VPS (§6 «Смена
+   тулсетов»), затем `hermes mcp test aimash` зелёный БЕЗ `aimash-bot`.
+3. **Перепривязать образ/compose:** [`Dockerfile:32`](../../Dockerfile#L32) `CMD ["python","-m","bot.main"]`
+   и сервис `bot` ([docker-compose.yml:46](../../docker-compose.yml#L46)) — удалить/переназначить; убедиться,
+   что образ, который переиспользуют `scheduler` и `mcp`, собирается без `bot/`.
+4. **Планировщик:** в compose уже `SCHEDULER_IN_BOT: "false"` у `bot` и `"true"` у сервиса `scheduler`
+   (владелец джоб — advisory-lock роли `scheduler`, не env-флаг) — **проверить, что на проде применён именно
+   этот compose**, иначе джобы исчезнут молча с уходом `bot/`.
+5. **Развязать тесты:** убрать/загардить [`tests/conftest.py:52`](../../tests/conftest.py#L52) (`import
+   bot.main` на уровне conftest тянет сбор всей сессии); удалить/перенести ~99 bot-тестов и ~36
+   agent(loop/router)-тестов; ~42 schemas-теста сохранить с новыми путями из шага 1.
+6. **Тег `pre-hermes`** — ДО физического удаления; вся работа на ветке.
+
+### Что удаляется / что остаётся
+- **Удаляется:** весь `bot/`; из `agent/` — `loop.py`, `campaign_edit.py`, `campaign_settings.py`,
+  `openrouter_account.py`.
+- **Остаётся (переезжает в bot-free пакет):** `agent/router.py`, `agent/tools/schemas.py`. Файлов
+  `agent/system_prompt.py`/`agent/tools.py` не существует.
+
+### Гейт выхода (зелёный → архивация завершена корректно)
+- `pytest tests/test_hermes_isolation.py tests/test_headless_bootstrap.py tests/test_scheduler_decoupled.py -q`
+  на энтрипоинтах `python -m mcp_server` и `python -m scheduler` (bot-free bootstrap).
+- READ-смоук идёт через durable `mcp`-сервис, **не** через `aimash-bot` (§5, §4 health-чеклист).
+- `deploy/hermes/lint_config.py` (К10) зелёный; ни один из 14 пакетов ядра не импортирует `bot/`.

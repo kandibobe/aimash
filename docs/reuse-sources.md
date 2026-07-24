@@ -2,6 +2,11 @@
 
 Принцип: берём **знание/инструкции** (после ревью на инъекции/секреты), а **код записи + confirm-гейт + audit пишем сами**. Готовые write-MCP небезопасны как бэкенд (см. план-файл, «Оценка готовых скилов/MCP»).
 
+> **Область этого файла — провенанс порогов `/audit` (ниже) и источники-паттерны.** Сводный аудит
+> открытых источников/библиотек/**dev-MCP** живёт в `AUDIT-open-source.md`, а
+> карта «что даёт фреймворк / что переиспользуем / что строим» — в `REUSE-MAP.md` там же. При расхождении
+> по dev-MCP и стеку прав `AUDIT-open-source.md` (см. пометку в разделе «MCP-серверы для разработки»).
+
 ## AgriciDaniel/claude-ads (MIT, 6.5k★, активный)
 Audit/analysis-скил для Claude Code. **Без записи, без GAQL** (делегирует MCP). Security low-risk (статический markdown, без секретов).
 **Брать (как контент для system-prompt / reference):**
@@ -96,18 +101,20 @@ Google, а не дефект аккаунта. `SCORE_MODEL_EPOCH` **не бам
 
 ---
 
-## MCP-серверы для разработки (ресёрч 2026-06-25)
+## MCP-серверы для разработки → перенесено в `AUDIT-open-source.md §6`
 
-**Ставим (`.mcp.json`):**
-- **Postgres** — `crystaldba/postgres-mcp --access-mode=restricted` (read-only dev-БД). + отдельная роль `aimash_ro` (SELECT-only) как defense-in-depth.
-- **Google Ads (read-only)** — `cohnen/mcp-google-ads` (выбор) либо официальный `googleads/google-ads-mcp` (pipx, без клона). Только TEST-аккаунт `7753643025`. **Build-time помощник, НЕ бэкенд** — запись всегда через свой `ads/mutations.py`.
-- **Context7** — `@upstash/context7-mcp` (свежие доки google-ads/aiogram).
-- **GitHub** — официальный remote `https://api.githubcopilot.com/mcp`.
+**Актуальный набор dev-MCP и его обоснование — `AUDIT-open-source.md §6`**
+(и готовый `../.mcp.json` в корне репозитория): context7 + `crystaldba/postgres-mcp` (restricted) +
+filesystem + git + fetch + sequential-thinking.
 
-**НЕ ставим (важно):**
-- `@modelcontextprotocol/server-postgres` — **архивирован + известная SQL-инъекция** в обход read-only. Заменён на `crystaldba/postgres-mcp`.
-- `google-marketing-solutions/google_ads_mcp` — **архивирован (2026-06-25), write без confirm-гейта/audit** → прямо против golden rules. Никогда как write-бэкенд.
-- filesystem MCP (нативные файл-тулы), Telegram MCP (сайд-эффекты вне confirm-гейта), fetch/websearch (встроены в Claude Code).
+> ⚠️ Прежний вердикт этого файла «filesystem/fetch **НЕ ставим** (встроены в Claude Code)» **снят**: он
+> относился к разработке старого слоя внутри Claude Code, где эти тулы дублируются встроенными. Для
+> проекта-пивота источник истины по dev-MCP — `AUDIT §6`, там filesystem/git/fetch включены.
+
+Что из прежних заметок остаётся верным (и уже отражено в `AUDIT §6/§2`): официальный
+`@modelcontextprotocol/server-postgres` не берём (архивирован, SQL-инъекция в обход read-only → заменён
+на `crystaldba/postgres-mcp`); `google-marketing-solutions/google_ads_mcp` не берём как write-бэкенд
+(архивирован, write без confirm-гейта/audit → прямо против золотых правил).
 
 ## Дополнительные источники (паттерны, не бэкенд)
 - **google-ads-python `generate_user_credentials.py`** — паттерн refresh-токена (сверить с `scripts/get_refresh_token.py`).
