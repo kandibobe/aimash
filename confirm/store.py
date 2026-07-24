@@ -355,6 +355,90 @@ class ConfirmStore:
             await s.commit()
             return True
 
+    async def confirm_by_reply(
+        self,
+        confirmation_id: str,
+        *,
+        actor_user_id: int,
+        actor_chat_id: int,
+        reply_to_message_id: int,
+        actor_username: str | None = None,
+    ) -> bool:
+        """pending → confirmed по РЕПЛАЙ-ЯКОРЮ (§2.2 №2/№3/№5, §6.4). True если перевёл. Пишет audit.
+
+        Отличие от `confirm()`: подтверждение привязано НЕ к владению чатом (`chat_id` — в форум-
+        топике супергруппы это весь чат, а не человек; проверка по нему там вырождается в тождество),
+        а к доверенным полям самого черновика:
+          • §2.2 №2 — реплай пришёл ИМЕННО на карточку черновика: `reply_to_message_id ==
+            proposal.tg_message_id`. Telegram message_id уникален ТОЛЬКО внутри чата, поэтому якорь
+            неймспейсится чатом: `actor_chat_id == proposal.chat_id`. Без него два черновика одного
+            автора в РАЗНЫХ супергруппах с совпавшим message_id спутались бы (defense-in-depth: chat_id
+            тут не «личность» — она по user_id ниже, — а лишь пространство имён для message_id);
+          • §2.2 №3 — подтвердил АВТОР черновика, личность по user_id: `actor_user_id ==
+            proposal.author_user_id`.
+        Все три поля черновик получает от ДОВЕРЕННОГО входа, не из LLM-аргумента: `author_user_id`/
+        `chat_id` — при `save_proposal`, `tg_message_id` — из `set_card_message_id` при публикации
+        карточки. `actor_user_id`/`actor_chat_id`/`reply_to_message_id` сюда приносит доверенный
+        ТРАНСПОРТ (плагин-хук Hermes мимо модели, §6.4), иначе агент подделал бы подтверждение (И-Т1).
+
+        Compare-and-set (зеркало `confirm`/`claim`): один UPDATE … WHERE status='pending' AND
+        chat_id=:chat AND tg_message_id=:reply AND author_user_id=:actor AND возраст≥TTL.
+        Второй/гоночный вызов не совпадёт → rowcount=0 → False (защита от TOCTOU двойной доставки).
+
+        Fail-closed по КОНСТРУКЦИИ (правило 10) — для ЯКОРЯ+АВТОРА+TTL (авторизация actor'а в
+        whitelist делегирована транспорту, см. §6.4-оркестратор). Черновик БЕЗ якоря —
+        `tg_message_id`/`author_user_id` == NULL (прод-реальность: транспорт якоря ещё не проведён) —
+        НИКОГДА не совпадёт: в SQL `NULL = :x` даёт UNKNOWN, строка выпадает из WHERE → «нет доверенной
+        записи» ⇒ отказ, не проход. ⚠️ None-параметры отсекаем ДО запроса: SQLAlchemy компилирует
+        `col == None` в `col IS NULL` (не `= NULL`!), и якорь-NULL тогда СОВПАЛ бы — это была бы дыра
+        fail-OPEN. Плюс `.isnot(None)` в WHERE — второй рубеж, переживёт правку, случайно снявшую
+        верхний guard."""
+        # None-guard (fail-closed + защита от SQLAlchemy `col == None` → `IS NULL`): без доверенной
+        # личности/якоря/чата подтверждать нечего. Отказ ДО запроса, чтобы None не стал `IS NULL`.
+        if actor_user_id is None or actor_chat_id is None or reply_to_message_id is None:
+            return False
+        async with Session() as s:
+            res = await s.execute(
+                update(Proposal)
+                .where(
+                    Proposal.confirmation_id == confirmation_id,
+                    Proposal.status == "pending",
+                    # §2.2 №2 — реплай на карточку. message_id уникален лишь ВНУТРИ чата, поэтому
+                    # неймспейсим чатом (chat_id NOT NULL — трапа `IS NULL` тут нет, но None-параметр
+                    # отсечён guard'ом выше). Это не «личность» (та по user_id ниже), а простр-во имён.
+                    Proposal.chat_id == actor_chat_id,
+                    # §2.2 №2 — якорь ДОЛЖЕН быть проставлен и совпасть с реплаем. `.isnot(None)` —
+                    # второй рубеж к None-guard выше: NULL-якорь не подтверждается никогда.
+                    Proposal.tg_message_id.isnot(None),
+                    Proposal.tg_message_id == reply_to_message_id,
+                    # §2.2 №3 — автор ДОЛЖЕН быть известен и совпасть с актором (личность по user_id).
+                    Proposal.author_user_id.isnot(None),
+                    Proposal.author_user_id == actor_user_id,
+                    Proposal.created_at >= db_dt(_ttl_boundary()),  # §2.2 №5: TTL в CAS, не в джобе
+                )
+                .values(status="confirmed", decided_at=func.now())
+            )
+            # cast: DML возвращает CursorResult (есть .rowcount); async-стаб видит общий Result.
+            if (
+                cast(CursorResult, res).rowcount != 1
+            ):  # нет/не pending/чужой якорь/чужой автор/просрочен
+                await s.rollback()
+                return False
+            p = (
+                await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
+            ).scalar_one()
+            s.add(
+                _audit(
+                    p,
+                    p.chat_id,
+                    "confirmed",
+                    actor_user_id=actor_user_id,
+                    actor_username=actor_username,
+                )
+            )
+            await s.commit()
+            return True
+
     async def reject(
         self,
         confirmation_id: str,

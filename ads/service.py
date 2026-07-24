@@ -1305,6 +1305,54 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
     return result
 
 
+async def confirm_and_execute_by_reply(
+    store,
+    *,
+    confirmation_id: str,
+    actor_user_id: int,
+    actor_chat_id: int,
+    reply_to_message_id: int,
+    actor_username: str | None = None,
+) -> dict:
+    """§6.4 — реплай-якорный вход в исполнение: подтвердить черновик РЕПЛАЕМ автора на его карточку,
+    затем исполнить. Композиция девяти проверок §2.2 БЕЗ переписывания существующего пути:
+
+      §2.2 №1 (черновик существует+pending), №2 (reply==tg_message_id в неймспейсе chat_id),
+      №3 (actor==author), №5-TTL (возраст) — атомарным CAS `store.confirm_by_reply`
+      (pending→confirmed, fail-closed);
+      №5-freshness, №6 (claim, одноразово), №7 (ensure_allowed из черновика), №8 (mutations.apply_*),
+      №9 (audit) — существующим `execute_confirmed`, БЕЗ изменений (§2.2: «не переписываются»).
+
+    Отказ подтверждения (нет доверенной записи / чужой якорь / чужой автор / просрочен / гонка) →
+    `confirm_by_reply` вернёт False → PermissionError ДО claim и ДО SDK: Google Ads не тронут, а
+    одноразовый claim не съеден (повтор возможен). Форма отказа — PermissionError, как у прочих
+    отказов денежного пути; текст без секретов (правило 5).
+
+    ⚠️ Границы этого входа (что он НЕ делает и делать не должен):
+    • Он НЕ устанавливает, что `actor_user_id`/`actor_chat_id`/`reply_to_message_id` доверенные — их
+      доставляет доверенный ТРАНСПОРТ мимо LLM (плагин-хук Hermes, §6.4), а не аргумент инструмента.
+    • §2.2 №4 (актор в whitelist операторов) остаётся на транспорте: рантайм-whitelist ключуется по
+      chat_id (`core.access`), а якорь здесь — по user_id; смешать их тут значило бы вернуть ту самую
+      вырожденность форум-топика, ради ухода от которой якорь и сделан по user_id. (`actor_chat_id`
+      здесь — лишь пространство имён для message_id, НЕ проверка авторизации.)
+    • Пока доверенный канал доставки/якоря не подтверждён живой пробой (V7–V9 на VPS), ЖИВОЙ
+      MCP-инструмент на этот вход НЕ регистрируется (§15.2) — контур существует ready-but-dark."""
+    ok = await store.confirm_by_reply(
+        confirmation_id,
+        actor_user_id=actor_user_id,
+        actor_chat_id=actor_chat_id,
+        reply_to_message_id=reply_to_message_id,
+        actor_username=actor_username,
+    )
+    if not ok:
+        # Fail-closed: якорь не совпал / нет доверенной записи / просрочен / уже обработан. Обобщённый
+        # текст (не раскрываем, ИМЕННО что не сошлось) — тот же generic-UX, что у confirm-владения.
+        raise PermissionError(
+            "подтверждение отклонено: реплай-якорь не совпал или черновик недоступен"
+        )
+    return await execute_confirmed(store, confirmation_id)
+
+
 def _verify_cmp(kind: str, expected, actual) -> dict:
     """Итог сверки. expected/actual is None ⇒ проверить НЕЧЕМ (нет снимка/значение не прочитано):
     verified=None — НЕ расхождение (fail-safe, без ложного needs_review). Оба конкретны ⇒ сравниваем."""
