@@ -1,0 +1,228 @@
+"""Orchestration рекомендаций (образец scheduler/jobs.py) — READ-ONLY.
+
+Собирает отчёт (reports.service), прогоняет по нему ДВИЖОК АУДИТА (audit.engine.build_audit —
+единственный источник находок), проецирует находки в рекомендации (advisor.from_findings),
+ранжирует по деньгам × опыту (advisor.rules), формулирует (advisor.formulate → детерминированный
+fallback) и персистит показанные (advisor.store). НЕ импортирует ads.mutations/ads.service и НЕ
+создаёт proposal — исполнение любого совета идёт ОТДЕЛЬНОЙ командой через confirm-гейт (rule #1/#3).
+
+`build_audit` зовётся БЕЗ ctx-сигналов (impression share, conversion_actions, search terms, …):
+/advise остаётся лёгким — те же чтения, что и раньше (один отчёт), никакой доп. латентности и
+квоты. Полный набор из 27 чеков живёт в /audit, который эти сигналы дочитывает (audit.collect).
+
+Проактивный путь (scheduler) передаёт уже собранный `report` → лишних чтений нет.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from advisor import formulate, store
+from advisor.from_findings import to_recommendations
+from advisor.rules import Recommendation, rank_recommendations
+from core.config import settings
+
+MAX_RECS = 5  # сколько рекомендаций показываем (топ по приоритету), анти-спам
+
+
+@dataclass
+class RecommendationSet:
+    account: str
+    period_label: str
+    currency: str
+    recs: list[Recommendation] = field(default_factory=list)
+    extras: list[str] = field(default_factory=list)  # advisory-довески (напр. LLM-минус-слова, #3)
+    has_activity: bool = (
+        False  # была ли активность в периоде (расход/показы) — для внятного empty-state
+    )
+
+
+def _keyword_texts(report, limit: int = 40) -> list[str]:
+    """Тексты ключей из разбивки keyword_view (топ по расходу) — для advisory LLM-минус-слов (#3)."""
+    kb = next((b for b in getattr(report, "breakdowns", []) if b.key == "keyword"), None)
+    if not kb or not kb.rows:
+        return []
+    rows = sorted(kb.rows, key=lambda r: -getattr(r[1], "cost_micros", 0))
+    out: list[str] = []
+    for dims, _m in rows[:limit]:
+        if len(dims) >= 3 and dims[2]:
+            out.append(str(dims[2]))
+    return out
+
+
+async def _client_profile_context(customer_id) -> str:
+    """2.11 (§20.6): компактный профиль клиента как КОНТЕКСТ advisor-LLM (тон/терминология ниши,
+    «не минусуй бренд»). Best-effort: нет профиля/сбой БД → '' (advisor работает как раньше).
+    Решения по-прежнему принимает КОД (rules) — профиль в детекторы НЕ подаётся."""
+    try:
+        # Класс называется ClientProfileStore. Раньше импортировался несуществующий `ClientStore`
+        # → ImportError глотался except ниже → профиль клиента НЕ подавался в advisor НИКОГДА,
+        # молча (mypy это видел, но в CI он continue-on-error). Тот же дефект был в _protected_terms.
+        from clients.store import ClientProfileStore
+
+        return await ClientProfileStore().profile_context_text(str(customer_id), max_chars=600)
+    except Exception:  # noqa: BLE001 — контекст-косметика
+        return ""
+
+
+async def _protected_terms(customer_id) -> set[str]:
+    """§7 брендозащита: токены бренда/услуг клиента, которые НЕЛЬЗЯ предлагать в минус-слова.
+    Докстринг ниже обещал это с самого начала, но `protected=` в вызов не передавался (2 из 3
+    call-site) — бот мог посоветовать заминусовать бренд самого клиента. Сбой/нет профиля → set()."""
+    try:
+        from clients.store import ClientProfileStore  # НЕ ClientStore — см. _client_profile_context
+
+        return await ClientProfileStore().protected_negative_terms(str(customer_id))
+    except Exception:  # noqa: BLE001 — защита опциональна, /advise не роняем
+        return set()
+
+
+async def _negative_keywords_extra(
+    report, topics, lang: str, client_context: str = "", protected: set[str] = frozenset()
+) -> list[str]:
+    """#3: LLM-предложение минус-слов по ключам аккаунта (advisory, ничего не добавляет — как §7).
+    Только для темы keywords и при наличии ключей. Сбой/пусто → [] (не роняем /advise).
+    client_context (2.11) — бренд/услуги клиента: тематика точнее, брендовые слова не минусуются.
+    protected — те же бренд/услуги ТОКЕНАМИ: пост-фильтр КОДА (модели не доверяем)."""
+    if topics and "keywords" not in topics:
+        return []
+    kws = _keyword_texts(report)
+    if not kws:
+        return []
+    try:
+        from core import i18n
+        from keywords.cluster import suggest_negative_keywords
+
+        negs = await suggest_negative_keywords(
+            client_context[:400],
+            kws,
+            protected=protected,
+            # D7: language уходит в промпт строкой («Язык: de») — зажим в ru/uk/en молча
+            # переводил минус-слова на русский для немецкой/угандийской кампании.
+            language=(lang or settings.geo_default_locale or "ru"),
+            limit=12,
+        )
+        if not negs:
+            return []
+        return [i18n.t("advise_negatives_hint", lang, words=", ".join(negs))]
+    except Exception:  # noqa: BLE001 — advisory-довесок, не критичен
+        return []
+
+
+def _has_activity(report) -> bool:
+    """Была ли реальная активность в периоде (расход/показы/клики). Пустой Draft/тест-аккаунт →
+    False → внятный empty-state («нет данных, выбери живой аккаунт»), а не «советов нет»."""
+    t = getattr(report, "totals", None)
+    if t is None:
+        return False
+    return bool(
+        getattr(t, "cost_micros", 0) or getattr(t, "impressions", 0) or getattr(t, "clicks", 0)
+    )
+
+
+def _period_label(report) -> str:
+    p = getattr(report, "period", None)
+    if p is None:
+        return ""
+    df, dt = getattr(p, "date_from", ""), getattr(p, "date_to", "")
+    return f"{df} — {dt}" if df and dt else (getattr(p, "label", "") or "")
+
+
+async def _gather_report(customer_id, period_days: int):
+    """Собрать отчёт с предыдущим периодом + валюта (READ-ONLY, замок чтения внутри). Образец
+    scheduler.jobs.run_scheduled_report: клиент per-account, currency best-effort, run_ads_read_call."""
+    from ads.client import build_client_async
+    from ads.read import account_currency
+    from core.resilience import run_ads_read_call
+    from reports.period import last_n_days
+    from reports.service import build_account_report_async
+
+    period = last_n_days(int(period_days))
+    client = await build_client_async(str(customer_id))
+    currency = ""
+    try:
+        currency = await run_ads_read_call(
+            account_currency, client, str(customer_id), label="advise_cur"
+        )
+    except Exception:  # noqa: BLE001 — валюта необязательна (показываем метрики без кода валюты)
+        currency = ""
+    return await build_account_report_async(client, str(customer_id), period, currency=currency)
+
+
+async def build_recommendations(
+    chat_id: int,
+    customer_id,
+    *,
+    period_days: int = 30,
+    source: str = "advise",
+    report=None,
+    topics=None,
+    lang: str | None = None,
+    thresholds: dict | None = None,
+    persist: bool = True,
+    use_llm: bool = True,
+    use_experience: bool = True,
+) -> RecommendationSet:
+    """Построить рекомендации по аккаунту. `report` не задан → собрать live (READ-ONLY). Находки
+    даёт движок аудита, ранжирует КОД (advisor.rules); опыт (Слой B) — КОД-множитель
+    priority/suppress, подаётся в rank (не в LLM). Текст — детерминированный audit.render, поверх
+    которого advisory-LLM может переписать формулировку (use_llm; факты сверяет КОД).
+    Персистит показанные (store) — но НИКОГДА не создаёт proposal. Возвращает RecommendationSet
+    с recs, у которых проставлены rec_uid + body (для кнопок 👍/👎)."""
+    from audit.engine import build_audit
+
+    from core import i18n
+
+    lang = lang or i18n.get_lang(chat_id)
+    if report is None:
+        report = await _gather_report(customer_id, period_days)
+
+    experience: dict = {}
+    if use_experience:
+        try:  # Слой B: накопленный опыт как КОД-сигнал (образец rank_clusters); сбой → веса 1.0
+            from advisor.experience import load_experience
+
+            experience = await load_experience(chat_id, customer_id)
+        except Exception:  # noqa: BLE001 — опыт не критичен, ранжируем без него
+            experience = {}
+
+    result = build_audit(report, thresholds)  # без ctx-сигналов → те же чтения, что и раньше
+    cands = rank_recommendations(
+        # Маппер сам увидит по result.ctx_signals (тут пусто), что семья conversion_tracking без ctx
+        # врёт («нет отслеживания» там, где оно есть), и промолчит — см. from_findings.CTX_ONLY_FAMILIES.
+        to_recommendations(result, lang, result.currency, topics=topics),
+        experience=experience,
+        thresholds=thresholds,  # 2.6: per-chat suppress_money_floor (валюта аккаунта, без FX)
+    )[:MAX_RECS]
+
+    client_ctx = ""
+    if use_llm:
+        # 2.11 (§20.6): профиль клиента — контекст формулировок (тон/термины ниши); решения — в КОДЕ.
+        client_ctx = await _client_profile_context(customer_id)
+        for r, b in zip(cands, await formulate.phrase(cands, lang, client_context=client_ctx)):
+            r.body = b
+
+    if persist and cands:
+        await store.record_recommendations(chat_id, customer_id, cands, source)
+
+    # #3: advisory LLM-минус-слова (тема keywords) — только на интерактивном пути (use_llm).
+    extras = (
+        await _negative_keywords_extra(
+            report,
+            topics,
+            lang,
+            client_context=client_ctx,
+            protected=await _protected_terms(customer_id),
+        )
+        if use_llm
+        else []
+    )
+
+    return RecommendationSet(
+        account=str(customer_id),
+        period_label=_period_label(report),
+        currency=getattr(report, "currency", "") or "",
+        recs=cands,
+        extras=extras,
+        has_activity=_has_activity(report),
+    )

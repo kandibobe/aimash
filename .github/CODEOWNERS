@@ -1,0 +1,43 @@
+# CODEOWNERS — обязательное человеческое ревью денежного пути и гардов.
+#
+# Зачем этот файл (§12 шаг 1 плана, SPEC.md §0.3/§8). Сегодня merge в master ==
+# авто-деплой в прод (.github/workflows/ci.yml:82 → git reset --hard origin/master +
+# docker compose up на VPS). Значит право мержить == право снять confirm-гейт и потом
+# «подтвердить себе» мутацию. Контур B (агент-билдер) НЕ должен иметь права merge; всё,
+# что он трогает на путях ниже, обязано пройти ревью человека-владельца.
+#
+# ⚠️ CODEOWNERS сам по себе НИЧЕГО не энфорсит. Он вступает в силу только вместе с
+#    branch protection / ruleset на master: «Require review from Code Owners» +
+#    «Require a pull request before merging» + «Do not allow bypassing». Точная
+#    настройка (что включить в UI GitHub) — docs/REPO_GUARDRAILS.md, применяет владелец.
+#
+# Замените @kandibobe на команду-ревьюеров, если она появится (напр. @org/money-path).
+# machine-аккаунт билдера в этот файл НЕ добавлять — у него не должно быть прав ревью.
+
+# ── Денежный путь: исполнение мутаций, замок аккаунта, провенанс, секреты, доступ ──
+/confirm/                       @kandibobe
+/ads/mutations.py               @kandibobe
+/ads/client.py                  @kandibobe
+/ads/service.py                 @kandibobe
+/core/provenance.py             @kandibobe
+/core/secrets.py                @kandibobe
+/core/access.py                 @kandibobe
+/core/limits.py                 @kandibobe
+
+# ── Гарды: их правка = правка того, что охраняет деньги ──
+/tests/test_hermes_isolation.py @kandibobe
+/tests/test_safety_core.py      @kandibobe
+/tests/test_invariants_core.py  @kandibobe
+/tests/test_write_layer.py      @kandibobe
+/tests/test_provenance_gate.py  @kandibobe
+
+# ── Слой инструментов, отдающий агенту доступ к Google Ads ──
+/mcp_server/                    @kandibobe
+
+# ── Схема БД: миграции трогают proposals/audit/провенанс ──
+/migrations/                    @kandibobe
+
+# ── Деплой-механика и конфиг прав агента: merge здесь = катится в прод ──
+/.github/workflows/             @kandibobe
+/deploy/hermes/config.yaml      @kandibobe
+/deploy/hermes/host-a/          @kandibobe

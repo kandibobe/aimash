@@ -1,0 +1,148 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev]" -c constraints.txt   # A11: воспроизводимые пины
+
+      # A11: известные CVE в зависимостях — блокирующий шаг. Сканируем окружение; реальные CVE валят
+      # билд (это дефолт pip-audit, exit 1 при находках). --skip-editable пропускает локальный
+      # editable-пакет aimash (не на PyPI). БЕЗ --strict осознанно: под --strict пропуск aimash сам по
+      # себе фатален («distribution marked as editable»), хотя реальные зависимости в порядке; без
+      # --strict пропуск лишь логируется, а блокировка на настоящие уязвимости сохраняется (2026-07-09).
+      - name: pip-audit (известные уязвимости зависимостей)
+        run: |
+          pip install pip-audit
+          pip-audit --desc --skip-editable
+
+      - name: Ruff (lint)
+        run: ruff check .
+
+      - name: Ruff (format check)
+        run: ruff format --check .
+
+      # К10: Hermes молча игнорирует неизвестные ключи и молча приводит неизвестные ЗНАЧЕНИЯ к
+      # дефолту — опечатка даёт конфиг, который выглядит рабочим и не работает. Отдельным шагом,
+      # а не только через pytest: вывод линта печатает и предупреждения (несверённые ключи), и
+      # падает РАНЬШЕ 2400 тестов — по сообщению сразу видно, какой ключ разошёлся.
+      # Гард на сам линт (включая отрицательные контроли) — tests/test_hermes_config_lint.py.
+      - name: Hermes config lint (К10)
+        run: python deploy/hermes/lint_config.py deploy/hermes/config.yaml deploy/hermes/host-a/config.yaml
+
+      # Типы — advisory (continue-on-error): в bot/main.py есть долг типизации aiogram
+      # (cq.message: Message|InaccessibleMessage|None). Делает долг видимым, но не блокирует
+      # CI и коммиты параллельного процесса. Ужесточить (убрать continue-on-error) — после
+      # чистки типов в bot/main.py. Список пакетов зеркалит Makefile (без scheduler/keywords).
+      - name: Mypy (типы, advisory)
+        continue-on-error: true
+        run: mypy core ads agent confirm bot db
+
+      # D1: порог покрытия как АНТИ-РЕГРЕСС. Сейчас ~68% — ставим floor 65 (буфер, чтобы не падать на
+      # шумных дельтах), но не даём покрытию просесть глубже. Поднимать порог по мере роста тестов.
+      - name: Pytest + coverage (офлайн safety-тесты)
+        run: pytest -q --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=65
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # gitleaks/trufflehog нужна полная история
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Авто-деплой на VPS (Hetzner) ────────────────────────────────────────────────
+  # Только push в master И только ПОСЛЕ зелёных lint-test + secret-scan (не катим сломанное).
+  # На сервере: git reset --hard origin/master → docker compose up -d --build. Миграции
+  # применяются АВТОМАТИЧЕСКИ при старте контейнера (docker-entrypoint.sh → alembic upgrade head,
+  # fail-fast). .env на сервере — untracked (секреты не в гите), reset --hard его не трогает.
+  # Нужны секреты репозитория (Settings → Secrets and variables → Actions):
+  #   VPS_SSH_HOST, VPS_SSH_USER, VPS_SSH_KEY (приватный ключ), VPS_SSH_PORT (опц., деф. 22).
+  deploy:
+    needs: [lint-test, secret-scan]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false   # деплои не отменяем посередине (полу-применённый rollout опаснее)
+    steps:
+      - name: Deploy over SSH (git pull + compose up --build)
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          passphrase: ${{ secrets.VPS_SSH_PASSPHRASE }}   # парольная фраза ключа (если ключ ею защищён); пусто — для ключа без passphrase
+          port: ${{ secrets.VPS_SSH_PORT || 22 }}
+          script_stop: true   # любая команда упала → job красный (видно сбой деплоя)
+          script: |
+            set -e
+            cd /opt/aimash
+            git fetch --prune origin master
+            git reset --hard origin/master
+            docker compose up -d --build
+            docker image prune -f
+            # `image prune` НЕ трогает кэш сборок BuildKit — а он растёт ~600 МБ за КАЖДЫЙ деплой
+            # (к 2026-07-14 накопил 26.5 ГБ = 81% диска; байты лежат в /var/lib/containerd, поэтому
+            # `du /var/lib/docker` их не показывает). Полный диск = сборка падает, авто-деплой встаёт,
+            # Postgres отказывает в записи. Прунинг ПОСЛЕ сборки: свежий кэш остаётся, срезается хвост.
+            # Флаг именно `--max-used-space` (Docker 29): старого `--keep-storage` больше нет.
+            docker builder prune -f --max-used-space 4GB
+            docker compose ps
+            # B1: пост-деплой проверка здоровья. `compose up` возвращается сразу — деплой считался бы
+            # «зелёным», даже если бот крэш-лупит (битая миграция / плохой рантайм-конфиг / 409).
+            # Семплируем состояние контейнера 3× за ~35с: крэш-луп не удержит status=running на всех
+            # проверках. Не running → script_stop=true валит job (красный деплой видно сразу).
+            #
+            # C4 (§5.3): контейнеров ДВА, и проверять надо оба. Планировщик — не косметика: в нём
+            # живёт `reconcile_stale_executing` (зависшие мутации → needs_review). Мёртвый
+            # aimash-scheduler = денежные черновики молча остаются в `executing`, никого не уведомив,
+            # а деплой при этом зелёный — ровно тот класс ошибки, который проект уже ловил.
+            echo "⏳ Пост-деплой проверка здоровья контейнеров..."
+            sleep 20
+            for PAIR in aimash-bot:bot aimash-scheduler:scheduler; do
+              CNT=${PAIR%%:*}
+              SVC=${PAIR##*:}
+              PREV=""
+              for i in 1 2 3; do
+                STATE=$(docker inspect -f '{{.State.Status}}' "$CNT" 2>/dev/null || echo missing)
+                RESTARTS=$(docker inspect -f '{{.RestartCount}}' "$CNT" 2>/dev/null || echo "?")
+                echo "check $i [$CNT]: state=$STATE restarts=$RESTARTS"
+                if [ "$STATE" != "running" ]; then
+                  echo "::error::$CNT не running после деплоя (state=$STATE) — вероятно крэш-луп"
+                  docker compose logs --tail=80 "$SVC" || true
+                  exit 1
+                fi
+                # Рестарт МЕЖДУ семплами: контейнер бывает running в каждый момент замера и при этом
+                # перезапускается между ними. Планировщик ведёт себя ровно так, когда advisory-lock
+                # роли `scheduler` держит бот (забыли SCHEDULER_IN_BOT=false): выход кодом 3 →
+                # restart → снова выход. Растущий счётчик — единственный признак, который это ловит.
+                if [ -n "$PREV" ] && [ "$RESTARTS" != "$PREV" ]; then
+                  echo "::error::$CNT перезапускался во время проверки ($PREV → $RESTARTS)"
+                  docker compose logs --tail=80 "$SVC" || true
+                  exit 1
+                fi
+                PREV=$RESTARTS
+                sleep 5
+              done
+              echo "✅ $CNT running (деплой здоров)"
+            done

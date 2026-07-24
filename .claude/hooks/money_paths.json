@@ -1,0 +1,24 @@
+{
+  "_comment": "Каркасный knob строгого режима. Перенос на другой проект = правка ТОЛЬКО этого файла: глобы путей + имена гейт-функций в напоминаниях. Логика — в money_path_guard.py. critical → PreToolUse спрашивает подтверждение ('ask'); broad → инъекция напоминания без блокировки; и то, и другое → PostToolUse напоминает прогнать safety-тесты.",
+  "critical": [
+    "ads/mutations.py",
+    "ads/client.py",
+    "ads/service.py",
+    "confirm/**",
+    "core/limits.py",
+    "core/secrets.py",
+    "core/logging.py",
+    "core/provenance.py"
+  ],
+  "broad": [
+    "scheduler/**",
+    "agent/**",
+    "mcp_server/**",
+    "bot/main.py",
+    "adcopy/validate.py",
+    "deploy/hermes/config.yaml"
+  ],
+  "critical_reminder": "ДЕНЕЖНЫЙ путь (золотые правила #1,#2,#3,#9). Инварианты до правки: подтверждение — реплай на карточку черновика, и гейт обязан пройти ВСЕ 9 проверок SPEC §2.2 fail-closed (реплай на ту самую карточку, автор = автор черновика, статус pending, TTL не истёк, свежесть данных перепроверена, ensure_allowed ПЕРВЫМ гейтом, атомарный ConfirmStore.claim, оба бита провенанса, user_initiated для денег). execute_confirmed берёт customer_id из proposal и ЗАНОВО проходит ensure_allowed. Секреты наружу только редактированными (str(e) не слать). После правки: /confirm-gate-audit + инвариант-тест в tests/test_invariants_core.py.",
+  "broad_reminder": "Путь рядом с деньгами/безопасностью (тул-слой MCP, планировщик, конфиг ядра Hermes, валидация длины). Держи fail-closed по умолчанию и 15 золотых правил из CLAUDE.md. Бюджет/ставки — только по прямой команде пользователя (никогда из cron/scheduler/anomaly). Мутирующий инструмент не должен быть виден агенту в read-фазе (И4). Правишь deploy/hermes/config.yaml — неизвестный/невалидный ключ Hermes проглатывает МОЛЧА (К10): сверь с реестром ключей и прогони lint_config.py.",
+  "post_reminder": "Ты изменил денежный/безопасный путь. Прогони safety-тесты: pytest tests/test_safety_core.py tests/test_write_layer.py tests/test_invariants_core.py — и, если добавил/изменил мутацию, /confirm-gate-audit."
+}

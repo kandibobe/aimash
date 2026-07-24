@@ -1,0 +1,381 @@
+"""Офлайн-тесты §11: кампании из видео (Demand Gen / Video) за двойным гейтом. Без живого SDK.
+
+Зеркалят test_gdn_campaign.py: оба гейта (замок аккаунта + confirm + user_initiated), валидация
+состава/длины/URL/бюджета/YouTube-id В КОДЕ ДО claim, статус PAUSED, разбор YouTube-ссылок, схемы.
+⚠️ SDK-цепочки (_create_*_via_sdk) требуют live-сверки на тест-аккаунте перед сдачей.
+"""
+
+from __future__ import annotations
+
+import sys
+from contextlib import contextmanager
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import ads.mutations as mut  # noqa: E402
+from ads.assets import parse_youtube_video_id  # noqa: E402
+from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
+from conftest import FakeConfirmStore, FakeProposal  # noqa: E402
+from core.config import settings  # noqa: E402
+
+_YT = "dQw4w9WgXcQ"
+
+
+@contextmanager
+def allowed_ids(value: str):
+    prev = settings.google_ads_allowed_customer_ids
+    settings.google_ads_allowed_customer_ids = value
+    try:
+        yield
+    finally:
+        settings.google_ads_allowed_customer_ids = prev
+
+
+@contextmanager
+def patched(obj, name, value):
+    orig = getattr(obj, name)
+    setattr(obj, name, value)
+    try:
+        yield
+    finally:
+        setattr(obj, name, orig)
+
+
+_VALID = dict(
+    campaign_name="Кения авто видео",
+    youtube_video_id=_YT,
+    headlines=["Поддержанные авто в Кении", "Авто с гарантией"],
+    long_headline="Проверенные б/у автомобили с гарантией 12 месяцев — доставка по Кении",
+    descriptions=["Большой выбор седанов и внедорожников. Рассрочка и trade-in."],
+    business_name="Kasi Motors",
+    final_url="https://kasimotors.co.ke/",
+    budget_daily_micros=40_000_000,
+)
+
+
+# ── Разбор YouTube-ссылок (чистая функция, КОД) ───────────────────────────────────
+def test_parse_youtube_variants():
+    assert parse_youtube_video_id(_YT) == _YT  # голый id
+    assert parse_youtube_video_id(f"https://www.youtube.com/watch?v={_YT}") == _YT
+    assert parse_youtube_video_id(f"https://youtu.be/{_YT}") == _YT
+    assert parse_youtube_video_id(f"https://youtube.com/shorts/{_YT}?feature=share") == _YT
+    assert parse_youtube_video_id(f"https://www.youtube.com/embed/{_YT}") == _YT
+    assert parse_youtube_video_id(f"https://www.youtube.com/watch?list=PL123&v={_YT}&t=10") == _YT
+
+
+def test_parse_youtube_rejects_garbage():
+    for bad in ("", "not a link", "https://example.com/watch?v=abc", "https://youtube.com/", "id"):
+        assert parse_youtube_video_id(bad) is None
+
+
+# ── apply_create_demand_gen_campaign: оба гейта + user_initiated + PAUSED ─────────
+async def test_apply_create_dg_happy_path():
+    called = {}
+
+    def fake(client, customer_id, **kw):
+        called.update(customer_id=customer_id, **kw)
+        return {"applied": True, "status": "PAUSED", "campaign": "customers/x/campaigns/1"}
+
+    store = FakeConfirmStore(
+        FakeProposal("create_demand_gen_campaign", "confirmed", user_initiated=True)
+    )
+    with patched(mut, "_create_demand_gen_campaign_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_create_demand_gen_campaign(
+            customer_id=DRAFT_ACCOUNT_ID,
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+            goal="clicks",
+            geo_locations=["Кения"],
+            **_VALID,
+        )
+    assert res["applied"] is True and res["status"] == "PAUSED"
+    assert called["customer_id"] == DRAFT_ACCOUNT_ID
+    assert called["youtube_video_id"] == _YT
+    assert called["goal"] == "clicks"
+    assert called["geo_locations"] == ["Кения"]
+    assert store.finalized is True
+
+
+async def test_apply_create_dg_blocked_when_not_user_initiated():
+    store = FakeConfirmStore(
+        FakeProposal("create_demand_gen_campaign", "confirmed", user_initiated=False)
+    )
+    with (
+        patched(mut, "_create_demand_gen_campaign_via_sdk", lambda *a, **k: {"applied": True}),
+        allowed_ids(DRAFT_ACCOUNT_ID),
+    ):
+        with pytest.raises(PermissionError):
+            await mut.apply_create_demand_gen_campaign(
+                customer_id=DRAFT_ACCOUNT_ID,
+                confirmation_id="x",
+                confirm_store=store,
+                ads_client=object(),
+                **_VALID,
+            )
+    assert store.finalized is False
+
+
+async def test_apply_create_dg_rejects_foreign_account():
+    calls = {"n": 0}
+
+    def fake(*a, **k):
+        calls["n"] += 1
+        return {"applied": True}
+
+    store = FakeConfirmStore(
+        FakeProposal("create_demand_gen_campaign", "confirmed", user_initiated=True)
+    )
+    with patched(mut, "_create_demand_gen_campaign_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        with pytest.raises(PermissionError):
+            await mut.apply_create_demand_gen_campaign(
+                customer_id="1234567890",  # чужой → замок ДО SDK
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=object(),
+                **_VALID,
+            )
+    assert calls["n"] == 0 and store.finalized is False
+
+
+async def test_apply_create_dg_validates_before_claim():
+    calls = {"n": 0}
+
+    def fake(*a, **k):
+        calls["n"] += 1
+        return {"applied": True}
+
+    store = FakeConfirmStore(
+        FakeProposal("create_demand_gen_campaign", "confirmed", user_initiated=True)
+    )
+    with patched(mut, "_create_demand_gen_campaign_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        with pytest.raises(ValueError):
+            await mut.apply_create_demand_gen_campaign(
+                customer_id=DRAFT_ACCOUNT_ID,
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=object(),
+                **{**_VALID, "headlines": ["а" * 31]},  # >30 (кириллица=1)
+            )
+    assert calls["n"] == 0 and store.finalized is False
+
+
+async def test_apply_create_dg_rejects_bad_goal_and_bad_youtube():
+    store = FakeConfirmStore(
+        FakeProposal("create_demand_gen_campaign", "confirmed", user_initiated=True)
+    )
+    with (
+        patched(mut, "_create_demand_gen_campaign_via_sdk", lambda *a, **k: {"applied": True}),
+        allowed_ids(DRAFT_ACCOUNT_ID),
+    ):
+        with pytest.raises(ValueError):
+            await mut.apply_create_demand_gen_campaign(
+                customer_id=DRAFT_ACCOUNT_ID,
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=object(),
+                goal="autopilot",  # не из списка
+                **_VALID,
+            )
+        with pytest.raises(ValueError):
+            await mut.apply_create_demand_gen_campaign(
+                customer_id=DRAFT_ACCOUNT_ID,
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=object(),
+                # ⚠️ не 11-символьная строка из [A-Za-z0-9_-] (та была бы валидным id!)
+                **{**_VALID, "youtube_video_id": "просто мусорный текст"},
+            )
+    assert store.finalized is False
+
+
+# ── apply_create_video_campaign: гейты + лимит описаний ≤70 ───────────────────────
+async def test_apply_create_video_happy_path():
+    called = {}
+
+    def fake(client, customer_id, **kw):
+        called.update(customer_id=customer_id, **kw)
+        return {"applied": True, "status": "PAUSED"}
+
+    store = FakeConfirmStore(
+        FakeProposal("create_video_campaign", "confirmed", user_initiated=True)
+    )
+    with patched(mut, "_create_video_campaign_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        res = await mut.apply_create_video_campaign(
+            customer_id=DRAFT_ACCOUNT_ID,
+            confirmation_id="ok",
+            confirm_store=store,
+            ads_client=object(),
+            **{**_VALID, "descriptions": ["Короткое описание до 70 символов."]},
+        )
+    assert res["applied"] is True and res["status"] == "PAUSED"
+    assert called["youtube_video_id"] == _YT
+    assert store.finalized is True
+
+
+async def test_apply_create_video_rejects_description_over_70():
+    store = FakeConfirmStore(
+        FakeProposal("create_video_campaign", "confirmed", user_initiated=True)
+    )
+    with (
+        patched(mut, "_create_video_campaign_via_sdk", lambda *a, **k: {"applied": True}),
+        allowed_ids(DRAFT_ACCOUNT_ID),
+    ):
+        with pytest.raises(ValueError):
+            await mut.apply_create_video_campaign(
+                customer_id=DRAFT_ACCOUNT_ID,
+                confirmation_id="ok",
+                confirm_store=store,
+                ads_client=object(),
+                **{**_VALID, "descriptions": ["о" * 71]},  # >70 (VIDEO_DESCRIPTION_MAX)
+            )
+    assert store.finalized is False
+
+
+async def test_apply_create_video_blocked_when_not_user_initiated():
+    store = FakeConfirmStore(
+        FakeProposal("create_video_campaign", "confirmed", user_initiated=False)
+    )
+    with (
+        patched(mut, "_create_video_campaign_via_sdk", lambda *a, **k: {"applied": True}),
+        allowed_ids(DRAFT_ACCOUNT_ID),
+    ):
+        with pytest.raises(PermissionError):
+            await mut.apply_create_video_campaign(
+                customer_id=DRAFT_ACCOUNT_ID,
+                confirmation_id="x",
+                confirm_store=store,
+                ads_client=object(),
+                **{**_VALID, "descriptions": ["Короткое описание."]},
+            )
+    assert store.finalized is False
+
+
+# ── B4: Video-кнопка скрыта по умолчанию (аккаунт не в allowlist Google) ──────────
+@contextmanager
+def _video_enabled(value: bool):
+    prev = settings.google_ads_video_enabled
+    settings.google_ads_video_enabled = value
+    try:
+        yield
+    finally:
+        settings.google_ads_video_enabled = prev
+
+
+def _kb_button_texts(markup) -> list[str]:
+    return [b.text for row in markup.inline_keyboard for b in row]
+
+
+def test_video_type_kb_hides_video_button_by_default():
+    """B4: по умолчанию (GOOGLE_ADS_VIDEO_ENABLED=false) кнопки «Video» НЕТ — создание Video через
+    API упирается в MUTATE_NOT_ALLOWED (allowlist Google), не ведём менеджера в тупик. Остаётся
+    Demand Gen (рабочий путь). Флаг True (аккаунт в allowlist) — кнопка возвращается."""
+    from bot.keyboards import video_type_kb
+
+    with _video_enabled(False):
+        off = _kb_button_texts(video_type_kb("ru"))
+    with _video_enabled(True):
+        on = _kb_button_texts(video_type_kb("ru"))
+    assert not any("Video" in t for t in off), off
+    assert any("Demand Gen" in t for t in off), off  # рабочий путь остаётся всегда
+    assert any("Video" in t for t in on), on  # включённый флаг возвращает кнопку
+
+
+# ── C1 (live 2026-07): логотип DG ОБЯЗАТЕЛЕН — «Пропустить» вёл к гарантированному отказу ──
+def test_video_logo_kb_has_no_skip_button():
+    """Без logo_images Google отвергает create DG (ASSET_LINK TOO_FEW → откат бюджета+кампании+
+    группы), поэтому кнопки «⏭ Пропустить» в клавиатуре логотипа больше нет — только отмена."""
+    from bot.keyboards import video_logo_kb
+
+    markup = video_logo_kb("ru")
+    cbs = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert not any("logo_skip" in str(cb) for cb in cbs), cbs
+    texts = _kb_button_texts(markup)
+    assert not any("Пропустить" in t or "Skip" in t for t in texts), texts
+
+
+@pytest.mark.asyncio
+async def test_stale_logo_skip_button_explains_not_mints(monkeypatch):
+    """Старая «⏭»-кнопка в истории чата: хендлер объясняет обязательность лого и НЕ минтит
+    proposal без логотипа (раньше вёл к гарантированному отказу create)."""
+    import bot.main as bm
+    from bot.handlers.search_media import video_logo_skip
+
+    minted = {"n": 0}
+
+    async def fake_mint(*a, **kw):
+        minted["n"] += 1
+
+    monkeypatch.setattr(bm, "_video_mint_proposal", fake_mint)
+
+    alerts: list[tuple[str, bool]] = []
+
+    class _Cq:
+        message = None
+
+        class from_user:
+            id = 100
+
+        async def answer(self, text: str = "", show_alert: bool = False, **kw):
+            alerts.append((text, show_alert))
+
+    class _State:
+        async def get_data(self):
+            return {}
+
+        async def clear(self):
+            pass
+
+    await video_logo_skip(_Cq(), None, _State())
+    assert minted["n"] == 0  # proposal без лого НЕ создан
+    assert alerts and alerts[0][1] is True and "логотип" in alerts[0][0].lower()
+
+
+# ── capability-guard зеркало + схемы ─────────────────────────────────────────────
+def test_video_ops_in_supported_operations():
+    from ads.service import SUPPORTED_OPERATIONS
+
+    assert "create_demand_gen_campaign" in SUPPORTED_OPERATIONS
+    assert "create_video_campaign" in SUPPORTED_OPERATIONS
+
+
+def test_video_ops_in_mutation_tools():
+    from agent.tools.schemas import MUTATION_TOOLS
+
+    assert "create_demand_gen_campaign" in MUTATION_TOOLS
+    assert "create_video_campaign" in MUTATION_TOOLS
+
+
+def test_dg_schema_validates_and_rejects():
+    from agent.tools.schemas import CreateDemandGenCampaign
+
+    ok = CreateDemandGenCampaign(**_VALID)
+    assert ok.goal == "clicks" and ok.logo_media_id is None  # дефолты
+    ok2 = CreateDemandGenCampaign(
+        **{**_VALID, "youtube_video_id": f"https://youtu.be/{_YT}"},
+        goal="conversions",
+        logo_media_id="abc123",
+    )
+    assert ok2.goal == "conversions"
+    with pytest.raises(Exception):
+        CreateDemandGenCampaign(**{**_VALID, "youtube_video_id": "мусор"})
+    with pytest.raises(Exception):
+        CreateDemandGenCampaign(**_VALID, logo_media_id="../evil")  # traversal
+    with pytest.raises(Exception):
+        CreateDemandGenCampaign(**{**_VALID, "headlines": ["а" * 31]})  # >30
+
+
+def test_video_schema_validates():
+    from agent.tools.schemas import CreateVideoCampaign
+
+    ok = CreateVideoCampaign(**_VALID, geo_locations=["Кения"])
+    assert ok.geo_locations == ["Кения"]
+    with pytest.raises(Exception):
+        CreateVideoCampaign(**{**_VALID, "final_url": "ftp://nope"})
+
+
+if __name__ == "__main__":
+    print("Запуск: pytest -q tests/test_video_campaigns.py")

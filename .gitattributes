@@ -1,0 +1,4 @@
+# Shell-скрипты ОБЯЗАНЫ быть LF — иначе в Linux-контейнере CRLF в shebang (`#!/bin/sh\r`)
+# даёт "bad interpreter" и entrypoint/бэкап не запустятся.
+*.sh text eol=lf
+docker-entrypoint.sh text eol=lf

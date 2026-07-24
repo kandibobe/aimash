@@ -1,0 +1,382 @@
+"""partial_failure для батчевых мутаций ключей/минус-слов (1F6).
+
+Одна плохая позиция (policy/серверный дубль) не валит весь батч: валидные применяются,
+отклонённые возвращаются в result['rejected'] с редактированной причиной; все отклонены —
+честный ValueError (record_failure). SDK подменён дакт-фейками (офлайн).
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import ads.mutations as mut  # noqa: E402
+from core.ads_errors import partial_failure_errors  # noqa: E402
+
+DRAFT = "7753643025"
+
+
+class _NS(SimpleNamespace):
+    """Автосоздание вложенных полей: op.create.keyword.text = … работает без описания структуры."""
+
+    def __getattr__(self, name):
+        val = _NS()
+        setattr(self, name, val)
+        return val
+
+
+class _Req:
+    def __init__(self) -> None:
+        self.customer_id = ""
+        self.operations: list = []
+        self.partial_failure = False
+
+
+def _pfe(*errs: tuple[int, str, str], code: int = 3):
+    """Фейковый google.rpc.Status с details[0].errors = [(index, code_name, message), …]."""
+    return SimpleNamespace(
+        code=code,
+        details=[
+            SimpleNamespace(
+                errors=[
+                    SimpleNamespace(
+                        message=msg,
+                        error_code=SimpleNamespace(name=code_name),
+                        location=SimpleNamespace(field_path_elements=[SimpleNamespace(index=idx)]),
+                    )
+                    for idx, code_name, msg in errs
+                ]
+            )
+        ],
+    )
+
+
+def _client(resp, captured: dict):
+    """Дакт-фейк GoogleAdsClient для батчевых _*_via_sdk (ключи/минус-слова/shared set)."""
+
+    class _AgSvc:
+        def ad_group_path(self, cid, agid):
+            return f"customers/{cid}/adGroups/{agid}"
+
+    class _CmpSvc:
+        def campaign_path(self, cid, campid):
+            return f"customers/{cid}/campaigns/{campid}"
+
+    class _CritSvc:
+        def mutate_ad_group_criteria(self, request):
+            captured["request"] = request
+            return resp
+
+        def mutate_campaign_criteria(self, request):
+            captured["request"] = request
+            return resp
+
+    class _SharedSetSvc:  # 3.2б-2: создание списка + путь sharedSets/<id>
+        def shared_set_path(self, cid, ssid):
+            return f"customers/{cid}/sharedSets/{ssid}"
+
+        def mutate_shared_sets(self, *, customer_id, operations):
+            captured["shared_set_ops"] = operations
+            return SimpleNamespace(results=_results(f"customers/{customer_id}/sharedSets/909"))
+
+    class _SharedCritSvc:
+        def mutate_shared_criteria(self, request):
+            captured["request"] = request
+            return resp
+
+    class _CampSharedSvc:
+        def mutate_campaign_shared_sets(self, *, customer_id, operations):
+            captured["css_ops"] = operations
+            camp = operations[0].create.campaign.rsplit("/", 1)[-1]
+            ss = operations[0].create.shared_set.rsplit("/", 1)[-1]
+            return SimpleNamespace(
+                results=_results(f"customers/{customer_id}/campaignSharedSets/{camp}~{ss}")
+            )
+
+    class _Enums:
+        KeywordMatchTypeEnum = SimpleNamespace(BROAD="BROAD", PHRASE="PHRASE", EXACT="EXACT")
+        AdGroupCriterionStatusEnum = SimpleNamespace(ENABLED="ENABLED")
+        SharedSetTypeEnum = SimpleNamespace(NEGATIVE_KEYWORDS="NEGATIVE_KEYWORDS")
+
+    class _Client:
+        enums = _Enums()
+
+        def get_service(self, name):
+            return {
+                "AdGroupService": _AgSvc(),
+                "CampaignService": _CmpSvc(),
+                "AdGroupCriterionService": _CritSvc(),
+                "CampaignCriterionService": _CritSvc(),
+                "SharedSetService": _SharedSetSvc(),
+                "SharedCriterionService": _SharedCritSvc(),
+                "CampaignSharedSetService": _CampSharedSvc(),
+            }[name]
+
+        def get_type(self, name):
+            if name.startswith("Mutate"):
+                return _Req()
+            return _NS()  # *Operation (ad_group/campaign/shared criterion, shared set, css)
+
+    return _Client()
+
+
+def _results(*resource_names: str):
+    return [SimpleNamespace(resource_name=rn) for rn in resource_names]
+
+
+def test_add_keywords_partial_failure_split():
+    """Индекс 1 отклонён → created=2, rejected=1 с текстом ключа операции 1."""
+    captured: dict = {}
+    resp = SimpleNamespace(
+        results=_results("crit0", "", "crit2"),  # у отклонённой позиции пустой resource_name
+        partial_failure_error=_pfe((1, "POLICY_FINDING", "policy violation")),
+    )
+    client = _client(resp, captured)
+    res = mut._add_keywords_via_sdk(client, DRAFT, ["10"], ["ok1", "bad", "ok2"], "broad")
+    assert res["count"] == 2
+    assert res["created"] == ["crit0", "crit2"]
+    assert res["rejected_count"] == 1
+    assert res["rejected"][0]["keyword"] == "bad"
+    assert "POLICY_FINDING" in res["rejected"][0]["reason"]
+    assert res["rejected"][0]["ad_group_id"] == "10"
+    assert captured["request"].partial_failure is True  # флаг реально выставлен
+
+
+def test_add_keywords_all_rejected_raises():
+    resp = SimpleNamespace(
+        results=_results("", ""),
+        partial_failure_error=_pfe((0, "DUPLICATE_KEYWORD", "dup"), (1, "POLICY_FINDING", "bad")),
+    )
+    client = _client(resp, {})
+    with pytest.raises(ValueError, match="отклонил все"):
+        mut._add_keywords_via_sdk(client, DRAFT, ["10"], ["a", "b"], "exact")
+
+
+def test_add_keywords_no_failures_backcompat():
+    """Без partial_failure_error — прежний результат, ключей rejected нет."""
+    resp = SimpleNamespace(results=_results("crit0", "crit1"))  # атрибута pfe вовсе нет
+    client = _client(resp, {})
+    res = mut._add_keywords_via_sdk(client, DRAFT, ["10"], ["a", "b"], "phrase")
+    assert res["count"] == 2 and "rejected" not in res
+
+
+def test_add_negative_keywords_partial_failure_mirror():
+    captured: dict = {}
+    resp = SimpleNamespace(
+        results=_results("neg0", ""),
+        partial_failure_error=_pfe((1, "KEYWORD_HAS_INVALID_CHARS", "invalid chars")),
+    )
+    client = _client(resp, captured)
+    res = mut._add_negative_keywords_via_sdk(client, DRAFT, "555", ["ok", "плох@й"], "broad")
+    assert res["count"] == 1 and res["resource_names"] == ["neg0"]
+    assert res["rejected"][0]["keyword"] == "плох@й"
+    assert "ad_group_id" not in res["rejected"][0]  # уровень кампании
+    assert captured["request"].partial_failure is True
+
+
+def test_add_negative_keywords_adgroup_partial_failure_mirror():
+    """3.2б: групповой вариант — negative=True на ad_group_criterion, тот же контракт rejected."""
+    captured: dict = {}
+    resp = SimpleNamespace(
+        results=_results("neg0", ""),
+        partial_failure_error=_pfe((1, "KEYWORD_HAS_INVALID_CHARS", "invalid chars")),
+    )
+    client = _client(resp, captured)
+    res = mut._add_negative_keywords_adgroup_via_sdk(
+        client, DRAFT, "555", "42", ["ok", "плох@й"], "broad"
+    )
+    assert res["count"] == 1 and res["resource_names"] == ["neg0"]
+    assert res["ad_group_id"] == "42" and res["campaign_id"] == "555"
+    assert res["rejected"][0]["keyword"] == "плох@й"
+    assert res["rejected"][0]["ad_group_id"] == "42"  # атрибуция отказа к группе
+    req = captured["request"]
+    assert req.partial_failure is True
+    assert req.operations[0].create.negative is True  # исключение, не таргетинг
+    assert req.operations[0].create.ad_group == f"customers/{DRAFT}/adGroups/42"
+
+
+# ── 3.2б-2: общий список минус-слов (SharedCriterion / SharedSet / CampaignSharedSet) ──
+def test_add_negatives_to_shared_set_partial_failure_mirror():
+    """Shared-set вариант — тот же контракт rejected. negative на SharedCriterion НЕ ставится
+    (исключение задаёт ТИП самого списка); существующий список → создание НЕ зовётся."""
+    captured: dict = {}
+    resp = SimpleNamespace(
+        results=_results("sc0", ""),
+        partial_failure_error=_pfe((1, "KEYWORD_HAS_INVALID_CHARS", "invalid chars")),
+    )
+    client = _client(resp, captured)
+    res = mut._add_negatives_to_shared_set_via_sdk(
+        client, DRAFT, "77", "Общие минуса", ["ok", "плох@й"], "broad"
+    )
+    assert res["count"] == 1 and res["resource_names"] == ["sc0"]
+    assert res["shared_set_id"] == "77" and res["shared_set_created"] is False
+    assert res["rejected"][0]["keyword"] == "плох@й"
+    req = captured["request"]
+    assert req.partial_failure is True
+    assert req.operations[0].create.shared_set == f"customers/{DRAFT}/sharedSets/77"
+    # vars(), не getattr: у _NS доступ к атрибуту СОЗДАЁТ его — проверяем реальное отсутствие
+    assert "negative" not in vars(req.operations[0].create)
+    assert "shared_set_ops" not in captured  # SharedSetService.create не вызывался
+
+
+def test_add_negatives_to_shared_set_creates_missing_list():
+    """id=None ⇒ СНАЧАЛА SharedSetService.create (type=NEGATIVE_KEYWORDS), критерии — в НОВЫЙ список."""
+    captured: dict = {}
+    resp = SimpleNamespace(results=_results("sc0"))  # без pfe — чистый батч
+    client = _client(resp, captured)
+    res = mut._add_negatives_to_shared_set_via_sdk(
+        client, DRAFT, None, "Новый список", ["a"], "exact"
+    )
+    assert res["shared_set_created"] is True and res["shared_set_id"] == "909"
+    assert res["count"] == 1 and "rejected" not in res
+    ss_create = captured["shared_set_ops"][0].create
+    assert ss_create.name == "Новый список" and ss_create.type_ == "NEGATIVE_KEYWORDS"
+    assert (
+        captured["request"].operations[0].create.shared_set == f"customers/{DRAFT}/sharedSets/909"
+    )
+
+
+def test_add_negatives_to_shared_set_all_rejected_notes_created_list():
+    """Все отклонены на СВЕЖЕсозданном списке → честный ValueError с пометкой про пустой список
+    (side-effect создания не скрываем: список уже существует в аккаунте)."""
+    resp = SimpleNamespace(
+        results=_results(""),
+        partial_failure_error=_pfe((0, "DUPLICATE_KEYWORD", "dup")),
+    )
+    client = _client(resp, {})
+    with pytest.raises(ValueError, match="список создан, но пуст"):
+        mut._add_negatives_to_shared_set_via_sdk(client, DRAFT, None, "Новый", ["a"], "broad")
+
+
+def test_attach_shared_set_via_sdk_shape():
+    """CampaignSharedSet CREATE: правильные resource_name кампании и списка, результат с applied."""
+    captured: dict = {}
+    client = _client(SimpleNamespace(results=_results()), captured)
+    res = mut._attach_shared_set_via_sdk(client, DRAFT, "555", "77")
+    op = captured["css_ops"][0]
+    assert op.create.campaign == f"customers/{DRAFT}/campaigns/555"
+    assert op.create.shared_set == f"customers/{DRAFT}/sharedSets/77"
+    assert res["resource_name"] == f"customers/{DRAFT}/campaignSharedSets/555~77"
+    assert res["campaign_id"] == "555" and res["shared_set_id"] == "77"
+    assert res["applied"] is True
+
+
+# ── B3: ключи визарда §19 идут тем же контрактом, что /addkeys ───────────────────
+def _composite_client(kw_resp, captured: dict):
+    """Дакт-фейк SDK для _create_search_campaign_via_sdk: бюджет/кампания/группа/RSA — успех,
+    батч ключей отвечает переданным kw_resp (в т.ч. с partial_failure_error)."""
+
+    class _Svc:
+        def mutate_campaign_budgets(self, *, customer_id, operations):
+            return SimpleNamespace(results=_results("customers/x/campaignBudgets/1"))
+
+        def mutate_campaigns(self, *, customer_id, operations):
+            return SimpleNamespace(results=_results("customers/x/campaigns/2"))
+
+        def mutate_ad_groups(self, *, customer_id, operations):
+            return SimpleNamespace(results=_results("customers/x/adGroups/3"))
+
+        def mutate_ad_group_ads(self, *, customer_id, operations):
+            return SimpleNamespace(results=_results("customers/x/adGroupAds/3~4"))
+
+        def mutate_ad_group_criteria(self, request):
+            captured["request"] = request
+            return kw_resp
+
+    class _Proto(list):
+        """Рекурсивный proto-подобный фейк: любой атрибут — снова _Proto (и это list → .append)."""
+
+        def __getattr__(self, k):
+            v = _Proto()
+            object.__setattr__(self, k, v)
+            return v
+
+    class _Client:
+        enums = _Proto()
+
+        def get_service(self, name):
+            return _Svc()
+
+        def get_type(self, name):
+            return _Req() if name.startswith("Mutate") else _Proto()
+
+    return _Client()
+
+
+def _run_composite(client, keywords):
+    return mut._create_search_campaign_via_sdk(
+        client,
+        DRAFT,
+        campaign_name="T",
+        final_url="https://x/",
+        headlines=["a", "b", "c"],
+        descriptions=["d", "e"],
+        budget_micros=40_000_000,
+        keywords=keywords,
+        match_type="phrase",
+        cpc_bid_micros=120_000,
+    )
+
+
+def test_wizard_keywords_partial_failure_does_not_zero_the_campaign(monkeypatch):
+    """B3: раньше ключи визарда шли БЕЗ partial_failure → один битый ключ («скидка 50%» →
+    KEYWORD_HAS_INVALID_CHARS) валил весь батч, `except Exception` глотал причину, и Search-кампания
+    создавалась с НУЛЁМ ключей. Теперь валидные создаются, отклонённые — в result['rejected']."""
+    monkeypatch.setattr(mut, "_downgrade_bidding_if_no_conversions", lambda c, cid, b: (b, None))
+    monkeypatch.setattr(mut, "_apply_bidding_on_create", lambda c, camp, b: None)
+    captured: dict = {}
+    kw_resp = SimpleNamespace(
+        results=_results("crit0", "", "crit2"),
+        partial_failure_error=_pfe((1, "KEYWORD_HAS_INVALID_CHARS", "invalid chars")),
+    )
+    res = _run_composite(_composite_client(kw_resp, captured), ["ok1", "скидка 50%", "ok2"])
+
+    assert captured["request"].partial_failure is True  # флаг реально выставлен
+    assert res["keywords"] == 2  # НЕ 0 — кампания уехала с валидными ключами
+    assert res["rejected_count"] == 1
+    assert res["rejected"][0]["keyword"] == "скидка 50%"
+    assert "KEYWORD_HAS_INVALID_CHARS" in res["rejected"][0]["reason"]
+    # частичный успех виден и в warnings (3C-контракт)
+    assert {"part": "keywords", "requested": 3, "applied": 2} in res["warnings"]
+
+
+def test_wizard_keywords_clean_batch_has_no_rejected(monkeypatch):
+    monkeypatch.setattr(mut, "_downgrade_bidding_if_no_conversions", lambda c, cid, b: (b, None))
+    monkeypatch.setattr(mut, "_apply_bidding_on_create", lambda c, camp, b: None)
+    kw_resp = SimpleNamespace(results=_results("crit0", "crit1"))  # атрибута pfe вовсе нет
+    res = _run_composite(_composite_client(kw_resp, {}), ["a", "b"])
+    assert res["keywords"] == 2 and "rejected" not in res
+    assert not [w for w in res.get("warnings", []) if w["part"] == "keywords"]
+
+
+def test_partial_failure_errors_parser_duck():
+    resp = SimpleNamespace(partial_failure_error=_pfe((0, "A_CODE", "msg0"), (2, "B_CODE", "msg2")))
+    out = partial_failure_errors(object(), resp)  # client не нужен дакт-фейку (detail.errors)
+    assert out == [(0, "A_CODE", "msg0"), (2, "B_CODE", "msg2")]
+    # нет partial_failure (None / code=0) → пусто
+    assert partial_failure_errors(object(), SimpleNamespace()) == []
+    assert (
+        partial_failure_errors(
+            object(), SimpleNamespace(partial_failure_error=SimpleNamespace(code=0))
+        )
+        == []
+    )
+
+
+def test_rejected_reasons_redacted():
+    """Серверный message с токен-подобной строкой → в reason только REDACTED (golden rule #5)."""
+    secret = "1//0SECRETtokenVALUE42"  # gitleaks:allow — форма refresh-токена
+    resp = SimpleNamespace(
+        results=_results("ok", ""),
+        partial_failure_error=_pfe((1, "AUTH", f"denied refresh_token={secret}")),
+    )
+    client = _client(resp, {})
+    res = mut._add_keywords_via_sdk(client, DRAFT, ["10"], ["a", "b"], "broad")
+    reason = res["rejected"][0]["reason"]
+    assert secret not in reason
+    assert "REDACTED" in reason

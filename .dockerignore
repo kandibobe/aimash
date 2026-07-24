@@ -1,0 +1,61 @@
+# Контекст сборки БЕЗ секретов и мусора (образ собирается из исходников, секреты — в рантайме).
+.git
+.gitignore
+
+# Секреты — НИКОГДА в образ
+.env
+.env.*
+google-ads.yaml
+google-ads-oauth*.json
+*.pem
+*.key
+client_secret*.json
+service_account*.json
+token.json
+credentials.json
+secrets/
+
+# Python-кэши и сборка
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Инструменты / отчёты
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Локальные данные / БД
+*.sqlite3
+*.db
+data/
+dumps/
+# A10: авто-дампы pg_dump (docker-compose backup-сайдкар ./backups:/backups) — pg_dump -Fc ВСЕЙ БД
+# (включая audit_log и шифрованные oauth_tokens). НЕ запекать в образ через `COPY . .` (симметрия
+# с .gitignore; дрейф двух списков ловит tests/test_ignore_sync.py).
+backups/
+*.dump
+
+# Не нужно в рантайме бота
+tests/
+.github/
+ab_results/
+*.ab.json
+*.log
+logs/
+
+# IDE / OS / Claude
+.idea/
+.vscode/
+.claude/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aimash"
+version = "0.0.1"
+description = "AI-агент управления Google Ads через Telegram (исполнитель с подтверждением каждого изменения)"
+requires-python = ">=3.12"
+dependencies = [
+    "aiogram>=3.13",
+    "openai>=1.50",            # клиент к OpenRouter (OpenAI-совместимый)
+    # SDK google-ads 31.1.x => API v24/v24.1/v24.2 (lib-версия ≠ API-версия!).
+    # 27.x НЕ умеет v24. <32 держит линию v24 (след. мажор lib может выкинуть v24).
+    # Релизы ежемесячные → бампить SDK ~раз в месяц (скил gads-version). Сансет v24 ~май 2027.
+    "google-ads>=31.1,<32",    # официальный SDK Google Ads API → API v24
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "SQLAlchemy>=2.0",
+    "asyncpg>=0.30",           # async-драйвер Postgres (prod DSN)
+    "aiosqlite>=0.20",         # async-драйвер SQLite (dev/test DSN по умолчанию sqlite+aiosqlite);
+                               # db.session импортирует драйвер сразу при загрузке → без него падает
+                               # collect всех тестов в CI (ModuleNotFoundError). Был не объявлен:
+                               # локально стоял, CI с `.[dev]` его не получал.
+    "alembic>=1.13",
+    "APScheduler>=3.10",
+    "cryptography>=43.0",      # Fernet для шифрования токенов at-rest
+    "openpyxl>=3.1",           # .xlsx экспорт (фаза 2)
+    "Pillow>=10.0",            # подготовка изображений для GDN-объявлений (§11): кроп 1.91:1 / 1:1
+    "google-api-python-client>=2.140",  # Sheets API (фаза 2)
+    "python-dotenv>=1.0",
+    "tenacity>=9.0",           # ретраи/backoff (rate limits Google Ads)
+    "sentry-sdk>=2.0",         # мониторинг ошибок (опц.; ВЫКЛ без SENTRY_DSN — core.observability)
+    "httpx>=0.27",             # чтение ссылок (ingest): async-фетч с таймаутом и SSRF-гардом
+    "beautifulsoup4>=4.12",    # HTML→текст при чтении ссылок (ingest)
+    "python-docx>=1.1",        # чтение .docx-брифов (ingest)
+    "mcp>=1.25",               # MCP SDK (FastMCP) — Контур A (пивот Hermes): mcp_server/ по stdio,
+                               # READ-инструменты поверх ридеров. Аддитивно; денежное ядро не трогает.
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",        # покрытие в CI (--cov-report=xml)
+    # ПИН ТОЧНОЙ ВЕРСИИ (не ">="): ruff меняет стиль форматтера между минорами (0.15.x
+    # переформатировал файлы иначе 0.14.x). Без пина CI ставил новейший ruff, расходился
+    # с локальным → `ruff format --check` падал → деплой не катился. Версия == pre-commit
+    # rev (.pre-commit-config.yaml). Бамп ruff — осознанный (обнови оба места + ruff format).
+    "ruff==0.14.10",
+    "mypy>=1.11",
+    "pre-commit>=3.8",        # хуки: gitleaks (секрет-скан) + ruff/ruff-format
+    "hypothesis>=6.100",      # property-based тесты счётчика длины RSA (кириллица=1, CJK=2 —
+                              # golden rule #4): краевые входы (эмодзи/диакритики/границы CJK),
+                              # которые примерами не перебрать. См. tests/test_rsa_length_properties.py
+]
+
+# Плоская раскладка с несколькими top-level пакетами → setuptools НЕ авто-определит их
+# (ошибка «Multiple top-level packages discovered»). Перечисляем явно; tests/scripts/migrations —
+# не пакеты (в образ всё равно COPY . . попадают, alembic/pytest находят их без установки).
+#
+# Список ОБЯЗАН покрывать все top-level каталоги с __init__.py — инвариант tests/test_packaging.py.
+# Прод этого не ловил: в Docker идёт `COPY . .`, а локальный pytest запускается из корня, поэтому
+# недостающий пакет импортируется из CWD и промах не виден. Бьёт он ровно там, где установка
+# честная: `pip install -e .` в отдельный venv + запуск из другой директории (хост A под Hermes) —
+# там `app` и `audit` отсутствовали, и MCP падал на импорте `app.bootstrap` / `audit.collect`.
+[tool.setuptools.packages.find]
+include = ["adcopy*", "ads*", "advisor*", "agent*", "app*", "audit*", "bot*", "clients*", "confirm*", "core*", "db*", "keywords*", "mcp_server*", "reports*", "scheduler*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint.per-file-ignores]
+# bot/main.py — ядро/namespace бота: его module-scope имена (импорты, хелперы, кэши) читают
+# доменные модули bot/handlers/* через bm.<name> (позднее связывание — так monkeypatch тестов
+# на bot.main продолжает влиять на вынесенные хендлеры). Ruff не видит это использование →
+# F401 здесь ложноположителен; хвостовые импорты bot.handlers регистрируют хендлеры сайд-эффектом.
+"bot/main.py" = ["F401"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+# Метрика по исходникам, а не по тест/служебным файлам (иначе % искажён).
+omit = ["tests/*", "migrations/*", "scripts/*", "*/__init__.py"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+check_untyped_defs = true
+no_implicit_optional = true
+ignore_missing_imports = true   # google-ads/openai/aiogram без полных стабов

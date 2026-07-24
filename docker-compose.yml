@@ -1,0 +1,219 @@
+# Локальная dev-БД. Запуск: `docker compose up -d postgres` (или `make db-up`).
+# Создаёт две роли: aimash (read-write для приложения/Alembic) и aimash_ro (read-only,
+# для Postgres MCP — defense-in-depth поверх --access-mode=restricted).
+#
+# 🔒 D3: пароли БД НЕ лежат в git. POSTGRES_PASSWORD / POSTGRES_RO_PASSWORD берутся из .env
+# (untracked) через `${VAR:?}` — при отсутствии `docker compose` ОТКАЗЫВАЕТ подниматься
+# (fail-closed, правило #10), а не поднимается со всем известным паролем «aimash».
+# ⚠️ На уже проинициализированном томе смена пароля требует ручного `ALTER ROLE aimash WITH
+#    PASSWORD '…';` — иначе бот не подключится (docs/DEPLOYMENT.md).
+services:
+  postgres:
+    image: postgres:16
+    container_name: aimash-pg
+    environment:
+      POSTGRES_USER: aimash
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD обязателен — задай в .env}
+      POSTGRES_DB: aimash
+      # Пароль read-only роли для init-скрипта (db/init/01-readonly-role.sh).
+      AIMASH_RO_PASSWORD: ${POSTGRES_RO_PASSWORD:?POSTGRES_RO_PASSWORD обязателен — задай в .env}
+    ports:
+      # 5433 ТОЛЬКО на loopback (localhost): dev/alembic с хоста работают, но наружу (0.0.0.0) НЕ
+      # светим — иначе Docker пробивает host-firewall через iptables. Внутри контейнера — 5432.
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - aimash_pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aimash -d aimash"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    # B3: как и у бота — БД должна сама подниматься после падения/перезагрузки VPS. Без этого
+    # упавший postgres остаётся мёртвым, а бот (depends_on healthy) уходит в бесконечный крэш-луп.
+    restart: unless-stopped
+    # Потолок ресурсов БД (co-located с ботом на 2 vCPU / 4 ГБ — БД не должна задушить бота).
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+
+  # Бот (Telegram long-poll + планировщик). Запуск всего: `docker compose up --build`.
+  # Секреты — из .env (env_file), в образ НЕ запекаются. Миграции применяются АВТОМАТИЧЕСКИ
+  # при старте (docker-entrypoint.sh → alembic upgrade head, fail-fast если миграция падает).
+  # Прогнать вручную при необходимости: docker compose run --rm bot alembic upgrade head
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Стабильный тег образа: его переиспользует сервис `mcp` (profiles: [mcp]), чтобы не пересобирать
+    # второй раз. Health-check смотрит на container_name, не на имя образа, — поведение не меняется.
+    image: aimash-bot
+    container_name: aimash-bot
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Порядок важен: .env.defaults (tracked, несекретные операционные дефолты) — базой;
+    # .env (untracked, секреты + оверрайды) — ПОСЛЕДНИМ, поэтому переопределяет дефолты.
+    env_file:
+      - .env.defaults
+      - .env
+    environment:
+      # ВНУТРИ сети compose — имя сервиса + порт 5432 (НЕ хостовый 5433!).
+      # ⚠️ `environment:` БЬЁТ `env_file:` — DATABASE_URL из .env тут не действует, поэтому пароль
+      # подставляем той же переменной, что и сам postgres (иначе бот молча уходил бы со старым).
+      DATABASE_URL: postgresql+asyncpg://aimash:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD обязателен — задай в .env}@postgres:5432/aimash
+      # Фиксируем UTC: APScheduler берёт локальную TZ контейнера, а код трактует naive datetime как
+      # UTC. Явный TZ=UTC делает cron детерминированным независимо от хоста: REPORT_SCHEDULE
+      # '0 1 * * *' = 01:00 UTC = 10:00 JST (10 утра по Японии).
+      TZ: UTC
+      # C4: джобы переехали в сервис `scheduler` (отдельный процесс, топология «три процесса»).
+      # Флаг выражает НАМЕРЕНИЕ; энфорсмент — advisory-lock роли `scheduler` в БД, поэтому забытый
+      # флаг не даст двойных дайджестов/двойного reconcile, а даст громкий отказ у проигравшего.
+      # Дефолт в коде — `true` (историческое поведение), здесь снимаем осознанно.
+      SCHEDULER_IN_BOT: "false"
+    restart: unless-stopped
+    # Потолок ресурсов одного инстанса (long-poll бот лёгкий; лимит ловит утечку/раздувание).
+    # docker compose v2 (не-swarm) применяет deploy.resources.limits для memory/cpus.
+    # 1200M (было 768M): пиковый путь — deep-MCC xlsx (`/export` → «Все аккаунты»), он держит в RAM
+    # ReportData ВСЕХ дочерних сразу (reports/mcc.py) и строит полный объектный граф openpyxl.
+    # Хост тянет: 1.2G (бот) + 512M (pg) + ~700M системы ≈ 2.4G из 3.8G, плюс 2G swap.
+    deploy:
+      resources:
+        limits:
+          memory: 1200M
+          cpus: "1.0"
+    # Ротация логов: без неё json-file растёт безгранично и забивает диск VPS.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # C4 (§5.3): ДОМ ПРОЦЕССА ПЛАНИРОВЩИКА. Раньше APScheduler крутился внутри aiogram-петли бота —
+  # значит архивация кнопочного слоя унесла бы с собой все 15 джоб, включая `reconcile_stale_executing`
+  # (зависшие мутации → needs_review). Это денежный путь, а не дайджесты. Топология «три процесса»
+  # даёт джобам собственный контейнер: «БД + тонкий Bot-клиент для отправки».
+  # Владение — advisory-lock роли `scheduler`: занято ⇒ этот процесс выходит ненулевым кодом
+  # (restart подхватит, когда бот отпустит), а НЕ уходит в тихий standby.
+  # ⚠️ Кнопочного слоя здесь нет по построению: порт `scheduler/delivery.py` не заполняется ⇒
+  #    дайджесты уходят текстом, а thr-tune молчит (его сообщение целиком — предложение под тап).
+  scheduler:
+    image: aimash-bot            # тот же образ, что собрал сервис bot (как у `mcp`) — без второй сборки
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aimash-scheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # Промежуточный ответ на C6: `docker-entrypoint.sh` гоняет `alembic upgrade head` только для
+      # команды `python -m bot.main`, поэтому одновременного апгрейда двумя сервисами не возникает
+      # по построению — планировщик стартует уже после того, как бот довёл схему до head. Свою
+      # проверку он всё равно делает сам (`assert_schema_at_head` в `bootstrap_ads_layer`).
+      bot:
+        condition: service_healthy
+    # Тот же порядок и файлы, что у бота: .env.defaults базой, .env (untracked) последним.
+    env_file:
+      - .env.defaults
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://aimash:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD обязателен — задай в .env}@postgres:5432/aimash
+      # Как у бота: APScheduler берёт локальную TZ контейнера, код трактует naive datetime как UTC.
+      TZ: UTC
+      # Здесь джобы и живут — флаг относится к боту, но пишем явно, чтобы `env_file` не переключил
+      # роли молча: этот процесс владеет джобами независимо от значения (энфорсмент — lock).
+      SCHEDULER_IN_BOT: "true"
+      PYTHONIOENCODING: utf-8
+    command: ["python", "-m", "scheduler"]
+    restart: unless-stopped
+    # Тот же HEALTHCHECK из образа (свежесть heartbeat) — энтрипоинт планировщика поднимает
+    # `heartbeat_loop()` на своём loop, иначе контейнер был бы вечно unhealthy. Файл heartbeat — в
+    # temp КОНТЕЙНЕРА (HEARTBEAT_FILE не задан), у бота свой: файловые системы разные.
+    # Пик памяти — плановый xlsx-отчёт (openpyxl держит объектный граф); интерактивный deep-MCC
+    # `/export` остаётся у бота, поэтому потолок ниже ботовского.
+    deploy:
+      resources:
+        limits:
+          memory: 900M
+          cpus: "0.5"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # Контур A (Hermes): READ-only MCP-сервер по stdio. НЕ поднимается штатным `up` (profiles) — только
+  # по требованию Hermes: `docker compose --profile mcp run --rm --no-deps -T mcp`. Тот же образ и env,
+  # что у бота (OAuth-кэш в БД, DATABASE_URL, GOOGLE_ADS_*, SECRETS_ENCRYPTION_KEY) — паритет окружения
+  # без host-venv. docker-entrypoint.sh для не-`bot.main` команды миграции НЕ гоняет (exec "$@").
+  # Дефолтный путь MCP — `docker exec` в aimash-bot (см. deploy/hermes/README.md); этот сервис —
+  # durable-вариант с изоляцией OAuth-процесса от Telegram-поллера (§20), включается сменой args в
+  # ~/.hermes/config.yaml на `docker compose … run … mcp`.
+  mcp:
+    profiles: ["mcp"]
+    image: aimash-bot            # переиспользовать образ, что уже собрал сервис bot (без второй сборки)
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Тот же порядок и файлы, что у бота: .env.defaults базой, серверный .env (untracked) последним.
+    env_file:
+      - .env.defaults
+      - .env
+    environment:
+      # Как у бота: внутри compose-сети — postgres:5432 (НЕ хостовый 5433); пароль той же переменной.
+      DATABASE_URL: postgresql+asyncpg://aimash:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD обязателен — задай в .env}@postgres:5432/aimash
+      TZ: UTC
+      PYTHONIOENCODING: utf-8    # Windows/utf8 не при чём здесь, но stdout MCP — строго utf-8
+    command: ["python", "-m", "mcp_server"]
+    restart: "no"               # запускается через `run --rm` на сессию Hermes, не long-running
+
+  # C1: АВТОБЭКАП БД. Раньше scripts/backup_db.sh надо было ставить в host-cron ВРУЧНУЮ — по факту он
+  # часто НЕ был запущен, а в БД oauth_tokens (шифр. refresh-токены) + audit_log (денежный реестр).
+  # Сайдкар делает pg_dump -Fc сразу на старте и далее раз в сутки в ./backups (хост-том, переживает
+  # пересоздание контейнера и `git reset --hard` — папка untracked), ротация BACKUP_RETAIN дампов.
+  # ⚠️ Локальный том — НЕ офсайт: для катастрофоустойчивости выгружай ./backups наружу (rsync/S3/rclone).
+  # ⚠️ SECRETS_ENCRYPTION_KEY бэкапь ОТДЕЛЬНО от дампа (docs/BACKUP.md): без него oauth_tokens в дампе
+  #    не расшифруются — потребуется повторная регистрация аккаунтов (scripts/register_account.py).
+  backup:
+    image: postgres:16
+    container_name: aimash-backup
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD обязателен — задай в .env}
+      BACKUP_RETAIN: "14"
+      TZ: UTC
+    volumes:
+      - ./backups:/backups
+    restart: unless-stopped
+    # Дамп сразу на старте, затем sleep 24ч. Сбой pg_dump не роняет цикл (|| echo). $$ = литеральный
+    # $ для shell (compose съедает одиночный $). Ротация: оставить последние BACKUP_RETAIN дампов.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          ts=$$(date +%Y%m%d-%H%M%S);
+          out="/backups/aimash-$$ts.dump";
+          echo "[backup] pg_dump -> $$out";
+          if pg_dump -Fc -h postgres -U aimash -d aimash > "$$out"; then
+            echo "[backup] ok";
+          else
+            echo "[backup] FAILED"; rm -f "$$out";
+          fi;
+          ls -1t /backups/aimash-*.dump 2>/dev/null | tail -n +$$(( $${BACKUP_RETAIN:-14} + 1 )) | xargs -r rm -f;
+          sleep 86400;
+        done
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+volumes:
+  aimash_pgdata:

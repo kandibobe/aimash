@@ -1,0 +1,84 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment & secrets
+.env
+*.env.local
+*.env.production
+auth.json
+credentials.json
+*.pem
+*.key
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Docker
+docker-compose.override.yml
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Hermes
+.hermes/plans/
+.hermes/pending/
+
+# Claude Code (keep .claude/ settings but ignore creds)
+.claude/.credentials.json
+.claude/sessions/
+.claude/backups/
+
+# Backup artifacts
+backups/*.sql
+backups/*.dump
+backups/*.tar.gz
+!backups/.gitkeep
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+.hypothesis/
+
+# MyPy
+.mypy_cache/
+
+# Ruff
+.ruff_cache/
+
+# Node (for MCP dev tools like context7)
+node_modules/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Temporary
+tmp/
+temp/
+*.tmp

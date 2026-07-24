@@ -1,0 +1,54 @@
+# Хуки качества + безопасности. Установка: `pre-commit install` (см. Makefile / README).
+# Прогон по всем файлам: `pre-commit run --all-files`.
+minimum_pre_commit_version: "3.8.0"
+
+repos:
+  # Секрет-скан: блокирует коммит с developer/refresh-токенами, ключами (golden rule №5).
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  # Линт + формат Python. rev ДОЛЖЕН совпадать с пином ruff в pyproject [dev] и версией
+  # в CI — иначе pre-commit/локаль/CI форматируют по-разному и `ruff format --check` в CI падает.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.10
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  # Базовая гигиена файлов.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: detect-private-key
+
+  - repo: local
+    hooks:
+      # К10: Hermes МОЛЧА игнорирует неизвестные ключи, а неизвестные ЗНАЧЕНИЯ приводит к дефолту
+      # без записи в лог. Линт объявлен в CLAUDE.md частью деплой-процедуры, но не звался ниоткуда
+      # — и прожил сломанным (TypeError на втором из пяти правил), пока за ним копились четыре
+      # нарушения, включая отсутствие `skills.inline_shell: false` (правило 14 / К1).
+      # Профиль каждому файлу выводится из пути, поэтому `pass_filenames` оставлен включённым.
+      - id: hermes-config-lint
+        name: Hermes config lint (К10)
+        entry: python deploy/hermes/lint_config.py
+        language: system
+        files: ^deploy/hermes/(host-a/)?config\.yaml$
+
+      # Типы — manual-стадия (не блокирует обычный коммит из-за долга типов в bot/main.py).
+      # Запуск: `pre-commit run --hook-stage manual mypy` или `make typecheck`.
+      - id: mypy
+        name: mypy (manual)
+        entry: mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [manual]
+        args: [core, ads, agent, confirm, bot, db]

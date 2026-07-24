@@ -1,0 +1,74 @@
+{
+  "env": {
+    "ENV": "dev",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "200000",
+    "BASH_MAX_OUTPUT_LENGTH": "20000"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(python -m:*)",
+      "Bash(pip install:*)",
+      "Bash(uv:*)",
+      "Bash(uvx:*)",
+      "Bash(npx:*)",
+      "Bash(pipx:*)",
+      "Bash(pytest:*)",
+      "Bash(ruff:*)",
+      "Bash(mypy:*)",
+      "Bash(alembic:*)",
+      "Bash(pre-commit:*)",
+      "Bash(gitleaks:*)",
+      "Bash(make:*)",
+      "Bash(docker:*)",
+      "Bash(docker compose:*)",
+      "Bash(claude mcp:*)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Read(./**)",
+      "Edit(./**)",
+      "Write(./**)",
+      "Bash(PYTHONIOENCODING=utf-8 python -m ruff check bot/texts.py tests/test_db_schema.py bot/i18n.py)",
+      "Bash(PYTHONIOENCODING=utf-8 python -m ruff format --check advisor/ tests/test_advisor.py)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./google-ads.yaml)",
+      "Read(./google-ads-oauth*.json)",
+      "Read(./.claude/settings.local.json)",
+      "Read(./secrets/**)",
+      "Bash(git push:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/money_path_guard.py\"",
+            "timeout": 10,
+            "statusMessage": "Строгий режим: проверка денежного пути"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/money_path_guard.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
