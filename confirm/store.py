@@ -153,6 +153,26 @@ class ConfirmStore:
             )
             await s.commit()
 
+    async def count_run_proposals(self, run_id: str) -> int:
+        """И8-плюмбинг: сколько черновиков уже создано в ХОДЕ `run_id` (любой статус). Политику
+        «не более одного черновика на ассистентский ход» энфорсит тул-слой (mcp_server.tools_write),
+        но СЧЁТ — свойство ХРАНИЛИЩА, не памяти процесса: агентский цикл делает много
+        последовательных итераций, и in-memory счётчик пережил бы не каждую (перезапуск воркера,
+        второй воркер, ретрай). Считаем строки по колонке.
+
+        Ключ усекаем `[:16]` ровно как `save_proposal` пишет `prov.run_id[:16]` — иначе счёт
+        промахнётся мимо только что вставленной строки. Машинный ход даёт run_id '-' (sentinel из
+        core.provenance): все машинные черновики схлопнутся в одно ведро, и лимит станет ≤1 на все
+        машинные ходы разом — осознанно строгая деградация (fail-closed), задокументирована в
+        tools_write. Read-only, секретов не касается."""
+        async with Session() as s:
+            n = (
+                await s.execute(
+                    select(func.count()).select_from(Proposal).where(Proposal.run_id == run_id[:16])
+                )
+            ).scalar_one()
+        return int(n)
+
     async def set_card_message_id(self, confirmation_id: str, tg_message_id: int) -> bool:
         """Проштамповать реплай-якорь: message_id опубликованной карточки «было→станет». True если
         проставил. Зовёт ТРАНСПОРТ подтверждения сразу после публикации карточки (message_id известен

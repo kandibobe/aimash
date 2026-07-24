@@ -44,6 +44,8 @@ ERROR_CODES: frozenset[str] = frozenset(
         "upstream_denied",  # Google отказал в доступе к аккаунту (нет линковки/токен без прав)
         "upstream_error",  # прочая ошибка Google Ads API
         "internal",  # всё остальное, включая сбой самой классификации
+        "refused",  # propose-гейт отказал ДО создания черновика (И8-лимит/замок/валюта/снижение) —
+        # это НЕ сбой, а штатный отказ: причина в `error` (текст сформирован КОДОМ). Google Ads не тронут.
     }
 )
 
@@ -145,4 +147,52 @@ def err(exc: BaseException) -> dict[str, Any]:
         "code_numbers": [],
         "error": redact_error(exc),
         "error_code": classify_error(exc),
+    }
+
+
+def proposed(
+    *,
+    confirmation_id: str,
+    operation: str,
+    customer_id: str,
+    preview: str,
+) -> dict[str, Any]:
+    """Успешный конверт propose-инструмента: черновик СОЗДАН (status='pending'), Google Ads НЕ тронут.
+
+    Форма НАМЕРЕННО отличается от `ok()` (там rows-пагинация): propose отдаёт один черновик, а не
+    страницу строк. `preview` — человеко-diff «было → станет», собранный `confirm.render` (КОД, не
+    модель): именно его увидит человек перед подтверждением. `confirmation_id` понадобится будущему
+    execute-контуру (реплай-якорь, §6.4); сегодня это просто идентификатор созданной строки.
+
+    Здесь НЕТ ни `code_numbers`, ни пагинации: propose ничего не читает из Google Ads наружу для
+    цитирования — весь текст уже в `preview`. `error`/`error_code` держим для симметрии с READ-скелетом
+    (на успехе оба None), чтобы клиент не различал READ/PROPOSE структурно."""
+    return {
+        "confirmation_id": confirmation_id,
+        "operation": operation,
+        "customer_id": str(customer_id),
+        "status": "pending",
+        "preview": preview,
+        "error": None,
+        "error_code": None,
+    }
+
+
+def refused(text: str, *, error_code: str = "refused") -> dict[str, Any]:
+    """Отказ propose-гейта ДО создания черновика: И8-лимит, замок аккаунта, валютный mismatch,
+    невыполнимое снижение, кривой вход. Черновика НЕТ (confirmation_id=None), Google Ads не тронут.
+
+    `text` — ГОТОВОЕ сообщение человеку. Для `ProposalRefused` его сформировал КОД (редактировать
+    нечего); для непредвиденного исключения вызывающий обязан передать УЖЕ редактированный текст
+    (`mcp_server.redact.redact_error`) — сырой `str(e)` наружу нельзя (правило 5). `error_code` — из
+    `ERROR_CODES`: `refused` для штатного отказа гейта, `invalid_argument` для кривого входа,
+    классифицированный код для непредвиденного. Скелет зеркалит `proposed()`, чтобы клиент не ветвился."""
+    return {
+        "confirmation_id": None,
+        "operation": None,
+        "customer_id": None,
+        "status": "refused",
+        "preview": None,
+        "error": text,
+        "error_code": error_code,
     }

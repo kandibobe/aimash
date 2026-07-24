@@ -591,6 +591,34 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": texts.PROPOSAL_PENDING,
         "en": "📝 <b>Change draft</b>\n\n{summary}\n\nConfirm? <i>(draft valid for {ttl_h}h)</i>",
     },
+    # — propose-инструменты MCP-WRITE (агентский контур): агенто-ориентированные отказы ДО
+    #   создания черновика. Текст читает АГЕНТ (через MCP-конверт) и решает, как переформулировать —
+    #   потому объясняет ПРИЧИНУ, а не только «нельзя». Локализованы наравне с ProposalRefused.text.
+    "propose_requires_human": {
+        "ru": "🚫 Денежный черновик (бюджет/ставка) создаётся только по прямой команде человека в "
+        "этом ходе — не из фонового/планового/аномального контекста (правило 3). Черновик не создан.",
+        "en": "🚫 A money draft (budget/bid) is created only on a human's direct command in this turn "
+        "— not from a background/scheduled/anomaly context (rule 3). No draft was created.",
+    },
+    "propose_no_turn_context": {
+        "ru": "🚫 Черновик не к чему привязать: нет контекста хода (чат доставки/подтверждения "
+        "неизвестен). Черновик не создан (fail-closed).",
+        "en": "🚫 Nothing to bind the draft to: no turn context (the delivery/confirmation chat is "
+        "unknown). No draft was created (fail-closed).",
+    },
+    "propose_draft_limit": {
+        "ru": "🚫 В этом ходе черновик уже создан — второй за тот же ход не создаю (И8). Дождись "
+        "решения человека по текущему черновику, затем предлагай следующий.",
+        "en": "🚫 A draft was already created in this turn — I won't create a second one in the same "
+        "turn (one draft per turn, invariant I8). Wait for the human's decision on the current draft, "
+        "then propose the next.",
+    },
+    "propose_bad_params": {
+        # {details} — компактный (loc: msg) из Pydantic; сами msg-валидаторов пока RU (agent.tools.
+        # schemas), потому детали остаются RU в обеих локалях — это ограничение схем, не этого слоя.
+        "ru": "🚫 Некорректные параметры: {details}",
+        "en": "🚫 Invalid parameters: {details}",
+    },
     "photo_in_flow_hint": {
         "ru": (
             "📎 Сейчас идёт другой шаг — фото/видео здесь не ожидается. Заверши текущий флоу "

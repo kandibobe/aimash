@@ -58,6 +58,8 @@ _HEADLESS_MODULES = (
     "agent.tools.schemas",
     "mcp_server.server",
     "mcp_server.tools_read",
+    "mcp_server.tools_write",  # propose-слой: тянет mcp_server.propose (переехал из bot/) — обязан
+    # быть bot-free, иначе MCP-процесс подтянул бы весь Telegram-слой (ровно зачем и был переезд).
 )
 
 # Тело зонда: импортируется в чистом процессе, падает assert'ом при утечке bot/aiogram.

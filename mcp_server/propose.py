@@ -9,6 +9,13 @@ aiogram-хендлер — `bot.main._present_proposal` принимал `Messag
 МОЛЧА. Модуль не импортирует aiogram: приколочено
 `tests/test_proposal_build.py::test_build_is_transport_free`.
 
+Переехал `bot/proposal.py` → `mcp_server/propose.py` (Волна 2, propose-only WRITE-MCP): это
+единственный bot-файл, которому CLAUDE.md предписан переезд в тул-слой, а не архивация на месте.
+Причина переезда именно сейчас — headless-развязка: `mcp_server.tools_write` зовёт `build_proposal`
+как свой primitive, а импорт `bot.*` из MCP-процесса протащил бы весь Telegram-слой в `sys.modules`
+(гард `tests/test_headless_bootstrap.py`). Первый и единственный реальный потребитель `build_proposal`
+— MCP-инструмент `propose_*`; кнопочный бот идёт своим синхронным `bot.main._build_proposal`.
+
 Отказы — исключение `ProposalRefused` с ГОТОВЫМ текстом: его формирует КОД (не SDK и не модель),
 поэтому редактировать на выходе нечего, а транспорт только показывает `.text`.
 
