@@ -104,6 +104,11 @@ class ConfirmedProposal(Protocol):
     # Волна 1.4: второй, НЕЗАВИСИМЫЙ бит — ход был человеческим. Штампует стор из core.provenance,
     # аргументом save_proposal не задаётся (в отличие от user_initiated выше).
     origin_human_turn: bool
+    # Волна 2.6 (реплай-якорь): личность заказчика и message_id карточки, на которую придёт реплай.
+    # Пока read-through — гейт на них ещё не смотрит; None означает «нет якоря» (будущая проверка
+    # обязана считать None отказом, не «проверять нечего» — fail-closed на старых NULL-строках).
+    author_user_id: int | None
+    tg_message_id: int | None
     # Волна 1.1: params черновика — там лежат `_before`/`_freshness` (аттестация свежести). Гейт A
     # берёт их ОТСЮДА, а не из аргументов apply_* (см. _require_freshness).
     params: dict

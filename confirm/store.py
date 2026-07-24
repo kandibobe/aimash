@@ -102,6 +102,13 @@ class ConfirmedProposal:
     # позиционное конструирование в старом коде/тестах не должно молча выдавать «это был человек»:
     # отсутствие сведений о провенансе = машинный ход = отказ на денежной операции (правило 10).
     origin_human_turn: bool = False
+    # Волна 2.6 (реплай-якорь) — сведения о личности «кто заказал» и о карточке, на которую придёт
+    # реплай-подтверждение. ПОКА read-through: ни один гейт на них не смотрит (этот шаг — чистый
+    # проброс, ноль изменений поведения). Дефолт None, а не 0: отсутствие записи должно прорастать
+    # как «нет якоря» (будущая проверка обязана считать None отказом — fail-closed), а не как
+    # валидный message_id/user_id 0. Заполняются из ORM-колонок Proposal.author_user_id/tg_message_id.
+    author_user_id: int | None = None
+    tg_message_id: int | None = None
 
 
 class ConfirmStore:
@@ -146,6 +153,36 @@ class ConfirmStore:
             )
             await s.commit()
 
+    async def set_card_message_id(self, confirmation_id: str, tg_message_id: int) -> bool:
+        """Проштамповать реплай-якорь: message_id опубликованной карточки «было→станет». True если
+        проставил. Зовёт ТРАНСПОРТ подтверждения сразу после публикации карточки (message_id известен
+        только ПОСЛЕ отправки — потому это отдельный шаг, а не аргумент save_proposal; см. Волна 2.6).
+
+        Compare-and-set, как confirm/claim: один UPDATE … WHERE status='pending' AND tg_message_id IS
+        NULL. Условие `IS NULL` делает штамп ОДНОРАЗОВЫМ — первый выигрывает; повторный вызов (гонка
+        двойной доставки, попытка перенаправить якорь на чужую карточку) не совпадёт по WHERE →
+        rowcount=0 → False, а не молчаливая перезапись якоря. `status='pending'` не даёт переставить
+        якорь уже подтверждённого/исполняемого черновика. Вызывающий, получивший False, обязан
+        считать якорь НЕ установленным (fail-closed) — не «наверное, и так сойдёт»."""
+        async with Session() as s:
+            res = await s.execute(
+                update(Proposal)
+                .where(
+                    Proposal.confirmation_id == confirmation_id,
+                    Proposal.status == "pending",
+                    Proposal.tg_message_id.is_(
+                        None
+                    ),  # одноразовость якоря: первый штамп выигрывает
+                )
+                .values(tg_message_id=tg_message_id)
+            )
+            # cast: DML возвращает CursorResult (есть .rowcount); async-стаб видит общий Result.
+            if cast(CursorResult, res).rowcount != 1:  # нет/не pending/якорь уже стоит
+                await s.rollback()
+                return False
+            await s.commit()
+            return True
+
     async def get_confirmed(self, confirmation_id: str) -> ConfirmedProposal | None:
         async with Session() as s:
             p = (
@@ -162,6 +199,8 @@ class ConfirmStore:
                 summary=p.summary,
                 chat_id=p.chat_id,
                 origin_human_turn=p.origin_human_turn,
+                author_user_id=p.author_user_id,
+                tg_message_id=p.tg_message_id,
             )
 
     async def load_proposals(self, confirmation_ids: list[str]) -> dict[str, ConfirmedProposal]:
@@ -187,6 +226,8 @@ class ConfirmStore:
                 summary=p.summary,
                 chat_id=p.chat_id,
                 origin_human_turn=p.origin_human_turn,
+                author_user_id=p.author_user_id,
+                tg_message_id=p.tg_message_id,
             )
             for p in rows
         }
@@ -233,6 +274,8 @@ class ConfirmStore:
                 summary=p.summary,
                 chat_id=p.chat_id,
                 origin_human_turn=p.origin_human_turn,
+                author_user_id=p.author_user_id,
+                tg_message_id=p.tg_message_id,
             )
             await s.commit()
             return snap
