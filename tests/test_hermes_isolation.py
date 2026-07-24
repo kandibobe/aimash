@@ -73,7 +73,9 @@ def test_i4_seed_read_tools_disjoint_from_mutations():
         "И4: READ-инструменты MCP пересеклись с мутационными: "
         f"{sorted(READ_MCP_TOOLS & MUTATION_TOOLS)}"
     )
-    assert len(READ_MCP_TOOLS) == 12, f"ожидалось 12 READ-инструментов, стало {len(READ_MCP_TOOLS)}"
+    # 13 = 12 Google Ads READ + recall_client (память клиента §20). Точный счёт держит реестр от
+    # тихого разрастания: новая обёртка обязана осознанно бампнуть его вместе с config.yaml/_ACCOUNT_ARG.
+    assert len(READ_MCP_TOOLS) == 13, f"ожидалось 13 READ-инструментов, стало {len(READ_MCP_TOOLS)}"
 
 
 def test_i4_seed_server_builds_and_registers_only_read():
@@ -109,6 +111,7 @@ _ACCOUNT_ARG: dict[str, str] = {
     "get_account_audit": "account",
     "get_change_history": "account",
     "keyword_ideas": "account",
+    "recall_client": "account",  # ридер НАШЕЙ БД (ClientProfileStore) — замок только на границе
 }
 
 
@@ -127,6 +130,7 @@ def _readers_explode():
         "run_ads_read_call",
         "gather_audit",
         "list_recent_applied_by_customer",
+        "ClientProfileStore",  # recall_client: ридер НАШЕЙ БД — тоже за границу, тест офлайн
     )
     saved = {n: getattr(tr, n) for n in names}
 
