@@ -335,12 +335,36 @@ _WRITE_STEP = (
 # И3 — исключение: инвариант УЖЕ проверен живьём в tests/test_provenance_gate.py (на настоящем
 # ConfirmStore). Заглушка держит дословную формулировку в общем файле изоляции, но не «ждёт WRITE».
 _I3_COVERED = "живьём покрыт tests/test_provenance_gate.py — заглушка держит формулировку И3"
+# И1 расщеплён на две половины с разным статусом. Execution-half (замок на исполнении) — УЖЕ живой
+# в tests/test_execute_account_binding.py на настоящем ConfirmStore: execute_confirmed берёт аккаунт
+# из proposal.customer_id и заново проходит ensure_allowed до SDK и до claim. Creation-half (внешний
+# источник не подменяет customer_id при СОЗДАНИИ черновика) ждёт propose-surface (шаг перед WRITE).
+_I1_EXEC_COVERED = (
+    "живьём покрыт tests/test_execute_account_binding.py "
+    "(test_execute_confirmed_uses_proposal_customer_id / _foreign_customer_id_denied / "
+    "_empty_stamp_fail_closed) — заглушка держит формулировку execution-half И1"
+)
 
 
 @pytest.mark.skip(reason=_WRITE_STEP)
 def test_i1_external_source_cannot_change_proposal_customer_id():
-    """И1: ни скил/память/факт/текст с сайта клиента не меняет customer_id в proposal; аккаунт берётся
-    из proposal.customer_id и заново проходит ensure_allowed."""
+    """И1 (creation-half): ни скил/память/факт/текст с сайта клиента не меняет customer_id в proposal
+    при СОЗДАНИИ черновика. Ждёт propose-surface (MCP PLAN/propose — шаг перед WRITE): пока черновики
+    рождает только кнопочный слой, инъекции в customer_id на создании неоткуда взяться в тесте.
+    Execution-half того же инварианта — отдельным тестом ниже, уже живым."""
+
+
+@pytest.mark.skip(reason=_I1_EXEC_COVERED)
+def test_i1_execution_binds_account_from_proposal_customer_id():
+    """И1 (execution-half): аккаунт исполнения берётся из proposal.customer_id (штамп доверенного
+    входа), а не из аргумента/контекста разговора, и ЗАНОВО проходит ensure_allowed — чужой/пустой
+    штамп → PermissionError ДО SDK и ДО claim (одноразовый черновик не сожжён отказом замка).
+
+    Живьём УЖЕ проверен — не здесь, а в tests/test_execute_account_binding.py (настоящий ConfirmStore
+    + temp SQLite): _uses_proposal_customer_id (штамп доезжает до apply_*), _foreign_customer_id_denied
+    (чужой id вне ALLOWED_CEILING → PermissionError, apply_* не вызван, claim цел), _empty_stamp_fail_
+    closed (пустой штамп НЕ откатывается молча на Draft). Заглушка держит дословную формулировку
+    execution-half И1 в общем файле изоляции; дублировать покрытие незачем (YAGNI)."""
 
 
 @pytest.mark.skip(reason=_WRITE_STEP)
