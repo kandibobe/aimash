@@ -53,6 +53,10 @@ _OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 _ENDPOINTS_URL_TMPL = "https://openrouter.ai/api/v1/models/{slug}/endpoints"
 _CATALOG_TIMEOUT = 6.0
 
+# Имена тиров, которые вообще может вернуть `classify_turn` (`agent/router.py:42-44` пиновой
+# версии). Всё остальное в `model_routing` — ключ, который рантайм не запросит ни разу.
+_ROUTER_TIERS = frozenset({"gemini", "v3", "r1"})
+
 # ── Аттестации ────────────────────────────────────────────────────────────────
 # Дословная цитата + откуда взята. Таблица НЕ читает эталонные конфиги этого репозитория:
 # оракул, сверяющий файл сам с собой, доказывает только собственную непротиворечивость.
@@ -576,7 +580,31 @@ def fetch_endpoint_params(slug: str, timeout: float = _CATALOG_TIMEOUT) -> list[
     ]
 
 
-def check_default_model_endpoints(cfg: dict, rep: Report) -> None:
+def _tool_turn_models(cfg: dict) -> list[tuple[str, str]]:
+    """`(путь, слаг)` каждой модели, которой достанется ход С ИНСТРУМЕНТАМИ.
+
+    Это глобальный дефолт плюс КАЖДЫЙ тир `model_routing`: роутер перебивает дефолт на тир,
+    так что негодный тир кладёт прод ровно так же, как негодный дефолт, — просто не сразу, а
+    на первом ходу нужного класса. `auxiliary.*` сюда не входит: инструментов эти роли не
+    получают, и требовать от них `tools` значит краснеть на том, что им не нужно.
+    """
+    root = _as_dict(_get(cfg, "model"))
+    default_provider = str(root.get("provider") or "").strip()
+    specs = [("model.default", default_provider, str(root.get("default") or "").strip())]
+    for tier, spec in _as_dict(_get(cfg, "model_routing")).items():
+        if not isinstance(spec, dict):
+            continue
+        provider = str(spec.get("provider") or "").strip() or default_provider
+        specs.append((f"model_routing.{tier}", provider, str(spec.get("model") or "").strip()))
+    # чужой провайдер и кривой формат слага — забота check_model_slugs, второй жалобы не нужно
+    return [
+        (path, model)
+        for path, provider, model in specs
+        if model and provider.lower() == "openrouter" and model.count("/") == 1
+    ]
+
+
+def check_tool_turn_model_endpoints(cfg: dict, rep: Report) -> None:
     """Слаг живой, а вызвать модель всё равно нельзя: ни один её провайдер не берёт наши параметры.
 
     Второй инцидент 27.07.2026, тем же вечером и с тем же симптомом «бот молчит», но другой
@@ -588,62 +616,67 @@ def check_default_model_endpoints(cfg: dict, rep: Report) -> None:
     parameters`. Замерено живым ключом: `chat+tools` → 200, `chat+tools+reasoning` → 404,
     `v4-flash+tools+reasoning` → 200.
 
-    Проверяется только глобальный дефолт: `auxiliary.*` инструментов не получают, и требовать
-    от них `tools` значит краснеть на ролях, которым это не нужно.
+    Тиры `model_routing` проверяются наравне с дефолтом и по той же мерке: третий за день
+    завал прода (12:01) пришёл именно оттуда — визард «умного роутинга» разложил тиры на
+    `deepseek-chat` (0 эндпоинтов с reasoning) и `deepseek-r1` (1 из 2), а заодно перебил
+    `model.default`. Тир `r1` включается по словам «аудит», «стратегия», «оптимизация» —
+    то есть краснеть он обязан ДО деплоя, а не на первом же профильном вопросе менеджера.
     """
-    root = _as_dict(_get(cfg, "model"))
-    model = str(root.get("default") or "").strip()
-    provider = str(root.get("provider") or "").strip().lower()
-    if not model or provider != "openrouter" or model.count("/") != 1:
-        return  # эти случаи разбирает check_model_slugs — второй жалобы на то же не нужно
-
     required = {"tools"}
     effort = _get(cfg, "agent.reasoning_effort")
     if effort is not _MISSING and str(effort).strip().lower() not in ("", "none"):
         required.add("reasoning")
 
-    endpoints = fetch_endpoint_params(model)
-    if endpoints is None:
-        rep.warn(
-            "model.default",
-            f"список эндпоинтов {model!r} не достался — совместимость с {sorted(required)} "
-            "НЕ проверена; прогнать линт с сетью до деплоя",
+    for path, model in _tool_turn_models(cfg):
+        endpoints = fetch_endpoint_params(model)
+        if endpoints is None:
+            rep.warn(
+                path,
+                f"список эндпоинтов {model!r} не достался — совместимость с {sorted(required)} "
+                "НЕ проверена; прогнать линт с сетью до деплоя",
+            )
+            continue
+        if any(required <= params for params in endpoints):
+            continue
+        have = set().union(*endpoints) if endpoints else set()
+        rep.error(
+            path,
+            f"{model!r}: ни один из {len(endpoints)} провайдеров OpenRouter не поддерживает "
+            f"{sorted(required - have) or sorted(required)} ⇒ при require_parameters: true это "
+            "HTTP 404 «No endpoints found» на КАЖДОМ ходу с инструментами, а не деградация "
+            "качества",
         )
-        return
-    if any(required <= params for params in endpoints):
-        return
-
-    have = set().union(*endpoints) if endpoints else set()
-    rep.error(
-        "model.default",
-        f"{model!r}: ни один из {len(endpoints)} провайдеров OpenRouter не поддерживает "
-        f"{sorted(required - have) or sorted(required)} ⇒ при require_parameters: true это "
-        "HTTP 404 «No endpoints found» на КАЖДОМ ходу с инструментами, а не деградация качества",
-    )
 
 
-def check_no_model_routing(cfg: dict, rep: Report) -> None:
-    """`model_routing` в нашем конфиге запрещён — не по вкусу, а потому что он ломает прод.
+def check_model_routing_tiers(cfg: dict, rep: Report) -> None:
+    """Тир, которого рантайм не знает, — молчаливый холостой ход: тот же класс, что К10.
 
-    Смарт-роутинг Hermes (`agent/router.py`) уводит в тир `v3` ЛЮБОЙ ход, где агенту доступны
-    инструменты, то есть у нас каждый. Тиры зашиты на старые модели DeepSeek, а у них нет
-    провайдера с `reasoning` — при обязательном `require_parameters: true` это HTTP 404 на всё.
-    27.07.2026 блок клал прод дважды за день: сперва со слагом `deepseek/deepseek-v3` из
-    докстринга (HTTP 400), потом с валидным `deepseek/deepseek-chat` (HTTP 404).
+    `select_model_for_turn` берёт ровно `routing.get(tier)` по имени из `classify_turn`, а имён
+    всего три — `gemini`/`v3`/`r1` (`agent/router.py:42-44`). Лишний ключ не ошибка для YAML и
+    не ошибка для Hermes: он просто никогда не выбирается, и «я же настроил модель для аудита»
+    остаётся неправдой без единой строчки в логе.
 
-    Выключателя у роутера нет: `smart_model_routing.enabled` пишет только setup-wizard, а
+    Выключателя у роутера нет вовсе: `smart_model_routing.enabled` пишет только setup-wizard, а
     рантайм смотрит исключительно на наличие ключа `model_routing` (`agent/router.py:287`:
-    `routing = config.get("model_routing", {})` → пусто ⇒ `(None, None)` ⇒ дефолт). Поэтому
-    единственная рабочая форма «выключено» — отсутствие ключа, и проверять надо именно её.
+    `routing = config.get("model_routing", {})` → пусто ⇒ `(None, None)` ⇒ дефолт). Значит
+    «выключено» = ключа нет; галочка в визарде роутинг не гасит и гасить не может.
     """
-    if _get(cfg, "model_routing") is _MISSING:
+    routing = _get(cfg, "model_routing")
+    if routing is _MISSING:
         return
-    rep.error(
-        "model_routing",
-        "блок присутствует: Hermes перебьёт дефолт на свои тиры (v3/r1) на каждом ходу с "
-        "инструментами. Выключателя нет — `smart_model_routing.enabled` рантайм не читает; "
-        "снять ключ целиком",
-    )
+    if not isinstance(routing, dict) or not routing:
+        rep.error("model_routing", "блок пуст или не словарь — роутинг молча не действует")
+        return
+    for tier, spec in routing.items():
+        if tier not in _ROUTER_TIERS:
+            rep.error(
+                f"model_routing.{tier}",
+                f"тир {tier!r} рантайму неизвестен (есть только {sorted(_ROUTER_TIERS)}) ⇒ "
+                "выбран не будет никогда, а выглядит настроенным",
+            )
+            continue
+        if not isinstance(spec, dict) or not str(spec.get("model") or "").strip():
+            rep.error(f"model_routing.{tier}", "нет `model:` ⇒ тир вырождается в дефолт молча")
 
 
 def check_no_secrets(raw_text: str, rep: Report) -> None:
@@ -741,8 +774,8 @@ def lint(cfg: dict, raw_text: str = "", profile: str = "host-a") -> Report:
         check_toolsets,
         check_hardening,
         check_model_slugs,
-        check_default_model_endpoints,
-        check_no_model_routing,
+        check_tool_turn_model_endpoints,
+        check_model_routing_tiers,
     ):
         check(cfg, rep)
     for check in _PROFILE_CHECKS.get(profile, ()):

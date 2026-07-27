@@ -276,7 +276,7 @@ def test_lint_warns_but_does_not_redden_without_network(monkeypatch):
     )
 
 
-def test_lint_reddens_when_the_default_model_has_no_reasoning_provider():
+def test_lint_reddens_when_a_tool_turn_model_has_no_reasoning_provider():
     """Второй инцидент 27.07.2026: слаг ЖИВОЙ, а вызвать модель нельзя.
 
     `deepseek/deepseek-chat` есть в каталоге — поэтому `check_model_slugs` его пропускает и
@@ -290,7 +290,7 @@ def test_lint_reddens_when_the_default_model_has_no_reasoning_provider():
         "agent": {"reasoning_effort": "medium"},
     }
     rep = _LINT.Report()
-    _LINT.check_default_model_endpoints(cfg, rep)
+    _LINT.check_tool_turn_model_endpoints(cfg, rep)
     assert any(f.path == "model.default" for f in rep.errors), (
         f"модель без reasoning-провайдера прошла мимо линта: {[str(f) for f in rep.findings]}"
     )
@@ -308,40 +308,87 @@ def test_lint_reddens_when_the_default_model_has_no_reasoning_provider():
         },
     ):
         rep_ok = _LINT.Report()
-        _LINT.check_default_model_endpoints(cfg_ok, rep_ok)
+        _LINT.check_tool_turn_model_endpoints(cfg_ok, rep_ok)
         assert not rep_ok.findings, (
             f"ложное срабатывание на {cfg_ok}: {[str(f) for f in rep_ok.findings]}"
         )
 
 
-def test_lint_forbids_model_routing_outright():
-    """`model_routing` запрещён как блок, а не «с правильными слагами».
+def test_lint_checks_routing_tiers_by_the_same_yardstick_as_the_default():
+    """Третий завал 27.07.2026 пришёл из тира, а не из дефолта — правило обязано их равнять.
 
-    27.07.2026 он клал прод дважды: сперва мёртвым `deepseek-v3` (400), потом живым
-    `deepseek-chat` (404). Оба раза тир выбирался на КАЖДОМ ходу с инструментами. Проверяем
-    именно присутствие ключа, потому что рантайм Hermes смотрит только на него:
-    `smart_model_routing.enabled` пишет setup-wizard, и никто его не читает.
+    Визард «умного роутинга» разложил тиры на `deepseek-chat` (0 эндпоинтов с reasoning) и
+    `deepseek-r1` (1 из 2). Тир `r1` включается по словам «аудит»/«стратегия»/«оптимизация»,
+    то есть на первом же профильном вопросе менеджера, а не на старте — поймать это может
+    только линт до деплоя.
     """
     cfg = {
         "model": {"provider": "openrouter", "default": "deepseek/deepseek-v4-flash"},
-        "model_routing": {"v3": {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"}},
+        "agent": {"reasoning_effort": "high"},
+        "model_routing": {"r1": {"provider": "openrouter", "model": "deepseek/deepseek-chat"}},
     }
     rep = _LINT.Report()
-    _LINT.check_no_model_routing(cfg, rep)
-    assert any(f.path == "model_routing" for f in rep.errors), (
-        "блок с ЖИВЫМИ слагами всё равно обязан быть ошибкой — ломает не слаг, а сам роутинг"
+    _LINT.check_tool_turn_model_endpoints(cfg, rep)
+    assert any(f.path == "model_routing.r1" for f in rep.errors), (
+        f"негодный тир прошёл мимо: {[str(f) for f in rep.findings]}"
+    )
+    assert not any(f.path == "model.default" for f in rep.errors), (
+        "дефолт исправен — правило не должно ругаться заодно и на него"
+    )
+
+    # Отрицательный контроль: рабочая раскладка тиров (та, что стоит на проде) — молчит.
+    rep_ok = _LINT.Report()
+    _LINT.check_tool_turn_model_endpoints(
+        {
+            **cfg,
+            "model_routing": {
+                "gemini": {"provider": "openrouter", "model": "google/gemini-3.1-flash-lite"},
+                "v3": {"provider": "openrouter", "model": "deepseek/deepseek-v4-flash"},
+                "r1": {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"},
+            },
+        },
+        rep_ok,
+    )
+    assert not rep_ok.findings, (
+        f"ложное срабатывание на рабочих тирах: {[str(f) for f in rep_ok.findings]}"
+    )
+
+
+def test_lint_catches_a_tier_name_the_runtime_never_asks_for():
+    """Опечатка в имени тира — К10 в чистом виде: YAML валиден, Hermes молчит, тир мёртв.
+
+    `select_model_for_turn` берёт `routing.get(tier)` по имени из `classify_turn`, а имён ровно
+    три. Лишний ключ не выбирается никогда, но выглядит настроенным — самый дорогой класс
+    ошибки в этом конфиге.
+    """
+    cfg = {
+        "model": {"provider": "openrouter", "default": "deepseek/deepseek-v4-flash"},
+        "model_routing": {"audit": {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"}},
+    }
+    rep = _LINT.Report()
+    _LINT.check_model_routing_tiers(cfg, rep)
+    assert any(f.path == "model_routing.audit" for f in rep.errors), (
+        f"неизвестный тир прошёл мимо: {[str(f) for f in rep.findings]}"
+    )
+
+    # Отрицательный контроль: три законных имени — молчание; блока нет — тоже молчание.
+    rep_ok = _LINT.Report()
+    _LINT.check_model_routing_tiers(
+        {
+            **cfg,
+            "model_routing": {
+                t: {"model": "deepseek/deepseek-v4-pro"} for t in _LINT._ROUTER_TIERS
+            },
+        },
+        rep_ok,
+    )
+    assert not rep_ok.findings, (
+        f"ложное срабатывание на живых тирах: {[str(f) for f in rep_ok.findings]}"
     )
 
     rep_off = _LINT.Report()
-    _LINT.check_no_model_routing({"model": cfg["model"]}, rep_off)
+    _LINT.check_model_routing_tiers({"model": cfg["model"]}, rep_off)
     assert not rep_off.findings, "без блока правило обязано молчать"
-
-    # И форма «выключено» через несуществующий выключатель НЕ считается выключением.
-    rep_fake = _LINT.Report()
-    _LINT.check_no_model_routing({**cfg, "smart_model_routing": {"enabled": False}}, rep_fake)
-    assert rep_fake.errors, (
-        "smart_model_routing.enabled не выключает роутинг — линт не должен верить"
-    )
 
 
 def test_lint_warns_on_a_second_provider_in_the_gateway():
