@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import pathlib
 import tempfile
+import time
 from dataclasses import dataclass
 
 import pytest
@@ -22,10 +23,32 @@ import pytest
 # молча падал OSError, если файл держал предыдущий (ещё не добитый) pytest-процесс, и сессия
 # стартовала на ГРЯЗНОЙ базе прошлого прогона — флак-ассерты «профиль уже есть»/«лишние
 # audit-строки»/IntegrityError в случайных местах. Per-pid имя убирает класс целиком.
-_db = pathlib.Path(tempfile.gettempdir()) / f"aimash_pytest_{os.getpid()}.db"
-for _stale in pathlib.Path(tempfile.gettempdir()).glob("aimash_pytest*.db*"):
+_TMP = pathlib.Path(tempfile.gettempdir())
+_db = _TMP / f"aimash_pytest_{os.getpid()}.db"
+
+# …но сама уборка хвостов класс возвращала: глоб бьёт файлы ВСЕХ pid'ов, а не только своего.
+# Второй одновременно запущенный pytest (обычный приём — гонять подмножество, пока идёт полный
+# прогон) удалял БД У РАБОТАЮЩЕГО соседа: с NullPool между тестами открытых хендлов нет, поэтому
+# unlink проходит и на Windows, а SQLite молча пересоздаёт файл ПУСТЫМ. Дальше сыплется
+# `no such table: …` в СЛУЧАЙНЫХ тестах — это и списывалось на «блокировку SQLite». С Волны 3 оно
+# ещё и валит денежный путь: `record_money_event` fail-closed, нет таблицы — нет мутации.
+# Признак живого владельца — свежий mtime: работающий прогон пишет в свою БД непрерывно.
+_REAP_AFTER_S = 3600.0
+_OWN_DB_PREFIX = f"aimash_pytest_{os.getpid()}.db"
+
+
+def _reapable(path: pathlib.Path, now: float) -> bool:
+    """Можно ли удалить файл БД: свой pid (вкл. -wal/-shm) — да, чужой СВЕЖИЙ — нет."""
+    if path.name.startswith(_OWN_DB_PREFIX):
+        return True  # хвост предшественника с тем же pid — наш, добиваем
+    return now - path.stat().st_mtime >= _REAP_AFTER_S
+
+
+_now = time.time()
+for _stale in _TMP.glob("aimash_pytest*.db*"):
     try:
-        _stale.unlink()  # уборка хвостов прошлых сессий (вкл. -wal/-shm); занятые — пропускаем
+        if _reapable(_stale, _now):
+            _stale.unlink()  # хвост мёртвой сессии (вкл. -wal/-shm); занятые — пропускаем
     except OSError:
         pass
 
