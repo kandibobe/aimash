@@ -247,12 +247,24 @@ async def chat(
         resp = await call_llm(
             lambda: _client().chat.completions.create(**call_kwargs), label=f"{model_slug}/{role}"
         )
-        # Учёт расхода (токены + реальная стоимость OpenRouter) для /balance. Наблюдаемость не
-        # должна ронять денежный путь — любую проблему с usage глотаем (record() и сам в try).
+        # Учёт расхода (токены + реальная стоимость OpenRouter) для /balance + per-run (#10). usage
+        # парсим ОДИН раз (extract) на оба потребителя. Наблюдаемость не должна ронять денежный путь —
+        # любую проблему с usage глотаем; record()/record_event сами no-op вне активного учёта.
         try:
-            from core.usage import record
+            from core import observe, usage as _usage
 
-            record(role, getattr(resp, "usage", None))
+            u = getattr(resp, "usage", None)
+            _usage.record(role, u)
+            ex = _usage.extract(u)
+            observe.note_model(model_slug)
+            observe.record_event(
+                "llm",
+                tool_name=role,
+                cost_usd=ex["cost"],
+                prompt_tokens=ex["prompt"],
+                completion_tokens=ex["completion"],
+                cached_tokens=ex["cached"],
+            )
         except Exception:  # noqa: BLE001
             pass
         choice = resp.choices[0]

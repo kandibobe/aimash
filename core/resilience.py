@@ -194,9 +194,11 @@ async def run_ads_call(
             result: T = await retryer(_inner)
     except Exception as e:
         log.warning("ads-call %s: %s за %dмс", name, _fail_cause(e), _ms(start))
+        _observe_ads(name, start, "ads_mutate", ok=False)
         raise
     await quota.record(account, kind="mutate", count=op_count)  # учёт операций батча в квоте (§3)
     log.info("ads-call %s: ok за %dмс", name, _ms(start))
+    _observe_ads(name, start, "ads_mutate", ok=True)
     return result
 
 
@@ -226,9 +228,11 @@ async def run_ads_create_call(
                 result: T = await asyncio.to_thread(fn, *args, **kwargs)
     except Exception as e:
         log.warning("ads-create %s: %s за %dмс", name, _fail_cause(e), _ms(start))
+        _observe_ads(name, start, "ads_mutate", ok=False)
         raise
     await quota.record(account, kind="mutate", count=op_count)  # учёт операций батча в квоте (§3)
     log.info("ads-create %s: ok за %dмс", name, _ms(start))
+    _observe_ads(name, start, "ads_mutate", ok=True)
     return result
 
 
@@ -266,14 +270,28 @@ async def run_ads_read_call(
             result: T = await retryer(_inner)
     except Exception as e:
         log.warning("ads-read %s: %s за %dмс", name, _fail_cause(e), _ms(start))
+        _observe_ads(name, start, "ads_read", ok=False)
         raise
     await quota.record(account, kind="read")  # учёт чтения в дневной квоте (§3), без блокировки
     log.info("ads-read %s: ok за %dмс", name, _ms(start))
+    _observe_ads(name, start, "ads_read", ok=True)
     return result
 
 
 def _ms(start: float) -> int:
     return int((time.monotonic() - start) * 1000)
+
+
+def _observe_ads(name: str, start: float, kind: str, *, ok: bool) -> None:
+    """Зафиксировать ads-вызов шагом прогона (#10 Наблюдаемость), если открыт observe.run_scope.
+    No-op вне scope; никогда не бросает — наблюдаемость НЕ роняет денежный путь (правило 10). Импорт
+    ленивый: resilience грузится очень рано, не тянем observe в его import-цепочку без нужды."""
+    try:
+        from core import observe
+
+        observe.record_event(kind, tool_name=name, latency_ms=_ms(start), ok=ok)
+    except Exception:  # noqa: BLE001 — учёт шага не критичен
+        pass
 
 
 def _fail_cause(exc: BaseException) -> str:

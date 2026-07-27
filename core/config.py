@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     # Модель через OpenRouter (сменяемая)
     openrouter_api_key: SecretStr = SecretStr("")
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    # #10 Наблюдаемость: management-ключ (provisioning) для GET /api/v1/activity — per-день/per-модель
+    # разбивка трат за 30 UTC-дней. ОБЫЧНЫЙ inference-ключ на /activity даёт 403 (по доке OpenRouter),
+    # потому ключ отдельный. Пусто ⇒ /activity не зовём (fail-soft, ридер деградирует на /key), фича
+    # opt-in — зажигается, когда владелец заведёт ключ на VPS (процедура RB-3). Секрет: только из env.
+    openrouter_provisioning_key: SecretStr = SecretStr("")
+    # Фильтр /activity по КОНКРЕТНОМУ ключу (SHA-256 hex, как в keys API): изолировать траты Hermes-
+    # ключа от ботовского, если ключи разные. Пусто ⇒ без фильтра (весь аккаунт). Не секрет (хэш).
+    openrouter_key_hash: str = ""
     # имена llm_* (не model_*) — иначе шадоуят метод BaseModel.model_copy()
     # Разделение «что за что» (дефолты; ручной выбор оператора через /model бьёт их — см.
     # agent.router.effective_model: override > роль-дефолт):
@@ -354,6 +362,13 @@ class Settings(BaseSettings):
     # считает вызовы per chat_id за сутки; warn на 80%, отказ (fail-closed) на 100%. 0 ⇒ ВЫКЛ (без
     # гарда). Дефолт 0 — opt-in: не удивить владельца (главный оператор) лимитом в разгар работы.
     llm_daily_calls_per_user: int = 0
+    # #10 Наблюдаемость / spend-cap НИЖЕ агента (предусловие delegation, config.yaml:75-78): дневной
+    # потолок СТОИМОСТИ (USD), не числа вызовов. llm_daily_calls_per_user ограничивает наш NL-путь
+    # пер-chat, но НЕ покрывает автономный Hermes-цикл (идёт мимо процесса). Этот потолок сверяется с
+    # реальными тратами из core.or_activity (OpenRouter /key usage_daily или /activity). 0.0 ⇒ ВЫКЛ
+    # (opt-in). Это МЯГКИЙ рубеж в нашем коде; ЖЁСТКИЙ — limit+limit_reset:daily на самом ключе
+    # OpenRouter (серверный enforcement, RB-3, руки владельца). Оба нужны: наш — раньше и с контекстом.
+    llm_daily_cost_cap_usd: float = 0.0
 
     @property
     def whitelist(self) -> set[int]:

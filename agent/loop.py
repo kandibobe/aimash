@@ -587,6 +587,35 @@ async def run_analysis_agent(
     max_iters: int = ANALYSIS_MAX_ITERS,
     timeout_s: float = ANALYSIS_TIMEOUT_S,
 ) -> str | None:
+    """Публичная обёртка: открыть per-run scope наблюдаемости (#10) на время нарратива, затем
+    делегировать реализации. run_scope сшивает LLM-шаги хода (router.record_event 'llm') и их
+    стоимость в строку agent_runs; origin/chat_id/customer_id — из core.context/provenance (человек
+    /audit ⇒ origin='human'), модель проставит note_model на первом вызове. Запись fail-open —
+    наблюдаемость НЕ роняет нарратив (сбой БД → warning, разбор возвращается как есть)."""
+    from core import observe
+
+    async with observe.run_scope("analysis"):
+        return await _run_analysis_agent_impl(
+            audit_facts,
+            chat_id=chat_id,
+            lang=lang,
+            drill=drill,
+            question=question,
+            max_iters=max_iters,
+            timeout_s=timeout_s,
+        )
+
+
+async def _run_analysis_agent_impl(
+    audit_facts: dict[str, Any],
+    *,
+    chat_id: int = 0,
+    lang: str = "ru",
+    drill: Any = None,
+    question: str | None = None,
+    max_iters: int = ANALYSIS_MAX_ITERS,
+    timeout_s: float = ANALYSIS_TIMEOUT_S,
+) -> str | None:
     """Агентный нарратив поверх УЖЕ посчитанного аудита. READ-ONLY: модель рассуждает, при желании
     вызывает drill-инструменты (async callback `drill(name, args)->dict`, задаёт bot-слой — он же
     держит замок аккаунта). Возвращает человеческий разбор (fact-guarded) ИЛИ None → bot показывает

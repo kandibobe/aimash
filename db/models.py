@@ -725,3 +725,81 @@ class AdsQuotaOp(Base):
     account: Mapped[str | None] = mapped_column(String(32))
     kind: Mapped[str] = mapped_column(String(8), nullable=False)  # 'read' | 'mutate'
     op_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class AgentRun(Base):
+    """#10 Наблюдаемость (Волна 1 шаг 10): агрегированный учёт ОДНОГО прогона агента —
+    cost/latency/итерации. Того, чего не даёт core.usage (срез по РОЛЯМ, сбрасываемый на рестарте) и
+    core.quota (счётчик API-операций, не денег): здесь строка = один ассистентский ход, персистентно.
+    Сшивка по run_id с core.provenance/core.context (одна корреляция на ход, не вторая нумерация —
+    provenance.run_id == context.request_id).
+
+    Заполняется НАШИМ путём (agent.loop.run_analysis_agent, NL-команды); траты Hermes-прогонов идут
+    мимо нашего процесса (config.yaml:70-71) — их подшивает ридер OpenRouter Activity API строкой с
+    origin='hermes'. Deliverable шага 10 «сколько стоит один прогон / одна группа в месяц» считается
+    отсюда: SUM(cost_usd) GROUP BY customer_id за окно по started_at.
+
+    Без секретов/PII (числа + id аккаунта, не секрет). Запись fail-OPEN: наблюдаемость НЕ роняет
+    денежный путь (как core.usage.record). На SQLite (dev/test) таблицу создаёт create_all; на
+    Postgres (prod) — Alembic (0032)."""
+
+    __tablename__ = "agent_runs"
+    __table_args__ = (
+        Index("ix_agent_runs_run_id", "run_id"),
+        # Отчёт «сколько стоит группа за окно»: WHERE customer_id = ? AND started_at > cutoff.
+        Index("ix_agent_runs_customer_started", "customer_id", "started_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # = provenance.run_id[:16] (машинный ход схлопывается в '-' — как в Proposal.run_id).
+    run_id: Mapped[str] = mapped_column(String(16), nullable=False)
+    origin: Mapped[str] = mapped_column(
+        String(16), default="machine", nullable=False
+    )  # human|machine|hermes|cron
+    chat_id: Mapped[int | None] = mapped_column(BigInteger)
+    customer_id: Mapped[str | None] = mapped_column(String(20))  # для отчёта по клиенту/группе
+    operation: Mapped[str | None] = mapped_column(String(64))  # analysis|command|…
+    model: Mapped[str | None] = mapped_column(String(64))  # разрезолвленная модель (если известна)
+    iterations_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cached_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # usage.cost OpenRouter (кредиты = USD). Реальная стоимость, а не оценка по токенам.
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), default="running", nullable=False
+    )  # running|ok|error
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AgentRunEvent(Base):
+    """#10 Наблюдаемость: один ШАГ прогона (LLM-вызов / tool-call / ads-read / ads-mutate) — то, что
+    раньше жило только в лог-строках core.resilience (latency каждого вызова) и терялось после ротации.
+    Сшивка с AgentRun по значению run_id (без FK — конвенция проекта, как audit_log). seq — порядок
+    шага в прогоне.
+
+    args_redacted проходит core.logging.redact_text ДО записи (golden rule #5): аргументы инструмента
+    могут нести секрето-подобное (developer_token, url с ключом). result_digest — КОРОТКАЯ сводка/хэш,
+    НЕ сырой результат (иначе таблица утянула бы PII клиента). Без секретов. Запись fail-OPEN. На
+    SQLite create_all; на Postgres — Alembic (0032)."""
+
+    __tablename__ = "agent_run_events"
+    __table_args__ = (Index("ix_agent_run_events_run_seq", "run_id", "seq"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(16), nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)  # порядок шага в прогоне
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)  # llm|tool|ads_read|ads_mutate
+    tool_name: Mapped[str | None] = mapped_column(String(64))
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    rows_returned: Mapped[int | None] = mapped_column(
+        Integer
+    )  # для ads_read (сколько строк вернул)
+    args_redacted: Mapped[str | None] = mapped_column(Text)  # РЕДАКТИРОВАНО (redact_text)
+    result_digest: Mapped[str | None] = mapped_column(String(255))  # короткая сводка, не сырьё
+    ok: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
