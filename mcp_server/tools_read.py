@@ -21,6 +21,11 @@
 Кросс-аккаунтность: у бот-схем `ANALYSIS_TOOLS` намеренно НЕТ `account` (бот залочен на один
 аккаунт); MCP кросс-аккаунтный → `account` обязателен у всех, кроме `list_accounts` (там `manager_id`).
 Мутаций тут нет по построению — только READ (инвариант И4 проверяет `server.py`).
+
+§20 READ-инструменты профиля (get_client_profile, get_profile_context, get_client_dossier):
+читают НАШУ БД (clients.store), а не Google Ads. Замок `_guarded` — ЕДИНСТВЕННАЯ защита
+(ридеры БД своего замка не имеют). Работают через тот же _guarded c account=, хотя и не требуют
+build_client_async (не Google Ads).
 """
 
 from __future__ import annotations
@@ -42,9 +47,11 @@ from mcp_server.serialize import (
     breakdown_rows,
     budget_dict,
     child_account_dict,
+    dossier_dict,
     impression_share_dict,
     keyword_idea_dict,
     negatives_payload,
+    profile_dict,
     recent_action_dict,
     search_term_dict,
 )
@@ -430,6 +437,66 @@ async def keyword_ideas(
     return await _guarded(_work, account=str(account))
 
 
+# ── §20: READ-инструменты профиля клиента (НАША БД, не Google Ads) ────────────────
+
+
+async def get_client_profile(
+    account: str,
+) -> dict[str, Any]:
+    """§20: полный профиль клиента (бренд/описание/гео/язык/сайт/соцсети/услуги/контакты).
+    account — customer_id Google Ads аккаунта. Замок: ensure_read_allowed (ридер БД своего замка
+    не имеет). Нет профиля → rows=[], error=null."""
+
+    async def _work() -> dict[str, Any]:
+        from clients.store import ClientProfileStore
+
+        p = await ClientProfileStore().get_by_account(str(account))
+        if p is None:
+            return ok([], extra={"customer_id": str(account)})
+        row = profile_dict(p)
+        return ok([row], extra={"customer_id": str(account)})
+
+    return await _guarded(_work, account=str(account))
+
+
+async def get_profile_context(
+    account: str,
+    max_chars: int | None = None,
+) -> dict[str, Any]:
+    """§20: компактный PII-free контекст профиля для генераторов RSA/ключей.
+    account — customer_id. max_chars — опц. обрезка (дефолт из config).
+    Нет профиля или досье → rows=[{text: ''}]."""
+
+    async def _work() -> dict[str, Any]:
+        from clients.store import ClientProfileStore
+
+        text = await ClientProfileStore().profile_context_text(
+            str(account), max_chars=max_chars
+        )
+        return ok([{"text": text}], extra={"customer_id": str(account)})
+
+    return await _guarded(_work, account=str(account))
+
+
+async def get_client_dossier(
+    account: str,
+) -> dict[str, Any]:
+    """§20: подтверждённое досье клиента (сводка краулинга, PII-free).
+    account — customer_id. Возвращает current-досье: версия, статус, наличие markdown/контекста.
+    Нет досье → rows=[], error=null."""
+
+    async def _work() -> dict[str, Any]:
+        from clients.dossier_store import ClientDossierStore
+
+        d = await ClientDossierStore().get_current(str(account))
+        if d is None:
+            return ok([], extra={"customer_id": str(account)})
+        dd = dossier_dict(d)
+        return ok([dd], extra={"customer_id": str(account)})
+
+    return await _guarded(_work, account=str(account))
+
+
 # Реестр: имя инструмента → функция. server.py регистрирует по нему в FastMCP и проверяет И4
 # (READ_MCP_TOOLS ∩ MUTATION_TOOLS == ∅). Имена подобраны заведомо непересекающимися с 39
 # мутационными (agent.tools.schemas.MUTATION_TOOLS).
@@ -446,6 +513,10 @@ READ_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "get_account_audit": get_account_audit,
     "get_change_history": get_change_history,
     "keyword_ideas": keyword_ideas,
+    # §20: READ-инструменты профиля клиента
+    "get_client_profile": get_client_profile,
+    "get_profile_context": get_profile_context,
+    "get_client_dossier": get_client_dossier,
 }
 
 READ_MCP_TOOLS: frozenset[str] = frozenset(READ_TOOL_FUNCS)
