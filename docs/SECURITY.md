@@ -55,7 +55,7 @@
 | 7 | **Только TEST MCC при разработке** | `ENV=dev` по умолчанию; замок аккаунта на `7753643025` (правило 9) | покрыто правилом 9 + `test_config_failfast` |
 | 8 | **Жёсткий allow-list операций** | `ads/service.py` исполняет только поддержанные операции (отклоняет неизвестную ДО кнопок и в `execute_confirmed`) | `test_write_layer` (отклонение неподдержанной операции) |
 | 9 | **Замок аккаунта** (мутации — все ВИДИМЫЕ, прод-дефолт `all`) + раздельное чтение (§8) | `ads/client.py::ensure_allowed` (мутации, набор = потолок при `all` / явный список), `ensure_read_allowed` (per-account чтение = мутационный ∪ read-env ∪ дочерние обхода), `ensure_manager_allowed` (обход MCC); потолок видимости `ALLOWED_CEILING`={Draft} зашит в коде | `test_safety_core` (сентинел/потолок/fail-closed/чужой), `test_mutations_all_accounts` (сквозной гейт на боевом), `test_mutation_lock_unchanged_by_read_allowlist`, `test_discovered_child_readable_but_not_mutable`, `test_ads_resolve`, `test_ads_read` |
-| 10 | **Fail-closed везде** (никогда fail-open) | `bot/main.py::WhitelistMiddleware` → `core.access.is_whitelisted` (источник = env `TELEGRAM_WHITELIST_CHAT_IDS` **∪ таблица `whitelist`**; блок при пустом объединении; сбой БД ⇒ пустой БД-набор, не fail-open); `core/config.py` prod fail-fast (нет ключа/пустой env-whitelist → `ValueError`); `user_initiated` дефолт `False`; пустой allow-list → отказ | `test_whitelist`, `test_runtime_whitelist`, `test_config_failfast`, `test_safety_core` |
+| 10 | **Fail-closed везде** (никогда fail-open) | `bot/main.py::WhitelistMiddleware` → `core.access.is_whitelisted` (источник = env `TELEGRAM_WHITELIST_CHAT_IDS` **∪ таблица `whitelist`**; блок при пустом объединении; сбой БД ⇒ пустой БД-набор, не fail-open); `core/config.py` prod fail-fast (нет ключа/пустой env-whitelist → `ValueError`); `user_initiated` дефолт `False`; пустой allow-list → отказ. **Единственное исключение — сбой стора размыкателя `core/breaker.py` (fail-OPEN), см. раздел ниже** | `test_whitelist`, `test_runtime_whitelist`, `test_config_failfast`, `test_safety_core`, `test_breaker_probe_lease` |
 
 ---
 
@@ -99,6 +99,32 @@ claim → `PermissionError`, SDK не вызывается.
 (обязателен в prod); дальше операторы добавляются в рантайме в таблицу `whitelist` (`/adduser`), но
 env всё равно должен быть непустым на старте. Пустое объединение (env ∪ БД) означало бы «отвечаю
 всем» — это запрещено (fail-closed).
+
+### Единственное узаконенное исключение из fail-closed — размыкатель (Волна 2)
+
+Правило 10 требует fail-closed **везде**. Ровно одно место отказывает наоборот, и это записано здесь
+явным исключением, а не оставлено умолчанием: **сбой хранилища размыкателя `core/breaker.py` →
+fail-OPEN, вызов проходит**.
+
+Основание — размыкатель управляет **доступностью**, а не правами. Отказав закрыто, он сам стал бы
+аварией того класса, против которого написан: не применилась миграция `0033` или подвисла БД ⇒ встал
+весь Google Ads и все LLM-вызовы разом. Прецедент в коде уже есть — `core/quota.py` (учёт операций)
+при недоступности стора тоже пропускает.
+
+Что исключение **не** ослабляет: ни один гейт безопасности через размыкатель не проходит. Замок
+аккаунта (`ensure_allowed`), confirm-гейт (`ConfirmStore.claim`), провенанс и whitelist стоят
+отдельно и остаются fail-closed каждый — размыкатель их не заменяет и не обходит. Он лишь решает,
+идти ли в сеть тому вызову, который **уже** прошёл все гейты.
+
+Границы исключения узкие и покрыты тестом (`tests/test_breaker_probe_lease.py`):
+- fail-open **только** на исключении самого стора (`Session`/таймаут `_DB_OP_TIMEOUT_S = 2.0`), не на
+  бизнес-условиях; разомкнутая цепь при живом сторе отсекает вызов, как и положено;
+- размыкают цепь **только** «сервис недоступен/душит нас» (`counts_as_failure`): транспортные
+  503/429, `RESOURCE_EXHAUSTED`/`RATE_EXCEEDED`/`TRANSIENT_ERROR`, для LLM — rate-limit/connection/5xx.
+  `is_account_access_error` (отключённый аккаунт) и `_OUTCOME_UNKNOWN_CODES`
+  (`INTERNAL_ERROR`/`DEADLINE_EXCEEDED`, наш `TimeoutError`) — **не** размыкают: первое заперло бы
+  исправный API из-за одного клиента, второе сделало бы вывод о Google из нашего собственного дедлайна;
+- один WARNING на процесс при недоступном сторе — молчаливого fail-open нет.
 
 ### Защита от GAQL-инъекции
 Резолв по имени (`ads/resolve.py::_gaql_escape`) экранирует `'` и `\` перед подстановкой в

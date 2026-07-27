@@ -171,8 +171,12 @@ async def run_ads_call(
     `op_count` — фактическое число mutate-операций батча (Google тарифицирует каждую).
 
     Квота (§3): ПЕРЕД вызовом check_mutation_allowed — на ≥95% дневного лимита бросает
-    QuotaExceededError (fail-closed, до SDK, без трат). Успешную операцию учитываем (record)."""
-    from core import quota
+    QuotaExceededError (fail-closed, до SDK, без трат). Успешную операцию учитываем (record).
+
+    Размыкатель (Волна 2): вокруг ретрай-цикла — один вызов даёт одно свидетельство о состоянии
+    дальней стороны. Цепь разомкнута ⇒ CircuitOpenError ДО семафора и SDK. Сбой стора ⇒ пропуск
+    (fail-OPEN — размыкатель про доступность, см. core.breaker)."""
+    from core import breaker, quota
 
     name = label or getattr(fn, "__name__", "ads_call")
     await quota.check_mutation_allowed(account)  # ДО семафора/SDK: не тратим слот на заведомо блок
@@ -190,8 +194,9 @@ async def run_ads_call(
     )
     start = time.monotonic()
     try:
-        async with _get_ads_semaphore():  # потолок одновременных вызовов к Google Ads
-            result: T = await retryer(_inner)
+        async with breaker.guard(breaker.circuit_name("ads", account)):
+            async with _get_ads_semaphore():  # потолок одновременных вызовов к Google Ads
+                result: T = await retryer(_inner)
     except Exception as e:
         log.warning("ads-call %s: %s за %dмс", name, _fail_cause(e), _ms(start))
         _observe_ads(name, start, "ads_mutate", ok=False)
@@ -215,17 +220,20 @@ async def run_ads_create_call(
     мог бы задвоить сущности (запрос мог примениться). Сохраняет ВЕСЬ остальной денежный контур,
     который раньше терялся на голом asyncio.to_thread: check_mutation_allowed ДО SDK (fail-closed
     на ≥95% дневной квоты §3), asyncio.timeout(ADS_TIMEOUT_S), семафор конкурентности,
-    quota.record(op_count=реальное число mutate-операций батча) ПОСЛЕ успеха, лог §15."""
-    from core import quota
+    quota.record(op_count=реальное число mutate-операций батча) ПОСЛЕ успеха, лог §15.
+    Размыкатель — тот же, что у прочих ads-обёрток: единая цепь на аккаунт, иначе этот путь был бы
+    слеп для счётчика отказов и продолжал бы стучаться в лежащий API."""
+    from core import breaker, quota
 
     name = label or getattr(fn, "__name__", "ads_create")
     await quota.check_mutation_allowed(account)  # ДО семафора/SDK: не тратим слот на заведомо блок
 
     start = time.monotonic()
     try:
-        async with _get_ads_semaphore():  # тот же потолок конкурентности, что и для мутаций
-            async with asyncio.timeout(ADS_TIMEOUT_S):
-                result: T = await asyncio.to_thread(fn, *args, **kwargs)
+        async with breaker.guard(breaker.circuit_name("ads", account)):
+            async with _get_ads_semaphore():  # тот же потолок конкурентности, что и для мутаций
+                async with asyncio.timeout(ADS_TIMEOUT_S):
+                    result: T = await asyncio.to_thread(fn, *args, **kwargs)
     except Exception as e:
         log.warning("ads-create %s: %s за %dмс", name, _fail_cause(e), _ms(start))
         _observe_ads(name, start, "ads_mutate", ok=False)
@@ -248,8 +256,12 @@ async def run_ads_read_call(
     (на денежном пути таймаут не повторяем — см. run_ads_call). Логирует запрос (§15).
 
     Квота (§3): чтение НЕ блокируем (нужно и для безопасности), но учитываем (record) — чтобы
-    дневной счётчик отражал реальную нагрузку. `account` — опц. метка аккаунта."""
-    from core import quota
+    дневной счётчик отражал реальную нагрузку. `account` — опц. метка аккаунта.
+
+    Размыкатель: чтения размыкаются наравне с мутациями — именно они и есть основной объём стука в
+    лежащий API (плановые отчёты × сотня аккаунтов × три процесса). Отказ чтения на разомкнутой цепи
+    ничего не теряет: API всё равно не отвечает."""
+    from core import breaker, quota
 
     name = label or getattr(fn, "__name__", "ads_read")
 
@@ -266,8 +278,9 @@ async def run_ads_read_call(
     )
     start = time.monotonic()
     try:
-        async with _get_ads_semaphore():  # тот же потолок конкурентности, что и для мутаций
-            result: T = await retryer(_inner)
+        async with breaker.guard(breaker.circuit_name("ads", account)):
+            async with _get_ads_semaphore():  # тот же потолок конкурентности, что и для мутаций
+                result: T = await retryer(_inner)
     except Exception as e:
         log.warning("ads-read %s: %s за %dмс", name, _fail_cause(e), _ms(start))
         _observe_ads(name, start, "ads_read", ok=False)
@@ -307,11 +320,22 @@ def _fail_cause(exc: BaseException) -> str:
     return type(exc).__name__
 
 
-async def call_llm(coro_factory: Callable[[], Awaitable[T]], *, label: str | None = None) -> T:
+async def call_llm(
+    coro_factory: Callable[[], Awaitable[T]],
+    *,
+    label: str | None = None,
+    circuit: str | None = None,
+) -> T:
     """Вызов OpenRouter с таймаутом + ретраем (rate-limit/timeout/connection/5xx). Логирует
     запрос к LLM (метка модели/роли, длительность, исход — БЕЗ секретов; ТЗ §15).
     `coro_factory` — zero-arg фабрика свежего awaitable: tenacity создаёт корутину заново на
-    каждую попытку (одну корутину нельзя await дважды)."""
+    каждую попытку (одну корутину нельзя await дважды).
+
+    `circuit` — слаг модели для размыкателя (цепь на МОДЕЛЬ: провайдер под ней ложится отдельно, и
+    роняющаяся `gpt-5.6-sol` не должна запирать `claude-sonnet-5`). Не задан ⇒ общая цепь `llm:-`:
+    вызов без метки размыкатель всё равно видит, просто грубее — молча выпасть из учёта нельзя."""
+    from core import breaker
+
     name = label or "llm"
 
     async def _inner() -> T:
@@ -327,7 +351,8 @@ async def call_llm(coro_factory: Callable[[], Awaitable[T]], *, label: str | Non
     )
     start = time.monotonic()
     try:
-        result: T = await retryer(_inner)
+        async with breaker.guard(breaker.circuit_name("llm", circuit)):
+            result: T = await retryer(_inner)
     except Exception as e:
         log.warning("llm-call %s: %s за %dмс", name, type(e).__name__, _ms(start))
         raise

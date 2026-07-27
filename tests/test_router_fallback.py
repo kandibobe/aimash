@@ -33,8 +33,11 @@ def patched(obj, name, value):
         setattr(obj, name, orig)
 
 
-async def _passthrough(factory, label=None):
-    """Замена core.resilience.call_llm: без ретраев/бэкоффа — просто выполнить фабрику один раз."""
+async def _passthrough(factory, label=None, circuit=None):
+    """Замена core.resilience.call_llm: без ретраев/бэкоффа — просто выполнить фабрику один раз.
+
+    Сигнатура повторяет настоящую (включая `circuit` — имя цепи размыкателя) намеренно: дубль,
+    принимающий `**kwargs`, молча проглотил бы рассинхрон с оригиналом."""
     return await factory()
 
 

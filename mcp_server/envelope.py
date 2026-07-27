@@ -146,12 +146,18 @@ def classify_error(exc: BaseException) -> str:
     """
     try:
         from core.ads_errors import error_code_names, is_account_access_error
+        from core.breaker import CircuitOpenError
         from core.quota import QuotaExceededError
 
         if isinstance(exc, PermissionError):
             return "forbidden_account"
         if isinstance(exc, QuotaExceededError):
             return "quota_exhausted"
+        # Размыкатель отсёк вызов ДО сети: это отказ ДАЛЬНЕЙ стороны (её и накопленных отказов), а
+        # не наш сбой. `internal` соврал бы модели про источник; новый код в ERROR_CODES не заводим —
+        # набор заморожен, а `upstream_error` описывает ситуацию точно.
+        if isinstance(exc, CircuitOpenError):
+            return "upstream_error"
         if isinstance(exc, TimeoutError):  # 3.11+: asyncio.TimeoutError — это он же
             return "timeout"
         if isinstance(exc, ValueError | TypeError | KeyError):

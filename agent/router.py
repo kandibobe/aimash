@@ -13,6 +13,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from core.config import _VALID_PROVIDER_SORTS, settings
+from core.breaker import CircuitOpenError  # цепь модели разомкнута → деградировать на резервную
 from core.resilience import (
     LLM_TIMEOUT_S,
     _is_retryable_llm,  # A4: транзиентность ошибки → решаем, стоит ли деградировать на fallback
@@ -245,7 +246,9 @@ async def chat(
         if temperature is not None and not _omits_sampling(model_slug):
             call_kwargs["temperature"] = temperature
         resp = await call_llm(
-            lambda: _client().chat.completions.create(**call_kwargs), label=f"{model_slug}/{role}"
+            lambda: _client().chat.completions.create(**call_kwargs),
+            label=f"{model_slug}/{role}",
+            circuit=model_slug,  # цепь размыкателя — на МОДЕЛЬ, не на роль (роли делят модели)
         )
         # Учёт расхода (токены + реальная стоимость OpenRouter) для /balance + per-run (#10). usage
         # парсим ОДИН раз (extract) на оба потребителя. Наблюдаемость не должна ронять денежный путь —
@@ -288,8 +291,12 @@ async def chat(
         # испробованной. Нетранзиентные (BadRequest/невалидная схема) НЕ фолбэчим (та же ошибка).
         # Раньше роль fallback была объявлена в конфиге и /balance, но не вызывалась нигде — деградации
         # LLM не было; сбой основной модели просто ронял парсинг.
+        # Разомкнутая цепь основной модели — сильнейший из возможных поводов уйти на резервную
+        # (не «сбой», а установленный факт недоступности), но в `_is_retryable_llm` её добавить
+        # НЕЛЬЗЯ: тот же предикат — условие ретрая tenacity (`core/resilience.py:348`), и цепь
+        # переретраивалась бы с бэкоффом впустую. Поэтому разбор здесь, в решении о деградации.
         fb = ROLE_MODELS.get("fallback") or settings.llm_fallback
-        if _is_retryable_llm(e) and fb and fb != chosen:
+        if (_is_retryable_llm(e) or isinstance(e, CircuitOpenError)) and fb and fb != chosen:
             import logging
 
             logging.getLogger("aimash.router").warning(

@@ -3,7 +3,7 @@
 ORM — SQLAlchemy 2.0 ([`db/models.py`](../db/models.py)); схему в проде ведёт **Alembic**
 ([`migrations/`](../migrations/)). Dev/тесты могут работать на SQLite; прод — Postgres 16.
 
-## Все таблицы (27)
+## Все таблицы (28)
 
 Полный перечень моделей из [`db/models.py`](../db/models.py). Каждая таблица подтверждена
 Alembic-миграцией (см. колонку «Миграция»). Колонка «Статус» отражает **реальное** использование
@@ -38,8 +38,9 @@ Alembic-миграцией (см. колонку «Миграция»). Коло
 | `ads_quota_ops` | распределённый счётчик дневной квоты Google Ads (§3, `core.quota`): общий стор вместо per-process deque — bot + scheduler + per-session MCP видят один потолок; PII/секретов нет (`account` = customer_id) | `ts` (индекс + `account,ts`), `account` (customer_id\|NULL), `kind` (read\|mutate), `op_count`; окно 24ч в SQL `SUM(op_count) WHERE ts>cutoff` (`db_dt`), ретеншн `ads_quota_ops_retain_days` | `0031` | ACTIVE |
 | `agent_runs` | #10 наблюдаемость: один ассистентский ход = одна строка (cost/итерации/латентность), персистентно — `core.usage` сбрасывается на рестарте, `core.quota` считает операции, не деньги | `run_id` (= `core.provenance.run_id`, индекс), `origin` (human\|machine\|hermes\|cron), `chat_id`, `customer_id` (+ индекс `customer_id, started_at` — отчёт «сколько стоит группа за окно»), `model`, `iterations_used`, токены, `cost_usd`, `status` | `0032` | ACTIVE |
 | `agent_run_events` | шаг хода (llm\|tool\|ads_read\|ads_mutate): латентность и стоимость, раньше жившие только в лог-строках `core.resilience` | `run_id` + `seq` (индекс), `kind`, `tool_name`, `latency_ms`, `cost_usd`, `rows_returned`, `args_redacted` (**редактировано** `redact_text`), `result_digest` (сводка, не сырьё), `ok` | `0032` | ACTIVE |
+| `circuit_state` | распределённый размыкатель (`core.breaker`, Волна 2): состояние цепи + **аренда пробы** — в half-open право на один пробный запрос берётся атомарным UPDATE, иначе три процесса (bot, scheduler, per-session MCP) пробуют втроём. PII/секретов нет (`name` = `ads:<customer_id>` / `llm:<slug>`) | `name` (UNIQUE + индекс, ≤96), `state` (closed\|open\|half_open), `failure_count` (инкремент в SQL, не read-modify-write), `opened_at`, `probe_lease_until` (аренда, не блокировка — умерший пробник задерживает восстановление на срок аренды, не навсегда), `updated_at` | `0033` | ACTIVE |
 
-> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0032`
+> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0033`
 > (`op.create_table(...)`). Инициалка `0001` создаёт базовые таблицы
 > (`whitelist`, `user_settings`, `proposals`, `audit_log`, `oauth_tokens`;
 > [`migrations/versions/0001_initial.py:22-92`](../migrations/versions/0001_initial.py)), остальные —
@@ -147,7 +148,15 @@ per-process deque; с появлением scheduler-процесса и per-ses
 на ход, не вторая нумерация. Пишет `core.observe` fail-OPEN — наблюдаемость не роняет денежный путь;
 `args_redacted` проходит `redact_text` ДО записи, `result_digest` — сводка, не сырьё. Отчёт
 «сколько стоит прогон/группа за месяц» — `scripts/run_costs.py` поверх индекса
-`ix_agent_runs_customer_started`) — **head**.
+`ix_agent_runs_customer_started`) →
+`0033` (`circuit_state`: распределённый размыкатель `core.breaker`, Волна 2. Джиттер ретраев уже был
+(`wait_random_exponential` во всех трёх политиках `core.resilience`), но он разносит попытки ВНУТРИ
+вызова — thundering herd делают разные вызывающие. Право на пробу в half-open берётся **одним**
+`UPDATE ... WHERE probe_lease_until IS NULL OR probe_lease_until <= now` (`rowcount == 1` ⇒ ты
+единственный пробник — приём `ConfirmStore.claim`). ⚠️ Сбой этого стора — **осознанное fail-OPEN**
+исключение из правила 10, выписанное в [SECURITY.md](SECURITY.md): размыкатель про доступность, и
+отказав закрыто, он сам стал бы аварией. Номер по порядку приземления, а не по номеру волны плана)
+— **head**.
 
 ### Добавить миграцию
 ```bash

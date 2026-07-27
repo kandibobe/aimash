@@ -20,6 +20,7 @@
 - bug_reports       — пользовательские баг-репорты (/reportbug, §6): текст РЕДАКТ., статус триажа
 - account_health_snapshot — агрегаты health-score /audit на дату (субстрат трендов, N1.1; без PII)
 - sheet_exports    — реестр созданных ботом Google-таблиц (отчёты/ключи): ссылка + исход шаринга
+- circuit_state    — распределённый размыкатель (Google Ads / LLM): состояние + аренда пробы
 
 ⚠️ Секреты (refresh-токены) хранятся ТОЛЬКО зашифрованными (oauth_tokens.refresh_token_enc).
 В audit_log/proposals секретов нет. PII клиента (§20) — не секрет проекта, но в логи сырьём не
@@ -803,3 +804,34 @@ class AgentRunEvent(Base):
     result_digest: Mapped[str | None] = mapped_column(String(255))  # короткая сводка, не сырьё
     ok: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CircuitState(Base):
+    """Волна 2: состояние РАСПРЕДЕЛЁННОГО размыкателя (`core.breaker`) — одна строка на цепь.
+
+    Зачем в БД, а не в модуле: bot, scheduler и per-session MCP — разные процессы. Локальный
+    размыкатель у каждого свой, и после сбоя Google все три (× число аккаунтов) синхронно идут
+    пробовать заново. Джиттер ретраев (`core.resilience`) разносит попытки ВНУТРИ одного вызова, но
+    не между процессами; thundering herd лечит аренда пробы: в half-open право на пробный запрос
+    берёт РОВНО ОДИН — атомарным UPDATE по `probe_lease_until` (rowcount==1 ⇒ ты пробник).
+
+    `name` — `ads:<customer_id>` или `llm:<model_slug>` (см. `core.breaker.circuit_name`). Не секрет:
+    id аккаунта и слаг модели секретами проекта не являются.
+
+    Строк — единицы десятков (по аккаунту/модели), они переиспользуются, ретеншн не нужен.
+    На SQLite (dev/test) таблицу создаёт create_all; на Postgres (prod) — Alembic (0033)."""
+
+    __tablename__ = "circuit_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Уникальность обязательна: на ней держится «одна строка на цепь» и атомарность аренды пробы.
+    name: Mapped[str] = mapped_column(String(96), unique=True, index=True, nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(12), default="closed", nullable=False
+    )  # closed|open|half_open
+    failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Момент размыкания (wall-clock UTC через db_dt) — от него отсчитывается окно остывания.
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # До этого момента проба арендована другим процессом. NULL/прошлое ⇒ аренда свободна.
+    probe_lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
