@@ -86,6 +86,29 @@ def test_envelope_ok_shape_and_code_numbers():
     assert 5.0 in env["code_numbers"]
 
 
+def test_code_numbers_never_exceed_what_the_model_sees():
+    """Направление ⊆ (обратное строке выше, и оно — про безопасность, а не про полноту).
+
+    `code_numbers` — allow-list ЦИТИРОВАНИЯ для `factguard.narrative_facts_preserved`. Он обязан
+    быть ПОДМНОЖЕСТВОМ чисел, которые реально уехали в окно модели. Шире — и агент вправе
+    процитировать число со страницы, которой не видел: «расход 2.5» пройдёт fact-guard как
+    проверенное кодом, хотя это чистая галлюцинация.
+
+    Сегодня свойство держится тем, что `ok()` считает `collect_numbers` по УЖЕ нарезанной странице.
+    Тест существует затем, что любой слой поверх конверта (сжатие ответа перед подачей в контекст —
+    ровно то, что предлагала ветка `main`) первым делом выбрасывает строки и переносит
+    `code_numbers` как есть. Тогда allow-list становится шире видимого — молча.
+
+    «Видимое» берём из САМОГО конверта минус `code_numbers` (иначе assert тавтологичен) — это то,
+    что FastMCP сериализует в JSON и отдаёт модели."""
+    from audit.factguard import collect_numbers
+
+    env = envelope.ok([{"cost": 5.0}, {"cost": 2.5}], offset=0, limit=1, extra={"title": "T"})
+    assert 2.5 not in env["code_numbers"], "число со ВТОРОЙ страницы не citeable"
+    visible = collect_numbers({k: v for k, v in env.items() if k != "code_numbers"})
+    assert set(env["code_numbers"]) <= visible
+
+
 def test_envelope_err_skeleton_and_redaction():
     env = envelope.err(RuntimeError("boom: token=SUPERSECRETVALUE123"))
     assert env["rows"] == [] and env["total_rows"] == 0 and env["truncated"] is False
