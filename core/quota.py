@@ -90,7 +90,9 @@ async def record(account: str | None = None, *, kind: str = "read", count: int =
     число операций батча (Google тарифицирует КАЖДУЮ mutate-операцию, а не вызов: батч из 50 ключей =
     50). Чтение учитывается по вызовам (count=1) — число страниц заранее неизвестно; осознанный
     недоучёт read-пути (гард ранний, авторитетен серверный лимит). Fail-safe: под таймаутом, ошибки
-    глотаем — учёт НИКОГДА не задерживает и не роняет завершённый read/мутацию (safety-critical)."""
+    не роняют основной путь (safety-critical), но делаем ОДИН повтор (P3, аудит 2026-07-27): при
+    транзиентном сбое БД/сети неучтённая операция может привести к квотному overshoot на следующем
+    вызове check_mutation_allowed."""
     try:
         n = max(1, min(int(count), 100_000))  # кламп: защита от мусорного count
         row = AdsQuotaOp(ts=db_dt(_now()), account=account, kind=str(kind)[:8], op_count=n)
@@ -99,7 +101,14 @@ async def record(account: str | None = None, *, kind: str = "read", count: int =
                 s.add(row)
                 await s.commit()
     except Exception:  # noqa: BLE001 — трекинг не должен задерживать/ронять основной путь
-        pass
+        try:
+            log.warning("quota.record retry: пытаюсь повторный commit (kind=%s, count=%s)", kind, count)
+            async with asyncio.timeout(_DB_OP_TIMEOUT_S):
+                async with Session() as s:
+                    s.add(row)
+                    await s.commit()
+        except Exception:  # noqa: BLE001 — не роняем основной путь ни при каких условиях
+            log.warning("quota.record: повтор тоже не удался — квота не зафиксирована (kind=%s)", kind)
 
 
 async def usage_pct(account: str | None = None) -> float:

@@ -24,6 +24,8 @@ from dataclasses import dataclass
 
 from ads.client import DRAFT_ACCOUNT_ID, ensure_allowed
 from ads.freshness import attach_freshness
+from ads.freshness import SnapshotKind as _SnapshotKind
+from datetime import datetime, timezone
 from ads.resolve import (
     MONEY_OPS,
     DecreaseBelowZero,
@@ -32,6 +34,7 @@ from ads.resolve import (
 )
 from ads.service import read_state
 from core import i18n
+from core.budget_policy import check_proposal_policy
 from confirm import render
 from confirm.xlsx_attachment import write_keywords_xlsx
 from confirm.store import ConfirmStore
@@ -173,7 +176,7 @@ async def build_proposal(
         claimed_cur = params.get("currency")
         if claimed_cur and claimed_cur != "percent" and not detect_currency_token(user_text):
             params = {**params, "currency": None}
-        acct_cur = ""
+        acct_cur: str = ""  # инициализация до try (pyright: possibly unbound)
         try:
             from ads.client import build_client_async
 
@@ -188,6 +191,84 @@ async def build_proposal(
         mismatch = currency_mismatch(operation, params, acct_cur)
         if mismatch:
             raise ProposalRefused("⚠️ " + mismatch)
+    # PolicyEngine (P0): проверки политик бюджета/ставок ДО создания черновика.
+    # Берём before_micros / after_micros из снимка (snap.data), если он успешный.
+    if (
+        operation in MONEY_OPS
+        and snap.kind is _SnapshotKind.OK
+        and snap.data is not None
+        and snap.data.get("before_micros") is not None
+        and snap.data.get("after_micros") is not None
+    ):
+        old_m = snap.data["before_micros"]
+        new_m = snap.data["after_micros"]
+        # Для multi-groups берём максимальный процент изменения (худший случай).
+        if isinstance(old_m, list) and isinstance(new_m, list) and old_m and new_m:
+            # zip безопасен: одинаковые длины (read_state гарантирует)
+            deltas = [
+                (abs(n - o) / o * 100 if o > 0 else 0)
+                for o, n in zip(old_m, new_m, strict=False)
+            ]
+            worst = max(range(len(deltas)), key=lambda i: deltas[i])
+            old_v = int(old_m[worst])
+            new_v = int(new_m[worst])
+        elif isinstance(old_m, int) and isinstance(new_m, int):
+            old_v = old_m
+            new_v = new_m
+        else:
+            old_v = int(old_m) if not isinstance(old_m, list) else 0
+            new_v = int(new_m) if not isinstance(new_m, list) else 0
+        if old_v > 0 and new_v > 0:
+            # PRO-R5: cooldown — последняя applied-мутация на этой кампании (или любой кампании
+            # аккаунта — для простоты). fail-closed: сбой БД = не блокируем, только лог.
+            from core.logging import log as _log
+
+            cooldown_hours: float | None = None
+            try:
+                from sqlalchemy import select
+                from db.models import AuditLog, Proposal
+                from db.session import Session as _DbSession
+
+                async with _DbSession() as s:
+                    row = (
+                        await s.execute(
+                            select(AuditLog.created_at)
+                            .where(
+                                AuditLog.status.in_(["applied"]),
+                                AuditLog.operation == operation,
+                            )
+                            .order_by(AuditLog.created_at.desc())
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+                    if row is not None:
+                        _now = datetime.now(timezone.utc)
+                        diff = _now - row
+                        cooldown_hours = diff.total_seconds() / 3600.0
+            except Exception:  # noqa: BLE001 — cooldown не должен ронять создание черновика
+                cooldown_hours = None
+
+            policy = check_proposal_policy(
+                operation=operation,
+                campaign_name=params.get("campaign", ""),
+                old_micros=old_v,
+                new_micros=new_v,
+                mode=params.get("mode"),
+                last_mutated_hours_ago=cooldown_hours,
+                currency=params.get("currency") or acct_cur or None,
+            )
+            if not policy.allowed:
+                reason = policy.blocked_reason() or "политика бюджета заблокировала изменение"
+                raise ProposalRefused("🚫 " + reason)
+            if policy.max_risk == "high":
+                # HIGH-риск: добавляем предупреждение в display
+                warn = (
+                    "⚠️ **Высокий риск** — операция прошла политики, "
+                    "но есть факторы повышенного внимания (двойной CPA, повтор). "
+                    "Пожалуйста, проверь сводку перед подтверждением."
+                )
+                # Отложим предупреждение: display ещё не собран, прикрепим к params
+                params = {**params, "_policy_warning": warn}
     # Снимок + аттестация свежести в одном месте: `_before` как раньше (только при успехе),
     # `_freshness` — всегда. Без маркера черновик считается непрочитанным (fail-closed).
     params = attach_freshness(params, snap)

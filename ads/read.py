@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import time
+
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -116,17 +118,24 @@ def account_stats(
 
 _CURRENCY_CACHE: dict[
     str, str
-] = {}  # customer_id → currency_code (валюта не меняется в рамках сессии)
+] = {}  # customer_id → currency_code
+
+# PRO-R6 (аудит 2026-07-27): TTL-кэш для валюты. Валюта стабильна, но при миграции
+# аккаунта или ошибке чтения (NON_MULTIPLE_OF_MINIMUM_CURRENCY_UNIT на мутации) должна
+# обновляться. Без TTL кэш живёт вечно → ошибка валюты чинится только рестартом процесса.
+_CURRENCY_CACHE_TTL_S: float = 3600.0  # 1 час
+_CURRENCY_CACHE_TS: dict[str, float] = {}  # customer_id → timestamp
 
 
 def account_currency(client: GoogleAdsClient, customer_id: str) -> str:
-    """Код валюты аккаунта (§9), напр. 'USD'/'UAH'. Один GAQL FROM customer, кэш по customer_id.
-    Только для белого списка (замок аккаунта). '' если не удалось прочитать (вызывающий покажет
-    метрики без явной валюты)."""
+    """Код валюты аккаунта (§9), напр. 'USD'/'UAH'. TTL-кэш 1ч (PRO-R6).
+    '' если не удалось прочитать (вызывающий покажет метрики без явной валюты)."""
     ensure_read_allowed(customer_id)
     cid = str(customer_id)
     if cid in _CURRENCY_CACHE:
-        return _CURRENCY_CACHE[cid]
+        ts = _CURRENCY_CACHE_TS.get(cid, 0.0)
+        if time.monotonic() - ts < _CURRENCY_CACHE_TTL_S:  # TTL проверка
+            return _CURRENCY_CACHE[cid]
     ga = client.get_service("GoogleAdsService")
     code = ""
     for row in ga.search(
@@ -135,7 +144,8 @@ def account_currency(client: GoogleAdsClient, customer_id: str) -> str:
         code = row.customer.currency_code
         break
     if code:
-        _CURRENCY_CACHE[cid] = code  # кэшируем только успешное чтение
+        _CURRENCY_CACHE[cid] = code
+        _CURRENCY_CACHE_TS[cid] = time.monotonic()
     return code
 
 

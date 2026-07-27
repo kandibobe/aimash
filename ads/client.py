@@ -401,9 +401,10 @@ def build_client(customer_id: str | None = None) -> "GoogleAdsClient":
     if cached is not None:
         return cached
     # version= делает `settings.google_ads_api_version` АВТОРИТЕТНЫМ (иначе SDK молча берёт свой
-    # дефолт — сейчас совпадает с пином google-ads>=31.1,<32=v24, но не гарантированно при апгрейде
-    # библиотеки). Рассинхрон версии теперь = явный отказ get_service, а не тихий дрейф. Пин lib и
-    # эту строку перепроверять скилом gads-version (v24 сансет ~май 2027).
+    # дефолт — сейчас совпадает с пином google-ads>=31.2,<32=v25, но не гарантированно при апгрейде
+    # библиотеки). Рассинхрон версии теперь = явный отказ get_service, а не тихий дрейф. Что пин
+    # доехал до ВСЕХ точек (зонд, .env-шаблоны, constraints), проверяет
+    # `tests/test_gads_version_pin.py`; актуальность версии — скил gads-version (v25 сансет ~июль 2027).
     raw = GoogleAdsClient.load_from_dict(_cfg_for(cid), version=settings.google_ads_api_version)
     # Прокси с gRPC-дедлайном на чтениях (см. _DeadlineClient): без него зависший RPC держит поток
     # to_thread вечно, а ретраи read-пути множат такие потоки. Мутационные сервисы не затронуты.
@@ -476,13 +477,12 @@ def ensure_allowed(customer_id: str) -> None:
     Это единственная точка, через которую ВСЕ мутации проверяют customer_id. Нормализуем id (только
     цифры), поэтому '775-364-3025' и '7753643025' эквивалентны.
 
-    Мутационный набор (решение владельца 2026-07, Draft-only доктрина снята):
-      • `settings.allow_all_visible` (сентинел `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all`, прод-дефолт)
-        ⇒ набор = ВЕСЬ `allowed_ceiling()` (все видимые: Draft ∪ read-list ∪ дочерние обхода MCC);
-      • иначе — явный `settings.allowed_customer_ids`, ограниченный тем же потолком (способ СУЗИТЬ).
-    Потолок видимости и confirm-гейт остаются несменяемыми страховками: аккаунт вне MCC немутируем,
-    «да» + confirmation_id обязательны (перепроверка на исполнении). В dev/test пусто ⇒ fail-closed.
+    Первая проверка — глобальный kill-switch (DISABLE_ALL_MUTATIONS / killswitch.flag).
     """
+    # Уровень 0: Глобальный kill-switch (самый верхний гард)
+    from core.guards import require_mutations_allowed
+    require_mutations_allowed()
+
     cid = normalize_customer_id(customer_id)
     ceiling = allowed_ceiling()
     # Сентинел «all» ⇒ мутационный набор = весь видимый потолок (динамически ограничен фактически

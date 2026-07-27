@@ -6900,6 +6900,11 @@ async def _dispatch_command_result(
         if not text:  # пустой ответ агента — не показываем «(пусто)», даём локализованную подсказку
             log.debug("agent-loop: пустой text в ответе (op=%s)", res.get("type"))
             text = i18n.t("loop_unrecognized")
+        # P2: process_agent_response — извлечение <thought> тегов, логирование в Langfuse,
+        # отправка пользователю только чистого текста.
+        from core.thought_parser import process_agent_response as _process_thought
+
+        text = _process_thought(text)
         await m.answer(text)
 
 
