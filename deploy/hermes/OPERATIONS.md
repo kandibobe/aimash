@@ -836,3 +836,85 @@ curl -sS -o /dev/null -w '%{http_code}\n' \
 
 ⛔ **Никогда `tailscale funnel`** для дашборда — это публичный интернет-канал к пульту (прямое
 нарушение К3). Только `tailscale serve` (tailnet-only). Порт 9119/9120/443 в ufw наружу НЕ открывать.
+
+### 14.1. Дашборд отдаёт 502 — это НЕ туннель, а OOM машины (разобрано 2026-07-27)
+
+**Симптом:** `https://hermes-vps.tailfd4d95.ts.net/chat` → `HTTP ERROR 502`.
+**Первое, что проверить — не цепочку, а слушателя на 9119:**
+```
+ss -ltnp | grep 9119                      # нет строки ⇒ дашборд мёртв, 502 отдаёт serve/Caddy
+journalctl -u hermes-dashboard -n 40      # искать 'oom-kill' / 'Failed with result'
+journalctl -k --since -24h | grep -c oom-kill
+```
+27.07 было так: `serve` и Caddy `active`, на 9119 никого; в логе —
+`The kernel OOM killer killed some processes in this unit` … `Failed with result 'oom-kill'`.
+
+**Корень — глобальный OOM (`constraint=CONSTRAINT_NONE`), а не лимит юнита.** На 3.7 GiB машине
+одновременно живут docker-стек (`aimash-bot` лимит 1.172G, `aimash-scheduler` 900M, `aimash-pg` 512M,
+`aimash-backup`, `ad-master-db-1`), `hermes-dashboard.service`, **user**-юнит `hermes-gateway.service`
+и по комплекту MCP-детей **на каждую сессию** (`docker exec aimash-bot python -m mcp_server` ~170M,
+`npx tavily-mcp` ~90M, `npx @modelcontextprotocol/server-github` ~87M). Cgroup дашборда доходил до
+**2.2–2.3G RSS за 40 мин** — ядро било по кому попало, включая контейнеры прода и `user@0.service`
+(**152 oom-kill за 14 дней**). Отдельный класс — **контейнерный** OOM в cgroup `aimash-bot`
+(уперся в свой лимит): выглядит как «MCP-инструмент отвалился посреди хода».
+
+**Усилитель: пересборка web UI при КАЖДОМ старте** (было 4 сборки на 4 старта).
+`_web_ui_build_needed()` (`hermes_cli/main.py`) считает дист устаревшим, если `package-lock.json`
+новее сентинела `hermes_cli/web_dist/index.html`; lockfile переписывает `npm`/`npx` (MCP-серверы
+ставятся через `npx -y`) — условие вечно истинно. Цена: `npm install` ~220M + node-сборка ~470M RSS
+ровно в момент, когда машина уже в OOM, плюс **~30 с окна 502** на каждый рестарт.
+
+**Что применено на VPS (обе правки — drop-in'ы, база юнита не тронута):**
+```
+# 1) локализовать ущерб: при превышении гибнет ТОЛЬКО дашборд, а не контейнеры прода
+systemctl set-property hermes-dashboard MemoryHigh=1200M MemoryMax=2G MemorySwapMax=1G
+#    (пишется в /etc/systemd/system.control/hermes-dashboard.service.d/)
+
+# 2) убрать пересборку UI и 90-секундную агонию при остановке
+systemctl edit --stdin --drop-in=20-aimash-faststart hermes-dashboard <<'EOF'
+[Service]
+ExecStartPre=-/usr/bin/touch /usr/local/lib/hermes-agent/hermes_cli/web_dist/index.html
+TimeoutStopSec=20
+EOF
+```
+Проверено живьём: старт **3 с** вместо ~30 с (`HERMES_DASHBOARD_READY` через 3 с после `Started`),
+строки `Building web UI` в логе нет, `curl 127.0.0.1:9119/api/status` → 200 за 37 мс.
+
+⚠️ **Плата за фикс №2:** после `hermes upgrade` UI молча останется старым. В процедуру обновления
+(§7) добавить:
+```
+rm -rf /usr/local/lib/hermes-agent/hermes_cli/web_dist && systemctl restart hermes-dashboard
+```
+⚠️ **После апгрейда VPS до 8 GB** поднять потолки, иначе дашборд будет душиться на ровном месте:
+`systemctl set-property hermes-dashboard MemoryHigh=3G MemoryMax=4G MemorySwapMax=2G`.
+
+## 15. Апгрейд VPS (Hetzner rescale) — в месте, без переезда
+
+Текущая машина: 2 vCPU AMD / **3.9 GiB RAM** / 38 GiB диск, `fsn1-dc14`, instance-id `146185353`.
+Памяти не хватает **структурно** (см. 14.1), поэтому rescale — не тюнинг, а лечение.
+
+**Переносить на новую машину НЕ надо.** Rescale сохраняет диск, IP `167.233.48.243`, tailnet-узел,
+docker-тома (в т.ч. Postgres), `~/.hermes` (сессии, скилы, cron, токен gateway) и все systemd-юниты.
+Переезд означал бы заново: tailnet-авторизацию, Caddy+serve, юниты, перенос томов БД — часы работы и
+риск для данных ради нуля выгоды. Единственный сценарий переезда — смена архитектуры на ARM (CAX):
+rescale между x86 и Arm64 **запрещён**, а образы стека собраны под amd64 → не наш случай.
+
+**Порядок (консоль Hetzner Cloud → сервер → Rescaling):**
+1. Цель: **8 GiB RAM** (`CPX31` 4 vCPU/8G — линия AMD, как текущая; `CX32` 4 vCPU/8G — Intel).
+2. Обязательно выбрать **«keep current disk size»**: диск уменьшить обратно нельзя никогда
+   («rescale only to a plan with a disk equal to or larger»), а с сохранённым диском остаётся
+   право откатиться на тариф поменьше. Диск занят на 47% — расти незачем.
+   Если диск всё же вырастет — раздел придётся расширять руками через Rescue System.
+3. Сервер должен быть **выключен** (`Power off` в консоли; изнутри — `shutdown -h now`).
+   Даунтайм = выключение + rescale + загрузка, обычно 2–5 мин.
+4. После загрузки — чеклист (всё `enabled`, поднимается само, но проверить):
+```
+free -h                                   # 8G
+systemctl is-active hermes-dashboard hermes-dash-proxy tailscaled
+systemctl --user is-active hermes-gateway # user-юнит! linger=yes уже включён (§2)
+docker ps                                 # 5 контейнеров, healthy
+tailscale serve status                    # tailnet only
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9119/api/status   # 200
+systemctl set-property hermes-dashboard MemoryHigh=3G MemoryMax=4G MemorySwapMax=2G
+```
+Источник правил rescale — [Hetzner Cloud FAQ](https://docs.hetzner.com/cloud/servers/faq/).
