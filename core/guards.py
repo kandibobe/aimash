@@ -1,4 +1,4 @@
-"""core/guards.py — construction-time гарды, которые интерпретатор НЕ вырежет.
+"""core/guards.py — construction-time гарды + runtime kill-switch на мутации.
 
 `assert` — не гард. Под `python -O` (и `PYTHONOPTIMIZE=1` в окружении) CPython выбрасывает
 assert-инструкции из байткода целиком, вместе с сообщением. Для проверки, единственная задача
@@ -15,11 +15,26 @@ assert-инструкции из байткода целиком, вместе �
 Держится тестами `tests/test_invariants_core.py`: (а) механизм роняет импорт под `-O` в подпроцессе;
 (б) в продовых пакетах нет ни одного module-level `assert` — то есть класс бага закрыт, а не два его
 экземпляра.
+
+## Emergency Kill-Switch
+
+`DISABLE_ALL_MUTATIONS=true` (env) — **глобальная заморозка ВСЕХ WRITE-операций**. 
+Проверяется на самом верхнем уровне `ensure_allowed()` в `ads/client.py`.
+Не влияет на READ-инструменты — бот продолжает читать и отвечать.
+
+Два уровня:
+1. **Env-флаг** — `DISABLE_ALL_MUTATIONS=true` в .env или export. Мгновенно блокирует все мутации.
+2. **Redis-флаг** (планируется) — ключ `admaster:killswitch` в Redis для remote-управления без рестарта.
+   Пока fallback: файл `~/.hermes/killswitch.flag`.
+
+Дополнительный уровень: cron-задания с `approvals.cron_mode: deny` в Hermes config — 
+WRITE-операции из кронов заблокированы на уровне фреймворка.
 """
 
 from __future__ import annotations
 
 from collections.abc import Collection
+from core.logging import log
 
 
 def require_no_mutations(
@@ -94,3 +109,56 @@ def require_registered_surface(
         "На живой MCP-поверхности — ТОЛЬКО одобренные инструменты (§15.2): confirm/execute/propose "
         "не выходят в прод, пока не подтверждён канал доставки/якоря."
     )
+
+
+# ── Runtime Kill-Switch ────────────────────────────────────────────────────
+import os
+import pathlib
+
+_KILLSWITCH_FILE = pathlib.Path(os.getenv("HERMES_HOME", "~/.hermes")) / "killswitch.flag"
+
+
+def mutations_allowed() -> bool:
+    """Глобальная проверка: разрешены ли WRITE-операции сейчас?
+
+    Два уровня проверки (fail-closed — отказ при любой ошибке чтения):
+    1. Env-флаг `DISABLE_ALL_MUTATIONS=true` — самый быстрый, не требует FS.
+    2. Файл `~/.hermes/killswitch.flag` — для remote-управления без рестарта контейнера.
+       Файл существует → мутации ЗАБЛОКИРОВАНЫ (touch-файл = kill).
+       Файл отсутствует → мутации разрешены.
+
+    В будущем: Redis-ключ `admaster:killswitch` (проверка с низким TTL).
+
+    Returns:
+        True если мутации разрешены, False если глобально заблокированы.
+    """
+    # Уровень 1: env-флаг (fast path)
+    if os.environ.get("DISABLE_ALL_MUTATIONS", "").strip().lower() in ("true", "1", "yes"):
+        log.warning("KILL-SWITCH: DISABLE_ALL_MUTATIONS=true в env — мутации заблокированы")
+        return False
+
+    # Уровень 2: файловый флаг
+    try:
+        kf = _KILLSWITCH_FILE.expanduser()
+        if kf.exists():
+            log.warning("KILL-SWITCH: файл %s существует — мутации заблокированы", kf)
+            return False
+    except OSError:
+        # fail-closed: ошибка чтения = мутации запрещены
+        log.error("KILL-SWITCH: ошибка проверки файла %s — мутации ЗАПРЕЩЕНЫ", _KILLSWITCH_FILE)
+        return False
+
+    return True
+
+
+def require_mutations_allowed() -> None:
+    """Runtime-проверка перед входом в `ensure_allowed()`. Бросает PermissionError если блокировано.
+
+    Это самый верхний уровень — вызывается ДО всех остальных проверок в ensure_allowed().
+    """
+    if not mutations_allowed():
+        raise PermissionError(
+            "Глобальный kill-switch активен: WRITE-операции заблокированы. "
+            "Проверь DISABLE_ALL_MUTATIONS в .env или удали killswitch.flag. "
+            "READ-инструменты продолжают работать."
+        )

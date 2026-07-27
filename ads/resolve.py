@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from decimal import Decimal
 
 from google.ads.googleads.client import GoogleAdsClient
 
@@ -495,6 +496,14 @@ def currency_mismatch(operation: str, params: dict, account_currency: str) -> st
     return None
 
 
+def _units_to_micros(value: float) -> int:
+    """Convert money units to micros using Decimal to avoid IEEE 754 precision loss.
+
+    Example: value=999_999.99 → 999_999_990_000 micros exactly (not 999_999_989_999.9999).
+    """
+    return int(Decimal(str(value)) * Decimal(1_000_000))
+
+
 def compute_new_micros(
     current_micros: int, mode: str, value: float, *, currency: str | None
 ) -> int:
@@ -511,17 +520,26 @@ def compute_new_micros(
     1 000 000, USD/EUR — 10 000), и валютно-слепое округление отвергалось API уже ПОСЛЕ «да».
 
     Направление несёт mode, value всегда > 0 (схема). decrease_* с результатом ≤ 0 →
-    DecreaseBelowZero: команду НЕ выполняем и НЕ «клампим к минимуму» — 100 → 0.01 никто не просил."""
+    DecreaseBelowZero: команду НЕ выполняем и НЕ «клампим к минимуму» — 100 → 0.01 никто не просил.
+
+    Арифметика через Decimal (P1, аудит 2026-07-27): float-умножение `value * 1_000_000`
+    теряло точность на границах биллинг-единицы для крупных сумм в UGX/JPY.
+    """
     if mode == "increase_by_percent":
-        raw = int(round(current_micros * (1 + value / 100)))
+        # Процент от текущего значения: value% от current_micros
+        factor = Decimal(str(value)) / Decimal(100)
+        raw = int((Decimal(current_micros) * factor).to_integral_value())
+        raw = current_micros + raw
     elif mode == "decrease_by_percent":
-        raw = int(round(current_micros * (1 - value / 100)))
+        factor = Decimal(str(value)) / Decimal(100)
+        raw = int((Decimal(current_micros) * factor).to_integral_value())
+        raw = current_micros - raw
     elif mode == "increase_by_amount":
-        raw = int(round(current_micros + value * 1_000_000))
+        raw = current_micros + _units_to_micros(value)
     elif mode == "decrease_by_amount":
-        raw = int(round(current_micros - value * 1_000_000))
+        raw = current_micros - _units_to_micros(value)
     elif mode == "set_to":
-        raw = int(round(value * 1_000_000))
+        raw = _units_to_micros(value)
     else:
         raise ValueError(f"неизвестный mode бюджета: {mode}")
     if raw <= 0:  # только decrease_*: «снизь бюджет на 200» при бюджете 100 — не 0, а бессмыслица

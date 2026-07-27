@@ -263,6 +263,18 @@ class Settings(BaseSettings):
     ads_timeout_s: float = 60.0
     llm_timeout_s: float = 45.0
     cleanup_interval_minutes: int = 60  # очистка просроченных черновиков каждые N минут
+
+    # P0: DRY_RUN — глобальное блокирование МУТАЦИЙ (для безопасной разработки/отладки).
+    # True ⇒ все apply_* в ads/mutations.py возвращают dry_run-ошибку ДО claim. Not a kill-switch
+    # (который DISABLE_ALL_MUTATIONS) — это development-safe режим, где ни одна мутация не доходит
+    # до CAS-claim и SDK. False (дефолт) — обычный режим.
+    dry_run_mutations: bool = False
+
+    # P0: Blast Radius Limiter — абсолютный потолок суточного прироста бюджета (в единицах валюты
+    # аккаунта) ДЛЯ ОДНОЙ кампании. Защита от каскада повышений, каждое из которых <20% порога
+    # PolicyEngine. 0 = без глобального лимита (только PolicyEngine Δ%). Google Ads API не даёт
+    # кросс-аккаунтного суммирования — лимит per-campaign.
+    daily_budget_increase_limit_units: float = 300.0
     # C4 (§5.3): чей процесс владеет джобами. `True` — исторический режим: APScheduler крутится в
     # event loop бота. `False` — джобы у отдельного процесса `python -m scheduler` (топология: три
     # процесса). Дефолт `True` намеренно: при архивации `bot/` планировщик обязан НЕ исчезнуть

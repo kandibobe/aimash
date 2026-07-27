@@ -12,6 +12,10 @@ OpenRouter в agent.router. Ретраит ТОЛЬКО транзиентные
 - Таймаут (`asyncio.timeout`) на ADS даёт TimeoutError и НЕ ретраится (запрос мог пройти).
   Финальный страж от double-spend — одноразовый `ConfirmStore.claim` (compare-and-set).
 LLM read-only → таймаут можно повторять.
+
+Circuit Breaker (PRO-R1, аудит 2026-07-27): при 5+ последовательных сбоях SDK-вызовов
+цепь размыкается на 30с — все дальнейшие мутации мгновенно блокируются CircuitBreakerError.
+Защита от каскадного сжигания одноразовых claim'ов при повальном сбое Google Ads API.
 """
 
 from __future__ import annotations
@@ -47,6 +51,53 @@ LLM_TIMEOUT_S: float = float(_settings.llm_timeout_s)
 LLM_MAX_ATTEMPTS: int = 3
 LLM_WAIT_MULTIPLIER: float = 0.5
 LLM_WAIT_MAX: float = 20.0
+
+# ── Circuit Breaker (PRO-R1, аудит 2026-07-27) ──────────────────────────────────
+# 5+ последовательных сбоев ЛЮБОГО SDK-вызова мутации → размыкаем цепь на 30 секунд.
+# Все последующие мутации мгновенно получают CircuitBreakerError, не тратя claim.
+# Первый успех сбрасывает счётчик.
+_CB_THRESHOLD: int = 5
+_CB_COOLDOWN_S: float = 30.0
+_cb_failures: int = 0
+_cb_open_until: float = 0.0
+
+
+class CircuitBreakerError(RuntimeError):
+    """Автоматическая блокировка мутаций из-за каскадных сбоев Google Ads API."""
+
+
+def _circuit_breaker_observe(ok: bool) -> None:
+    """Уведомить circuit breaker об исходе одного SDK-вызова. Успех → сброс."""
+    global _cb_failures, _cb_open_until
+    if ok:
+        _cb_failures = 0
+        _cb_open_until = 0.0
+        return
+    _cb_failures += 1
+    if _cb_failures >= _CB_THRESHOLD:
+        _cb_open_until = time.monotonic() + _CB_COOLDOWN_S
+        log.warning(
+            "circuit-breaker: %d последовательных сбоев — цепь разомкнута на %.0fс",
+            _cb_failures, _CB_COOLDOWN_S,
+        )
+
+
+def _circuit_breaker_check() -> None:
+    """Проверить цепь перед SDK-вызовом мутации. Бросает CircuitBreakerError если разомкнута."""
+    if time.monotonic() < _cb_open_until:
+        remaining = _cb_open_until - time.monotonic()
+        raise CircuitBreakerError(
+            f"автоматическая блокировка мутаций: {remaining:.0f}с ожидания до "
+            f"восстановления (каскад сбоев Google Ads API)"
+        )
+
+
+def circuit_breaker_reset() -> None:
+    """Принудительный сброс цепи (административная команда / тесты)."""
+    global _cb_failures, _cb_open_until
+    _cb_failures = 0
+    _cb_open_until = 0.0
+
 
 # ── Ограничение конкурентности к Google Ads ──────────────────────────────────────
 # Глобальный потолок ОДНОВРЕМЕННЫХ вызовов к Google Ads (и read, и мутации, идущие через эти
@@ -103,8 +154,6 @@ RETRYABLE_ADS_MUTATE_NAMES: frozenset[str] = frozenset(
 
 def _retryable_by_names(exc: BaseException, names: frozenset[str], *, server_5xx: bool) -> bool:
     # Импорт внутри — google.ads тяжёлый; держим модуль дешёвым, если ADS-путь не задействован.
-    # Имена кодов извлекает единый источник core.ads_errors.error_code_names (раньше логика
-    # была продублирована здесь как _ads_error_names).
     from core.ads_errors import error_code_names
 
     try:
@@ -112,28 +161,25 @@ def _retryable_by_names(exc: BaseException, names: frozenset[str], *, server_5xx
 
         if isinstance(exc, GoogleAdsException):
             return bool(error_code_names(exc) & names)
-    except Exception:  # pragma: no cover - SDK всегда есть, но не падаем из-за импорта
+    except Exception:  # pragma: no cover
         pass
     try:
         from google.api_core import exceptions as gapi
     except Exception:  # pragma: no cover
         return False
     transport: tuple = (gapi.ServiceUnavailable, gapi.TooManyRequests)
-    if server_5xx:  # DeadlineExceeded/InternalServerError — только где повтор безопасен (чтения)
+    if server_5xx:
         transport = (*transport, gapi.DeadlineExceeded, gapi.InternalServerError)
     return isinstance(exc, transport)
 
 
 def _is_retryable_ads(exc: BaseException) -> bool:
-    """Предикат ретрая МУТАЦИЙ (2.9): БЕЗ серверных INTERNAL/DEADLINE — исход мог примениться,
-    повтор неидемпотентного батча дал бы дубли. Финальный страж от double-spend — одноразовый
-    claim, но он живёт ВЫШЕ ретрая; сам SDK-вызов повторять нельзя."""
+    """Предикат ретрая МУТАЦИЙ (2.9): БЕЗ серверных INTERNAL/DEADLINE."""
     return _retryable_by_names(exc, RETRYABLE_ADS_MUTATE_NAMES, server_5xx=False)
 
 
 def _is_retryable_ads_read(exc: BaseException) -> bool:
-    """Для ЧТЕНИЙ Google Ads (идемпотентны) ретраим ПОЛНЫЙ транзиентный набор (вкл. INTERNAL/
-    DEADLINE) ПЛЮС TimeoutError — повторный read не «трогает деньги»."""
+    """Для ЧТЕНИЙ Google Ads (идемпотентны) ретраем ПОЛНЫЙ набор (вкл. INTERNAL/DEADLINE)."""
     return isinstance(exc, TimeoutError) or _retryable_by_names(
         exc, RETRYABLE_ADS_NAMES, server_5xx=True
     )
@@ -149,7 +195,6 @@ def _is_retryable_llm(exc: BaseException) -> bool:
         )
     except Exception:  # pragma: no cover
         return isinstance(exc, TimeoutError)
-    # LLM read-only → таймаут безопасно повторять (в отличие от ADS-пути).
     return isinstance(
         exc,
         (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError, TimeoutError),
@@ -164,18 +209,16 @@ async def run_ads_call(
     op_count: int = 1,
     **kwargs: object,
 ) -> T:
-    """Замена `asyncio.to_thread(fn, *args)` для синхронных вызовов google-ads SDK (МУТАЦИИ):
-    таймаут на попытку + ретрай транзиентных ошибок с backoff+jitter. Логирует запрос к
-    Google Ads API (имя, длительность, исход — БЕЗ секретов; ТЗ §15). Сигнатура совместима
-    с to_thread (call-site не меняется); `label` — опц. имя для лога, `account` — для квоты,
-    `op_count` — фактическое число mutate-операций батча (Google тарифицирует каждую).
-
-    Квота (§3): ПЕРЕД вызовом check_mutation_allowed — на ≥95% дневного лимита бросает
-    QuotaExceededError (fail-closed, до SDK, без трат). Успешную операцию учитываем (record)."""
+    """Замена `asyncio.to_thread(fn, *args)` для мутаций:
+    circuit-breaker check → квота → семафор → ретрай транзиентных ошибок → observe+record."""
     from core import quota
 
     name = label or getattr(fn, "__name__", "ads_call")
-    await quota.check_mutation_allowed(account)  # ДО семафора/SDK: не тратим слот на заведомо блок
+
+    # PRO-R1: проверяем цепь ДО квоты — не тратим ресурсы на заведомо блокированный вызов.
+    _circuit_breaker_check()
+
+    await quota.check_mutation_allowed(account)
 
     async def _inner() -> T:
         async with asyncio.timeout(ADS_TIMEOUT_S):
@@ -190,15 +233,17 @@ async def run_ads_call(
     )
     start = time.monotonic()
     try:
-        async with _get_ads_semaphore():  # потолок одновременных вызовов к Google Ads
+        async with _get_ads_semaphore():
             result: T = await retryer(_inner)
     except Exception as e:
         log.warning("ads-call %s: %s за %dмс", name, _fail_cause(e), _ms(start))
         _observe_ads(name, start, "ads_mutate", ok=False)
+        _circuit_breaker_observe(False)  # PRO-R1: сбой учтён
         raise
-    await quota.record(account, kind="mutate", count=op_count)  # учёт операций батча в квоте (§3)
+    await quota.record(account, kind="mutate", count=op_count)
     log.info("ads-call %s: ok за %dмс", name, _ms(start))
     _observe_ads(name, start, "ads_mutate", ok=True)
+    _circuit_breaker_observe(True)  # PRO-R1: успех сбрасывает счётчик
     return result
 
 
@@ -210,29 +255,29 @@ async def run_ads_create_call(
     op_count: int = 1,
     **kwargs: object,
 ) -> T:
-    """Как run_ads_call, но БЕЗ РЕТРАЕВ — для НЕидемпотентных создателей (composite-создание
-    кампаний Search/GDN/Video/DG, ассеты/расширения): повтор после серверного INTERNAL/DEADLINE
-    мог бы задвоить сущности (запрос мог примениться). Сохраняет ВЕСЬ остальной денежный контур,
-    который раньше терялся на голом asyncio.to_thread: check_mutation_allowed ДО SDK (fail-closed
-    на ≥95% дневной квоты §3), asyncio.timeout(ADS_TIMEOUT_S), семафор конкурентности,
-    quota.record(op_count=реальное число mutate-операций батча) ПОСЛЕ успеха, лог §15."""
+    """Как run_ads_call, но БЕЗ РЕТРАЕВ. Circuit-breaker проверка та же."""
     from core import quota
 
     name = label or getattr(fn, "__name__", "ads_create")
-    await quota.check_mutation_allowed(account)  # ДО семафора/SDK: не тратим слот на заведомо блок
+
+    _circuit_breaker_check()  # PRO-R1
+
+    await quota.check_mutation_allowed(account)
 
     start = time.monotonic()
     try:
-        async with _get_ads_semaphore():  # тот же потолок конкурентности, что и для мутаций
+        async with _get_ads_semaphore():
             async with asyncio.timeout(ADS_TIMEOUT_S):
                 result: T = await asyncio.to_thread(fn, *args, **kwargs)
     except Exception as e:
         log.warning("ads-create %s: %s за %dмс", name, _fail_cause(e), _ms(start))
         _observe_ads(name, start, "ads_mutate", ok=False)
+        _circuit_breaker_observe(False)
         raise
-    await quota.record(account, kind="mutate", count=op_count)  # учёт операций батча в квоте (§3)
+    await quota.record(account, kind="mutate", count=op_count)
     log.info("ads-create %s: ok за %dмс", name, _ms(start))
     _observe_ads(name, start, "ads_mutate", ok=True)
+    _circuit_breaker_observe(True)
     return result
 
 
@@ -243,12 +288,7 @@ async def run_ads_read_call(
     account: str | None = None,
     **kwargs: object,
 ) -> T:
-    """Как run_ads_call, но для ЧТЕНИЙ Google Ads (идемпотентны): таймаут на попытку + ретрай
-    транзиентных ошибок И TimeoutError (read безопасно повторить). НЕ использовать для мутаций
-    (на денежном пути таймаут не повторяем — см. run_ads_call). Логирует запрос (§15).
-
-    Квота (§3): чтение НЕ блокируем (нужно и для безопасности), но учитываем (record) — чтобы
-    дневной счётчик отражал реальную нагрузку. `account` — опц. метка аккаунта."""
+    """ЧТЕНИЯ — ретраем TimeoutError + полный транзиентный набор. Circuit-breaker не триггерим (чтения не тратят claim)."""
     from core import quota
 
     name = label or getattr(fn, "__name__", "ads_read")
@@ -266,13 +306,13 @@ async def run_ads_read_call(
     )
     start = time.monotonic()
     try:
-        async with _get_ads_semaphore():  # тот же потолок конкурентности, что и для мутаций
+        async with _get_ads_semaphore():
             result: T = await retryer(_inner)
     except Exception as e:
         log.warning("ads-read %s: %s за %dмс", name, _fail_cause(e), _ms(start))
         _observe_ads(name, start, "ads_read", ok=False)
         raise
-    await quota.record(account, kind="read")  # учёт чтения в дневной квоте (§3), без блокировки
+    await quota.record(account, kind="read")
     log.info("ads-read %s: ok за %dмс", name, _ms(start))
     _observe_ads(name, start, "ads_read", ok=True)
     return result
@@ -283,22 +323,15 @@ def _ms(start: float) -> int:
 
 
 def _observe_ads(name: str, start: float, kind: str, *, ok: bool) -> None:
-    """Зафиксировать ads-вызов шагом прогона (#10 Наблюдаемость), если открыт observe.run_scope.
-    No-op вне scope; никогда не бросает — наблюдаемость НЕ роняет денежный путь (правило 10). Импорт
-    ленивый: resilience грузится очень рано, не тянем observe в его import-цепочку без нужды."""
     try:
         from core import observe
 
         observe.record_event(kind, tool_name=name, latency_ms=_ms(start), ok=ok)
-    except Exception:  # noqa: BLE001 — учёт шага не критичен
+    except Exception:  # noqa: BLE001
         pass
 
 
 def _fail_cause(exc: BaseException) -> str:
-    """Причина сбоя для лога (§15): для GoogleAdsException — имена enum-кодов (FIELD_NOT_FOUND,
-    USER_PERMISSION_DENIED…) вместо неинформативного 'GoogleAdsException'; иначе тип класса
-    (покрывает TimeoutError и пр.). GR5: в лог идут ТОЛЬКО имена enum-кодов (константы) + имя
-    типа; сырой str(exc)/e.failure/трейсбэк — НЕЛЬЗЯ (могут нести developer_token/креды)."""
     from core.ads_errors import error_code_names
 
     names = error_code_names(exc)
@@ -308,10 +341,7 @@ def _fail_cause(exc: BaseException) -> str:
 
 
 async def call_llm(coro_factory: Callable[[], Awaitable[T]], *, label: str | None = None) -> T:
-    """Вызов OpenRouter с таймаутом + ретраем (rate-limit/timeout/connection/5xx). Логирует
-    запрос к LLM (метка модели/роли, длительность, исход — БЕЗ секретов; ТЗ §15).
-    `coro_factory` — zero-arg фабрика свежего awaitable: tenacity создаёт корутину заново на
-    каждую попытку (одну корутину нельзя await дважды)."""
+    """Вызов OpenRouter с таймаутом + ретраем."""
     name = label or "llm"
 
     async def _inner() -> T:

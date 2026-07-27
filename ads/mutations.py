@@ -53,6 +53,11 @@ from core.logging import (  # причины отказов partial_failure — 
     log,
     redact_text,
 )
+
+# P0: DRY_RUN_MUTATIONS — глобальный перехватчик apply_*. Значение читается
+# лениво при каждом вызове (env/конфиг могут измениться без рестарта через kill-switch).
+# Не импортируем на уровне модуля — settings не готов при холодном импорте снаружи контейнера.
+_DRY_RUN: bool | None = None  # lazy sentinel для `require_dry_run_check`
 from core.limits import (
     BILLING_UNIT_MICROS,
     MAX_RADIUS_KM,
@@ -61,6 +66,53 @@ from core.limits import (
     round_micros,
     wizard_default_money_units,
 )  # единый источник порогов (defense-in-depth)
+
+
+# ── DRY_RUN: глобальный перехватчик apply_* (P0) ─────────────────────────────
+def _dry_run_enabled() -> bool:
+    """Ленивое чтение флага DRY_RUN_MUTATIONS. Кэшируем в модульной переменной,
+    но допускаем принудительный сброс через `_dry_run_reload()` для тестов."""
+    global _DRY_RUN
+    if _DRY_RUN is None:
+        try:
+            from core.config import settings
+            _DRY_RUN = bool(settings.dry_run_mutations)
+        except Exception:  # noqa: BLE001 — settings не готов → safe заслон
+            _DRY_RUN = False
+    return _DRY_RUN
+
+
+def _dry_run_reload() -> None:
+    """Принудительный сброс кэша (для тестов / kill-switch через config reload)."""
+    global _DRY_RUN
+    _DRY_RUN = None
+
+
+def require_dry_run_check(func):
+    """Декоратор-перехватчик apply_*: проверяет DRY_RUN_MUTATIONS до claim.
+
+    Вызывает `_dry_run_enabled()` — ленивое чтение из core.config.settings.
+    Если True → raise RuntimeError с отказом (предотвращает claim и SDK-вызов).
+    Для 41 apply_* защита уже встроена в _require_confirmation / _require_confirmation_money;
+    этот декоратор — defence-in-depth на случай прямого вызова apply_* из нового кода
+    в обход confirm-гейта.
+    """
+    import functools
+
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        if _dry_run_enabled():
+            name = getattr(func, "__name__", "apply_*")
+            log.warning("DRY_RUN: мутация '%s' отменена (DRY_RUN_MUTATIONS=true)", name)
+            raise RuntimeError(
+                "DRY RUN: мутации заблокированы. Установи DRY_RUN_MUTATIONS=false "
+                "для продакшена, или DISABLE_ALL_MUTATIONS для аварийной остановки."
+            )
+        return await func(*args, **kwargs)
+    return wrapper
+
+
+# ── Пороговые константы ──────────────────────────────────────────────────────
 from core.resilience import (  # таймаут+ретрай на самом SDK-вызове (не на гейтах)
     run_ads_call,
     run_ads_create_call,  # НЕидемпотентные создатели: квота+таймаут+семафор БЕЗ ретраев
@@ -205,8 +257,52 @@ async def _require_confirmation(
     Гейт свежести (Волна 1.1) вызывается ОТСЮДА, до claim, а не 41 раз по телам `apply_*`. Так он
     структурно неотключаем: новая мутация обязана пройти confirm-гейт (инвариант
     `test_all_apply_functions_call_require_confirmation`) — значит проходит и freshness, и забыть
-    его в новой операции физически негде. Список из 41 строки давал бы 41 место, где можно не дописать."""
+    его в новой операции физически негде. Список из 41 строки давал бы 41 место, где можно не дописать.
+
+    P0 (DRY_RUN): проверка ДО claim, чтобы не сжигать одноразовый confirmation_id
+    при dry_run_mutations=true. Аналогично _require_freshness — структурно неотключаем."""
+    # P0: DRY_RUN — блокировка ДО claim (не сжигаем одноразовый confirmation_id)
+    if _dry_run_enabled():
+        raise RuntimeError(
+            f"DRY RUN: мутация '{operation}' отменена (DRY_RUN_MUTATIONS=true). "
+            "Отключи DRY_RUN_MUTATIONS или используй execute_confirmed(dry_run=True) "
+            "для теневого прогона."
+        )
     await _require_freshness(confirm_store, confirmation_id, operation)
+    proposal = await confirm_store.claim(confirmation_id, operation=operation)
+    if proposal is None:
+        raise PermissionError(
+            f"мутация '{operation}' без валидного/одноразового confirmation_id — отклонено"
+        )
+    return proposal
+
+
+async def _require_confirmation_money(
+    confirm_store: ConfirmStore, confirmation_id: str, operation: str, what: str
+) -> ConfirmedProposal:
+    """Гейт исполнения для ДЕНЕЖНЫХ операций: проверяет провенанс (LOW-3, аудит 2026-07-27)
+    ДО claim, чтобы не сжигать одноразовый confirmation_id на машинном черновике.
+
+    Раньше _require_user_command стоял ПОСЛЕ claim: если биты провенанса False (cron/агент),
+    claim УЖЕ переводил confirmed→executing — черновик сожжён без вызова SDK, но и без
+    возможности повтора. Теперь: свежесть → user_command → claim (в этом порядке)."""
+    # P0: DRY_RUN — блокировка ДО claim (не сжигаем одноразовый confirmation_id)
+    if _dry_run_enabled():
+        raise RuntimeError(
+            f"DRY RUN: денежная мутация '{operation}' отменена (DRY_RUN_MUTATIONS=true). "
+            "Отключи DRY_RUN_MUTATIONS или используй execute_confirmed(dry_run=True) "
+            "для теневого прогона."
+        )
+    await _require_freshness(confirm_store, confirmation_id, operation)
+    # Читаем proposal ДО claim — freshness уже подтвердил, что он есть с подходящей оперой.
+    # Если нет/не та операция — claim всё равно упадёт, а снимок нужен для провенанса (claim
+    # его возвращает, но это ПОСЛЕ необратимого перехода статуса). Берём снимок до claim.
+    getter = getattr(confirm_store, "get_confirmed", None)
+    if getter is not None:
+        proposal = await getter(confirmation_id)
+        if proposal is not None:
+            _require_user_command(proposal, what)
+    # claim — атомарный CAS confirmed→executing (одноразовый). После него черновик сожжён.
     proposal = await confirm_store.claim(confirmation_id, operation=operation)
     if proposal is None:
         raise PermissionError(
@@ -237,10 +333,8 @@ async def apply_update_budget(
         raise ValueError("бюджет подозрительно большой — проверь команду (>1 000 000)")
 
     # Гейт 2 — confirm-гейт (АТОМАРНО столбит черновик: confirmed → executing).
-    proposal = await _require_confirmation(confirm_store, confirmation_id, "update_budget")
-
-    # Бюджет — ТОЛЬКО по прямой команде пользователя (никогда из scheduler/anomaly)
-    _require_user_command(proposal, "изменение бюджета")
+    proposal = await _require_confirmation_money(confirm_store, confirmation_id, "update_budget", "изменение бюджета")
+    # proposal гарантированно не None — _require_confirmation_money бросает PermissionError иначе
 
     # Реальный вызов SDK (google-ads синхронный → в потоке). _apply_budget_via_sdk вынесен
     # отдельно, чтобы юнит-тест мог подменить его (офлайн, без живого аккаунта). disclosed_shared_scope
@@ -591,11 +685,8 @@ async def apply_update_bid(
         if int(micros) > MAX_AMOUNT_MICROS:
             raise ValueError(f"ставка подозрительно большая (ad_group {ad_group_id})")
 
-    proposal = await _require_confirmation(confirm_store, confirmation_id, "update_bid")
-
-    # Ставки — деньги: меняем только прямой командой пользователя (defense-in-depth,
-    # сверх golden rule #3 о бюджете). Scheduler/anomaly ставки не двигают.
-    _require_user_command(proposal, "изменение ставки")
+    proposal = await _require_confirmation_money(confirm_store, confirmation_id, "update_bid", "изменение ставки")
+    # proposal гарантированно не None — _require_confirmation_money бросает PermissionError иначе
 
     result = await run_ads_call(
         _apply_bid_via_sdk,
@@ -634,11 +725,8 @@ async def apply_update_keyword_bid(
         if int(micros) > MAX_AMOUNT_MICROS:
             raise ValueError(f"ставка подозрительно большая (ключ {criterion_id})")
 
-    proposal = await _require_confirmation(confirm_store, confirmation_id, "update_keyword_bid")
-
-    # Ставки — деньги: только прямая команда человека. Scheduler/anomaly ставки не двигают
-    # (golden rule #3); оба бита по умолчанию False (fail-closed) — см. _require_user_command.
-    _require_user_command(proposal, "изменение ставки")
+    proposal = await _require_confirmation_money(confirm_store, confirmation_id, "update_keyword_bid", "изменение ставки")
+    # proposal гарантированно не None — _require_confirmation_money бросает PermissionError иначе
 
     result = await run_ads_call(
         _apply_keyword_bid_via_sdk,
@@ -1449,8 +1537,8 @@ async def apply_set_bidding_strategy(
     if target_roas is not None and (target_roas <= 0 or target_roas > 1000):
         raise ValueError("target_roas — доля в (0, 1000] (напр. 4.0 = 400%)")
 
-    proposal = await _require_confirmation(confirm_store, confirmation_id, "set_bidding_strategy")
-    _require_user_command(proposal, "смена стратегии ставок")  # деньги
+    proposal = await _require_confirmation_money(confirm_store, confirmation_id, "set_bidding_strategy", "смена стратегии ставок")
+    # proposal гарантированно не None — _require_confirmation_money бросает PermissionError иначе
 
     result = await run_ads_call(
         _set_bidding_strategy_via_sdk,
@@ -1587,10 +1675,23 @@ def _round_money(client, customer_id: str, micros: int) -> int:
 
 
 def _account_billing_currency(client, customer_id: str) -> str | None:
-    """Валюта аккаунта или None, если прочитать не удалось (округлим по дефолтной единице)."""
+    """Валюта аккаунта или None, если прочитать не удалось.
+
+    При сбое ЛОГИРУЕМ (P2, fail-closed): `round_micros` с None использует дефолтную
+    биллинг-единицу (10 000 micros), что для JPY/UGX = 1 000 000 даёт API-reject
+    (NON_MULTIPLE_OF_MINIMUM_CURRENCY_UNIT) ПОСЛЕ claim. Повтор чтения невозможен —
+    claim уже сожжён. Лог нужен для мониторинга: частая потеря claim'ов на одном
+    аккаунте = проблема с чтением валюты (кэш/доступ), которую нужно чинить.
+    """
+    from core.logging import log
+
     try:
-        return account_currency(client, str(customer_id)) or None
+        cur = account_currency(client, str(customer_id))
+        if cur is None:
+            log.warning("currency: аккаунт %s — валюта не найдена, биллинг-единица: неизвестна", str(customer_id))
+        return cur or None
     except Exception:  # noqa: BLE001 — округление не должно ронять мутацию из-за справочного чтения
+        log.exception("currency: сбой чтения валюты аккаунта %s — биллинг-единица: неизвестна", str(customer_id))
         return None
 
 
@@ -2719,8 +2820,8 @@ async def apply_create_search_campaign(
             clean_kw, clean_mts = dedup_keyword_pairs(keywords, keyword_match_types)
         else:
             clean_kw = normalize_keywords(keywords)
-    proposal = await _require_confirmation(confirm_store, confirmation_id, "create_search_campaign")
-    _require_user_command(proposal, "создание кампании")
+    proposal = await _require_confirmation_money(confirm_store, confirmation_id, "create_search_campaign", "создание кампании")
+    # proposal гарантированно не None — _require_confirmation_money бросает PermissionError иначе
     # Честный op_count composite-цепочки (§3): бюджет+кампания+группа+RSA + ключи + гео + языки
     # + блоки расписания (+страна, если задана кодом). Google тарифицирует КАЖДУЮ операцию.
     _search_ops = (
@@ -3412,9 +3513,8 @@ async def apply_create_gdn_campaign(
     )
     if not landscape_bytes or not square_bytes:
         raise ValueError("нужны подготовленные изображения (landscape + square)")
-    proposal = await _require_confirmation(confirm_store, confirmation_id, "create_gdn_campaign")
-    # Создание кампании — ТОЛЬКО прямой командой пользователя (как бюджет): bot ставит биты, агент нет.
-    _require_user_command(proposal, "создание кампании")
+    proposal = await _require_confirmation_money(confirm_store, confirmation_id, "create_gdn_campaign", "создание кампании")
+    # proposal гарантированно не None — _require_confirmation_money бросает PermissionError иначе
     result = await run_ads_create_call(
         _create_gdn_campaign_via_sdk,
         ads_client,
@@ -3703,11 +3803,10 @@ async def apply_create_demand_gen_campaign(
     )
     if goal not in ("clicks", "conversions"):
         raise ValueError("goal должен быть 'clicks' или 'conversions'")
-    proposal = await _require_confirmation(
-        confirm_store, confirmation_id, "create_demand_gen_campaign"
+    proposal = await _require_confirmation_money(
+        confirm_store, confirmation_id, "create_demand_gen_campaign", "создание кампании"
     )
-    # Создание кампании — ТОЛЬКО прямой командой пользователя (как бюджет/GDN).
-    _require_user_command(proposal, "создание кампании")
+    # proposal гарантированно не None — _require_confirmation_money бросает PermissionError иначе
     result = await run_ads_create_call(
         _create_demand_gen_campaign_via_sdk,
         ads_client,
@@ -3964,8 +4063,8 @@ async def apply_create_video_campaign(
         youtube_video_id,
         description_max=VIDEO_DESCRIPTION_MAX,  # Video: описания ≤70 (консервативно)
     )
-    proposal = await _require_confirmation(confirm_store, confirmation_id, "create_video_campaign")
-    _require_user_command(proposal, "создание кампании")
+    proposal = await _require_confirmation_money(confirm_store, confirmation_id, "create_video_campaign", "создание кампании")
+    # proposal гарантированно не None — _require_confirmation_money бросает PermissionError иначе
     result = await run_ads_create_call(
         _create_video_campaign_via_sdk,
         ads_client,

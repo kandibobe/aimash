@@ -477,13 +477,12 @@ def ensure_allowed(customer_id: str) -> None:
     Это единственная точка, через которую ВСЕ мутации проверяют customer_id. Нормализуем id (только
     цифры), поэтому '775-364-3025' и '7753643025' эквивалентны.
 
-    Мутационный набор (решение владельца 2026-07, Draft-only доктрина снята):
-      • `settings.allow_all_visible` (сентинел `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all`, прод-дефолт)
-        ⇒ набор = ВЕСЬ `allowed_ceiling()` (все видимые: Draft ∪ read-list ∪ дочерние обхода MCC);
-      • иначе — явный `settings.allowed_customer_ids`, ограниченный тем же потолком (способ СУЗИТЬ).
-    Потолок видимости и confirm-гейт остаются несменяемыми страховками: аккаунт вне MCC немутируем,
-    «да» + confirmation_id обязательны (перепроверка на исполнении). В dev/test пусто ⇒ fail-closed.
+    Первая проверка — глобальный kill-switch (DISABLE_ALL_MUTATIONS / killswitch.flag).
     """
+    # Уровень 0: Глобальный kill-switch (самый верхний гард)
+    from core.guards import require_mutations_allowed
+    require_mutations_allowed()
+
     cid = normalize_customer_id(customer_id)
     ceiling = allowed_ceiling()
     # Сентинел «all» ⇒ мутационный набор = весь видимый потолок (динамически ограничен фактически

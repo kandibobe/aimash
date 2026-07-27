@@ -28,6 +28,7 @@ TTL — тоже в CAS, а не в фоновой джобе (Волна 1.2). 
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -641,6 +642,18 @@ class ConfirmStore:
                 await s.commit()
 
 
+def _audit_fingerprint(confirmation_id: str, operation: str, customer_id: str,
+                        chat_id: int, status: str, timestamp: str) -> str:
+    """SHA256 fingerprint для audit-строки (PRO-R4, аудит 2026-07-27).
+
+    Позволяет пост-фактум проверить, что строка не была изменена в БД:
+    сохранённый fingerprint должен совпадать с перевычисленным по тем же полям.
+    Иммутабельный аудит-трейл — требование SOC 2 / PCI DSS.
+    """
+    raw = f"{confirmation_id}|{operation}|{customer_id}|{chat_id}|{status}|{timestamp}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]  # 32 hex = 128 бит — достаточно
+
+
 def _audit(
     p: Proposal,
     chat_id: int,
@@ -650,6 +663,17 @@ def _audit(
     actor_user_id: int | None = None,
     actor_username: str | None = None,
 ) -> AuditLog:
+    capped = _cap_result(result)
+    if isinstance(capped, dict):
+        fp = _audit_fingerprint(
+            confirmation_id=p.confirmation_id,
+            operation=p.operation,
+            customer_id=p.customer_id,
+            chat_id=chat_id,
+            status=status,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        capped["_fp"] = fp  # SHA256 fingerprint — 32 hex, immutable audit proof
     return AuditLog(
         confirmation_id=p.confirmation_id,
         operation=p.operation,
@@ -658,7 +682,7 @@ def _audit(
         actor_user_id=actor_user_id,
         actor_username=actor_username,
         status=status,
-        result=_cap_result(result),  # потолок размера (защита audit_log от раздувания)
+        result=capped,
     )
 
 

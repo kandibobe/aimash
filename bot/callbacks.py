@@ -104,6 +104,18 @@ class AlertCB(CallbackData, prefix="alr"):
     value: str = ""
 
 
+class QuickCB(CallbackData, prefix="qck"):
+    """P2: Quick Action кнопки экстренных действий — [Пауза], [Срезать бюджет].
+
+    campaign — имя кампании (короткое, для callback_data).
+    action — pause | cut_budget_50 | cut_budget_30 | increase_budget_20
+    account — customer_id (для propose_* вызова)."""
+
+    action: str  # pause | cut_budget_50 | cut_budget_30 | increase_budget_20
+    account: str  # customer_id
+    campaign: str  # имя кампании (обрезанное до ~20 символов, резолв через find_campaign_by_name)
+
+
 class MoreCB(CallbackData, prefix="more"):
     """3E: inline-хаб «➕ Ещё» — вторичные флоу, у которых не было входа из главного меню
     (обнаружимость: раньше только слэш-командой). Кнопка лишь МАРШРУТИЗИРУЕТ в тот же entry,

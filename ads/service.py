@@ -1263,23 +1263,38 @@ async def _apply_confirmed(store, confirmation_id: str) -> dict:
     raise ValueError(f"операция '{op}' заявлена поддержанной, но не имеет обработчика (баг)")
 
 
-async def execute_confirmed(store, confirmation_id: str) -> dict:
+async def execute_confirmed(store, confirmation_id: str, dry_run: bool = False) -> dict:
     """Публичный вход: исполнить подтверждённый черновик + ОКНО ПОСТ-ПРОВЕРКИ (Доп.2A).
 
-    Это чужие деньги: после «✅ применено» никто не перечитывал аккаунт, а `_assert_no_drift`
-    защищает лишь ДО применения (TOCTOU). Тут, ПОСЛЕ успешного apply и только для diffable-операций
-    со снимком `_before`, READ-ONLY перечитываем аккаунт теми же резолверами, что кормят read_before,
-    и сверяем фактическое значение с ожидаемым «станет». Расхождение (частичный сбой/гонка/тихая
-    деградация SDK) → applied→needs_review + флаг наверх (бот предупредит).
+    dry_run=True (PRO-R3, аудит 2026-07-27): теневой прогон — черновик проходит claim,
+    но Google Ads API НЕ вызывается. Возвращает синтетический result и audit-строку
+    с `dry_run=True` в метаданных. Позволяет проверить PolicyEngine → claim → finalize
+    без реальных денег. Используется в /shadow-mode и тестах."""
+    if dry_run:
+        # Теневой прогон: claim + synthetic result + finalize
+        p = await store.get_confirmed(confirmation_id)
+        if p is None:
+            raise ValueError("черновик не найден")
+        if p.status != "confirmed":
+            raise PermissionError(f"черновик не подтверждён (status={p.status})")
+        proposal = await store.claim(confirmation_id, operation=p.operation)
+        if proposal is None:
+            raise PermissionError(
+                f"dry_run: мутация '{p.operation}' — claim не удался (double-spend/TTL)"
+            )
+        synthetic_result = {
+            "dry_run": True,
+            "confirmation_id": confirmation_id,
+            "operation": p.operation,
+            "customer_id": p.customer_id,
+            "applied": True,
+            "message": "DRY RUN — Google Ads API не вызывался",
+        }
+        await store.finalize(confirmation_id, result=synthetic_result)
+        return synthetic_result
 
-    Инварианты, которые здесь НЕ нарушаются:
-    • Гейт денег цел (golden rule #3): _verify_applied — чистое ЧТЕНИЕ, ads.mutations не трогает.
-    • Все прежние проверки/исключения летят из _apply_confirmed БЕЗ перехвата (форма отказа не
-      изменилась: ValueError/PermissionError доходят до вызывающего как раньше).
-    • Сбой самой проверки НЕ откатывает уже применённую мутацию (degrade → verified=None).
-    • result операции остаётся прежним; ключ `verification` дописывается ТОЛЬКО при расхождении
-      (verified is False), чтобы не менять контракт result для happy-path."""
     result = await _apply_confirmed(store, confirmation_id)
+
     # Метаданные для сверки берём ПОСЛЕ apply (статус теперь applied): op/params/customer_id.
     try:
         snap = await store.get_confirmed(confirmation_id)
