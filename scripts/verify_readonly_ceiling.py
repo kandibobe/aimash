@@ -58,7 +58,11 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):  # не TextIOWrapper / уже настроен
         pass
 
-API_VERSION = "v24"
+# Литерал, а не импорт `core.config`: скрипт обязан работать на голой ВМ (см. докстринг). Env
+# перекрывает его, чтобы .env хоста был авторитетнее кода. Равенство этого дефолта с
+# `settings.google_ads_api_version` держит `tests/test_gads_version_pin.py` — иначе бамп версии в
+# конфиге оставляет зонд на старой, и «потолок подтверждён» относится не к той API-версии.
+API_VERSION = os.environ.get("GOOGLE_ADS_API_VERSION") or "v25"
 
 # Единственное доказательство «сервер отказал ИМЕННО по роли».
 PROOF_CODE = "authorization_error.ACTION_NOT_PERMITTED"

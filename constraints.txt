@@ -77,7 +77,7 @@ frozenlist==1.8.0
     # via
     #   aiohttp
     #   aiosignal
-google-ads==31.1.0
+google-ads==31.2.0
     # via aimash (pyproject.toml)
 google-api-core==2.31.0
     # via

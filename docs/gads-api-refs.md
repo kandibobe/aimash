@@ -1,19 +1,25 @@
 # Google Ads API — закреплённые ссылки и факты версии
 
-> Сверено по живой доке **2026-06-25**. Перепроверять ежемесячно (скил `gads-version`).
+> Сверено по живой доке **2026-07-25**. Перепроверять ежемесячно (скил `gads-version`).
 
 ## Текущие версии
-- **API: v24.2** (релиз 2026-06-24). Пин на уровне мажора — `GOOGLE_ADS_API_VERSION=v24`.
-- **SDK `google-ads`: 31.1.0** (PyPI, 2026-06-24). Пин — `google-ads>=31.1,<32` в `pyproject.toml`.
+- **API: v25** (релиз 2026-07-22). Пин на уровне мажора — `GOOGLE_ADS_API_VERSION=v25`.
+- **SDK `google-ads`: 31.2.0** (PyPI). Пин — `google-ads>=31.2,<32` в `pyproject.toml`;
+  хард-пин `google-ads==31.2.0` в `constraints.txt` (его применяют Dockerfile и CI).
 - **Lib-версия ≠ API-версия.** Пакет бандлит несколько API-версий; выбирается на запрос:
-  `client.get_service("GoogleAdsService", version="v24")`.
+  `client.get_service("GoogleAdsService", version="v25")`. Проверено интроспекцией установленного
+  пакета: 31.2.0 бандлит `v21, v22, v23, v24, v25`.
 - Кадэнс с янв 2026 — **ежемесячный** (~3–4 мажора/год). Мажор живёт ~12 мес, поддерживаются ~3 последних.
-- **Сансет v24 — ~май 2027.** v22 (~окт 2026) и v23 (~фев 2027) ещё работают в lib 31.1 как фолбэк.
-- В core-путях (SearchStream, CampaignBudgetService, KeywordPlanIdeaService, customer_client/MCC) **breaking changes в v23→v24 нет**.
+- **Сансет: v23 ~фев 2027, v24 ~май 2027, v25 ~июль 2027.**
+- В core-путях (SearchStream, CampaignBudgetService, CampaignService.mutate, KeywordPlanIdeaService,
+  customer_client/MCC) **breaking changes в v24→v25 нет** — денежный путь не затронут.
+- Согласованность всех точек пина (конфиг, зонд, `.env`-шаблоны, `pyproject`, `constraints`,
+  отсутствие хардкода прото-пути) держит `tests/test_gads_version_pin.py`, а не чеклист.
 
 ## Соответствие lib ↔ API (из GitHub releases)
 | `google-ads` | Дата | API |
 |---|---|---|
+| 31.2.0 | 2026-07 | +v25 (первая lib с v25) |
 | 31.1.0 | 2026-06-24 | +v24.2 |
 | 31.0.0 | 2026-05-13 | +v24.1; −v20 |
 | 30.1.0 | 2026-04-22 | +v24 (первая lib с v24) |
@@ -34,6 +40,10 @@
 - Limits & quotas: https://developers.google.com/google-ads/api/docs/best-practices/quotas
 
 ## Заметки на будущее (вне текущего объёма)
+- **v25 breaking changes — ни один не задевает наши пути** (проверено грепом по репо, 2026-07-25):
+  удалены `CustomerLifecycleGoalService`/`CampaignLifecycleGoalService`, перестроены Incentive-энумы,
+  в Reach forecasting `plannable_location_id` → `plannable_location_ids`, у CreatorInsights убран
+  `search_brand`. Ни один из этих сервисов/полей в коде не используется.
 - **v24:** видео-RSA (`VideoResponsiveAdInfo`) — поля `videos`/`business_name`/`logo_images` стали обязательны; удалён `Campaign.video_brand_safety_suitability`.
 - **2026-06-01:** retention гранулярных отчётов сокращён до **37 месяцев**.
 - **2026-04/06:** Customer Match и offline-конверсии мигрируют в **Data Manager API** (если когда-нибудь добавим загрузку конверсий).

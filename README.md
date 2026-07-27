@@ -84,7 +84,7 @@ cp .env.example .env          # затем заполнить .env (см. зам
 **МУТАЦИИ** по умолчанию разрешены **ТОЛЬКО** на `Aimash (Draft)` = **`7753643025`** (775-364-3025). В `.env`: `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=7753643025`. Замок — в коде (`ads.client.ensure_allowed`): пустой allow-list = отказ (fail-closed). Код-минимум `ALLOWED_CEILING = {Draft}` `.env` **не понизит**; включить мутации на ещё одном аккаунте можно управляемым конфигом (`GOOGLE_ADS_ALLOWED_CUSTOMER_IDS`), но только среди **видимых** боту аккаунтов — эффективный потолок `allowed_ceiling()` отсекает опечатку в чужой боевой id (см. `docs/DEPLOYMENT.md §2.1`). **ЧТЕНИЕ** — отдельный, более широкий замок `ensure_read_allowed` (§8: дочерние MCC читаются, но не мутируются). См. golden rule №9 в `CLAUDE.md`.
 
 ## Версия Google Ads API/SDK
-API — **v24** (текущая v24.2); SDK-пин — **`google-ads>=31.1,<32`** (lib-версия ≠ API-версии!). Релизы ежемесячные, v24 сансет ~май 2027 → бампить SDK ~раз в месяц. Скил `gads-version`, ссылки `docs/gads-api-refs.md`.
+API — **v25** (релиз 2026-07-22); SDK-пин — **`google-ads>=31.2,<32`**, хард-пин `31.2.0` в `constraints.txt` (lib-версия ≠ API-версии!). Релизы ежемесячные, v25 сансет ~июль 2027 → бампить SDK ~раз в месяц. Скил `gads-version`, ссылки `docs/gads-api-refs.md`. Все точки пина сверяет `tests/test_gads_version_pin.py` — бамп в одном месте больше не проходит молча.
 
 ## MCP-серверы (для разработки)
 Конфиг — `.mcp.json` (4 сервера: Postgres read-only, Google Ads read-only, Context7, GitHub). Секреты/пути — НЕ в `.mcp.json`, а в `.claude/settings.local.json` (gitignored):

@@ -401,9 +401,10 @@ def build_client(customer_id: str | None = None) -> "GoogleAdsClient":
     if cached is not None:
         return cached
     # version= делает `settings.google_ads_api_version` АВТОРИТЕТНЫМ (иначе SDK молча берёт свой
-    # дефолт — сейчас совпадает с пином google-ads>=31.1,<32=v24, но не гарантированно при апгрейде
-    # библиотеки). Рассинхрон версии теперь = явный отказ get_service, а не тихий дрейф. Пин lib и
-    # эту строку перепроверять скилом gads-version (v24 сансет ~май 2027).
+    # дефолт — сейчас совпадает с пином google-ads>=31.2,<32=v25, но не гарантированно при апгрейде
+    # библиотеки). Рассинхрон версии теперь = явный отказ get_service, а не тихий дрейф. Что пин
+    # доехал до ВСЕХ точек (зонд, .env-шаблоны, constraints), проверяет
+    # `tests/test_gads_version_pin.py`; актуальность версии — скил gads-version (v25 сансет ~июль 2027).
     raw = GoogleAdsClient.load_from_dict(_cfg_for(cid), version=settings.google_ads_api_version)
     # Прокси с gRPC-дедлайном на чтениях (см. _DeadlineClient): без него зависший RPC держит поток
     # to_thread вечно, а ретраи read-пути множат такие потоки. Мутационные сервисы не затронуты.

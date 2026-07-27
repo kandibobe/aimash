@@ -54,7 +54,7 @@ cp .env.example .env
 | `GOOGLE_ADS_READ_CUSTOMER_IDS` | нет | доп. аккаунты для ЧТЕНИЯ (§8), CSV. Чтение НЕ открывает мутации (нужен ещё ALLOWED_CUSTOMER_IDS, §2.1) |
 | `ACCOUNT_ACCESS_MODE` | нет | `auto`/`enforced`/`legacy` — пер-юзер изоляция аккаунтов; админ (`ADMIN_CHAT_IDS`) видит всё на чтение |
 | `GOOGLE_ADS_LOGIN_CUSTOMER_IDS` | нет | доп. MCC для обхода дочерних (§8), CSV |
-| `GOOGLE_ADS_API_VERSION` | нет | `v24` (мажор API; SDK-пин — в `pyproject.toml`) |
+| `GOOGLE_ADS_API_VERSION` | нет | `v25` (мажор API; SDK-пин — в `pyproject.toml`, хард-пин — в `constraints.txt`) |
 | `DEFAULT_GEO_COUNTRY_CODE` | нет | D7: страна-по-умолчанию для гео, когда бриф её не задал (ISO alpha-2). Дефолт **пусто** — код НЕ угадывает страну: без гео в брифе кампания не создастся. **Деплой ставит свой код** (Уганда → `UG`) |
 | `DEFAULT_GEO_LOCALE` | нет | D7: язык названий локаций по умолчанию. Дефолт `ru`. **Пусто** ⇒ язык выводится из страны (UG→en) и совпадает с гео-таргетами Google; явное значение (`en`) побеждает |
 | `GOOGLE_ADS_DAILY_OP_LIMIT` | нет | `15000` — дневной лимит операций API; на 95% мутации блокируются (`/quota`) |

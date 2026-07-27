@@ -34,6 +34,20 @@ from conftest import FakeConfirmStore, FakeProposal, attested  # noqa: E402
 from core.config import settings  # noqa: E402
 
 
+def gads_proto(path: str):
+    """Модуль прото ТЕКУЩЕЙ API-версии (`settings.google_ads_api_version`), напр.
+    `gads_proto("resources.types").Campaign`.
+
+    Захардкоженный прото-путь с номером версии здесь — не мелочь, а класс бага: тесты «на реальных
+    прото» продолжают проверять СТАРУЮ версию после бампа пина, остаются зелёными, и расхождение
+    «прод ходит в vNN, схема проверена по vNN-1» не имеет ни одного признака. Импорт по конфигу
+    делает эти тесты частью проверки версии: пин переключили — прото поехали за ним, а если версии
+    нет в установленном SDK, падает импорт (см. также `tests/test_gads_version_pin.py`)."""
+    import importlib
+
+    return importlib.import_module(f"google.ads.googleads.{settings.google_ads_api_version}.{path}")
+
+
 # ── Хелперы (зеркало test_safety_core, чтобы файл был самодостаточным) ───────────
 @contextmanager
 def allowed_ids(value: str):
@@ -1285,9 +1299,9 @@ async def test_apply_set_campaign_geo_target_type_replay_is_one_shot():
 def test_set_campaign_geo_target_type_via_sdk_mask_and_enum_real_proto():
     """На РЕАЛЬНЫХ прото: маска — лист geo_target_type_setting.positive_geo_target_type; значение
     ложится настоящим enum'ом; negative_geo_target_type НЕ трогаем."""
-    from google.ads.googleads.v24.enums.types.positive_geo_target_type import (
-        PositiveGeoTargetTypeEnum,
-    )
+    PositiveGeoTargetTypeEnum = gads_proto(
+        "enums.types.positive_geo_target_type"
+    ).PositiveGeoTargetTypeEnum
 
     for value in ("PRESENCE", "PRESENCE_OR_INTEREST"):
         client = _RealProtoClient()
@@ -1363,10 +1377,8 @@ def test_ad_status_and_remove_via_sdk_resource_and_mask():
             return _Svc()
 
         def get_type(self, name):
-            from google.ads.googleads.v24.services.types import AdGroupAdOperation
-
             assert name == "AdGroupAdOperation"
-            return AdGroupAdOperation()
+            return gads_proto("services.types").AdGroupAdOperation()
 
         @staticmethod
         def copy_from(destination, origin):
@@ -1921,7 +1933,7 @@ def test_set_bidding_strategy_via_sdk_maximize_conversions_sets_mask():
 
 
 class _RealProtoClient:
-    """Фейк GoogleAdsClient на РЕАЛЬНЫХ v24-прото (а не SimpleNamespace) — ловит ошибки уровня
+    """Фейк GoogleAdsClient на РЕАЛЬНЫХ прото текущей API-версии (а не SimpleNamespace) — ловит ошибки уровня
     схемы, которые «всё-принимающие» моки пропускали дважды: update_mask на Campaign и bare-имя
     стратегии в маске. get_type отдаёт настоящие сообщения, поэтому неверное поле бросит, как SDK."""
 
@@ -1943,29 +1955,23 @@ class _RealProtoClient:
         return _Svc()
 
     def get_type(self, name):
-        from google.ads.googleads.v24.common.types import (
-            ManualCpc,
-            MaximizeConversions,
-            MaximizeConversionValue,
-            TargetSpend,
-        )
-        from google.ads.googleads.v24.services.types import CampaignOperation
+        common, services = gads_proto("common.types"), gads_proto("services.types")
 
         return {
-            "CampaignOperation": CampaignOperation,
-            "MaximizeConversions": MaximizeConversions,
-            "MaximizeConversionValue": MaximizeConversionValue,
-            "TargetSpend": TargetSpend,
-            "ManualCpc": ManualCpc,
+            "CampaignOperation": services.CampaignOperation,
+            "MaximizeConversions": common.MaximizeConversions,
+            "MaximizeConversionValue": common.MaximizeConversionValue,
+            "TargetSpend": common.TargetSpend,
+            "ManualCpc": common.ManualCpc,
         }[name]()
 
     @property
     def enums(self):
         """Зеркало google.ads…client._EnumGetter: отдаёт ВНУТРЕННИЙ enum (ProtoEnumMeta), а не
         сообщение-обёртку. Значения настоящие — подстановка мусора в прото упадёт, как у SDK."""
-        from google.ads.googleads.v24.enums.types.positive_geo_target_type import (
-            PositiveGeoTargetTypeEnum,
-        )
+        PositiveGeoTargetTypeEnum = gads_proto(
+            "enums.types.positive_geo_target_type"
+        ).PositiveGeoTargetTypeEnum
 
         return SimpleNamespace(
             PositiveGeoTargetTypeEnum=PositiveGeoTargetTypeEnum.PositiveGeoTargetType
@@ -1985,7 +1991,7 @@ def _assert_mask_paths_are_leaf(paths):
     маски должен заканчиваться на ЛИСТ (скаляр) реального Campaign, а не на message-поле."""
     from google.protobuf.descriptor import FieldDescriptor
 
-    from google.ads.googleads.v24.resources.types import Campaign
+    Campaign = gads_proto("resources.types").Campaign
 
     desc = Campaign.pb(Campaign()).DESCRIPTOR
     for path in paths:

@@ -10,10 +10,10 @@ requires-python = ">=3.12"
 dependencies = [
     "aiogram>=3.13",
     "openai>=1.50",            # клиент к OpenRouter (OpenAI-совместимый)
-    # SDK google-ads 31.1.x => API v24/v24.1/v24.2 (lib-версия ≠ API-версия!).
-    # 27.x НЕ умеет v24. <32 держит линию v24 (след. мажор lib может выкинуть v24).
-    # Релизы ежемесячные → бампить SDK ~раз в месяц (скил gads-version). Сансет v24 ~май 2027.
-    "google-ads>=31.1,<32",    # официальный SDK Google Ads API → API v24
+    # SDK google-ads 31.2.x => API v21..v25 (lib-версия ≠ API-версия!). Первая lib с v25 — 31.2.0.
+    # 27.x НЕ умеет ни v24, ни v25. <32 держит линию (след. мажор lib может выкинуть старые версии).
+    # Релизы ежемесячные → бампить SDK ~раз в месяц (скил gads-version). Сансет v25 ~июль 2027.
+    "google-ads>=31.2,<32",    # официальный SDK Google Ads API → API v25
     "pydantic>=2.9",
     "pydantic-settings>=2.5",
     "SQLAlchemy>=2.0",

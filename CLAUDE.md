@@ -239,8 +239,9 @@ Telegram), delegation/субагенты, curator. **Что Hermes НЕ даёт
 
 Python 3.12 · Hermes v0.19.0 (ядро агента) · MCP-сервер (тул-слой) · SQLAlchemy + Alembic + PostgreSQL ·
 `openai` SDK (→ OpenRouter) · openpyxl / google-api-python-client (Sheets, scope `drive.file`) · Docker ·
-`google-ads` SDK — **пин `>=31.1,<32` → API `v24`** (lib-версия ≠ API-версии!; сансет v24 ~май 2027;
-перепроверять ежемесячно — скил `gads-version`, ссылки [`docs/gads-api-refs.md`](docs/gads-api-refs.md)).
+`google-ads` SDK — **пин `>=31.2,<32` → API `v25`** (lib-версия ≠ API-версии!; сансет v25 ~июль 2027;
+перепроверять ежемесячно — скил `gads-version`, ссылки [`docs/gads-api-refs.md`](docs/gads-api-refs.md);
+согласованность всех точек пина держит `tests/test_gads_version_pin.py`).
 `aiogram` — в архивируемом слое интерфейса и в тонком Bot-клиенте планировщика.
 
 ## Структура
