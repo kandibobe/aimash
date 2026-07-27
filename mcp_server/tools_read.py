@@ -1,4 +1,4 @@
-"""12 READ-обёрток MCP-слоя над существующими ридерами (Контур A, инкремент «MCP READ»).
+"""15 READ-обёрток MCP-слоя над существующими ридерами (Контур A, инкремент «MCP READ»).
 
 Каждая обёртка:
   1) проходит замок ЧТЕНИЯ на ГРАНИЦЕ слоя — `_guarded` требует `account=` и зовёт
@@ -25,12 +25,13 @@
 
 from __future__ import annotations
 
-from datetime import date
+import asyncio
+from datetime import date, datetime
 from typing import Any, Awaitable, Callable
 
 from ads.client import build_client_async, ensure_manager_allowed, ensure_read_allowed
 from ads.keyword_plan import generate_keyword_ideas
-from ads.read import list_child_accounts
+from ads.read import account_timezone, list_child_accounts
 from audit.collect import gather_audit
 from clients.store import ClientProfileStore
 from core.logging import log
@@ -45,12 +46,14 @@ from mcp_server.serialize import (
     child_account_dict,
     impression_share_dict,
     keyword_idea_dict,
+    mcc_deep_payload,
+    mcc_summary_payload,
     negatives_payload,
     recent_action_dict,
     search_term_dict,
 )
 from reports import period as pperiod
-from reports.tz import account_period
+from reports.tz import account_period, reanchor
 from reports.queries import (
     fetch_budgets,
     fetch_by_ad,
@@ -496,6 +499,117 @@ async def recall_client(account: str, max_chars: int | None = None) -> dict[str,
     return await _guarded(_work, account=str(account))
 
 
+# ── §8: MCC — отчёты по ВСЕМ дочерним аккаунтам менеджера ──────────────────────────
+
+
+def _child_period_factory(base):
+    """Фабрика окна дочернего аккаунта: то же окно, что запросил вызывающий, но с «сегодня» ЕГО
+    таймзоны (§8). Отдаётся в `build_mcc_summary_async(period_for=...)`.
+
+    Зачем вообще: границы дней Google режет по таймзоне АККАУНТА. Считая «последние 30 дней» от
+    даты хоста, кросс-аккаунтная сводка складывает окна, сдвинутые друг относительно друга на
+    сутки, — и цифры MCP расходятся и с интерфейсом Google Ads, и с bot-путём на тех же данных.
+
+    `reanchor` сам различает вид окна: относительное (last_n/MTD/LM) пере-якорит, custom
+    (обе ISO-даты названы человеком явно) возвращает как есть — абсолютные даты не двигаем.
+    Неизвестная/пустая TZ → `None`: `build_mcc_summary_async` откатится на общее окно и НЕ уронит
+    строку аккаунта (best-effort; TZ — уточнение, а не условие отчёта)."""
+
+    def factory(tz_name: str):
+        try:
+            from zoneinfo import ZoneInfo
+
+            today = datetime.now(ZoneInfo(tz_name)).date()
+        except Exception:  # noqa: BLE001 — неизвестная TZ: общее окно, отчёт не роняем
+            return None
+        return reanchor(base, today)
+
+    return factory
+
+
+async def get_mcc_summary(
+    manager_id: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    period_days: int = 30,
+    offset: int = 0,
+    limit: int = DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Сводка по ВСЕМ дочерним аккаунтам MCC за период: метрики на каждый аккаунт + подытоги по
+    валютам (без конвертации — разные валюты не суммируются). manager_id пуст ⇒ настроенный MCC.
+    Замок: ensure_manager_allowed (обход чужого менеджера запрещён) + ensure_read_allowed на каждом
+    дочернем внутри ридера (лист вне read-list попадает в `skipped`, а не в строки — fail-closed).
+
+    Строки — по одному аккаунту. Аккаунты, которых в строках НЕТ, перечислены поимённо:
+    `skipped` (вне read-list), `managers` (менеджерские, своих метрик не имеют), `inactive`
+    (не ENABLED — метрику не запрашивали), `errors` (сбой чтения). Пустой список ≠ «нет аккаунта»."""
+    # mid считаем ДО `_guarded` (как в list_accounts): замок обхода MCC применяется к тому же id,
+    # который уйдёт в ридер, а не к пересчитанному второй раз.
+    mid = str(manager_id) if manager_id else _default_manager()
+
+    async def _work() -> dict[str, Any]:
+        from reports.mcc import build_mcc_summary_async
+
+        client = await build_client_async(mid)
+        # Базовое окно — от даты хоста, БЕЗ `_account_period`: пере-якорять его на таймзону
+        # менеджера незачем (у менеджера своих метрик нет), а каждый дочерний всё равно получает
+        # своё окно через `period_for`. База работает фолбэком там, где TZ ребёнка не прочиталась.
+        period = _period(date_from, date_to, period_days)
+        summary = await build_mcc_summary_async(
+            client,
+            mid,
+            period,
+            tz_of=account_timezone,
+            period_for=_child_period_factory(period),
+        )
+        rows, extra = mcc_summary_payload(summary)
+        return ok(rows, offset=offset, limit=limit, extra=extra)
+
+    return await _guarded(_work, account=mid, manager=True)
+
+
+async def get_mcc_deep(
+    manager_id: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    period_days: int = 30,
+    offset: int = 0,
+    limit: int = DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Глубокий отчёт по ВСЕМ дочерним аккаунтам MCC: итоги + ПРЕДЫДУЩИЙ равный период + разбивка
+    по кампаниям на каждый аккаунт. Отвечает на «в каком аккаунте и какой кампании сдвиг»; дальше
+    по одному аккаунту точечно — get_campaign_stats / get_adgroup_stats. Замки те же, что у
+    get_mcc_summary.
+
+    ДОРОГОЙ вызов: на каждый дочерний собирается полный отчёт §9 (~10 GAQL), то есть ~70+ запросов
+    на MCC из семи аккаунтов. Если нужны только итоги по аккаунтам — get_mcc_summary дешевле на
+    порядок. Прочитанные, но не выложенные разбивки перечислены в `breakdowns_omitted`."""
+    mid = str(manager_id) if manager_id else _default_manager()
+
+    async def _work() -> dict[str, Any]:
+        from reports.mcc import build_mcc_deep_async
+
+        client = await build_client_async(mid)
+        period = _period(date_from, date_to, period_days)
+        # Общий таймаут, как на bot-пути (`_run_mcc_deep_export`): ~70 запросов под семафором
+        # Google Ads легко переживают потолок одного вызова, а MCP-клиент ждёт ответа. Без него
+        # зависший обход держит вызов бесконечно; с ним наружу уйдёт честный `timeout`-конверт.
+        deep = await asyncio.wait_for(
+            build_mcc_deep_async(
+                client,
+                mid,
+                period,
+                tz_of=account_timezone,
+                period_for=_child_period_factory(period),
+            ),
+            timeout=300,
+        )
+        rows, extra = mcc_deep_payload(deep)
+        return ok(rows, offset=offset, limit=limit, extra=extra)
+
+    return await _guarded(_work, account=mid, manager=True)
+
+
 # Реестр: имя инструмента → функция. server.py регистрирует по нему в FastMCP и проверяет И4
 # (READ_MCP_TOOLS ∩ MUTATION_TOOLS == ∅). Имена подобраны заведомо непересекающимися с 39
 # мутационными (agent.tools.schemas.MUTATION_TOOLS).
@@ -513,6 +627,8 @@ READ_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "get_change_history": get_change_history,
     "keyword_ideas": keyword_ideas,
     "recall_client": recall_client,
+    "get_mcc_summary": get_mcc_summary,
+    "get_mcc_deep": get_mcc_deep,
 }
 
 READ_MCP_TOOLS: frozenset[str] = frozenset(READ_TOOL_FUNCS)

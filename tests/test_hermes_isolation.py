@@ -73,9 +73,10 @@ def test_i4_seed_read_tools_disjoint_from_mutations():
         "И4: READ-инструменты MCP пересеклись с мутационными: "
         f"{sorted(READ_MCP_TOOLS & MUTATION_TOOLS)}"
     )
-    # 13 = 12 Google Ads READ + recall_client (память клиента §20). Точный счёт держит реестр от
-    # тихого разрастания: новая обёртка обязана осознанно бампнуть его вместе с config.yaml/_ACCOUNT_ARG.
-    assert len(READ_MCP_TOOLS) == 13, f"ожидалось 13 READ-инструментов, стало {len(READ_MCP_TOOLS)}"
+    # 15 = 14 Google Ads READ (в т.ч. §8 MCC: get_mcc_summary/get_mcc_deep) + recall_client (память
+    # клиента §20). Точный счёт держит реестр от тихого разрастания: новая обёртка обязана осознанно
+    # бампнуть его вместе с config.yaml/_ACCOUNT_ARG.
+    assert len(READ_MCP_TOOLS) == 15, f"ожидалось 15 READ-инструментов, стало {len(READ_MCP_TOOLS)}"
 
 
 def test_i4_seed_server_builds_and_registers_only_read():
@@ -112,6 +113,11 @@ _ACCOUNT_ARG: dict[str, str] = {
     "get_change_history": "account",
     "keyword_ideas": "account",
     "recall_client": "account",  # ридер НАШЕЙ БД (ClientProfileStore) — замок только на границе
+    # §8 MCC: адресуют не лист, а УПРАВЛЯЮЩИЙ аккаунт — тот же чокпойнт, что у list_accounts
+    # (ensure_manager_allowed). Дочерние аккаунты внутри обхода фильтрует сам `reports/mcc.py`
+    # по read-allow-листу, поэтому граница проверяет ровно то, что адресовал вызывающий.
+    "get_mcc_summary": "manager_id",
+    "get_mcc_deep": "manager_id",
 }
 
 

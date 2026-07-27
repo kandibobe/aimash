@@ -221,7 +221,7 @@ mcp_servers:
     timeout: 120           # bootstrap (init_db + обход MCC) занимает секунды
     connect_timeout: 30
     tools:
-      include:             # 13 READ (12 Google Ads + recall_client); PLAN/WRITE — шагом перед автономией
+      include:             # 15 READ (14 Google Ads + recall_client); PLAN/WRITE — шагом перед автономией
         - list_accounts
         - get_campaign_stats
         - get_adgroup_stats
@@ -235,6 +235,11 @@ mcp_servers:
         - get_change_history
         - keyword_ideas
         - recall_client
+        # §8 MCC: сводка по всем дочерним + глубокий разбор. Список обязан совпадать с
+        # READ_TOOL_FUNCS РОВНО (require_registered_surface сверяет на равенство, не на вхождение):
+        # добавили инструмент в код и забыли здесь — Hermes его не увидит и работать будет «почти».
+        - get_mcc_summary
+        - get_mcc_deep
 
 gateway:
   platforms:
