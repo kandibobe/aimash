@@ -59,6 +59,24 @@ def _load_cfg(path):
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
+# Слаги, которые эталоны репо называют сегодня. Каталог подменяется ВСЕГДА (autouse): тест не
+# имеет права зависеть от сети — иначе он краснеет по погоде, а не по конфигу. Живая сверка с
+# `/api/v1/models` остаётся на CI-шаге и pre-commit, где линт запускают процессом.
+_CATALOG_STUB = frozenset(
+    {
+        "openai/gpt-5.6-terra",
+        "google/gemini-3.1-flash-lite",
+        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4-pro",
+    }
+)
+
+
+@pytest.fixture(autouse=True)
+def _offline_model_catalog(monkeypatch):
+    monkeypatch.setattr(_LINT, "fetch_openrouter_catalog", lambda *_a, **_kw: set(_CATALOG_STUB))
+
+
 @pytest.mark.parametrize(
     ("path", "profile"), _REFERENCE_CONFIGS, ids=lambda v: getattr(v, "parent", v)
 )
@@ -171,3 +189,86 @@ def test_lint_reddens_when_a_must_disable_toolset_is_enabled():
     )
     missed = [t for t in _LINT._MUST_DISABLE if not any(t in str(f) for f in rep.errors)]
     assert not missed, f"тулсеты из _MUST_DISABLE не названы поимённо: {missed}"
+
+
+# ── Слаги моделей: тот же класс, что К10 — «рабочий на вид и не работает» ─────
+
+
+@pytest.mark.parametrize(
+    ("section", "role"),
+    [("model_routing", "v3"), ("auxiliary", "compression")],
+)
+def test_lint_catches_a_dead_model_slug(section, role):
+    """Регресс инцидента 27.07.2026: прод молчал сутки на несуществующем слаге.
+
+    В `~/.hermes/config.yaml` лежал `model_routing`, скопированный из докстринга
+    `agent/router.py:264` установленного Hermes, а там `deepseek/deepseek-v3` — слага нет у
+    OpenRouter с 2025 года. `classify_turn()` уводит в тир `v3` любой ход с доступными
+    инструментами, то есть каждый наш → HTTP 400 non-retryable на каждом сообщении. Ни в
+    `hermes model`, ни в дашборде эти два блока не видны: единственный шанс поймать — линт.
+    """
+    cfg = {
+        "model": {"provider": "openrouter", "default": "deepseek/deepseek-v4-flash"},
+        section: {role: {"provider": "openrouter", "model": "deepseek/deepseek-v3"}},
+    }
+    rep = _LINT.lint(cfg, profile="vps-read")
+    assert any(f.path == f"{section}.{role}" for f in rep.errors), (
+        f"мёртвый слаг в {section}.{role} прошёл мимо линта: {[str(f) for f in rep.findings]}"
+    )
+
+
+def test_lint_accepts_live_slugs_everywhere():
+    """Отрицательный контроль: на живых слагах правило обязано МОЛЧАТЬ во всех трёх местах.
+
+    Без него предыдущий тест не отличает «поймало мёртвый слаг» от «ругается на любой».
+    """
+    cfg = {
+        "model": {"provider": "openrouter", "default": "openai/gpt-5.6-terra"},
+        "auxiliary": {
+            "transient_retries": 2,  # скаляр среди mapping'ов — не должен ломать разбор
+            "compression": {"provider": "openrouter", "model": "google/gemini-3.1-flash-lite"},
+        },
+        "model_routing": {"r1": {"model": "deepseek/deepseek-v4-pro"}},  # provider наследуется
+    }
+    # Правило зовём напрямую: на минимальном cfg штатно ругаются соседние правила (хардненинг,
+    # тулсеты, неаттестованные ключи), и через `lint()` их шум утопил бы предмет проверки.
+    rep = _LINT.Report()
+    _LINT.check_model_slugs(cfg, rep)
+    assert not rep.findings, (
+        f"ложные срабатывания на живых слагах: {[str(f) for f in rep.findings]}"
+    )
+
+
+def test_lint_warns_but_does_not_redden_without_network(monkeypatch):
+    """Каталог не достался ⇒ WARN, не ERROR: линт зовут из pre-commit и из CI без гарантии сети.
+
+    Fail-closed здесь был бы вредителем — красный линт по причине «нет интернета» научит
+    прогонять его с `|| true`, и правило умрёт целиком, как уже умирал сам линт.
+    """
+    cfg = {"model": {"provider": "openrouter", "default": "deepseek/deepseek-v3"}}
+    rep = _LINT.lint(cfg, profile="vps-read")
+    assert any(f.path == "model" for f in rep.errors), "с каталогом мёртвый слаг обязан быть ERROR"
+
+    monkeypatch.setattr(_LINT, "fetch_openrouter_catalog", lambda *_a, **_kw: None)
+    rep_offline = _LINT.lint(cfg, profile="vps-read")
+    offline_model_errors = [f for f in rep_offline.errors if f.path == "model"]
+    assert not offline_model_errors, f"офлайн дал ERROR: {[str(f) for f in offline_model_errors]}"
+    assert any("НЕ проверены" in f.message for f in rep_offline.warnings), (
+        "офлайн обязан сказать вслух, что слаги не проверены — молчание читается как «проверено»"
+    )
+
+
+def test_lint_warns_on_a_second_provider_in_the_gateway():
+    """Чужой провайдер в `auxiliary` — это второй секрет в процессе, который знает один ключ.
+
+    Так и было до 27.07: весь `auxiliary:` стоял на `provider: google` со снятой
+    `gemini-2.0-flash-exp` и валил компрессию с генерацией заголовков 404-м.
+    """
+    cfg = {
+        "model": {"provider": "openrouter", "default": "openai/gpt-5.6-terra"},
+        "auxiliary": {"title_generation": {"provider": "google", "model": "gemini-2.0-flash-exp"}},
+    }
+    rep = _LINT.lint(cfg, profile="vps-read")
+    assert any(f.path == "auxiliary.title_generation" for f in rep.warnings), (
+        f"второй провайдер не отмечен: {[str(f) for f in rep.findings]}"
+    )

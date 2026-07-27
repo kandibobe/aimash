@@ -37,6 +37,7 @@ import argparse
 import json
 import re
 import sys
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,11 @@ import yaml
 
 _HERE = Path(__file__).resolve().parent
 PIN_PATH = _HERE / "PIN.json"
+
+# Каталог слагов OpenRouter — публичный, без ключа. Таймаут короткий: линт зовут из pre-commit,
+# и сеть здесь удобство, а не условие (нет каталога ⇒ предупреждение, см. check_model_slugs).
+_OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+_CATALOG_TIMEOUT = 6.0
 
 # ── Аттестации ────────────────────────────────────────────────────────────────
 # Дословная цитата + откуда взята. Таблица НЕ читает эталонные конфиги этого репозитория:
@@ -446,6 +452,100 @@ def check_hardening(cfg: dict, rep: Report) -> None:
             rep.error(path, f"{val!r}, ожидалось {str(want).lower()} — {why}")
 
 
+def fetch_openrouter_catalog(timeout: float = _CATALOG_TIMEOUT) -> set[str] | None:
+    """Живые слаги OpenRouter или `None`, если каталог не достался (нет сети, таймаут, мусор).
+
+    Эндпоинт публичный и ключа не требует — секрет в линт не попадает (правило 5). Отдельная
+    функция, а не инлайн: тест подменяет её и проверяет правило офлайн и детерминированно.
+    """
+    try:
+        with urllib.request.urlopen(_OPENROUTER_MODELS_URL, timeout=timeout) as resp:  # noqa: S310
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        return None
+    slugs = {str(item.get("id", "")).strip() for item in data if isinstance(item, dict)}
+    slugs.discard("")
+    return slugs or None
+
+
+def _model_specs(cfg: dict) -> list[tuple[str, str, str]]:
+    """`(путь, provider, model)` для КАЖДОГО места, где конфиг называет модель.
+
+    Мест три, и опасны именно два последних: глобальный `model:` виден в `hermes model` и в
+    дашборде, а `auxiliary.*` и `model_routing.*` не показывает никто.
+    """
+    root = _as_dict(_get(cfg, "model"))
+    default_provider = str(root.get("provider") or "").strip()
+    out: list[tuple[str, str, str]] = []
+    if root:
+        out.append(("model", default_provider, str(root.get("default") or "").strip()))
+    for section in ("auxiliary", "model_routing"):
+        for role, spec in _as_dict(_get(cfg, section)).items():
+            if not isinstance(spec, dict) or "model" not in spec:
+                continue
+            provider = str(spec.get("provider") or "").strip() or default_provider
+            out.append((f"{section}.{role}", provider, str(spec.get("model") or "").strip()))
+    return out
+
+
+def check_model_slugs(cfg: dict, rep: Report) -> None:
+    """Слаг несуществующей модели — тот же класс, что К10: конфиг рабочий на вид и не работает.
+
+    Инцидент 27.07.2026, прод стоял до вмешательства: в `~/.hermes/config.yaml` лежал блок
+    `model_routing`, дословно скопированный из докстринга `agent/router.py:264` установленного
+    Hermes, а в том примере — `deepseek/deepseek-v3`, слага которого у OpenRouter нет.
+    `classify_turn()` шлёт в тир `v3` ЛЮБОЙ ход, где агенту доступны инструменты (то есть у нас
+    каждый), поэтому дефолт перебивался на мёртвую модель → `HTTP 400 … is not a valid model ID`
+    → non-retryable → бот молчал вообще. Тем же заходом весь `auxiliary:` смотрел на снятую
+    `gemini-2.0-flash-exp` и валил компрессию с генерацией заголовков.
+
+    Проверяется против ЖИВОГО каталога, а не против таблицы в этом файле: список моделей меняется
+    еженедельно, а зашитая копия протухла бы ровно так же, как протух пример в докстринге.
+    """
+    specs = _model_specs(cfg)
+    if not specs:
+        return
+
+    catalog: set[str] | None = None
+    if any(provider.lower() == "openrouter" for _, provider, _ in specs):
+        catalog = fetch_openrouter_catalog()
+        if catalog is None:
+            rep.warn(
+                "model",
+                f"каталог {_OPENROUTER_MODELS_URL} недоступен — слаги моделей НЕ проверены; "
+                "прогнать линт с сетью до деплоя",
+            )
+
+    for path, provider, model in specs:
+        if not model:
+            rep.error(path, "модель не задана — Hermes молча уедет на свой дефолт")
+            continue
+        if provider.lower() != "openrouter":
+            rep.warn(
+                path,
+                f"провайдер {provider!r}: по топологии (CLAUDE.md) gateway знает ровно один ключ, "
+                "OPENROUTER_API_KEY — чужой провайдер тянет второй секрет в тот же процесс, а его "
+                f"слаг {model!r} линт сверить не может",
+            )
+            continue
+        if model.count("/") != 1:
+            rep.error(
+                path,
+                f"{model!r} — не слаг OpenRouter: формат `vendor/model` "
+                "(в 400-х уже ловили и голое `deepseek-chat`)",
+            )
+            continue
+        if catalog is not None and model not in catalog:
+            rep.error(
+                path,
+                f"{model!r} нет в каталоге OpenRouter ⇒ HTTP 400 на КАЖДОМ вызове этой роли; "
+                "проверить живое имя в /api/v1/models",
+            )
+
+
 def check_no_secrets(raw_text: str, rep: Report) -> None:
     """Правило 5. Линт печатает ТОЛЬКО имя формы, никогда — совпавший текст."""
     for pattern, what in _SECRET_SHAPES:
@@ -540,6 +640,7 @@ def lint(cfg: dict, raw_text: str = "", profile: str = "host-a") -> Report:
         check_telegram_gates,
         check_toolsets,
         check_hardening,
+        check_model_slugs,
     ):
         check(cfg, rep)
     for check in _PROFILE_CHECKS.get(profile, ()):
