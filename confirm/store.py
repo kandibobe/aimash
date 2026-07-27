@@ -111,6 +111,20 @@ class ConfirmedProposal:
     tg_message_id: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PendingAttachment:
+    """Строка-заявка курьеру вложений (Волна 1b): черновик, которому ОБЕЩАН .xlsx.
+
+    Файл здесь не лежит и лежать не может: обещание переживает рестарт, а временный файл — нет.
+    Курьер пересобирает вложение из `params` той же строки — из тех же данных, по которым карточка
+    печатала обещание. Ни байтов, ни путей через границу процессов."""
+
+    confirmation_id: str
+    operation: str
+    params: dict
+    chat_id: int
+
+
 class ConfirmStore:
     """confirm_store на SQLAlchemy. Все методы async (apply_* их await-ят)."""
 
@@ -124,9 +138,14 @@ class ConfirmStore:
         summary: str,
         chat_id: int,
         user_initiated: bool = False,
+        attachment_state: str | None = None,
     ) -> None:
         """Создать черновик (pending). Провенанс хода — `origin_human_turn`/`author_user_id`/`run_id`
         — стор берёт САМ из `core.provenance`, и параметра для него нет намеренно (Волна 1.4).
+
+        `attachment_state='pending'` ставит тот, кто НАПЕЧАТАЛ в `summary` обещание .xlsx-вложения:
+        обещание и обязательство его выполнить обязаны родиться одной вставкой в одну строку. Двух
+        мест, где решение принимается, тогда нет — а именно из них и брались обещания без файла.
 
         `user_initiated` остаётся аргументом ради обратной совместимости вызывающих, но одного его
         мало: аргумент — это то, что напишет вызывающий, а в headless-контуре вызывающим станет
@@ -148,6 +167,7 @@ class ConfirmStore:
                     origin_human_turn=prov.human_turn,
                     author_user_id=prov.actor_user_id,
                     run_id=prov.run_id[:16],  # 8 hex; срез — страховка от чужого длинного id
+                    attachment_state=attachment_state,
                     status="pending",
                 )
             )
@@ -202,6 +222,74 @@ class ConfirmStore:
                 return False
             await s.commit()
             return True
+
+    async def list_pending_attachments(self, limit: int = 10) -> list[PendingAttachment]:
+        """Черновики, которым ОБЕЩАНО .xlsx-вложение и оно ещё не доставлено. Read-only.
+
+        Возраст ограничен тем же TTL, что и подтверждение (`_ttl_boundary`), и это не украшение:
+        курьер живёт в отдельном контейнере, и после суток простоя без этого условия он вывалил бы
+        в чаты пачку файлов к давно решённым черновикам. Просроченные строки остаются в 'pending'
+        навсегда — это НАБЛЮДАЕМАЯ величина («обещали и не отдали»), а не тихая потеря."""
+        async with Session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(Proposal)
+                        .where(
+                            Proposal.attachment_state == "pending",
+                            Proposal.created_at >= db_dt(_ttl_boundary()),
+                        )
+                        .order_by(Proposal.id)
+                        .limit(max(1, int(limit)))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return [
+            PendingAttachment(
+                confirmation_id=p.confirmation_id,
+                operation=p.operation,
+                params=p.params,
+                chat_id=p.chat_id,
+            )
+            for p in rows
+        ]
+
+    async def claim_attachment(self, confirmation_id: str) -> bool:
+        """Застолбить доставку вложения: 'pending' → 'sending'. True — застолбил ты.
+
+        Compare-and-set той же формы, что `claim`/`set_card_message_id`: одноразовость — свойство
+        ХРАНИЛИЩА, а не аккуратности курьера. Два процесса-планировщика (или один после рестарта,
+        подобравший ту же строку) не пришлют файл дважды: второй UPDATE не совпадёт по WHERE →
+        rowcount=0 → False. Промежуточное 'sending' нужно затем, что курьер может умереть между
+        клеймом и отправкой; тогда строка видимо застревает в 'sending', а не врёт про 'sent'."""
+        async with Session() as s:
+            res = await s.execute(
+                update(Proposal)
+                .where(
+                    Proposal.confirmation_id == confirmation_id,
+                    Proposal.attachment_state == "pending",
+                )
+                .values(attachment_state="sending")
+            )
+            # cast: DML возвращает CursorResult (есть .rowcount); async-стаб видит общий Result.
+            if cast(CursorResult, res).rowcount != 1:
+                await s.rollback()
+                return False
+            await s.commit()
+            return True
+
+    async def finish_attachment(self, confirmation_id: str, state: str) -> None:
+        """Отметить исход доставки: 'sent' | 'failed'. Терминально, без ретраев (YAGNI): повторная
+        отправка того же файла раздражает сильнее, чем видимый 'failed' в строке и запись в логе."""
+        async with Session() as s:
+            await s.execute(
+                update(Proposal)
+                .where(Proposal.confirmation_id == confirmation_id)
+                .values(attachment_state=state)
+            )
+            await s.commit()
 
     async def get_confirmed(self, confirmation_id: str) -> ConfirmedProposal | None:
         async with Session() as s:

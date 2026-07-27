@@ -852,6 +852,8 @@ def keyword_action_label(operation: str, lang: str | None = None) -> str:
             "remove_keywords": "Remove keywords",
             "add_negative_keywords": "Add negative keywords",
             "remove_negative_keywords": "Remove negative keywords",
+            # Операция обещала вложение и не имела подписи — в шапке листа стоял голый слаг.
+            "add_negatives_to_shared_set": "Add negatives to a shared list",
             "create_search_campaign": "Keywords of the new campaign",
         }.get(operation, operation)
     return {
@@ -859,14 +861,19 @@ def keyword_action_label(operation: str, lang: str | None = None) -> str:
         "remove_keywords": "Удалить ключевые слова",
         "add_negative_keywords": "Добавить минус-слова",
         "remove_negative_keywords": "Удалить минус-слова",
+        "add_negatives_to_shared_set": "Добавить минус-слова в общий список",
         "create_search_campaign": "Ключи новой кампании",
     }.get(operation, operation)
 
 
-def fmt_mutation_summary(operation: str, params: dict, lang: str | None = None) -> str:
+def fmt_mutation_summary(
+    operation: str, params: dict, lang: str | None = None, *, attachment: bool = False
+) -> str:
     """Сводка черновика «было → станет». Реализация — `confirm.render.fmt_mutation_summary`;
-    здесь только разрешение языка из contextvar запроса."""
-    return render.fmt_mutation_summary(operation, params, _lang(lang))
+    здесь только разрешение языка из contextvar запроса. `attachment` — чистый проброс: решение
+    «есть ли канал доставки .xlsx» принимает вызывающий (`confirm.attachment.plan_attachment`),
+    обёртка его не додумывает (журнал/шаблон зовут без флага и обещания не печатают)."""
+    return render.fmt_mutation_summary(operation, params, _lang(lang), attachment=attachment)
 
 
 # §7: короткая метка уровня конкуренции для чат-таблицы (полная — в .xlsx). UNSPECIFIED не показываем.

@@ -160,6 +160,12 @@ class Proposal(Base):
     # сегодня NULL. Любая будущая проверка «ответ именно на эту карточку» обязана считать NULL
     # отказом, а не «проверять нечего» — иначе гард самоотключится на старых строках (fail-closed).
     tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    # Волна 1b — состояние ОБЕЩАННОГО .xlsx-вложения: NULL = не обещано, 'pending' = обещано и не
+    # доставлено, 'sending' (застолблено курьером), 'sent', 'failed'. Обещание в `summary` и эта
+    # колонка рождаются ОДНОЙ вставкой — разъехаться им не на чем. Курьер живёт в процессе
+    # `scheduler` (единственный вне `bot/`, у кого есть Bot-токен), поэтому доставка асинхронна и
+    # наблюдаема: вечный 'pending' — видимая величина, а не тишина.
+    attachment_state: Mapped[str | None] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(
         String(16), default="pending", nullable=False
     )  # pending|confirmed|executing|applied|failed|rejected|needs_review

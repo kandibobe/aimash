@@ -363,6 +363,8 @@ async def send_proposal_keywords_xlsx(
     header_html: str,
     reply_markup: object,
     parse_mode: object,
+    scope: str = "",
+    filename: str = "keywords.xlsx",
 ) -> None:
     """Большой список ключей/минус-слов в черновике (ТЗ §5): полный список — .xlsx-вложением,
     затем короткое ТЕКСТОВОЕ сообщение с кнопками ✅/❌ (его правит _do_confirm.edit_text)."""
@@ -371,8 +373,8 @@ async def send_proposal_keywords_xlsx(
     fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_kw_proposal_")
     os.close(fd)
     try:
-        write_keyword_list_xlsx(list(keywords), str(match_type), action, path)
-        await message.answer_document(FSInputFile(path, filename="keywords.xlsx"))  # type: ignore[attr-defined]
+        write_keyword_list_xlsx(list(keywords), str(match_type), action, path, scope=str(scope))
+        await message.answer_document(FSInputFile(path, filename=filename))  # type: ignore[attr-defined]
     finally:
         if os.path.exists(path):
             try:

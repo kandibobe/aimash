@@ -14,7 +14,7 @@ Alembic-миграцией (см. колонку «Миграция»). Коло
 | `whitelist` | рантайм-allow-list доступа к БОТУ (§12); объединяется с env `TELEGRAM_WHITELIST_CHAT_IDS` | `chat_id` (unique), `added_by`, `note` | `0001` (drop `0016` → возврат `0017`) | **ACTIVE** — читается гейтом (см. ниже) |
 | `admins` | рантайм-админы бота (`/addadmin`, `/removeadmin`); объединяется с env `ADMIN_CHAT_IDS` | `chat_id` (unique), `added_by`, `note` | `0021` | **ACTIVE** — читается `core.access.is_admin` (fail-closed: сбой БД ⇒ только env) |
 | `user_settings` | язык, пороги алертов (`/alerts`), override модели, активный аккаунт, per-user расписание отчётов, ui_prefs | `chat_id` (unique), `report_schedule` (crontab-строка; **читается** планировщиком — `scheduler.service.register_user_report_schedules` заводит per-chat cron-джобу; **UI-сеттер есть** — `bot/handlers/commands.py:1109` (пресеты/свой cron), сохранение `_save_report_schedule`), `alert_thresholds` (JSON, пишет `/alerts`), `model_override`, `language`, `selected_customer_id`, `ui_prefs` (JSON) | `0001` (+`0005`,`0007`,`0015`) | ACTIVE |
-| `proposals` | очередь черновиков изменений Google Ads (diff «было→станет») | `confirmation_id` (unique), `operation`, `customer_id`, `summary`, `params` (JSON), `user_initiated`, `status`, **провенанс хода**: `origin_human_turn`, `author_user_id`, `run_id`, `tg_message_id` | `0001` (+индекс `0003`, +`0030` провенанс) | ACTIVE |
+| `proposals` | очередь черновиков изменений Google Ads (diff «было→станет») | `confirmation_id` (unique), `operation`, `customer_id`, `summary`, `params` (JSON), `user_initiated`, `status`, **провенанс хода**: `origin_human_turn`, `author_user_id`, `run_id`, `tg_message_id`, `attachment_state` | `0001` (+индекс `0003`, +`0030` провенанс, +`0034` вложение) | ACTIVE |
 | `audit_log` | журнал всех операций (кто/когда/что/результат), по `confirmation_id` | `confirmation_id`, `operation`, `customer_id`, `chat_id`, `actor_user_id`, `status`, `result` (JSON) | `0001` (+`0004` актор) | ACTIVE |
 | `oauth_tokens` | per-account refresh-токены (§8), **зашифрованы at-rest** | `account` (unique), `refresh_token_enc`, `login_customer_id` | `0001` (+`0008`) | **ACTIVE** — загружается на старте (см. ниже) |
 | `error_events` | перехваченные исключения для триажа (§15), текст **редактирован** | `request_id`, `chat_id`, `customer_id`, `where`, `exc_type`, `message`, `traceback` | `0006` (+`0011`) | ACTIVE |
@@ -155,8 +155,20 @@ per-process deque; с появлением scheduler-процесса и per-ses
 `UPDATE ... WHERE probe_lease_until IS NULL OR probe_lease_until <= now` (`rowcount == 1` ⇒ ты
 единственный пробник — приём `ConfirmStore.claim`). ⚠️ Сбой этого стора — **осознанное fail-OPEN**
 исключение из правила 10, выписанное в [SECURITY.md](SECURITY.md): размыкатель про доступность, и
-отказав закрыто, он сам стал бы аварией. Номер по порядку приземления, а не по номеру волны плана)
-— **head**.
+отказав закрыто, он сам стал бы аварией. Номер по порядку приземления, а не по номеру волны плана) →
+`0034` (`proposals.attachment_state`: состояние ОБЕЩАННОГО .xlsx-вложения черновика, Волна 1b.
+`NULL` = не обещано · `pending` = обещано и не доставлено · `sending` = застолблено курьером ·
+`sent`/`failed` = терминальные. Колонка появилась потому, что обещание и доставка жили в РАЗНЫХ
+местах: `confirm/render.py` печатал «…полный список во вложении .xlsx» для шести операций, а слал
+файл `bot/main.py::_KEYWORD_OPS` для четырёх — `add_negatives_to_shared_set` получал обещание без
+файла, и текст обещания уезжал в `summary` → audit-row, из которого правило 15 репортит «выполнено».
+Теперь решение одно (`confirm.attachment.plan_attachment`), и обещание с обязательством пишутся
+ОДНОЙ вставкой `save_proposal`. Доставляет `scheduler` — единственный процесс фонового контура с
+Bot-токеном; клейм `pending → sending` атомарным CAS (`rowcount == 1`, приём `ConfirmStore.claim`),
+поэтому два планировщика не пришлют файл дважды. Вечный `pending` — **наблюдаемая** величина
+(«обещали и не отдали»), а не тишина. `nullable` без `server_default`: существующим строкам вложение
+не обещалось, и `NULL` это и означает — штамп `pending` пообещал бы им файл задним числом.
+Ретеншна не требует: живёт в строке черновика и уходит с ней) — **head**.
 
 ### Добавить миграцию
 ```bash

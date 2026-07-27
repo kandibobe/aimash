@@ -29,13 +29,21 @@ def test_fmt_add_keywords_human_readable():
 
 
 def test_fmt_add_keywords_truncates_big_list_with_xlsx_note():
+    """Усечение видно ВСЕГДА, обещание вложения — только когда вложение действительно будет.
+
+    Волна 1b изменила контракт: раньше «…полный список во вложении .xlsx» печаталось безусловно, а
+    файл слал отдельный список операций (`bot/main.py::_KEYWORD_OPS`) — для
+    `add_negatives_to_shared_set` обещание уходило без файла И оседало в `summary` → audit-row.
+    Теперь фразу включает тот же `plan_attachment`, который отвечает за доставку."""
     kws = [f"kw{i}" for i in range(30)]
-    s = texts.fmt_mutation_summary(
-        "add_keywords", {"campaign": "X", "keywords": kws, "match_type": "broad"}
-    )
+    params = {"campaign": "X", "keywords": kws, "match_type": "broad"}
+    s = texts.fmt_mutation_summary("add_keywords", params)
     assert "широкое" in s
     assert s.count("•") == texts.KW_INLINE_MAX  # ровно KW_INLINE_MAX в тексте
-    assert f"ещё {30 - texts.KW_INLINE_MAX}" in s and ".xlsx" in s
+    # Без вложения: усечение показано, обещания нет — «молча показать 20 из 30» тоже недопустимо.
+    assert f"ещё {30 - texts.KW_INLINE_MAX}" in s and ".xlsx" not in s
+    with_att = texts.fmt_mutation_summary("add_keywords", params, attachment=True)
+    assert f"ещё {30 - texts.KW_INLINE_MAX}" in with_att and ".xlsx" in with_att
 
 
 def test_fmt_negative_and_remove_labels():

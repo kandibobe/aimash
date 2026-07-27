@@ -194,6 +194,21 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
         misfire_grace_time=600,
         next_run_time=datetime.now(timezone.utc),
     )
+    # Волна 1b: курьер обещанных .xlsx-вложений к черновикам. READ-ONLY по Ads — собирает файл из
+    # `Proposal.params` и шлёт вторым сообщением. Интервал маленький нарочно: человек читает карточку
+    # с обещанием «полный список во вложении» сразу, и файл должен догнать её за секунды, а не за
+    # десяток минут `cleanup_interval_minutes`. Цена прогона — один индексируемый SELECT по
+    # attachment_state='pending', почти всегда пустой. Пропущенный запуск ничего не теряет: строки
+    # остаются 'pending' и достаются следующим (grace маленький — навёрстывать нечего).
+    sched.add_job(
+        jobs.deliver_proposal_attachments,
+        IntervalTrigger(seconds=30),
+        args=[bot],
+        id="proposal_attachments",
+        replace_existing=True,
+        misfire_grace_time=60,
+        coalesce=True,
+    )
     # §advisor Слой B: замер результата применённых рекомендаций (read-only, delta+verdict в КОДЕ).
     sched.add_job(
         jobs.run_recommendation_followups,

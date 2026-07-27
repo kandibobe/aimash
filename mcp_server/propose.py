@@ -40,6 +40,7 @@ from ads.resolve import (
 from ads.service import read_state
 from core import i18n
 from confirm import render
+from confirm.attachment import plan_attachment
 from confirm.store import ConfirmStore
 from core.config import normalize_customer_id
 from core.resilience import run_ads_read_call
@@ -187,7 +188,15 @@ async def build_proposal(
     params = attach_freshness(params, snap)
     # Человекочитаемая сводка по operation+params (деньги — реальное «40.00 → 48.00 (+20%)»).
     # Для create_rsa/create_gdn у вызывающего свой богатый summary → рендер вернёт "".
-    display = render.fmt_mutation_summary(operation, params, lang) or summary
+    # Волна 1b: обещание вложения и обязательство его доставить рождаются ИЗ ОДНОГО решения. `spec`
+    # решает оба: он же включает фразу «полный список во вложении» в тексте, он же ставит
+    # attachment_state='pending' в той же вставке ниже. Разъехаться им негде — раньше первое жило в
+    # confirm/render.py (6 операций), второе в bot/main.py::_KEYWORD_OPS (4), и обещание уезжало в
+    # summary → audit-row, из которого правило 15 репортит «выполнено».
+    spec = plan_attachment(operation, params, cid=cid, lang=lang)
+    display = (
+        render.fmt_mutation_summary(operation, params, lang, attachment=spec is not None) or summary
+    )
     # AD.2: баннер аккаунта — на КАЖДОЙ карточке (и в audit), включая Draft. Раз выбрано «одно
     # подтверждение везде», всегда-видимый ярлык — единственная страховка от мутации не того
     # аккаунта: менеджер видит, на ЧЬИ деньги идёт правка, до ✅. Боевой — ⚠️, Draft — 🧪 (спокойнее),
@@ -209,6 +218,7 @@ async def build_proposal(
         summary=display,
         chat_id=chat_id,
         user_initiated=user_initiated,
+        attachment_state="pending" if spec is not None else None,
     )
     return BuiltProposal(
         cid=cid,

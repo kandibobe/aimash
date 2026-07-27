@@ -229,6 +229,7 @@ from bot.keyboards import (
     rsa_pick_campaigns_kb,
 )
 from bot.throttle import ThrottleMiddleware
+from confirm.attachment import plan_attachment
 from confirm.gate import Proposal, build_summary
 from confirm.store import ConfirmStore
 from core import ingest
@@ -272,13 +273,10 @@ DOSSIERS = ClientDossierStore()  # §20: досье по краулу (client_do
 WELCOME_IMG = Path(__file__).resolve().parent / "assets" / "welcome.png"
 _welcome_file_id: str | None = None
 
-# Операции со списком ключей — большой список в черновике уходит .xlsx-вложением (ТЗ §5).
-# remove_negative_keywords ОБЯЗАН быть здесь: fmt_mutation_summary усекает его список до
-# KW_INLINE_MAX и обещает «…полный список во вложении .xlsx» — без этой операции в наборе вложение
-# не слалось, и менеджер жал ✅ на объёме, который не видел (нарушение §5/golden rule #1).
-_KEYWORD_OPS = frozenset(
-    {"add_keywords", "remove_keywords", "add_negative_keywords", "remove_negative_keywords"}
-)
+# Набора `_KEYWORD_OPS` здесь больше нет: список операций, у которых большой список ключей уходит
+# .xlsx-вложением (ТЗ §5), живёт в `confirm.attachment.KEYWORD_XLSX_OPS` — там же, где решение
+# напечатать обещание «…полный список во вложении». Два независимых списка (шесть операций обещали,
+# четыре слали) — тот самый дефект, ради которого модуль появился.
 
 # P1-6: необратимые удаления — карточка подтверждения проходит ДВА шага (confirm_destructive_kb →
 # confirm_final_kb). Замок аккаунта (ensure_allowed) и confirm-гейт неизменны; это доп. защита в UI.
@@ -1751,7 +1749,14 @@ async def _present_proposal(
     params = attach_freshness(params, snap)
     # Человекочитаемая сводка по operation+params (деньги — реальное «40.00 → 48.00 (+20%)»).
     # Для create_rsa/create_gdn у вызывающего свой богатый summary → fmt вернёт "".
-    display = texts.fmt_mutation_summary(operation, params) or summary
+    # Волна 1b: обещание вложения и его отправка — ОДНО решение (`confirm.attachment.plan_attachment`).
+    # Раньше обещание печатал confirm/render.py для ШЕСТИ операций, а слал `_KEYWORD_OPS` для ЧЕТЫРЁХ:
+    # add_negatives_to_shared_set получал «полный список во вложении .xlsx» без файла, и текст уезжал
+    # в summary → audit-row, из которого правило 15 репортит «выполнено».
+    attach_spec = plan_attachment(operation, params, cid=cid, lang=i18n.current_lang())
+    display = (
+        texts.fmt_mutation_summary(operation, params, attachment=attach_spec is not None) or summary
+    )
     # AD.2: баннер аккаунта — на КАЖДОЙ карточке (и в audit), включая Draft. Раз выбрано «одно
     # подтверждение везде», всегда-видимый ярлык — единственная страховка от мутации не того
     # аккаунта: менеджер видит, на ЧЬИ деньги идёт правка, до ✅. Боевой — ⚠️, Draft — 🧪 (спокойнее),
@@ -1793,25 +1798,21 @@ async def _present_proposal(
         if operation in _DESTRUCTIVE_OPS
         else confirm_kb(cid, extra_top=extra_confirm_top)  # A7: опц. «✏️ Изменить ставку»
     )
-    kws = params.get("keywords") if isinstance(params, dict) else None
-    # C4 (аудит 2026-07): create_search_campaign тоже несёт список ключей — раньше на финальном
-    # гейте создания он усекался до KW_INLINE_MAX БЕЗ вложения, и менеджер жал ✅ на объёме,
-    # который не видел (тот же класс, что и remove_negative_keywords выше).
-    if (
-        (operation in _KEYWORD_OPS or operation == "create_search_campaign")
-        and isinstance(kws, list)
-        and len(kws) > texts.KW_INLINE_MAX
-    ):
+    # Набор операций, порог усечения и подписи колонок берутся из того же `attach_spec`, который
+    # решил напечатать обещание, — списка операций здесь больше нет (был `_KEYWORD_OPS`).
+    if attach_spec is not None:
         await ux.send_proposal_keywords_xlsx(
             message,
-            keywords=kws,
-            match_type=params.get("match_type", ""),
-            action=texts.keyword_action_label(operation),
+            keywords=list(attach_spec.keywords),
+            match_type=attach_spec.match_type,
+            action=attach_spec.action,
             header_html=i18n.t(
                 "proposal_pending", summary=texts.esc(display), ttl_h=settings.proposal_ttl_hours
             ),
             reply_markup=confirm_markup,
             parse_mode=ParseMode.HTML,
+            scope=attach_spec.scope,
+            filename=attach_spec.filename,
         )
         return
     rendered = i18n.t(

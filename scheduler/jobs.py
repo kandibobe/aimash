@@ -1439,6 +1439,116 @@ async def run_recommendation_followups(bot=None) -> int:
         return n
 
 
+async def deliver_proposal_attachments(bot, *, limit: int = 10) -> int:
+    """Курьер обещанных .xlsx-вложений (Волна 1b). Возвращает число доставленных файлов.
+
+    Зачем отдельная джоба, а не отправка на месте создания черновика. Карточку в MCP-контуре печатает
+    gateway Hermes, а Bot-токен есть ровно у одного процесса фонового контура — этого. Тул-слой
+    (`mcp_server/`) токена не имеет и иметь не должен (топология: OAuth и Telegram — разные процессы),
+    протащить файл в MCP-конверте нельзя (base64 = весь файл через окно модели, +33% и платная запись
+    кэша 1.25×), а `Proposal.tg_message_id` в этом контуре NULL — реплаем к карточке файл тоже не
+    приложить. Остаётся вторая отправка из процесса, у которого транспорт уже есть.
+
+    Цена решения названа честно: файл приходит ОТДЕЛЬНЫМ сообщением и ПОЗЖЕ карточки, а контейнер
+    `scheduler` становится обязательным звеном. Он лёг — строки остаются в `attachment_state='pending'`
+    и это ВИДНО (обещали и не отдали), а не теряется молча.
+
+    READ-ONLY по отношению к Google Ads: ни одного вызова SDK, файл собирается из `params` той же
+    строки. Одноразовость — CAS `claim_attachment`: два планировщика (или один после рестарта) не
+    пришлют файл дважды."""
+    import os
+
+    from confirm.attachment import plan_attachment
+    from core import i18n
+
+    with request_scope("scheduler:proposal-attachments"):
+        store = ConfirmStore()
+        rows = await store.list_pending_attachments(limit=limit)
+        if not rows:
+            return 0
+        sent = 0
+        for row in rows:
+            lang = i18n.get_lang(row.chat_id)
+            spec = plan_attachment(row.operation, row.params, cid=row.confirmation_id, lang=lang)
+            if spec is None:
+                # Обещание было, а плана нет: строка пережила правку KEYWORD_XLSX_OPS/порога. Файла
+                # не будет — честно закрываем 'failed', а не держим вечный 'pending'.
+                if await store.claim_attachment(row.confirmation_id):
+                    await store.finish_attachment(row.confirmation_id, "failed")
+                    log.warning(
+                        "attachments: план вложения не собрался для %s (%s) — помечено failed",
+                        row.confirmation_id,
+                        row.operation,
+                    )
+                continue
+            if not await store.claim_attachment(row.confirmation_id):
+                continue  # застолбил кто-то другой — не наша строка
+            state = "failed"
+            try:
+                path = await asyncio.to_thread(_build_attachment_file, spec)
+            except Exception as e:  # noqa: BLE001 — сборка файла не должна валить остальные строки
+                log.warning(
+                    "attachments: сборка .xlsx для %s не удалась: %s",
+                    row.confirmation_id,
+                    type(e).__name__,
+                )
+                await store.finish_attachment(row.confirmation_id, state)
+                continue
+            try:
+                from scheduler.transport import send_bot_file
+
+                await send_bot_file(bot, row.chat_id, path=path, filename=spec.filename)
+                state = "sent"
+                sent += 1
+            except Exception as e:  # noqa: BLE001 — недоступный чат не роняет остальные вложения
+                log.warning(
+                    "attachments: вложение %s не доставлено в %s: %s",
+                    row.confirmation_id,
+                    row.chat_id,
+                    type(e).__name__,
+                )
+            finally:
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                await store.finish_attachment(row.confirmation_id, state)
+        if sent:
+            log.info("scheduler: вложений черновиков доставлено: %d", sent)
+        return sent
+
+
+def _build_attachment_file(spec) -> str:
+    """Собрать .xlsx во временный файл и вернуть путь. СИНХРОННО и НАРОЧНО: openpyxl — CPU-bound,
+    вызывающий уносит его в `asyncio.to_thread`, чтобы сборка списка на тысячи ключей не держала
+    event loop планировщика. Импорт `keywords.export` тоже локальный: он тянет openpyxl, а модуль
+    джоб импортируется в процессе, где вложения могут не понадобиться ни разу."""
+    import os
+    import tempfile
+
+    from keywords.export import write_keyword_list_xlsx
+
+    fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_kw_")
+    os.close(fd)  # openpyxl пишет по пути сам; дескриптор нам не нужен, но mkstemp его открывает
+    try:
+        write_keyword_list_xlsx(
+            list(spec.keywords),
+            spec.match_type,
+            spec.action,
+            path,
+            scope=spec.scope,
+        )
+    except Exception:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        raise
+    return path
+
+
 async def cleanup_stale_proposals(
     *, now: datetime | None = None, ttl_hours: int | None = None
 ) -> int:

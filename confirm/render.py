@@ -35,6 +35,23 @@ def status_human(status: str, lang: str) -> str:
 
 
 KW_INLINE_MAX = 20  # ключей показываем в сводке черновика; больше — во вложении .xlsx
+
+
+def _kw_tail(kws: object, lang: str, *, promised: bool) -> str:
+    """Хвост усечённого списка ключей: «…ещё N» и — ТОЛЬКО при promised — обещание вложения.
+
+    Обещание печатается не по факту «список длинный», а по факту «канал доставки есть и решение
+    принято» (`confirm.attachment.plan_attachment`). Дефолт `promised=False` — fail-closed: не
+    обещаем того, чего не отправим. Раньше эти четыре хвоста были выписаны в четырёх местах и
+    обещали безусловно; отсюда и брались обещания без файла (add_negatives_to_shared_set)."""
+    more = len(kws or []) - KW_INLINE_MAX  # type: ignore[arg-type]
+    if more <= 0:
+        return ""
+    if lang == "en":
+        return f"\n  …{more} more" + (" — full list in the .xlsx attachment" if promised else "")
+    return f"\n  …ещё {more}" + (" — полный список во вложении .xlsx" if promised else "")
+
+
 _CURRENCY_HUMAN = {
     "USD": "USD",
     "UAH": "грн",
@@ -285,18 +302,26 @@ def _keyword_bid_summary(params: dict, lang: str) -> str:
     return f"Ключ «{kw}»{mt_s} (кампания «{c}») — ставка CPC: {change}"
 
 
-def fmt_mutation_summary(operation: str, params: dict, lang: str) -> str:
+def fmt_mutation_summary(
+    operation: str, params: dict, lang: str, *, attachment: bool = False
+) -> str:
     """Человекочитаемая сводка черновика «было → станет»/действия (plain text; esc — при показе).
 
-    Для ключей — тип соответствия словами + список (усечён до KW_INLINE_MAX; полный — во вложении).
+    Для ключей — тип соответствия словами + список (усечён до KW_INLINE_MAX).
     Возвращает '' для операций со своим богатым форматтером (create_rsa/create_gdn_campaign) — тогда
-    вызывающий оставляет собственный summary (create_rsa/GDN рисуют карточку сами)."""
+    вызывающий оставляет собственный summary (create_rsa/GDN рисуют карточку сами).
+
+    `attachment` — есть ли КАНАЛ доставки .xlsx у вызывающего (решение принимает
+    `confirm.attachment.plan_attachment`, а не этот форматтер). Только при `True` в хвосте
+    усечённого списка печатается обещание «полный список во вложении». Дефолт `False` —
+    fail-closed: сводка уезжает в `summary` черновика, то есть в audit-row, из которого правило 15
+    репортит «выполнено»; безусловное обещание клало туда обещание файла, которого никто не слал."""
     if not isinstance(params, dict):
         return ""
     lng = lang
     c = params.get("campaign", "")
     if lng == "en":
-        return _mutation_summary_en(operation, params, c)
+        return _mutation_summary_en(operation, params, c, attachment=attachment)
     if operation == "update_budget":
         return _money_summary("бюджет", params, lng)
     if operation == "update_bid":
@@ -446,9 +471,7 @@ def fmt_mutation_summary(operation: str, params: dict, lang: str) -> str:
         where = f"«{c}» → группа «{ag}»" if ag else f"«{c}»"
         head = f"Кампания {where} — {verb} {len(kws)} {what} (тип соответствия: {mt}):"
         shown = list(kws)[:KW_INLINE_MAX]
-        lines = "\n".join(f"  • {k}" for k in shown)
-        if len(kws) > KW_INLINE_MAX:
-            lines += f"\n  …ещё {len(kws) - KW_INLINE_MAX} — полный список во вложении .xlsx"
+        lines = "\n".join(f"  • {k}" for k in shown) + _kw_tail(kws, lng, promised=attachment)
         return f"{head}\n{lines}"
     if operation == "add_negatives_to_shared_set":
         kws = params.get("keywords") or []
@@ -462,9 +485,7 @@ def fmt_mutation_summary(operation: str, params: dict, lang: str) -> str:
             "к которым привязан:"
         )
         shown = list(kws)[:KW_INLINE_MAX]
-        lines = "\n".join(f"  • {k}" for k in shown)
-        if len(kws) > KW_INLINE_MAX:
-            lines += f"\n  …ещё {len(kws) - KW_INLINE_MAX} — полный список во вложении .xlsx"
+        lines = "\n".join(f"  • {k}" for k in shown) + _kw_tail(kws, lng, promised=attachment)
         return f"{head}\n{lines}"
     if operation == "attach_shared_set":
         return (
@@ -524,7 +545,7 @@ def fmt_mutation_summary(operation: str, params: dict, lang: str) -> str:
     return ""  # create_rsa / create_gdn_campaign / неизвестное — оставить summary вызывающего
 
 
-def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
+def _mutation_summary_en(operation: str, params: dict, c: str, *, attachment: bool = False) -> str:
     """EN-ветка fmt_mutation_summary: те же operation/params/плейсхолдеры, английская формулировка.
     RU-ветка остаётся источником истины по структуре — здесь зеркально по-английски."""
     if operation == "update_budget":
@@ -663,9 +684,7 @@ def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
         where = f"“{c}” → ad group “{ag}”" if ag else f"“{c}”"
         head = f"Campaign {where} — {verb} {len(kws)} {what} (match type: {mt}):"
         shown = list(kws)[:KW_INLINE_MAX]
-        lines = "\n".join(f"  • {k}" for k in shown)
-        if len(kws) > KW_INLINE_MAX:
-            lines += f"\n  …{len(kws) - KW_INLINE_MAX} more — full list in the .xlsx attachment"
+        lines = "\n".join(f"  • {k}" for k in shown) + _kw_tail(kws, "en", promised=attachment)
         return f"{head}\n{lines}"
     if operation == "add_negatives_to_shared_set":
         kws = params.get("keywords") or []
@@ -677,9 +696,7 @@ def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
             "campaigns it is attached to:"
         )
         shown = list(kws)[:KW_INLINE_MAX]
-        lines = "\n".join(f"  • {k}" for k in shown)
-        if len(kws) > KW_INLINE_MAX:
-            lines += f"\n  …{len(kws) - KW_INLINE_MAX} more — full list in the .xlsx attachment"
+        lines = "\n".join(f"  • {k}" for k in shown) + _kw_tail(kws, "en", promised=attachment)
         return f"{head}\n{lines}"
     if operation == "attach_shared_set":
         return (

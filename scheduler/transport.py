@@ -25,6 +25,17 @@ import tempfile
 from aiogram.types import FSInputFile
 
 
+async def send_bot_file(bot: object, chat_id: int, *, path: str, filename: str) -> None:
+    """Отправить УЖЕ СУЩЕСТВУЮЩИЙ файл с диска. Жизненным циклом файла НЕ владеет.
+
+    Разделение намеренное: у .txt-дайджеста файл существует ровно ради отправки и умирает здесь же,
+    а .xlsx-вложение черновика курьер собирает сам (openpyxl вне event loop) и сам же удаляет —
+    отдать его удаление транспорту значило бы, что при исключении на отправке владелец не знает,
+    остался файл или нет. Кто создал, тот и удаляет; транспорт умеет ровно один трюк — завернуть
+    путь в `FSInputFile`, потому что голая строка трактуется Telegram как file_id/URL."""
+    await bot.send_document(chat_id, FSInputFile(path, filename=filename))  # type: ignore[attr-defined]
+
+
 async def send_bot_document(bot: object, chat_id: int, *, text: str, filename: str) -> None:
     """Отправить ТЕКСТ .txt-вложением из SCHEDULER-контекста (нет message, только bot). Аналог
     send_text_document для плановых джоб (еженедельный дайджест). Временный файл — в finally.
@@ -33,7 +44,7 @@ async def send_bot_document(bot: object, chat_id: int, *, text: str, filename: s
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        await bot.send_document(chat_id, FSInputFile(path, filename=filename))  # type: ignore[attr-defined]
+        await send_bot_file(bot, chat_id, path=path, filename=filename)
     finally:
         if os.path.exists(path):
             try:
