@@ -81,4 +81,4 @@ node_modules/
 # Temporary
 tmp/
 temp/
-*.tmp
+*.tmpcache/

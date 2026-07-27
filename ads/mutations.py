@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Protocol
+from typing import Any, Callable, Protocol
 
 from google.ads.googleads.errors import GoogleAdsException
 from google.api_core import protobuf_helpers
@@ -84,6 +84,57 @@ MAX_AMOUNT_MICROS = MONEY_MAX_MICROS
 
 # Лимиты состава RSA — единый источник в adcopy.validate; зеркалят agent.tools.schemas.CreateRsa
 # (два независимых гейта: схема + SDK). Длину каждого элемента считает КОД (golden rule #4).
+
+
+# ── Централизованная проверка DRY_RUN (CRIT-3 fix) ──────────────────────────
+
+async def _run_ads_mutation(
+    fn: Callable[..., Any],
+    *args: Any,
+    label: str | None = None,
+    account: str | None = None,
+    op_count: int = 1,
+    **kwargs: Any,
+) -> Any:
+    """Обёртка run_ads_call с проверкой DRY_RUN.
+
+    Если DRY_RUN=true (production default), SDK-вызов НЕ выполняется.
+    Возвращает {"dry_run": True, "operation": label}.
+    """
+    try:
+        from core.budget_policy import DRY_RUN
+    except Exception:
+        DRY_RUN = True  # fail-safe
+    if DRY_RUN:
+        name = label or getattr(fn, "__name__", "mutation")
+        log.info("DRY_RUN: %s skipped (no real API call)", name)
+        # Квота не учитывается — запрос не ушёл
+        return {"dry_run": True, "operation": name}
+    return await run_ads_call(
+        fn, *args, label=label, account=account, op_count=op_count, **kwargs
+    )
+
+
+async def _run_ads_create_mutation(
+    fn: Callable[..., Any],
+    *args: Any,
+    label: str | None = None,
+    account: str | None = None,
+    op_count: int = 1,
+    **kwargs: Any,
+) -> Any:
+    """Обёртка run_ads_create_call с проверкой DRY_RUN."""
+    try:
+        from core.budget_policy import DRY_RUN
+    except Exception:
+        DRY_RUN = True
+    if DRY_RUN:
+        name = label or getattr(fn, "__name__", "mutation")
+        log.info("DRY_RUN: %s skipped (no real API call)", name)
+        return {"dry_run": True, "operation": name}
+    return await run_ads_create_call(
+        fn, *args, label=label, account=account, op_count=op_count, **kwargs
+    )
 
 
 class ConfirmStore(Protocol):
@@ -244,7 +295,7 @@ async def apply_update_budget(
     # отдельно, чтобы юнит-тест мог подменить его (офлайн, без живого аккаунта). disclosed_shared_scope
     # (П1): раскрыт ли на карточке общий scope бюджета — прокидывается доверенным вызывающим
     # (execute_confirmed из _before.shared); дефолт False = fail-closed (см. гард в _apply_budget_via_sdk).
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _apply_budget_via_sdk,
         ads_client,
         customer_id,
@@ -268,7 +319,7 @@ async def apply_pause_campaign(
     ensure_allowed(customer_id)
     await _require_confirmation(confirm_store, confirmation_id, "pause_campaign")
     status = ads_client.enums.CampaignStatusEnum.PAUSED
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _set_campaign_status_via_sdk, ads_client, customer_id, campaign_id, status
     )
     await confirm_store.finalize(confirmation_id, result=result)
@@ -287,7 +338,7 @@ async def apply_resume_campaign(
     ensure_allowed(customer_id)
     await _require_confirmation(confirm_store, confirmation_id, "resume_campaign")
     status = ads_client.enums.CampaignStatusEnum.ENABLED
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _set_campaign_status_via_sdk, ads_client, customer_id, campaign_id, status
     )
     await confirm_store.finalize(confirmation_id, result=result)
@@ -313,7 +364,7 @@ async def apply_launch_campaign(
 ) -> dict:
     ensure_allowed(customer_id)
     await _require_confirmation(confirm_store, confirmation_id, "launch_campaign")
-    result = await run_ads_call(_launch_campaign_via_sdk, ads_client, customer_id, campaign_id)
+    result = await _run_ads_mutation(_launch_campaign_via_sdk, ads_client, customer_id, campaign_id)
     await confirm_store.finalize(confirmation_id, result=result)
     return result
 
@@ -338,7 +389,7 @@ async def apply_update_campaign(
     if len(clean) > 255:  # потолок Google Ads на имя кампании
         raise ValueError("имя кампании слишком длинное (>255 символов)")
     await _require_confirmation(confirm_store, confirmation_id, "update_campaign")
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _update_campaign_name_via_sdk, ads_client, customer_id, campaign_id, clean
     )
     await confirm_store.finalize(confirmation_id, result=result)
@@ -362,7 +413,7 @@ async def apply_set_campaign_network(
 ) -> dict:
     ensure_allowed(customer_id)
     await _require_confirmation(confirm_store, confirmation_id, "set_campaign_network")
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _set_campaign_network_via_sdk,
         ads_client,
         customer_id,
@@ -389,7 +440,7 @@ async def apply_set_campaign_display_network(
 ) -> dict:
     ensure_allowed(customer_id)
     await _require_confirmation(confirm_store, confirmation_id, "set_campaign_display_network")
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _set_campaign_display_network_via_sdk,
         ads_client,
         customer_id,
@@ -424,7 +475,7 @@ async def apply_set_campaign_geo_target_type(
             f"geo_target_type должен быть одним из {', '.join(GEO_TARGET_TYPES)}, получено «{geo_target_type}»"
         )
     await _require_confirmation(confirm_store, confirmation_id, "set_campaign_geo_target_type")
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _set_campaign_geo_target_type_via_sdk,
         ads_client,
         customer_id,
@@ -449,7 +500,7 @@ async def apply_pause_ad_group(
     ensure_allowed(customer_id)
     await _require_confirmation(confirm_store, confirmation_id, "pause_ad_group")
     status = ads_client.enums.AdGroupStatusEnum.PAUSED
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _set_ad_group_status_via_sdk, ads_client, customer_id, ad_group_id, status
     )
     await confirm_store.finalize(confirmation_id, result=result)
@@ -467,7 +518,7 @@ async def apply_resume_ad_group(
     ensure_allowed(customer_id)
     await _require_confirmation(confirm_store, confirmation_id, "resume_ad_group")
     status = ads_client.enums.AdGroupStatusEnum.ENABLED
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _set_ad_group_status_via_sdk, ads_client, customer_id, ad_group_id, status
     )
     await confirm_store.finalize(confirmation_id, result=result)
@@ -490,7 +541,7 @@ async def apply_pause_ad(
     ensure_allowed(customer_id)
     await _require_confirmation(confirm_store, confirmation_id, "pause_ad")
     status = ads_client.enums.AdGroupAdStatusEnum.PAUSED
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _set_ad_status_via_sdk, ads_client, customer_id, ad_group_id, ad_id, status
     )
     await confirm_store.finalize(confirmation_id, result=result)
@@ -509,7 +560,7 @@ async def apply_resume_ad(
     ensure_allowed(customer_id)
     await _require_confirmation(confirm_store, confirmation_id, "resume_ad")
     status = ads_client.enums.AdGroupAdStatusEnum.ENABLED
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _set_ad_status_via_sdk, ads_client, customer_id, ad_group_id, ad_id, status
     )
     await confirm_store.finalize(confirmation_id, result=result)
@@ -529,7 +580,7 @@ async def apply_remove_ad(
     (_DESTRUCTIVE_OPS в bot/main), как remove_campaign/remove_ad_group."""
     ensure_allowed(customer_id)
     await _require_confirmation(confirm_store, confirmation_id, "remove_ad")
-    result = await run_ads_call(_remove_ad_via_sdk, ads_client, customer_id, ad_group_id, ad_id)
+    result = await _run_ads_mutation(_remove_ad_via_sdk, ads_client, customer_id, ad_group_id, ad_id)
     await confirm_store.finalize(confirmation_id, result=result)
     return result
 
@@ -548,7 +599,7 @@ async def apply_remove_campaign(
 ) -> dict:
     ensure_allowed(customer_id)
     await _require_confirmation(confirm_store, confirmation_id, "remove_campaign")
-    result = await run_ads_call(_remove_campaign_via_sdk, ads_client, customer_id, campaign_id)
+    result = await _run_ads_mutation(_remove_campaign_via_sdk, ads_client, customer_id, campaign_id)
     await confirm_store.finalize(confirmation_id, result=result)
     return result
 
@@ -563,7 +614,7 @@ async def apply_remove_ad_group(
 ) -> dict:
     ensure_allowed(customer_id)
     await _require_confirmation(confirm_store, confirmation_id, "remove_ad_group")
-    result = await run_ads_call(_remove_ad_group_via_sdk, ads_client, customer_id, ad_group_id)
+    result = await _run_ads_mutation(_remove_ad_group_via_sdk, ads_client, customer_id, ad_group_id)
     await confirm_store.finalize(confirmation_id, result=result)
     return result
 
@@ -595,7 +646,7 @@ async def apply_update_bid(
     # сверх golden rule #3 о бюджете). Scheduler/anomaly ставки не двигают.
     _require_user_command(proposal, "изменение ставки")
 
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _apply_bid_via_sdk,
         ads_client,
         customer_id,
@@ -638,7 +689,7 @@ async def apply_update_keyword_bid(
     # (golden rule #3); оба бита по умолчанию False (fail-closed) — см. _require_user_command.
     _require_user_command(proposal, "изменение ставки")
 
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _apply_keyword_bid_via_sdk,
         ads_client,
         customer_id,
@@ -718,7 +769,7 @@ async def apply_add_keywords(
         raise ValueError("нет групп объявлений для добавления ключевых слов")
     clean = normalize_keywords(keywords)
     await _require_confirmation(confirm_store, confirmation_id, "add_keywords")
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _add_keywords_via_sdk,
         ads_client,
         customer_id,
@@ -750,7 +801,7 @@ async def apply_add_negative_keywords(
     # Выбор уровня — по уже отрезолвленному id из execute_confirmed (имя группы не совпало → отказ
     # ТАМ, до claim), здесь только диспатч на нужный SDK-исполнитель.
     if ad_group_id:
-        result = await run_ads_call(
+        result = await _run_ads_mutation(
             _add_negative_keywords_adgroup_via_sdk,
             ads_client,
             customer_id,
@@ -761,7 +812,7 @@ async def apply_add_negative_keywords(
             op_count=len(clean),  # квота §3: каждая mutate-операция батча
         )
     else:
-        result = await run_ads_call(
+        result = await _run_ads_mutation(
             _add_negative_keywords_via_sdk,
             ads_client,
             customer_id,
@@ -789,7 +840,7 @@ async def apply_remove_negative_keywords(
     ensure_allowed(customer_id)
     clean = normalize_keywords(keywords)  # форму/дубли считает КОД — ДО claim
     await _require_confirmation(confirm_store, confirmation_id, "remove_negative_keywords")
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _remove_negative_keywords_via_sdk,
         ads_client,
         customer_id,
@@ -855,7 +906,7 @@ async def apply_attach_shared_set(
     if not str(shared_set_id or "").strip():
         raise ValueError("shared_set_id обязателен (резолв имени — в execute_confirmed)")
     await _require_confirmation(confirm_store, confirmation_id, "attach_shared_set")
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _attach_shared_set_via_sdk, ads_client, customer_id, campaign_id, shared_set_id
     )
     await confirm_store.finalize(confirmation_id, result=result)
@@ -895,8 +946,38 @@ async def apply_set_geo_proximity(
         raise ValueError(f"радиус подозрительно большой (>{MAX_RADIUS_KM} км) — проверь команду")
     _validate_address_fields(address)  # ДО claim: плохой адрес не «съедает» черновик
     await _require_confirmation(confirm_store, confirmation_id, "set_geo_proximity")
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _set_geo_proximity_via_sdk, ads_client, customer_id, campaign_id, radius_km, address
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+async def apply_set_geo_proximity_by_coords(
+    *,
+    customer_id: str,
+    campaign_id: str,
+    latitude: float,
+    longitude: float,
+    radius_km: float,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """Радиус-таргетинг по координатам (lat/lng) — Geo-by-Coordinates."""
+    ensure_allowed(customer_id)
+    if radius_km <= 0:
+        raise ValueError("радиус должен быть > 0")
+    if radius_km > MAX_RADIUS_KM:
+        raise ValueError(f"радиус подозрительно большой (>{MAX_RADIUS_KM} км) — проверь команду")
+    if not (-90 <= latitude <= 90):
+        raise ValueError("широта должна быть в диапазоне -90..90")
+    if not (-180 <= longitude <= 180):
+        raise ValueError("долгота должна быть в диапазоне -180..180")
+    await _require_confirmation(confirm_store, confirmation_id, "set_geo_proximity_by_coords")
+    result = await _run_ads_mutation(
+        _set_geo_proximity_by_coords_via_sdk, ads_client, customer_id, campaign_id,
+        latitude, longitude, radius_km
     )
     await confirm_store.finalize(confirmation_id, result=result)
     return result
@@ -933,7 +1014,7 @@ async def apply_set_geo_location(
     ensure_allowed(customer_id)  # гейт 1 — замок аккаунта
     _validate_locations(locations, country_code)  # ДО claim
     await _require_confirmation(confirm_store, confirmation_id, "set_geo_location")  # гейт 2
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _set_geo_location_via_sdk,
         ads_client,
         customer_id,
@@ -972,7 +1053,7 @@ async def apply_attach_audience(
     ensure_allowed(customer_id)  # гейт 1 — замок аккаунта
     _validate_audience_rns(audience_resource_names)  # ДО claim
     await _require_confirmation(confirm_store, confirmation_id, "attach_audience")  # гейт 2
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _attach_audience_via_sdk,
         ads_client,
         customer_id,
@@ -1025,7 +1106,7 @@ async def apply_detach_audience(
     ensure_allowed(customer_id)  # гейт 1 — замок аккаунта
     _validate_audience_rns(audience_resource_names)  # ДО claim
     await _require_confirmation(confirm_store, confirmation_id, "detach_audience")  # гейт 2
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _detach_audience_via_sdk,
         ads_client,
         customer_id,
@@ -1136,7 +1217,7 @@ async def apply_add_sitelinks(
     ensure_allowed(customer_id)  # гейт 1 — замок аккаунта
     _validate_sitelinks(sitelinks)  # ДО claim
     await _require_confirmation(confirm_store, confirmation_id, "add_sitelinks")  # гейт 2
-    result = await run_ads_create_call(
+    result = await _run_ads_create_mutation(
         extensions._add_sitelinks_via_sdk,
         ads_client,
         customer_id,
@@ -1163,7 +1244,7 @@ async def apply_add_callouts(
     ensure_allowed(customer_id)
     _validate_callouts(callouts)
     await _require_confirmation(confirm_store, confirmation_id, "add_callouts")
-    result = await run_ads_create_call(
+    result = await _run_ads_create_mutation(
         extensions._add_callouts_via_sdk,
         ads_client,
         customer_id,
@@ -1191,7 +1272,7 @@ async def apply_add_structured_snippets(
     ensure_allowed(customer_id)
     _validate_snippets(header, values)
     await _require_confirmation(confirm_store, confirmation_id, "add_structured_snippets")
-    result = await run_ads_create_call(
+    result = await _run_ads_create_mutation(
         extensions._add_structured_snippets_via_sdk,
         ads_client,
         customer_id,
@@ -1225,7 +1306,7 @@ async def apply_attach_image_asset(
     if not (name or "").strip():
         raise ValueError("пустое имя ассета")
     await _require_confirmation(confirm_store, confirmation_id, "attach_image_asset")  # гейт 2
-    result = await run_ads_create_call(
+    result = await _run_ads_create_mutation(
         extensions._attach_image_asset_via_sdk,
         ads_client,
         customer_id,
@@ -1302,7 +1383,7 @@ async def apply_add_call_asset(
     ensure_allowed(customer_id)
     _validate_call(phone_number, country_code)
     await _require_confirmation(confirm_store, confirmation_id, "add_call_asset")
-    result = await run_ads_create_call(
+    result = await _run_ads_create_mutation(
         extensions._add_call_asset_via_sdk,
         ads_client,
         customer_id,
@@ -1335,7 +1416,7 @@ async def apply_add_promotion(
     ensure_allowed(customer_id)
     _validate_promotion(promotion_target, final_url, percent_off, money_off_units, currency)
     await _require_confirmation(confirm_store, confirmation_id, "add_promotion")
-    result = await run_ads_create_call(
+    result = await _run_ads_create_mutation(
         lambda: extensions._add_promotion_via_sdk(
             ads_client,
             customer_id,
@@ -1371,7 +1452,7 @@ async def apply_add_price_asset(
     ensure_allowed(customer_id)
     _validate_price(offerings, currency)
     await _require_confirmation(confirm_store, confirmation_id, "add_price_asset")
-    result = await run_ads_create_call(
+    result = await _run_ads_create_mutation(
         lambda: extensions._add_price_asset_via_sdk(
             ads_client,
             customer_id,
@@ -1401,7 +1482,7 @@ async def apply_remove_asset_link(
     ensure_allowed(customer_id)
     _validate_link_rns(link_resource_names)
     await _require_confirmation(confirm_store, confirmation_id, "remove_asset_link")
-    result = await run_ads_create_call(
+    result = await _run_ads_create_mutation(
         extensions._remove_campaign_assets_via_sdk,
         ads_client,
         customer_id,
@@ -1450,7 +1531,7 @@ async def apply_set_bidding_strategy(
     proposal = await _require_confirmation(confirm_store, confirmation_id, "set_bidding_strategy")
     _require_user_command(proposal, "смена стратегии ставок")  # деньги
 
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _set_bidding_strategy_via_sdk,
         ads_client,
         customer_id,
@@ -1538,7 +1619,7 @@ async def apply_create_rsa(
     _validate_rsa_inputs(headlines, descriptions, final_url, path1, path2)
 
     await _require_confirmation(confirm_store, confirmation_id, "create_rsa")  # гейт 2 — claim
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _create_rsa_via_sdk,
         ads_client,
         customer_id,
@@ -2050,7 +2131,7 @@ async def apply_remove_keywords(
         raise ValueError("нет групп объявлений для удаления ключевых слов")
     clean = normalize_keywords(keywords)  # длину/форму/дубли считает КОД — ДО claim
     await _require_confirmation(confirm_store, confirmation_id, "remove_keywords")
-    result = await run_ads_call(
+    result = await _run_ads_mutation(
         _remove_keywords_via_sdk,
         ads_client,
         customer_id,
@@ -2388,6 +2469,57 @@ def _set_geo_proximity_via_sdk(
     }
 
 
+def _set_geo_proximity_by_coords_via_sdk(
+    client, customer_id: str, campaign_id: str, latitude: float, longitude: float, radius_km: float
+) -> dict:
+    """Geo-by-coordinates: радиус-таргетинг по координатам (lat/lng) через
+    proximity.geo_point.latitude_in_micro_degrees / longitude_in_micro_degrees. Address-driven
+    поля (city_name/country_code) НЕ заполняем — это чистый координатный таргетинг.
+    REMOVE-BEFORE-CREATE: удаляем существующие proximity-критерии кампании + создаём новый,
+    одним атомарным mutate."""
+    cmp_svc = client.get_service("CampaignService")
+    svc = client.get_service("CampaignCriterionService")
+    ga = client.get_service("GoogleAdsService")
+    campaign_rn = cmp_svc.campaign_path(str(customer_id), str(campaign_id))
+
+    ops = []
+    # Существующие proximity-критерии кампании → remove (immutable, заменяем целиком).
+    for row in ga.search(
+        customer_id=str(customer_id),
+        query=(
+            "SELECT campaign_criterion.resource_name FROM campaign_criterion "
+            f"WHERE campaign_criterion.campaign = '{gaql_escape(campaign_rn)}' "
+            "AND campaign_criterion.type = 'PROXIMITY'"
+        ),
+    ):
+        rm = client.get_type("CampaignCriterionOperation")
+        rm.remove = row.campaign_criterion.resource_name
+        ops.append(rm)
+    removed = len(ops)
+
+    op = client.get_type("CampaignCriterionOperation")
+    crit = op.create
+    crit.campaign = campaign_rn
+    prox = crit.proximity
+    prox.radius = float(radius_km)
+    prox.radius_units = client.enums.ProximityRadiusUnitsEnum.KILOMETERS
+    prox.geo_point.latitude_in_micro_degrees = int(round(latitude * 1_000_000))
+    prox.geo_point.longitude_in_micro_degrees = int(round(longitude * 1_000_000))
+    ops.append(op)  # create — последней, чтобы resp.results[-1] был новым критерием
+
+    resp = svc.mutate_campaign_criteria(customer_id=str(customer_id), operations=ops)
+    return {
+        "customer_id": customer_id,
+        "campaign_id": str(campaign_id),
+        "latitude": float(latitude),
+        "longitude": float(longitude),
+        "radius_km": float(radius_km),
+        "removed_proximity": removed,
+        "resource_name": resp.results[-1].resource_name if resp.results else None,
+        "applied": True,
+    }
+
+
 def _set_geo_location_via_sdk(
     client, customer_id: str, campaign_id: str, locations: list, country_code: str, locale: str
 ) -> dict:
@@ -2711,7 +2843,7 @@ async def apply_create_search_campaign(
         + len(languages or [])
         + len(ad_schedule_blocks or [])
     )
-    result = await run_ads_create_call(
+    result = await _run_ads_create_mutation(
         _create_search_campaign_via_sdk,
         ads_client,
         customer_id,
@@ -2750,7 +2882,7 @@ async def apply_create_search_campaign(
     campaign_id = (result.get("campaign") or "").rsplit("/", 1)[-1]
     if asset_specs and campaign_id:
         try:
-            added, skipped = await run_ads_create_call(
+            added, skipped = await _run_ads_create_mutation(
                 _attach_asset_specs_via_sdk,
                 ads_client,
                 customer_id,
@@ -2775,7 +2907,7 @@ async def apply_create_search_campaign(
         # квота) была видна только как «переиспользовано 3» вместо 7, и никто не замечал.
         result["assets_reuse_requested"] = len(existing_asset_links)
         try:
-            reused, reuse_skipped = await run_ads_create_call(
+            reused, reuse_skipped = await _run_ads_create_mutation(
                 _link_existing_assets_via_sdk,
                 ads_client,
                 customer_id,
@@ -2796,7 +2928,7 @@ async def apply_create_search_campaign(
         imgs = 0
         for img_bytes, name in image_specs:
             try:
-                await run_ads_create_call(
+                await _run_ads_create_mutation(
                     extensions._attach_image_asset_via_sdk,
                     ads_client,
                     customer_id,
@@ -3395,7 +3527,7 @@ async def apply_create_gdn_campaign(
     proposal = await _require_confirmation(confirm_store, confirmation_id, "create_gdn_campaign")
     # Создание кампании — ТОЛЬКО прямой командой пользователя (как бюджет): bot ставит биты, агент нет.
     _require_user_command(proposal, "создание кампании")
-    result = await run_ads_create_call(
+    result = await _run_ads_create_mutation(
         _create_gdn_campaign_via_sdk,
         ads_client,
         customer_id,
@@ -3688,7 +3820,7 @@ async def apply_create_demand_gen_campaign(
     )
     # Создание кампании — ТОЛЬКО прямой командой пользователя (как бюджет/GDN).
     _require_user_command(proposal, "создание кампании")
-    result = await run_ads_create_call(
+    result = await _run_ads_create_mutation(
         _create_demand_gen_campaign_via_sdk,
         ads_client,
         customer_id,
@@ -3946,7 +4078,7 @@ async def apply_create_video_campaign(
     )
     proposal = await _require_confirmation(confirm_store, confirmation_id, "create_video_campaign")
     _require_user_command(proposal, "создание кампании")
-    result = await run_ads_create_call(
+    result = await _run_ads_create_mutation(
         _create_video_campaign_via_sdk,
         ads_client,
         customer_id,

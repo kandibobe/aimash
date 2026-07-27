@@ -401,6 +401,18 @@ def fmt_mutation_summary(operation: str, params: dict, lang: str) -> str:
         if b and b.get("kind") == "geo":  # D6: реальное «было → станет»
             return f"Кампания «{c}» — гео: {_geo_before_str(b, False)} → {after}."
         return f"Кампания «{c}» — {after}. Заменит прежний гео-радиус."
+    if operation == "set_geo_proximity_by_coords":
+        try:
+            rs = f"{float(params.get('radius_km')):g}"
+        except (TypeError, ValueError):
+            rs = str(params.get("radius_km"))
+        lat = params.get("latitude")
+        lng = params.get("longitude")
+        after = f"радиус {rs} км вокруг точки ({lat}, {lng})"
+        b = _before(params)
+        if b and b.get("kind") == "geo":
+            return f"Кампания «{c}» — гео: {_geo_before_str(b, False)} → {after}."
+        return f"Кампания «{c}» — {after}. Заменит прежний гео-радиус."
     if operation == "set_geo_location":
         locs = ", ".join(str(x) for x in (params.get("locations") or []))
         cc = params.get("country_code", "")
@@ -618,6 +630,18 @@ def _mutation_summary_en(operation: str, params: dict, c: str) -> str:
         after = f"{rs} km radius around “{city}” ({cc})"
         b = _before(params)
         if b and b.get("kind") == "geo":  # D6: real before → after
+            return f"Campaign “{c}” — geo: {_geo_before_str(b, True)} → {after}."
+        return f"Campaign “{c}” — {after}. Replaces the prior geo-radius."
+    if operation == "set_geo_proximity_by_coords":
+        try:
+            rs = f"{float(params.get('radius_km')):g}"
+        except (TypeError, ValueError):
+            rs = str(params.get("radius_km"))
+        lat = params.get("latitude")
+        lng = params.get("longitude")
+        after = f"{rs} km radius around point ({lat}, {lng})"
+        b = _before(params)
+        if b and b.get("kind") == "geo":
             return f"Campaign “{c}” — geo: {_geo_before_str(b, True)} → {after}."
         return f"Campaign “{c}” — {after}. Replaces the prior geo-radius."
     if operation == "set_geo_location":

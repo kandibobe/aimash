@@ -137,6 +137,7 @@ MUTATION_TOOLS = {
     "resume_ad",
     "remove_ad",
     "set_geo_proximity",
+    "set_geo_proximity_by_coords",
     "set_geo_location",
     "set_bidding_strategy",
     "attach_audience",
@@ -475,6 +476,17 @@ class SetGeoProximity(BaseModel):
         if v and (len(v) != 2 or not v.isalpha()):
             raise ValueError("country_code — ISO-3166 alpha-2 (напр. UG) или пусто")
         return v
+
+
+class SetGeoProximityByCoords(BaseModel):
+    """Радиус-таргетинг кампании (proximity) по координатам (широта/долгота) + радиус.
+    Координаты — ПОЛЬЗОВАТЕЛЬСКИЕ (из геокодинга или прямого ввода), Google Ads сам принимает
+    latitude/longitude в микро-градусах. Предыдущие proximity-критерии удаляются (replace)."""
+
+    campaign: str  # обязателен: радиус-таргетинг привязывается к кампании
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    radius_km: float = Field(gt=0, le=2000)  # лимит Google Ads
 
 
 class SetGeoLocation(BaseModel):
@@ -1287,6 +1299,7 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "remove_campaign": RemoveCampaign,
     "remove_ad_group": RemoveAdGroup,
     "set_geo_proximity": SetGeoProximity,
+    "set_geo_proximity_by_coords": SetGeoProximityByCoords,
     "set_geo_location": SetGeoLocation,
     "set_bidding_strategy": SetBiddingStrategy,
     "attach_audience": AttachAudience,
@@ -1466,6 +1479,12 @@ TOOLS: list[dict] = [
         "country_code (ISO alpha-2) — ТОЛЬКО если страну назвал пользователь; не подставляй свою "
         "(дефолт подставит код из конфига деплоя).",
         SetGeoProximity,
+    ),
+    _tool(
+        "set_geo_proximity_by_coords",
+        "Радиус-таргетинг (км) по координатам для кампании. Укажи campaign, latitude, longitude и radius_km. "
+        "Для случаев, когда пользователь называет конкретные координаты (широту/долготу) вместо города.",
+        SetGeoProximityByCoords,
     ),
     _tool(
         "set_geo_location",

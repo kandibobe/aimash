@@ -35,8 +35,11 @@ dependencies = [
     "beautifulsoup4>=4.12",    # HTML→текст при чтении ссылок (ingest)
     "python-docx>=1.1",        # чтение .docx-брифов (ingest)
     "mcp>=1.25",               # MCP SDK (FastMCP) — Контур A (пивот Hermes): mcp_server/ по stdio,
-                               # READ-инструменты поверх ридеров. Аддитивно; денежное ядро не трогает.
-]
+                                   # READ-инструменты поверх ридеров. Аддитивно; денежное ядро не трогает.
+        "langfuse>=4.14",          # observability/трейсинг LLM-вызовов (OpenAI SDK через langfuse.openai).
+                                   # Захват model/tokens/стоимости, traces + sessions. Без этого —
+                                   # Langfuse-интеграция недоступна; core.langfuse_tracing молча no-op.
+    ]
 
 [project.optional-dependencies]
 dev = [

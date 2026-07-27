@@ -33,6 +33,7 @@ from ads.resolve import (
 from ads.service import read_state
 from core import i18n
 from confirm import render
+from confirm.xlsx_attachment import write_keywords_xlsx
 from confirm.store import ConfirmStore
 from core.config import normalize_customer_id
 from core.resilience import run_ads_read_call
@@ -50,6 +51,17 @@ MONEY_OPS_UI: frozenset[str] = frozenset(
         "create_gdn_campaign",
         "create_demand_gen_campaign",
         "create_video_campaign",
+    }
+)
+
+# Операции с ключами/минус-словами, для которых при >KW_INLINE_MAX генерируется .xlsx-вложение.
+_KEYWORD_XLSX_OPS: frozenset[str] = frozenset(
+    {
+        "add_keywords",
+        "remove_keywords",
+        "add_negative_keywords",
+        "remove_negative_keywords",
+        "add_negatives_to_shared_set",
     }
 )
 
@@ -71,6 +83,7 @@ class BuiltProposal:
     customer_id: str
     params: dict  # с аттестацией свежести: `_freshness` всегда, `_before` — только при успехе
     display: str  # баннер аккаунта + «было → станет» (+ предупреждение о внешнем контенте)
+    big_list_attachment: str | None = None  # путь к .xlsx-файлу с полным списком ключей/минус-слов
 
 
 def account_label(cid: str) -> str:
@@ -194,6 +207,23 @@ async def build_proposal(
     if external_context and operation in MONEY_OPS_UI:
         # Денежное предложение при внешнем контенте — усиленное предупреждение В СВОДКЕ (и в audit).
         display = i18n.t("external_context_money_warn", lang) + "\n\n" + display
+    # Большой список ключей/минус-слов (>KW_INLINE_MAX) — полный список во вложении .xlsx.
+    big_list_attachment: str | None = None
+    if operation in _KEYWORD_XLSX_OPS:
+        kws = params.get("keywords") or []
+        if isinstance(kws, list) and len(kws) > render.KW_INLINE_MAX:
+            mt = render.match_type_human(params.get("match_type", ""), lang)
+            camp = str(params.get("campaign") or params.get("shared_set") or "")
+            try:
+                big_list_attachment = write_keywords_xlsx(
+                    keywords=list(kws),
+                    operation=operation,
+                    match_type=mt,
+                    campaign=camp,
+                )
+            except Exception:
+                # xlsx — best-effort: сбой генерации не должен ронять показ черновика.
+                big_list_attachment = None
     await store.save_proposal(
         confirmation_id=cid,
         operation=operation,
@@ -209,4 +239,5 @@ async def build_proposal(
         customer_id=customer_id,
         params=params,
         display=display,
+        big_list_attachment=big_list_attachment,
     )

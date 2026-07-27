@@ -107,9 +107,21 @@ class Settings(BaseSettings):
     # операционно рискованнее, поэтому по умолчанию ВЫКЛ и включается осознанно в .env.
     openrouter_parsing_provider_sort: str = ""
 
+    # Prompt Injection Guard: легковесная LLM-проверка ВСЕХ внешних текстовых вводов
+    # перед передачей агенту. Gemini Flash 8B — быстро и дёшево (~$0.0001/запрос).
+    # True (дефолт) — fail-safe: guard включён. False — kill-switch (отладка/бюджет).
+    prompt_guard_enabled: bool = True
+    # Модель-классификатор для guard. Дешёвая и быстрая — каждый пользовательский
+    # ввод проходит через неё. Пусто ⇒ guard отключён (независимо от флага выше).
+    prompt_guard_model: str = "google/gemini-flash-8b-1.5"
+
     # Telegram
     telegram_bot_token: SecretStr = SecretStr("")
     telegram_whitelist_chat_ids: str = ""  # "123,456"
+    # Топик для confirm-гейта: все предложения мутаций дублируются сюда.
+    # Пусто ⇒ proposals идут только в чат, где была команда (legacy).
+    telegram_approvals_chat_id: str = ""  # ID группы (напр. "-1004443550627")
+    telegram_approvals_thread_id: str = ""  # ID топика (напр. "156")
     # Пер-пользовательская изоляция аккаунтов ЧТЕНИЯ (core.access, таблица account_access):
     #   auto (дефолт) — пустая таблица грантов ⇒ legacy-проход (все whitelisted видят весь
     #                   read-list; поведение одно-операторного режима), ПЕРВЫЙ грант включает

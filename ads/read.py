@@ -503,6 +503,42 @@ def read_campaign_config(
     )
 
 
+# ── §2.5-budget: живое чтение дневного бюджета кампании (для PolicyEngine) ──────────
+
+def campaign_budget(
+    client: GoogleAdsClient,
+    customer_id: str,
+    *,
+    campaign_name: str | None = None,
+    campaign_id: int | None = None,
+) -> float | None:
+    """Текущий дневной бюджет кампании в единицах валюты аккаунта (НЕ micros).
+
+    Принимает ИЛИ campaign_name, ИЛИ campaign_id (одно из двух обязательно).
+    Возвращает None если кампания не найдена. READ-ONLY, замок ensure_read_allowed.
+    """
+    ensure_read_allowed(customer_id)
+    cid = str(customer_id)
+    ga = client.get_service("GoogleAdsService")
+
+    if campaign_name is not None:
+        safe = gaql_escape(campaign_name)
+        where = f"campaign.name = '{safe}'"
+    elif campaign_id is not None:
+        where = f"campaign.id = {int(campaign_id)}"
+    else:
+        raise ValueError("campaign_name or campaign_id required")
+
+    q = (
+        "SELECT campaign_budget.amount_micros FROM campaign "
+        f"WHERE {where} AND campaign.status != 'REMOVED' LIMIT 1"
+    )
+    for row in ga.search(customer_id=cid, query=q):
+        micros = int(row.campaign_budget.amount_micros or 0)
+        return round_micros(micros)  # micros → единицы валюты
+    return None
+
+
 # ── §3-assets: список ассетов-расширений кампании (для показа/открепления) ────────────
 @dataclass
 class CampaignAssetRow:

@@ -153,6 +153,82 @@ def finding_dict(f) -> dict[str, Any]:
     }
 
 
+def mcc_summary_dict(s) -> dict[str, Any]:
+    """reports.mcc.MccSummary → dict для MCP (лёгкая сводка)."""
+    children = []
+    for cr in s.children:
+        ch = {
+            "account": child_account_dict(cr.account),
+            "totals": metrics_dict(cr.totals),
+        }
+        if cr.active_campaigns is not None:
+            ch["active_campaigns"] = int(cr.active_campaigns)
+        if cr.campaign_status:
+            ch["campaign_status"] = cr.campaign_status
+        if cr.health_score is not None:
+            ch["health"] = {
+                "score": int(cr.health_score),
+                "grade": cr.health_grade,
+                "at_risk": round(float(cr.health_at_risk), 2) if cr.health_at_risk else None,
+                "date": cr.health_date,
+                "stale": bool(cr.health_stale),
+            }
+        children.append(ch)
+
+    subtotals = [
+        {
+            "currency": st.currency,
+            "accounts": int(st.accounts),
+            "totals": metrics_dict(st.totals),
+        }
+        for st in s.subtotals
+    ]
+
+    return {
+        "manager_id": s.manager_id,
+        "period": {
+            "date_from": s.period.date_from.isoformat(),
+            "date_to": s.period.date_to.isoformat(),
+            "label": s.period.label,
+            "days": int(s.period.days),
+        },
+        "children": children,
+        "subtotals": subtotals,
+        "skipped": list(s.skipped),
+        "managers": list(s.managers),
+        "inactive": [child_account_dict(c) for c in s.inactive],
+        "errors": [{"account_id": eid, "reason": reason} for eid, reason in s.errors],
+    }
+
+
+def mcc_deep_dict(d) -> dict[str, Any]:
+    """reports.mcc.MccDeep → dict для MCP (сводка + totals каждого ребёнка без разбивок)."""
+    items = []
+    for ch, report in d.items:
+        items.append(
+            {
+                "account": child_account_dict(ch),
+                "totals": metrics_dict(report.totals),
+                "prev_totals": metrics_dict(report.prev_totals) if report.prev_totals else None,
+            }
+        )
+
+    return {
+        "manager_id": d.manager_id,
+        "period": {
+            "date_from": d.period.date_from.isoformat(),
+            "date_to": d.period.date_to.isoformat(),
+            "label": d.period.label,
+            "days": int(d.period.days),
+        },
+        "items": items,
+        "skipped": list(d.skipped),
+        "managers": list(d.managers),
+        "inactive": [child_account_dict(c) for c in d.inactive],
+        "errors": [{"account_id": eid, "reason": reason} for eid, reason in d.errors],
+    }
+
+
 def audit_payload(a) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """audit.engine.AuditResult → (findings, extra). extra несёт score/grade/итоги; findings — rows.
     families отдаём как есть (family→счётчики/at_risk/penalty). Тяжёлые срезы (report/audit_tables)

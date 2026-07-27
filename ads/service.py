@@ -66,6 +66,7 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
         "resume_ad",
         "remove_ad",
         "set_geo_proximity",
+        "set_geo_proximity_by_coords",
         "set_geo_location",
         "set_bidding_strategy",
         "attach_audience",
@@ -106,6 +107,7 @@ _DIFFABLE_OPS = frozenset(
         "resume_ad",
         "set_geo_location",
         "set_geo_proximity",
+        "set_geo_proximity_by_coords",
         "set_bidding_strategy",
     }
 )

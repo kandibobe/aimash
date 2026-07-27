@@ -133,6 +133,24 @@ tool_loop_guardrails:
     same_tool_failure: 8
     idempotent_no_progress: 5
 
+# Сжатие контекста — единственный потолок РОСТА одного промпта в долгоживущей сессии Telegram
+# (топик живёт неделями, история копится). Значения = дефолты апстрима, но ВЫПИСАНЫ ЯВНО
+# (Р7: смена дефолта в 0.x видна диффом, а не «стало иначе молча»). Схема сверена с pinned-
+# источником построчно (cli-config.yaml.example @ v2026.7.20): enabled:409, threshold:415,
+# target_ratio:425, protect_last_n:430, protect_first_n:450 — top-level ключ, НЕ под agent:.
+# ⚠️ Это НЕ потолок расхода на LLM: сжатие уменьшает РАЗМЕР одного промпта, а не число вызовов
+#    (потолок расхода — незакрытое предусловие 1 в agent:, его у нас пока нет).
+# ⚠️ НЕ ВЕРИФИЦИРОВАНО в этом заходе: суммаризацию гонит ВСПОМОГАТЕЛЬНАЯ модель
+#    (`auxiliary.compression`, по умолчанию Gemini Flash, автодетект кредов). Она читает
+#    обрезаемую историю топика = переписку клиента; распространяется ли на её вызовы
+#    `provider_routing.data_collection: deny` — проверить ПЕРЕД тем, как полагаться (Р2/И6).
+compression:
+  enabled: true          # дефолт апстрима, выписан явно (без него — ошибка на переполнении окна)
+  threshold: 0.50        # старт сжатия при 50% окна модели (дефолт)
+  target_ratio: 0.20     # хвост-остаток как доля threshold (дефолт)
+  protect_last_n: 20     # последние ~10 полных ходов не суммируются (дефолт)
+  protect_first_n: 3     # + первые 3 не-system сообщения топика (дефолт)
+
 # ⚠️ ЧАСТИ КЛЮЧЕЙ НИЖЕ НЕТ В `cli-config.yaml.example` — И ЭТО НЕ ЗНАЧИТ, ЧТО ИХ НЕТ.
 #    Пример апстрима — НИЖНЯЯ ГРАНИЦА, а не whitelist: `skills.write_approval`,
 #    `skills.guard_agent_created`, `skills.inline_shell`, `privacy.redact_pii`,
@@ -252,16 +270,16 @@ gateway:
       #    2) `group_allowed_chats` авторизует чат ЦЕЛИКОМ и делает это ПЕРВЫМ, до проверки лица
       #       (authz_mixin.py:344-358), то есть отменяет `group_allow_from`, а не дополняет его.
       #    Поэтому чат-лист снят, а К4 (HERMES_SPEC.md:315) выполняется перечислением людей.
-      allow_from: ["REPLACE_USER_ID"]        # ваш user id (@userinfobot) → TELEGRAM_ALLOWED_USERS
-      group_allow_from: ["REPLACE_USER_ID"]  # КТО командует в группе (fail-closed, К4)
-      # group_allowed_chats: ["REPLACE_SUPERGROUP_ID"]   # НЕ включать: см. п.2 выше
+      allow_from: ["787132457", "1674890775"]        # ваш user id (@userinfobot) → TELEGRAM_ALLOWED_USERS
+      group_allow_from: ["787132457", "1674890775"]  # КТО командует в группе (fail-closed, К4)
+      # group_allowed_chats: ["-1004443550627"]   # НЕ включать: см. п.2 выше
       require_mention: true                  # в группе бот отвечает только на упоминание
       guest_mode: false
       extra:
         # `group_topics` — наоборот, только в `extra`: единственный потребитель читает
         # `self.config.extra.get("group_topics", [])` (adapter.py:9023).
         group_topics:                                # привязка форум-топик → скил (как на скриншоте)
-          - chat_id: "REPLACE_SUPERGROUP_ID"
+          - chat_id: "-1004443550627"
             topics:
               - { name: "Настройка рекламы", thread_id: 0, skill: paid-growth }
               - { name: "Оптимизация ТикТок", thread_id: 0, skill: wash24-miyki24-agent }

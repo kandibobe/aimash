@@ -57,6 +57,17 @@ async def bootstrap_ads_layer() -> None:
     """
     # БД: критично. Ловим, чтобы дефолтный excepthook не напечатал DSN с паролем, и пробрасываем
     # санитизированную ошибку (fail-closed: сервер не поднимаем в полу-инициализированном виде).
+
+    # Langfuse observability — опциональный трейсинг LLM-вызовов (OpenAI SDK через langfuse.openai).
+    # Должен быть инициализирован ДО первого создания AsyncOpenAI (router._client).
+    # Fail-soft: без ключей → no-op, бот работает как раньше.
+    try:
+        from core.langfuse_tracing import init_langfuse
+
+        init_langfuse()
+    except Exception as e:  # noqa: BLE001
+        log.debug("langfuse: трейсинг не включён: %s", type(e).__name__)
+
     from db.session import assert_schema_at_head, init_db
 
     try:

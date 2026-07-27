@@ -44,6 +44,8 @@ from mcp_server.serialize import (
     child_account_dict,
     impression_share_dict,
     keyword_idea_dict,
+    mcc_deep_dict,
+    mcc_summary_dict,
     negatives_payload,
     recent_action_dict,
     search_term_dict,
@@ -469,6 +471,93 @@ async def keyword_ideas(
     return await _guarded(_work, account=str(account))
 
 
+# ── Helpers для MCC (резолв таймзон и пере-якорение периода) ─────────────────────
+
+
+async def _resolve_tz(client, account_id: str) -> str:
+    """best-effort: таймзона аккаунта (для нормализации окна MCC)."""
+    from ads.read import account_timezone
+
+    try:
+        return await run_ads_read_call(account_timezone, client, account_id, label=f"tz_{account_id}")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _resolve_period_for(tz: str):
+    """Построить period с пере-якорением на таймзону (best-effort)."""
+    from datetime import datetime, date as dt_date, timezone, timedelta
+    from reports.period import last_n_days as _lnd
+
+    if not tz:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        zi = ZoneInfo(tz)
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        now = datetime.now(zi)
+        return _lnd(30, today=dt_date(now.year, now.month, now.day))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# ── §8: MCC Multi-account Reporting ────────────────────────────────────────────────
+
+
+async def get_mcc_summary(
+    manager_id: str | None = None,
+    period_days: int = 30,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict[str, Any]:
+    """Сводный отчёт по всем дочерним аккаунтам MCC: метрики на каждый + валютные подытоги.
+    manager_id пуст ⇒ настроенный MCC. period_days — за сколько дней (7/14/30/90)."""
+
+    async def _work() -> dict[str, Any]:
+        from reports.mcc import build_mcc_summary_async
+
+        mid = manager_id or _default_manager()
+        client = await build_client_async(mid)
+        per = await _account_period(client, mid, date_from, date_to, period_days)
+        summary = await build_mcc_summary_async(
+            client, mid, per,
+            tz_of=_resolve_tz,
+            period_for=_resolve_period_for,
+        )
+        data = mcc_summary_dict(summary)
+        return ok(data)
+
+    return await _guarded(_work, account=manager_id or _default_manager(), manager=True)
+
+
+async def get_mcc_deep(
+    manager_id: str | None = None,
+    period_days: int = 30,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict[str, Any]:
+    """Детальный глубокий отчёт по всем дочерним аккаунтам MCC: totals + предыдущий период
+    + разбивки кампаний (как build_account_report_async на каждый дочерний). Только READ."""
+
+    async def _work() -> dict[str, Any]:
+        from reports.mcc import build_mcc_deep_async
+
+        mid = manager_id or _default_manager()
+        client = await build_client_async(mid)
+        per = await _account_period(client, mid, date_from, date_to, period_days)
+        deep = await build_mcc_deep_async(
+            client, mid, per,
+            tz_of=_resolve_tz,
+            period_for=_resolve_period_for,
+        )
+        data = mcc_deep_dict(deep)
+        return ok(data)
+
+    return await _guarded(_work, account=manager_id or _default_manager(), manager=True)
+
+
 # Реестр: имя инструмента → функция. server.py регистрирует по нему в FastMCP и проверяет И4
 # (READ_MCP_TOOLS ∩ MUTATION_TOOLS == ∅). Имена подобраны заведомо непересекающимися с 39
 # мутационными (agent.tools.schemas.MUTATION_TOOLS).
@@ -485,6 +574,8 @@ READ_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "get_account_audit": get_account_audit,
     "get_change_history": get_change_history,
     "keyword_ideas": keyword_ideas,
+    "get_mcc_summary": get_mcc_summary,
+    "get_mcc_deep": get_mcc_deep,
 }
 
 READ_MCP_TOOLS: frozenset[str] = frozenset(READ_TOOL_FUNCS)

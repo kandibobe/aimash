@@ -209,6 +209,9 @@ async def on_text(m: bm.Message, state: bm.FSMContext) -> None:
             return
     if await bm._llm_budget_or_reply(m):  # C3: пер-юзер дневной потолок LLM (fail-closed)
         return
+    # Prompt Injection Guard: проверка ДО агента (fail-open при сбое)
+    if await bm._prompt_guard_or_reply(m, text):
+        return
     ctx = bm._build_agent_context(m.chat.id)  # C1/C3: контекст диалога (последняя кампания/история)
     async with bm.ux.typing_action(m):  # «печатает…» пока модель парсит команду
         res = await bm.handle_command(text, chat_id=m.chat.id, context=ctx)

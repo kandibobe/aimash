@@ -42,6 +42,12 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "⏳ Too frequent — wait a couple of seconds.",
     },
     "rejected": {"ru": "❌ Отменено", "en": "❌ Cancelled"},
+    "prompt_guard_blocked": {
+        "ru": "⚠️ <b>Сообщение заблокировано</b> фильтром безопасности.\n"
+        "Если это ошибка — обратись к администратору.",
+        "en": "⚠️ <b>Message blocked</b> by the security filter.\n"
+        "If this is a mistake, please contact the administrator.",
+    },
     # Кнопки/статусы выгрузки результата /audit (bot.keyboards.audit_export_kb)
     "audit_export_btn_sheets": {"ru": "📄 В Google Sheets", "en": "📄 To Google Sheets"},
     "audit_export_btn_xlsx": {"ru": "📊 Скачать .xlsx", "en": "📊 Download .xlsx"},

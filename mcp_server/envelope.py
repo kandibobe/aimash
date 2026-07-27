@@ -69,6 +69,7 @@ def ok(
     limit: int = DEFAULT_LIMIT,
     extra: dict[str, Any] | None = None,
     reader_limit: int | None = None,
+    compact: bool = False,
 ) -> dict[str, Any]:
     """Успешный конверт. `extra` — доп. поля верхнего уровня (score/grade/currency для аудита);
     его числа тоже попадают в `code_numbers`.
@@ -77,7 +78,11 @@ def ok(
     change_history 20). Когда `total >= reader_limit`, ридер упёрся в свой потолок → `reader_capped=
     true` и конверт эхо-несёт `reader_limit`: истинный размер набора БОЛЬШЕ `total_rows`, следующим
     offset НЕ добирается (в отличие от `truncated`). None ⇒ у ридера нет потолка либо он выражен
-    текстом в `note` (Breakdown) ⇒ `reader_capped=false`, без дублирования сигнала."""
+    текстом в `note` (Breakdown) ⇒ `reader_capped=false`, без дублирования сигнала.
+
+    `compact` — если True, применяет compact_envelope (удаление null, обрезка строк, ограничение
+    rows до 100). По умолчанию False — включать для инструментов, возвращающих много данных
+    (get_search_terms, get_account_audit)."""
     from audit.factguard import collect_numbers
 
     page, total, truncated = paginate(rows, offset=offset, limit=limit)
@@ -98,6 +103,11 @@ def ok(
     }
     if reader_capped:
         env["reader_limit"] = int(reader_limit)  # сколько строк тянул ридер — модель видит потолок
+
+    if compact:
+        from mcp_server.compact import compact_envelope
+
+        env = compact_envelope(env)
     return env
 
 

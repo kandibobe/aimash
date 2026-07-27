@@ -9,8 +9,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-import httpx
-from openai import AsyncOpenAI
+from core.langfuse_tracing import is_enabled as _lf_enabled, get_client as _lf_client
 
 from core.config import _VALID_PROVIDER_SORTS, settings
 from core.resilience import (
@@ -37,6 +36,9 @@ ROLE_MODELS = {
     "extract": settings.llm_extract or settings.llm_parsing,
     # §20 досье, reduce-фаза: ОДИН синтез связной прозы на сайт ⇒ сильная модель (пусто ⇒ keywords).
     "dossier": settings.llm_dossier or settings.llm_keywords or settings.llm_parsing,
+    # Prompt Injection Guard: своя модель (дешёвая, быстрая), не зависит от основных ролей.
+    # Пусто в .env ⇒ guard отключён (prompt_guard_enabled не отменяет отсутствие модели).
+    "guard": settings.prompt_guard_model or "",
 }
 
 # Потолок генерации по ролям (явный max_tokens). Зачем ЯВНО: без max_tokens OpenRouter
@@ -55,6 +57,7 @@ ROLE_MAX_TOKENS = {
     # Дефолт роли — страховка; clients/dossier_* всё равно передают max_tokens ЯВНО (R13).
     "extract": settings.llm_max_tokens_extract,
     "dossier": settings.llm_max_tokens_dossier,
+    "guard": 4,  # одно слово SAFE/INJECTION
 }
 
 
@@ -159,11 +162,16 @@ def effective_model(role: str = "parsing") -> str:
 # битый клиент. Ключ читается из SecretStr в момент конструирования и в логи/repr не попадает (§5).
 # max_retries=0 + явный timeout: tenacity (core.resilience.call_llm) — ЕДИНСТВЕННЫЙ авторитет
 # ретраев, иначе встроенные 2 ретрая SDK вложились бы в 3 попытки tenacity (до 9 HTTP-попыток).
-_client_cache: AsyncOpenAI | None = None
+# Кэш AsyncOpenAI клиента — лениво импортируется из langfuse.openai (если трейсинг включён)
+# или из openai напрямую. langfuse.openai — прозрачный прокси: тот же API + авто-захват
+# model/tokens/стоимости в Langfuse traces. Без Langfuse (нет ключей) — обычный openai.AsyncOpenAI.
+# Импорт ВНУТРИ _client(), а не на уровне модуля: Langfuse должен быть инициализирован ДО
+# первого импорта langfuse.openai (иначе прокси инициализируется без клиента → no-op).
+_client_cache: Any = None
 _client_loop: asyncio.AbstractEventLoop | None = None
 
 
-def _client() -> AsyncOpenAI:
+def _client() -> Any:
     global _client_cache, _client_loop
     key = settings.openrouter_api_key.get_secret_value()
     if not key:
@@ -173,7 +181,20 @@ def _client() -> AsyncOpenAI:
     except RuntimeError:  # вне event loop (не наш рантайм-путь) — не кэшируем по loop
         loop = None
     if _client_cache is None or _client_loop is not loop:
-        _client_cache = AsyncOpenAI(
+        import httpx
+
+        if _lf_enabled():
+            # Langfuse-обёрнутый AsyncOpenAI — автоматический захват model/tokens/стоимости
+            # в traces + все OpenAI-вызовы становятся generation-спанами.
+            from langfuse.openai import AsyncOpenAI as _LFAsyncOpenAI
+
+            _AsyncOpenAI = _LFAsyncOpenAI
+        else:
+            from openai import AsyncOpenAI as _PlainAsyncOpenAI
+
+            _AsyncOpenAI = _PlainAsyncOpenAI
+
+        _client_cache = _AsyncOpenAI(
             api_key=key,
             base_url=settings.openrouter_base_url,
             max_retries=0,  # ретраи — только через tenacity (core.resilience), без вложенности
@@ -198,11 +219,18 @@ async def chat(
     tools: list[dict[str, Any]] | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    langfuse_ctx: dict[str, Any] | None = None,
 ) -> Any:
     """Один вызов модели. `role` выбирает модель из ROLE_MODELS; `model` — явное переопределение.
 
     Возвращает message ответа (с .content и/или .tool_calls). Тул-исполнение — НЕ здесь:
     mutation-инструменты только предлагают proposal, выполняет код после «да».
+
+    langfuse_ctx: опциональный словарь с контекстом трейсинга —
+        session_id: str  — Telegram chat_id (группировка сообщений в сессии)
+        user_id: str     — Telegram user_id (атрибуция стоимости)
+        tags: list[str]  — теги для фильтрации ('parsing', 'copy', 'mutation')
+        metadata: dict   — произвольные метаданные (account_id и т.д.)
     """
     chosen = model or effective_model(role)  # явный model > рантайм-override > дефолт роли
     kwargs: dict[str, Any] = {"messages": messages}  # model проставляется в _call (для fallback)
@@ -238,35 +266,59 @@ async def chat(
     kwargs["extra_body"] = extra_body
 
     async def _call(model_slug: str) -> Any:
-        # call_llm: zero-arg фабрика — tenacity создаёт свежую корутину на каждую попытку.
-        # label → лог запроса к LLM (модель/роль, без секретов; ТЗ §15).
-        call_kwargs = {**kwargs, "model": _with_price_floor(model_slug)}
-        # temperature — только если модель его принимает (Opus 4.7+/Sonnet 5/Fable 5 отклоняют).
-        if temperature is not None and not _omits_sampling(model_slug):
-            call_kwargs["temperature"] = temperature
-        resp = await call_llm(
-            lambda: _client().chat.completions.create(**call_kwargs), label=f"{model_slug}/{role}"
-        )
-        # Учёт расхода (токены + реальная стоимость OpenRouter) для /balance. Наблюдаемость не
-        # должна ронять денежный путь — любую проблему с usage глотаем (record() и сам в try).
-        try:
-            from core.usage import record
+            # call_llm: zero-arg фабрика — tenacity создаёт свежую корутину на каждую попытку.
+            # label → лог запроса к LLM (модель/роль, без секретов; ТЗ §15).
 
-            record(role, getattr(resp, "usage", None))
-        except Exception:  # noqa: BLE001
-            pass
-        choice = resp.choices[0]
-        msg = choice.message
-        # finish_reason нужен вызывающим, чья корректность ЗАВИСИТ от полноты ответа: обрыв по
-        # max_tokens отдаёт валидный, но НЕПОЛНЫЙ текст, и fail-open-парсер молча решает, что
-        # «модель ничего не нашла» (keywords/filter.py: все ключи «релевантны»). Кладём на message
-        # (SDK-модель допускает extra-поля); присвоение под try — контракт chat() не должен падать
-        # из-за наблюдаемости. Читать — через finish_reason(msg).
-        try:
-            msg.finish_reason = getattr(choice, "finish_reason", None) or ""
-        except Exception:  # noqa: BLE001 — не наш путь (чужой объект сообщения)
-            pass
-        return msg
+            # Langfuse-контекст: session_id/user_id/tags/metadata — обогащают авто-трейс.
+            # Делаем ДО вызова API, чтобы langfuse.openai прикрепил generation к правильной трассе.
+            # Fail-soft: любая проблема с трейсингом глотается — не мешаем денежному пути.
+            if langfuse_ctx and _lf_enabled():
+                try:
+                    from langfuse import get_client as _get_lf
+
+                    lf = _get_lf()
+                    if lf is not None:
+                        update_kwargs: dict[str, Any] = {}
+                        if "session_id" in langfuse_ctx:
+                            update_kwargs["session_id"] = langfuse_ctx["session_id"]
+                        if "user_id" in langfuse_ctx:
+                            update_kwargs["user_id"] = langfuse_ctx["user_id"]
+                        if "tags" in langfuse_ctx:
+                            update_kwargs["tags"] = langfuse_ctx["tags"]
+                        if "metadata" in langfuse_ctx:
+                            update_kwargs["metadata"] = langfuse_ctx["metadata"]
+                        if update_kwargs:
+                            lf.update_current_trace(**update_kwargs)
+                except Exception:  # noqa: BLE001 — трейсинг не должен ронять LLM-вызов
+                    pass
+
+            call_kwargs = {**kwargs, "model": _with_price_floor(model_slug)}
+            # temperature — только если модель его принимает (Opus 4.7+/Sonnet 5/Fable 5 отклоняют).
+            if temperature is not None and not _omits_sampling(model_slug):
+                call_kwargs["temperature"] = temperature
+            resp = await call_llm(
+                lambda: _client().chat.completions.create(**call_kwargs), label=f"{model_slug}/{role}"
+            )
+            # Учёт расхода (токены + реальная стоимость OpenRouter) для /balance. Наблюдаемость не
+            # должна ронять денежный путь — любую проблему с usage глотаем (record() и сам в try).
+            try:
+                from core.usage import record
+
+                record(role, getattr(resp, "usage", None))
+            except Exception:  # noqa: BLE001
+                pass
+            choice = resp.choices[0]
+            msg = choice.message
+            # finish_reason нужен вызывающим, чья корректность ЗАВИСИТ от полноты ответа: обрыв по
+            # max_tokens отдаёт валидный, но НЕПОЛНЫЙ текст, и fail-open-парсер молча решает, что
+            # «модель ничего не нашла» (keywords/filter.py: все ключи «релевантны»). Кладём на message
+            # (SDK-модель допускает extra-поля); присвоение под try — контракт chat() не должен падать
+            # из-за наблюдаемости. Читать — через finish_reason(msg).
+            try:
+                msg.finish_reason = getattr(choice, "finish_reason", None) or ""
+            except Exception:  # noqa: BLE001 — не наш путь (чужой объект сообщения)
+                pass
+            return msg
 
     try:
         return await _call(chosen)

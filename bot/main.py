@@ -864,6 +864,45 @@ async def _llm_budget_or_reply(message) -> bool:
         return True
 
 
+async def _prompt_guard_or_reply(message, text: str) -> bool:
+    """Prompt Injection Guard: легковесная LLM-проверка ПЕРЕД агентом.
+    INJECTION → блокируем сообщение, возвращаем True. SAFE/ошибка → False.
+    Fail-open при сбое guard-модели: лучше пропустить под confirm-гейт,
+    чем заблокировать легитимную работу.
+    Guard выключен (prompt_guard_enabled=False или пустая модель) → всегда False.
+    """
+    if not settings.prompt_guard_enabled or not settings.prompt_guard_model:
+        return False
+
+    from core.prompt_guard import check_message
+
+    try:
+        api_key = settings.openrouter_api_key.get_secret_value()
+        if not api_key:
+            return False  # нет ключа → guard недоступен (fail-open)
+        result = await check_message(
+            text,
+            api_key=api_key,
+            base_url=settings.openrouter_base_url,
+            model=settings.prompt_guard_model,
+        )
+        if not result.allowed:
+            log.warning(
+                "prompt_guard: ЗАБЛОКИРОВАНА инъекция от chat_id=%s (первые 100 симв: %.100r)",
+                message.chat.id,
+                text.strip(),
+            )
+            await message.answer(
+                i18n.t("prompt_guard_blocked"),
+                parse_mode=ParseMode.HTML,
+            )
+            return True
+        return False
+    except Exception as e:
+        log.warning("prompt_guard: сбой гарда (%s) — пропускаем (fail-open)", type(e).__name__)
+        return False
+
+
 async def _notify_admins_started(bot) -> None:
     """B1 (§15): однократный readiness-пинг админам (ADMIN_CHAT_IDS) на УСПЕШНОМ старте — миграция
     HEAD, число аккаунтов на чтение, активная parse-модель. Живой сигнал деплоя: не пришёл после
@@ -1813,6 +1852,8 @@ async def _present_proposal(
             reply_markup=confirm_markup,
             parse_mode=ParseMode.HTML,
         )
+        # AD.4: для keyword-предложений тоже редирект в approvals
+        await _forward_to_approvals(message, display, confirm_markup, display)
         return
     rendered = i18n.t(
         "proposal_pending", summary=texts.esc(display), ttl_h=settings.proposal_ttl_hours
@@ -1829,11 +1870,57 @@ async def _present_proposal(
             reply_markup=confirm_markup,
             parse_mode=ParseMode.HTML,
         )
+    # AD.4: редирект confirm-карточки в #approvals-and-audits (если настроен).
+    # Текущий чат получает «Предложение отправлено в #approvals-and-audits»,
+    # а сам confirm с кнопками ✅/❌ — в назначенный топик.
+    await _forward_to_approvals(message, rendered, confirm_markup, display)
+
+
+async def _forward_to_approvals(
+    message: Message,
+    rendered: str,
+    confirm_markup: InlineKeyboardMarkup,
+    display: str,
+) -> None:
+    """Если настроен approvals-топик — отправить confirm-карточку туда."""
+    approvals_chat = settings.telegram_approvals_chat_id.strip()
+    if not approvals_chat:
+        return  # не настроен — legacy-поведение (карточка в том же чате)
+
+    approvals_thread = settings.telegram_approvals_thread_id.strip()
+    try:
+        target_chat_id = int(approvals_chat)
+    except ValueError:
+        log.warning("approvals: невалидный chat_id %r — пропускаем", approvals_chat)
+        return
+
+    # Если мы УЖЕ в approvals-топике — не дублируем (избегаем петли)
+    current_chat_id = message.chat.id
+    current_thread = getattr(message, "message_thread_id", None)
+    if current_chat_id == target_chat_id and str(current_thread or "") == approvals_thread:
+        return
+
+    # Отправляем карточку в approvals-топик
+    try:
+        send_kwargs: dict = {
+            "chat_id": target_chat_id,
+            "text": rendered,
+            "reply_markup": confirm_markup,
+            "parse_mode": ParseMode.HTML,
+        }
+        if approvals_thread:
+            send_kwargs["message_thread_id"] = int(approvals_thread)
+        await message.bot.send_message(**send_kwargs)
+        log.info(
+            "approvals: карточка отправлена в chat=%s thread=%s",
+            target_chat_id, approvals_thread or "—",
+        )
+    except Exception as e:
+        log.warning("approvals: не удалось отправить карточку: %s", type(e).__name__)
+        # Не роняем основной поток — карточка уже в текущем чате
 
 
 # AD.3: отложенные мутации, ждущие выбора аккаунта (неоднозначно: активный не закреплён + живых >1).
-# Стэш пер-чат; колбэк пикера аккаунта (target='mutate', bot/handlers/reports.py) резолвит аккаунт и
-# доигрывает _present_proposal на выбранном. TTL — на случай, если пикер бросили (stale → «повтори»).
 _PENDING_MUT: dict[int, dict] = {}
 _PENDING_MUT_TTL_S = 600.0
 
@@ -6821,6 +6908,12 @@ async def _run_task_with_context(
 ) -> None:
     """Задача + СПРАВОЧНЫЙ КОНТЕНТ (из файла/ссылки) → агент → роутинг исхода (как on_text).
     Мутации всё равно за confirm-гейтом — контент это данные, не команды."""
+    # Prompt Injection Guard: внешний контент — главная поверхность атаки.
+    # Проверяем И instruction, И context_text (содержимое файла/URL).
+    if await _prompt_guard_or_reply(m, instruction):
+        return
+    if context_text and await _prompt_guard_or_reply(m, context_text):
+        return
     if await _llm_budget_or_reply(m):  # C3: пер-юзер дневной потолок LLM (fail-closed)
         return
     ctx = _build_agent_context(m.chat.id)  # C1/C3: последняя кампания/аккаунт + история реплик
