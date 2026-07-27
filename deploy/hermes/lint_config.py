@@ -50,6 +50,7 @@ PIN_PATH = _HERE / "PIN.json"
 # Каталог слагов OpenRouter — публичный, без ключа. Таймаут короткий: линт зовут из pre-commit,
 # и сеть здесь удобство, а не условие (нет каталога ⇒ предупреждение, см. check_model_slugs).
 _OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+_ENDPOINTS_URL_TMPL = "https://openrouter.ai/api/v1/models/{slug}/endpoints"
 _CATALOG_TIMEOUT = 6.0
 
 # ── Аттестации ────────────────────────────────────────────────────────────────
@@ -443,6 +444,12 @@ def check_hardening(cfg: dict, rep: Report) -> None:
         "skills.write_approval": (True, "дефолт false = агент правит свои постоянные инструкции"),
         "skills.guard_agent_created": (True, "дефолт false"),
         "skills.inline_shell": (False, "скил исполняет shell из своего markdown в обход approvals"),
+        "provider_routing.require_parameters": (
+            True,
+            "правило 13: без него OpenRouter МОЛЧА срежет tools/reasoning у провайдера, который "
+            "их не умеет — агент «отвечает текстом» вместо вызова MCP, и это читается как "
+            "деградация модели, а не как сбой конфига",
+        ),
     }
     for path, (want, why) in expected.items():
         val = _get(cfg, path)
@@ -546,6 +553,99 @@ def check_model_slugs(cfg: dict, rep: Report) -> None:
             )
 
 
+def fetch_endpoint_params(slug: str, timeout: float = _CATALOG_TIMEOUT) -> list[set[str]] | None:
+    """`supported_parameters` по каждому эндпоинту модели, или `None`, если список не достался.
+
+    Тот же публичный эндпоинт без ключа, что и каталог. Отдельная функция по той же причине:
+    тест её подменяет и проверяет правило офлайн.
+    """
+    url = _ENDPOINTS_URL_TMPL.format(slug=slug)
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    endpoints = data.get("endpoints") if isinstance(data, dict) else None
+    if not isinstance(endpoints, list):
+        return None
+    return [
+        {str(p) for p in (ep.get("supported_parameters") or [])}
+        for ep in endpoints
+        if isinstance(ep, dict)
+    ]
+
+
+def check_default_model_endpoints(cfg: dict, rep: Report) -> None:
+    """Слаг живой, а вызвать модель всё равно нельзя: ни один её провайдер не берёт наши параметры.
+
+    Второй инцидент 27.07.2026, тем же вечером и с тем же симптомом «бот молчит», но другой
+    причиной — почему `check_model_slugs` его и не поймал: `deepseek/deepseek-chat` в каталоге
+    ЕСТЬ. Не оказалось эндпоинта, умеющего `reasoning`: `agent.reasoning_effort` задан, Hermes
+    шлёт параметр всегда, а `provider_routing.require_parameters: true` (правило 13) велит
+    OpenRouter отбрасывать провайдера, не поддерживающего ЛЮБОЙ переданный параметр. Отбросив
+    всех троих, он отвечает `HTTP 404 No endpoints found that can handle the requested
+    parameters`. Замерено живым ключом: `chat+tools` → 200, `chat+tools+reasoning` → 404,
+    `v4-flash+tools+reasoning` → 200.
+
+    Проверяется только глобальный дефолт: `auxiliary.*` инструментов не получают, и требовать
+    от них `tools` значит краснеть на ролях, которым это не нужно.
+    """
+    root = _as_dict(_get(cfg, "model"))
+    model = str(root.get("default") or "").strip()
+    provider = str(root.get("provider") or "").strip().lower()
+    if not model or provider != "openrouter" or model.count("/") != 1:
+        return  # эти случаи разбирает check_model_slugs — второй жалобы на то же не нужно
+
+    required = {"tools"}
+    effort = _get(cfg, "agent.reasoning_effort")
+    if effort is not _MISSING and str(effort).strip().lower() not in ("", "none"):
+        required.add("reasoning")
+
+    endpoints = fetch_endpoint_params(model)
+    if endpoints is None:
+        rep.warn(
+            "model.default",
+            f"список эндпоинтов {model!r} не достался — совместимость с {sorted(required)} "
+            "НЕ проверена; прогнать линт с сетью до деплоя",
+        )
+        return
+    if any(required <= params for params in endpoints):
+        return
+
+    have = set().union(*endpoints) if endpoints else set()
+    rep.error(
+        "model.default",
+        f"{model!r}: ни один из {len(endpoints)} провайдеров OpenRouter не поддерживает "
+        f"{sorted(required - have) or sorted(required)} ⇒ при require_parameters: true это "
+        "HTTP 404 «No endpoints found» на КАЖДОМ ходу с инструментами, а не деградация качества",
+    )
+
+
+def check_no_model_routing(cfg: dict, rep: Report) -> None:
+    """`model_routing` в нашем конфиге запрещён — не по вкусу, а потому что он ломает прод.
+
+    Смарт-роутинг Hermes (`agent/router.py`) уводит в тир `v3` ЛЮБОЙ ход, где агенту доступны
+    инструменты, то есть у нас каждый. Тиры зашиты на старые модели DeepSeek, а у них нет
+    провайдера с `reasoning` — при обязательном `require_parameters: true` это HTTP 404 на всё.
+    27.07.2026 блок клал прод дважды за день: сперва со слагом `deepseek/deepseek-v3` из
+    докстринга (HTTP 400), потом с валидным `deepseek/deepseek-chat` (HTTP 404).
+
+    Выключателя у роутера нет: `smart_model_routing.enabled` пишет только setup-wizard, а
+    рантайм смотрит исключительно на наличие ключа `model_routing` (`agent/router.py:287`:
+    `routing = config.get("model_routing", {})` → пусто ⇒ `(None, None)` ⇒ дефолт). Поэтому
+    единственная рабочая форма «выключено» — отсутствие ключа, и проверять надо именно её.
+    """
+    if _get(cfg, "model_routing") is _MISSING:
+        return
+    rep.error(
+        "model_routing",
+        "блок присутствует: Hermes перебьёт дефолт на свои тиры (v3/r1) на каждом ходу с "
+        "инструментами. Выключателя нет — `smart_model_routing.enabled` рантайм не читает; "
+        "снять ключ целиком",
+    )
+
+
 def check_no_secrets(raw_text: str, rep: Report) -> None:
     """Правило 5. Линт печатает ТОЛЬКО имя формы, никогда — совпавший текст."""
     for pattern, what in _SECRET_SHAPES:
@@ -641,6 +741,8 @@ def lint(cfg: dict, raw_text: str = "", profile: str = "host-a") -> Report:
         check_toolsets,
         check_hardening,
         check_model_slugs,
+        check_default_model_endpoints,
+        check_no_model_routing,
     ):
         check(cfg, rep)
     for check in _PROFILE_CHECKS.get(profile, ()):

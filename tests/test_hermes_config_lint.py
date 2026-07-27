@@ -68,13 +68,30 @@ _CATALOG_STUB = frozenset(
         "google/gemini-3.1-flash-lite",
         "deepseek/deepseek-v4-flash",
         "deepseek/deepseek-v4-pro",
+        "deepseek/deepseek-chat",
     }
 )
+
+# Наборы `supported_parameters` по эндпоинтам — списаны с живого ответа OpenRouter 27.07.2026.
+# Важна ровно одна асимметрия: у `deepseek-chat` НИ ОДИН провайдер не берёт `reasoning`, и
+# именно на ней прод отвечал 404, хотя слаг в каталоге есть.
+_ENDPOINTS_STUB = {
+    "openai/gpt-5.6-terra": [{"tools", "reasoning", "reasoning_effort", "include_reasoning"}],
+    "deepseek/deepseek-v4-flash": [{"tools", "reasoning", "reasoning_effort"}],
+    "deepseek/deepseek-v4-pro": [{"tools", "reasoning", "reasoning_effort"}],
+    "google/gemini-3.1-flash-lite": [{"tools", "reasoning"}],
+    "deepseek/deepseek-chat": [{"tools", "tool_choice"}, {"tools", "response_format"}],
+}
 
 
 @pytest.fixture(autouse=True)
 def _offline_model_catalog(monkeypatch):
     monkeypatch.setattr(_LINT, "fetch_openrouter_catalog", lambda *_a, **_kw: set(_CATALOG_STUB))
+    monkeypatch.setattr(
+        _LINT,
+        "fetch_endpoint_params",
+        lambda slug, *_a, **_kw: [set(s) for s in _ENDPOINTS_STUB.get(slug, [])] or None,
+    )
 
 
 @pytest.mark.parametrize(
@@ -150,6 +167,7 @@ def test_lint_reports_display_tool_progress_typo():
     [
         ("skills.inline_shell", "правило 14 / К1: RCE из SKILL.md мимо approvals"),
         ("memory.user_profile_enabled", "профиль пользователя один на всю команду"),
+        ("provider_routing.require_parameters", "правило 13: tools/reasoning срежутся МОЛЧА"),
     ],
 )
 def test_lint_reddens_when_a_hardening_key_disappears(dotted, why):
@@ -255,6 +273,74 @@ def test_lint_warns_but_does_not_redden_without_network(monkeypatch):
     assert not offline_model_errors, f"офлайн дал ERROR: {[str(f) for f in offline_model_errors]}"
     assert any("НЕ проверены" in f.message for f in rep_offline.warnings), (
         "офлайн обязан сказать вслух, что слаги не проверены — молчание читается как «проверено»"
+    )
+
+
+def test_lint_reddens_when_the_default_model_has_no_reasoning_provider():
+    """Второй инцидент 27.07.2026: слаг ЖИВОЙ, а вызвать модель нельзя.
+
+    `deepseek/deepseek-chat` есть в каталоге — поэтому `check_model_slugs` его пропускает и
+    поймать обязано отдельное правило. Ни один из трёх его провайдеров не берёт `reasoning`, а
+    `agent.reasoning_effort` задан ⇒ Hermes шлёт параметр всегда ⇒ `require_parameters: true`
+    отбрасывает всех ⇒ `HTTP 404 No endpoints found` на каждом ходу. Замерено живым ключом:
+    `chat+tools` → 200, `chat+tools+reasoning` → 404.
+    """
+    cfg = {
+        "model": {"provider": "openrouter", "default": "deepseek/deepseek-chat"},
+        "agent": {"reasoning_effort": "medium"},
+    }
+    rep = _LINT.Report()
+    _LINT.check_default_model_endpoints(cfg, rep)
+    assert any(f.path == "model.default" for f in rep.errors), (
+        f"модель без reasoning-провайдера прошла мимо линта: {[str(f) for f in rep.findings]}"
+    )
+
+    # Отрицательный контроль ДВОЙНОЙ: правило обязано молчать и на модели с reasoning, и на той
+    # же `deepseek-chat`, когда reasoning не запрашивается — иначе оно ругается на всё подряд.
+    for cfg_ok in (
+        {
+            "model": {"provider": "openrouter", "default": "deepseek/deepseek-v4-flash"},
+            "agent": {"reasoning_effort": "medium"},
+        },
+        {
+            "model": {"provider": "openrouter", "default": "deepseek/deepseek-chat"},
+            "agent": {"reasoning_effort": "none"},
+        },
+    ):
+        rep_ok = _LINT.Report()
+        _LINT.check_default_model_endpoints(cfg_ok, rep_ok)
+        assert not rep_ok.findings, (
+            f"ложное срабатывание на {cfg_ok}: {[str(f) for f in rep_ok.findings]}"
+        )
+
+
+def test_lint_forbids_model_routing_outright():
+    """`model_routing` запрещён как блок, а не «с правильными слагами».
+
+    27.07.2026 он клал прод дважды: сперва мёртвым `deepseek-v3` (400), потом живым
+    `deepseek-chat` (404). Оба раза тир выбирался на КАЖДОМ ходу с инструментами. Проверяем
+    именно присутствие ключа, потому что рантайм Hermes смотрит только на него:
+    `smart_model_routing.enabled` пишет setup-wizard, и никто его не читает.
+    """
+    cfg = {
+        "model": {"provider": "openrouter", "default": "deepseek/deepseek-v4-flash"},
+        "model_routing": {"v3": {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"}},
+    }
+    rep = _LINT.Report()
+    _LINT.check_no_model_routing(cfg, rep)
+    assert any(f.path == "model_routing" for f in rep.errors), (
+        "блок с ЖИВЫМИ слагами всё равно обязан быть ошибкой — ломает не слаг, а сам роутинг"
+    )
+
+    rep_off = _LINT.Report()
+    _LINT.check_no_model_routing({"model": cfg["model"]}, rep_off)
+    assert not rep_off.findings, "без блока правило обязано молчать"
+
+    # И форма «выключено» через несуществующий выключатель НЕ считается выключением.
+    rep_fake = _LINT.Report()
+    _LINT.check_no_model_routing({**cfg, "smart_model_routing": {"enabled": False}}, rep_fake)
+    assert rep_fake.errors, (
+        "smart_model_routing.enabled не выключает роутинг — линт не должен верить"
     )
 
 
