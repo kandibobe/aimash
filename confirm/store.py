@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
-from sqlalchemy import CursorResult, func, select, update
+from sqlalchemy import CursorResult, func, or_, select, update
 
 from core.config import settings
 from core.logging import log, redact_text
@@ -85,6 +85,37 @@ def _ttl_boundary() -> datetime:
     нечего — отказ, а не проход (правило 10). Выключателя тут нет намеренно: «отключить срок жизни
     подтверждения» — это и есть та дыра, ради которой эпик заведён."""
     return datetime.now(timezone.utc) - timedelta(hours=int(settings.proposal_ttl_hours))
+
+
+def effective_ttl_hours(risk_tier: str | None = None) -> int:
+    """Срок жизни согласия, который РЕАЛЬНО применит CAS, — чтобы карточка печатала его, а не общий.
+
+    Нужна ровно потому, что тир укорачивает TTL: показать «действует 24 ч» и отказать через 2 —
+    это не строгость, а обман. `min` (а не выбор ветки) держит ту же монотонность, что и `_l3_fresh`:
+    значение L3-настройки БОЛЬШЕ общего срока жизнь не удлиняет. Источник у печати и у CAS один —
+    `_l3_fresh()` зовёт эту же функцию."""
+    ttl = int(settings.proposal_ttl_hours)
+    if risk_tier == "L3":
+        return min(ttl, int(settings.proposal_ttl_hours_l3))
+    return ttl
+
+
+def _l3_fresh():
+    """ДОПОЛНИТЕЛЬНОЕ условие возраста для черновиков тира L3 (Волна 5): у них согласие живёт
+    `PROPOSAL_TTL_HOURS_L3`, а не общий срок.
+
+    Конъюнкт, а не замена `_ttl_boundary()`, и это важно в трёх отношениях. (1) Строгость
+    монотонна по построению: общий потолок остаётся в том же WHERE, поэтому значение L3-настройки
+    БОЛЬШЕ общего срок не удлиняет — «ослабить TTL, подкрутив тир» невозможно. (2) Условие остаётся
+    внутри CAS-запроса: возраст проверяет хранилище одним UPDATE, а не код между выборкой и записью
+    (TOCTOU — см. мета-гарды `tests/test_confirm_ttl_cas.py`). (3) NULL (строки до миграции 0037)
+    через `coalesce` попадает в не-L3 ветку: укоротить задним числом чужое согласие, которое на
+    момент показа было действительным, — это отмена подтверждений, а не ужесточение."""
+    boundary = datetime.now(timezone.utc) - timedelta(hours=effective_ttl_hours("L3"))
+    return or_(
+        func.coalesce(Proposal.risk_tier, "") != "L3",
+        Proposal.created_at >= db_dt(boundary),
+    )
 
 
 @dataclass
@@ -139,9 +170,16 @@ class ConfirmStore:
         chat_id: int,
         user_initiated: bool = False,
         attachment_state: str | None = None,
+        risk_tier: str | None = None,
     ) -> None:
         """Создать черновик (pending). Провенанс хода — `origin_human_turn`/`author_user_id`/`run_id`
         — стор берёт САМ из `core.provenance`, и параметра для него нет намеренно (Волна 1.4).
+
+        `risk_tier` (Волна 5) — ПРЕЗЕНТАЦИОННЫЙ тир `confirm.risk.risk_tier`: он не участвует ни в
+        одной проверке §2.2, а фиксирует, В КАКОЙ ФОРМЕ человека спросили. Пишется здесь, потому что
+        аудит обязан отвечать на вопрос «что человек видел, когда соглашался», а пересчёт задним
+        числом даст ответ про сегодняшние пороги, а не про действовавшие в момент показа. Читает
+        колонку ровно одно место кода — `_l3_fresh()` в CAS-условиях.
 
         `attachment_state='pending'` ставит тот, кто НАПЕЧАТАЛ в `summary` обещание .xlsx-вложения:
         обещание и обязательство его выполнить обязаны родиться одной вставкой в одну строку. Двух
@@ -168,6 +206,7 @@ class ConfirmStore:
                     author_user_id=prov.actor_user_id,
                     run_id=prov.run_id[:16],  # 8 hex; срез — страховка от чужого длинного id
                     attachment_state=attachment_state,
+                    risk_tier=risk_tier,
                     status="pending",
                 )
             )
@@ -238,6 +277,7 @@ class ConfirmStore:
                         .where(
                             Proposal.attachment_state == "pending",
                             Proposal.created_at >= db_dt(_ttl_boundary()),
+                            _l3_fresh(),  # Волна 5: у L3 согласие живёт короче — файл к нему тоже
                         )
                         .order_by(Proposal.id)
                         .limit(max(1, int(limit)))
@@ -363,6 +403,7 @@ class ConfirmStore:
                     Proposal.operation == operation,
                     Proposal.status == "confirmed",
                     Proposal.created_at >= db_dt(_ttl_boundary()),  # TTL в CAS, не в джобе
+                    _l3_fresh(),  # Волна 5: L3 — свой, более короткий срок (доп. конъюнкт)
                 )
                 .values(status="executing", decided_at=func.now())
             )
@@ -421,6 +462,7 @@ class ConfirmStore:
                     Proposal.status == "pending",
                     Proposal.chat_id == chat_id,  # владение: только владелец черновика
                     Proposal.created_at >= db_dt(_ttl_boundary()),  # TTL в CAS, не в джобе
+                    _l3_fresh(),  # Волна 5: L3 — свой, более короткий срок (доп. конъюнкт)
                 )
                 .values(status="confirmed", decided_at=func.now())
             )
@@ -503,6 +545,7 @@ class ConfirmStore:
                     Proposal.author_user_id.isnot(None),
                     Proposal.author_user_id == actor_user_id,
                     Proposal.created_at >= db_dt(_ttl_boundary()),  # §2.2 №5: TTL в CAS, не в джобе
+                    _l3_fresh(),  # Волна 5: L3 — свой, более короткий срок (доп. конъюнкт)
                 )
                 .values(status="confirmed", decided_at=func.now())
             )

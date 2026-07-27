@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from openpyxl import Workbook
+from openpyxl.chart import LineChart, Reference
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -449,4 +450,102 @@ def build_mcc_deep_workbook(deep, lang: str = "ru") -> Workbook:
 def write_mcc_deep_xlsx(deep, path: str, lang: str = "ru") -> str:
     """Сохранить DEEP-книгу по пути path. Возвращает path."""
     build_mcc_deep_workbook(deep, lang).save(path)
+    return path
+
+
+def build_budget_projection_workbook(spec, lang: str = "ru") -> Workbook:
+    """График L3 к карточке подтверждения (Волна 5): накопленный расход при прежнем и новом дневном
+    бюджете. На вход — `confirm.attachment.BudgetChartSpec` (duck-typed, чтобы `reports/` не зависел
+    от `confirm/`).
+
+    Две ПРЯМЫЕ линии, и лист говорит об этом первой же строкой. Модели поведения кампании в аукционе
+    у нас нет; рисовать кривую «прогноза» означало бы выдать арифметику дневного потолка за
+    предсказание — ровно тот класс, который правило 4/15 запрещает на денежном пути. Расхождение
+    линий на последнем дне равно `delta_horizon_micros` из текста карточки: график и текст считаются
+    из одних чисел и разойтись не могут.
+
+    Ни одного чтения Google Ads: курьер вложений (`scheduler.jobs.deliver_proposal_attachments`)
+    SDK не трогает по контракту, файл собирается из `params` той же строки черновика."""
+    from confirm.consequences import PROJECTION_DAYS, projection_rows
+
+    cons = spec.cons
+    en = lang == "en"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Spend projection" if en else "Проекция расхода"
+    head = (
+        f"Campaign “{spec.campaign}” — daily budget projection"
+        if en
+        else f"Кампания «{spec.campaign}» — проекция расхода по дневному бюджету"
+    )
+    _append(ws, [head])
+    ws.cell(row=1, column=1).font = Font(bold=True, size=14)
+    _append(
+        ws,
+        [
+            "Linear projection of the daily cap, not an auction forecast."
+            if en
+            else "Линейная проекция дневного потолка, не прогноз аукциона."
+        ],
+    )
+    if cons.shared_campaigns:
+        # Общий бюджет: линия проекции описывает не одну кампанию, а весь набор на этом бюджете.
+        # Без этой строки лист отвечал бы на вопрос про кампанию, а рисовал бы про чужие деньги.
+        n = len(cons.shared_campaigns)
+        _append(
+            ws,
+            [
+                f"Shared budget: the projection covers {n} more campaign(s) on it."
+                if en
+                else f"Общий бюджет: проекция описывает ещё {n} кампан. на нём."
+            ],
+        )
+    _append(ws, [])
+
+    cur = cons.currency or ""
+    headers = (
+        [
+            "Day",
+            f"At previous budget{f' ({cur})' if cur else ''}",
+            f"At new budget{f' ({cur})' if cur else ''}",
+        ]
+        if en
+        else [
+            "День",
+            f"При прежнем бюджете{f' ({cur})' if cur else ''}",
+            f"При новом бюджете{f' ({cur})' if cur else ''}",
+        ]
+    )
+    _append(ws, headers)
+    header_row = ws.max_row
+    for c in range(1, len(headers) + 1):
+        ws.cell(row=header_row, column=c).fill = _HEADER_FILL
+        ws.cell(row=header_row, column=c).font = _HEADER_FONT
+    for day, before_micros, after_micros in projection_rows(cons, PROJECTION_DAYS):
+        _append(ws, [day, before_micros / 1_000_000, after_micros / 1_000_000])
+    last_row = ws.max_row
+    for r in range(header_row + 1, last_row + 1):
+        for c in (2, 3):
+            ws.cell(row=r, column=c).number_format = MONEY_FORMAT
+
+    chart = LineChart()
+    chart.title = "Cumulative spend" if en else "Накопленный расход"
+    chart.y_axis.title = cur or ("money" if en else "деньги")
+    chart.x_axis.title = "Day" if en else "День"
+    chart.height, chart.width = 9, 18
+    # titles_from_data=True — подписи серий берутся из строки заголовков, поэтому диапазон данных
+    # начинается ИМЕННО с неё, а категории — со следующей.
+    chart.add_data(
+        Reference(ws, min_col=2, max_col=3, min_row=header_row, max_row=last_row),
+        titles_from_data=True,
+    )
+    chart.set_categories(Reference(ws, min_col=1, min_row=header_row + 1, max_row=last_row))
+    ws.add_chart(chart, "F4")
+    _autosize(ws, len(headers))
+    return wb
+
+
+def write_budget_projection_xlsx(spec, path: str, lang: str = "ru") -> str:
+    """Сохранить книгу проекции бюджета по пути path. Возвращает path."""
+    build_budget_projection_workbook(spec, lang).save(path)
     return path

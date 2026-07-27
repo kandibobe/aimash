@@ -28,7 +28,9 @@ from dataclasses import dataclass
 # порога, снятая в момент импорта. Одного источника истины на два решения (усечь / приложить) при
 # такой связи нет — есть два числа, которые сегодня совпадают. Через атрибут связь настоящая.
 from confirm import render
+from confirm.consequences import Consequences, consequences
 from confirm.render import match_type_human
+from confirm.risk import TIER_L3, risk_tier
 
 # Операции, чей список ключей/минус-слов уходит .xlsx-вложением (ТЗ §5: большие списки — вложением,
 # не текстом). ЕДИНСТВЕННЫЙ источник истины: `confirm/render.py` печатает обещание по тому же
@@ -69,13 +71,47 @@ def safe_filename(stem: str) -> str:
 class AttachmentSpec:
     """ЧТО приложить. Чистые данные: ни путей, ни байтов, ни chat_id — их знает доставка."""
 
-    kind: str  # "keywords_xlsx"; точка расширения под график L3 (Волна 5)
+    kind: str  # "keywords_xlsx" — по нему курьер выбирает сборщик файла (ср. BudgetChartSpec)
     keywords: tuple[str, ...]
     match_type: str  # уже человекочитаемый (render.match_type_human)
     action: str  # core.texts.keyword_action_label
     scope: str  # кампания или общий набор — лист самодостаточен без карточки
     filename: str
     total: int  # ДО усечения по MAX_ATTACHMENT_ROWS
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetChartSpec:
+    """ЧТО приложить к карточке L3: график проекции расхода. Те же правила, что у AttachmentSpec —
+    чистые данные, ни путей, ни байтов, ни chat_id.
+
+    Числа не свои: внутри лежит тот же `Consequences`, который напечатан в тексте карточки. Второго
+    источника чисел для графика нет намеренно — разошедшиеся текст и картинка на денежной карточке
+    хуже, чем отсутствие картинки."""
+
+    kind: str  # "budget_chart"
+    campaign: str
+    cons: Consequences
+    filename: str
+
+
+def plan_budget_chart(operation: str, params: dict, *, cid: str) -> BudgetChartSpec | None:
+    """График проекции — только для L3-изменения дневного бюджета. `None` во всех прочих случаях.
+
+    Тир пересчитывается ЗДЕСЬ, а не берётся из строки черновика, по той же причине, что и остальная
+    политика вложений: решение обязано быть чистой функцией от (operation, params), иначе тот, кто
+    печатал обещание, и тот, кто через минуту доставляет файл, разойдутся."""
+    if not isinstance(params, dict) or risk_tier(operation, params) != TIER_L3:
+        return None
+    cons = consequences(operation, params)
+    if cons is None:
+        return None
+    return BudgetChartSpec(
+        kind="budget_chart",
+        campaign=str(params.get("campaign") or ""),
+        cons=cons,
+        filename=f"budget_{safe_filename(cid)[:12]}.xlsx",
+    )
 
 
 def plan_attachment(operation: str, params: dict, *, cid: str, lang: str) -> AttachmentSpec | None:

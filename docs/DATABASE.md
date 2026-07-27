@@ -14,7 +14,7 @@ Alembic-миграцией (см. колонку «Миграция»). Коло
 | `whitelist` | рантайм-allow-list доступа к БОТУ (§12); объединяется с env `TELEGRAM_WHITELIST_CHAT_IDS` | `chat_id` (unique), `added_by`, `note` | `0001` (drop `0016` → возврат `0017`) | **ACTIVE** — читается гейтом (см. ниже) |
 | `admins` | рантайм-админы бота (`/addadmin`, `/removeadmin`); объединяется с env `ADMIN_CHAT_IDS` | `chat_id` (unique), `added_by`, `note` | `0021` | **ACTIVE** — читается `core.access.is_admin` (fail-closed: сбой БД ⇒ только env) |
 | `user_settings` | язык, пороги алертов (`/alerts`), override модели, активный аккаунт, per-user расписание отчётов, ui_prefs | `chat_id` (unique), `report_schedule` (crontab-строка; **читается** планировщиком — `scheduler.service.register_user_report_schedules` заводит per-chat cron-джобу; **UI-сеттер есть** — `bot/handlers/commands.py:1109` (пресеты/свой cron), сохранение `_save_report_schedule`), `alert_thresholds` (JSON, пишет `/alerts`), `model_override`, `language`, `selected_customer_id`, `ui_prefs` (JSON) | `0001` (+`0005`,`0007`,`0015`) | ACTIVE |
-| `proposals` | очередь черновиков изменений Google Ads (diff «было→станет») | `confirmation_id` (unique), `operation`, `customer_id`, `summary`, `params` (JSON), `user_initiated`, `status`, **провенанс хода**: `origin_human_turn`, `author_user_id`, `run_id`, `tg_message_id`, `attachment_state` | `0001` (+индекс `0003`, +`0030` провенанс, +`0034` вложение) | ACTIVE |
+| `proposals` | очередь черновиков изменений Google Ads (diff «было→станет») | `confirmation_id` (unique), `operation`, `customer_id`, `summary`, `params` (JSON), `user_initiated`, `status`, **провенанс хода**: `origin_human_turn`, `author_user_id`, `run_id`, `tg_message_id`, `attachment_state`, `risk_tier` | `0001` (+индекс `0003`, +`0030` провенанс, +`0034` вложение, +`0037` тир риска) | ACTIVE |
 | `audit_log` | журнал всех операций (кто/когда/что/результат), по `confirmation_id` | `confirmation_id`, `operation`, `customer_id`, `chat_id`, `actor_user_id`, `status`, `result` (JSON) | `0001` (+`0004` актор) | ACTIVE |
 | `oauth_tokens` | per-account refresh-токены (§8), **зашифрованы at-rest** | `account` (unique), `refresh_token_enc`, `login_customer_id` | `0001` (+`0008`) | **ACTIVE** — загружается на старте (см. ниже) |
 | `error_events` | перехваченные исключения для триажа (§15), текст **редактирован** | `request_id`, `chat_id`, `customer_id`, `where`, `exc_type`, `message`, `traceback` | `0006` (+`0011`) | ACTIVE |
@@ -41,7 +41,7 @@ Alembic-миграцией (см. колонку «Миграция»). Коло
 | `circuit_state` | распределённый размыкатель (`core.breaker`, Волна 2): состояние цепи + **аренда пробы** — в half-open право на один пробный запрос берётся атомарным UPDATE, иначе три процесса (bot, scheduler, per-session MCP) пробуют втроём. PII/секретов нет (`name` = `ads:<customer_id>` / `llm:<slug>`) | `name` (UNIQUE + индекс, ≤96), `state` (closed\|open\|half_open), `failure_count` (инкремент в SQL, не read-modify-write), `opened_at`, `probe_lease_until` (аренда, не блокировка — умерший пробник задерживает восстановление на срок аренды, не навсегда), `updated_at` | `0033` | ACTIVE |
 | `rollback_watch` | Волна 4, контур автооткатa: наблюдение за применённой мутацией и вердикт «не стало ли хуже». Строка фиксирует **намерение наблюдать**, а не право откатить: провенанса не несёт, мутацию не разрешает; что случится по вердикту, решает `mode`. `shadow` (дефолт) — вердикт пишется, наружу НИЧЕГО; `alert` — человеку текст, обратный черновик рождается в ЕГО ходе обычным путём; `auto` (исполнение кодом) не реализован (Волна 6a) и деградирует до `shadow`. Ретеншн `rollback_watch_retain_days` (180), денежный след — в `audit_log`, не здесь | `confirmation_id` (**UNIQUE** + индекс — второе наблюдение за тем же изменением дало бы в `auto` ДВОЙНУЮ компенсацию, бюджет уехал бы ниже исходного), `customer_id` (индекс), `campaign_id` (числовой id, не имя: кампанию могли переименовать между применением и проверкой), `operation`, `applied_at`, `window_until`, **`expected_ratio`** (ожидаемый эффект изменения на расход из снимка «было→станет» — без него детектор ловил бы собственную причину: подняли бюджет на 20%, расход вырос на 20%, «деградация»), `mode`, `state` (индекс; watching\|verdict_ok\|verdict_degraded\|acted\|expired\|skipped), `verdict_json`, `checked_at`, `acted_confirmation_id` | `0036` | ACTIVE |
 
-> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0036`
+> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0037`
 > (`op.create_table(...)`). Инициалка `0001` создаёт базовые таблицы
 > (`whitelist`, `user_settings`, `proposals`, `audit_log`, `oauth_tokens`;
 > [`migrations/versions/0001_initial.py:22-92`](../migrations/versions/0001_initial.py)), остальные —
@@ -190,7 +190,17 @@ Bot-токеном; клейм `pending → sending` атомарным CAS (`ro
 вернул конкретную обратную мутацию, `expected_ratio` — конкретное число. `confirmation_id` UNIQUE:
 повтор `finalize` (ретрай доставки, дубль джобы, рестарт между коммитом и ответом) завёл бы второе
 наблюдение за тем же изменением — в `shadow` лишний вердикт, в `alert` двойное сообщение, в `auto`
-двойная компенсация) — **head**.
+двойная компенсация) →
+`0037` (`proposals.risk_tier`: презентационный тир риска черновика `L1|L2|L3`, Волна 5. Считает
+`confirm.risk.risk_tier` — чистая функция от (operation, params); в девяти проверках §2.2 не
+участвует, а меняет ФОРМУ вопроса человеку: полноту карточки (блок «последствия»), вложение с
+графиком проекции, число независимых человеческих актов и срок жизни согласия. Колонка нужна по
+двум причинам, обе про проверяемость: **аудит** — «что человек видел, когда соглашался» (пороги
+поменяются, и пересчёт задним числом ответит про сегодняшние, а не про действовавшие), и **TTL** —
+единственное место, где колонку читает код: CAS-конъюнкт `confirm.store._l3_fresh` даёт L3 более
+короткий срок `PROPOSAL_TTL_HOURS_L3`, а считать тир из JSON-`params` внутри UPDATE нечем. NULL
+(строки до миграции) через `coalesce` трактуется как обычный срок, не как L3: укоротить задним
+числом действовавшее согласие — это отмена подтверждений, а не ужесточение) — **head**.
 
 ### Добавить миграцию
 ```bash

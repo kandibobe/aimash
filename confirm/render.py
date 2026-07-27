@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from confirm.consequences import MONTH_DAYS, PROJECTION_DAYS
 from core.limits import ZERO_DECIMAL_CURRENCIES
 
 
@@ -225,6 +226,61 @@ def _money_summary(label: str, params: dict, lang: str) -> str:
     if mode == "set_to":
         return f"Кампания «{c}» — {label} → {v} {cur}".rstrip()
     return f"Кампания «{c}» — {label}: {v} {cur}".rstrip()
+
+
+def fmt_consequences(cons, lang: str = "ru") -> str:
+    """Блок «последствия» для карточки L3 из готовых чисел `confirm.consequences.Consequences`.
+
+    Здесь ТОЛЬКО раскладка и формат — ни одного вычисления (правило 4/15: числа считает код, и
+    ровно один раз, в одном месте). Пустая строка на `None` — блок необязателен."""
+    if cons is None:
+        return ""
+    cur = cons.currency or None
+    sign = (
+        "+" if cons.delta_micros >= 0 else "−"
+    )  # U+2212: минус на денежной карточке обязан быть виден
+    d = _fmt_micros(abs(cons.delta_micros), cur)
+    dh = _fmt_micros(abs(cons.delta_horizon_micros), cur)
+    pct = f" ({sign}{abs(cons.delta_pct):.0f}%)" if cons.delta_pct is not None else ""
+    en = lang == "en"
+    lines = [
+        "📊 Последствия (линейная проекция, не прогноз аукциона):"
+        if not en
+        else "📊 Consequences (linear projection, not an auction forecast):",
+    ]
+    if en:
+        lines.append(
+            f"• per day: {_fmt_micros(cons.before_micros, cur)} → "
+            f"{_fmt_micros(cons.after_micros, cur)} — {sign}{d}{pct}"
+        )
+        lines.append(f"• over {PROJECTION_DAYS} days: {sign}{dh}")
+        lines.append(
+            f"• monthly cap (×{MONTH_DAYS}): "
+            f"{_fmt_micros(cons.month_before_micros, cur)} → "
+            f"{_fmt_micros(cons.month_after_micros, cur)}"
+        )
+        if cons.days_to_month is not None:
+            lines.append(
+                f"• at the new pace the previous monthly cap is used up in "
+                f"{cons.days_to_month:.0f} days instead of {MONTH_DAYS:.0f}"
+            )
+    else:
+        lines.append(
+            f"• в сутки: {_fmt_micros(cons.before_micros, cur)} → "
+            f"{_fmt_micros(cons.after_micros, cur)} — {sign}{d}{pct}"
+        )
+        lines.append(f"• за {PROJECTION_DAYS} дней: {sign}{dh}")
+        lines.append(
+            f"• месячный потолок (×{MONTH_DAYS}): "
+            f"{_fmt_micros(cons.month_before_micros, cur)} → "
+            f"{_fmt_micros(cons.month_after_micros, cur)}"
+        )
+        if cons.days_to_month is not None:
+            lines.append(
+                f"• прежний месячный потолок при новой скорости кончится за "
+                f"{cons.days_to_month:.0f} дней вместо {MONTH_DAYS:.0f}"
+            )
+    return "\n".join(lines)
 
 
 def _bid_summary(params: dict, lang: str) -> str:

@@ -1458,7 +1458,7 @@ async def deliver_proposal_attachments(bot, *, limit: int = 10) -> int:
     пришлют файл дважды."""
     import os
 
-    from confirm.attachment import plan_attachment
+    from confirm.attachment import plan_attachment, plan_budget_chart
     from core import i18n
 
     with request_scope("scheduler:proposal-attachments"):
@@ -1469,7 +1469,12 @@ async def deliver_proposal_attachments(bot, *, limit: int = 10) -> int:
         sent = 0
         for row in rows:
             lang = i18n.get_lang(row.chat_id)
-            spec = plan_attachment(row.operation, row.params, cid=row.confirmation_id, lang=lang)
+            # Волна 5: две политики вложения на один флаг 'pending' — список ключей и график
+            # проекции бюджета для L3. Обе ЧИСТЫЕ функции от (operation, params) той же строки,
+            # поэтому курьер приходит ровно к тому же решению, что тул-слой минуту назад.
+            spec = plan_attachment(
+                row.operation, row.params, cid=row.confirmation_id, lang=lang
+            ) or plan_budget_chart(row.operation, row.params, cid=row.confirmation_id)
             if spec is None:
                 # Обещание было, а плана нет: строка пережила правку KEYWORD_XLSX_OPS/порога. Файла
                 # не будет — честно закрываем 'failed', а не держим вечный 'pending'.
@@ -1485,7 +1490,7 @@ async def deliver_proposal_attachments(bot, *, limit: int = 10) -> int:
                 continue  # застолбил кто-то другой — не наша строка
             state = "failed"
             try:
-                path = await asyncio.to_thread(_build_attachment_file, spec)
+                path = await asyncio.to_thread(_build_attachment_file, spec, lang)
             except Exception as e:  # noqa: BLE001 — сборка файла не должна валить остальные строки
                 log.warning(
                     "attachments: сборка .xlsx для %s не удалась: %s",
@@ -1519,26 +1524,34 @@ async def deliver_proposal_attachments(bot, *, limit: int = 10) -> int:
         return sent
 
 
-def _build_attachment_file(spec) -> str:
+def _build_attachment_file(spec, lang: str = "ru") -> str:
     """Собрать .xlsx во временный файл и вернуть путь. СИНХРОННО и НАРОЧНО: openpyxl — CPU-bound,
     вызывающий уносит его в `asyncio.to_thread`, чтобы сборка списка на тысячи ключей не держала
-    event loop планировщика. Импорт `keywords.export` тоже локальный: он тянет openpyxl, а модуль
-    джоб импортируется в процессе, где вложения могут не понадобиться ни разу."""
+    event loop планировщика. Импорты локальные: они тянут openpyxl, а модуль джоб импортируется в
+    процессе, где вложения могут не понадобиться ни разу.
+
+    Ветвление по `spec.kind`, а не по типу: политика вложения (`confirm/attachment.py`) отдаёт
+    ЧИСТЫЕ данные, и «какой это файл» — её слово, а не свойство класса в этом модуле."""
     import os
     import tempfile
-
-    from keywords.export import write_keyword_list_xlsx
 
     fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="aimash_kw_")
     os.close(fd)  # openpyxl пишет по пути сам; дескриптор нам не нужен, но mkstemp его открывает
     try:
-        write_keyword_list_xlsx(
-            list(spec.keywords),
-            spec.match_type,
-            spec.action,
-            path,
-            scope=spec.scope,
-        )
+        if getattr(spec, "kind", "") == "budget_chart":
+            from reports.xlsx import write_budget_projection_xlsx
+
+            write_budget_projection_xlsx(spec, path, lang)
+        else:
+            from keywords.export import write_keyword_list_xlsx
+
+            write_keyword_list_xlsx(
+                list(spec.keywords),
+                spec.match_type,
+                spec.action,
+                path,
+                scope=spec.scope,
+            )
     except Exception:
         if os.path.exists(path):
             try:

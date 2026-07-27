@@ -40,7 +40,9 @@ from ads.resolve import (
 from ads.service import read_state
 from core import i18n
 from confirm import render
-from confirm.attachment import plan_attachment
+from confirm.attachment import plan_attachment, plan_budget_chart
+from confirm.consequences import consequences
+from confirm.risk import TIER_L3, risk_tier
 from confirm.store import ConfirmStore
 from core.config import normalize_customer_id
 from core.resilience import run_ads_read_call
@@ -197,6 +199,17 @@ async def build_proposal(
     display = (
         render.fmt_mutation_summary(operation, params, lang, attachment=spec is not None) or summary
     )
+    # Волна 5: тир риска — ЧТО показать, а не нужен ли человек (`confirm/risk.py`). Считается из тех
+    # же (operation, params), из которых курьер вложений пересчитает его через минуту, — второго
+    # места, где решение принимается, нет. На L3 карточка несёт блок «последствия», а числа в нём
+    # выведены из ТОГО ЖЕ снимка `_before`, что и «было → станет» выше: двух разных «станет» на одной
+    # денежной карточке быть не может по построению.
+    tier = risk_tier(operation, params)
+    chart = plan_budget_chart(operation, params, cid=cid)
+    if tier == TIER_L3:
+        block = render.fmt_consequences(consequences(operation, params), lang)
+        if block:
+            display += "\n\n" + block
     # AD.2: баннер аккаунта — на КАЖДОЙ карточке (и в audit), включая Draft. Раз выбрано «одно
     # подтверждение везде», всегда-видимый ярлык — единственная страховка от мутации не того
     # аккаунта: менеджер видит, на ЧЬИ деньги идёт правка, до ✅. Боевой — ⚠️, Draft — 🧪 (спокойнее),
@@ -218,7 +231,8 @@ async def build_proposal(
         summary=display,
         chat_id=chat_id,
         user_initiated=user_initiated,
-        attachment_state="pending" if spec is not None else None,
+        attachment_state="pending" if (spec is not None or chart is not None) else None,
+        risk_tier=tier,
     )
     return BuiltProposal(
         cid=cid,

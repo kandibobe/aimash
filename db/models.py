@@ -166,6 +166,11 @@ class Proposal(Base):
     # `scheduler` (единственный вне `bot/`, у кого есть Bot-токен), поэтому доставка асинхронна и
     # наблюдаема: вечный 'pending' — видимая величина, а не тишина.
     attachment_state: Mapped[str | None] = mapped_column(String(16))
+    # Волна 5 — тир риска (`confirm/risk.py`): 'L1'|'L2'|'L3', NULL на строках до миграции.
+    # ПРЕЗЕНТАЦИОННЫЙ: он не участвует ни в одной проверке §2.2, а меняет полноту карточки, срок
+    # жизни согласия и число человеческих актов. Пишется ради аудита («что человек видел, когда
+    # соглашался») и ради TTL-условия CAS — единственного места, где колонка читается кодом.
+    risk_tier: Mapped[str | None] = mapped_column(String(2))
     status: Mapped[str] = mapped_column(
         String(16), default="pending", nullable=False
     )  # pending|confirmed|executing|applied|failed|rejected|needs_review

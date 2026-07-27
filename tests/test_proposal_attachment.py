@@ -401,7 +401,7 @@ async def test_courier_removes_tempfile_when_send_fails(monkeypatch, tmp_path):
     )
     seen: list[str] = []
 
-    def _fake_build(spec):
+    def _fake_build(spec, lang="ru"):  # lang — Волна 5: подписи графика L3 выбираются при сборке
         p = tmp_path / f"{spec.filename}"
         p.write_bytes(b"x")
         seen.append(str(p))

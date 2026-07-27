@@ -876,6 +876,13 @@ def fmt_mutation_summary(
     return render.fmt_mutation_summary(operation, params, _lang(lang), attachment=attachment)
 
 
+def fmt_consequences(cons, lang: str | None = None) -> str:
+    """Блок «последствия» карточки L3 (Волна 5). Реализация — `confirm.render.fmt_consequences`;
+    здесь только разрешение языка из contextvar. Числа считает `confirm/consequences.py` из того же
+    снимка `_before`, что напечатал «было → станет», — обёртка ничего не пересчитывает."""
+    return render.fmt_consequences(cons, _lang(lang))
+
+
 # §7: короткая метка уровня конкуренции для чат-таблицы (полная — в .xlsx). UNSPECIFIED не показываем.
 _COMP_RU = {"LOW": "конк. низк.", "MEDIUM": "конк. сред.", "HIGH": "конк. выс."}
 _COMP_EN = {"LOW": "comp low", "MEDIUM": "comp med", "HIGH": "comp high"}

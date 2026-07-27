@@ -229,10 +229,12 @@ from bot.keyboards import (
     rsa_pick_campaigns_kb,
 )
 from bot.throttle import ThrottleMiddleware
-from confirm.attachment import plan_attachment
+from confirm.attachment import plan_attachment, plan_budget_chart
+from confirm.consequences import consequences
 from confirm.gate import Proposal, build_summary
 from confirm.reverse import ROLLBACKABLE_OPS, reverse_spec
-from confirm.store import ConfirmStore
+from confirm.risk import TIER_L3, risk_tier
+from confirm.store import ConfirmStore, effective_ttl_hours
 from core import ingest
 from core import twofa  # §12 2FA-гейт опасных операций (opt-in, дефолт OFF, fail-closed)
 from core.access import ensure_account_allowed_for_user, is_whitelisted
@@ -281,9 +283,9 @@ _welcome_file_id: str | None = None
 
 # P1-6: необратимые удаления — карточка подтверждения проходит ДВА шага (confirm_destructive_kb →
 # confirm_final_kb). Замок аккаунта (ensure_allowed) и confirm-гейт неизменны; это доп. защита в UI.
-_DESTRUCTIVE_OPS = frozenset(
-    {"remove_campaign", "remove_ad_group", "remove_ad", "remove_keywords", "remove_asset_link"}
-)
+# Волна 5: своего литерала здесь больше нет — набор живёт в `confirm.risk.DESTRUCTIVE_OPS`, откуда
+# его читает и классификатор тиров. Решает теперь не «удаление ли это», а `risk_tier(...) == L3`:
+# двойной шаг получают и удаления, и денежные правки с большой дельтой (см. bot/main.py:1709).
 
 # Лёгкое in-memory состояние UI (теряется при рестарте — это ок, не источник истины):
 _CAMP_CACHE: dict[int, list[dict]] = {}  # chat_id → последний список кампаний (резолв idx→имя)
@@ -1668,6 +1670,17 @@ async def _present_proposal(
     display = (
         texts.fmt_mutation_summary(operation, params, attachment=attach_spec is not None) or summary
     )
+    # Волна 5: тир риска — ПРЕЗЕНТАЦИОННЫЙ (`confirm/risk.py`). Он не участвует ни в одной проверке
+    # §2.2 и меняет только форму вопроса: полноту карточки, число человеческих актов и TTL согласия.
+    # Считается один раз здесь и переиспользуется ниже — пересчёт в трёх местах разошёлся бы.
+    tier = risk_tier(operation, params)
+    chart_spec = plan_budget_chart(operation, params, cid=cid)
+    if tier == TIER_L3:
+        # Числа блока — из того же `_before`, что напечатал «было → станет»: второго источника
+        # чисел на денежной карточке нет намеренно (правило 4/15, пригодно для fact-guard).
+        _cons_block = texts.fmt_consequences(consequences(operation, params))
+        if _cons_block:
+            display += "\n\n" + _cons_block
     # AD.2: баннер аккаунта — на КАЖДОЙ карточке (и в audit), включая Draft. Раз выбрано «одно
     # подтверждение везде», всегда-видимый ярлык — единственная страховка от мутации не того
     # аккаунта: менеджер видит, на ЧЬИ деньги идёт правка, до ✅. Боевой — ⚠️, Draft — 🧪 (спокойнее),
@@ -1689,6 +1702,12 @@ async def _present_proposal(
         summary=display,
         chat_id=chat_id,
         user_initiated=True,
+        # Волна 5: график проекции доставляет курьер планировщика (у него уже есть и Bot-токен, и
+        # CAS-одноразовость). Список ключей этот контур шлёт сам, синхронно, — поэтому 'pending'
+        # ставится ТОЛЬКО под график: пересечься эти политики не могут (график живёт лишь на
+        # update_budget, которого нет в KEYWORD_XLSX_OPS), но флаг всё равно один на строку.
+        attachment_state="pending" if chart_spec is not None else None,
+        risk_tier=tier,
     )
     _LAST_PENDING[chat_id] = cid
     # C1: запоминаем кампанию/аккаунт этого черновика — чтобы следующий ход «измени гео ЭТОЙ
@@ -1703,12 +1722,17 @@ async def _present_proposal(
         _LAST_SEARCH_PARAMS[chat_id] = strip_attestation(params)
     # Большой список ключей/минус-слов (ТЗ §5) → полный список .xlsx-вложением, кнопки на коротком
     # сообщении; в самой сводке список усечён до KW_INLINE_MAX с пометкой «…ещё N во вложении».
-    # P1-6: необратимые удаления → двойное подтверждение (первый шаг), остальное — обычная ✅/❌.
+    # P1-6 → Волна 5: двойное подтверждение теперь получает весь тир L3, а не только удаления.
+    # Набор `DESTRUCTIVE_OPS` целиком внутри L3 (`confirm/risk.py`), так что защита не ослабла ни на
+    # одну операцию — расширилась на денежные правки с большой дельтой и на правки без снимка «до».
     confirm_markup = (
         confirm_destructive_kb(cid)
-        if operation in _DESTRUCTIVE_OPS
+        if tier == TIER_L3
         else confirm_kb(cid, extra_top=extra_confirm_top)  # A7: опц. «✏️ Изменить ставку»
     )
+    # Волна 5: печатаем срок, который РЕАЛЬНО применит CAS (у L3 он короче общего). Показать «24 ч»
+    # и отказать через два — не строгость, а обман; источник у печати и у CAS один.
+    ttl_h = effective_ttl_hours(tier)
     # Набор операций, порог усечения и подписи колонок берутся из того же `attach_spec`, который
     # решил напечатать обещание, — списка операций здесь больше нет (был `_KEYWORD_OPS`).
     if attach_spec is not None:
@@ -1717,18 +1741,14 @@ async def _present_proposal(
             keywords=list(attach_spec.keywords),
             match_type=attach_spec.match_type,
             action=attach_spec.action,
-            header_html=i18n.t(
-                "proposal_pending", summary=texts.esc(display), ttl_h=settings.proposal_ttl_hours
-            ),
+            header_html=i18n.t("proposal_pending", summary=texts.esc(display), ttl_h=ttl_h),
             reply_markup=confirm_markup,
             parse_mode=ParseMode.HTML,
             scope=attach_spec.scope,
             filename=attach_spec.filename,
         )
         return
-    rendered = i18n.t(
-        "proposal_pending", summary=texts.esc(display), ttl_h=settings.proposal_ttl_hours
-    )
+    rendered = i18n.t("proposal_pending", summary=texts.esc(display), ttl_h=ttl_h)
     if ux.proposal_fits(rendered):
         await message.answer(rendered, reply_markup=confirm_markup, parse_mode=ParseMode.HTML)
     else:
