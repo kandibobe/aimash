@@ -311,12 +311,17 @@ tar tzf "$(ls -1t /root/hermes-backups/*.tgz | head -1)" | grep -E 'state\.db|\.
 ## 9. Kill-switch и лимиты трат
 
 `confirm`-гейт защищает бюджет **Google Ads**, а не трату **LLM** (Hermes → OpenRouter напрямую, мимо нашего кода).
-Потолок — только платформенный (см. также [`README.md`](README.md) RB-3):
+Два рубежа по стоимости LLM (полная процедура — [`README.md`](README.md) RB-3):
 
-- **Дневной потолок:** OpenRouter Provisioning-ключ профиля с `limit: <USD>` + `limit_reset: daily`.
+- **Жёсткий (backstop):** Credit limit `<USD>` + сброс `daily` на самом inference-ключе Hermes
+  (`OPENROUTER_API_KEY`). Срабатывает у провайдера независимо от нашего кода — настоящая граница.
+- **Мягкий (наш код, opt-in):** `LLM_DAILY_COST_CAP_USD=<USD>` → `core/llm_budget.check_daily_cost_cap()`
+  читает живую трату (`GET /key` `usage_daily`) и отказывает ДО дорогого прогона. OpenRouter недоступен ⇒
+  fail-open (жёсткий рубеж выше — backstop). Предусловие spend-cap для delegation (Фаза C).
 - **Kill-switch:** деактивация ключа в OpenRouter (account-wide — гасит все прогоны). Плюс «мягкий»: `hermes gateway
   stop` (боевой бот при этом жив).
-- `usage.cost`/resolved `model` в наш audit-row **не** попадают — LLM-трафик мимо кода (§20 открытый хвост).
+- Per-день/per-модель траты Hermes поднимает ридер `core/or_activity` (`GET /activity`, нужен
+  `OPENROUTER_PROVISIONING_KEY`) в `agent_runs` — открытый хвост §20 закрывается атрибуцией, не только логом.
 
 ---
 
@@ -768,3 +773,66 @@ context7) описывают `MCPServer` из `mcp.server.mcpserver` — **та�
   на энтрипоинтах `python -m mcp_server` и `python -m scheduler` (bot-free bootstrap).
 - READ-смоук идёт через durable `mcp`-сервис, **не** через `aimash-bot` (§5, §4 health-чеклист).
 - `deploy/hermes/lint_config.py` (К10) зелёный; ни один из 14 пакетов ядра не импортирует `bot/`.
+
+## 14. Веб-дашборд Hermes — постоянный приватный доступ через Tailscale
+
+Дашборд (`hermes dashboard`) — **пульт** (config, API-ключи, сессии, install/uninstall скилов),
+поэтому наружу торчать не должен (**К3**). Постоянный доступ с любого устройства владельца даёт
+приватная mesh-сеть **Tailscale** (`tailscale serve` = tailnet-only), а не публичный порт.
+
+**Итоговая цепочка (всё на VPS `167.233.48.243` / tailnet-имя `hermes-vps`):**
+```
+браузер (любое устройство tailnet)
+  ↓ https, MagicDNS
+tailscale serve :443  (tailnet-only, слушает 100.103.88.42:443 — НЕ 0.0.0.0)
+  ↓ форвардит с Host: hermes-vps.tailfd4d95.ts.net
+Caddy 127.0.0.1:9120  ← header_up Host/Origin → localhost   (loopback-only)
+  ↓ Host: localhost
+дашборд 127.0.0.1:9119  → 200
+```
+Открывать: **`https://hermes-vps.tailfd4d95.ts.net`** с устройства, где стоит клиент Tailscale и
+выполнен вход в тот же tailnet. Туннель поднимать больше не нужно.
+
+**Зачем Caddy (не просто `serve → :9119`).** У дашборда защита от DNS-rebinding
+(`web_server.py:_is_accepted_host`, GHSA-ppp5-vxwm-4cf7): на loopback-бинде принимается Host
+**только** из loopback-имён. `tailscale serve` пробрасывает `Host: *.ts.net` → дашборд отвечает
+**400 Invalid Host**. Флага «переписать Host» нет ни у `hermes dashboard`, ни у `tailscale serve`.
+Ребинд на tailnet-IP не помогает: `should_require_auth` тогда требует пароль/OAuth, а Host всё равно
+не совпадёт. Поэтому между serve и дашбордом стоит тонкий loopback-прокси Caddy, переписывающий
+`Host`/`Origin` в `localhost`. Дашборд остаётся на `127.0.0.1` без пароля (auth = членство в tailnet).
+
+**Юниты (все `enabled`, переживают ребут):**
+- `tailscaled.service` — сеть Tailscale.
+- `tailscale serve --bg 9120` — конфиг хранится в состоянии tailscaled, восстанавливается сам.
+- `hermes-dash-proxy.service` — Caddy (`/etc/caddy/Caddyfile`, `/usr/local/bin/caddy`).
+- `hermes-dashboard.service` — сам дашборд (`--host 127.0.0.1 --port 9119 --no-open`).
+
+**Caddyfile (`/etc/caddy/Caddyfile`):**
+```
+:9120 {
+	bind 127.0.0.1
+	reverse_proxy 127.0.0.1:9119 {
+		header_up Host localhost
+		header_up Origin http://localhost:9119
+	}
+}
+```
+⚠️ В Caddy v2 хост в адресе сайта — это Host-**матчер**, а не bind: без `bind 127.0.0.1` сокет висит
+на `*:9120` (публично!). Держать `bind 127.0.0.1` и матчер `:9120` (любой Host — его шлёт serve).
+
+**Барьер безопасности (проверять при каждой правке):**
+```
+tailscale serve status    # → «(tailnet only)», target http://127.0.0.1:9120
+tailscale funnel status   # НЕ должно быть «Funnel on» — funnel = публичный интернет, нарушение К3
+ss -ltnp | grep -E ':443|:9119|:9120'
+#   9119, 9120 → ТОЛЬКО 127.0.0.1;  :443 → ТОЛЬКО 100.103.88.42 (tailnet), не 0.0.0.0
+```
+E2E c самого VPS (MagicDNS на сервере не резолвится — норма, идём через --resolve на tailnet-IP):
+```
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  --resolve hermes-vps.tailfd4d95.ts.net:443:100.103.88.42 \
+  https://hermes-vps.tailfd4d95.ts.net/        # → 200
+```
+
+⛔ **Никогда `tailscale funnel`** для дашборда — это публичный интернет-канал к пульту (прямое
+нарушение К3). Только `tailscale serve` (tailnet-only). Порт 9119/9120/443 в ufw наружу НЕ открывать.

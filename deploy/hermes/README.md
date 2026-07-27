@@ -13,10 +13,11 @@ MCP-сервера. Hermes ставится рядом отдельным system
 контейнер бота (паритет окружения: `DATABASE_URL=@postgres:5432`, `GOOGLE_ADS_*`,
 `SECRETS_ENCRYPTION_KEY`, OAuth-кэш — всё из контейнера, без host-venv).
 
-**Артефакты рядом:** `config.yaml` (эталон `~/.hermes/config.yaml`), `hermes.env.example` (шаблон
-`~/.hermes/.env`), `lint_config.py` (конфиг-линт К10 — **неизвестные ключи Hermes игнорирует молча**),
-`host-a/` (эталон живого хоста + RUNBOOK), `RISK_REGISTER.md`, `plugins/aimash_probe` (проб
-доверенного канала метаданных гейта).
+**Артефакты рядом:** `config.yaml` (эталон `~/.hermes/config.yaml`), `SOUL.md` (идентичность агента —
+слот №1 системного промпта, эталон `~/.hermes/SOUL.md`), `hermes.env.example` (шаблон `~/.hermes/.env`),
+`lint_config.py` (конфиг-линт К10 — **неизвестные ключи Hermes игнорирует молча**), `host-a/` (эталон
+живого хоста + RUNBOOK), `RISK_REGISTER.md`, `plugins/aimash_probe` (проб доверенного канала метаданных
+гейта).
 
 **Этот файл — только установка (RB-0…RB-3).** День-2 эксплуатация (что применяется вживую vs требует
 restart, редеплой↔MCP-reconnect, логи, обновление/откат, бэкап, kill-switch, траблшутинг) — в
@@ -90,6 +91,13 @@ hermes config edit
 #   (альтернатива «с нуля из файла»: cp /opt/aimash/deploy/hermes/config.yaml ~/.hermes/config.yaml,
 #    затем hermes model — мастер перезапишет только model-блок.)
 
+# 4b. Идентичность агента → ~/.hermes/SOUL.md (слот №1 системного промпта, автозагрузка Hermes;
+#     head/tail-усечение на context_file_max_chars, дефолт 20000 — эталон умещается с запасом).
+#     Плейсхолдеров нет, секретов нет: копируется как есть, применяется со следующей сессии агента.
+cp /opt/aimash/deploy/hermes/SOUL.md ~/.hermes/SOUL.md
+#   ⚠️ SOUL.md описывает READ-фазу («ничего не меняю»). При выпуске WRITE (Волна 1 шаг 5) обновить
+#      раздел «Чего ты НЕ делаешь» — иначе персона расходится с реально подключёнными инструментами.
+
 # 5. Проверка конфига до старта. ВАЖНО: `hermes config check` про «missing/stale», он НЕ ловит
 #    неизвестные/опечатанные ключи — Hermes их молча игнорирует (К10). Единственный надёжный контроль:
 hermes config check                # ключи .env: OPENROUTER_API_KEY / TELEGRAM_BOT_TOKEN /
@@ -153,16 +161,29 @@ hermes mcp test aimash             # должен отдать 12 инструм
 
 ---
 
-## RB-3. OpenRouter: дневной потолок + kill-switch (рекомендация, не блокер)
+## RB-3. OpenRouter: дневной потолок трат + атрибуция + kill-switch
 
-Ключ уже рабочий → пилот стартует на нём. confirm-гейт защищает бюджет **Google Ads**, а не трату
-**LLM** (Hermes → OpenRouter напрямую, мимо кода) — потолок только платформенный:
+Для READ-пилота — **рекомендация**; для delegation/WRITE (Фаза C, fan-out субагентов) **жёсткий потолок
+— предусловие**, без него агентский цикл может сжечь бюджет без confirm-гейта (гейт защищает деньги
+**Google Ads**, не трату **LLM**). Два ключа OpenRouter с РАЗНОЙ ролью — не путать:
 
-1. OpenRouter → **Provisioning API keys** → ключ профиля `aimash` с `limit: <USD>` +
-   `limit_reset: daily`. В `~/.hermes/.env` (не в git).
-2. **Kill-switch:** деактивация ключа в OpenRouter (account-wide — гасит все прогоны разом).
-3. Открытый хвост: `usage.cost`/resolved `model` в наш audit-row не попадают (LLM-трафик мимо кода,
-   §20). Конкретные $-потолки — вопрос заказчику.
+1. **Жёсткий потолок (backstop, руки владельца — это и есть настоящая граница).** Тот inference-ключ,
+   которым платит Hermes (`OPENROUTER_API_KEY`), в OpenRouter → **Settings → Keys** получает **Credit
+   limit** `<USD>` + сброс **daily**. Срабатывает у провайдера независимо от нашего кода — переживает
+   любой наш сбой. Число задаёт владелец. Рекомендация: бот и Hermes делят ОДИН ключ (единый спенд-пул),
+   иначе софт-потолок (п.2) и `/activity` видят не всю трату.
+2. **Софт-потолок (наш код, opt-in, ниже агента).** `LLM_DAILY_COST_CAP_USD=<USD>` в `~/.hermes/.env` —
+   `core/llm_budget.check_daily_cost_cap()` читает ЖИВУЮ дневную трату (`GET /key` `usage_daily`) и
+   отказывает ДО дорогого прогона. `0`/пусто ⇒ выкл. ⚠️ OpenRouter недоступен ⇒ **fail-open** (пропускает
+   с warning): это бюджетный рубеж, не security-гейт, жёсткий backstop — п.1. Ставить НИЖЕ числа из п.1.
+3. **Атрибуция трат Hermes (opt-in, закрывает открытый хвост §20).** LLM-трафик Hermes идёт мимо нашего
+   процесса — чтобы поднять его per-день/per-модель в `agent_runs`, заведи ОТДЕЛЬНЫЙ **management-ключ**:
+   OpenRouter → **Provisioning API keys** → новый ключ → `OPENROUTER_PROVISIONING_KEY=<mgmt>` (обычный
+   inference-ключ на `GET /activity` даёт 403). Опционально `OPENROUTER_KEY_HASH=<sha256 ключа Hermes>`
+   — сузить `/activity` до конкретного ключа, если пул общий с ботом. Пусто ⇒ ридер тихо деградирует на
+   `/key` (fail-soft), сшивка `origin='hermes'` спит.
+4. **Kill-switch:** деактивация ключа в OpenRouter (account-wide — гасит все прогоны разом). Мягкий:
+   `hermes gateway stop` (боевой бот жив).
 
 ---
 
