@@ -61,6 +61,7 @@ from core.limits import (
     round_micros,
     wizard_default_money_units,
 )  # единый источник порогов (defense-in-depth)
+from core.observe import record_money_event  # событие денежного пути ДО вызова SDK (Волна 3)
 from core.resilience import (  # таймаут+ретрай на самом SDK-вызове (не на гейтах)
     run_ads_call,
     run_ads_create_call,  # НЕидемпотентные создатели: квота+таймаут+семафор БЕЗ ретраев
@@ -205,8 +206,22 @@ async def _require_confirmation(
     Гейт свежести (Волна 1.1) вызывается ОТСЮДА, до claim, а не 41 раз по телам `apply_*`. Так он
     структурно неотключаем: новая мутация обязана пройти confirm-гейт (инвариант
     `test_all_apply_functions_call_require_confirmation`) — значит проходит и freshness, и забыть
-    его в новой операции физически негде. Список из 41 строки давал бы 41 место, где можно не дописать."""
+    его в новой операции физически негде. Список из 41 строки давал бы 41 место, где можно не дописать.
+
+    Волна 3 (event sourcing): здесь же — ЕДИНСТВЕННАЯ точка, где денежный путь эмитит своё событие,
+    и по той же причине: чокпойнт один, обойти его новой мутацией нельзя. Порядок трёх шагов —
+    свойство, а не стиль:
+      1. freshness — отказ по нему НЕ должен сжигать одноразовое подтверждение;
+      2. событие (fail-closed) — не записалось ⇒ `EventWriteError` летит ДО `claim` и ДО SDK:
+         Google Ads не тронут, подтверждение не съедено, человек повторяет ту же команду;
+      3. claim — атомарный CAS.
+    Если бы событие писалось после claim, отказ журнала оставлял бы человека и без мутации, и без
+    карточки; если бы писалось батчем на закрытии `run_scope` (как вся прочая наблюдаемость) — оно
+    ложилось бы уже ПОСЛЕ вызова к API, и fail-closed не защищал бы ни от чего."""
     await _require_freshness(confirm_store, confirmation_id, operation)
+    # Заявка на исполнение, не факт исполнения: исход живёт в audit-row, и «выполнено» пользователю
+    # репортится оттуда (правило 15). Отклонённая ниже попытка тоже обязана оставить след.
+    await record_money_event("ads_mutate", operation=operation, confirmation_id=confirmation_id)
     proposal = await confirm_store.claim(confirmation_id, operation=operation)
     if proposal is None:
         raise PermissionError(

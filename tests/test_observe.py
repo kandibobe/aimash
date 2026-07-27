@@ -45,7 +45,9 @@ async def _events(run_id: str) -> list[AgentRunEvent]:
 
 async def _clear() -> None:
     async with Session() as s:
-        await s.execute(delete(AgentRunEvent))
+        # Денежные события НЕ удаляем: их держит триггер (пол хранения, Волна 3) — и они здесь ни
+        # при чём, детерминизм нужен `cost_report`, а он считает по agent_runs.
+        await s.execute(delete(AgentRunEvent).where(AgentRunEvent.kind.not_in(observe.MONEY_KINDS)))
         await s.execute(delete(AgentRun))
         await s.commit()
 

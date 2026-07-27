@@ -124,6 +124,29 @@ def attested(params: dict, before: dict | None = None) -> dict:
     return attach_freshness(params, snap)
 
 
+_schema_ready = False
+
+
+@pytest.fixture(autouse=True)
+async def _ensure_schema():
+    """Схема тестовой БД поднимается ОДИН раз за процесс, до первого теста.
+
+    Раньше её создавал тот тест, которому она понадобилась (`await init_db()` в теле), а
+    юнит-тесты вертикали `ads.mutations.apply_*` обходились фейковым стором и БД не касались
+    вовсе. Волна 3 это положение сняла: `_require_confirmation` пишет событие денежного пути
+    fail-closed ДО `claim`, и «схемы нет» стало законным отказом исполнять мутацию.
+
+    Чинится фикстурой, а не послаблением гарда: в проде эта зависимость и так жёсткая — `claim`
+    ходит в ТУ ЖЕ базу, и конфигурации, где денежный путь работает без неё, не существует.
+    Отсутствие схемы в тестах было удобством фейкового стора, а не свойством системы."""
+    global _schema_ready
+    if not _schema_ready:
+        from db.session import init_db
+
+        await init_db()
+        _schema_ready = True
+
+
 @pytest.fixture(autouse=True)
 def _reset_discovered_children_cache():
     """Изоляция: набор обнаруженных дочерних MCC (`ads.client._READ_DISCOVERED`/`_READ_CHILDREN_META`)

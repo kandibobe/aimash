@@ -1909,15 +1909,23 @@ async def purge_stale_rows(*, now: datetime | None = None) -> dict[str, int]:
     account_health_snapshot) и ОБНУЛИТЬ протухшие тексты страниц (client_site_pages.text — строка
     остаётся, карта sitelinks не рушится). Остальные cleanup-джобы лишь меняют статус — эти таблицы
     копятся вечно. Пороги — settings.error_events_retain_days / crawl_jobs_retain_days /
-    account_health_retain_days / site_page_text_retain_days (0 ⇒ ВЫКЛ для этой таблицы, fail-safe:
-    не удаляем ничего).
+    account_health_retain_days / site_page_text_retain_days / ads_quota_ops_retain_days /
+    agent_runs_retain_days (0 ⇒ ВЫКЛ для этой таблицы, fail-safe: не удаляем ничего).
     crawl_jobs чистим ТОЛЬКО в терминальном статусе (done|failed) — running/незавершённые закрывает
     reconcile_stale_crawls. ⛔ audit_log НЕ трогаем НИКОГДА (денежный реестр, ручной колд-архив —
     docs/BACKUP.md). Возраст — в Python (tz-нейтрально). Возвращает {table: удалено}.
-    Удаляем батчами по 500 id (лимит переменных SQLite)."""
+    Удаляем батчами по 500 id (лимит переменных SQLite).
+
+    Волна 3: каждая таблица — СВОЯ транзакция. Раньше все пять чистились одной сессией с одним
+    коммитом, и отказ на любой откатывал уборку ЦЕЛИКОМ — включая уже посчитанные удаления, так что
+    возвращённые числа описывали то, чего в БД не произошло. Класс перестал быть теоретическим, как
+    только у `agent_run_events` появился триггер неизменяемости: одна отказавшая строка отменяла бы
+    очистку четырёх посторонних таблиц. Сбой одной таблицы теперь виден отдельной строкой лога и
+    остальных не трогает."""
     from sqlalchemy import delete as sa_delete
     from sqlalchemy import update as sa_update
 
+    from core.observe import MONEY_KINDS
     from db.models import AccountHealthSnapshot, AdsQuotaOp, ClientSitePage, CrawlJob, ErrorEvent
 
     now = now or datetime.now(timezone.utc)
@@ -1927,86 +1935,130 @@ async def purge_stale_rows(*, now: datetime | None = None) -> dict[str, int]:
         "account_health_snapshot": 0,
         "site_page_text": 0,
         "ads_quota_ops": 0,
+        "agent_runs": 0,  # ЦЕЛЫХ прогонов убрано (заголовок + события), денежные не трогаем
     }
+
+    async def _sweep(key: str, days: int, sweep) -> None:
+        """Одна таблица = одна транзакция + собственная обработка отказа."""
+        if days <= 0:
+            return  # 0 ⇒ ВЫКЛ для этой таблицы (fail-safe: не удаляем ничего)
+        cutoff = now - timedelta(days=days)
+        try:
+            async with Session() as s:
+                n = await sweep(s, cutoff)
+                if n:
+                    await s.commit()
+            result[key] = n
+        except Exception as e:  # noqa: BLE001 — отказ одной таблицы не отменяет уборку остальных
+            log.warning("scheduler: purge %s не выполнена (%s)", key, type(e).__name__)
+
+    async def _error_events(s, cutoff) -> int:
+        rows = (await s.execute(select(ErrorEvent.id, ErrorEvent.created_at))).all()
+        stale = [rid for rid, ca in rows if _older_than(ca, cutoff)]
+        for i in range(0, len(stale), 500):  # батч: не упереться в лимит переменных SQLite
+            await s.execute(sa_delete(ErrorEvent).where(ErrorEvent.id.in_(stale[i : i + 500])))
+        return len(stale)
+
+    async def _crawl_jobs(s, cutoff) -> int:
+        rows = (
+            await s.execute(
+                select(CrawlJob.id, CrawlJob.created_at).where(
+                    CrawlJob.status.in_(("done", "failed"))
+                )
+            )
+        ).all()
+        stale = [rid for rid, ca in rows if _older_than(ca, cutoff)]
+        for i in range(0, len(stale), 500):
+            await s.execute(sa_delete(CrawlJob).where(CrawlJob.id.in_(stale[i : i + 500])))
+        return len(stale)
+
+    async def _health(s, cutoff) -> int:  # N1.1: снапшоты health-score (тренды)
+        rows = (
+            await s.execute(select(AccountHealthSnapshot.id, AccountHealthSnapshot.created_at))
+        ).all()
+        stale = [rid for rid, ca in rows if _older_than(ca, cutoff)]
+        for i in range(0, len(stale), 500):
+            await s.execute(
+                sa_delete(AccountHealthSnapshot).where(
+                    AccountHealthSnapshot.id.in_(stale[i : i + 500])
+                )
+            )
+        return len(stale)
+
+    async def _site_text(s, cutoff) -> int:  # §20: тексты краула (крупные, чужой контент)
+        rows = (
+            await s.execute(
+                select(ClientSitePage.id, ClientSitePage.crawled_at).where(
+                    ClientSitePage.text.is_not(None)
+                )
+            )
+        ).all()
+        stale = [rid for rid, ca in rows if _older_than(ca, cutoff)]
+        for i in range(0, len(stale), 500):
+            # СТРОКУ не удаляем: карта страниц (top_site_pages → sitelinks) должна жить,
+            # протухает только тяжёлый текст — досье по нему всё равно уже собрано.
+            await s.execute(
+                sa_update(ClientSitePage)
+                .where(ClientSitePage.id.in_(stale[i : i + 500]))
+                .values(text=None)
+            )
+        return len(stale)
+
+    async def _quota_ops(s, cutoff) -> int:  # C2: строки распределённого счётчика квоты
+        rows = (await s.execute(select(AdsQuotaOp.id, AdsQuotaOp.ts))).all()
+        stale = [rid for rid, ts in rows if _older_than(ts, cutoff)]
+        for i in range(0, len(stale), 500):
+            await s.execute(sa_delete(AdsQuotaOp).where(AdsQuotaOp.id.in_(stale[i : i + 500])))
+        return len(stale)
+
+    async def _agent_runs(s, cutoff) -> int:
+        """Волна 3: журнал прогонов убирается ЦЕЛЫМИ прогонами и НИКОГДА — денежными.
+
+        Почему не построчно, как везде выше: события сшиты хэш-цепочкой внутри run_id, и удаление
+        отдельного звена неотличимо от подделки — `verify_chain` увидит `seq_gap` и объявит
+        подделкой то, что сделала штатная уборка. Прогон уходит целиком (заголовок + все события)
+        либо не уходит вовсе.
+
+        Прогон с ХОТЬ ОДНИМ событием денежного пути пропускаем целиком. Это не оптимизация под
+        триггер (он и так отказал бы), а правило: денежный след живёт дольше наблюдаемости, и его
+        архивация — ручная процедура (docs/BACKUP.md), а не побочный эффект джобы."""
+        from db.models import AgentRun, AgentRunEvent
+
+        protected = set(
+            (
+                await s.execute(
+                    select(AgentRunEvent.run_id)
+                    .where(AgentRunEvent.kind.in_(sorted(MONEY_KINDS)))
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
+        rows = (await s.execute(select(AgentRun.run_id, AgentRun.started_at))).all()
+        stale = sorted({rid for rid, started in rows if _older_than(started, cutoff)} - protected)
+        for i in range(0, len(stale), 500):
+            batch = stale[i : i + 500]
+            await s.execute(sa_delete(AgentRunEvent).where(AgentRunEvent.run_id.in_(batch)))
+            await s.execute(sa_delete(AgentRun).where(AgentRun.run_id.in_(batch)))
+        return len(stale)
+
     with request_scope("scheduler:purge"):  # §15: корреляция логов джобы по request_id
-        async with Session() as s:
-            if settings.error_events_retain_days > 0:
-                cutoff = now - timedelta(days=settings.error_events_retain_days)
-                rows = (await s.execute(select(ErrorEvent.id, ErrorEvent.created_at))).all()
-                stale = [rid for rid, ca in rows if _older_than(ca, cutoff)]
-                for i in range(0, len(stale), 500):  # батч: не упереться в лимит переменных SQLite
-                    await s.execute(
-                        sa_delete(ErrorEvent).where(ErrorEvent.id.in_(stale[i : i + 500]))
-                    )
-                result["error_events"] = len(stale)
-            if settings.crawl_jobs_retain_days > 0:
-                cutoff = now - timedelta(days=settings.crawl_jobs_retain_days)
-                rows = (
-                    await s.execute(
-                        select(CrawlJob.id, CrawlJob.created_at).where(
-                            CrawlJob.status.in_(("done", "failed"))
-                        )
-                    )
-                ).all()
-                stale = [rid for rid, ca in rows if _older_than(ca, cutoff)]
-                for i in range(0, len(stale), 500):
-                    await s.execute(sa_delete(CrawlJob).where(CrawlJob.id.in_(stale[i : i + 500])))
-                result["crawl_jobs"] = len(stale)
-            if settings.account_health_retain_days > 0:  # N1.1: снапшоты health-score (тренды)
-                cutoff = now - timedelta(days=settings.account_health_retain_days)
-                rows = (
-                    await s.execute(
-                        select(AccountHealthSnapshot.id, AccountHealthSnapshot.created_at)
-                    )
-                ).all()
-                stale = [rid for rid, ca in rows if _older_than(ca, cutoff)]
-                for i in range(0, len(stale), 500):
-                    await s.execute(
-                        sa_delete(AccountHealthSnapshot).where(
-                            AccountHealthSnapshot.id.in_(stale[i : i + 500])
-                        )
-                    )
-                result["account_health_snapshot"] = len(stale)
-            if (
-                settings.site_page_text_retain_days > 0
-            ):  # §20: тексты краула (крупные, чужой контент)
-                cutoff = now - timedelta(days=settings.site_page_text_retain_days)
-                rows = (
-                    await s.execute(
-                        select(ClientSitePage.id, ClientSitePage.crawled_at).where(
-                            ClientSitePage.text.is_not(None)
-                        )
-                    )
-                ).all()
-                stale = [rid for rid, ca in rows if _older_than(ca, cutoff)]
-                for i in range(0, len(stale), 500):
-                    # СТРОКУ не удаляем: карта страниц (top_site_pages → sitelinks) должна жить,
-                    # протухает только тяжёлый текст — досье по нему всё равно уже собрано.
-                    await s.execute(
-                        sa_update(ClientSitePage)
-                        .where(ClientSitePage.id.in_(stale[i : i + 500]))
-                        .values(text=None)
-                    )
-                result["site_page_text"] = len(stale)
-            if settings.ads_quota_ops_retain_days > 0:  # C2: строки распределённого счётчика квоты
-                cutoff = now - timedelta(days=settings.ads_quota_ops_retain_days)
-                rows = (await s.execute(select(AdsQuotaOp.id, AdsQuotaOp.ts))).all()
-                stale = [rid for rid, ts in rows if _older_than(ts, cutoff)]
-                for i in range(0, len(stale), 500):
-                    await s.execute(
-                        sa_delete(AdsQuotaOp).where(AdsQuotaOp.id.in_(stale[i : i + 500]))
-                    )
-                result["ads_quota_ops"] = len(stale)
-            if any(result.values()):
-                await s.commit()
+        await _sweep("error_events", settings.error_events_retain_days, _error_events)
+        await _sweep("crawl_jobs", settings.crawl_jobs_retain_days, _crawl_jobs)
+        await _sweep("account_health_snapshot", settings.account_health_retain_days, _health)
+        await _sweep("site_page_text", settings.site_page_text_retain_days, _site_text)
+        await _sweep("ads_quota_ops", settings.ads_quota_ops_retain_days, _quota_ops)
+        await _sweep("agent_runs", settings.agent_runs_retain_days, _agent_runs)
         if any(result.values()):
             log.info(
                 "scheduler: purge — error_events удалено %d, crawl_jobs %d, health-снапшотов %d, "
-                "текстов страниц обнулено %d, quota-строк удалено %d",
+                "текстов страниц обнулено %d, quota-строк удалено %d, прогонов агента %d",
                 result["error_events"],
                 result["crawl_jobs"],
                 result["account_health_snapshot"],
                 result["site_page_text"],
                 result["ads_quota_ops"],
+                result["agent_runs"],
             )
         return result

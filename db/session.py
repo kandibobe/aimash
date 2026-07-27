@@ -14,7 +14,7 @@ from sqlalchemy.pool import NullPool
 
 from core.config import settings
 from core.logging import log
-from db.models import Base
+from db.models import Base, event_immutability_ddl
 
 # SQLite (dev/test): NullPool — aiosqlite держит соединение в фоновом потоке, привязанном к
 # своему event loop. Пул, переживающий loop (напр. per-test event loop у pytest-asyncio),
@@ -186,6 +186,11 @@ async def init_db() -> None:
             await conn.run_sync(Base.metadata.create_all)
             # create_all не альтерит существующие таблицы → аддитивный self-heal схемы.
             await conn.run_sync(heal_sqlite_schema)
+            # Волна 3: неизменяемость agent_run_events обеспечивает СУБД, а не дисциплина
+            # вызывающего. Ставим ЗДЕСЬ, а не через after_create-листенер: у уже существующей
+            # dev-БД таблица не пересоздаётся, а гард нужен и ей. Операторы идемпотентны.
+            for stmt in event_immutability_ddl("sqlite"):
+                await conn.execute(text(stmt))
         return
 
     async with engine.begin() as conn:

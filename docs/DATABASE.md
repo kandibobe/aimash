@@ -36,11 +36,11 @@ Alembic-миграцией (см. колонку «Миграция»). Коло
 | `sheet_exports` | реестр созданных ботом Google-таблиц (`/sheets`, ключи визарда §19.4.2) → выдача в `/mysheets`; секретов нет (url уже уходил в чат) | `chat_id` (+ индекс `chat_id, id`), `customer_id`, `kind` (keywords\|report), `spreadsheet_id`, `url`, `title`, `share` (роль\|off\|failed) | `0025` | ACTIVE |
 | `auction_insight_row` | импортированные строки «Статистики аукционов» (CSV из интерфейса Ads, `/competitors`) — ЕДИНСТВЕННЫЙ легальный источник имён конкурентов (в GAQL ресурса нет) | `customer_id` + `snapshot_date` + `domain` (unique тройка), `is_you`, доли 0..1 (`impression_share`, `overlap_rate`, …; NULL = «--» в файле, это **не** 0), `period_label` | `0026` | ACTIVE |
 | `ads_quota_ops` | распределённый счётчик дневной квоты Google Ads (§3, `core.quota`): общий стор вместо per-process deque — bot + scheduler + per-session MCP видят один потолок; PII/секретов нет (`account` = customer_id) | `ts` (индекс + `account,ts`), `account` (customer_id\|NULL), `kind` (read\|mutate), `op_count`; окно 24ч в SQL `SUM(op_count) WHERE ts>cutoff` (`db_dt`), ретеншн `ads_quota_ops_retain_days` | `0031` | ACTIVE |
-| `agent_runs` | #10 наблюдаемость: один ассистентский ход = одна строка (cost/итерации/латентность), персистентно — `core.usage` сбрасывается на рестарте, `core.quota` считает операции, не деньги | `run_id` (= `core.provenance.run_id`, индекс), `origin` (human\|machine\|hermes\|cron), `chat_id`, `customer_id` (+ индекс `customer_id, started_at` — отчёт «сколько стоит группа за окно»), `model`, `iterations_used`, токены, `cost_usd`, `status` | `0032` | ACTIVE |
-| `agent_run_events` | шаг хода (llm\|tool\|ads_read\|ads_mutate): латентность и стоимость, раньше жившие только в лог-строках `core.resilience` | `run_id` + `seq` (индекс), `kind`, `tool_name`, `latency_ms`, `cost_usd`, `rows_returned`, `args_redacted` (**редактировано** `redact_text`), `result_digest` (сводка, не сырьё), `ok` | `0032` | ACTIVE |
+| `agent_runs` | #10 наблюдаемость: один ассистентский ход = одна строка (cost/итерации/латентность), персистентно — `core.usage` сбрасывается на рестарте, `core.quota` считает операции, не деньги. Ретеншн `agent_runs_retain_days` (90): уборка идёт **целыми прогонами** (заголовок + события), денежные прогоны не трогает вовсе — вырезать звено из хэш-цепочки значит своими руками создать разрыв, который `verify_chain` обязан считать подделкой | `run_id` (= `core.provenance.run_id`, индекс), `origin` (human\|machine\|hermes\|cron), `chat_id`, `customer_id` (+ индекс `customer_id, started_at` — отчёт «сколько стоит группа за окно»), `model`, `iterations_used`, токены, `cost_usd`, `status` | `0032` | ACTIVE |
+| `agent_run_events` | шаг хода (llm\|tool\|ads_read\|ads_mutate\|compensation): латентность и стоимость, раньше жившие только в лог-строках `core.resilience`. Волна 3 — **защищённый журнал**: UPDATE запрещён триггером СУБД всегда, DELETE — для денежных событий моложе 365 дней; хэш-цепочка внутри `run_id` делает вырезанное звено видимым (`core.observe.verify_chain`, разбор — `scripts/replay_run.py`) | `run_id` + `seq` (индекс), `kind`, `tool_name`, `latency_ms`, `cost_usd`, `rows_returned`, `args_redacted` (**редактировано** `redact_text`), `result_digest` (сводка, не сырьё), `ok`, **`prev_digest`/`payload_digest`** (NULL у строк до `0035` — они не сломаны, а непроверяемы) | `0032` (+`0035` цепочка и триггеры) | ACTIVE |
 | `circuit_state` | распределённый размыкатель (`core.breaker`, Волна 2): состояние цепи + **аренда пробы** — в half-open право на один пробный запрос берётся атомарным UPDATE, иначе три процесса (bot, scheduler, per-session MCP) пробуют втроём. PII/секретов нет (`name` = `ads:<customer_id>` / `llm:<slug>`) | `name` (UNIQUE + индекс, ≤96), `state` (closed\|open\|half_open), `failure_count` (инкремент в SQL, не read-modify-write), `opened_at`, `probe_lease_until` (аренда, не блокировка — умерший пробник задерживает восстановление на срок аренды, не навсегда), `updated_at` | `0033` | ACTIVE |
 
-> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0033`
+> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0035`
 > (`op.create_table(...)`). Инициалка `0001` создаёт базовые таблицы
 > (`whitelist`, `user_settings`, `proposals`, `audit_log`, `oauth_tokens`;
 > [`migrations/versions/0001_initial.py:22-92`](../migrations/versions/0001_initial.py)), остальные —
@@ -168,7 +168,19 @@ Bot-токеном; клейм `pending → sending` атомарным CAS (`ro
 поэтому два планировщика не пришлют файл дважды. Вечный `pending` — **наблюдаемая** величина
 («обещали и не отдали»), а не тишина. `nullable` без `server_default`: существующим строкам вложение
 не обещалось, и `NULL` это и означает — штамп `pending` пообещал бы им файл задним числом.
-Ретеншна не требует: живёт в строке черновика и уходит с ней) — **head**.
+Ретеншна не требует: живёт в строке черновика и уходит с ней) →
+`0035` (`agent_run_events`: неизменяемость средствами СУБД + хэш-цепочка, Волна 3. Таблица событий
+существует с `0032`, но защищена не была ничем: любой скрипт или psql-сессия могли переписать строку —
+«неизменяемое событие» держалось на дисциплине вызывающего. Два рубежа. **Триггер**: UPDATE запрещён
+всегда и для всех `kind` (легальной причины переписать событие нет; разрешить «иногда» значит завести
+путь, где подмену не отличить от штатной правки), DELETE запрещён для денежных `kind`
+(`ads_mutate`/`compensation`) моложе `MONEY_RETENTION_DAYS = 365` — ретеншн обязан работать, но
+денежный след не уходит вместе с мусором. Аварийного флага обхода нет намеренно: он понадобился бы
+ровно тому, от кого пол и защищает; ошибочное событие исправляется КОМПЕНСИРУЮЩИМ, а не правкой
+журнала. **Хэш-цепочка** `prev_digest`/`payload_digest` по каноническому JSON — триггер запрещает
+изменение, цепочка делает его ВИДНЫМ, включая случай, когда правивший триггер снял. Текст SQL —
+`db.models.event_immutability_ddl(dialect)`, один источник на Postgres (эта миграция) и SQLite
+(`db.session.init_db`), иначе гард жил бы только на проде и проверялся бы только там) — **head**.
 
 ### Добавить миграцию
 ```bash

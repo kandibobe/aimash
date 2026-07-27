@@ -181,6 +181,7 @@ async def test_purge_disabled_when_retain_zero(monkeypatch):
     monkeypatch.setattr(settings, "account_health_retain_days", 0)  # N1.1: та же семантика
     monkeypatch.setattr(settings, "site_page_text_retain_days", 0)  # §20: тексты краула
     monkeypatch.setattr(settings, "ads_quota_ops_retain_days", 0)  # C2: строки счётчика квоты
+    monkeypatch.setattr(settings, "agent_runs_retain_days", 0)  # Волна 3: журнал прогонов
     async with Session() as s:
         await s.execute(delete(ErrorEvent))
         s.add(
@@ -199,6 +200,7 @@ async def test_purge_disabled_when_retain_zero(monkeypatch):
         "account_health_snapshot": 0,
         "site_page_text": 0,
         "ads_quota_ops": 0,
+        "agent_runs": 0,
     }
     async with Session() as s:
         cnt = (await s.execute(select(func.count()).select_from(ErrorEvent))).scalar()

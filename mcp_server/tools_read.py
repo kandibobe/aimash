@@ -34,6 +34,7 @@ from ads.keyword_plan import generate_keyword_ideas
 from ads.read import account_timezone, list_child_accounts
 from audit.collect import gather_audit
 from clients.store import ClientProfileStore
+from core import observe  # Волна 3: вызов инструмента — прогон в журнале событий
 from core.logging import log
 from core.resilience import run_ads_read_call
 from db.history import list_recent_applied_by_customer
@@ -83,13 +84,20 @@ async def _guarded(
 
     Отказ замка приезжает как `error_code == "forbidden_account"` (`envelope.classify_error`) —
     инвариант `tests/test_hermes_isolation.py` ассертит именно код, а не текст.
+
+    Волна 3 (event sourcing): тело выполняется внутри `observe.run_scope` — вызов инструмента обязан
+    быть прогоном в журнале, иначе `ads_read`-события, которые `core.resilience` уже эмитит, в
+    MCP-процессе падают в никуда (вне scope `record_event` — no-op). Отсюда берётся ответ на
+    «что агент реально читал перед тем, как это предложить». Прогон закрывается статусом 'error',
+    если тело бросило, — и до конверта `err` это доезжает неизменным.
     """
     try:
         if manager:
             ensure_manager_allowed(str(account))
         else:
             ensure_read_allowed(str(account))
-        return await work()
+        async with observe.run_scope("mcp_read"):
+            return await work()
     except Exception as e:  # noqa: BLE001 — граница слоя: наружу только редактированное
         log.warning("mcp read tool failed: %s", type(e).__name__)
         return err(e)

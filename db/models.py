@@ -810,6 +810,75 @@ class AgentRunEvent(Base):
     result_digest: Mapped[str | None] = mapped_column(String(255))  # короткая сводка, не сырьё
     ok: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Волна 3 (event sourcing): хэш-цепочка ВНУТРИ run_id — вырезанное звено обязано быть видно, а не
+    # только запрещено. prev_digest = payload_digest предыдущего события прогона (у первого — genesis
+    # от run_id, core.observe.genesis_digest). NULL у строк, записанных ДО миграции 0035: они не
+    # «сломаны», они вне цепочки, и core.observe.verify_chain считает их отдельно (`unchained`).
+    # NULLABLE намеренно: NOT NULL потребовал бы задним числом подписать то, чего никто не подписывал.
+    prev_digest: Mapped[str | None] = mapped_column(String(64))
+    payload_digest: Mapped[str | None] = mapped_column(String(64))
+
+
+def event_immutability_ddl(dialect: str) -> list[str]:
+    """DDL неизменяемости `agent_run_events` для диалекта: список идемпотентных операторов.
+
+    Зачем в СУБД, а не в коде. «Неизменяемое событие», обеспеченное дисциплиной вызывающего, — это
+    не неизменяемость, а обещание: любой скрипт, миграция или psql-сессия обходит его молча. Здесь
+    же UPDATE запрещён физически, а DELETE — пока строка денежного пути моложе пола хранения.
+
+    Два правила, РАЗНЫЕ по строгости, и это осознанно:
+      • UPDATE — запрещён ВСЕГДА и для всех kind. Легальной причины переписать событие нет ни одной;
+        разрешить «иногда» значит завести путь, по которому подмену не отличить от штатной правки.
+      • DELETE — разрешён, КРОМЕ событий MONEY_KINDS моложе MONEY_RETENTION_DAYS. Ретеншн обязан
+        работать (таблица растёт монотонно), но денежный след не должен уходить вместе с мусором.
+        Аварийного «флага обхода» нет намеренно: единственный, кому он понадобился бы, — тот, от
+        кого пол и защищает. Ошибочно записанное событие исправляется компенсирующим событием, а не
+        правкой журнала — это и есть event sourcing.
+
+    Один источник этих правил на оба диалекта: Alembic зовёт для Postgres (прод), `db.session.init_db`
+    — для SQLite (dev/test), поэтому гард проверяем локально, а не «только на проде»."""
+    from core.observe import MONEY_KINDS, MONEY_RETENTION_DAYS
+
+    kinds = ", ".join(f"'{k}'" for k in sorted(MONEY_KINDS))
+    if dialect == "postgresql":
+        return [
+            f"""
+CREATE OR REPLACE FUNCTION agent_run_events_immutable() RETURNS trigger AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    RAISE EXCEPTION 'agent_run_events immutable: UPDATE forbidden (run_id=%, seq=%)',
+      OLD.run_id, OLD.seq;
+  END IF;
+  IF OLD.kind IN ({kinds})
+     AND OLD.created_at > now() - interval '{MONEY_RETENTION_DAYS} days' THEN
+    RAISE EXCEPTION 'agent_run_events: money-path event within retention floor (run_id=%, seq=%)',
+      OLD.run_id, OLD.seq;
+  END IF;
+  RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+""".strip(),
+            "DROP TRIGGER IF EXISTS trg_agent_run_events_immutable ON agent_run_events;",
+            "CREATE TRIGGER trg_agent_run_events_immutable "
+            "BEFORE UPDATE OR DELETE ON agent_run_events "
+            "FOR EACH ROW EXECUTE FUNCTION agent_run_events_immutable();",
+        ]
+    if dialect == "sqlite":
+        # SQLite не знает TG_OP — два отдельных триггера. created_at здесь наивный UTC-текст
+        # ('YYYY-MM-DD HH:MM:SS', server_default=CURRENT_TIMESTAMP), datetime('now',…) даёт тот же
+        # формат, поэтому лексикографическое сравнение корректно (см. db.session.db_dt).
+        return [
+            "CREATE TRIGGER IF NOT EXISTS trg_agent_run_events_no_update "
+            "BEFORE UPDATE ON agent_run_events BEGIN "
+            "SELECT RAISE(ABORT, 'agent_run_events immutable: UPDATE forbidden'); END;",
+            "CREATE TRIGGER IF NOT EXISTS trg_agent_run_events_money_retention "
+            "BEFORE DELETE ON agent_run_events "
+            f"WHEN OLD.kind IN ({kinds}) "
+            f"AND OLD.created_at > datetime('now', '-{MONEY_RETENTION_DAYS} days') BEGIN "
+            "SELECT RAISE(ABORT, "
+            "'agent_run_events: money-path event within retention floor'); END;",
+        ]
+    return []
 
 
 class CircuitState(Base):

@@ -33,6 +33,7 @@ from ads.read import (  # D6: «было» для гео-мутаций; вал�
     account_currency,
     read_campaign_targeting,
 )
+from core import observe  # Волна 3: исполнение мутации — прогон в журнале событий
 from core.config import normalize_customer_id, settings  # D7: гео-дефолты из env, не хардкод «UA»
 from core.logging import log, redact_text  # Доп.2A: лог сбоя пост-проверки (редактируем текст)
 
@@ -1278,7 +1279,18 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
       изменилась: ValueError/PermissionError доходят до вызывающего как раньше).
     • Сбой самой проверки НЕ откатывает уже применённую мутацию (degrade → verified=None).
     • result операции остаётся прежним; ключ `verification` дописывается ТОЛЬКО при расхождении
-      (verified is False), чтобы не менять контракт result для happy-path."""
+      (verified is False), чтобы не менять контракт result для happy-path.
+
+    Волна 3: блок обёрнут в `observe.run_scope` — исполнение мутации обязано быть прогоном в журнале
+    событий, а не безымянным вызовом. До этого scope открывался ровно из одного места (агентский цикл
+    `agent/loop.py`), и денежный путь не эмитил НИЧЕГО: событиям мутации, SDK-вызовов и пост-проверки
+    некуда было сшиваться. Вложенность безопасна — внутренний scope переиспользует внешний."""
+    async with observe.run_scope("execute_confirmed"):
+        return await _execute_confirmed_inner(store, confirmation_id)
+
+
+async def _execute_confirmed_inner(store, confirmation_id: str) -> dict:
+    """Тело `execute_confirmed` без обвязки прогона (см. её докстринг)."""
     result = await _apply_confirmed(store, confirmation_id)
     # Метаданные для сверки берём ПОСЛЕ apply (статус теперь applied): op/params/customer_id.
     try:

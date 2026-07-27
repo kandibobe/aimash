@@ -16,11 +16,18 @@
 Наблюдаемость НЕ роняет денежный путь (правило 5/10): запись fail-OPEN (как `core.usage.record`) —
 любой сбой БД/разбора глотаем, ход продолжается. args_redacted проходит `redact_text` ДО записи
 (правило 5). Секретов/PII здесь нет: числа + id аккаунта, ключ OpenRouter сюда не попадает.
+
+Волна 3 (event sourcing) добавляет РОВНО ОДНО исключение из этого fail-open и хэш-цепочку:
+`record_money_event` (kind ∈ MONEY_KINDS) пишет СИНХРОННО, своей транзакцией и fail-CLOSED — см. её
+докстринг о том, почему батч на закрытии scope для мутаций непригоден в принципе. Неизменяемость
+обеспечивает СУБД (триггеры, `db.models.event_immutability_ddl`), а вырезанное звено видно по
+`prev_digest`/`payload_digest` (`verify_chain`) — не дисциплиной вызывающего.
 """
 
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -31,6 +38,19 @@ from core.logging import log, redact_text
 
 _ARGS_MAX = 2000  # потолок длины args_redacted в БД (как _MSG_MAX в core.errors)
 _DIGEST_MAX = 255
+
+# Волна 3: события ДЕНЕЖНОГО пути. Для них запись fail-closed (record_money_event), а удаление
+# блокирует триггер СУБД, пока строка моложе пола хранения. Значение — и в SQL-триггерах
+# (db.models.event_immutability_ddl), менять надо в обоих местах согласованно (гард — тесты).
+MONEY_KINDS = frozenset({"ads_mutate", "compensation"})
+MONEY_RETENTION_DAYS = 365
+
+
+class EventWriteError(RuntimeError):
+    """Событие ДЕНЕЖНОГО пути не записано ⇒ мутация исполняться не должна.
+
+    Отдельный тип, потому что это единственный класс наблюдаемости, чей сбой обязан остановить ход:
+    вся прочая — fail-open по правилу 10 (авария наблюдаемости не должна становиться аварией бота)."""
 
 
 @dataclass
@@ -75,6 +95,95 @@ def _redact_args(args: Any) -> str | None:
         return redact_text(raw)[:_ARGS_MAX]
     except Exception:  # noqa: BLE001
         return None
+
+
+# ── Хэш-цепочка событий (Волна 3): вырезанное/переписанное звено обязано быть ВИДНО ──────────
+# Поля события, входящие в дайджест. `created_at` НЕ входит намеренно: его ставит СУБД
+# server_default'ом, и в момент вычисления дайджеста клиент его не знает. Подмену времени ловит не
+# хэш, а триггер (UPDATE запрещён целиком) — разделение честное, а не «забыли».
+_CHAINED_FIELDS = (
+    "kind",
+    "tool_name",
+    "latency_ms",
+    "cost_usd",
+    "prompt_tokens",
+    "completion_tokens",
+    "rows_returned",
+    "args_redacted",
+    "result_digest",
+    "ok",
+)
+
+
+def _canon(value: Any) -> Any:
+    """Нормализовать значение ПЕРЕД сериализацией: float — до 6 знаков, контейнеры — рекурсивно,
+    несериализуемое — в строку. Без этого дайджест зависит от представления числа, а не от числа."""
+    if isinstance(value, bool) or value is None or isinstance(value, (str, int)):
+        return value
+    if isinstance(value, float):
+        return round(value, 6)
+    if isinstance(value, dict):
+        return {str(k): _canon(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_canon(v) for v in value]
+    return str(value)
+
+
+def canonical_json(payload: Any) -> str:
+    """Канонический JSON: сортированные ключи, без пробелов, фиксированная точность float.
+    Дайджест обязан воспроизводиться ДРУГИМ процессом и другой версией кода — иначе цепочка
+    неверифицируема, а «неизменяемый журнал» проверить нечем."""
+    return json.dumps(_canon(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def genesis_digest(run_id: str) -> str:
+    """Якорь цепочки прогона. Считается ОТ run_id, а не константа: иначе первое событие можно
+    перенести в другой прогон, не порвав ни одной ссылки."""
+    return hashlib.sha256(f"aimash:run:{run_id}".encode("utf-8")).hexdigest()
+
+
+def event_digest(run_id: str, seq: int, ev: dict[str, Any], prev_digest: str) -> str:
+    """sha256 по (run_id, seq, prev_digest, содержимое события) — звено цепочки."""
+    payload = {"run_id": run_id, "seq": int(seq), "prev": prev_digest}
+    payload.update({k: ev.get(k) for k in _CHAINED_FIELDS})
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def chain_events(
+    run_id: str, events: list[dict[str, Any]], *, start_seq: int = 0, prev: str | None = None
+) -> list[dict[str, Any]]:
+    """Проставить подряд идущим событиям одного прогона seq/prev_digest/payload_digest.
+    Возвращает НОВЫЕ словари (вход не мутируется) — годные под `AgentRunEvent(run_id=…, **row)`."""
+    out: list[dict[str, Any]] = []
+    prev_digest = prev or genesis_digest(run_id)
+    for i, ev in enumerate(events):
+        seq = start_seq + i
+        digest = event_digest(run_id, seq, ev, prev_digest)
+        out.append({**ev, "seq": seq, "prev_digest": prev_digest, "payload_digest": digest})
+        prev_digest = digest
+    return out
+
+
+async def _chain_tail(session: Any, run_id: str) -> tuple[int, str]:
+    """(следующий seq, дайджест последнего события) прогона. Пустой прогон ⇒ (0, genesis).
+
+    Строка без `payload_digest` (записана ДО миграции 0035) якорем служить не может — берём genesis;
+    разрыв на стыке старого и нового покажет `verify_chain`, а не тихо замажет запись."""
+    from sqlalchemy import select
+
+    from db.models import AgentRunEvent
+
+    row = (
+        await session.execute(
+            select(AgentRunEvent.seq, AgentRunEvent.payload_digest)
+            .where(AgentRunEvent.run_id == run_id)
+            .order_by(AgentRunEvent.seq.desc())
+            .limit(1)
+        )
+    ).first()
+    if row is None:
+        return 0, genesis_digest(run_id)
+    return int(row[0]) + 1, (row[1] or genesis_digest(run_id))
 
 
 def record_event(
@@ -142,9 +251,19 @@ async def run_scope(
 
     На выходе — ОДНА best-effort транзакция: заголовок AgentRun (с суммами и finished_at) + события
     AgentRunEvent по порядку. Сбой записи глотаем (наблюдаемость не роняет ход). Статус: 'ok' при
-    нормальном выходе, 'error' если из блока вылетело исключение (пробрасывается дальше)."""
+    нормальном выходе, 'error' если из блока вылетело исключение (пробрасывается дальше).
+
+    ВЛОЖЕННЫЙ scope ПЕРЕИСПОЛЬЗУЕТ внешний, а не заводит второй прогон. Прогон = один ассистентский
+    ход, а ход не содержит внутри себя ходов; иначе `execute_confirmed`, вызванный из агентского
+    цикла, дал бы ДВЕ строки agent_runs с одним run_id — и `cost_report` посчитал бы один ход за два.
+    Волна 3 открывает scope на денежном пути и в тул-слое, то есть вложенность стала штатной."""
     from core.context import get_context, new_request_id, reset_context, set_context
     from core.provenance import get_provenance
+
+    outer = _RUN.get()
+    if outer is not None:
+        yield outer  # события блока лягут во внешний прогон; своей транзакции здесь нет
+        return
 
     ctx = get_context()
     prov = get_provenance()
@@ -204,11 +323,174 @@ async def _persist_run(acc: _RunAcc) -> None:
                     finished_at=finished,
                 )
             )
-            for seq, ev in enumerate(acc.events):
-                s.add(AgentRunEvent(run_id=acc.run_id, seq=seq, **ev))
+            # seq продолжает УЖЕ ЛЕЖАЩИЕ события прогона, а не начинается с нуля: денежные события
+            # пишутся синхронно (record_money_event) ДО закрытия scope, и enumerate(0..N) затёр бы
+            # их позиции — цепочка разветвилась бы на два звена с одним prev_digest.
+            next_seq, prev = await _chain_tail(s, acc.run_id)
+            for row in chain_events(acc.run_id, acc.events, start_seq=next_seq, prev=prev):
+                s.add(AgentRunEvent(run_id=acc.run_id, **row))
             await s.commit()
     except Exception as e:  # noqa: BLE001 — наблюдаемость fail-open (правило 10)
         log.warning("observe: прогон %s не записан (%s)", acc.run_id, type(e).__name__)
+
+
+def current_run_id() -> str:
+    """run_id ТЕКУЩЕГО хода — одна корреляция на ход (provenance.run_id == context.request_id).
+    Нет ни того, ни другого ⇒ заводим свежий: событие без прогона лучше, чем отсутствие события."""
+    from core.context import get_context, new_request_id
+    from core.provenance import get_provenance
+
+    ctx = get_context()
+    prov = get_provenance()
+    rid = next((r for r in (prov.run_id, ctx.request_id) if r and r != "-"), "") or new_request_id()
+    return rid[:16]
+
+
+async def record_money_event(
+    kind: str,
+    *,
+    operation: str | None = None,
+    confirmation_id: str | None = None,
+    customer_id: str | None = None,
+    args: Any = None,
+    result_digest: str | None = None,
+    ok: bool = True,
+) -> str:
+    """Записать событие ДЕНЕЖНОГО пути СИНХРОННО, СОБСТВЕННОЙ транзакцией и FAIL-CLOSED.
+
+    Почему не `record_event`. Тот копит событие в памяти и пишет всё скопом на закрытии `run_scope`
+    — то есть УЖЕ ПОСЛЕ вызова к Google Ads. Сделать ту запись fail-closed бессмысленно: деньги
+    потрачены, откатывать нечего. Событие мутации обязано лечь в БД ДО SDK-вызова, иначе
+    «неизменяемый журнал» не покрывает ровно тот класс, ради которого заведён.
+
+    Почему fail-closed здесь НЕ заводит нового класса аварий. Денежный путь и так жёстко зависит от
+    ЭТОЙ БД: в ней живёт `confirm_store`, и без неё `claim` не выполнится в любом случае. Отказ
+    здесь ничего не открывает и ничего дополнительно не роняет — он лишь отказывает раньше.
+
+    Что событие ЗНАЧИТ: заявку на исполнение, а не факт исполнения. Исход мутации живёт в audit-row,
+    и «выполнено» пользователю репортится оттуда (правило 15), а не отсюда.
+
+    Работает и вне `run_scope` (мутацию может звать headless-путь без агентского цикла): run_id
+    берётся из provenance/context. Возвращает run_id, под которым событие записано.
+
+    Raises:
+        EventWriteError: событие не записано. Вызывающий обязан НЕ выполнять мутацию.
+    """
+    from db.models import AgentRunEvent
+    from db.session import Session
+
+    from core.context import get_context
+
+    run_id = current_run_id()
+    ev = {
+        "kind": str(kind)[:16],
+        "tool_name": (str(operation)[:64] if operation else None),
+        "latency_ms": None,
+        "cost_usd": 0.0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "rows_returned": None,
+        "args_redacted": _redact_args(
+            {
+                "confirmation_id": confirmation_id,
+                "customer_id": customer_id or get_context().customer_id,
+                "args": args,
+            }
+        ),
+        "result_digest": (str(result_digest)[:_DIGEST_MAX] if result_digest else None),
+        "ok": bool(ok),
+    }
+    try:
+        async with Session() as s:
+            next_seq, prev = await _chain_tail(s, run_id)
+            row = chain_events(run_id, [ev], start_seq=next_seq, prev=prev)[0]
+            s.add(AgentRunEvent(run_id=run_id, **row))
+            await s.commit()
+    except Exception as e:  # noqa: BLE001 — наружу ТИП, не str(e) (правило 5: в DSN пароль)
+        raise EventWriteError(
+            f"событие '{kind}' денежного пути не записано ({type(e).__name__}) — мутация отклонена"
+        ) from None
+    return run_id
+
+
+async def verify_chain(run_id: str) -> dict[str, Any]:
+    """Пересчитать хэш-цепочку прогона и сказать, ГДЕ она рвётся: замена доверия проверкой.
+
+    Ловит и переписанное звено (дайджест не сойдётся), и вырезанное (`prev_digest` следующего не
+    совпадёт с `payload_digest` предыдущего, либо разорвётся нумерация seq) — даже если писавший
+    имел права на таблицу и триггер обошёл.
+
+    Строки, записанные ДО миграции 0035, дайджеста не имеют. Они не «сломаны» — они вне цепочки:
+    считаем их отдельно (`unchained`) и проверку начинаем с первой подписанной. Врать «всё сошлось»
+    про непроверяемый хвост нельзя, молча его проверять — тем более.
+
+    Returns:
+        {ok, events, unchained, broken_at, reason} — `broken_at` = seq первого расхождения."""
+    from sqlalchemy import select
+
+    from db.models import AgentRunEvent
+    from db.session import Session
+
+    async with Session() as s:
+        rows = list(
+            (
+                await s.execute(
+                    select(AgentRunEvent)
+                    .where(AgentRunEvent.run_id == run_id)
+                    .order_by(AgentRunEvent.seq)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    unchained = 0
+    while unchained < len(rows) and not rows[unchained].payload_digest:
+        unchained += 1
+    chained = rows[unchained:]
+    prev_digest: str | None = None
+    prev_seq: int | None = None
+    for row in chained:
+        if not row.payload_digest:  # подписанное, потом неподписанное — дырка в середине
+            return {
+                "ok": False,
+                "events": len(rows),
+                "unchained": unchained,
+                "broken_at": row.seq,
+                "reason": "missing_digest",
+            }
+        if prev_seq is not None and row.seq != prev_seq + 1:
+            return {
+                "ok": False,
+                "events": len(rows),
+                "unchained": unchained,
+                "broken_at": row.seq,
+                "reason": "seq_gap",
+            }
+        if prev_digest is not None and row.prev_digest != prev_digest:
+            return {
+                "ok": False,
+                "events": len(rows),
+                "unchained": unchained,
+                "broken_at": row.seq,
+                "reason": "prev_mismatch",
+            }
+        ev = {k: getattr(row, k) for k in _CHAINED_FIELDS}
+        if event_digest(run_id, row.seq, ev, row.prev_digest or "") != row.payload_digest:
+            return {
+                "ok": False,
+                "events": len(rows),
+                "unchained": unchained,
+                "broken_at": row.seq,
+                "reason": "payload_mismatch",
+            }
+        prev_digest, prev_seq = row.payload_digest, row.seq
+    return {
+        "ok": True,
+        "events": len(rows),
+        "unchained": unchained,
+        "broken_at": None,
+        "reason": None,
+    }
 
 
 def _hermes_run_id(date: str, model: str) -> str:
