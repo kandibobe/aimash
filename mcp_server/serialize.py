@@ -174,3 +174,37 @@ def audit_payload(a) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         "families": a.families,
     }
     return rows, extra
+
+
+def profile_dict(p: dict) -> dict[str, Any]:
+    """§20: клиентский профиль (из ClientProfileStore.get_by_account) → компактный dict.
+    Содержит скаляры, контакты, услуги, число страниц сайта, дату краула.
+    Поля для sitelinks (top_site_pages) не входят — их отдаёт get_profile_context."""
+    return {
+        "customer_id": p.get("customer_id", ""),
+        "brand": p.get("brand"),
+        "business_desc": p.get("business_desc"),
+        "geo": p.get("geo"),
+        "language": p.get("language"),
+        "website": p.get("website"),
+        "socials": p.get("socials", {}),
+        "notes": p.get("notes"),
+        "contacts_count": len(p.get("contacts", [])),
+        "services_count": len(p.get("services", [])),
+        "site_pages_count": p.get("site_pages_count", 0),
+        "last_crawled_at": p.get("last_crawled_at").isoformat() if p.get("last_crawled_at") else None,
+    }
+
+
+def dossier_dict(d: dict | None) -> dict[str, Any] | None:
+    """§20: досье клиента → компактный dict. None → профиль ещё не краулился."""
+    if d is None:
+        return None
+    return {
+        "customer_id": d.get("customer_id", ""),
+        "version": d.get("version", 1),
+        "status": d.get("status", "draft"),
+        "has_markdown": bool(d.get("markdown")),
+        "has_llm_context": bool(d.get("llm_context")),
+        "created_at": d.get("created_at"),
+    }
