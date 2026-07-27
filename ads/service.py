@@ -1289,6 +1289,56 @@ async def execute_confirmed(store, confirmation_id: str) -> dict:
         return await _execute_confirmed_inner(store, confirmation_id)
 
 
+async def _watch_after_apply(confirmation_id: str, snap) -> None:
+    """Волна 4: завести наблюдение за только что применённой мутацией (режим `shadow`).
+
+    Строго best-effort и строго READ-ONLY: мутация уже состоялась, человек уже подтвердил, и
+    уронить исполнение из-за недоступности вспомогательной таблицы значило бы обменять важное на
+    второстепенное. Любой отказ здесь ⇒ наблюдения нет, исход мутации не меняется.
+
+    Наблюдаем ТОЛЬКО то, что реально откатывается И чей эффект на расход вычислим: операция в
+    `WATCHABLE_OPS`, `reverse_spec` по имеющемуся снимку вернул конкретную обратную мутацию, а
+    `expected_ratio` — конкретное число. Каждое из трёх условий отсекает свой класс бесполезных
+    строк: без обратной операции вердикту нечем ответить, без ожидаемого эффекта вердикт был бы про
+    сам факт изменения (подняли бюджет на 20% — расход вырос на 20% — «деградация»), а вне
+    `WATCHABLE_OPS` расход по замыслу либо уходит в ноль, либо не меняется вовсе.
+
+    `campaign_id` резолвим здесь, а не храним имя: между применением и проверкой кампанию могли
+    переименовать, и наблюдение молча начало бы мерить другую кампанию (или ничего)."""
+    from confirm.reverse import reverse_spec
+    from scheduler.rollback import WATCHABLE_OPS, expected_ratio
+
+    if snap.operation not in WATCHABLE_OPS:
+        return
+    params = snap.params or {}
+    before = attested_snapshot(params)
+    if reverse_spec(snap.operation, params, before) is None:
+        return  # необратимо по имеющемуся снимку — наблюдать не за чем
+    ratio = expected_ratio(snap.operation, params, before)
+    if ratio is None:
+        return  # ожидаемый эффект неизвестен — база несопоставима, вердикт был бы про сам факт
+    name = params.get("campaign")
+    if not name:
+        return
+    try:
+        cid = normalize_customer_id(snap.customer_id) if snap.customer_id else DRAFT_ACCOUNT_ID
+        client = await build_client_async(cid)
+        ref = await asyncio.to_thread(resolve.find_campaign_by_name, client, cid, name)
+        if ref is None:
+            return
+        from scheduler.rollback import record_watch
+
+        await record_watch(
+            confirmation_id=confirmation_id,
+            customer_id=cid,
+            campaign_id=ref.id,
+            operation=snap.operation,
+            expected_ratio=ratio,
+        )
+    except Exception as e:  # noqa: BLE001 — наблюдение не смеет ронять применённую мутацию
+        log.info("rollback-watch cid=%s не заведено: %s", confirmation_id, type(e).__name__)
+
+
 async def _execute_confirmed_inner(store, confirmation_id: str) -> dict:
     """Тело `execute_confirmed` без обвязки прогона (см. её докстринг)."""
     result = await _apply_confirmed(store, confirmation_id)
@@ -1297,6 +1347,8 @@ async def _execute_confirmed_inner(store, confirmation_id: str) -> dict:
         snap = await store.get_confirmed(confirmation_id)
     except Exception:  # noqa: BLE001 — метаданные не прочитать → пропускаем проверку, не роняем apply
         return result
+    if snap is not None:
+        await _watch_after_apply(confirmation_id, snap)
     if snap is None or snap.operation not in _DIFFABLE_OPS or not isinstance(result, dict):
         return result
     try:

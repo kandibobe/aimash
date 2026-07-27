@@ -1936,6 +1936,7 @@ async def purge_stale_rows(*, now: datetime | None = None) -> dict[str, int]:
         "site_page_text": 0,
         "ads_quota_ops": 0,
         "agent_runs": 0,  # ЦЕЛЫХ прогонов убрано (заголовок + события), денежные не трогаем
+        "rollback_watch": 0,  # закрытых наблюдений убрано; открытые (watching) не трогаем
     }
 
     async def _sweep(key: str, days: int, sweep) -> None:
@@ -2043,6 +2044,24 @@ async def purge_stale_rows(*, now: datetime | None = None) -> dict[str, int]:
             await s.execute(sa_delete(AgentRun).where(AgentRun.run_id.in_(batch)))
         return len(stale)
 
+    async def _rollback_watch(s, cutoff) -> int:
+        """Волна 4: журнал наблюдений за применёнными мутациями. Денежного следа тут нет — он в
+        `audit_log` и `agent_run_events`, — поэтому строку можно убирать обычным ретеншном.
+        Открытые наблюдения (`watching`) не трогаем: их окно могло не закрыться."""
+        from db.models import RollbackWatch
+
+        rows = (
+            await s.execute(
+                select(RollbackWatch.id, RollbackWatch.created_at).where(
+                    RollbackWatch.state != "watching"
+                )
+            )
+        ).all()
+        ids = [i for i, created in rows if _older_than(created, cutoff)]
+        for i in range(0, len(ids), 500):
+            await s.execute(sa_delete(RollbackWatch).where(RollbackWatch.id.in_(ids[i : i + 500])))
+        return len(ids)
+
     with request_scope("scheduler:purge"):  # §15: корреляция логов джобы по request_id
         await _sweep("error_events", settings.error_events_retain_days, _error_events)
         await _sweep("crawl_jobs", settings.crawl_jobs_retain_days, _crawl_jobs)
@@ -2050,15 +2069,18 @@ async def purge_stale_rows(*, now: datetime | None = None) -> dict[str, int]:
         await _sweep("site_page_text", settings.site_page_text_retain_days, _site_text)
         await _sweep("ads_quota_ops", settings.ads_quota_ops_retain_days, _quota_ops)
         await _sweep("agent_runs", settings.agent_runs_retain_days, _agent_runs)
+        await _sweep("rollback_watch", settings.rollback_watch_retain_days, _rollback_watch)
         if any(result.values()):
             log.info(
                 "scheduler: purge — error_events удалено %d, crawl_jobs %d, health-снапшотов %d, "
-                "текстов страниц обнулено %d, quota-строк удалено %d, прогонов агента %d",
+                "текстов страниц обнулено %d, quota-строк удалено %d, прогонов агента %d, "
+                "наблюдений отката %d",
                 result["error_events"],
                 result["crawl_jobs"],
                 result["account_health_snapshot"],
                 result["site_page_text"],
                 result["ads_quota_ops"],
                 result["agent_runs"],
+                result["rollback_watch"],
             )
         return result

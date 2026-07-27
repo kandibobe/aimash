@@ -17,7 +17,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from core.config import settings
 from core.errors import capture_exception
 from core.logging import log
-from scheduler import jobs
+from scheduler import jobs, rollback
 
 # Дефолт планового отчёта — fallback, если REPORT_SCHEDULE невалиден (см. report_trigger).
 _DEFAULT_REPORT_CRON = {"hour": 9, "minute": 0}  # ежедневно 09:00 (локальное время)
@@ -300,6 +300,17 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
         jobs.purge_stale_rows,
         IntervalTrigger(hours=24),
         id="purge_stale_rows",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    # Волна 4: разбор наблюдений за применёнными мутациями, чьё окно закрылось. READ-ONLY: в режиме
+    # shadow (дефолт) пишет вердикт и молчит, в alert — сигналит человеку и НИЧЕГО не исполняет.
+    # Кадэнс час: окно наблюдения задаётся часами, проверять чаще нечего, реже — тянуть с сигналом.
+    sched.add_job(
+        rollback.run_rollback_watch,
+        IntervalTrigger(hours=1),
+        args=[bot],
+        id="rollback_watch",
         replace_existing=True,
         misfire_grace_time=3600,
     )

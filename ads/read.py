@@ -578,6 +578,68 @@ def _median_int(values: list[int]) -> int | None:
     return vals[mid] if n % 2 else int((vals[mid - 1] + vals[mid]) / 2)
 
 
+@dataclass
+class HourlyPoint:
+    """Один час одной кампании. Деньги — в micros (правило 4: деньги считает КОД)."""
+
+    day: str  # ISO-дата в таймзоне АККАУНТА (так их отдаёт segments.date), не в host-time
+    hour: int  # 0..23
+    cost_micros: int
+    clicks: int
+    impressions: int
+    conversions: float
+
+
+def read_campaign_hourly(
+    client: GoogleAdsClient,
+    customer_id: str,
+    campaign_id: str,
+    *,
+    date_from: str,
+    date_to: str,
+) -> list[HourlyPoint]:
+    """Почасовой расход/клики одной кампании за диапазон дат. READ-ONLY, замок ЧТЕНИЯ.
+
+    Волна 4 (контур автооткатa). Нужен потому, что за окно 3–6 часов измеримы только расход и
+    клики: конверсия атрибутируется ко времени КЛИКА и досчитывается сутками, поэтому «падение
+    CPA за 4 часа» — величина, которой в API просто нет. Детектор сравнивает расход с базой «тот
+    же час того же дня недели за 4 предыдущие недели», и для этого ему нужна ровно эта нарезка.
+    Ограничение записано в `SPEC.md`, а не обойдено.
+
+    `conversions` возвращается тоже — не для вердикта за 4 часа, а для последующего разбора
+    наблюдения, когда конверсии уже досчитались.
+
+    Дни отдаёт Google в таймзоне аккаунта. Сшивать их с host-датой нельзя (§8): `applied_at`
+    хранится в UTC, и вызывающий обязан переводить окно сам, а не считать, что «сегодня» совпало.
+    """
+    ensure_read_allowed(customer_id)
+    start, end = date.fromisoformat(str(date_from)), date.fromisoformat(str(date_to))
+    if end < start:
+        start, end = end, start
+    ga = client.get_service("GoogleAdsService")
+    q = (
+        "SELECT segments.date, segments.hour, metrics.cost_micros, metrics.clicks, "
+        "metrics.impressions, metrics.conversions FROM campaign "
+        f"WHERE campaign.id = {int(campaign_id)} "
+        f"AND segments.date BETWEEN '{start.isoformat()}' AND '{end.isoformat()}' "
+        "ORDER BY segments.date, segments.hour"
+    )
+    out: list[HourlyPoint] = []
+    for row in ga.search(customer_id=str(customer_id), query=q):
+        m = row.metrics
+        out.append(
+            HourlyPoint(
+                day=str(row.segments.date),
+                hour=int(row.segments.hour or 0),
+                cost_micros=int(m.cost_micros or 0),
+                clicks=int(m.clicks or 0),
+                impressions=int(m.impressions or 0),
+                conversions=float(m.conversions or 0.0),
+            )
+        )
+    return out
+
+
 def search_campaign_medians(
     client: GoogleAdsClient, customer_id: str, *, days: int = 90
 ) -> AccountMedians:

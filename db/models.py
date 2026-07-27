@@ -910,3 +910,63 @@ class CircuitState(Base):
     # До этого момента проба арендована другим процессом. NULL/прошлое ⇒ аренда свободна.
     probe_lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RollbackWatch(Base):
+    """Волна 4: наблюдение за применённой мутацией — «не стало ли хуже» (§2, автооткат).
+
+    Строка заводится ПОСЛЕ успешного `finalize()` в `ads/service.py`, и только если выполнены оба
+    условия: операция входит в `confirm.reverse.ROLLBACKABLE_OPS` И `reverse_spec` вернул не-`None`.
+    Второе важнее первого: наблюдать за тем, что откатить нельзя, — значит копить вердикты, по
+    которым нечего сделать, и приучать себя их игнорировать.
+
+    ⚠️ Строка НЕ даёт права на мутацию и не несёт провенанса. Она фиксирует НАМЕРЕНИЕ наблюдать;
+    что именно случится по вердикту, решает `mode`, а не наличие записи:
+
+      * `shadow` (дефолт) — вердикт пишется, наружу не уходит НИЧЕГО. Копится выборка, по которой
+        потом оценивается точность детектора. Это единственный режим, включённый на старте.
+      * `alert`  — воркер сигналит человеку текстом; обратный черновик рождается в ЕГО ходе,
+        обычным путём через confirm-гейт. Правок гейта, провенанса и золотых правил — ноль.
+      * `auto`   — исполнение компенсации кодом. Включается пер-аккаунт и только после того, как
+        shadow-точность подтверждена; сегодня этого пути нет вовсе (Волна 6a).
+
+    `confirmation_id` — UNIQUE: одно наблюдение на применённую мутацию. Без уникальности повторный
+    проход `finalize` (ретрай доставки, дубль джобы) завёл бы второе наблюдение за тем же
+    изменением, и вердикт «деградация» пришёл бы дважды — а в режиме `auto` это была бы ДВОЙНАЯ
+    компенсация: бюджет уехал бы ниже исходного.
+
+    Ретеншн — общий для журнала наблюдений (`rollback_watch_retain_days`); денежного следа здесь
+    нет, он живёт в `audit_log` и `agent_run_events`."""
+
+    __tablename__ = "rollback_watch"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    confirmation_id: Mapped[str] = mapped_column(
+        String(64), unique=True, index=True, nullable=False
+    )
+    customer_id: Mapped[str] = mapped_column(String(20), index=True, nullable=False)
+    # Числовой id кампании из Google Ads. Имя не годится: его могли переименовать между применением
+    # и проверкой, и наблюдение молча начало бы мерить другую кампанию (или ничего).
+    campaign_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    operation: Mapped[str] = mapped_column(String(64), nullable=False)
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # До этого момента вердикт выносить рано: метрики за неполное окно не отличают «стало хуже» от
+    # «ещё не набралось». Проверка раньше срока даёт `insufficient`, а не `degraded`.
+    window_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Во сколько раз изменение ДОЛЖНО было изменить расход (из снимка «было → станет»). Без него
+    # детектор ловил бы собственную причину: подняли бюджет на 20% — расход вырос на 20% —
+    # «деградация». Пишется в момент применения, потому что позже снимка «было» уже нет.
+    expected_ratio: Mapped[float | None] = mapped_column(Float)
+    mode: Mapped[str] = mapped_column(
+        String(8), default="shadow", nullable=False
+    )  # shadow|alert|auto
+    state: Mapped[str] = mapped_column(
+        String(20), default="watching", index=True, nullable=False
+    )  # watching|verdict_ok|verdict_degraded|acted|expired|skipped
+    # Вердикт целиком, как его вынес детектор: метрика, база сравнения, отклонение, причина отказа.
+    # JSON, потому что состав полей будет меняться по мере калибровки, а схему ради этого не гонять.
+    verdict_json: Mapped[str | None] = mapped_column(Text)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # confirmation_id компенсирующего черновика — заполняется только в `auto` (Волна 6a).
+    acted_confirmation_id: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

@@ -231,6 +231,7 @@ from bot.keyboards import (
 from bot.throttle import ThrottleMiddleware
 from confirm.attachment import plan_attachment
 from confirm.gate import Proposal, build_summary
+from confirm.reverse import ROLLBACKABLE_OPS, reverse_spec
 from confirm.store import ConfirmStore
 from core import ingest
 from core import twofa  # §12 2FA-гейт опасных операций (opt-in, дефолт OFF, fail-closed)
@@ -1503,104 +1504,14 @@ def _build_proposal(operation: str, **args) -> tuple[str, str, dict, str]:
 
 
 # ── D2: «↩️ Откатить» — обратная операция из снимка _before (за confirm-гейтом) ──────
-# Только детерминированно обратимые операции (снимок _before достаточен для одной обратной
-# мутации). update_bid откатывается лишь при ОДИНАКОВЫХ ставках групп (иначе один set_to не
-# восстановит разнородные ставки — честно НЕ предлагаем). Геостратегия/bidding_strategy —
-# не откатываются одной операцией (в backlog). Обратный черновик минтится как ОБЫЧНЫЙ proposal
-# (confirm-гейт + user_initiated=True в _present_proposal → бюджет-откат легитимен, правило 3).
-_ROLLBACKABLE_OPS = frozenset(
-    {
-        "update_budget",
-        "update_bid",
-        "update_keyword_bid",
-        "pause_campaign",
-        "resume_campaign",
-        "launch_campaign",
-        "update_campaign",
-        "set_campaign_network",
-        "pause_ad_group",
-        "resume_ad_group",
-        "pause_ad",
-        "resume_ad",
-    }
-)
+# Волна 4: синтез обратной операции переехал в bot-free `confirm/reverse.py` — его зовёт не только
+# кнопка, но и фоновый контур автооткатa, а тот про aiogram знать не должен (мина C4). Здесь
+# остались алиасы под прежними именами: 151 хендлер и `tests/test_rollback.py` зовут их поздним
+# связыванием (`bm._reverse_spec`), и переименование ради переименования сломало бы их без пользы.
+_ROLLBACKABLE_OPS = ROLLBACKABLE_OPS
+_reverse_spec = reverse_spec
 # chat_id → {token, operation, params, customer_id}: последняя откатываемая операция (одноразово).
 _ROLLBACK_CACHE: dict[int, dict] = {}
-
-
-def _reverse_spec(operation: str, params: dict, before) -> tuple[str, dict] | None:
-    """Собрать (обратная_операция, params) из снимка _before. None — необратимо/нет снимка/
-    неоднозначно. Восстанавливаем прежнее значение/статус ПРОТИВОПОЛОЖНОЙ операцией."""
-    if not isinstance(before, dict) or not isinstance(params, dict):
-        return None
-    camp = params.get("campaign")
-    if not camp:
-        return None
-    kind = before.get("kind")
-    if operation == "update_budget" and kind == "budget":
-        micros = before.get("before_micros")
-        if micros is None:
-            return None
-        return ("update_budget", {"campaign": camp, "mode": "set_to", "value": int(micros) / 1e6})
-    if operation == "update_bid" and kind == "bid":
-        uniq = {int(x) for x in (before.get("before_micros") or [])}
-        if len(uniq) != 1:  # разные ставки по группам — одним set_to не вернуть (честно skip)
-            return None
-        return ("update_bid", {"campaign": camp, "mode": "set_to", "value": next(iter(uniq)) / 1e6})
-    if operation == "update_keyword_bid" and kind == "keyword_bid":
-        kw = params.get("keyword")
-        uniq = {int(x) for x in (before.get("before_micros") or [])}
-        if not kw or len(uniq) != 1:  # ключ в разных группах со РАЗНЫМИ ставками — одним set_to
-            return None  # прежние не вернуть (честно не предлагаем откат)
-        # У ключа могло НЕ БЫТЬ своей ставки (наследовал группу) — «было» тогда = ставка группы.
-        # set_to завёл бы критерию СОБСТВЕННУЮ ставку: числом то же, состоянием — другое (группа
-        # больше не управляет ключом). Это не откат. Нет флага (старый снимок) → тоже не предлагаем.
-        own = before.get("own_bid")
-        if not isinstance(own, list) or len(own) != len(before.get("before_micros") or []):
-            return None
-        if not all(bool(x) for x in own):
-            return None
-        spec = {"campaign": camp, "keyword": kw, "mode": "set_to", "value": next(iter(uniq)) / 1e6}
-        for narrow in (
-            "ad_group",
-            "match_type",
-        ):  # сужения черновика сохраняем: откат адресует ТЕ ЖЕ ключи
-            if params.get(narrow):
-                spec[narrow] = params[narrow]
-        return ("update_keyword_bid", spec)
-    if operation == "set_campaign_network" and kind == "network":
-        return (
-            "set_campaign_network",
-            {"campaign": camp, "search_partners": bool(before.get("before_search_partners"))},
-        )
-    if operation == "update_campaign" and kind == "name":
-        old, new = before.get("before_name"), params.get("new_name")
-        if not old or not new:
-            return None
-        return (
-            "update_campaign",
-            {"campaign": new, "new_name": old},
-        )  # текущее имя new → назад в old
-    if kind == "status":  # восстановить before_status противоположной операцией
-        bs = (before.get("before_status") or "").upper()
-        if operation in ("pause_campaign", "resume_campaign", "launch_campaign"):
-            if bs == "PAUSED":
-                return ("pause_campaign", {"campaign": camp})
-            if bs == "ENABLED":
-                return ("resume_campaign", {"campaign": camp})
-        elif operation in ("pause_ad_group", "resume_ad_group"):
-            ag = params.get("ad_group")
-            if ag and bs == "PAUSED":
-                return ("pause_ad_group", {"campaign": camp, "ad_group": ag})
-            if ag and bs == "ENABLED":
-                return ("resume_ad_group", {"campaign": camp, "ad_group": ag})
-        elif operation in ("pause_ad", "resume_ad"):
-            ag, ad = params.get("ad_group"), params.get("ad")
-            if ag and ad and bs == "PAUSED":
-                return ("pause_ad", {"campaign": camp, "ad_group": ag, "ad": ad})
-            if ag and ad and bs == "ENABLED":
-                return ("resume_ad", {"campaign": camp, "ad_group": ag, "ad": ad})
-    return None
 
 
 # ── C1/C3 (гибрид): пер-чат контекст диалога для разрешения ссылок-местоимений ──────
