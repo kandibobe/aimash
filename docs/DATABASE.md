@@ -3,7 +3,7 @@
 ORM — SQLAlchemy 2.0 ([`db/models.py`](../db/models.py)); схему в проде ведёт **Alembic**
 ([`migrations/`](../migrations/)). Dev/тесты могут работать на SQLite; прод — Postgres 16.
 
-## Все таблицы (15)
+## Все таблицы (27)
 
 Полный перечень моделей из [`db/models.py`](../db/models.py). Каждая таблица подтверждена
 Alembic-миграцией (см. колонку «Миграция»). Колонка «Статус» отражает **реальное** использование
@@ -12,11 +12,13 @@ Alembic-миграцией (см. колонку «Миграция»). Коло
 | Таблица | Назначение | Ключевые поля | Миграция | Статус |
 |---|---|---|---|---|
 | `whitelist` | рантайм-allow-list доступа к БОТУ (§12); объединяется с env `TELEGRAM_WHITELIST_CHAT_IDS` | `chat_id` (unique), `added_by`, `note` | `0001` (drop `0016` → возврат `0017`) | **ACTIVE** — читается гейтом (см. ниже) |
+| `admins` | рантайм-админы бота (`/addadmin`, `/removeadmin`); объединяется с env `ADMIN_CHAT_IDS` | `chat_id` (unique), `added_by`, `note` | `0021` | **ACTIVE** — читается `core.access.is_admin` (fail-closed: сбой БД ⇒ только env) |
 | `user_settings` | язык, пороги алертов (`/alerts`), override модели, активный аккаунт, per-user расписание отчётов, ui_prefs | `chat_id` (unique), `report_schedule` (crontab-строка; **читается** планировщиком — `scheduler.service.register_user_report_schedules` заводит per-chat cron-джобу; **UI-сеттер есть** — `bot/handlers/commands.py:1109` (пресеты/свой cron), сохранение `_save_report_schedule`), `alert_thresholds` (JSON, пишет `/alerts`), `model_override`, `language`, `selected_customer_id`, `ui_prefs` (JSON) | `0001` (+`0005`,`0007`,`0015`) | ACTIVE |
 | `proposals` | очередь черновиков изменений Google Ads (diff «было→станет») | `confirmation_id` (unique), `operation`, `customer_id`, `summary`, `params` (JSON), `user_initiated`, `status`, **провенанс хода**: `origin_human_turn`, `author_user_id`, `run_id`, `tg_message_id` | `0001` (+индекс `0003`, +`0030` провенанс) | ACTIVE |
 | `audit_log` | журнал всех операций (кто/когда/что/результат), по `confirmation_id` | `confirmation_id`, `operation`, `customer_id`, `chat_id`, `actor_user_id`, `status`, `result` (JSON) | `0001` (+`0004` актор) | ACTIVE |
 | `oauth_tokens` | per-account refresh-токены (§8), **зашифрованы at-rest** | `account` (unique), `refresh_token_enc`, `login_customer_id` | `0001` (+`0008`) | **ACTIVE** — загружается на старте (см. ниже) |
 | `error_events` | перехваченные исключения для триажа (§15), текст **редактирован** | `request_id`, `chat_id`, `customer_id`, `where`, `exc_type`, `message`, `traceback` | `0006` (+`0011`) | ACTIVE |
+| `bug_reports` | баг-репорты оператора (`/reportbug`, §6): форвард админам + недельный дайджест; `text` **редактирован** | `chat_id`, `username`, `text` (redact_text), `context_request_id` (сшивка с `error_events`), `status`, `triaged_by` | `0019` | ACTIVE |
 | `account_access` | пер-пользовательский доступ к аккаунтам (§12), fail-closed | `chat_id`, `customer_id` (unique пара) | `0009` | ACTIVE |
 | `campaign_templates` | именованные пресеты параметров кампании (§2B) | `chat_id`, `name` (unique пара), `params` (JSON), `source_campaign` | `0010` | ACTIVE |
 | `campaign_drafts` | накопленный черновик 8-этапного визарда «Создание кампании» (§19); переживает рестарт | `session_id` (unique), `chat_id`, `customer_id`, `preview_customer_id`, `current_step`, `wizard_state` (JSON), `status` | `0012` | ACTIVE |
@@ -27,11 +29,17 @@ Alembic-миграцией (см. колонку «Миграция»). Коло
 | `crawl_jobs` | журнал задач краулинга сайта (§20.4): статус/страницы/ошибка | `job_id` (unique), `customer_id`, `chat_id`, `domain`, `mode`, `status`, `pages_crawled`, `error` | `0013` | ACTIVE |
 | `client_profile_history` | версии профиля «до» для отката/аудита (§20.5); переживают clear | `customer_id`, `snapshot` (JSON), `operation`, `confirmation_id` | `0013` | ACTIVE |
 | `client_dossiers` | досье по сайту клиента (§20, map-reduce): `.md`-файл владельцу + PII-free контекст генераторам. Своя таблица, а НЕ поля профиля: снапшоты `client_profile_history` переживают «🗑 Очистить профиль», и имена сотрудников клиента остались бы в БД после удаления — здесь каскад по `profile_id` их уносит | `customer_id`, `profile_id`, `version` (монотонная), `status` (draft\|current), `markdown` (с контактами), `llm_context` (без PII), `data` (JSON) | `0029` | ACTIVE |
+| `recommendation` | показанные рекомендации `/advise` и находки `/audit` (субстрат обучения на цифрах) | `rec_uid` (unique), `chat_id`, `customer_id`, `topic` (семья чека), `kind` (check_id), `severity`, `suggested_operation` (**advisory-метка, НЕ путь исполнения**), `priority`, `evidence` (JSON), `body`, `source`, `status` | `0018` (+`0023` ширина `topic`, +`0024` `kind` без префикса) | ACTIVE |
+| `recommendation_feedback` | Слой B: голос оператора 👍/👎 на рекомендацию (один тогл на человека) | `rec_uid` + `chat_id` (unique пара), `actor_user_id`, `actor_username`, `rating` (up\|down) | `0018` | ACTIVE |
+| `recommendation_outcome` | Слой B: сшивка рекомендация → применённая мутация → delta метрик (замер результата) | `rec_uid`, `confirmation_id`, `customer_id`, `baseline`/`followup`/`delta` (JSON), `measure_after`, `measured_at` (NULL = ждёт замера), `verdict` (считает КОД) | `0018` | ACTIVE |
 | `account_health_snapshot` | агрегаты health-score `/audit` на дату в TZ аккаунта (субстрат трендов, N1.1); без PII/имён кампаний | `customer_id` + `snapshot_date` + `period_days` (unique тройка), `score`, `grade`, `at_risk`, `family_penalty` (JSON), `score_model_version` | `0022` | ACTIVE |
 | `sheet_exports` | реестр созданных ботом Google-таблиц (`/sheets`, ключи визарда §19.4.2) → выдача в `/mysheets`; секретов нет (url уже уходил в чат) | `chat_id` (+ индекс `chat_id, id`), `customer_id`, `kind` (keywords\|report), `spreadsheet_id`, `url`, `title`, `share` (роль\|off\|failed) | `0025` | ACTIVE |
+| `auction_insight_row` | импортированные строки «Статистики аукционов» (CSV из интерфейса Ads, `/competitors`) — ЕДИНСТВЕННЫЙ легальный источник имён конкурентов (в GAQL ресурса нет) | `customer_id` + `snapshot_date` + `domain` (unique тройка), `is_you`, доли 0..1 (`impression_share`, `overlap_rate`, …; NULL = «--» в файле, это **не** 0), `period_label` | `0026` | ACTIVE |
 | `ads_quota_ops` | распределённый счётчик дневной квоты Google Ads (§3, `core.quota`): общий стор вместо per-process deque — bot + scheduler + per-session MCP видят один потолок; PII/секретов нет (`account` = customer_id) | `ts` (индекс + `account,ts`), `account` (customer_id\|NULL), `kind` (read\|mutate), `op_count`; окно 24ч в SQL `SUM(op_count) WHERE ts>cutoff` (`db_dt`), ретеншн `ads_quota_ops_retain_days` | `0031` | ACTIVE |
+| `agent_runs` | #10 наблюдаемость: один ассистентский ход = одна строка (cost/итерации/латентность), персистентно — `core.usage` сбрасывается на рестарте, `core.quota` считает операции, не деньги | `run_id` (= `core.provenance.run_id`, индекс), `origin` (human\|machine\|hermes\|cron), `chat_id`, `customer_id` (+ индекс `customer_id, started_at` — отчёт «сколько стоит группа за окно»), `model`, `iterations_used`, токены, `cost_usd`, `status` | `0032` | ACTIVE |
+| `agent_run_events` | шаг хода (llm\|tool\|ads_read\|ads_mutate): латентность и стоимость, раньше жившие только в лог-строках `core.resilience` | `run_id` + `seq` (индекс), `kind`, `tool_name`, `latency_ms`, `cost_usd`, `rows_returned`, `args_redacted` (**редактировано** `redact_text`), `result_digest` (сводка, не сырьё), `ok` | `0032` | ACTIVE |
 
-> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0031`
+> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0032`
 > (`op.create_table(...)`). Инициалка `0001` создаёт базовые таблицы
 > (`whitelist`, `user_settings`, `proposals`, `audit_log`, `oauth_tokens`;
 > [`migrations/versions/0001_initial.py:22-92`](../migrations/versions/0001_initial.py)), остальные —
@@ -132,7 +140,14 @@ alembic history                          # список ревизий
 per-process deque; с появлением scheduler-процесса и per-session MCP счётчики стали слепы друг к другу,
 и потолок Basic (15 000 операций/сутки) пробивался молча. Одна строка = один `quota.record()` с
 `op_count`; окно 24ч считается в SQL `SUM(op_count) WHERE ts > cutoff` через `db.session.db_dt`;
-ретеншн — `scheduler.jobs.purge_stale_rows`/`ads_quota_ops_retain_days`) — **head**.
+ретеншн — `scheduler.jobs.purge_stale_rows`/`ads_quota_ops_retain_days`) →
+`0032` (`agent_runs` + `agent_run_events`: per-run учёт cost/latency/итераций, #10 «Наблюдаемость»,
+Волна 1 шаг 10. Строка `agent_runs` = один ассистентский ход, строка `agent_run_events` = один его шаг;
+сшивка по значению `run_id` == `core.provenance.run_id` == `core.context.request_id` — одна корреляция
+на ход, не вторая нумерация. Пишет `core.observe` fail-OPEN — наблюдаемость не роняет денежный путь;
+`args_redacted` проходит `redact_text` ДО записи, `result_digest` — сводка, не сырьё. Отчёт
+«сколько стоит прогон/группа за месяц» — `scripts/run_costs.py` поверх индекса
+`ix_agent_runs_customer_started`) — **head**.
 
 ### Добавить миграцию
 ```bash

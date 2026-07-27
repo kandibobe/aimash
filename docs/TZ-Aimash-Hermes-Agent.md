@@ -85,7 +85,7 @@
 
 ### Фаза 1 — Harness / Инфраструктура / телеметрия / retry / БД (ШАГ 1, ШАГ 3)
 - **Даёт фреймворк:** агент-цикл, диспетчеризация, tool-calling, ретраи вызова модели, трейс шагов (SPEC §5.6).
-- **Переиспользуем:** retry+backoff+семафор+квота Google Ads (`core/resilience.py`), структурные логи с корреляцией request_id/chat_id/operation (`core/logging.py`), учёт токенов/стоимости по ролям (`core/usage.py`), SQLAlchemy 2.0 + Alembic (0001–0031), Sentry (`core/observability.py`).
+- **Переиспользуем:** retry+backoff+семафор+квота Google Ads (`core/resilience.py`), структурные логи с корреляцией request_id/chat_id/operation (`core/logging.py`), учёт токенов/стоимости по ролям (`core/usage.py`), SQLAlchemy 2.0 + Alembic (`migrations/`; цепочка ревизий — docs/DATABASE.md), Sentry (`core/observability.py`).
 - **Достраиваем:** persistent per-run трейсинг (Langfuse/Helicone) с привязкой токенов к шагу агента; новые таблицы (SPEC §9.2). ШАГ 1: VPS-харднинг (см. §12 ниже).
 - Ссылки: SPEC §9 (схема данных), §11 (NFR/эксплуатация); OPERATIONS.md (день-2).
 

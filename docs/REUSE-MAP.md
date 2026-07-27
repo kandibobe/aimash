@@ -29,7 +29,7 @@
 | Retry+backoff+семафор+квота Google Ads | **[R]** | `core/resilience.py` (`run_ads_call`/`run_ads_read_call`/`call_llm`) |
 | Структурные логи + корреляция | **[R]** | `core/logging.py` (`ContextFilter`, `RedactionFilter`) |
 | Учёт токенов/стоимости | **[R]** (per-process) | `core/usage.py` (`record`/`snapshot`) |
-| SQLAlchemy 2.0 + Alembic 0001–0031 | **[R]** | `db/models.py`, `db/session.py`, `migrations/` |
+| SQLAlchemy 2.0 + Alembic (цепочка ревизий — docs/DATABASE.md) | **[R]** | `db/models.py`, `db/session.py`, `migrations/` |
 | Sentry (опц.) | **[R]** | `core/observability.py` |
 | Per-iteration трейсинг (Langfuse/Helicone), токены→шаг/run_id | **[B]** | `observability/` (новое) |
 | Новые таблицы (agent-runs, message-history, vector-store) | **[B]** | SPEC §9.2 |
