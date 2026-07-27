@@ -397,6 +397,27 @@ def fmt_rsa_overview(
     )
 
 
+def _moderation_advisory(ad_texts: list[str], lng: str) -> str:
+    """§10: редакторские замечания Google (КАПС/пунктуация/повторы) хвостом карточки «было→станет».
+    Одна формулировка на все карточки — иначе она разъедется между форматтерами. Считает КОД
+    (`adcopy.validate.count_flagged`), решает человек: эвристика ловит бренды в капсе (OZON/IKEA/
+    СБЕР), которые Google разрешает. Пусто = замечаний нет (карточка без шума)."""
+    from adcopy.validate import count_flagged
+
+    flagged = count_flagged(ad_texts)
+    if not flagged:
+        return ""
+    if lng == "en":
+        return (
+            f"\n\n⚠️ {flagged} text(s) may fail ad review (caps / punctuation / repeats)"
+            " — the ad is created paused, fix before launch."
+        )
+    return (
+        f"\n\n⚠️ Текстов с риском модерации: {flagged} (КАПС / пунктуация / повторы)"
+        " — объявление создаётся на паузе, поправь до запуска."
+    )
+
+
 def fmt_rsa_proposal_summary(
     ad_group: str,
     headlines: list[str],
@@ -404,21 +425,30 @@ def fmt_rsa_proposal_summary(
     final_url: str,
     lang: str | None = None,
 ) -> str:
-    """Плейн-текст сводка create_rsa для confirm-гейта (esc применяется при показе)."""
+    """Плейн-текст сводка create_rsa для confirm-гейта (esc применяется при показе).
+
+    §10: здесь же — редакторские замечания Google, которые считает КОД (`_moderation_advisory`).
+    Место выбрано не для красоты: карточка — последняя поверхность, которую человек читает ДО «да»,
+    и единственная, что переживает архивацию `bot/` (в `bot.ux.fmt_rsa_diagnostics` замечание висело
+    на ГЕНЕРАЦИИ и уехало бы вместе с кнопками)."""
+    lng = _lang(lang)
     h_lines = "\n".join(f"  • {h}" for h in headlines)
     d_lines = "\n".join(f"  • {d}" for d in descriptions)
-    if _lang(lang) == "en":
+    adv = _moderation_advisory([*headlines, *descriptions], lng)
+    if lng == "en":
         return (
             f"Create an ad (RSA) in group “{ad_group}” — paused.\n"
             f"Link: {final_url}\n\n"
             f"Headlines ({len(headlines)}):\n{h_lines}\n\n"
             f"Descriptions ({len(descriptions)}):\n{d_lines}"
+            f"{adv}"
         )
     return (
         f"Создать объявление (RSA) в группе «{ad_group}» — на паузе.\n"
         f"Ссылка: {final_url}\n\n"
         f"Заголовки ({len(headlines)}):\n{h_lines}\n\n"
         f"Описания ({len(descriptions)}):\n{d_lines}"
+        f"{adv}"
     )
 
 
@@ -612,6 +642,8 @@ def fmt_search_proposal_summary(
     # не применяем, его накладывает показ).
     a_block = fmt_assets_block(assets, lng, images=images, html=False)
     a_block = f"\n\n{a_block}" if a_block else ""
+    # §10: тот же advisory, что на карточке RSA — кампанию создаёт та же операция, что и объявление.
+    adv = _moderation_advisory([*headlines, *descriptions], lng)
     if lng == "en":
         kw_block = ""
         if keywords:
@@ -634,7 +666,7 @@ def fmt_search_proposal_summary(
             f"{tgt_block}\n\n"
             f"Headlines ({len(headlines)}):\n{h_lines}\n\n"
             f"Descriptions ({len(descriptions)}):\n{d_lines}"
-            f"{kw_block}{a_block}"
+            f"{kw_block}{a_block}{adv}"
         )
     kw_block = ""
     if keywords:
@@ -653,7 +685,7 @@ def fmt_search_proposal_summary(
         f"{tgt_block}\n\n"
         f"Заголовки ({len(headlines)}):\n{h_lines}\n\n"
         f"Описания ({len(descriptions)}):\n{d_lines}"
-        f"{kw_block}{a_block}"
+        f"{kw_block}{a_block}{adv}"
     )
 
 

@@ -24,7 +24,9 @@ from adcopy.validate import (
     RSA_MIN_HEADLINES,
     STRUCTURED_SNIPPET_HEADERS,
     assert_asset_len,
+    count_flagged,
     find_duplicates,
+    moderation_issues,
 )
 from adcopy.validate import validate as _rsa_validate
 from ads import extensions, geo
@@ -1514,6 +1516,24 @@ def _validate_rsa_inputs(
                 raise ValueError(
                     f"{label} содержит пробел или слэш (недопустимо в display path): «{p}»"
                 )
+    # §10 редакторская политика Google (КАПС/пунктуация/повторы) — ADVISORY, НЕ отказ. Тот же
+    # разрез, что у `_require_freshness` выше: STRICT бросает, признанный долг пишет ФАКТ в лог.
+    # Почему не raise, хотя проверка стоит в валидаторе:
+    #   · эвристика ловит бренды в капсе (OZON/IKEA/СБЕР/ASUS) — Google их разрешает, а обхода у
+    #     этой функции нет: отказ стал бы стеной, которую менеджер не может обойти вовсе;
+    #   · сюда приходят уже ПОСЛЕ «да» человека (валидация до claim, но после подтверждения), а
+    #     редакторское замечание обязано попасть на карточку ДО подтверждения — оно там и есть
+    #     (`core.texts.fmt_rsa_proposal_summary`). Здесь — последний след для вызывающего мимо
+    #     карточки (headless-WRITE, dev-скрипт, будущий MCP-инструмент).
+    # В лог идут КОДЫ и счётчики, не тексты клиента (правило #5: наружу — только редактированное).
+    codes = sorted({c for t in (*headlines, *descriptions) for c in moderation_issues(t)})
+    if codes:
+        log.info(
+            "moderation(RSA): текстов с замечаниями=%d/%d коды=%s",
+            count_flagged([*headlines, *descriptions]),
+            len(headlines) + len(descriptions),
+            ",".join(codes),
+        )
 
 
 async def apply_create_rsa(

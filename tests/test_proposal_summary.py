@@ -79,6 +79,74 @@ def test_fmt_returns_empty_for_rich_ops():
     assert texts.fmt_mutation_summary("create_gdn_campaign", {"campaign": "X"}) == ""
 
 
+# ── §10: редакторские замечания видны на карточке ДО «да» (bot-free дом эвристики) ──
+_CLEAN_H = ["Заголовок один", "Заголовок два", "Заголовок три"]
+_CLEAN_D = ["Описание первое.", "Описание второе."]
+
+
+def test_rsa_card_carries_moderation_advisory_ru():
+    dirty = texts.fmt_rsa_proposal_summary(
+        "Группа", ["OZON доставка", *_CLEAN_H[1:]], _CLEAN_D, "https://x.example/", lang="ru"
+    )
+    assert "⚠️" in dirty and "модерац" in dirty
+    clean = texts.fmt_rsa_proposal_summary(
+        "Группа", _CLEAN_H, _CLEAN_D, "https://x.example/", lang="ru"
+    )
+    assert "⚠️" not in clean  # чисто → карточка без шума
+
+
+def test_rsa_card_carries_moderation_advisory_en():
+    s = texts.fmt_rsa_proposal_summary(
+        "Group",
+        ["OZON delivery", "Headline two", "Headline three"],
+        ["First description.", "Second description."],
+        "https://x.example/",
+        lang="en",
+    )
+    assert "⚠️" in s and "ad review" in s
+
+
+def _search_card(headlines, lang="ru"):
+    return texts.fmt_search_proposal_summary(
+        "Кампания",
+        "https://x.example/",
+        100.0,
+        headlines,
+        _CLEAN_D,
+        ["купить телефон"],
+        "phrase",
+        lang=lang,
+    )
+
+
+def test_search_campaign_card_carries_moderation_advisory():
+    """Второй вызывающий _validate_rsa_inputs строит карточку ДРУГИМ форматтером — advisory
+    обязан быть и там, иначе на пути create_search_campaign замечание доходит только в лог."""
+    dirty = _search_card(["OZON доставка", *_CLEAN_H[1:]])
+    assert "⚠️" in dirty and "модерац" in dirty
+    assert "⚠️" not in _search_card(_CLEAN_H)
+    assert "ad review" in _search_card(["OZON delivery", "Headline two"], lang="en")
+
+
+def test_clone_card_inherits_moderation_advisory():
+    """Сводка клона переиспользует тело fmt_search_proposal_summary — строка наследуется."""
+    s = texts.fmt_clone_proposal_summary(
+        "Новая",
+        "Старая",
+        100.0,
+        {
+            "final_url": "https://x.example/",
+            "headlines": ["OZON доставка", *_CLEAN_H[1:]],
+            "descriptions": _CLEAN_D,
+            "keywords": ["купить телефон"],
+            "match_type": "phrase",
+        },
+        lang="ru",
+    )
+    assert "⚠️" in s and "модерац" in s
+    assert "Не переносится автоматически" in s  # хвост клона на месте, не срезан advisory
+
+
 def test_write_keyword_list_xlsx(tmp_path):
     path = str(tmp_path / "kw.xlsx")
     write_keyword_list_xlsx(["alpha", "beta", "gamma"], "phrase", "Добавить ключевые слова", path)

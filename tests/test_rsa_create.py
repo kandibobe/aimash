@@ -212,6 +212,32 @@ async def test_path2_without_path1_blocked():
     assert store.finalized is False
 
 
+# ── §10 редакторская политика: ADVISORY, а не отказ ──────────────────────────────
+async def test_moderation_flags_are_advisory_not_a_block(caplog):
+    """КАПС/повторы мутацию НЕ отменяют (эвристика ловит бренды — OZON/IKEA/СБЕР), но факт
+    обязан лечь в лог: после архивации `bot/` это единственный след политики на денежном пути."""
+    calls = {"n": 0}
+
+    def fake(*a, **k):
+        calls["n"] += 1
+        return {"applied": True}
+
+    store = FakeConfirmStore(FakeProposal("create_rsa", "confirmed", user_initiated=True))
+    with patched(mut, "_create_rsa_via_sdk", fake), allowed_ids(DRAFT_ACCOUNT_ID):
+        with caplog.at_level("INFO", logger="aimash"):
+            await _call(store, headlines=["OZON доставка", "ооочень выгодно", "Заголовок три"])
+    assert calls["n"] == 1  # мутация НЕ заблокирована редакторской эвристикой
+    msgs = [r.getMessage() for r in caplog.records if "moderation(RSA)" in r.getMessage()]
+    assert msgs and "all_caps" in msgs[0] and "repeat_char" in msgs[0]
+
+
+def test_clean_rsa_set_logs_no_moderation_line(caplog):
+    """Чистый набор — молчим: advisory не должен зашумлять лог на каждом создании."""
+    with caplog.at_level("INFO", logger="aimash"):
+        mut._validate_rsa_inputs(_H3, _D2, _URL, None, None)
+    assert not [r for r in caplog.records if "moderation(RSA)" in r.getMessage()]
+
+
 # ── Capability-guard / маршрутизация ─────────────────────────────────────────────
 def test_create_rsa_in_supported_operations():
     assert "create_rsa" in svc.SUPPORTED_OPERATIONS
