@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ads.client import DRAFT_ACCOUNT_ID  # noqa: E402
 from core.config import settings  # noqa: E402
+from mcp_server.serialize import audit_payload  # noqa: E402
 from reports import queries as Q  # noqa: E402
 from reports.queries import Breakdown, Metrics  # noqa: E402
 
@@ -160,6 +161,21 @@ def test_check_sums_googles_own_forecast_and_ranks_by_conversions():
     assert f.facts["add_conversions"] == 16.0 and f.facts["add_cost"] == 80.0
     assert [t["type"] for t in f.facts["top"]] == ["KEYWORD", "CAMPAIGN_BUDGET", "CALLOUT_ASSET"]
     assert f.facts["top"][2]["add_conversions"] == 0.0  # «Google не оценил», а не «ноль эффекта»
+    # Полный список типов — В FACTS: агенту уезжает только facts (mcp_server.serialize.finding_dict),
+    # и без этого он видел бы count + суммы + топ-3, но не то, ЧТО именно советует Google.
+    assert f.facts["types"] == ["CALLOUT_ASSET", "CAMPAIGN_BUDGET", "KEYWORD"]
+
+
+def test_types_in_facts_and_evidence_are_separate_lists():
+    """Гард на алиас: facts уезжает агенту, evidence — в БД советов (from_findings → store).
+    Один объект на два канала = будущее усечение facts молча урежет то, что персистится."""
+    f = next(
+        f
+        for f in build_audit(_report(), recommendations=[_rec(), _rec("CAMPAIGN_BUDGET")]).findings
+        if f.check_id == "google_recommendations_pending"
+    )
+    assert f.facts["types"] == f.evidence["types"] == ["CAMPAIGN_BUDGET", "KEYWORD"]
+    assert f.facts["types"] is not f.evidence["types"]
 
 
 def test_google_opinion_never_touches_our_score_or_buttons():
@@ -206,3 +222,18 @@ def test_render_stays_silent_about_gain_when_google_did_not_estimate_it():
     )
     card = render_audit(res, "ru")
     assert "Google советует: Keyword" in card and "оценивает" not in card
+
+
+# ── MCP-конверт: разбивка доходит до агента и мимо пагинации находок ──────────────────
+def test_audit_payload_carries_recommendation_types_in_facts_and_extra():
+    """Агенту уезжает только facts (evidence — внутренний канал advisor), а сама находка info/at_risk=0
+    стоит в хвосте сортировки ⇒ на большом аккаунте в первую страницу не попадёт. Поэтому агрегат
+    тип→число дублируется в extra, который не пагинируется."""
+    res = build_audit(
+        _report(), recommendations=[_rec("KEYWORD"), _rec("CAMPAIGN_BUDGET"), _rec(dismissed=True)]
+    )
+    rows, extra = audit_payload(res)
+    assert extra["google_recommendations"] == {"KEYWORD": 1, "CAMPAIGN_BUDGET": 1}
+    row = next(r for r in rows if r["check_id"] == "google_recommendations_pending")
+    assert row["facts"]["types"] == ["CAMPAIGN_BUDGET", "KEYWORD"]
+    assert "evidence" not in row  # контракт finding_dict: evidence агенту не отдаём

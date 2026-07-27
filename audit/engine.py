@@ -2147,6 +2147,8 @@ def check_google_recommendations(report, thr: dict, ctx: _Ctx) -> list[Finding]:
         }
         for r in scored[:3]
     ]
+    # Полный набор типов считаем ОДИН раз: он идёт и в facts (агент), и в evidence (advisor).
+    rec_types = sorted({str(getattr(r, "type", "")) for r in recs})
     return [
         Finding(
             check_id="google_recommendations_pending",
@@ -2162,8 +2164,16 @@ def check_google_recommendations(report, thr: dict, ctx: _Ctx) -> list[Finding]:
                 "add_cost": add_cost,
                 "currency": cur,
                 "top": top,
+                # Разбивка по типам — В FACTS: в MCP-конверт уезжает только facts
+                # (mcp_server/serialize.py:finding_dict), поэтому агент видел count + суммы + топ-3
+                # и НЕ видел, что именно советует Google. Размер ограничен ридером
+                # (reports.queries.fetch_recommendations limit=50) и самим перечислением типов.
+                "types": rec_types,
             },
-            evidence={"types": sorted({str(getattr(r, "type", "")) for r in recs})},
+            # ДУБЛЬ (отдельный список, не алиас): evidence — внутренний контракт advisor
+            # (from_findings → store → apply/rules/outcome), его читателей снимать нельзя, а
+            # общий объект дал бы «усекли facts — молча урезали то, что персистится в БД».
+            evidence={"types": list(rec_types)},
         )
     ]
 
@@ -3460,6 +3470,8 @@ def build_audit(
     impressions = float(getattr(totals, "impressions", 0) or 0)
     has_activity = impressions > 0 or total_spend > 0
     if not has_activity:
+        # `grec` заполнен, а findings пуст — не рассинхрон: чеки на мёртвом аккаунте не гоняются
+        # вовсе, но рекомендации Google прочитаны и отдаются как есть (в конверте — extra).
         return AuditResult(
             cid,
             currency,

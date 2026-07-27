@@ -139,8 +139,10 @@ def recent_action_dict(a) -> dict[str, Any]:
 
 
 def finding_dict(f) -> dict[str, Any]:
-    """audit.engine.Finding → компактный dict. facts/evidence несут числа (→ code_numbers).
-    one_tap считает КОД (свойство f.one_tap), не модель."""
+    """audit.engine.Finding → компактный dict. Числа агенту несёт facts (→ code_numbers).
+    `evidence` СОЗНАТЕЛЬНО НЕ отдаём: это внутренний канал advisor (ранжирование rules._magnitude,
+    сборка one-tap-параметров apply.one_tap_params, baseline outcome), а не факты для модели —
+    что агент обязан видеть, движок кладёт в `facts`. one_tap считает КОД (f.one_tap), не модель."""
     return {
         "check_id": f.check_id,
         "family": f.family,
@@ -155,8 +157,9 @@ def finding_dict(f) -> dict[str, Any]:
 
 def audit_payload(a) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """audit.engine.AuditResult → (findings, extra). extra несёт score/grade/итоги; findings — rows.
-    families отдаём как есть (family→счётчики/at_risk/penalty). Тяжёлые срезы (report/audit_tables)
-    НЕ включаем — это бумага для выгрузки, не для инструмента."""
+    families отдаём как есть (family→счётчики/at_risk/penalty), google_recommendations — агрегат
+    «тип Google-рекомендации → число активных». Тяжёлые срезы (report/audit_tables) НЕ включаем —
+    это бумага для выгрузки, не для инструмента."""
     rows = [finding_dict(f) for f in a.findings]
     extra = {
         "customer_id": a.customer_id,
@@ -172,5 +175,10 @@ def audit_payload(a) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         "lost_opportunity": round(float(a.lost_opportunity), 2),
         "score_model_version": a.score_model_version,
         "families": a.families,
+        # Тип Google-рекомендации → число активных (AuditResult.google_recommendations). Дублирует
+        # facts находки google_recommendations_pending НАМЕРЕННО: та находка severity=info и
+        # at_risk=0 ⇒ сортируется в самый хвост (engine.build_audit findings.sort) и на аккаунте с
+        # >50 находками в первую страницу конверта (DEFAULT_LIMIT=50) не попадает вовсе.
+        "google_recommendations": a.google_recommendations,
     }
     return rows, extra
