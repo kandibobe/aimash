@@ -1,12 +1,8 @@
 name: CI
 
-# Единственная линия — `master` (default branch). `main` была orphan-веткой с пустым merge-base:
-# слить её git-ом нельзя в принципе, ценное перенесено вручную (docs/archive/main-transplant-*),
-# остальное сохранено тегом `archive/main-*`. Триггер на неё убран вместе с самой веткой — прогоны
-# на ней всё равно падали, а зелёный CI на удалённой ветке ничего не значит.
 on:
   push:
-    branches: [master]
+    branches: [main, master]
   pull_request:
 
 permissions:

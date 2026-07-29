@@ -799,7 +799,11 @@ Caddy 127.0.0.1:9120  ← header_up Host/Origin → localhost   (loopback-only)
 **400 Invalid Host**. Флага «переписать Host» нет ни у `hermes dashboard`, ни у `tailscale serve`.
 Ребинд на tailnet-IP не помогает: `should_require_auth` тогда требует пароль/OAuth, а Host всё равно
 не совпадёт. Поэтому между serve и дашбордом стоит тонкий loopback-прокси Caddy, переписывающий
-`Host`/`Origin` в `localhost`. Дашборд остаётся на `127.0.0.1` без пароля (auth = членство в tailnet).
+`Host`/`Origin` в `localhost`. Дашборд остаётся на `127.0.0.1`.
+
+⚠️ **Аутентификация дашборда — не то, чем кажется по `/api/status`.** Что именно гейтит `/api/*`,
+почему `auth_required: false` не значит «проверки нет», и почему граница контура — по-прежнему
+членство в tailnet: **§14.2** ниже. Читать перед любой правкой бинда или Caddyfile.
 
 **Юниты (все `enabled`, переживают ребут):**
 - `tailscaled.service` — сеть Tailscale.
@@ -887,6 +891,66 @@ rm -rf /usr/local/lib/hermes-agent/hermes_cli/web_dist && systemctl restart herm
 ```
 ⚠️ **После апгрейда VPS до 8 GB** поднять потолки, иначе дашборд будет душиться на ровном месте:
 `systemctl set-property hermes-dashboard MemoryHigh=3G MemoryMax=4G MemorySwapMax=2G`.
+
+### 14.2. Аутентификация дашборда — ДВА механизма, активен ровно один (замерено 2026-07-29)
+
+Замерено по исходникам пиновой версии. Обе прежние редакции этого раздела были неполны: и «пароля
+нет, граница = членство в tailnet», и «REST закрыт 401, войти нечем».
+
+Выбор механизма делает **адрес бинда**, а не конфиг — `should_require_auth(host)`
+(`hermes_cli/web_server.py:400`) = `host not in _LOOPBACK_HOST_VALUES`:
+
+| Бинд | Кто гейтит `/api/*` | Как войти | `/api/status` |
+|---|---|---|---|
+| `127.0.0.1` (**сегодня**) | старый `auth_middleware` — эфемерный `_SESSION_TOKEN` | токен **впечатан в HTML главной страницы** (`web_server.py:17924`, `window.__HERMES_SESSION_TOKEN__`), обратно ждут в `X-Hermes-Session-Token` или `Authorization: Bearer` | `auth_required: false` |
+| не-loopback | `gated_auth_middleware` — сессия в куках | `POST /auth/password-login` (или OAuth) | `auth_required: true` |
+
+Ключевое следствие, которого не было ни в одной прежней редакции: **на loopback-бинде токен
+получает любой, кто может сделать `GET /`** — то есть 401 на `/api/*` НЕ является границей, граница
+по-прежнему = членство в tailnet. Куки провайдера пароля в этом режиме не смотрит никто:
+`gated_auth_middleware` при `auth_required=False` — сквозной проход (`web_server.py:589`).
+`_SESSION_TOKEN` эфемерный (`secrets.token_urlsafe(32)` при старте, `web_server.py:281`, либо
+`HERMES_DASHBOARD_SESSION_TOKEN` из окружения) — меняется при каждом рестарте дашборда.
+
+Без сессии в любом режиме отвечают только пути публичного allow-list
+(`hermes_cli/dashboard_auth/public_paths.py`): `/api/status`, `/api/model/info`,
+`/api/config/defaults`, `/api/config/schema`, `/api/dashboard/themes`, `/api/dashboard/plugins`,
+`/api/cron/fire`. Всё остальное — **401** `{"detail":"Unauthorized"}` (проверено на
+`/api/system/stats`, `/api/config`, `/api/logs`, `/api/sessions`, `/api/cron/jobs`,
+`/api/analytics/*` и на опасной `/api/fs/read-text` — запрос без параметров, файл не читался).
+`hermes dashboard --insecure` с июньского харднинга 2026 — **NO-OP**.
+
+**Провайдер пароля поставлен, но сегодня инертен.** В `/root/.hermes/config.yaml` добавлены ровно
+три ключа — `dashboard.basic_auth.{username,password_hash,secret}` (хэш — scrypt через штатный
+`plugins/dashboard_auth/basic:hash_password`, бэкап `config.yaml.bak-20260729-155450`,
+семантический диф 98→101 ключ, больше ничего не тронуто). `/api/status` показывает
+`auth_providers: ['basic']`, `POST /auth/password-login` отвечает 200 и ставит куки. **И это ничего
+не меняет**, пока бинд loopback: куки не смотрит никто. Провайдер включится сам в момент, когда
+дашборд встанет на не-loopback адрес.
+
+Чтобы гейт заработал, нужны две правки инфраструктуры (обе обратимые, **не применены** — ждут
+решения владельца):
+1. drop-in `/etc/systemd/system/hermes-dashboard.service.d/30-aimash-gated.conf`: сброс
+   `ExecStart=` + `--host 100.103.88.42`, плюс `After=`/`Wants=tailscaled.service` (иначе дашборд
+   стартует раньше, чем поднят tailnet-интерфейс, и падает на bind).
+2. Caddy: `reverse_proxy 100.103.88.42:9119`, `header_up Host 100.103.88.42:9119` (иначе
+   `_is_accepted_host` вернёт **400 Invalid Host** — на не-loopback бинде Host обязан совпадать с
+   адресом бинда точно), `header_up Origin http://localhost:9119` (CORS-регексп дашборда допускает
+   только `localhost`/`127.0.0.1`).
+
+Есть узкий не-интерактивный путь — bearer-токен (`dashboard_auth/token_auth.py`), но он действует
+**только на явно зарегистрированных маршрутах** (`register_token_route`, сегодня — `/api/cron/fire`);
+на произвольные READ-ручки его натянуть нельзя.
+
+**Как входит `hermes_ops`** (MCP-сервер наблюдения из Claude Code, `hermes_ops/auth.py`). Режим не
+задаётся конфигом, а замеряется: `GET /` → нашли `window.__HERMES_SESSION_TOKEN__` ⇒ loopback-режим,
+шлём токен заголовком; не нашли ⇒ режим гейта, логинимся паролем из
+`HERMES_DASHBOARD_USERNAME`/`HERMES_DASHBOARD_PASSWORD` (`.claude/settings.local.json` →
+`.mcp.json`). 401 на закрытой ручке ⇒ один повтор после переустановки сессии (токен мог смениться
+рестартом), второй 401 ⇒ отказ с причиной **без значений секретов**. Токен и пароль вычищаются из
+любого ответа наружу (`client.redact_deep(..., auth.secret_values())`, правило 5) — дашборд
+возвращает собственный токен как минимум в `/api/config`. Смена бинда по пунктам 1–2 выше ничего в
+`hermes_ops` не ломает: тот же клиент молча переедет на вход по паролю.
 
 ## 15. Апгрейд VPS (Hetzner rescale) — в месте, без переезда
 

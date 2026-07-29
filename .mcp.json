@@ -25,6 +25,16 @@
         "PYTHONIOENCODING": "utf-8"
       }
     },
+    "hermes": {
+      "command": "python",
+      "args": ["-m", "hermes_ops"],
+      "env": {
+        "HERMES_DASHBOARD_URL": "${HERMES_DASHBOARD_URL}",
+        "HERMES_DASHBOARD_USERNAME": "${HERMES_DASHBOARD_USERNAME}",
+        "HERMES_DASHBOARD_PASSWORD": "${HERMES_DASHBOARD_PASSWORD}",
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
     "context7": {
       "command": "npx",
       "args": ["-y", "@upstash/context7-mcp"]

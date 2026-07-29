@@ -1,0 +1,764 @@
+{
+ "/api/actions/{name}/status": [
+  "GET"
+ ],
+ "/api/analytics/models": [
+  "GET"
+ ],
+ "/api/analytics/usage": [
+  "GET"
+ ],
+ "/api/audio/elevenlabs/voices": [
+  "GET"
+ ],
+ "/api/audio/speak": [
+  "POST"
+ ],
+ "/api/audio/transcribe": [
+  "POST"
+ ],
+ "/api/auth/me": [
+  "GET"
+ ],
+ "/api/auth/providers": [
+  "GET"
+ ],
+ "/api/auth/ws-ticket": [
+  "POST"
+ ],
+ "/api/chat/image-upload": [
+  "POST"
+ ],
+ "/api/config": [
+  "GET",
+  "PUT"
+ ],
+ "/api/config/defaults": [
+  "GET"
+ ],
+ "/api/config/raw": [
+  "GET",
+  "PUT"
+ ],
+ "/api/config/schema": [
+  "GET"
+ ],
+ "/api/credentials/pool": [
+  "GET",
+  "POST"
+ ],
+ "/api/credentials/pool/{provider}/{index}": [
+  "DELETE"
+ ],
+ "/api/cron/blueprints": [
+  "GET"
+ ],
+ "/api/cron/blueprints/instantiate": [
+  "POST"
+ ],
+ "/api/cron/delivery-targets": [
+  "GET"
+ ],
+ "/api/cron/fire": [
+  "POST"
+ ],
+ "/api/cron/jobs": [
+  "GET",
+  "POST"
+ ],
+ "/api/cron/jobs/{job_id}": [
+  "DELETE",
+  "GET",
+  "PUT"
+ ],
+ "/api/cron/jobs/{job_id}/pause": [
+  "POST"
+ ],
+ "/api/cron/jobs/{job_id}/resume": [
+  "POST"
+ ],
+ "/api/cron/jobs/{job_id}/runs": [
+  "GET"
+ ],
+ "/api/cron/jobs/{job_id}/trigger": [
+  "POST"
+ ],
+ "/api/curator": [
+  "GET"
+ ],
+ "/api/curator/paused": [
+  "PUT"
+ ],
+ "/api/curator/run": [
+  "POST"
+ ],
+ "/api/dashboard/agent-plugins/install": [
+  "POST"
+ ],
+ "/api/dashboard/agent-plugins/{name}": [
+  "DELETE"
+ ],
+ "/api/dashboard/agent-plugins/{name}/disable": [
+  "POST"
+ ],
+ "/api/dashboard/agent-plugins/{name}/enable": [
+  "POST"
+ ],
+ "/api/dashboard/agent-plugins/{name}/update": [
+  "POST"
+ ],
+ "/api/dashboard/font": [
+  "GET",
+  "PUT"
+ ],
+ "/api/dashboard/plugin-providers": [
+  "PUT"
+ ],
+ "/api/dashboard/plugins": [
+  "GET"
+ ],
+ "/api/dashboard/plugins/hub": [
+  "GET"
+ ],
+ "/api/dashboard/plugins/rescan": [
+  "GET"
+ ],
+ "/api/dashboard/plugins/{name}/visibility": [
+  "POST"
+ ],
+ "/api/dashboard/theme": [
+  "PUT"
+ ],
+ "/api/dashboard/themes": [
+  "GET"
+ ],
+ "/api/env": [
+  "DELETE",
+  "GET",
+  "PUT"
+ ],
+ "/api/env/reveal": [
+  "POST"
+ ],
+ "/api/files": [
+  "DELETE",
+  "GET"
+ ],
+ "/api/files/download": [
+  "GET"
+ ],
+ "/api/files/mkdir": [
+  "POST"
+ ],
+ "/api/files/read": [
+  "GET"
+ ],
+ "/api/files/upload": [
+  "POST"
+ ],
+ "/api/files/upload-stream": [
+  "POST"
+ ],
+ "/api/fs/default-cwd": [
+  "GET"
+ ],
+ "/api/fs/git-root": [
+  "GET"
+ ],
+ "/api/fs/list": [
+  "GET"
+ ],
+ "/api/fs/read-data-url": [
+  "GET"
+ ],
+ "/api/fs/read-text": [
+  "GET"
+ ],
+ "/api/fs/write-text": [
+  "POST"
+ ],
+ "/api/gateway/drain": [
+  "POST"
+ ],
+ "/api/gateway/restart": [
+  "POST"
+ ],
+ "/api/gateway/start": [
+  "POST"
+ ],
+ "/api/gateway/stop": [
+  "POST"
+ ],
+ "/api/git/base-branches": [
+  "GET"
+ ],
+ "/api/git/branch/switch": [
+  "POST"
+ ],
+ "/api/git/branches": [
+  "GET"
+ ],
+ "/api/git/file-diff": [
+  "GET"
+ ],
+ "/api/git/review/commit": [
+  "POST"
+ ],
+ "/api/git/review/commit-context": [
+  "GET"
+ ],
+ "/api/git/review/create-pr": [
+  "POST"
+ ],
+ "/api/git/review/diff": [
+  "GET"
+ ],
+ "/api/git/review/list": [
+  "GET"
+ ],
+ "/api/git/review/push": [
+  "POST"
+ ],
+ "/api/git/review/rev-parse": [
+  "GET"
+ ],
+ "/api/git/review/revert": [
+  "POST"
+ ],
+ "/api/git/review/ship-info": [
+  "GET"
+ ],
+ "/api/git/review/stage": [
+  "POST"
+ ],
+ "/api/git/review/unstage": [
+  "POST"
+ ],
+ "/api/git/status": [
+  "GET"
+ ],
+ "/api/git/worktree/add": [
+  "POST"
+ ],
+ "/api/git/worktree/remove": [
+  "POST"
+ ],
+ "/api/git/worktrees": [
+  "GET"
+ ],
+ "/api/hermes/update": [
+  "POST"
+ ],
+ "/api/hermes/update/check": [
+  "GET"
+ ],
+ "/api/learning/graph": [
+  "GET"
+ ],
+ "/api/learning/node": [
+  "DELETE",
+  "GET",
+  "PUT"
+ ],
+ "/api/logs": [
+  "GET"
+ ],
+ "/api/mcp/catalog": [
+  "GET"
+ ],
+ "/api/mcp/catalog/install": [
+  "POST"
+ ],
+ "/api/mcp/oauth/callback/{server_name}": [
+  "GET"
+ ],
+ "/api/mcp/oauth/flows/{flow_id}": [
+  "GET"
+ ],
+ "/api/mcp/servers": [
+  "GET",
+  "POST",
+  "PUT"
+ ],
+ "/api/mcp/servers/{name}": [
+  "DELETE"
+ ],
+ "/api/mcp/servers/{name}/auth": [
+  "POST"
+ ],
+ "/api/mcp/servers/{name}/enabled": [
+  "PUT"
+ ],
+ "/api/mcp/servers/{name}/test": [
+  "POST"
+ ],
+ "/api/media": [
+  "GET"
+ ],
+ "/api/memory": [
+  "GET"
+ ],
+ "/api/memory/provider": [
+  "PUT"
+ ],
+ "/api/memory/providers/{name}/config": [
+  "GET",
+  "PUT"
+ ],
+ "/api/memory/providers/{name}/setup": [
+  "POST"
+ ],
+ "/api/memory/providers/{provider}/oauth/start": [
+  "POST"
+ ],
+ "/api/memory/providers/{provider}/oauth/status": [
+  "GET"
+ ],
+ "/api/memory/reset": [
+  "POST"
+ ],
+ "/api/messaging/platforms": [
+  "GET"
+ ],
+ "/api/messaging/platforms/{platform_id}": [
+  "PUT"
+ ],
+ "/api/messaging/platforms/{platform_id}/test": [
+  "POST"
+ ],
+ "/api/messaging/telegram/onboarding/start": [
+  "POST"
+ ],
+ "/api/messaging/telegram/onboarding/{pairing_id}": [
+  "DELETE",
+  "GET"
+ ],
+ "/api/messaging/telegram/onboarding/{pairing_id}/apply": [
+  "POST"
+ ],
+ "/api/messaging/whatsapp/onboarding/start": [
+  "POST"
+ ],
+ "/api/messaging/whatsapp/onboarding/{pairing_id}": [
+  "DELETE",
+  "GET"
+ ],
+ "/api/messaging/whatsapp/onboarding/{pairing_id}/apply": [
+  "POST"
+ ],
+ "/api/model/auxiliary": [
+  "GET"
+ ],
+ "/api/model/info": [
+  "GET"
+ ],
+ "/api/model/moa": [
+  "GET",
+  "PUT"
+ ],
+ "/api/model/options": [
+  "GET"
+ ],
+ "/api/model/recommended-default": [
+  "GET"
+ ],
+ "/api/model/set": [
+  "POST"
+ ],
+ "/api/ops/backup": [
+  "POST"
+ ],
+ "/api/ops/backup/download": [
+  "GET"
+ ],
+ "/api/ops/checkpoints": [
+  "GET"
+ ],
+ "/api/ops/checkpoints/prune": [
+  "POST"
+ ],
+ "/api/ops/config-migrate": [
+  "POST"
+ ],
+ "/api/ops/debug-share": [
+  "POST"
+ ],
+ "/api/ops/doctor": [
+  "POST"
+ ],
+ "/api/ops/dump": [
+  "POST"
+ ],
+ "/api/ops/hooks": [
+  "DELETE",
+  "GET",
+  "POST"
+ ],
+ "/api/ops/import": [
+  "POST"
+ ],
+ "/api/ops/import-upload": [
+  "POST"
+ ],
+ "/api/ops/prompt-size": [
+  "POST"
+ ],
+ "/api/ops/security-audit": [
+  "POST"
+ ],
+ "/api/pairing": [
+  "GET"
+ ],
+ "/api/pairing/approve": [
+  "POST"
+ ],
+ "/api/pairing/clear-pending": [
+  "POST"
+ ],
+ "/api/pairing/revoke": [
+  "POST"
+ ],
+ "/api/plugins/hermes-achievements/achievements": [
+  "GET"
+ ],
+ "/api/plugins/hermes-achievements/recent-unlocks": [
+  "GET"
+ ],
+ "/api/plugins/hermes-achievements/rescan": [
+  "POST"
+ ],
+ "/api/plugins/hermes-achievements/reset-state": [
+  "POST"
+ ],
+ "/api/plugins/hermes-achievements/scan-status": [
+  "GET"
+ ],
+ "/api/plugins/hermes-achievements/sessions/{session_id}/badges": [
+  "GET"
+ ],
+ "/api/plugins/kanban/assignees": [
+  "GET"
+ ],
+ "/api/plugins/kanban/attachments/{attachment_id}": [
+  "DELETE",
+  "GET"
+ ],
+ "/api/plugins/kanban/board": [
+  "GET"
+ ],
+ "/api/plugins/kanban/boards": [
+  "GET",
+  "POST"
+ ],
+ "/api/plugins/kanban/boards/{slug}": [
+  "DELETE",
+  "PATCH"
+ ],
+ "/api/plugins/kanban/boards/{slug}/switch": [
+  "POST"
+ ],
+ "/api/plugins/kanban/config": [
+  "GET"
+ ],
+ "/api/plugins/kanban/diagnostics": [
+  "GET"
+ ],
+ "/api/plugins/kanban/dispatch": [
+  "POST"
+ ],
+ "/api/plugins/kanban/home-channels": [
+  "GET"
+ ],
+ "/api/plugins/kanban/links": [
+  "DELETE",
+  "POST"
+ ],
+ "/api/plugins/kanban/orchestration": [
+  "GET",
+  "PUT"
+ ],
+ "/api/plugins/kanban/profiles": [
+  "GET"
+ ],
+ "/api/plugins/kanban/profiles/{profile_name}": [
+  "PATCH"
+ ],
+ "/api/plugins/kanban/profiles/{profile_name}/describe-auto": [
+  "POST"
+ ],
+ "/api/plugins/kanban/runs/{run_id}": [
+  "GET"
+ ],
+ "/api/plugins/kanban/runs/{run_id}/inspect": [
+  "GET"
+ ],
+ "/api/plugins/kanban/runs/{run_id}/terminate": [
+  "POST"
+ ],
+ "/api/plugins/kanban/stats": [
+  "GET"
+ ],
+ "/api/plugins/kanban/tasks": [
+  "POST"
+ ],
+ "/api/plugins/kanban/tasks/bulk": [
+  "POST"
+ ],
+ "/api/plugins/kanban/tasks/{task_id}": [
+  "DELETE",
+  "GET",
+  "PATCH"
+ ],
+ "/api/plugins/kanban/tasks/{task_id}/attachments": [
+  "GET",
+  "POST"
+ ],
+ "/api/plugins/kanban/tasks/{task_id}/comments": [
+  "POST"
+ ],
+ "/api/plugins/kanban/tasks/{task_id}/decompose": [
+  "POST"
+ ],
+ "/api/plugins/kanban/tasks/{task_id}/home-subscribe/{platform}": [
+  "DELETE",
+  "POST"
+ ],
+ "/api/plugins/kanban/tasks/{task_id}/log": [
+  "GET"
+ ],
+ "/api/plugins/kanban/tasks/{task_id}/reassign": [
+  "POST"
+ ],
+ "/api/plugins/kanban/tasks/{task_id}/reclaim": [
+  "POST"
+ ],
+ "/api/plugins/kanban/tasks/{task_id}/specify": [
+  "POST"
+ ],
+ "/api/plugins/kanban/workers/active": [
+  "GET"
+ ],
+ "/api/portal": [
+  "GET"
+ ],
+ "/api/profiles": [
+  "GET",
+  "POST"
+ ],
+ "/api/profiles/active": [
+  "GET",
+  "POST"
+ ],
+ "/api/profiles/sessions": [
+  "GET"
+ ],
+ "/api/profiles/sessions/sidebar": [
+  "GET"
+ ],
+ "/api/profiles/{name}": [
+  "DELETE",
+  "PATCH"
+ ],
+ "/api/profiles/{name}/describe-auto": [
+  "POST"
+ ],
+ "/api/profiles/{name}/description": [
+  "PUT"
+ ],
+ "/api/profiles/{name}/model": [
+  "PUT"
+ ],
+ "/api/profiles/{name}/open-terminal": [
+  "POST"
+ ],
+ "/api/profiles/{name}/setup-command": [
+  "GET"
+ ],
+ "/api/profiles/{name}/soul": [
+  "GET",
+  "PUT"
+ ],
+ "/api/providers/custom-endpoints": [
+  "GET",
+  "POST"
+ ],
+ "/api/providers/custom-endpoints/validate": [
+  "POST"
+ ],
+ "/api/providers/custom-endpoints/{endpoint_id}": [
+  "DELETE"
+ ],
+ "/api/providers/custom-endpoints/{endpoint_id}/activate": [
+  "POST"
+ ],
+ "/api/providers/oauth": [
+  "GET"
+ ],
+ "/api/providers/oauth/sessions/{session_id}": [
+  "DELETE"
+ ],
+ "/api/providers/oauth/{provider_id}": [
+  "DELETE"
+ ],
+ "/api/providers/oauth/{provider_id}/poll/{session_id}": [
+  "GET"
+ ],
+ "/api/providers/oauth/{provider_id}/start": [
+  "POST"
+ ],
+ "/api/providers/oauth/{provider_id}/submit": [
+  "POST"
+ ],
+ "/api/providers/validate": [
+  "POST"
+ ],
+ "/api/sessions": [
+  "GET"
+ ],
+ "/api/sessions/bulk-delete": [
+  "POST"
+ ],
+ "/api/sessions/empty": [
+  "DELETE"
+ ],
+ "/api/sessions/empty/count": [
+  "GET"
+ ],
+ "/api/sessions/import": [
+  "POST"
+ ],
+ "/api/sessions/prune": [
+  "POST"
+ ],
+ "/api/sessions/search": [
+  "GET"
+ ],
+ "/api/sessions/stats": [
+  "GET"
+ ],
+ "/api/sessions/{session_id}": [
+  "DELETE",
+  "GET",
+  "PATCH"
+ ],
+ "/api/sessions/{session_id}/export": [
+  "GET"
+ ],
+ "/api/sessions/{session_id}/latest-descendant": [
+  "GET"
+ ],
+ "/api/sessions/{session_id}/messages": [
+  "GET"
+ ],
+ "/api/skills": [
+  "GET",
+  "POST"
+ ],
+ "/api/skills/content": [
+  "GET",
+  "PUT"
+ ],
+ "/api/skills/hub/install": [
+  "POST"
+ ],
+ "/api/skills/hub/preview": [
+  "GET"
+ ],
+ "/api/skills/hub/scan": [
+  "GET"
+ ],
+ "/api/skills/hub/search": [
+  "GET"
+ ],
+ "/api/skills/hub/sources": [
+  "GET"
+ ],
+ "/api/skills/hub/uninstall": [
+  "POST"
+ ],
+ "/api/skills/hub/update": [
+  "POST"
+ ],
+ "/api/skills/toggle": [
+  "PUT"
+ ],
+ "/api/status": [
+  "GET"
+ ],
+ "/api/system/stats": [
+  "GET"
+ ],
+ "/api/tools/computer-use/permissions/grant": [
+  "POST"
+ ],
+ "/api/tools/computer-use/status": [
+  "GET"
+ ],
+ "/api/tools/terminal/backend": [
+  "PUT"
+ ],
+ "/api/tools/terminal/backends": [
+  "GET"
+ ],
+ "/api/tools/toolsets": [
+  "GET"
+ ],
+ "/api/tools/toolsets/{name}": [
+  "PUT"
+ ],
+ "/api/tools/toolsets/{name}/config": [
+  "GET"
+ ],
+ "/api/tools/toolsets/{name}/env": [
+  "PUT"
+ ],
+ "/api/tools/toolsets/{name}/model": [
+  "PUT"
+ ],
+ "/api/tools/toolsets/{name}/models": [
+  "GET"
+ ],
+ "/api/tools/toolsets/{name}/post-setup": [
+  "POST"
+ ],
+ "/api/tools/toolsets/{name}/provider": [
+  "PUT"
+ ],
+ "/api/webhooks": [
+  "GET",
+  "POST"
+ ],
+ "/api/webhooks/enable": [
+  "POST"
+ ],
+ "/api/webhooks/{name}": [
+  "DELETE"
+ ],
+ "/api/webhooks/{name}/enabled": [
+  "PUT"
+ ],
+ "/assets/{filename}.css": [
+  "GET"
+ ],
+ "/auth/callback": [
+  "GET"
+ ],
+ "/auth/login": [
+  "GET"
+ ],
+ "/auth/logout": [
+  "POST"
+ ],
+ "/auth/password-login": [
+  "POST"
+ ],
+ "/dashboard-plugins/{plugin_name}/{file_path}": [
+  "GET"
+ ],
+ "/login": [
+  "GET"
+ ],
+ "/{full_path}": [
+  "GET"
+ ]
+}

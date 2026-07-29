@@ -7,6 +7,9 @@
     "GOOGLE_ADS_OAUTH_JSON": "C:/tools/mcp-google-ads/google-ads-oauth.json",
     "GOOGLE_ADS_DEVELOPER_TOKEN": "<developer-token-Basic>",
     "GOOGLE_ADS_LOGIN_CUSTOMER_ID": "<MCC-id-без-дефисов>",
-    "GITHUB_PAT": "<github-PAT-scope-repo-issues>"
+    "GITHUB_PAT": "<github-PAT-scope-repo-issues>",
+    "HERMES_DASHBOARD_URL": "https://<vps>.<tailnet>.ts.net",
+    "HERMES_DASHBOARD_USERNAME": "<логин дашборда, dashboard.basic_auth.username>",
+    "HERMES_DASHBOARD_PASSWORD": "<пароль дашборда — нужен только когда бинд не loopback>"
   }
 }
