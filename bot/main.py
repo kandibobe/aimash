@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import re
 import uuid
 from typing import TypeGuard
@@ -894,11 +895,17 @@ async def _notify_admins_started(bot) -> None:
     except Exception:  # noqa: BLE001
         n_children = 0
     model = router.effective_model("parsing")
+    # Версия задеплоенного кода. До этого «что сейчас в проде» не отвечалось ничем: `.dockerignore`
+    # исключает `.git`, значит внутри контейнера коммита нет, а снаружи оставалось только время
+    # сборки. Именно на этом разъехались линии — рантайм собран из одной ветки, дерево на сервере
+    # стояло на другой, и увидеть это было негде. Пишет `GIT_SHA` в Dockerfile, ставит деплой.
+    build = os.getenv("AIMASH_GIT_SHA") or "unknown"
     for chat_id in admins:
         en = i18n.get_lang(chat_id) == "en"
         body = (
             (
                 "✅ <b>Aimash started</b>\n"
+                f"• build: <code>{texts.esc(build)}</code>\n"
                 f"• migration: <code>{texts.esc(str(head))}</code>\n"
                 f"• readable accounts: {n_children}\n"
                 f"• model (parsing): <code>{texts.esc(model)}</code>"
@@ -906,6 +913,7 @@ async def _notify_admins_started(bot) -> None:
             if en
             else (
                 "✅ <b>Aimash запущен</b>\n"
+                f"• сборка: <code>{texts.esc(build)}</code>\n"
                 f"• миграция: <code>{texts.esc(str(head))}</code>\n"
                 f"• аккаунтов на чтение: {n_children}\n"
                 f"• модель (parsing): <code>{texts.esc(model)}</code>"

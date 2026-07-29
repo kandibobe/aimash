@@ -7,6 +7,20 @@
 # (fail-closed, правило #10), а не поднимается со всем известным паролем «aimash».
 # ⚠️ На уже проинициализированном томе смена пароля требует ручного `ALTER ROLE aimash WITH
 #    PASSWORD '…';` — иначе бот не подключится (docs/DEPLOYMENT.md).
+
+# Сборка образа `aimash-bot` описана ОДИН раз и переиспользуется тремя сервисами (bot, scheduler,
+# mcp). Раньше блок был скопирован трижды: три определения сборки под ОДНИМ тегом образа — стоит
+# аргументам разъехаться, и какой из них выиграл в `aimash-bot`, зависит от порядка сборки.
+# GIT_SHA — маркер версии внутри образа. `.dockerignore` исключает `.git`, поэтому
+# `docker exec … git rev-parse` не работает в принципе: без этого аргумента вопрос «какой коммит
+# сейчас в проде» отвечается только по времени сборки контейнера. Пусто ⇒ `unknown`, не отказ:
+# локальная сборка версией не занимается. Проставляет CI/деплой (`.github/workflows/ci.yml`).
+x-aimash-build: &aimash-build
+  context: .
+  dockerfile: Dockerfile
+  args:
+    GIT_SHA: ${GIT_SHA:-unknown}
+
 services:
   postgres:
     image: postgres:16
@@ -44,9 +58,7 @@ services:
   # при старте (docker-entrypoint.sh → alembic upgrade head, fail-fast если миграция падает).
   # Прогнать вручную при необходимости: docker compose run --rm bot alembic upgrade head
   bot:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: *aimash-build
     # Стабильный тег образа: его переиспользует сервис `mcp` (profiles: [mcp]), чтобы не пересобирать
     # второй раз. Health-check смотрит на container_name, не на имя образа, — поведение не меняется.
     image: aimash-bot
@@ -101,9 +113,7 @@ services:
   #    дайджесты уходят текстом, а thr-tune молчит (его сообщение целиком — предложение под тап).
   scheduler:
     image: aimash-bot            # тот же образ, что собрал сервис bot (как у `mcp`) — без второй сборки
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: *aimash-build
     container_name: aimash-scheduler
     depends_on:
       postgres:
@@ -154,9 +164,7 @@ services:
   mcp:
     profiles: ["mcp"]
     image: aimash-bot            # переиспользовать образ, что уже собрал сервис bot (без второй сборки)
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: *aimash-build
     depends_on:
       postgres:
         condition: service_healthy

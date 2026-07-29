@@ -22,6 +22,16 @@ COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /app /app
 # Entrypoint применяет миграции (alembic upgrade head) перед стартом бота. chmod до USER (root).
 RUN chmod +x /app/docker-entrypoint.sh
+# Маркер версии. `.dockerignore` исключает `.git`, поэтому внутри контейнера коммит узнать
+# НЕЧЕМ — `docker exec … git rev-parse` не работает не по недосмотру, а по построению. Без
+# этого «какая версия в проде» отвечалось только временем сборки контейнера, то есть никак.
+# Объявлено ПОСЛЕ всех COPY/RUN: смена sha не должна инвалидировать кэш установки зависимостей.
+# Дефолт `unknown` намеренный — локальная сборка версией не занимается; проставляет деплой.
+ARG GIT_SHA=unknown
+ENV AIMASH_GIT_SHA=${GIT_SHA}
+LABEL org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.title="aimash-bot" \
+      org.opencontainers.image.source="https://github.com/kandibobe/aimash"
 USER aimash
 # B9: healthcheck по СВЕЖЕСТИ heartbeat (живость event-loop бота), а не только импорт модулей —
 # раньше зависший polling / крэш-луп оставался «healthy». Бот пишет heartbeat каждые 10с; протух
