@@ -27,6 +27,7 @@ venv/
 env/
 
 # Инструменты / отчёты
+node_modules/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -36,6 +37,7 @@ htmlcov/
 
 # Локальные данные / БД
 *.sqlite3
+*.sqlite
 *.db
 data/
 dumps/

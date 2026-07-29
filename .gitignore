@@ -31,6 +31,7 @@ env/
 .python-version
 
 # Tooling / caches
+node_modules/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -41,10 +42,16 @@ htmlcov/
 
 # DB / local data
 *.sqlite3
+*.sqlite
 *.db
 data/
 dumps/
-backups/    # C1: авто-дампы pg_dump (docker-compose backup-сайдкар) — на VPS, не в гит
+# C1: авто-дампы pg_dump (docker-compose backup-сайдкар ./backups:/backups) — pg_dump -Fc ВСЕЙ БД,
+# включая audit_log и шифрованные oauth_tokens. Живут на VPS, в гит не попадают НИКОГДА.
+# ⚠️ Комментарий обязан быть на ОТДЕЛЬНОЙ строке: git не знает trailing-комментариев и читает
+# `backups/    # ...` как один литерал — паттерн молча не срабатывает (гард в tests/test_ignore_sync.py).
+backups/
+*.dump
 
 # A/B test outputs (могут содержать данные)
 ab_results/
@@ -59,6 +66,12 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Мусор редакторов, патчей и merge-конфликтов
+*.bak
+*.orig
+*.rej
+*.tmp
 
 # client documents — keep local only, never commit
 *.docx
