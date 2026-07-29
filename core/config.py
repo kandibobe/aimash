@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     #   parsing — разбор команд (function calling, денежный путь): дёшево и точно, ошибку
     #             ловит confirm-гейт + код-валидация → дорогая модель тут не нужна.
     #   copy    — генерация RSA-текстов: качество РУССКОГО важнее цены → сильная модель.
-    llm_parsing: str = "deepseek/deepseek-chat"  # A/B: дёшево, ≈Claude на парсинге команд
+    llm_parsing: str = "deepseek/deepseek-v4-flash"  # A/B: дёшево, ≈Claude на парсинге команд
     llm_copy: str = "anthropic/claude-opus-4.8"  # копирайт RU — максимум качества RSA (решение владельца 2026-07)
     llm_fallback: str = "anthropic/claude-sonnet-4.6"  # Hermes выбыл (нет tool use на OpenRouter)
     # P2: отдельная роль КЛАСТЕРИЗАЦИИ/интента keyword research (вопрос заказчика 2026-07-06

@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 """Модели БД (SQLAlchemy 2.0). Миграции — Alembic (migrations/).
 
 Таблицы:
@@ -725,3 +726,59 @@ class AdsQuotaOp(Base):
     account: Mapped[str | None] = mapped_column(String(32))
     kind: Mapped[str] = mapped_column(String(8), nullable=False)  # 'read' | 'mutate'
     op_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+class OutcomeLog(Base):
+    """Волна 5 (Self-Learning): запись результата каждой применённой мутации для обратной связи.
+
+    Строка заводится ПОСЛЕ успешного execute_confirmed в ads/service.py.
+    Через 7 дней OutcomeChecker собирает metrics_after, сравнивает с metrics_before
+    и выставляет вердикт (success/neutral/failure). PatternExtractor обобщает паттерны
+    по нескольким аккаунтам в memory-правила.
+
+    confirmation_id — уникальный ключ: повторный record() с тем же id = UPDATE, не INSERT.
+    metrics_before — снимок метрик кампании ДО мутации (get_campaign_stats за 7 дней).
+    metrics_after — заполняется OutcomeChecker через 7+ дней после applied_at.
+    """
+
+    __tablename__ = "outcome_log"
+    __table_args__ = (
+        Index("ix_outcome_verdict", "verdict"),
+        Index("ix_outcome_account", "account_id", "platform"),
+        Index("ix_outcome_checked", "checked_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    confirmation_id: Mapped[str] = mapped_column(
+        String(64), unique=True, index=True, nullable=False
+    )
+    account_id: Mapped[str] = mapped_column(String(20), index=True, nullable=False)
+    account_name: Mapped[str | None] = mapped_column(String(128))
+    platform: Mapped[str] = mapped_column(
+        String(16), default="google", nullable=False
+    )  # google|meta|tiktok
+    campaign_id: Mapped[str | None] = mapped_column(String(32))
+    operation: Mapped[str] = mapped_column(String(64), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Снимок «до» — заполняется при создании
+    metrics_before: Mapped[str | None] = mapped_column(JSON)  # {cpa, roas, spend, conversions, ...}
+    budget_before: Mapped[float | None] = mapped_column(Float)
+    bid_before: Mapped[float | None] = mapped_column(Float)
+
+    # Снимок «после» — заполняется OutcomeChecker через 7+ дней
+    metrics_after: Mapped[str | None] = mapped_column(JSON)
+    budget_after: Mapped[float | None] = mapped_column(Float)
+    bid_after: Mapped[float | None] = mapped_column(Float)
+
+    # Вердикт — заполняется OutcomeChecker
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verdict: Mapped[str] = mapped_column(
+        String(16), default="pending", nullable=False
+    )  # pending|success|neutral|failure|error
+    reason: Mapped[str | None] = mapped_column(Text)  # почему такой вердикт
+    delta_percent: Mapped[float | None] = mapped_column(Float)  # Δ CPA/ROAS в %
+
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
