@@ -49,8 +49,21 @@
 
 ## Технические референсы
 - [gads-api-refs.md](gads-api-refs.md) — версии Google Ads API/SDK, график сансета.
-- [reuse-sources.md](reuse-sources.md) — что переиспользуем из внешних репозиториев + MCP-нюансы.
-- [ab-results.md](ab-results.md) — результаты A/B-теста моделей (стоимость/точность).
+- [reuse-sources.md](reuse-sources.md) — **провенанс порогов `/audit`**: какая проверка из какого MIT-источника (это лицензионная атрибуция, не заметка) + источники-паттерны. Сводный аудит открытых источников — в `AUDIT-open-source.md`.
+- [ab-results.md](ab-results.md) — A/B моделей. ⚠️ Раздел «Решение» **историчен** (Фаза −1, выбирал `deepseek/deepseek-chat`); действующая раскладка по ролям — `SPEC.md` §10.1. Живым остаётся **замер**: Hermes-модели дали 0/11 function-calling на OpenRouter — на этом стоит выбор модели-мозга в `TZ-Aimash-Hermes-Agent.md`.
+
+## Процесс, рубежи, эксплуатация ядра
+- [REPO_GUARDRAILS.md](REPO_GUARDRAILS.md) — **`merge в master` == авто-деплой в прод**, значит право мержить == право снять confirm-гейт. Ruleset на ветку, machine-аккаунт билдера без merge, пустой bypass-list. ⚠️ `CODEOWNERS` без ruleset не энфорсит ничего.
+- Эксплуатация ядра Hermes живёт рядом с самим ядром, в [`deploy/hermes/`](../deploy/hermes/):
+  [`README.md`](../deploy/hermes/README.md) — установка (RB-0…RB-3) ·
+  [`OPERATIONS.md`](../deploy/hermes/OPERATIONS.md) — день-2: редеплой↔MCP-reconnect, логи, откат, kill-switch, замеры §12 ·
+  [`OPEN_DECISIONS.md`](../deploy/hermes/OPEN_DECISIONS.md) — решения заказчика D1–D7 (**настройка**, у каждого строгий дефолт) ·
+  [`RISK_REGISTER.md`](../deploy/hermes/RISK_REGISTER.md) — риски Р1–Р9 (**подпись**, дефолта нет; приложение к договору) ·
+  [`host-a/RUNBOOK.md`](../deploy/hermes/host-a/RUNBOOK.md) — двухсерверная схема; ⚠️ **ни один шаг не выполнялся живьём**.
+
+## Архив
+`docs/archive/` — вне зоны инвариантов ссылок (`tests/_docs_paths.py`), хранит документ таким, каким он был на момент заморозки.
+- [archive/main-transplant-2026-07-27.md](archive/main-transplant-2026-07-27.md) — разбор orphan-ветки `main` с VPS: что из неё взято, что отклонено и почему (`DRY_RUN` рапортует об успехе несостоявшейся мутации; `tools_writes.py` даёт исполняющий `execute_confirmed` на MCP-поверхности без И8).
 
 ## Скилы разработчика (`.claude/skills/`)
 `new-mutation` · `confirm-gate-audit` · `gaql-query` · `check-rsa-copy` · `gads-version`.
