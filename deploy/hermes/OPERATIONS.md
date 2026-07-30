@@ -137,7 +137,7 @@ hermes doctor --fix                  # health self-check с авто-фиксо�
 ```
 
 **Кавеат `mcp test`:** доки подтверждают, что он тестирует **коннект**, но не сказано, что печатает список/счётчик
-инструментов [Likely]. Чтобы позитивно убедиться, что 12 READ-tools живые — в чате `/reload-mcp` и спросить агента
+инструментов [Likely]. Чтобы позитивно убедиться, что 15 READ-инструментов живые — в чате `/reload-mcp` и спросить агента
 «какие MCP-инструменты доступны», либо смотреть стартовый баннер в `gateway.log`. MCP-инструменты регистрируются с
 префиксом `mcp_<server>_<tool>`.
 
@@ -527,7 +527,7 @@ grep 'pre_tool_call.block' ~/.hermes/aimash_probe.log | tail -1
 
 | V | Действие | Проверка |
 |---|---|---|
-| **V18** | Удалить `~/.hermes/plugins/aimash_probe`, **убрать `aimash_probe` из `plugins.enabled`**, удалить запись `mcp_servers.aimash-probe`, все `AIMASH_PROBE_*` из окружения, **вернуть `vision` в `disabled_toolsets`** (если снимался под R6); restart | `hermes plugins` → `aimash_probe` отсутствует; `hermes mcp list` → только `aimash`; `hermes config show` → 12 инструментов, `vision` погашен; `hermes gateway status` → active |
+| **V18** | Удалить `~/.hermes/plugins/aimash_probe`, **убрать `aimash_probe` из `plugins.enabled`**, удалить запись `mcp_servers.aimash-probe`, все `AIMASH_PROBE_*` из окружения, **вернуть `vision` в `disabled_toolsets`** (если снимался под R6); restart | `hermes plugins` → `aimash_probe` отсутствует; `hermes mcp list` → только `aimash`; `hermes config show` → 15 READ-инструментов, `vision` погашен; `hermes gateway status` → active |
 | **V19** | Гигиена вывода — команды ниже | `aimash_probe.log` вывезти в защищённое место или удалить: у хука своя редакция по ФОРМЕ секрета, чужие поля она гарантировать не может |
 
 **V19 — паттерны файлом, и обязательно с положительным контролем.** «Пусто» само по себе ничего не

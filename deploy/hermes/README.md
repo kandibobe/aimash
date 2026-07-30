@@ -1,7 +1,7 @@
 # Ранбук: поднять Hermes (Контур A) рядом с боевым ботом на VPS
 
 READ-пилот пивота Aimash → Hermes. Hermes-агент отвечает в Telegram и через
-MCP-сервер `aimash` (пакет `mcp_server/`, 12 READ-инструментов) читает Google Ads. Денежное ядро не
+MCP-сервер `aimash` (пакет `mcp_server/`, 15 READ-инструментов) читает Google Ads. Денежное ядро не
 затрагивается: слой **READ-only by construction** — WRITE-инструментов физически нет.
 
 **Где что написано:** требования и приёмка — [`/SPEC.md`](../../SPEC.md); архитектура (топология,
@@ -118,7 +118,7 @@ hermes gateway status              # active; в логах — коннект MC
 #          (подробнее про логи/linger — OPERATIONS.md §0/§3)
 
 # 7. Быстрая проверка MCP-коннекта до Telegram.
-hermes mcp test aimash             # должен отдать 12 инструментов
+hermes mcp test aimash             # должен отдать 15 READ-инструментов
 #   (`aimash` здесь — имя MCP-сервера из config.yaml, НЕ профиля)
 ```
 
@@ -203,7 +203,7 @@ hermes mcp test aimash             # должен отдать 12 инструм
 
 ## Что прогнано, что нет
 
-MCP READ-слой (`mcp_server/`) прогнан вживую на Draft `7753643025` локально (все 12 инструментов —
+MCP READ-слой (`mcp_server/`) прогнан вживую на Draft `7753643025` локально (все 15 READ-инструментов —
 чистые редактированные конверты). Шаги на VPS (RB-0…RB-3) выполняет владелец — SSH к боевому серверу
 и `git push` в среде агента недоступны. Артефакты этого каталога приезжают на сервер штатным
 авто-деплоем (push master → CI green → `git reset --hard` → `docker compose up -d --build`).
