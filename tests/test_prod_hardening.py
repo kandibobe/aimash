@@ -248,6 +248,9 @@ async def test_purge_disabled_when_retain_zero(monkeypatch):
     monkeypatch.setattr(settings, "ads_quota_ops_retain_days", 0)  # C2: строки счётчика квоты
     monkeypatch.setattr(settings, "agent_runs_retain_days", 0)  # Волна 3: журнал прогонов
     monkeypatch.setattr(settings, "rollback_watch_retain_days", 0)  # Волна 4: журнал наблюдений
+    monkeypatch.setattr(settings, "operations_retain_days", 0)
+    monkeypatch.setattr(settings, "revenue_events_retain_days", 0)
+    monkeypatch.setattr(settings, "channel_metrics_retain_days", 0)
     async with Session() as s:
         await s.execute(delete(ErrorEvent))
         s.add(
@@ -268,6 +271,12 @@ async def test_purge_disabled_when_retain_zero(monkeypatch):
         "ads_quota_ops": 0,
         "agent_runs": 0,
         "rollback_watch": 0,
+        "operational_decisions": 0,
+        "ops_incidents": 0,
+        "pacing_snapshots": 0,
+        "managed_experiments": 0,
+        "revenue_events": 0,
+        "channel_metric_snapshots": 0,
     }
     async with Session() as s:
         cnt = (await s.execute(select(func.count()).select_from(ErrorEvent))).scalar()

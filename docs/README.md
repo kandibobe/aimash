@@ -35,6 +35,11 @@
 ## Безопасность
 - [SECURITY.md](SECURITY.md) — золотые правила → где реализовано → чем покрыто (артефакт для ревью). **[ядро]** — правил стало 15 (`CLAUDE.md`), карта покрытия здесь.
 
+## Операционный слой
+- [DECISION_LAYER.md](DECISION_LAYER.md) — decision queue, incidents, pacing, experiments, RBAC/four-eyes, CRM, portfolio, playbooks и граница live-cutover.
+- [ACCOUNT_HEALTH_SCORE.md](ACCOUNT_HEALTH_SCORE.md) — формула 0–100, семейные веса, grades и версия модели.
+- [SHADOW_MODE_EVAL.md](SHADOW_MODE_EVAL.md) — что реально измеряет rollback shadow, критерии до auto-cutover.
+
 ## Фичи — источники функционального объёма
 > Все шесть **[переписываются]**: функции остаются, кнопочная механика переезжает в текстовую модель (`SPEC.md` §3.3–§3.8). Не выбрасывать — это единственное подробное описание того, что именно должно работать.
 

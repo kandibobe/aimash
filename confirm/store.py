@@ -40,6 +40,7 @@ from core.logging import log, redact_text
 from core.provenance import get_provenance
 from db.models import AuditLog, Proposal
 from db.session import Session, db_dt
+from operations.governance import four_eyes_claim_condition
 
 # Потолок размера JSON результата в audit_log.result (защита от раздувания: некоторые мутации
 # возвращают длинные списки resource_name'ов — add_keywords во многих группах и т.п.). Зеркалит
@@ -175,11 +176,13 @@ class ConfirmStore:
         """Создать черновик (pending). Провенанс хода — `origin_human_turn`/`author_user_id`/`run_id`
         — стор берёт САМ из `core.provenance`, и параметра для него нет намеренно (Волна 1.4).
 
-        `risk_tier` (Волна 5) — ПРЕЗЕНТАЦИОННЫЙ тир `confirm.risk.risk_tier`: он не участвует ни в
-        одной проверке §2.2, а фиксирует, В КАКОЙ ФОРМЕ человека спросили. Пишется здесь, потому что
+        `risk_tier` (Волна 5) фиксирует, В КАКОЙ ФОРМЕ человека спросили, и может только ужесточить
+        confirm-гейт: сократить TTL и, при `FOUR_EYES_REQUIRED`, потребовать независимый голос.
+        Он не отменяет ни одну базовую проверку §2.2 и не даёт права на Ads-мутацию. Пишется здесь, потому что
         аудит обязан отвечать на вопрос «что человек видел, когда соглашался», а пересчёт задним
         числом даст ответ про сегодняшние пороги, а не про действовавшие в момент показа. Читает
-        колонку ровно одно место кода — `_l3_fresh()` в CAS-условиях.
+        колонку читают только дополнительные CAS-конъюнкты `_l3_fresh()` и
+        `four_eyes_claim_condition()`.
 
         `attachment_state='pending'` ставит тот, кто НАПЕЧАТАЛ в `summary` обещание .xlsx-вложения:
         обещание и обязательство его выполнить обязаны родиться одной вставкой в одну строку. Двух
@@ -439,6 +442,9 @@ class ConfirmStore:
                     Proposal.status == "confirmed",
                     Proposal.created_at >= db_dt(_ttl_boundary()),  # TTL в CAS, не в джобе
                     _l3_fresh(),  # Волна 5: L3 — свой, более короткий срок (доп. конъюнкт)
+                    # Дополнительный four-eyes-гейт внутри ТОГО ЖЕ CAS: между проверкой
+                    # независимого голоса и claim нет TOCTOU-окна.
+                    four_eyes_claim_condition(),
                 )
                 .values(status="executing", decided_at=func.now())
             )

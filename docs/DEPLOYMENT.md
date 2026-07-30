@@ -44,9 +44,12 @@ cp .env.example .env
 | `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | нет | MCC (контекст авторизации) |
 | `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS` | нет | набор аккаунтов для МУТАЦИЙ. **`all`/`*`** = все ВИДИМЫЕ боту (потолок `allowed_ceiling()`) — задаётся ТОЛЬКО явно. Явный CSV id = СУЗИТЬ набор. **Пусто = fail-closed в ЛЮБОМ окружении** (мутаций нет; prod поднимается read-only с warning — коэрция «пусто → all» снята 2026-07-30, BZ-1). Любая мутация — за confirm-гейтом. См. §2.1 |
 | `SECRETS_ENCRYPTION_KEY` | **да** | Fernet-ключ шифрования токенов at-rest (обязателен в prod) |
+| `PSEUDONYMIZATION_HMAC_KEY` | при CRM/SSO | Отдельный стабильный secret ≥32 bytes для domain-separated CRM/identity HMAC; отдельный бэкап |
 | `TWO_FACTOR_ENABLED` | нет | §12 2FA-гейт опасных операций. `false` (дефолт) = выкл. `true` = перед исполнением опасной мутации бот просит PIN. **Fail-closed**: `true` без `TWO_FACTOR_PIN` ⇒ опасные операции блокируются (не пропускаются). См. §2.2 |
 | `TWO_FACTOR_PIN` | **да** | PIN для 2FA (маскируется в логах/repr). Сверяется в коде constant-time (`core/twofa.py`) |
 | `TWO_FACTOR_OPS_CSV` | нет | какие операции требуют кода (CSV). Дефолт `remove_campaign,remove_ad_group,update_budget,update_bid,update_keyword_bid,set_bidding_strategy`. Пусто ⇒ при включённом 2FA ничего не гейтится |
+| `FOUR_EYES_REQUIRED` | нет | opt-in независимого approver для выбранных risk tiers. Не включать до выдачи ролей: отсутствие vote/role блокирует claim fail-closed |
+| `FOUR_EYES_RISK_TIERS_CSV` | нет | `L1,L2,L3`; дефолт `L3`. Неизвестный/пустой при REQUIRED ⇒ отказ старта/claim, не отключение гейта |
 | `DATABASE_URL` | нет | строка подключения (в compose СОБИРАЕТСЯ из `POSTGRES_PASSWORD` на `postgres:5432` — значение из `.env` там не действует, `environment:` бьёт `env_file:`) |
 | `POSTGRES_PASSWORD` | **да** (docker) | D3: пароль роли `aimash`. Читает compose (postgres + `DATABASE_URL` бота + бэкап-сайдкар). Пусто ⇒ `docker compose up` ОТКАЗЫВАЕТ. В prod пароль `aimash` (утёк в git) отвергается на старте бота. Ротация — §4.0 |
 | `POSTGRES_RO_PASSWORD` | **да** (docker) | D3: пароль read-only роли `aimash_ro` (Postgres MCP). Задаётся при ПЕРВОЙ инициализации тома (`db/init/01-readonly-role.sh`) |

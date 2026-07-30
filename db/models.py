@@ -21,6 +21,12 @@
 - account_health_snapshot — агрегаты health-score /audit на дату (субстрат трендов, N1.1; без PII)
 - sheet_exports    — реестр созданных ботом Google-таблиц (отчёты/ключи): ссылка + исход шаринга
 - circuit_state    — распределённый размыкатель (Google Ads / LLM): состояние + аренда пробы
+- operational_decisions / ops_incidents — единая очередь решений и дедуплицированный alert lifecycle
+- budget_plans / pacing_snapshots — медиапланы, forecast и контроль потолков без автоприменения
+- managed_experiments / playbook_versions — безопасные эксперименты и версионированные rules
+- role_assignments / approval_votes / external_identities — RBAC, four-eyes и trusted identity mapping
+- revenue_events / channel_metric_snapshots — PII-free CRM feedback и cross-channel metrics
+- notification_routes — маршруты доставки по ссылкам на секреты, не сами credentials
 
 ⚠️ Секреты (refresh-токены) хранятся ТОЛЬКО зашифрованными (oauth_tokens.refresh_token_enc).
 В audit_log/proposals секретов нет. PII клиента (§20) — не секрет проекта, но в логи сырьём не
@@ -167,9 +173,10 @@ class Proposal(Base):
     # наблюдаема: вечный 'pending' — видимая величина, а не тишина.
     attachment_state: Mapped[str | None] = mapped_column(String(16))
     # Волна 5 — тир риска (`confirm/risk.py`): 'L1'|'L2'|'L3', NULL на строках до миграции.
-    # ПРЕЗЕНТАЦИОННЫЙ: он не участвует ни в одной проверке §2.2, а меняет полноту карточки, срок
-    # жизни согласия и число человеческих актов. Пишется ради аудита («что человек видел, когда
-    # соглашался») и ради TTL-условия CAS — единственного места, где колонка читается кодом.
+    # Тир не ослабляет ни одну проверку §2.2 и не даёт права на мутацию. Он меняет полноту карточки,
+    # срок жизни согласия и, при включённом four-eyes, число независимых человеческих актов.
+    # Пишется ради аудита («что человек видел, когда соглашался») и двух дополнительных условий
+    # authoritative CAS: TTL и four-eyes.
     risk_tier: Mapped[str | None] = mapped_column(String(2))
     status: Mapped[str] = mapped_column(
         String(16), default="pending", nullable=False
@@ -974,4 +981,341 @@ class RollbackWatch(Base):
     checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # confirmation_id компенсирующего черновика — заполняется только в `auto` (Волна 6a).
     acted_confirmation_id: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class OperationalDecision(Base):
+    """Unified operator queue item.
+
+    This is advisory state only: a row may point at a suggested operation or a proposal, but never
+    authorizes or executes a Google Ads mutation. Execution remains in ``confirm/`` + ``ads/``.
+    """
+
+    __tablename__ = "operational_decisions"
+    __table_args__ = (
+        Index("ix_operational_decisions_queue", "customer_id", "status", "severity", "created_at"),
+        Index("ix_operational_decisions_fingerprint", "customer_id", "fingerprint", "last_seen_at"),
+        Index(
+            "ux_operational_decisions_active_fingerprint",
+            "active_fingerprint",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    decision_uid: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    chat_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
+    customer_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_ref: Mapped[str | None] = mapped_column(String(96))
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Равен fingerprint только пока decision активен; в terminal становится NULL. UNIQUE даёт
+    # DB-level dedup конкурентных детекторов, но разрешает хранить несколько завершённых циклов.
+    active_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    category: Mapped[str] = mapped_column(String(32), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    recommended_action: Mapped[str] = mapped_column(Text, nullable=False)
+    recommended_operation: Mapped[str | None] = mapped_column(String(64))
+    confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    evidence: Mapped[dict | None] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(16), default="new", index=True, nullable=False)
+    assigned_to: Mapped[int | None] = mapped_column(BigInteger, index=True)
+    snoozed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    proposal_confirmation_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    decided_by: Mapped[int | None] = mapped_column(BigInteger)
+    decision_note: Mapped[str | None] = mapped_column(Text)
+    occurrence_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class OpsIncident(Base):
+    """Deduplicated alert lifecycle: events fold into one acknowledgeable incident."""
+
+    __tablename__ = "ops_incidents"
+    __table_args__ = (
+        Index("ix_ops_incidents_queue", "customer_id", "status", "severity", "last_seen_at"),
+        Index("ux_ops_incidents_fingerprint", "customer_id", "fingerprint", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    incident_uid: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    customer_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    decision_uid: Mapped[str | None] = mapped_column(String(64), index=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    evidence: Mapped[dict | None] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True, nullable=False)
+    occurrence_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    assigned_to: Mapped[int | None] = mapped_column(BigInteger)
+    acknowledged_by: Mapped[int | None] = mapped_column(BigInteger)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    snoozed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_by: Mapped[int | None] = mapped_column(BigInteger)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    escalation_level: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class BudgetPlan(Base):
+    """Versioned media-plan line for account/campaign/portfolio pacing."""
+
+    __tablename__ = "budget_plans"
+    __table_args__ = (
+        Index(
+            "ix_budget_plans_scope_period",
+            "customer_id",
+            "scope_type",
+            "scope_id",
+            "period_start",
+            "period_end",
+        ),
+        Index(
+            "ux_budget_plans_scope_version",
+            "customer_id",
+            "scope_type",
+            "scope_id",
+            "period_start",
+            "period_end",
+            "version",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plan_uid: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    customer_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    scope_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    scope_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    period_start: Mapped[str] = mapped_column(String(10), nullable=False)
+    period_end: Mapped[str] = mapped_column(String(10), nullable=False)
+    currency: Mapped[str] = mapped_column(String(8), nullable=False)
+    planned_spend_micros: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    monthly_ceiling_micros: Mapped[int | None] = mapped_column(BigInteger)
+    daily_ceiling_micros: Mapped[int | None] = mapped_column(BigInteger)
+    source: Mapped[str] = mapped_column(String(16), default="manual", nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True, nullable=False)
+    created_by: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PacingSnapshot(Base):
+    """Deterministic spend-to-plan result; recommendations are advisory only."""
+
+    __tablename__ = "pacing_snapshots"
+    __table_args__ = (
+        Index("ix_pacing_snapshots_plan_asof", "plan_uid", "as_of_date", unique=True),
+        Index("ix_pacing_snapshots_customer_asof", "customer_id", "as_of_date", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plan_uid: Mapped[str] = mapped_column(String(64), nullable=False)
+    customer_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    as_of_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    spend_to_date_micros: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expected_to_date_micros: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    projected_spend_micros: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    variance_micros: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    variance_ratio: Mapped[float] = mapped_column(Float, nullable=False)
+    recommended_daily_budget_micros: Mapped[int | None] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ManagedExperiment(Base):
+    """First-class experiment record; this table does not create or mutate Ads experiments."""
+
+    __tablename__ = "managed_experiments"
+    __table_args__ = (Index("ix_managed_experiments_queue", "customer_id", "status", "end_date"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    experiment_uid: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    customer_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    hypothesis: Mapped[str] = mapped_column(Text, nullable=False)
+    control: Mapped[dict] = mapped_column(JSON, nullable=False)
+    treatment: Mapped[dict] = mapped_column(JSON, nullable=False)
+    primary_metric: Mapped[str] = mapped_column(String(32), nullable=False)
+    success_direction: Mapped[str] = mapped_column(String(8), nullable=False)
+    success_threshold: Mapped[float] = mapped_column(Float, nullable=False)
+    minimum_sample: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    start_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    end_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    rollback_trigger: Mapped[dict | None] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(16), default="draft", index=True, nullable=False)
+    result: Mapped[dict | None] = mapped_column(JSON)
+    verdict: Mapped[str | None] = mapped_column(String(16))
+    created_by: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RoleAssignment(Base):
+    """Viewer/operator/approver/admin assignment, optionally scoped to one Ads customer."""
+
+    __tablename__ = "role_assignments"
+    __table_args__ = (
+        Index("ux_role_assignments_scope", "user_id", "customer_id", "role", unique=True),
+        Index("ix_role_assignments_customer_role", "customer_id", "role"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    customer_id: Mapped[str] = mapped_column(String(20), default="*", nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    capabilities: Mapped[list | None] = mapped_column(JSON)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ApprovalVote(Base):
+    """Independent approval evidence for four-eyes policies; never substitutes ConfirmStore CAS."""
+
+    __tablename__ = "approval_votes"
+    __table_args__ = (
+        Index("ux_approval_votes_actor", "confirmation_id", "approver_user_id", unique=True),
+        Index("ix_approval_votes_confirmation", "confirmation_id", "decision"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    confirmation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    approver_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    decision: Mapped[str] = mapped_column(String(8), nullable=False)
+    comment: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RevenueEvent(Base):
+    """PII-free CRM stage/revenue event keyed by a one-way external-id digest."""
+
+    __tablename__ = "revenue_events"
+    __table_args__ = (
+        Index("ux_revenue_events_source_id", "source", "external_id_hash", unique=True),
+        Index("ix_revenue_events_customer_time", "customer_id", "occurred_at"),
+        Index("ix_revenue_events_campaign_time", "customer_id", "campaign_id", "occurred_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    external_id_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    customer_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    campaign_id: Mapped[str | None] = mapped_column(String(32))
+    channel: Mapped[str] = mapped_column(String(16), default="google", nullable=False)
+    stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    qualified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    revenue_micros: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    currency: Mapped[str] = mapped_column(String(8), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ChannelMetricSnapshot(Base):
+    """Provider-neutral daily metrics for portfolio and cross-channel orchestration."""
+
+    __tablename__ = "channel_metric_snapshots"
+    __table_args__ = (
+        Index(
+            "ux_channel_metric_scope_date",
+            "channel",
+            "customer_id",
+            "external_account_id",
+            "campaign_id",
+            "metric_date",
+            unique=True,
+        ),
+        Index("ix_channel_metric_customer_date", "customer_id", "metric_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel: Mapped[str] = mapped_column(String(16), nullable=False)
+    customer_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    external_account_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    campaign_id: Mapped[str] = mapped_column(String(96), default="", nullable=False)
+    metric_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    spend_micros: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    impressions: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    clicks: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    conversions: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    revenue_micros: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    currency: Mapped[str] = mapped_column(String(8), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PlaybookVersion(Base):
+    """Versioned deterministic rule; actions are restricted to creating decisions/incidents."""
+
+    __tablename__ = "playbook_versions"
+    __table_args__ = (
+        Index("ux_playbook_versions_name_version", "name", "version", unique=True),
+        Index("ix_playbook_versions_enabled", "enabled", "name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    playbook_uid: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(96), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    rule: Mapped[dict] = mapped_column(JSON, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_by: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ExternalIdentity(Base):
+    """Mapping created only after a trusted gateway verifies an OIDC/SAML identity."""
+
+    __tablename__ = "external_identities"
+    __table_args__ = (
+        Index(
+            "ux_external_identities_subject", "provider", "issuer_hash", "subject_hash", unique=True
+        ),
+        Index("ix_external_identities_user", "user_id", "active"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    issuer_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class NotificationRoute(Base):
+    """Persistent routing policy; destination_ref points to config/secrets, never a raw webhook."""
+
+    __tablename__ = "notification_routes"
+    __table_args__ = (
+        Index(
+            "ux_notification_routes_scope", "customer_id", "channel", "destination_ref", unique=True
+        ),
+        Index("ix_notification_routes_enabled", "customer_id", "enabled"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    route_uid: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    customer_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    channel: Mapped[str] = mapped_column(String(16), nullable=False)
+    destination_ref: Mapped[str] = mapped_column(String(96), nullable=False)
+    severities: Mapped[list] = mapped_column(JSON, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

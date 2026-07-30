@@ -2382,3 +2382,41 @@ R3 и R6 **бинарные**: либо gateway умеет, либо два ра
 | **R9** | 2FA-PIN в групповом топике | PIN в личку, либо TOTP, либо отключить и записать отклонением (§31.2) |
 | **R10** | Поиск и навигация по аккаунтам: пикеры исчезают | `name_like` в `list_accounts` + правило «показывать ≤10 и просить уточнить» (§8.1) |
 | **R11** | Пользователь не знает, что можно сказать: «описание команд» описывало кнопочного бота | Гайд `docs/USER_GUIDE.md` + `help`-скил; иначе функциональные П-критерии заказчику физически недостижимы (П37) |
+
+---
+
+## 35. Операционный control plane (`operations/`)
+
+Миграция `0038` добавляет decision queue, incidents, pacing, experiments, RBAC/four-eyes,
+PII-free revenue feedback, provider-neutral channel metrics, playbooks, identity mapping и routing.
+Слой живёт в процессе наших инструментов/планировщика, не в Hermes gateway: Google/CRM OAuth и
+destination secrets Hermes не получает.
+
+```
+Hermes READ / scheduler / importer
+            ↓ typed validated facts
+operations/ → decision|incident|snapshot
+            ↓ новый человеческий ход
+existing propose → trusted reply → ConfirmStore.claim → ads/mutations → audit
+```
+
+Архитектурные запреты:
+
+1. `operations/` не импортирует Google Ads SDK и не исполняет mutations.
+2. Playbook actions ограничены `decision|incident`; mutation vocabulary отвергает validator.
+3. Budget/reallocation/experiment rollback остаются advisory до нового proposal человека.
+4. Four-eyes — EXISTS/NOT EXISTS внутри атомарного claim-CAS, а не новый execute endpoint.
+5. Reply-confirm автора остаётся обязательным; self-vote/unknown author/нет роли/reject — отказ;
+   revoke роли не стирает уже записанный reject, пустой required tier-set даёт отказ.
+6. External identity принимается только после проверки gateway; raw token/claim в БД не пишется.
+7. Notification route хранит `destination_ref`, не URL/token; transport инъецирует процесс.
+8. Cross-channel snapshots не складывают разные валюты, требуют явный customer scope, не предлагают
+   перенос между клиентами и не открывают cross-channel WRITE.
+9. Decision `applied` требует matching applied proposal + applied audit-row в одном correlated UPDATE.
+10. CRM/SSO identifiers — domain-separated HMAC-SHA256; без отдельного
+    `PSEUDONYMIZATION_HMAC_KEY` ingest/mapping отказывает.
+
+**Статус публикации:** сервисы и таблицы готовы в коде, но в live Hermes не зарегистрированы как
+PLAN/WRITE. До принятого trusted reply-канала реестр остаётся READ-only (И4, §15.2). Наличие `0038`
+не является разрешением обойти cutover. Функциональный контракт — `SPEC.md` §3.11,
+эксплуатационный — `docs/DECISION_LAYER.md`.

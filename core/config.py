@@ -206,8 +206,16 @@ class Settings(BaseSettings):
     # (bot.main._twofa_register_fail). Анти-перебор PIN: раньше счётчик обнулялся каждым новым ✅.
     two_factor_lockout_minutes: int = 15
 
+    # Additive to the author's existing reply-confirmation.  Selected risk tiers also need an
+    # independent approver/admin vote before the authoritative claim CAS can execute them.
+    four_eyes_required: bool = False
+    four_eyes_risk_tiers_csv: str = "L3"
+
     # Безопасность / БД
     secrets_encryption_key: SecretStr = SecretStr("")
+    # Stable keyed pseudonymization for CRM and identity ids. Separate from Fernet intentionally:
+    # rotating the encryption key must not invalidate historical dedup/identity hashes.
+    pseudonymization_hmac_key: SecretStr = SecretStr("")
     # SecretStr: DSN несёт пароль БД — маскируем в repr/логах/трейсбеках (golden rule #5).
     # Реальное значение — только через .get_secret_value() (db.session, migrations.env).
     database_url: SecretStr = SecretStr("postgresql+asyncpg://aimash:aimash@localhost:5432/aimash")
@@ -395,6 +403,9 @@ class Settings(BaseSettings):
     # Волна 4 (автооткат): журнал наблюдений за применёнными мутациями. Денежного следа тут нет —
     # он в audit_log и agent_run_events, — поэтому строку можно убирать обычным ретеншном. 0 ⇒ ВЫКЛ.
     rollback_watch_retain_days: int = 180
+    operations_retain_days: int = 365
+    revenue_events_retain_days: int = 730
+    channel_metrics_retain_days: int = 730
     # Окно наблюдения после применения мутации, часы. За него измеримы РАСХОД и КЛИКИ, но не CPA:
     # конверсия атрибутируется ко времени клика и досчитывается сутками (см. scheduler/rollback.py).
     # Меньше 2 ч ставить бессмысленно — час применения неполный, и база сравнения его не покрывает.
@@ -482,6 +493,29 @@ class Settings(BaseSettings):
         """§12: множество операций, требующих 2FA-кода (нормализованные имена мутаций). Гейт —
         core.twofa.required_for × bot.main._do_confirm. Пусто ⇒ ничего не гейтится."""
         return {op for x in self.two_factor_ops_csv.split(",") if (op := x.strip())}
+
+    @property
+    def four_eyes_risk_tiers(self) -> set[str]:
+        """Normalized proposal risk tiers requiring an independent approval vote."""
+        return {
+            tier
+            for value in self.four_eyes_risk_tiers_csv.split(",")
+            if (tier := value.strip().upper()) in {"L1", "L2", "L3"}
+        }
+
+    @model_validator(mode="after")
+    def _validate_four_eyes_tiers(self) -> "Settings":
+        raw = {
+            value.strip().upper()
+            for value in self.four_eyes_risk_tiers_csv.split(",")
+            if value.strip()
+        }
+        invalid = raw - {"L1", "L2", "L3"}
+        if invalid:
+            raise ValueError(f"FOUR_EYES_RISK_TIERS_CSV contains unknown tiers: {sorted(invalid)}")
+        if self.four_eyes_required and not raw:
+            raise ValueError("FOUR_EYES_REQUIRED needs at least one configured risk tier")
+        return self
 
     @property
     def geo_default_country(self) -> str:
@@ -614,7 +648,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _default_budget_blast_radius_in_prod(self) -> "Settings":
         """B1-4: в prod счётный кап повышений бюджета НЕ должен быть выключен молча — серию
-        подтверждённых «+20%» за день больше ничто не ограничивает (тиры L1/L3 презентационные,
+        подтверждённых «+20%» за день больше ничто не ограничивает (тиры L1/L3 не заменяют
+        отдельный накопительный cap,
         quota считает операции, MONEY_MAX — потолок ОДНОЙ операции). 0 в prod → 10 повышений на
         аккаунт в сутки (ручная работа не упирается; env переопределяет явно — тот же паттерн,
         что _default_llm_cap_in_prod). Денежный кап (units) дефолтом не трогаем: сумма зависит

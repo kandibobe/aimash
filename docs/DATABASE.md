@@ -3,7 +3,7 @@
 ORM — SQLAlchemy 2.0 ([`db/models.py`](../db/models.py)); схему в проде ведёт **Alembic**
 ([`migrations/`](../migrations/)). Dev/тесты могут работать на SQLite; прод — Postgres 16.
 
-## Все таблицы (29)
+## Все таблицы (41)
 
 Полный перечень моделей из [`db/models.py`](../db/models.py). Каждая таблица подтверждена
 Alembic-миграцией (см. колонку «Миграция»). Колонка «Статус» отражает **реальное** использование
@@ -41,7 +41,20 @@ Alembic-миграцией (см. колонку «Миграция»). Коло
 | `circuit_state` | распределённый размыкатель (`core.breaker`, Волна 2): состояние цепи + **аренда пробы** — в half-open право на один пробный запрос берётся атомарным UPDATE, иначе три процесса (bot, scheduler, per-session MCP) пробуют втроём. PII/секретов нет (`name` = `ads:<customer_id>` / `llm:<slug>`) | `name` (UNIQUE + индекс, ≤96), `state` (closed\|open\|half_open), `failure_count` (инкремент в SQL, не read-modify-write), `opened_at`, `probe_lease_until` (аренда, не блокировка — умерший пробник задерживает восстановление на срок аренды, не навсегда), `updated_at` | `0033` | ACTIVE |
 | `rollback_watch` | Волна 4, контур автооткатa: наблюдение за применённой мутацией и вердикт «не стало ли хуже». Строка фиксирует **намерение наблюдать**, а не право откатить: провенанса не несёт, мутацию не разрешает; что случится по вердикту, решает `mode`. `shadow` (дефолт) — вердикт пишется, наружу НИЧЕГО; `alert` — человеку текст, обратный черновик рождается в ЕГО ходе обычным путём; `auto` (исполнение кодом) не реализован (Волна 6a) и деградирует до `shadow`. Ретеншн `rollback_watch_retain_days` (180), денежный след — в `audit_log`, не здесь | `confirmation_id` (**UNIQUE** + индекс — второе наблюдение за тем же изменением дало бы в `auto` ДВОЙНУЮ компенсацию, бюджет уехал бы ниже исходного), `customer_id` (индекс), `campaign_id` (числовой id, не имя: кампанию могли переименовать между применением и проверкой), `operation`, `applied_at`, `window_until`, **`expected_ratio`** (ожидаемый эффект изменения на расход из снимка «было→станет» — без него детектор ловил бы собственную причину: подняли бюджет на 20%, расход вырос на 20%, «деградация»), `mode`, `state` (индекс; watching\|verdict_ok\|verdict_degraded\|acted\|expired\|skipped), `verdict_json`, `checked_at`, `acted_confirmation_id` | `0036` | ACTIVE |
 
-> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0037`
+| `operational_decisions` | единая очередь решений: находки, pacing, integrity, QA, эксперименты и playbooks | `decision_uid`, `customer_id`, `fingerprint`, UNIQUE nullable `active_fingerprint`, `severity`, `evidence`, lifecycle, audit-proven ссылка на proposal | `0038` | ACTIVE — advisory; Ads не исполняет |
+| `ops_incidents` | дедуплицированные incidents с ACK, snooze, resolve, cooldown и escalation | `incident_uid`, unique `(customer_id,fingerprint)`, `status`, `occurrence_count`, `escalation_level` | `0038` | ACTIVE |
+| `budget_plans` | версионные медиапланы account/campaign/portfolio с hard ceilings | `plan_uid`, scope, period, currency, planned/ceiling micros, UNIQUE scope+period+`version`, `active` | `0038` | ACTIVE |
+| `pacing_snapshots` | spend-to-date, projection и advisory daily budget | unique `(plan_uid,as_of_date)`, expected/projected/variance micros, `status` | `0038` | ACTIVE |
+| `managed_experiments` | hypothesis/control/treatment, KPI, окно и заранее заданные success/rollback criteria | `experiment_uid`, primary metric, threshold, sample, dates, result, verdict | `0038` | ACTIVE — Ads experiment не создаёт |
+| `role_assignments` | RBAC Viewer/Operator/Approver/Admin, глобально или на customer | unique `(user_id,customer_id,role)`, capabilities, `active` | `0038` | ACTIVE |
+| `approval_votes` | независимое four-eyes evidence; reply-confirm автора не заменяет | unique `(confirmation_id,approver_user_id)`, approve/reject, comment | `0038` | ACTIVE — claim-CAS |
+| `revenue_events` | PII-free CRM/revenue feedback; сырой внешний id не хранится, словарный SHA запрещён | unique `(source,external_id_hash)` с keyed HMAC-SHA256, campaign/channel, stage, qualified, revenue micros | `0038` | ACTIVE |
+| `channel_metric_snapshots` | provider-neutral метрики Google/Meta/Microsoft/TikTok/other | unique channel/account/campaign/date, spend, conversions, revenue, currency | `0038` | ACTIVE — cross-channel apply отсутствует |
+| `playbook_versions` | версионные детерминированные правила | unique `(name,version)`, rule JSON; action только decision/incident | `0038` | ACTIVE |
+| `external_identities` | mapping проверенной gateway OIDC/SAML identity на внутренний user id | unique provider + keyed HMAC issuer/subject, `user_id`, `active`, `last_seen_at` | `0038` | ACTIVE — claims/tokens не хранятся |
+| `notification_routes` | routing policy на Telegram/Slack/email/Teams/webhook | customer, channel, `destination_ref` (secret/config ref, не URL), severities | `0038` | ACTIVE — transport инъецируется |
+
+> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0038`
 > (`op.create_table(...)`). Инициалка `0001` создаёт базовые таблицы
 > (`whitelist`, `user_settings`, `proposals`, `audit_log`, `oauth_tokens`;
 > [`migrations/versions/0001_initial.py:22-92`](../migrations/versions/0001_initial.py)), остальные —
@@ -191,16 +204,23 @@ Bot-токеном; клейм `pending → sending` атомарным CAS (`ro
 повтор `finalize` (ретрай доставки, дубль джобы, рестарт между коммитом и ответом) завёл бы второе
 наблюдение за тем же изменением — в `shadow` лишний вердикт, в `alert` двойное сообщение, в `auto`
 двойная компенсация) →
-`0037` (`proposals.risk_tier`: презентационный тир риска черновика `L1|L2|L3`, Волна 5. Считает
-`confirm.risk.risk_tier` — чистая функция от (operation, params); в девяти проверках §2.2 не
-участвует, а меняет ФОРМУ вопроса человеку: полноту карточки (блок «последствия»), вложение с
-графиком проекции, число независимых человеческих актов и срок жизни согласия. Колонка нужна по
-двум причинам, обе про проверяемость: **аудит** — «что человек видел, когда соглашался» (пороги
+`0037` (`proposals.risk_tier`: сохранённая классификация риска черновика `L1|L2|L3`, Волна 5. Считает
+`confirm.risk.risk_tier` — чистая функция от (operation, params); она не ослабляет девять проверок
+§2.2 и не даёт права на мутацию, а меняет форму вопроса человеку: полноту карточки (блок
+«последствия»), вложение с графиком проекции и срок жизни согласия. С `0038` при отдельно включённом
+four-eyes она также выбирает тиры, которым нужен независимый голос внутри authoritative CAS. Колонка нужна по
+трём причинам, все про проверяемость/ужесточение: **аудит** — «что человек видел, когда соглашался» (пороги
 поменяются, и пересчёт задним числом ответит про сегодняшние, а не про действовавшие), и **TTL** —
-единственное место, где колонку читает код: CAS-конъюнкт `confirm.store._l3_fresh` даёт L3 более
+CAS-конъюнкт `confirm.store._l3_fresh` даёт L3 более
 короткий срок `PROPOSAL_TTL_HOURS_L3`, а считать тир из JSON-`params` внутри UPDATE нечем. NULL
 (строки до миграции) через `coalesce` трактуется как обычный срок, не как L3: укоротить задним
-числом действовавшее согласие — это отмена подтверждений, а не ужесточение) — **head**.
+числом действовавшее согласие — это отмена подтверждений, а не ужесточение), и **four-eyes** —
+опциональный дополнительный `EXISTS`-конъюнкт того же CAS →
+`0038` (операционный control plane: decisions/incidents, медиапланы+pacing, experiments,
+RBAC+four-eyes evidence, PII-free revenue events, provider-neutral channel metrics, versioned
+playbooks, external identity mapping и notification routes. Ни одна новая таблица сама не даёт
+права на Ads-мутацию; four-eyes — дополнительный EXISTS-конъюнкт внутри существующего атомарного
+`ConfirmStore.claim`) — **head**.
 
 ### Добавить миграцию
 ```bash

@@ -9,6 +9,11 @@
 > мёртвые (придётся перерегистрировать аккаунты через `scripts/register_account.py`). Храни ключ
 > в менеджере секретов/офлайн, НЕ рядом с дампами.
 
+> При включённом CRM/SSO отдельно сохраняй `PSEUDONYMIZATION_HMAC_KEY`. Без него новые события нельзя
+> дедуплицировать с восстановленной `revenue_events`, а identity — сопоставить с `external_identities`;
+> сырого external id/subject в дампе намеренно нет.
+> Этот ключ не ротируется вместе с Fernet и также не хранится рядом с дампом.
+
 ## Что бэкапим
 PostgreSQL целиком (`postgres:16` из `docker-compose.yml`, БД `aimash`). Формат `-Fc` (custom,
 сжатый, выборочный restore).

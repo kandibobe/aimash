@@ -2365,6 +2365,9 @@ async def purge_stale_rows(*, now: datetime | None = None) -> dict[str, int]:
         await _sweep("ads_quota_ops", settings.ads_quota_ops_retain_days, _quota_ops)
         await _sweep("agent_runs", settings.agent_runs_retain_days, _agent_runs)
         await _sweep("rollback_watch", settings.rollback_watch_retain_days, _rollback_watch)
+        from operations.retention import purge_operational_rows
+
+        result.update(await purge_operational_rows(now=now))
         if any(result.values()):
             log.info(
                 "scheduler: purge — error_events удалено %d, crawl_jobs %d, health-снапшотов %d, "

@@ -1,0 +1,63 @@
+# Decision / Action Queue
+
+## Граница
+
+`operations/` — операционная нервная система поверх существующего ядра. Она обнаруживает,
+дедуплицирует, приоритизирует и объясняет, но **не даёт права на Google Ads mutation**.
+
+```
+signal → operational_decisions / ops_incidents → человек решает
+       → отдельный proposal «было → станет» → reply-confirm → claim → Ads → audit
+```
+
+`approved` у decision означает «рекомендация принята в работу». Это не `confirmed` у proposal.
+`applied` допустим только через `mark_decision_applied_from_audit`: один correlated UPDATE требует
+matching proposal и `audit_log` со статусом `applied`, тем же customer и совместимой operation.
+Произвольная ссылка на `proposal_confirmation_id` статус не меняет.
+
+## Контракты
+
+| Контур | Код | Персистентность | Что гарантирует |
+|---|---|---|---|
+| Decision queue | `operations/decisions.py` | `operational_decisions` | UNIQUE active fingerprint, audit-proven applied, evidence, confidence, assignee, lifecycle |
+| Incidents | `operations/incidents.py` | `ops_incidents` | один incident на поток событий, ACK/snooze/resolve, cooldown/escalation |
+| Pacing | `operations/pacing.py` | `budget_plans`, `pacing_snapshots` | transactional unique versions, CSV/Sheets, plan/fact/projection/ceilings; только advisory |
+| Integrity | `operations/integrity.py` | через decision | primary actions, zero/drop, clicks↔sessions, Ads↔CRM; `None` не трактуется как ноль |
+| Change correlation | `operations/correlation.py` | в evidence | internal audit + Google `change_event`; correlation явно не называется причиной |
+| Search mining | `operations/search_mining.py` | через decision/artifact | harvest, waste n-grams, conflicts, cannibalization, MCC themes |
+| Creative/LP QA | `operations/qa.py` | через decision | лимиты из `adcopy.validate`, policy/coverage, SSRF-safe GET; форма не отправляется |
+| Experiments | `operations/experiments.py` | `managed_experiments` | hypothesis, control, treatment, KPI, sample/window, keep/rollback/inconclusive |
+| Playbooks | `operations/playbooks.py` | `playbook_versions` | только `decision`/`incident`; ключи mutation/execute запрещены валидатором |
+| Bulk guardrails | `operations/policy.py`, `operations/bulk.py` | proposal создаёт вызывающий | dry-run, полный scope diff, cap targets/delta; прямого execute нет |
+| Governance | `operations/governance.py` | roles + votes | RBAC и независимый vote; four-eyes добавлен внутрь claim-CAS |
+| Revenue/portfolio | `operations/revenue.py`, `operations/portfolio.py` | revenue/channel snapshots | keyed HMAC CRM ids, explicit customer scope, no cross-client reallocation |
+| Routing | `operations/routing.py` | `notification_routes` | только uppercase config refs; payload редактируется; transport инъецируется |
+| Identity | `operations/identity.py` | `external_identities` | только verified claims; issuer/subject проходят domain-separated keyed HMAC |
+| Explainability | `operations/explain.py` | ответ | applied/failed нельзя заявить без audit reference |
+
+## Lifecycle
+
+Decision: `new → acknowledged|approved|rejected|snoozed`; `snoozed → new`; `approved → applied`;
+активная строка может стать `expired`. Incident: `open → acknowledged|snoozed|resolved`; новый факт
+переоткрывает resolved incident и увеличивает `occurrence_count`.
+
+## Four-eyes
+
+`FOUR_EYES_REQUIRED=false` сохраняет прежний flow. При `true` proposal выбранного тира
+(`FOUR_EYES_RISK_TIERS_CSV`, дефолт `L3`) проходит `ConfirmStore.claim` только если в **том же SQL
+UPDATE** существует approve от активного Approver/Admin нужного customer, автор известен и vote
+принадлежит другому user. Независимый reject блокирует claim и остаётся блокирующим после отзыва
+роли rejector. Пустой runtime-набор тиров при включённом флаге блокирует claim, а неизвестный тир
+роняет конфигурацию. Reply-confirm автора, TTL, account lock,
+provenance, 2FA, freshness и audit остаются обязательны.
+
+## Что ещё требует live-cutover
+
+Код и схема не равны включённому продукту. Hermes по-прежнему публикует только READ-набор; новые
+операционные функции не зарегистрированы как WRITE. Slack/email/Teams требуют настроенных transport
+adapters и uppercase config refs (`SLACK_OPS_CHANNEL`), не raw URL/token. Перед transport title/body
+проходят `redact_text`. SSO требует проверки подписи/issuer/audience в доверенном gateway — модуль
+identity намеренно не принимает сырой токен. Meta/Microsoft/TikTok требуют ingestion adapters и
+credentials; cross-channel рекомендации не исполняются.
+
+Приёмка ядра: `python -m pytest -q tests/test_operations_layer.py` и полный `python -m pytest -q`.

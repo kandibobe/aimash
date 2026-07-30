@@ -662,6 +662,74 @@
 
 **Поправка к Г4:** регрессионный набор должен ловить **false negatives** — хорошие скилы, зарезанные куратором, — а не только пропущенный мусор. Иначе библиотека тихо перестанет расти.
 
+### 3.11 Операционный control plane
+
+**3.11.1 Единая очередь решений** [Реализовано 30.07.2026]. Все новые детекторы пишут
+нормализованный `DecisionInput` в `operational_decisions`. Lifecycle:
+`new → acknowledged|approved|rejected|snoozed → applied|expired`. `active_fingerprint` под UNIQUE
+схлопывает даже конкурентные сигналы на уровне БД, evidence редактируется до БД. `approved` **не
+подтверждает Ads proposal**; `applied` ставится только correlated UPDATE при одновременно существующих
+matching proposal `status=applied` и audit-row `status=applied` того же customer/operation.
+
+**3.11.2 Incidents** [Реализовано]. События одного fingerprint складываются в `ops_incidents` с
+`occurrence_count`; оператор может ACK/snooze/resolve. Нерешённые critical/warning переходят в
+escalation по разным окнам, повторная доставка ограничена cooldown. Новый факт переоткрывает
+resolved incident. Каналы маршрутизации: Telegram/Slack/email/Teams/webhook через transport adapters;
+в БД хранится только uppercase config reference (`destination_ref`), не webhook/secret, а исходящий
+title/body обязательно проходит `redact_text`.
+
+**3.11.3 Budget pacing** [Реализовано ядро]. Версионный медиаплан импортируется из CSV или уже
+прочитанных Sheets rows; scope — account/campaign/portfolio. Код считает spend-to-date, ожидаемый
+расход, month-end projection, overspend/underspend и hard daily/monthly ceiling. Рекомендация нового
+daily budget — только decision. Создать `update_budget` proposal можно исключительно в новом прямом
+человеческом ходе: scheduler/план/decision провенанс денег не повышают.
+
+**3.11.4 Достоверность данных и change history** [Реализовано ядро]. Conversion integrity проверяет
+enabled primary goals, zero/drop anomaly, clicks↔sessions и Ads↔CRM. Недоступный источник (`None`)
+не превращается в «ноль». Timeline объединяет наш audit и Google `change_event`, ранжирует близкие
+изменения и всегда называет результат корреляцией, не доказанной причиной.
+
+**3.11.5 Health / search / creative / landing** [Реализовано]. Health 0–100 и версия модели описаны
+в `docs/ACCOUNT_HEALTH_SCORE.md`. Search mining: harvest, waste n-grams, brand split, exact/phrase/
+broad negative conflicts, cannibalization и MCC themes. Creative QA переиспользует кодовый RSA
+validator; LP probe идёт через SSRF-safe GET. Форма реального лида не отправляется: `form_ok` может
+принести только отдельный synthetic probe.
+
+**3.11.6 Experiments и bulk** [Реализовано ядро]. Эксперимент хранит hypothesis, control, treatment,
+end date, minimum sample, pre-registered KPI/success/rollback threshold и выдаёт
+`keep|rollback|inconclusive|continue`. Bulk planner требует полный before/after scope, target cap,
+dry-run digest и PolicyEngine verdict. Прямого execute в `operations/` нет; один bulk = максимум один
+proposal в человеческом ходе (И8).
+
+**3.11.7 Rule engine / playbooks** [Реализовано]. Версионный declarative rule читает закрытый набор
+метрик. Единственные action types — `decision` и `incident`; `operation/params/execute/mutation`
+запрещены валидатором. Playbook физически не может стать обходом confirm-гейта.
+
+**3.11.8 RBAC, four-eyes, identity** [Реализовано ядро, opt-in]. Viewer/Operator/Approver/Admin
+назначаются глобально или на customer. `FOUR_EYES_REQUIRED=true` добавляет к выбранным тирам
+(дефолт L3) независимый approve внутри **того же** атомарного `ConfirmStore.claim`: author reply,
+TTL, provenance, account lock, freshness, 2FA и audit не заменяются. Автор неизвестен/self-vote/
+отсутствующая роль/reject ⇒ отказ. Записанный reject не исчезает после отзыва роли; пустой/ошибочный
+список тиров при включённом four-eyes блокирует claim/fail-fast. SSO mapping принимает только claims, уже проверенные доверенным
+gateway; issuer/subject проходят keyed HMAC, токены не сохраняются.
+
+**3.11.9 Revenue, portfolio, cross-channel** [Реализовано ядро]. CRM id хранится только как keyed
+HMAC-SHA256 dedup digest с отдельным стабильным `PSEUDONYMIZATION_HMAC_KEY`; пустой ключ даёт
+fail-closed отказ. Агрегаты дают qualified rate/revenue по campaign. Provider-neutral snapshots держат
+Google/Meta/Microsoft/TikTok/other раздельно по валюте. Portfolio summary и reallocation — advisory;
+summary требует явный непустой customer scope, а reallocation не пересекает границу клиента. FX и
+cross-channel mutations отсутствуют намеренно.
+
+**3.11.10 Explainability и shadow eval** [Реализовано]. Стандарт ответа: what happened, evidence с
+источником, likely causes, next step, what not to do, confidence+basis, approval, execution status.
+`applied|failed|needs_review` без audit reference невалидны. Оценка последствий существующего
+rollback shadow-контура — `docs/SHADOW_MODE_EVAL.md`.
+
+**3.11.11 Граница live-готовности.** Миграция `0038` и сервисы не публикуют WRITE в Hermes: живой
+MCP остаётся READ-only до trusted reply transport/cutover §15.2. Slack/email/Teams, OIDC/SAML и
+Meta/Microsoft/TikTok требуют credentials и transport/ingestion adapters. Считать наличие схемы
+«включённой интеграцией» запрещено. Детальный контракт — `docs/DECISION_LAYER.md`.
+
 ---
 
 ## 4. Границы объёма и отклонения от исходных ТЗ
@@ -1124,6 +1192,22 @@ proposals          + tg_message_id      (к какому сообщению аг
 - `pending_expires_at` — прогон без ответа 24 ч протухает, иначе накопятся зомби.
 - **Факты не удаляются, а помечаются `superseded_by`** — иначе нельзя разобрать, почему агент когда-то принял решение.
 - **Процедура привязки топика к клиенту** (кто привязывает, когда, что если топика ещё нет) — [Дизайн открыт], сегодня описана только структура.
+
+### 9.2.1 Операционный слой — реализован миграцией `0038`
+
+```
+operational_decisions, ops_incidents
+budget_plans, pacing_snapshots
+managed_experiments
+role_assignments, approval_votes
+revenue_events, channel_metric_snapshots
+playbook_versions
+external_identities, notification_routes
+```
+
+Эти таблицы не подменяют плановые `agent_threads/facts/artifacts`: это отдельный слой исполнения
+§3.11. Полные поля и ретеншн — `docs/DATABASE.md`. Критический инвариант: ни наличие decision/vote,
+ни статус `approved` не разрешают Ads mutation. Только proposal + trusted reply + claim + audit.
 
 ### 9.3 Артефактная память
 
