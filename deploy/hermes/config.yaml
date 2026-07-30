@@ -94,9 +94,15 @@ agent:
   #       умолчанию). Иначе cron + WRITE = трата без команды человека.
   #    `kanban` в списке установленной версии ОТСУТСТВУЕТ — вслепую не включаем:
   #       сначала `hermes version` (субкоманда, НЕ `--version`) и живой список тулсетов — это V1.
+  #    Список задан ОТ РАЗРЕШЁННОГО: включёнными остаются ровно `skills`, `todo`, `clarify`
+  #    (+ MCP `aimash`), всё остальное из пиновой версии перечислено здесь поимённо. Проверяет это
+  #    `lint_config.check_toolsets` по `_ALLOWED_ENABLED_TOOLSETS` — иначе новый тулсет апгрейда
+  #    приезжает ВКЛЮЧЁННЫМ и молча (так 27.07 вернулись terminal/file/code_execution/computer_use,
+  #    когда живой конфиг пересобрался из дефолта).
   disabled_toolsets:
-    [terminal, browser, file, code_execution, context_engine, cronjob, delegation,
-     web, memory, vision, image_gen, tts, video, session_search]
+    [terminal, browser, file, code_execution, computer_use, context_engine, cronjob,
+     delegation, web, memory, vision, image_gen, video, video_gen, x_search, tts,
+     session_search, homeassistant, spotify, yuanbao]
   tool_use_enforcement: auto
 
   # Выписаны явно, а не оставлены на дефолт: cron даёт СВЕЖУЮ сессию на каждый тик, и потолка

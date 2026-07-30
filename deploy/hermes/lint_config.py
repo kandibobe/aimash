@@ -184,28 +184,43 @@ _EXTRA_ONLY_KEYS = ("group_topics",)
 
 _TOOL_PROGRESS_VALUES = frozenset({"off", "new", "all", "verbose", "log"})
 
-# Слаги тулсетов установленной версии (`platform_toolsets.cli`, сверено 21.07).
+# Слаги тулсетов установленной версии. Пересверено 30.07.2026 живым
+# `hermes tools list --platform telegram` на v0.19.0 — предыдущий список (21.07) не знал шести
+# слагов, и ровно через эту дыру `computer_use` два дня стоял включённым на боевом gateway.
 _KNOWN_TOOLSETS = frozenset(
     {
         "browser",
         "clarify",
         "code_execution",
+        "computer_use",
         "context_engine",
         "cronjob",
         "delegation",
         "file",
+        "homeassistant",
         "image_gen",
         "memory",
         "session_search",
         "skills",
+        "spotify",
         "terminal",
         "todo",
         "tts",
         "video",
+        "video_gen",
         "vision",
         "web",
+        "x_search",
+        "yuanbao",
     }
 )
+
+# Единственные тулсеты, которым позволено быть ВКЛЮЧЁННЫМИ. Список задан от разрешённого, а не от
+# запрещённого, — иначе новый тулсет апгрейда приезжает включённым и молча (правило 8: возможность
+# закрывается тем, что её нет, а не перечислением запретов). Так и случилось: 27.07 конфиг на VPS
+# пересобрался из дефолта, и `terminal`/`file`/`code_execution`/`computer_use` вернулись, а линт
+# смотрел только на то, что перечислено в `disabled_toolsets`.
+_ALLOWED_ENABLED_TOOLSETS = frozenset({"skills", "todo", "clarify"})
 
 # Тулсеты, гашение которых — решение архитектуры, а не вкус. Снятие любого требует письменного
 # решения (Р2), поэтому линт держит их списком, а не комментарием.
@@ -437,6 +452,30 @@ def check_toolsets(cfg: dict, rep: Report) -> None:
     for slug, why in _MUST_DISABLE.items():
         if slug not in disabled:
             rep.error("agent.disabled_toolsets", f"{slug} обязан быть погашен: {why}")
+
+
+def check_toolset_allowlist(cfg: dict, rep: Report) -> None:
+    """Поверхность агента — от РАЗРЕШЁННОГО, а не от запрещённого (профиль `vps-read`).
+
+    `check_toolsets` смотрит только на то, что перечислено в `disabled_toolsets`, поэтому тулсет,
+    которого там нет, проходит молча — а по дефолту он ВКЛЮЧЁН. Через эту дыру `computer_use`,
+    `x_search`, `video_gen`, `homeassistant`, `spotify`, `yuanbao` вообще не попадали в поле зрения
+    линта, а 27.07.2026 живой конфиг пересобрался из дефолта и вернул `terminal`/`file`/
+    `code_execution` на боевой telegram-gateway — линт при этом молчал.
+
+    Только для `vps-read`: там агент ходит в чужие деньги и обязан иметь ровно наш набор. Профиль
+    `host-a` — рабочая машина владельца, её включённая поверхность (терминал и т.п.) — отдельное
+    осознанное решение, у неё свои проверки (`check_terminal_backend`, `check_credential_boundary`).
+    """
+    disabled = set(_as_list(_get(cfg, "agent.disabled_toolsets")))
+    for slug in sorted(_KNOWN_TOOLSETS - _ALLOWED_ENABLED_TOOLSETS - disabled):
+        rep.error(
+            "agent.disabled_toolsets",
+            f"{slug} не погашен и не входит в разрешённые "
+            f"{sorted(_ALLOWED_ENABLED_TOOLSETS)} ⇒ ВКЛЮЧЁН по дефолту. Либо дописать его в "
+            "disabled_toolsets, либо (осознанно, письменным решением) — в "
+            "_ALLOWED_ENABLED_TOOLSETS линта",
+        )
 
 
 def check_hardening(cfg: dict, rep: Report) -> None:
@@ -739,7 +778,7 @@ def check_terminal_backend(cfg: dict, rep: Report) -> None:
 
 _PROFILE_CHECKS = {
     "host-a": (check_credential_boundary, check_terminal_backend),
-    "vps-read": (),
+    "vps-read": (check_toolset_allowlist,),
 }
 
 

@@ -209,6 +209,57 @@ def test_lint_reddens_when_a_must_disable_toolset_is_enabled():
     assert not missed, f"тулсеты из _MUST_DISABLE не названы поимённо: {missed}"
 
 
+def test_lint_reddens_when_a_known_toolset_is_merely_unmentioned():
+    """Регресс 27.07–30.07.2026: неупомянутый тулсет ВКЛЮЧЁН, а линт молчал.
+
+    `check_toolsets` смотрит только на перечисленное в `disabled_toolsets` — значит слаг, которого
+    там нет, проходит без единого слова, хотя по дефолту он включён. Ровно так `computer_use`,
+    `x_search`, `video_gen`, `homeassistant`, `spotify`, `yuanbao` не попадали в поле зрения линта
+    вовсе, а когда живой конфиг на VPS пересобрался из дефолта, на боевом telegram-gateway двое
+    суток стояли включёнными `terminal`/`file`/`code_execution` — при зелёном линте.
+
+    Проверка ведётся ОТ РАЗРЕШЁННОГО (`_ALLOWED_ENABLED_TOOLSETS`), поэтому краснеет и новый
+    тулсет, приехавший с апгрейдом Hermes: его нет ни в разрешённых, ни в погашенных.
+    """
+    path, profile = _REFERENCE_CONFIGS[0]
+    assert profile == "vps-read", "тест написан под профиль агента, а не под машину владельца"
+    allowed = _LINT._ALLOWED_ENABLED_TOOLSETS
+    assert allowed < _LINT._KNOWN_TOOLSETS, (
+        "_ALLOWED_ENABLED_TOOLSETS покрыл все тулсеты — проверка выродилась в тождество"
+    )
+
+    cfg = copy.deepcopy(_load_cfg(path))
+    victim = sorted(set(cfg["agent"]["disabled_toolsets"]) - allowed)[0]
+    cfg["agent"]["disabled_toolsets"] = [
+        t for t in cfg["agent"]["disabled_toolsets"] if t != victim
+    ]
+
+    rep = _LINT.lint(cfg, profile=profile)
+    assert any(victim in str(f) for f in rep.errors), (
+        f"молча выпавший из disabled_toolsets {victim!r} не дал ошибки — "
+        f"найдено: {[str(f) for f in rep.errors]}"
+    )
+
+
+def test_the_pinned_toolset_list_covers_the_live_surface():
+    """`_KNOWN_TOOLSETS` — пин поверхности версии, и проверка от разрешённого стоит на нём.
+
+    Отстал пин — «неупомянутых» слагов для линта не существует, и он снова молчит про включённое.
+    Список сверен живым `hermes tools list --platform telegram` на v0.19.0 (30.07.2026); шесть
+    слагов ниже в редакции 21.07 отсутствовали.
+    """
+    added_2026_07_30 = {
+        "computer_use",
+        "x_search",
+        "video_gen",
+        "homeassistant",
+        "spotify",
+        "yuanbao",
+    }
+    missing = sorted(added_2026_07_30 - _LINT._KNOWN_TOOLSETS)
+    assert not missing, f"пин тулсетов отстал от замера живой поверхности: {missing}"
+
+
 # ── Слаги моделей: тот же класс, что К10 — «рабочий на вид и не работает» ─────
 
 
