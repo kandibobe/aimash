@@ -273,6 +273,13 @@ class Settings(BaseSettings):
     # 2.6: окна планового отчёта/сравнения аномалий (дни) — раньше зашиты в scheduler/jobs.
     report_window_days: int = 7
     anomaly_window_days: int = 7
+    # Р6: алерт о правках, сделанных в аккаунте МИМО бота (change_event). Opt-in: 0 = выкл, потому
+    # что на чужом аккаунте с активным агентством это шумный поток, а не сигнал. Окно шире интервала
+    # НАМЕРЕННО (после простоя событие не должно выпасть из выборки) — дубли отсекает per-chat
+    # курсор, а не узость окна. Потолок окна — 29 дней (ресурс живёт 30, сутки — запас, см.
+    # reports.queries.CHANGE_EVENT_MAX_DAYS).
+    external_changes_interval_hours: int = 0
+    external_changes_window_days: int = 7
     # 2.6: таймауты денежного пути (сек) — крутятся без пересборки образа (env ADS_TIMEOUT_S/
     # LLM_TIMEOUT_S); влияют на деградацию OpenRouter/Google Ads.
     ads_timeout_s: float = 60.0
@@ -614,6 +621,29 @@ class Settings(BaseSettings):
         от валюты аккаунта, универсального числа нет."""
         if self.env == "prod" and int(self.daily_budget_increase_max_ops or 0) <= 0:
             self.daily_budget_increase_max_ops = 10
+        return self
+
+    @model_validator(mode="after")
+    def _clamp_external_changes_window(self) -> "Settings":
+        """Р6: окно журнала правок вне 1..29 дней → откат на 7 с ГРОМКИМ логом.
+
+        Ресурс `change_event` хранит 30 дней, и ридер (`check_change_event_days`) на выходе за
+        границу отказывает — правильно для вызова инструмента, но для фоновой джобы это значило бы
+        отказ на каждом аккаунте каждый цикл: опечатка в env превратилась бы в «алертов нет» вместо
+        «алерты сломаны». Расписание — не гейт безопасности, поэтому здесь тот же fail-safe, что у
+        невалидного REPORT_SCHEDULE: работаем на дефолте и говорим об этом вслух. Потолок 29, а не
+        30, — сутки запаса на host-date фолбэк чтения таймзоны (см. CHANGE_EVENT_MAX_DAYS); число
+        продублировано литералом (импорт `reports.queries` отсюда = цикл), совпадение держит тест."""
+        days = int(self.external_changes_window_days or 0)
+        if not 1 <= days <= 29:
+            import logging  # stdlib напрямую: core.logging импортирует этот модуль (цикл)
+
+            logging.getLogger("aimash.config").warning(
+                "EXTERNAL_CHANGES_WINDOW_DAYS=%s вне 1..29 (ретенция change_event минус сутки "
+                "запаса) — беру 7",
+                self.external_changes_window_days,
+            )
+            self.external_changes_window_days = 7
         return self
 
     @model_validator(mode="after")

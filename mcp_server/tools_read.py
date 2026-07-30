@@ -1,4 +1,4 @@
-"""23 READ-обёртки MCP-слоя над существующими ридерами (Контур A, инкремент «MCP READ»).
+"""24 READ-обёртки MCP-слоя над существующими ридерами (Контур A, инкремент «MCP READ»).
 
 Каждая обёртка:
   1) проходит замок ЧТЕНИЯ на ГРАНИЦЕ слоя — `_guarded` требует `account=` и зовёт
@@ -63,6 +63,7 @@ from mcp_server.serialize import (
     budget_dict,
     campaign_config_payload,
     campaign_dict,
+    change_event_dict,
     child_account_dict,
     impression_share_dict,
     keyword_idea_dict,
@@ -75,9 +76,11 @@ from mcp_server.serialize import (
     targeting_payload,
 )
 from reports import period as pperiod
-from reports.tz import account_period, reanchor
+from reports.tz import account_period, account_today, reanchor
 from reports.queries import (
+    check_change_event_days,
     fetch_budgets,
+    fetch_change_events,
     fetch_by_ad,
     fetch_by_ad_group,
     fetch_by_campaign,
@@ -162,6 +165,13 @@ async def _account_period(client, account: str, window):
     `invalid_argument`. Модель по такому конверту чинит не свой вызов, а несуществующую аварию.
     Порядок держит гард `tests/test_mcp_read_smoke.py::test_args_are_validated_before_the_network`."""
     return await account_period(client, str(account), window)
+
+
+def _window_days(days: int) -> int:
+    """Разбор окна `days` (change_event) — ПРЯМЫМ вызовом в теле инструмента и ДО клиента, по той же
+    причине, что `_period`: иначе на бессмысленном окне наружу уедет код чужой аварии. Порядок
+    держит тот же гард `tests/test_mcp_read_smoke.py::test_args_are_validated_before_the_network`."""
+    return check_change_event_days(days)
 
 
 def _default_manager() -> str:
@@ -472,6 +482,50 @@ async def get_change_history(
         )
         return ok(
             [recent_action_dict(a) for a in actions],
+            offset=offset,
+            limit=limit,
+            reader_limit=int(reader_limit),
+        )
+
+    return await _guarded(_work, account=str(account))
+
+
+async def get_account_changes(
+    account: str,
+    days: int = 7,
+    reader_limit: int = 200,
+    offset: int = 0,
+    limit: int = DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Журнал изменений аккаунта в GOOGLE ADS: кто, когда, через какой канал и какой объект правил.
+
+    НЕ путать с `get_change_history` — тот отдаёт НАШ audit-trail (что применил бот через
+    confirm-гейт). Здесь — правки ЛЮБЫМ каналом: веб-интерфейс, Editor, другой API-клиент. Именно
+    так узнаётся, что бюджет подняли руками мимо нас: Google об этом не уведомляет, узнать можно
+    только спросив (`via_api=false` ⇒ правка сделана точно не через наш слой).
+
+    Окно `days` — 1..29 суток, считая сегодняшние (глубже история через API недоступна, в
+    веб-интерфейсе она за 2 года — это не одно и то же); якорится на «сегодня» аккаунта, иначе на
+    аккаунте в чужой TZ край окна уезжает на сутки. `changed_fields` — какие поля затронуты;
+    значений «было → стало» ресурс в нашем разборе не отдаёт, текущее читается обычным ридером.
+    Почты правивших маскированы. Замок: ensure_read_allowed."""
+
+    async def _work() -> dict[str, Any]:
+        window_days = _window_days(days)
+        client = await build_client_async(account)
+        today = await account_today(client, str(account))
+        rows = await run_ads_read_call(
+            fetch_change_events,
+            client,
+            str(account),
+            days=window_days,
+            today=today,
+            limit=int(reader_limit),
+            account=str(account),
+            label="mcp.get_account_changes",
+        )
+        return ok(
+            [change_event_dict(r) for r in rows],
             offset=offset,
             limit=limit,
             reader_limit=int(reader_limit),
@@ -953,6 +1007,7 @@ READ_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "get_auction_insights": get_auction_insights,
     "get_account_audit": get_account_audit,
     "get_change_history": get_change_history,
+    "get_account_changes": get_account_changes,
     "keyword_ideas": keyword_ideas,
     "list_campaigns": list_campaigns,
     "read_campaign_targeting": read_campaign_targeting,

@@ -644,34 +644,36 @@ def test_args_are_validated_before_the_network():
     import ast
     import inspect
 
-    # Множество считаем по СИГНАТУРЕ, а не по списку имён: новый инструмент с `date_from` попадает
-    # под гард сам. Требуем ПРЯМОГО вызова `_period` в теле — спрятать разбор в помощник, который
-    # зовётся после клиента, ровно так и получилось в первый раз (`_account_period` считал период
-    # внутри себя, и порядок «клиент → период» был не виден ни в одном теле).
-    with_dates = {
-        n for n, f in tr.READ_TOOL_FUNCS.items() if "date_from" in inspect.signature(f).parameters
-    }
-    assert len(with_dates) >= 10, f"инструментов с периодом стало {len(with_dates)} — гард ослеп"
-
+    # Множества считаем по СИГНАТУРЕ, а не по списку имён: новый инструмент с `date_from` (или с
+    # окном `days`) попадает под гард сам. Требуем ПРЯМОГО вызова парсера в теле — спрятать разбор в
+    # помощник, который зовётся после клиента, ровно так и получилось в первый раз (`_account_period`
+    # считал период внутри себя, и порядок «клиент → период» был не виден ни в одном теле).
+    # `days` разбирается своим парсером (`_window_days` → change_event 1..29) и попал сюда не сразу:
+    # докстринг `_window_days` ссылался на этот гард, пока гард отбирал инструменты по `date_from` и
+    # `get_account_changes` в набор не входил вовсе. Ложная ссылка на защиту хуже отсутствия защиты.
+    checks = (("date_from", "_period", 10), ("days", "_window_days", 1))
     src = Path(tr.__file__).read_text(encoding="utf-8")
     bad: dict[str, str] = {}
-    for node in ast.parse(src).body:
-        if (
-            not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
-            or node.name not in with_dates
-        ):
-            continue
-        first: dict[str, int] = {}
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name):
-                first.setdefault(sub.func.id, sub.lineno)
-        if "_period" not in first:
-            bad[node.name] = "`_period` не вызван в теле — разбор спрятан в помощнике"
-        elif first["_period"] > first.get("build_client_async", 1 << 30):
-            bad[node.name] = (
-                f"строка _period {first['_period']} > клиента {first['build_client_async']}"
-            )
+    for arg, parser, at_least in checks:
+        names = {n for n, f in tr.READ_TOOL_FUNCS.items() if arg in inspect.signature(f).parameters}
+        assert len(names) >= at_least, f"инструментов с `{arg}` стало {len(names)} — гард ослеп"
+        for node in ast.parse(src).body:
+            if (
+                not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+                or node.name not in names
+            ):
+                continue
+            first: dict[str, int] = {}
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name):
+                    first.setdefault(sub.func.id, sub.lineno)
+            if parser not in first:
+                bad[node.name] = f"`{parser}` не вызван в теле — разбор спрятан в помощнике"
+            elif first[parser] > first.get("build_client_async", 1 << 30):
+                bad[node.name] = (
+                    f"строка {parser} {first[parser]} > клиента {first['build_client_async']}"
+                )
     assert not bad, (
-        "период разбирается не раньше сети — на неполном периоде наружу уедет код чужой аварии "
+        "аргумент разбирается не раньше сети — на бессмысленном окне наружу уедет код чужой аварии "
         f"вместо invalid_argument: {bad}"
     )
