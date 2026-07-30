@@ -12,6 +12,7 @@ import re
 
 from agent.router import chat
 from core.config import settings
+from core.llm_budget import LLMBudgetError
 
 SEED_COUNT = 15  # §19.4.2 (P1-7): больше сид-ключей → богаче набор идей от Keyword Planner
 
@@ -94,6 +95,8 @@ async def generate_seed_keywords(
             temperature=0.4,
         )
         seeds = _parse(getattr(msg, "content", "") or "", n)
+    except LLMBudgetError:
+        raise  # BZ-4: иначе эвристика из темы уедет в Keyword Planner как «сиды от ИИ»
     except Exception:  # noqa: BLE001 — конвейер не должен падать из-за LLM
         seeds = []
     return seeds or _fallback_seeds(topic, n)

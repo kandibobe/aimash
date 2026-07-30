@@ -399,6 +399,16 @@ CATALOG: dict[str, dict[str, str]] = {
             "account with /account for full, sorted results."
         ),
     },
+    "kw_ai_budget_note": {
+        "ru": (
+            "⚠️ ИИ-слой подбора не отработал: кластеры, минус-слова и релевантность моделью НЕ "
+            "проверены — список ниже сырой, из Keyword Planner.\n{err}"
+        ),
+        "en": (
+            "⚠️ The AI layer didn't run: clusters, negatives and relevance were NOT checked by the "
+            "model — the list below is raw Keyword Planner output.\n{err}"
+        ),
+    },
     "kw_bad_input": {
         "ru": texts.KW_BAD_INPUT,
         "en": "I need seed words or a link. Send, for example: <code>buy phone, smartphone</code>",
@@ -1964,6 +1974,16 @@ CATALOG: dict[str, dict[str, str]] = {
             "Try again tomorrow or ask an admin to raise the limit."
         ),
     },
+    "llm_cost_cap_exceeded": {
+        "ru": (
+            "🚦 Дневной бюджет на ИИ исчерпан (${spent} из ${cap}). "
+            "Сброс в полночь UTC; поднять потолок может админ (LLM_DAILY_COST_CAP_USD)."
+        ),
+        "en": (
+            "🚦 Daily AI spend cap reached (${spent} of ${cap}). "
+            "Resets at midnight UTC; an admin can raise the cap (LLM_DAILY_COST_CAP_USD)."
+        ),
+    },
     "err_campaigns": {
         "ru": "⚠️ Не удалось получить кампании: {err}",
         "en": "⚠️ Couldn't fetch campaigns: {err}",
@@ -2411,6 +2431,16 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": (
             "📄 Dossier not built: daily AI limit reached ({used}/{limit}). "
             "Site pages are saved — run the crawl tomorrow to build the dossier."
+        ),
+    },
+    "cli_crawl_dossier_cost_cap": {
+        "ru": (
+            "📄 Досье не собрано: дневной бюджет на ИИ исчерпан (${spent} из ${cap}). "
+            "Страницы сайта сохранены — запусти обход после сброса в полночь UTC."
+        ),
+        "en": (
+            "📄 Dossier not built: daily AI budget spent (${spent} of ${cap}). "
+            "Site pages are saved — run the crawl after the midnight UTC reset."
         ),
     },
     "cli_crawl_profile_updated": {

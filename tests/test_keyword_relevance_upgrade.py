@@ -8,12 +8,19 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import keywords.cluster as C  # noqa: E402
 import keywords.filter as F  # noqa: E402
 import keywords.seeds as S  # noqa: E402
 from adcopy.generate import _keyword_coverage, _tok_match  # noqa: E402
+from core.llm_budget import (  # noqa: E402
+    LLMBudgetError,
+    LLMBudgetExceededError,
+    LLMCostCapExceededError,
+)
 from keywords.cluster import Cluster, _drop_protected, _neg_system, rank_clusters  # noqa: E402
 from keywords.export import _headers, _relevance_cell, build_workbook  # noqa: E402
 
@@ -117,3 +124,57 @@ def test_keyword_coverage_word_forms():
     assert cov == round(2 / 3, 2)
     assert _keyword_coverage([], ["x"]) == 1.0  # нет заголовков → не флагаем
     assert _keyword_coverage(["a"], []) == 1.0  # нет ключей → не флагаем
+
+
+# ── BZ-4: бюджет-стоп LLM ПРОБРАСЫВАЕТСЯ, а не деградирует в «всё релевантно» ──
+# Долларовый потолок держится часами (до полуночи UTC), поэтому fail-open здесь означал бы не
+# «редкий сбой модели», а систематическую выдачу непроверенного результата под видом проверенного:
+# все ключи релевантны, одна группа «Все ключи», минус-слов «не нашлось». Гард на КЛАСС ошибки
+# (LLMBudgetError), а не на конкретный подкласс — иначе новый бюджетный класс проедет мимо.
+def _budget_stop_chat(exc: BaseException):
+    async def _chat(messages, **kw):
+        raise exc
+
+    return _chat
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [LLMCostCapExceededError(10.5, 10.0), LLMBudgetExceededError(500, 500)],
+    ids=["cost_cap", "call_limit"],
+)
+async def test_filter_relevance_reraises_budget_stop(monkeypatch, exc):
+    monkeypatch.setattr(F, "chat", _budget_stop_chat(exc))
+    with pytest.raises(LLMBudgetError):
+        await F.filter_relevance(texts=["k1", "k2"], topic="t")
+
+
+async def test_cluster_keywords_reraises_budget_stop(monkeypatch):
+    # Важно именно через cluster_keywords: батчи собираются asyncio.gather(return_exceptions=True),
+    # который глотает исключение — проброс из _cluster_batch без разбора results был бы мёртвым.
+    monkeypatch.setattr(C, "chat", _budget_stop_chat(LLMCostCapExceededError(10.5, 10.0)))
+    with pytest.raises(LLMBudgetError):
+        await C.cluster_keywords([f"k{i}" for i in range(150)])  # >1 батча (_CLUSTER_BATCH=70)
+
+
+async def test_suggest_negatives_reraises_budget_stop(monkeypatch):
+    monkeypatch.setattr(C, "chat", _budget_stop_chat(LLMCostCapExceededError(10.5, 10.0)))
+    with pytest.raises(LLMBudgetError):
+        await C.suggest_negative_keywords("тема", ["идея1"])
+
+
+async def test_seeds_reraise_budget_stop(monkeypatch):
+    # Иначе эвристика из темы уехала бы в Keyword Planner под видом «сиды от ИИ».
+    monkeypatch.setattr(S, "chat", _budget_stop_chat(LLMCostCapExceededError(10.5, 10.0)))
+    with pytest.raises(LLMBudgetError):
+        await S.generate_seed_keywords(topic="телефоны")
+
+
+async def test_ordinary_llm_failure_still_fails_open(monkeypatch):
+    # Контроль: обычный сбой модели прежнюю fail-open семантику НЕ теряет (иначе advisory-фичи
+    # начали бы падать на каждом таймауте).
+    monkeypatch.setattr(F, "chat", _budget_stop_chat(RuntimeError("LLM down")))
+    assert await F.filter_relevance(texts=["k1"], topic="t") == {"k1": True}
+    monkeypatch.setattr(C, "chat", _budget_stop_chat(RuntimeError("LLM down")))
+    assert await C.suggest_negative_keywords("тема", ["идея1"]) == []
+    assert [c.name for c in await C.cluster_keywords(["k1"])] == ["Все ключи"]

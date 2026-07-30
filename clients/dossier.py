@@ -38,8 +38,8 @@ async def build_dossier(
     (client_site_pages.text — ради этого текст и сохраняется, миграция 0028: пересобрать досье без
     повторного обхода сайта).
 
-    LLMBudgetExceededError НЕ глушится: исчерпанный дневной лимит — это ответ пользователю, а не
-    молчаливо пустое досье.
+    LLMBudgetError (счётный лимит И долларовый потолок BZ-4) НЕ глушится: исчерпанный бюджет —
+    это ответ пользователю, а не молчаливо пустое досье.
     """
     total = sum(len((p.get("text") or "")) for p in pages or [])
     if total < MIN_SITE_CHARS:
@@ -70,7 +70,7 @@ async def build_dossier(
     # Свести двуязычный сайт к одному языку и схлопнуть кросс-язычные дубли ДО синтеза прозы — иначе
     # проза (и патч карточки) строилась бы по задвоенным EN+RU спискам. Рынки уже канонизированы кодом
     # в merge_extracts; здесь — услуги/УТП/факты/роли/компания. Fail-open: сбой оставит код-сведённые
-    # списки, LLMBudgetExceededError пробрасывается (как synthesize).
+    # списки, LLMBudgetError пробрасывается (как synthesize).
     if settings.dossier_normalize_ru:
         d = await normalize_ru(d, chat_id=chat_id, language=language)
     d = await synthesize(d, chat_id=chat_id, language=language)

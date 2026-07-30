@@ -105,6 +105,21 @@ def test_err_text_plain_for_clean_message():
     assert out == "ValueError: кампания не найдена"
 
 
+def test_err_text_renders_budget_stop_as_human_text():
+    """BZ-4: бюджет-стоп прилетает наверх из глубины (кластеризация/релевантность/досье) — до
+    пользователя он обязан дойти локализованным «бюджет исчерпан», а не как имя класса
+    'LLMCostCapExceededError: LLM daily cost cap reached'. Единая точка — llm_budget_text."""
+    from core.llm_budget import LLMBudgetExceededError, LLMCostCapExceededError
+
+    cap = ux.err_text(LLMCostCapExceededError(10.5, 10.0))
+    assert "LLMCostCapExceededError" not in cap and "10.50" in cap and "10.00" in cap
+
+    calls = ux.err_text(LLMBudgetExceededError(500, 500))
+    assert "LLMBudgetExceededError" not in calls and "500" in calls
+
+    assert ux.llm_budget_text(ValueError("не бюджет")) == ""  # прочие исключения не перехватываем
+
+
 def test_err_text_appends_hint_for_transient_errors():
     # сеть/таймаут/LLM → короткая подсказка «что делать»; валидация — без подсказки
     assert "попробуй ещё раз" in ux.err_text(TimeoutError("read timed out")).lower()

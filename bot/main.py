@@ -852,19 +852,33 @@ async def _load_error_detail(rid: str, eid: int = 0):
 
 
 async def _llm_budget_or_reply(message) -> bool:
-    """C3: пер-юзер дневной потолок LLM ПЕРЕД дорогим агент-вызовом. Над лимитом → отвечаем понятно и
+    """C3 + BZ-4: бюджетные потолки LLM ПЕРЕД дорогим агент-вызовом. Над лимитом → отвечаем понятно и
     возвращаем True (вызывающий прекращает обработку, LLM не зовём — fail-closed, трат нет). В пределах —
-    фиксируем вызов и возвращаем False. Гард выключен (LLM_DAILY_CALLS_PER_USER=0) → всегда False.
-    Ставится в NL-точках входа (on_text / _run_task_with_context), а НЕ в call_llm — иначе отказ летел
-    бы в глобальный on_error и засорял /diag «ошибкой» (блок бюджета — не дефект)."""
+    фиксируем вызов и возвращаем False. Ставится в NL-точках входа (on_text / _run_task_with_context),
+    а НЕ в call_llm — иначе отказ летел бы в глобальный on_error и засорял /diag «ошибкой» (блок
+    бюджета — не дефект). Два рубежа: долларовый cap (BZ-4, общий на весь спенд-пул) — ПЕРВЫМ и ДО
+    consume, чтобы отказ не сжигал пер-юзер счётчик; затем пер-чат счётный лимит (C3). Дубль-гейт
+    долларового capа стоит в agent/router.chat — он ловит фоновые пути (advisor/дайджесты), здесь —
+    ранний человекочитаемый ответ вместо голого исключения."""
     from core import llm_budget
 
     try:
+        await llm_budget.check_daily_cost_cap()
         llm_budget.consume(message.chat.id)
         return False
-    except llm_budget.LLMBudgetExceededError as e:
-        await message.answer(i18n.t("llm_budget_exceeded", used=e.used, limit=e.limit))
+    except llm_budget.LLMBudgetError as e:
+        await message.answer(ux.llm_budget_text(e))
         return True
+
+
+def _crawl_dossier_budget_note(e) -> str:
+    """LLMBudgetError при сборке досье → нота в итоговое сообщение краула (страницы сохранены,
+    досье — после сброса лимита). Разные ключи под разные потолки — у них разные поля."""
+    from core import llm_budget
+
+    if isinstance(e, llm_budget.LLMCostCapExceededError):
+        return i18n.t("cli_crawl_dossier_cost_cap", spent=f"{e.spent:.2f}", cap=f"{e.cap:.2f}")
+    return i18n.t("cli_crawl_dossier_budget", used=e.used, limit=e.limit)
 
 
 async def _notify_admins_started(bot) -> None:
@@ -4092,6 +4106,14 @@ async def _kw_run(
             filter_relevance(texts=idea_texts, topic=src, language=language, profile=prof),
             return_exceptions=True,
         )
+        # BZ-4: бюджет-стоп ИИ ≠ «advisory не нашлось». Идеи Keyword Planner уже получены и ценны
+        # сами по себе — таблицу отдаём, но ЧЕСТНО говорим, что ИИ-слой не отработал: иначе одна
+        # группа «Все ключи» без минус-слов выглядит как проверенный моделью результат.
+        for r in (clusters_res, negatives, relevance):
+            note = ux.llm_budget_text(r) if isinstance(r, BaseException) else ""
+            if note:
+                await target.answer(i18n.t("kw_ai_budget_note", err=note))
+                break
     clusters = (
         clusters_res
         if isinstance(clusters_res, list) and clusters_res
@@ -4667,7 +4689,15 @@ async def _cli_extract_and_propose(bot, chat_id: int, customer_id: str, buf: lis
     False, если извлечь нечего (пустой буфер/пустое извлечение). Буфер чистит вызыватель."""
     if not buf:
         return False
-    extracted = await extract_profile("\n".join(buf), language=i18n.current_lang())
+    from core.llm_budget import LLMBudgetError
+
+    try:
+        extracted = await extract_profile("\n".join(buf), language=i18n.current_lang())
+    except LLMBudgetError as e:
+        # Бюджет-стоп — сказать менеджеру ПОЧЕМУ, а не молча «извлечь нечего» (буфер цел,
+        # повторит после сброса лимита).
+        await bot.send_message(chat_id, ux.llm_budget_text(e))
+        return False
     if extracted.is_empty():
         return False
     patch = extracted.to_patch()
@@ -5005,7 +5035,7 @@ async def _run_client_crawl(
     новые/изменённые → обычный update-proposal, но со сводкой diff (сколько новых/изменённых)."""
     from urllib.parse import urlparse
 
-    from core.llm_budget import LLMBudgetExceededError
+    from core.llm_budget import LLMBudgetError
 
     domain = urlparse(url).netloc or url
     job_id = await crawl_jobs.create_running(
@@ -5078,11 +5108,12 @@ async def _run_client_crawl(
                     chat_id=chat_id,
                     language=i18n.current_lang(),
                 )
-            except LLMBudgetExceededError as e:
-                # Дневной лимит ИИ исчерпан (fail-closed, до OpenRouter не ходили). Краул не
-                # выбрасываем: карта страниц и контакты собраны кодом — сохраним их, досье — потом.
-                dossier_note = i18n.t("cli_crawl_dossier_budget", used=e.used, limit=e.limit)
-                log.warning("crawl %s: дневной лимит LLM исчерпан — досье не собрано", domain)
+            except LLMBudgetError as e:
+                # Бюджет ИИ исчерпан — счётный лимит ИЛИ долларовый потолок BZ-4 (fail-closed, до
+                # OpenRouter не ходили). Краул не выбрасываем: карта страниц и контакты собраны
+                # кодом — сохраним их, досье — потом.
+                dossier_note = _crawl_dossier_budget_note(e)
+                log.warning("crawl %s: бюджет LLM исчерпан — досье не собрано", domain)
             except Exception:  # noqa: BLE001 — сбой досье не отменяет удачный обход сайта
                 log.exception("crawl %s: досье не собрано", domain)
 
@@ -5091,14 +5122,20 @@ async def _run_client_crawl(
             elif dossier_note:  # лимит исчерпан: второй LLM-путь упрётся в него же — не пробуем
                 patch = _crawl_patch_from_result(None, result)
             else:
-                extract = await structure_crawl(
-                    pages_text=result.combined_text(
-                        max_chars=settings.crawl_llm_text_chars,
-                        per_page_chars=settings.crawl_llm_per_page_chars,
-                    ),
-                    website=url,
-                    language=i18n.current_lang(),
-                )
+                try:
+                    extract = await structure_crawl(
+                        pages_text=result.combined_text(
+                            max_chars=settings.crawl_llm_text_chars,
+                            per_page_chars=settings.crawl_llm_per_page_chars,
+                        ),
+                        website=url,
+                        language=i18n.current_lang(),
+                    )
+                except LLMBudgetError as e:
+                    # Досье упало НЕ по бюджету, а фолбэк в потолок упёрся — честная нота вместо
+                    # молча пустого профиля (extract_profile бюджет-стоп пробрасывает).
+                    dossier_note = _crawl_dossier_budget_note(e)
+                    extract = None
                 patch = _crawl_patch_from_result(extract, result)
             crawl_extra = {
                 "website": url,

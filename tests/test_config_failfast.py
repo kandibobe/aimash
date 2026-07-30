@@ -18,6 +18,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.config import Settings  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _no_env_leak(monkeypatch):
+    """_env_file=None отключает только .env — ЭКСПОРТИРОВАННУЮ переменную окружения
+    pydantic-settings всё равно читает (приоритет kwargs > env > default). Локальный
+    `LLM_DAILY_COST_CAP_USD=25` в шелле молча ломал бы дефолт-тесты ниже — чистим
+    переменные, чьи ДЕФОЛТЫ здесь проверяются."""
+    for name in (
+        "LLM_DAILY_COST_CAP_USD",
+        "DAILY_BUDGET_INCREASE_MAX_OPS",
+        "LLM_DAILY_CALLS_PER_USER",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_prod_without_key_raises():
     with pytest.raises(ValidationError):
         Settings(env="prod", secrets_encryption_key="", _env_file=None)
@@ -120,6 +134,18 @@ def test_prod_budget_blast_radius_defaults_on():
 def test_dev_budget_blast_radius_stays_off():
     # В dev/test кап по умолчанию выключен (не мешаем офлайн-тестам вертикали мутаций).
     assert Settings(**_prod_kwargs(env="dev")).daily_budget_increase_max_ops == 0
+
+
+def test_prod_llm_cost_cap_defaults_on():
+    # BZ-4: в prod долларовый потолок дня не остаётся выключенным молча (0 → 10 USD, значение D1);
+    # явное значение env валидатор не трогает.
+    assert Settings(**_prod_kwargs()).llm_daily_cost_cap_usd == 10.0
+    assert Settings(**_prod_kwargs(llm_daily_cost_cap_usd=25.0)).llm_daily_cost_cap_usd == 25.0
+
+
+def test_dev_llm_cost_cap_stays_off():
+    # В dev/test кап по умолчанию выключен (офлайн-тестам не нужен мок httpx в каждом вызове chat).
+    assert Settings(**_prod_kwargs(env="dev")).llm_daily_cost_cap_usd == 0.0
 
 
 def test_prod_explicit_allowed_ids_narrow_not_all():

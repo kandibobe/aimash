@@ -46,6 +46,7 @@ from core.config import settings
 from core.context import reset_context, set_context
 from core.errors import capture_exception
 from core.resilience import run_ads_read_call
+from scheduler import transport
 
 log = logging.getLogger(__name__)
 
@@ -480,7 +481,7 @@ async def _notify(bot, watch, verdict: Verdict) -> bool:
         "обычный черновик с подтверждением."
     )
     try:
-        await bot.send_message(snap.chat_id, text)
+        await transport.send_bot_message(bot, snap.chat_id, text)
         return True
     except Exception as e:  # noqa: BLE001 — доставка не должна ронять разбор
         log.warning("rollback: алерт не доставлен (%s)", type(e).__name__)

@@ -407,9 +407,12 @@ class Settings(BaseSettings):
     # #10 Наблюдаемость / spend-cap НИЖЕ агента (предусловие delegation, config.yaml:75-78): дневной
     # потолок СТОИМОСТИ (USD), не числа вызовов. llm_daily_calls_per_user ограничивает наш NL-путь
     # пер-chat, но НЕ покрывает автономный Hermes-цикл (идёт мимо процесса). Этот потолок сверяется с
-    # реальными тратами из core.or_activity (OpenRouter /key usage_daily или /activity). 0.0 ⇒ ВЫКЛ
-    # (opt-in). Это МЯГКИЙ рубеж в нашем коде; ЖЁСТКИЙ — limit+limit_reset:daily на самом ключе
-    # OpenRouter (серверный enforcement, RB-3, руки владельца). Оба нужны: наш — раньше и с контекстом.
+    # реальными тратами из core.or_activity (OpenRouter /key usage_daily или /activity); энфорсится
+    # в agent/router.chat (BZ-4, единая точка всех наших LLM-вызовов) + ранний человекочитаемый отказ
+    # в bot/main._llm_budget_or_reply. 0.0 ⇒ ВЫКЛ (в prod автодефолт 10 USD —
+    # _default_llm_cost_cap_in_prod). Это МЯГКИЙ рубеж в нашем коде; ЖЁСТКИЙ — limit+limit_reset:daily
+    # на самом ключе OpenRouter (серверный enforcement, RB-3, руки владельца). Оба нужны: наш — раньше
+    # и с контекстом.
     llm_daily_cost_cap_usd: float = 0.0
 
     @property
@@ -569,6 +572,17 @@ class Settings(BaseSettings):
         явно). В dev дефолт остаётся 0 (не мешаем отладке)."""
         if self.env == "prod" and int(self.llm_daily_calls_per_user or 0) <= 0:
             self.llm_daily_calls_per_user = 500
+        return self
+
+    @model_validator(mode="after")
+    def _default_llm_cost_cap_in_prod(self) -> "Settings":
+        """BZ-4: в prod долларовый потолок дня НЕ должен быть выключен молча — до 2026-07-30
+        check_daily_cost_cap не звался нигде, а решение D1 («$10/сутки кредитным лимитом на ключе
+        OpenRouter») замером 29.07 опровергнуто: limit=null на живом ключе. 0 в prod → 10 USD/сутки
+        (значение из D1; env переопределяет явно — тот же паттерн, что _default_llm_cap_in_prod).
+        В dev дефолт остаётся 0 (не мешаем отладке; тестам не нужен httpx-мок в каждом вызове)."""
+        if self.env == "prod" and float(self.llm_daily_cost_cap_usd or 0.0) <= 0:
+            self.llm_daily_cost_cap_usd = 10.0
         return self
 
     @model_validator(mode="after")

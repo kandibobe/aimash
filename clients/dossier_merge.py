@@ -16,7 +16,7 @@ import re
 from agent.router import chat
 from clients.dossier_schema import Company, Dossier, DossierExtract, FaqItem, Fact, Person, Service
 from core.config import settings
-from core.llm_budget import LLMBudgetExceededError, consume
+from core.llm_budget import LLMBudgetError, consume
 from core.logging import log
 
 # Потолки итогового документа: досье читает человек, а llm_context едет в промпт генератора RSA —
@@ -289,7 +289,7 @@ async def synthesize(d: Dossier, *, chat_id: int | None = None, language: str = 
         if isinstance(data, dict):
             d.overview = (str(data.get("overview") or "").strip() or None) or d.overview
             d.positioning = (str(data.get("positioning") or "").strip() or None) or d.positioning
-    except LLMBudgetExceededError:
+    except LLMBudgetError:
         raise
     except Exception as e:  # noqa: BLE001 — проза не критична, факты уже собраны
         log.warning("dossier: синтез прозы не удался (%s)", type(e).__name__)
@@ -473,7 +473,7 @@ async def normalize_ru(d: Dossier, *, chat_id: int | None = None, language: str 
         data = json.loads(raw[start : end + 1])
         if not isinstance(data, dict):
             return d
-    except LLMBudgetExceededError:
+    except LLMBudgetError:
         raise
     except Exception as e:  # noqa: BLE001 — нормализация не критична: списки уже собраны кодом
         log.warning("dossier: нормализация языка не удалась (%s)", type(e).__name__)
