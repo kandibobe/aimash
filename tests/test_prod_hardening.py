@@ -275,6 +275,7 @@ async def test_purge_disabled_when_retain_zero(monkeypatch):
         "ops_incidents": 0,
         "pacing_snapshots": 0,
         "managed_experiments": 0,
+        "notification_outbox": 0,
         "revenue_events": 0,
         "channel_metric_snapshots": 0,
     }

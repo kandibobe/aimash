@@ -3,7 +3,7 @@
 ORM — SQLAlchemy 2.0 ([`db/models.py`](../db/models.py)); схему в проде ведёт **Alembic**
 ([`migrations/`](../migrations/)). Dev/тесты могут работать на SQLite; прод — Postgres 16.
 
-## Все таблицы (41)
+## Все таблицы (42)
 
 Полный перечень моделей из [`db/models.py`](../db/models.py). Каждая таблица подтверждена
 Alembic-миграцией (см. колонку «Миграция»). Колонка «Статус» отражает **реальное** использование
@@ -53,8 +53,9 @@ Alembic-миграцией (см. колонку «Миграция»). Коло
 | `playbook_versions` | версионные детерминированные правила | unique `(name,version)`, rule JSON; action только decision/incident | `0038` | ACTIVE |
 | `external_identities` | mapping проверенной gateway OIDC/SAML identity на внутренний user id | unique provider + keyed HMAC issuer/subject, `user_id`, `active`, `last_seen_at` | `0038` | ACTIVE — claims/tokens не хранятся |
 | `notification_routes` | routing policy на Telegram/Slack/email/Teams/webhook | customer, channel, `destination_ref` (secret/config ref, не URL), severities | `0038` | ACTIVE — transport инъецируется |
+| `notification_outbox` | durable at-least-once доставка escalation по одному route; crash recovery, lease, retry и dead-letter | unique `dedup_key`, incident/route snapshot, `state`, `attempts`, `available_at`, lease token/TTL, error **code без message** | `0039` | ACTIVE — scheduler; возможен дубль после send-before-commit, тихая потеря исключена |
 
-> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0038`
+> Все таблицы объявлены в `db/models.py` и создаются миграциями `0001`–`0039`
 > (`op.create_table(...)`). Инициалка `0001` создаёт базовые таблицы
 > (`whitelist`, `user_settings`, `proposals`, `audit_log`, `oauth_tokens`;
 > [`migrations/versions/0001_initial.py:22-92`](../migrations/versions/0001_initial.py)), остальные —
@@ -220,7 +221,9 @@ CAS-конъюнкт `confirm.store._l3_fresh` даёт L3 более
 RBAC+four-eyes evidence, PII-free revenue events, provider-neutral channel metrics, versioned
 playbooks, external identity mapping и notification routes. Ни одна новая таблица сама не даёт
 права на Ads-мутацию; four-eyes — дополнительный EXISTS-конъюнкт внутри существующего атомарного
-`ConfirmStore.claim`) — **head**.
+`ConfirmStore.claim`) →
+`0039` (durable notification outbox: escalation и route snapshot создаются одной транзакцией;
+воркер доставляет через lease, bounded retry и dead-letter, сохраняя только класс ошибки) — **head**.
 
 ### Добавить миграцию
 ```bash

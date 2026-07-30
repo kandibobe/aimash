@@ -13,6 +13,7 @@
 | `run_scheduled_report` (глобальная) | cron **09:00** ежедневно | `REPORT_SCHEDULE` | плановый отчёт за последние 7 дн. → рассылка операторам БЕЗ персонального расписания |
 | `run_scheduled_report` (персональная, `only_chat`) | cron из `UserSettings.report_schedule` | — (per-user) | §14: свой отчёт оператору с собственным расписанием (`register_user_report_schedules` на старте) |
 | `run_anomaly_check` | каждые **6 ч** | `ANOMALY_INTERVAL_HOURS` | week-over-week сравнение, алерт при спайке расхода / падении конверсий |
+| `run_notification_delivery` | каждые **30 с** + сразу на старте | `NOTIFICATION_OUTBOX_*` | due incident → atomic outbox; lease, Telegram delivery, retry/dead-letter; другие каналы требуют adapter |
 | `cleanup_stale_proposals` | каждые **60 мин** | `CLEANUP_INTERVAL_MINUTES` | просроченные `pending`-черновики → `rejected` (с аудитом) |
 | `cleanup_stale_campaign_drafts` | каждые **60 мин** | `CAMPAIGN_DRAFT_TTL_HOURS` (72) | §19: активные черновики визарда старше TTL → `abandoned` (переживают рестарт, но не вечно) |
 | `reconcile_stale_crawls` | каждые **60 мин** | `CRAWL_STALE_MINUTES` (30) | §20.4: зависшие `running` crawl_jobs (процесс умер на рестарте) → `failed` |
@@ -73,6 +74,15 @@ SQLite, и на Postgres (tz-aware). Жизненный цикл proposal — [D
 Один недоступный чат **не роняет** рассылку (исключение на отправку логируется редактированно и
 идёт дальше). Сбой сети/SDK при сборке отчёта/метрик логируется и не валит планировщик.
 `misfire_grace_time` задан на каждую задачу (отчёт 3600с, аномалии 1800с, очистка 600с).
+
+Операционные escalation доставляются отдельно через `notification_outbox`: route snapshot и
+escalation cursor коммитятся вместе, сетевой send идёт под lease, сбой повторяется с bounded
+exponential backoff. Это at-least-once, поэтому падение между send и success-commit может дать дубль,
+но не потерю. `last_error_code` содержит только класс исключения; URL/token/chat id из env в БД не
+пишутся. Resolve/snooze отменяет pending-row; claim не берёт неактивный incident. Для Telegram
+`destination_ref` должен указывать на env-переменную с chat id. Тайминги и retry задаются
+`INCIDENT_*_ESCALATION_MINUTES`, `INCIDENT_ESCALATION_COOLDOWN_MINUTES` и
+`NOTIFICATION_OUTBOX_*`.
 
 Формулировка для пользователя в алертах прямая: «Это только сигнал — сам я ничего не меняю. Реши и
 дай команду». Гарантии безопасности целиком — [SECURITY.md](SECURITY.md).

@@ -5,14 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import and_, case, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from core.logging import redact_text
-from db.models import OpsIncident
+from db.models import NotificationOutbox, OpsIncident
 from db.session import Session, db_dt
 from operations.decisions import _clean
 from operations.types import IncidentInput
@@ -173,6 +173,19 @@ async def transition_incident(
             .values(**values)
         )
         if int(getattr(result, "rowcount", 0) or 0) == 1:
+            if target in {"resolved", "snoozed"}:
+                await session.execute(
+                    update(NotificationOutbox)
+                    .where(
+                        NotificationOutbox.incident_uid == incident_uid,
+                        NotificationOutbox.state == "pending",
+                    )
+                    .values(
+                        state="cancelled",
+                        last_error_code=None,
+                        updated_at=db_dt(now),
+                    )
+                )
             await session.commit()
             return True
         await session.rollback()
@@ -204,69 +217,3 @@ async def list_incidents(
             .scalars()
             .all()
         )
-
-
-async def claim_escalations(
-    *,
-    now: datetime | None = None,
-    critical_after: timedelta = timedelta(minutes=15),
-    warning_after: timedelta = timedelta(hours=4),
-    cooldown: timedelta = timedelta(hours=1),
-    limit: int = 100,
-) -> list[OpsIncident]:
-    """Atomically mark due incidents before a transport sends them, preventing duplicate routes."""
-    point = now or utcnow()
-    async with Session() as session:
-        candidates = list(
-            (
-                await session.execute(
-                    select(OpsIncident)
-                    .where(
-                        OpsIncident.status.in_(("open", "acknowledged")),
-                        OpsIncident.first_seen_at
-                        <= db_dt(
-                            point
-                            - min(
-                                critical_after,
-                                warning_after,
-                            )
-                        ),
-                    )
-                    .order_by(OpsIncident.first_seen_at)
-                    .limit(max(1, min(int(limit), 500)))
-                )
-            )
-            .scalars()
-            .all()
-        )
-        claimed: list[OpsIncident] = []
-        for row in candidates:
-            age = point - row.first_seen_at.replace(tzinfo=row.first_seen_at.tzinfo or timezone.utc)
-            due_after = critical_after if row.severity == "critical" else warning_after
-            if age < due_after:
-                continue
-            if row.last_notified_at:
-                last = row.last_notified_at.replace(
-                    tzinfo=row.last_notified_at.tzinfo or timezone.utc
-                )
-                if point - last < cooldown:
-                    continue
-            result = await session.execute(
-                update(OpsIncident)
-                .where(
-                    OpsIncident.id == row.id,
-                    OpsIncident.status == row.status,
-                    OpsIncident.escalation_level == row.escalation_level,
-                )
-                .values(
-                    escalation_level=row.escalation_level + 1,
-                    last_notified_at=db_dt(point),
-                    updated_at=db_dt(point),
-                )
-            )
-            if int(getattr(result, "rowcount", 0) or 0) == 1:
-                row.escalation_level += 1
-                row.last_notified_at = db_dt(point)
-                claimed.append(row)
-        await session.commit()
-        return claimed

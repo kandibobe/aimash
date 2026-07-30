@@ -293,6 +293,14 @@ class Settings(BaseSettings):
     ads_timeout_s: float = 60.0
     llm_timeout_s: float = 45.0
     cleanup_interval_minutes: int = 60  # очистка просроченных черновиков каждые N минут
+    # Durable incident notifications: enqueue, lease, and retry without storing route secrets.
+    notification_outbox_interval_seconds: int = 30
+    notification_outbox_lease_seconds: int = 120
+    notification_outbox_max_attempts: int = 5
+    notification_outbox_base_retry_seconds: int = 30
+    incident_critical_escalation_minutes: int = 15
+    incident_warning_escalation_minutes: int = 240
+    incident_escalation_cooldown_minutes: int = 60
     # C4 (§5.3): чей процесс владеет джобами. `True` — исторический режим: APScheduler крутится в
     # event loop бота. `False` — джобы у отдельного процесса `python -m scheduler` (топология: три
     # процесса). Дефолт `True` намеренно: при архивации `bot/` планировщик обязан НЕ исчезнуть
@@ -515,6 +523,24 @@ class Settings(BaseSettings):
             raise ValueError(f"FOUR_EYES_RISK_TIERS_CSV contains unknown tiers: {sorted(invalid)}")
         if self.four_eyes_required and not raw:
             raise ValueError("FOUR_EYES_REQUIRED needs at least one configured risk tier")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_notification_outbox(self) -> "Settings":
+        if not 5 <= self.notification_outbox_interval_seconds <= 3600:
+            raise ValueError("NOTIFICATION_OUTBOX_INTERVAL_SECONDS must be between 5 and 3600")
+        if not 10 <= self.notification_outbox_lease_seconds <= 3600:
+            raise ValueError("NOTIFICATION_OUTBOX_LEASE_SECONDS must be between 10 and 3600")
+        if not 1 <= self.notification_outbox_max_attempts <= 20:
+            raise ValueError("NOTIFICATION_OUTBOX_MAX_ATTEMPTS must be between 1 and 20")
+        if not 1 <= self.notification_outbox_base_retry_seconds <= 3600:
+            raise ValueError("NOTIFICATION_OUTBOX_BASE_RETRY_SECONDS must be between 1 and 3600")
+        if not 0 <= self.incident_critical_escalation_minutes <= 10080:
+            raise ValueError("INCIDENT_CRITICAL_ESCALATION_MINUTES must be between 0 and 10080")
+        if not 0 <= self.incident_warning_escalation_minutes <= 10080:
+            raise ValueError("INCIDENT_WARNING_ESCALATION_MINUTES must be between 0 and 10080")
+        if not 1 <= self.incident_escalation_cooldown_minutes <= 10080:
+            raise ValueError("INCIDENT_ESCALATION_COOLDOWN_MINUTES must be between 1 and 10080")
         return self
 
     @property

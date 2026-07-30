@@ -31,7 +31,7 @@ matching proposal и `audit_log` со статусом `applied`, тем же cu
 | Bulk guardrails | `operations/policy.py`, `operations/bulk.py` | proposal создаёт вызывающий | dry-run, полный scope diff, cap targets/delta; прямого execute нет |
 | Governance | `operations/governance.py` | roles + votes | RBAC и независимый vote; four-eyes добавлен внутрь claim-CAS |
 | Revenue/portfolio | `operations/revenue.py`, `operations/portfolio.py` | revenue/channel snapshots | keyed HMAC CRM ids, explicit customer scope, no cross-client reallocation |
-| Routing | `operations/routing.py` | `notification_routes` | только uppercase config refs; payload редактируется; transport инъецируется |
+| Routing | `operations/routing.py`, `operations/outbox.py` | `notification_routes`, `notification_outbox` | config refs без secret values; atomic enqueue, lease, retry/dead-letter; payload редактируется |
 | Identity | `operations/identity.py` | `external_identities` | только verified claims; issuer/subject проходят domain-separated keyed HMAC |
 | Explainability | `operations/explain.py` | ответ | applied/failed нельзя заявить без audit reference |
 
@@ -40,6 +40,21 @@ matching proposal и `audit_log` со статусом `applied`, тем же cu
 Decision: `new → acknowledged|approved|rejected|snoozed`; `snoozed → new`; `approved → applied`;
 активная строка может стать `expired`. Incident: `open → acknowledged|snoozed|resolved`; новый факт
 переоткрывает resolved incident и увеличивает `occurrence_count`.
+
+## Доставка escalation
+
+Scheduler не отмечает incident доставленным перед сетевым вызовом. `enqueue_due_escalations`
+одной транзакцией сдвигает escalation cursor и создаёт по outbox-row на каждый effective route;
+customer-specific route подавляет идентичный global route. Воркеры забирают строки атомарным
+lease-CAS, после сбоя повторяют с exponential backoff и после ограниченного числа попыток переводят
+в `dead`. Resolve/snooze отменяет ещё не взятые строки как `cancelled`; claim повторно проверяет,
+что incident активен. В БД сохраняется только тип исключения, не `str(e)`.
+
+Семантика — **at-least-once**: падение после успешного send, но до `delivered` commit может дать
+дубль. Отметить успех до send означало бы необратимую тихую потерю, поэтому это запрещено.
+Стабильный `dedup_key` передаётся transport adapter и позволяет каналам с идемпотентностью убрать
+дубль. Telegram такого примитива не даёт. `destination_ref` разрешается из env только в момент
+отправки и никогда не попадает в outbox, логи или текст ошибки.
 
 ## Four-eyes
 
@@ -54,10 +69,12 @@ provenance, 2FA, freshness и audit остаются обязательны.
 ## Что ещё требует live-cutover
 
 Код и схема не равны включённому продукту. Hermes по-прежнему публикует только READ-набор; новые
-операционные функции не зарегистрированы как WRITE. Slack/email/Teams требуют настроенных transport
-adapters и uppercase config refs (`SLACK_OPS_CHANNEL`), не raw URL/token. Перед transport title/body
-проходят `redact_text`. SSO требует проверки подписи/issuer/audience в доверенном gateway — модуль
+операционные функции не зарегистрированы как WRITE. Живой scheduler подключает Telegram adapter;
+Slack/email/Teams требуют настроенных transport adapters и uppercase config refs
+(`SLACK_OPS_CHANNEL`), не raw URL/token. Перед transport title/body проходят `redact_text`. SSO
+требует проверки подписи/issuer/audience в доверенном gateway — модуль
 identity намеренно не принимает сырой токен. Meta/Microsoft/TikTok требуют ingestion adapters и
 credentials; cross-channel рекомендации не исполняются.
 
-Приёмка ядра: `python -m pytest -q tests/test_operations_layer.py` и полный `python -m pytest -q`.
+Приёмка ядра: `python -m pytest -q tests/test_operations_layer.py tests/test_notification_outbox.py`
+и полный `python -m pytest -q`.

@@ -17,7 +17,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from core.config import settings
 from core.errors import capture_exception
 from core.logging import log
-from scheduler import jobs, rollback
+from scheduler import jobs, ops_delivery, rollback
 
 # Дефолт планового отчёта — fallback, если REPORT_SCHEDULE невалиден (см. report_trigger).
 _DEFAULT_REPORT_CRON = {"hour": 9, "minute": 0}  # ежедневно 09:00 (локальное время)
@@ -147,6 +147,17 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
         id="anomaly_check",
         replace_existing=True,
         misfire_grace_time=1800,
+    )
+    sched.add_job(
+        ops_delivery.run_notification_delivery,
+        IntervalTrigger(seconds=settings.notification_outbox_interval_seconds),
+        args=[bot],
+        id="notification_outbox",
+        replace_existing=True,
+        misfire_grace_time=max(30, settings.notification_outbox_interval_seconds * 2),
+        coalesce=True,
+        max_instances=1,
+        next_run_time=datetime.now(timezone.utc),
     )
     sched.add_job(
         jobs.cleanup_stale_proposals,

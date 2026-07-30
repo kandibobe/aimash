@@ -26,7 +26,7 @@
 - managed_experiments / playbook_versions — безопасные эксперименты и версионированные rules
 - role_assignments / approval_votes / external_identities — RBAC, four-eyes и trusted identity mapping
 - revenue_events / channel_metric_snapshots — PII-free CRM feedback и cross-channel metrics
-- notification_routes — маршруты доставки по ссылкам на секреты, не сами credentials
+- notification_routes / notification_outbox — routing policy и durable delivery без credentials
 
 ⚠️ Секреты (refresh-токены) хранятся ТОЛЬКО зашифрованными (oauth_tokens.refresh_token_enc).
 В audit_log/proposals секретов нет. PII клиента (§20) — не секрет проекта, но в логи сырьём не
@@ -1319,3 +1319,38 @@ class NotificationRoute(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_by: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class NotificationOutbox(Base):
+    """Durable at-least-once delivery state for one incident escalation and route."""
+
+    __tablename__ = "notification_outbox"
+    __table_args__ = (
+        Index("ux_notification_outbox_dedup", "dedup_key", unique=True),
+        Index("ix_notification_outbox_due", "state", "available_at"),
+        Index("ix_notification_outbox_lease", "state", "lease_expires_at"),
+        Index("ix_notification_outbox_incident", "incident_uid", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    outbox_uid: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    incident_uid: Mapped[str] = mapped_column(String(64), nullable=False)
+    customer_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    route_uid: Mapped[str] = mapped_column(String(64), nullable=False)
+    escalation_level: Mapped[int] = mapped_column(Integer, nullable=False)
+    occurrence_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    channel: Mapped[str] = mapped_column(String(16), nullable=False)
+    destination_ref: Mapped[str] = mapped_column(String(96), nullable=False)
+    dedup_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    lease_token: Mapped[str | None] = mapped_column(String(64))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_code: Mapped[str | None] = mapped_column(String(96))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

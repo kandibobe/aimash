@@ -2410,6 +2410,8 @@ existing propose → trusted reply → ConfirmStore.claim → ads/mutations → 
    revoke роли не стирает уже записанный reject, пустой required tier-set даёт отказ.
 6. External identity принимается только после проверки gateway; raw token/claim в БД не пишется.
 7. Notification route хранит `destination_ref`, не URL/token; transport инъецирует процесс.
+   Escalation доставляет durable `notification_outbox`: atomic enqueue, lease, bounded retry/dead-letter,
+   error class без `str(e)`. Семантика at-least-once; `dedup_key` закрывает дубль там, где умеет канал.
 8. Cross-channel snapshots не складывают разные валюты, требуют явный customer scope, не предлагают
    перенос между клиентами и не открывают cross-channel WRITE.
 9. Decision `applied` требует matching applied proposal + applied audit-row в одном correlated UPDATE.

@@ -15,6 +15,7 @@ from core.logging import log
 from db.models import (
     ChannelMetricSnapshot,
     ManagedExperiment,
+    NotificationOutbox,
     OperationalDecision,
     OpsIncident,
     PacingSnapshot,
@@ -30,6 +31,7 @@ async def purge_operational_rows(*, now: datetime | None = None) -> dict[str, in
         "ops_incidents": 0,
         "pacing_snapshots": 0,
         "managed_experiments": 0,
+        "notification_outbox": 0,
         "revenue_events": 0,
         "channel_metric_snapshots": 0,
     }
@@ -66,6 +68,12 @@ async def purge_operational_rows(*, now: datetime | None = None) -> dict[str, in
         settings.operations_retain_days,
         ManagedExperiment,
         ManagedExperiment.status.in_(("completed", "cancelled")),
+    )
+    await sweep(
+        "notification_outbox",
+        settings.operations_retain_days,
+        NotificationOutbox,
+        NotificationOutbox.state.in_(("delivered", "dead", "cancelled")),
     )
     await sweep("revenue_events", settings.revenue_events_retain_days, RevenueEvent)
     await sweep(

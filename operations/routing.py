@@ -122,11 +122,16 @@ async def load_routes(customer_id: str) -> list[Route]:
             .scalars()
             .all()
         )
-    return [
-        Route(
+    # A customer-specific row overrides an identical global route. Without this collapse the same
+    # destination receives every alert twice when an agency default is later customized per client.
+    effective: dict[tuple[str, str], Route] = {}
+    for row in sorted(rows, key=lambda item: (item.customer_id != "*", item.id), reverse=True):
+        key = (row.channel, row.destination_ref)
+        if key in effective:
+            continue
+        effective[key] = Route(
             channel=row.channel,
             destination_ref=row.destination_ref,
             severities=frozenset(row.severities),
         )
-        for row in rows
-    ]
+    return list(effective.values())

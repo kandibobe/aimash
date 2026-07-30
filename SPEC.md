@@ -676,7 +676,9 @@ matching proposal `status=applied` и audit-row `status=applied` того же c
 escalation по разным окнам, повторная доставка ограничена cooldown. Новый факт переоткрывает
 resolved incident. Каналы маршрутизации: Telegram/Slack/email/Teams/webhook через transport adapters;
 в БД хранится только uppercase config reference (`destination_ref`), не webhook/secret, а исходящий
-title/body обязательно проходит `redact_text`.
+title/body обязательно проходит `redact_text`. Доставка — через `notification_outbox`: escalation
+cursor и route snapshot коммитятся вместе, воркер использует lease, bounded retry и dead-letter.
+Семантика at-least-once; тихая потеря запрещена, возможный crash-window дубль несёт `dedup_key`.
 
 **3.11.3 Budget pacing** [Реализовано ядро]. Версионный медиаплан импортируется из CSV или уже
 прочитанных Sheets rows; scope — account/campaign/portfolio. Код считает spend-to-date, ожидаемый
