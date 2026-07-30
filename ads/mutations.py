@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from typing import Protocol
@@ -42,12 +43,18 @@ from ads.keyword_plan import LANGUAGE_IDS  # ISO → languageConstant id (пол
 from ads.read import account_currency  # валюта аккаунта → биллинг-единица округления (кэш, 1 GAQL)
 from ads.resolve import (  # единый GAQL-эскейп для literal-WHERE (defense-in-depth) + shared-budget
     campaigns_sharing_budget,
+    compute_new_micros,  # B1-4: пересчёт «станет» из снимка — тем же вызовом, что и исполнение
     gaql_escape,
 )
 from ads.validation import assert_keyword_ok, dedup_keyword_pairs, normalize_keywords
 from core.ads_errors import (  # единый источник имён кодов ошибок Google Ads
     error_code_names,
     partial_failure_errors,
+)
+from core.config import settings  # B1-4: пороги blast-radius (живой settings, не снимок)
+from core.killswitch import (  # BZ-1: аварийный стоп ДО claim; GateRefusal = «черновик жив»
+    GateRefusal,
+    ensure_mutations_enabled,
 )
 from core.logging import (  # причины отказов partial_failure — без секретов (правило #5)
     log,
@@ -98,11 +105,19 @@ class ConfirmStore(Protocol):
     # по свежести не сжигал одноразовое подтверждение. Отдельный метод, а не поле claim: claim уже
     # необратим, а решение «исполнять ли» принимается раньше.
     async def get_confirmed(self, confirmation_id: str) -> "ConfirmedProposal | None": ...
+    # B1-4: история исполненных денежных строк аккаунта за окно — источник blast-radius капа.
+    # Стор без метода при ВКЛЮЧЁННОМ капе получает отказ (fail-closed, _require_budget_blast_radius).
+    async def recent_money_params(
+        self, customer_id: str, *, operations: tuple[str, ...], window_hours: int = 24
+    ) -> list[dict]: ...
 
 
 class ConfirmedProposal(Protocol):
     operation: str
     status: str  # "confirmed" | "executing" | "applied" | "failed" | "rejected" | "pending"
+    # B1-4: аккаунт черновика — по нему blast-radius кап выбирает историю повышений. Читается
+    # гейтом (_require_budget_blast_radius), поэтому поле — часть контракта, а не деталь стора.
+    customer_id: str
     user_initiated: bool  # True только если изменение пришло прямой командой пользователя
     # Волна 1.4: второй, НЕЗАВИСИМЫЙ бит — ход был человеческим. Штампует стор из core.provenance,
     # аргументом save_proposal не задаётся (в отличие от user_initiated выше).
@@ -196,6 +211,152 @@ async def _require_freshness(
     log.info("freshness(A): снимка нет op=%s tier=advisory cause=%s", operation, why)
 
 
+# B1-4: операции, меняющие СУЩЕСТВУЮЩИЙ бюджет, — только их считает суточный blast-radius кап.
+# Ставки (update_bid/update_keyword_bid/set_bidding_strategy) — вне скоупа: другой рычаг с другой
+# экономикой (кап на них — отдельное решение, не молчаливое расширение этого). Бюджет НОВОЙ
+# кампании (create_campaign*) капом не считается — признанный gap, см. docs/SECURITY.md.
+BUDGET_INCREASE_OPS = ("update_budget",)
+
+# B1-4: сериализация окна «проверка капа → claim» ВНУТРИ процесса. Конкурентные ✅ — это
+# aiogram-таски ОДНОГО event loop: без лока каждая читала бы историю ДО чужого claim, и кап
+# обнуляла бы пачка быстрых нажатий («сколько успели — столько прошло»). Лок один на процесс,
+# не пер-customer: подтверждение бюджета — редкое человеческое событие, contention нулевой,
+# а словарь пер-аккаунтных Lock-ов — лишняя машинерия. Межпроцессного претендента сегодня нет
+# (см. докстринг _require_budget_blast_radius); появится — лок обязан стать advisory-lock БД.
+_BUDGET_GATE_LOCK = asyncio.Lock()
+
+
+def _budget_delta_micros(params: dict) -> int | None:
+    """Прирост бюджета (micros) по params черновика: «станет» − «было». None = посчитать нельзя
+    (нет аттестованного снимка / нет mode/value / вычисление упало) — вызывающий обязан трактовать
+    None по месту: для ТЕКУЩЕГО черновика это отказ (fail-closed), для строки ИСТОРИИ — консервативный
+    зачёт в счётный кап (см. _require_budget_blast_radius).
+
+    «Было» берётся из аттестованного снимка (`attested_snapshot` — тот же источник, что у freshness:
+    подделать его без валидного маркера нельзя). «Станет» — в первую очередь `after_micros` ТОГО ЖЕ
+    снимка: его посчитал `read_state` с РЕАЛЬНОЙ валютой аккаунта, и ровно это число человек видел
+    на карточке. Fallback (старые строки без after_micros) — пересчёт `compute_new_micros` с
+    currency=None: округление дефолтной биллинг-единицей — допустимая черновая оценка для дельты
+    капа (авторитетное округление всё равно делает граница SDK), а лишний GAQL в гейте не оправдан."""
+    snap = attested_snapshot(params or {})
+    if not snap:
+        return None
+    before = snap.get("before_micros")
+    if not isinstance(before, int) or before <= 0:
+        return None
+    after = snap.get("after_micros")
+    if isinstance(after, int) and after > 0:
+        return after - before
+    mode = (params or {}).get("mode")
+    value = (params or {}).get("value")
+    if not mode or value is None:
+        return None
+    try:
+        new = compute_new_micros(before, str(mode), float(value), currency=None)
+    except Exception:  # noqa: BLE001 — любой сбой вычисления = «не знаю», решает вызывающий
+        return None
+    return new - before
+
+
+async def _require_budget_blast_radius(
+    confirm_store: ConfirmStore, confirmation_id: str, operation: str
+) -> None:
+    """B1-4, «смерть от тысячи подтверждённых порезов»: суточный кап ПОВЫШЕНИЙ бюджета на аккаунт.
+
+    Что закрывает: каждая отдельная операция уже ограничена (MONEY_MAX — потолок суммы, confirm-гейт —
+    согласие человека), но СЕРИЯ подтверждённых «+20%» за день не ограничена ничем — усталый менеджер,
+    уговорённый агентом, или скомпрометированный аккаунт Telegram могут за вечер удвоить бюджет
+    двадцатью маленькими шагами. Кап смотрит на аккаунт целиком за окно 24 ч.
+
+    Два независимых порога (оба из settings, 0 = порог выключен):
+      · `daily_budget_increase_max_ops` — ЧИСЛО повышений (в prod автодефолт 10);
+      · `daily_budget_increase_cap_units` — СУММАРНЫЙ прирост в единицах валюты аккаунта.
+    Понижения бюджета НЕ ограничиваются никогда: путь «срезать расход» обязан оставаться открытым
+    даже при выеденном капе — иначе кап мешал бы ровно тому действию, ради которого существует.
+
+    Порядок и последствия: вызывается из `_require_confirmation` ДО `record_money_event` и ДО
+    `claim` — отказ капа не сжигает одноразовое подтверждение и не оставляет событие «заявка была».
+    Исчерпанный кап и недоступная история — `GateRefusal` (черновик ЖИВ, кнопочный путь возвращает
+    его в pending); несчитаемая дельта — обычный `PermissionError` (дефект черновика, пересоздать).
+    Источник истории — строки proposals в статусах executing/applied/needs_review за окно
+    (decided_at штампует claim): уже-исполненные (или возможно исполненные — needs_review) траты
+    капа. failed-строки не считаются (бюджет не изменился).
+
+    Гонка «проверка → claim» закрыта В ПРОЦЕССЕ: `_require_confirmation` держит `_BUDGET_GATE_LOCK`
+    на шагах 1b→3 для BUDGET_INCREASE_OPS — конкурентные ✅ (aiogram-таски одного event loop)
+    сериализуются, и каждый следующий видит claim предыдущего в истории. Остаток — МЕЖПРОЦЕССНАЯ
+    гонка (агрегат за 24 ч не влезает в CAS-WHERE одного UPDATE), но второй процесс с правом
+    подтверждения сегодня не существует: scheduler мутаций не подтверждает (правило 3 отсекает его
+    раньше), MCP-WRITE не подключён. Появится второй исполнитель — лок обязан стать межпроцессным
+    (advisory lock БД), см. docs/SECURITY.md.
+
+    Известные и принятые ограничения (документированы, не баги):
+      · дельта истории считается из СНИМКА строки, а не из фактического ответа API — точность
+        черновая (см. _budget_delta_micros), направление (повышение/понижение) — по снимку;
+      · направление `set_to` оценивается на момент СОЗДАНИЯ черновика: freshness для set_to
+        сознательно не сверяет «было» (ads/freshness.py — откаты обязаны работать ПОСЛЕ дрейфа),
+        поэтому set_to, созданный при высокой базе и исполненный после понижения, пройдёт как
+        «понижение» мимо капа. Безусловный зачёт set_to закрыл бы дыру, но блокировал бы откаты
+        при выеденном капе — путь «срезать/откатить» дороже этого остатка. Ограничители остатка:
+        L3-TTL согласия (короткое окно между созданием и ✅), MONEY_MAX на абсолютный размер,
+        человек видит целевое значение на карточке.
+    Fail-closed по построению: стор без нужных методов, недоступная БД, несчитаемая дельта ТЕКУЩЕГО
+    черновика — всё это отказ, а не пропуск."""
+    if operation not in BUDGET_INCREASE_OPS:
+        return
+    max_ops = int(settings.daily_budget_increase_max_ops or 0)
+    cap_units = float(settings.daily_budget_increase_cap_units or 0.0)
+    if max_ops <= 0 and cap_units <= 0:
+        return  # оба порога выключены явно (dev/test-дефолт; prod автоподнимает max_ops)
+    getter = getattr(confirm_store, "get_confirmed", None)
+    lister = getattr(confirm_store, "recent_money_params", None)
+    if getter is None or lister is None:
+        raise PermissionError(
+            f"'{operation}': стор не отдаёт историю повышений бюджета (blast-radius B1-4) — "
+            "отклонено (fail-closed)"
+        )
+    proposal = await getter(confirmation_id)
+    if proposal is None or getattr(proposal, "operation", None) != operation:
+        # Черновика нет / чужая операция — авторитетный (и точный по тексту) отказ даст claim
+        # ниже; подменять его здесь сообщением про кап значит врать о причине (как в freshness).
+        return
+    delta = _budget_delta_micros(getattr(proposal, "params", None) or {})
+    if delta is None:
+        raise PermissionError(
+            f"'{operation}': прирост бюджета не вычислим из черновика (нет снимка/полей) — "
+            "отклонено (fail-closed, B1-4); создай черновик заново"
+        )
+    if delta <= 0:
+        return  # понижение/без изменений — кап не про это, путь «срезать» всегда открыт
+    try:
+        rows = await lister(proposal.customer_id, operations=BUDGET_INCREASE_OPS, window_hours=24)
+    except Exception as e:  # noqa: BLE001 — история недоступна ⇒ кап проверить нельзя ⇒ отказ
+        # GateRefusal: сбой БД временный, черновик не дефектен — повтор ✅ уместен.
+        raise GateRefusal(
+            f"'{operation}': история повышений бюджета недоступна ({type(e).__name__}) — "
+            "отклонено (fail-closed, B1-4)"
+        ) from e
+    deltas = [_budget_delta_micros(p or {}) for p in rows]
+    # История: положительные дельты — повышения; None (несчитаемая старая строка) зачитывается в
+    # СЧЁТНЫЙ кап консервативно (могла быть повышением), в сумму не входит (числа нет). Известные
+    # понижения кап не тратят.
+    increases = [d for d in deltas if d is not None and d > 0]
+    n_spent = len(increases) + sum(1 for d in deltas if d is None)
+    # Исчерпанный кап — GateRefusal: причина уедет вместе с 24-часовым окном, черновик жив.
+    if max_ops > 0 and n_spent >= max_ops:
+        raise GateRefusal(
+            f"суточный кап повышений бюджета исчерпан: {n_spent}/{max_ops} за 24 ч по аккаунту "
+            f"{proposal.customer_id} — отклонено (B1-4). Понижения не ограничены; кап задаёт "
+            "DAILY_BUDGET_INCREASE_MAX_OPS"
+        )
+    if cap_units > 0 and (sum(increases) + delta) > int(cap_units * 1_000_000):
+        raise GateRefusal(
+            f"суточный кап СУММЫ прироста бюджета превышен: +{(sum(increases) + delta) / 1e6:.2f} "
+            f"при лимите {cap_units:g} (единиц валюты, 24 ч, аккаунт {proposal.customer_id}) — "
+            "отклонено (B1-4). Понижения не ограничены; кап задаёт DAILY_BUDGET_INCREASE_CAP_UNITS"
+        )
+
+
 async def _require_confirmation(
     confirm_store: ConfirmStore, confirmation_id: str, operation: str
 ) -> ConfirmedProposal:
@@ -209,20 +370,37 @@ async def _require_confirmation(
     его в новой операции физически негде. Список из 41 строки давал бы 41 место, где можно не дописать.
 
     Волна 3 (event sourcing): здесь же — ЕДИНСТВЕННАЯ точка, где денежный путь эмитит своё событие,
-    и по той же причине: чокпойнт один, обойти его новой мутацией нельзя. Порядок трёх шагов —
+    и по той же причине: чокпойнт один, обойти его новой мутацией нельзя. Порядок шагов —
     свойство, а не стиль:
+      0. kill-switch (BZ-1) — аварийный стоп раньше всего: env/файл-флаг читаются живьём, отказ
+         не трогает ни черновик, ни журнал (после снятия рубильника человек повторяет «да»);
       1. freshness — отказ по нему НЕ должен сжигать одноразовое подтверждение;
+      1b. blast-radius бюджета (B1-4) — по той же причине ДО claim и ДО события: исчерпанный кап
+         оставляет черновик живым (завтра окно уедет — та же карточка снова исполнима);
       2. событие (fail-closed) — не записалось ⇒ `EventWriteError` летит ДО `claim` и ДО SDK:
          Google Ads не тронут, подтверждение не съедено, человек повторяет ту же команду;
       3. claim — атомарный CAS.
+    Шаги 1b→3 для операций из BUDGET_INCREASE_OPS идут под `_BUDGET_GATE_LOCK`: кап (1b) читает
+    агрегат истории, который меняет claim (3), — без сериализации конкурентные подтверждения
+    видели бы историю ДО чужого claim и проходили бы кап пачкой.
     Если бы событие писалось после claim, отказ журнала оставлял бы человека и без мутации, и без
     карточки; если бы писалось батчем на закрытии `run_scope` (как вся прочая наблюдаемость) — оно
     ложилось бы уже ПОСЛЕ вызова к API, и fail-closed не защищал бы ни от чего."""
+    ensure_mutations_enabled()
     await _require_freshness(confirm_store, confirmation_id, operation)
-    # Заявка на исполнение, не факт исполнения: исход живёт в audit-row, и «выполнено» пользователю
-    # репортится оттуда (правило 15). Отклонённая ниже попытка тоже обязана оставить след.
-    await record_money_event("ads_mutate", operation=operation, confirmation_id=confirmation_id)
-    proposal = await confirm_store.claim(confirmation_id, operation=operation)
+
+    async def _capped_steps() -> ConfirmedProposal | None:
+        await _require_budget_blast_radius(confirm_store, confirmation_id, operation)
+        # Заявка на исполнение, не факт исполнения: исход живёт в audit-row, и «выполнено»
+        # пользователю репортится оттуда (правило 15). Отклонённая попытка тоже оставляет след.
+        await record_money_event("ads_mutate", operation=operation, confirmation_id=confirmation_id)
+        return await confirm_store.claim(confirmation_id, operation=operation)
+
+    if operation in BUDGET_INCREASE_OPS:
+        async with _BUDGET_GATE_LOCK:
+            proposal = await _capped_steps()
+    else:  # кап — no-op (первая строка 1b), лок не нужен: чужие операции им не задерживаем
+        proposal = await _capped_steps()
     if proposal is None:
         raise PermissionError(
             f"мутация '{operation}' без валидного/одноразового confirmation_id — отклонено"

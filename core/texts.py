@@ -1235,8 +1235,9 @@ def fmt_mutready(r: dict, lang: str | None = None) -> str:
         )
     else:
         lines.append(
-            "⏭ финальный шаг (ВЛАДЕЛЕЦ, руками): GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (все видимые; "
-            "прод-дефолт) или явный список id (docs/DEPLOYMENT.md §2.1). Бот этот конфиг сам НЕ меняет."
+            "⏭ финальный шаг (ВЛАДЕЛЕЦ, руками): GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (все видимые) "
+            "или явный список id (docs/DEPLOYMENT.md §2.1). Пусто = мутации выключены (fail-closed). "
+            "Бот этот конфиг сам НЕ меняет."
         )
     return "\n".join(lines)
 
@@ -1270,11 +1271,11 @@ def fmt_mutready_all(results: list[dict], lang: str | None = None) -> str:
             mut_s = "мут: ВКЛ" if mut else "мут: выкл"
         lines.append(f"{'✅' if ready else '⚠️'} <b>{title}</b> — {flags} · {mut_s}")
     tail = (
-        "Enable all: GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (prod default). The bot never changes this "
-        "config. Every mutation still needs confirmation."
+        "Enable all: GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (explicit; empty = mutations off, "
+        "fail-closed). The bot never changes this config. Every mutation still needs confirmation."
         if en
-        else "Включить все: GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (прод-дефолт). Бот конфиг НЕ меняет. "
-        "Любая мутация — только через подтверждение «да»."
+        else "Включить все: GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (явно; пусто = мутации выключены, "
+        "fail-closed). Бот конфиг НЕ меняет. Любая мутация — только через подтверждение «да»."
     )
     lines.append("")
     lines.append(tail)

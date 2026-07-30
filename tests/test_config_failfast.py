@@ -91,14 +91,35 @@ def test_prod_without_google_ads_token_raises():
         Settings(**_prod_kwargs(google_ads_developer_token=""))
 
 
-def test_prod_without_allowed_customer_ids_defaults_to_all_visible():
-    # Решение владельца 2026-07 (Draft-only доктрина снята): prod с пустым списком мутаций
-    # НЕ падает, а дефолтится в сентинел «all» — мутации на всём ВИДИМОМ потолке
-    # (allowed_ceiling(); замок видимости ensure_allowed и confirm-гейт остаются).
-    # Явный список id по-прежнему СУЖАЕТ набор; в dev/test пусто = fail-closed.
+def test_prod_empty_allowed_ids_stays_fail_closed():
+    # BZ-1 (2026-07-30): прежняя коэрция пусто→«all» в prod СНЯТА — «очистить env» обязано
+    # ЗАКРЫВАТЬ мутации, а не открывать их на все видимые аккаунты (инверсия правила 10).
+    # Prod с пустым списком поднимается read-only: старт НЕ падает, мутационный набор пуст,
+    # ensure_allowed отказывает (fail-closed), чтение/отчёты работают.
     s = Settings(**_prod_kwargs(google_ads_allowed_customer_ids=""))
-    assert s.google_ads_allowed_customer_ids == "all"
+    assert s.google_ads_allowed_customer_ids == ""
+    assert s.allow_all_visible is False and s.allowed_customer_ids == set()
+
+
+def test_prod_explicit_all_sentinel_still_valid():
+    # Сентинел «all» остаётся валидным ЯВНЫМ значением env — прежнее поведение возвращается
+    # одной строкой, но как решение владельца, а не тихий дефолт.
+    s = Settings(**_prod_kwargs(google_ads_allowed_customer_ids="all"))
     assert s.allow_all_visible is True
+
+
+def test_prod_budget_blast_radius_defaults_on():
+    # B1-4: в prod счётный кап повышений бюджета не остаётся выключенным молча (0 → 10);
+    # явное значение env валидатор не трогает.
+    assert Settings(**_prod_kwargs()).daily_budget_increase_max_ops == 10
+    assert (
+        Settings(**_prod_kwargs(daily_budget_increase_max_ops=3)).daily_budget_increase_max_ops == 3
+    )
+
+
+def test_dev_budget_blast_radius_stays_off():
+    # В dev/test кап по умолчанию выключен (не мешаем офлайн-тестам вертикали мутаций).
+    assert Settings(**_prod_kwargs(env="dev")).daily_budget_increase_max_ops == 0
 
 
 def test_prod_explicit_allowed_ids_narrow_not_all():

@@ -253,6 +253,7 @@ from core.context import (
     stash_context_on,
 )
 from core.errors import capture_exception
+from core.killswitch import GateRefusal  # BZ-1/B1-4: отказ гейта ДО claim — черновик НЕ жечь
 from core.limits import MONEY_MAX_UNITS  # единый источник денежного потолка (defense-in-depth)
 from core.logging import log, redact_text, setup_logging
 from core.observability import init_observability
@@ -3573,7 +3574,8 @@ async def _mutready_check(cid: str) -> dict:
     r["twofa"] = twofa.is_ready()
     # AD.1: мутации включены для аккаунта ⇔ он ВИДИМ и (сентинел «all» ИЛИ он в явном списке) —
     # зеркалим логику ensure_allowed БЕЗ её вызова (инвариант test_mutready: команда «на пропуск»
-    # ensure_allowed не зовёт). allow_all_visible — прод-дефолт (решение владельца 2026-07).
+    # ensure_allowed не зовёт). allow_all_visible — явный сентинел env (решение владельца 2026-07;
+    # с 2026-07-30/BZ-1 пустой env = fail-closed, тихого прод-дефолта «all» больше нет).
     r["all_visible"] = settings.allow_all_visible
     r["mutations_enabled"] = r["visible"] and (
         settings.allow_all_visible
@@ -6891,6 +6893,15 @@ async def _do_confirm(
     # A13: _safe_answer — на re-entry 2FA cq (waiting['cq']) уже отвечен в _twofa_begin; повторный
     # cq.answer БРОСИЛ бы TelegramBadRequest ДО try-блока execute и сжёг бы черновик без исполнения.
     await _safe_answer(cq, i18n.t("cb_working"))
+    # BZ-1/B1-4: ветка GateRefusal ниже ВОССТАНАВЛИВАЕТ карточку (текст + кнопки ✅/❌) — снимаем
+    # их до edit «выполняю…», пока они ещё в сообщении. Только getattr/try: html_text бросает на
+    # без-текстовых сообщениях, а дакт-фейки тестов не обязаны нести поля aiogram-Message.
+    _card = _cq_msg(cq)
+    try:
+        orig_html = _card.html_text if _card is not None else None
+    except Exception:  # noqa: BLE001 — сообщение без текста/недоступно: восстанавливать нечего
+        orig_html = None
+    orig_markup = getattr(_card, "reply_markup", None)
     await _safe_edit(cq, i18n.t("executing"))  # убирает кнопки
     # ВАЖНО (денежный путь): успешное исполнение и косметический edit_text РАЗДЕЛЕНЫ. execute_confirmed
     # уже применил мутацию и записал finalize → если бы пост-успешный edit_text (часто бросает
@@ -6906,6 +6917,31 @@ async def _do_confirm(
             result = await execute_confirmed_memory(STORE, cid)
         else:
             result = await execute_confirmed(STORE, cid)
+    except GateRefusal as e:
+        # BZ-1/B1-4: политика отказала ДО claim (рубильник/кап) — SDK не вызывался, черновик НЕ
+        # дефектен. Жечь его record_failure нельзя (одноразовое подтверждение сгорало бы за отказ,
+        # который завтра пройдёт сам): CAS-возврат confirmed → pending + восстановление карточки
+        # с кнопками. Повторный ✅ идёт штатной дорогой (2FA, владелец, TTL, L3 — заново).
+        log.warning("гейт отказал до claim cid=%s chat=%s: %s", cid, chat_id, e)
+        reopened = False
+        try:
+            reopened = await STORE.reopen(cid, reason=str(e))
+        except Exception:  # noqa: BLE001 — БД недоступна; юзеру всё равно сообщим
+            log.exception("reopen не записан cid=%s (БД недоступна?)", cid)
+        note = i18n.t(
+            "gate_refused", err=texts.esc(str(e))
+        )  # текст наш (killswitch/кап), esc — HTML
+        if reopened and orig_html:
+            _LAST_PENDING[chat_id] = cid  # текстовое «да» снова указывает на эту карточку
+            await _safe_edit(
+                cq,
+                f"{orig_html}\n\n{note}\n{i18n.t('gate_refused_retry')}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=orig_markup,
+            )
+        else:  # реопен не прошёл (TTL/гонка/БД) — честный текст без обещания живых кнопок
+            await _safe_edit(cq, note, parse_mode=ParseMode.HTML)
+        return False
     except Exception as e:  # доступ/резолв/SDK — мутация НЕ применена
         # Денежный путь: пишем в лог С traceback (RedactionFilter чистит секреты) — раньше молчал;
         # в audit_log кладём УЖЕ редактированный текст (str(e) от SDK/google.auth может нести креды).

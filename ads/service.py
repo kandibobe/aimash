@@ -461,8 +461,9 @@ async def _apply_confirmed(store, confirmation_id: str) -> dict:
     # Аккаунт исполнения — ИЗ ЧЕРНОВИКА (штампует доверенный вход бота при показе), а не хардкод:
     # хранимый customer_id теперь authoritative. Повторный ensure_allowed ЗДЕСЬ (fail-closed:
     # пустой/чужой штамп → PermissionError ДО build_client и ДО apply_* — черновик падает, не съев
-    # одноразовый claim и не тронув SDK). Штамп — любой ВИДИМЫЙ аккаунт (прод-дефолт allow_all_visible,
-    # решение владельца 2026-07); повторный ensure_allowed гарантирует, что аккаунт всё ещё в потолке.
+    # одноразовый claim и не тронув SDK). Штамп — любой ВИДИМЫЙ аккаунт (allow_all_visible — явный
+    # сентинел env, решение владельца 2026-07); повторный ensure_allowed гарантирует, что аккаунт
+    # всё ещё в потолке.
     customer_id = normalize_customer_id(p.customer_id)
     ensure_allowed(customer_id)
     # Гейт B (Волна 1.1): состояние перечитывается живьём и сверяется со снимком карточки — ЗДЕСЬ,
