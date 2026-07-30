@@ -44,6 +44,12 @@ CRITICAL = [
     "dumps/",
     "*.pem",
     "*.key",
+    # Рантайм-состояние агента в деплой-чекауте (замер на VPS 30.07.2026): Hermes работает с
+    # cwd=/opt/aimash и пишет туда `.hermes/plans/*.md` и `cache/context_summaries_pending.json` —
+    # сводки контекста, то есть переписку по клиентам. Untracked + не игнорируемые = та же мина,
+    # что backups/: публичный репозиторий, один `git add -A` на сервере, и они снаружи.
+    ".hermes/",
+    "cache/",
 ]
 
 
