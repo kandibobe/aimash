@@ -227,7 +227,7 @@ mcp_servers:
     timeout: 120           # bootstrap (init_db + обход MCC) занимает секунды
     connect_timeout: 30
     tools:
-      include:             # 15 READ (14 Google Ads + recall_client); PLAN/WRITE — шагом перед автономией
+      include:             # 23 READ (22 Google Ads + recall_client); PLAN/WRITE — шагом перед автономией
         - list_accounts
         - get_campaign_stats
         - get_adgroup_stats
@@ -240,6 +240,17 @@ mcp_servers:
         - get_account_audit
         - get_change_history
         - keyword_ideas
+        # Структура и настройки кампаний («было» для правок, не метрики): список кампаний, гео/языки,
+        # настройки по имени с группами и RSA, стратегия ставок, разбивки device/network/day,
+        # аудитории (доступные и прикреплённые) и остаток нашей суточной квоты операций.
+        - list_campaigns
+        - read_campaign_targeting
+        - read_campaign_config
+        - get_bidding_strategy
+        - get_report_breakdown
+        - list_audiences
+        - list_attached_audiences
+        - get_quota
         - recall_client
         # §8 MCC: сводка по всем дочерним + глубокий разбор. Список обязан совпадать с
         # READ_TOOL_FUNCS РОВНО (require_registered_surface сверяет на равенство, не на вхождение):

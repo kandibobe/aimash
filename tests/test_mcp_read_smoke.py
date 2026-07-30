@@ -406,3 +406,221 @@ def test_get_change_history_denies_foreign_account_offline(monkeypatch):
     with _read_allowed():  # разрешён DRAFT, спрашиваем ДРУГОЙ
         env = asyncio.run(tr.get_change_history(account="628-373-8601"))
     assert env["rows"] == [] and env["error_code"] == "forbidden_account"
+
+
+# ── §6.1: структура и настройки кампаний («было» для правок) ─────────────────────────
+@contextmanager
+def _fake_reader(monkeypatch, result):
+    """Общий каркас для обёрток без периода: клиент — заглушка, ридер отдаёт `result`.
+    Проверяем СВОЙ слой (сериализация + конверт), ридеры покрыты своими тестами в tests/test_read*."""
+
+    async def fake_client(customer_id=None):
+        return object()
+
+    async def fake_read(*args, **kwargs):
+        return result
+
+    monkeypatch.setattr(tr, "build_client_async", fake_client)
+    monkeypatch.setattr(tr, "run_ads_read_call", fake_read)
+    with _read_allowed():
+        yield
+
+
+def test_list_campaigns_copies_reader_fields_offline(monkeypatch):
+    """Строка = кампания, поля перечислены явно (`campaign_dict`): новое поле ридера наружу само не
+    поедет. Инструмент нужен ровно потому, что `get_campaign_stats` сегментирует по `segments.date`
+    и кампанию без показов не покажет вовсе — а правят как раз такие."""
+    reader_rows = [
+        {"id": 111, "name": "Camp A", "status": "ENABLED", "внутреннее": "не наружу"},
+        {"id": 222, "name": "Camp B", "status": "PAUSED"},
+    ]
+    with _fake_reader(monkeypatch, reader_rows):
+        env = asyncio.run(tr.list_campaigns(account=DRAFT_ACCOUNT_ID))
+    assert env["error"] is None and env["total_rows"] == 2
+    assert env["rows"][0] == {"id": "111", "name": "Camp A", "status": "ENABLED"}  # id → str
+    assert "внутреннее" not in env["rows"][0]
+
+
+def test_read_campaign_targeting_flags_all_regions_offline(monkeypatch):
+    """Пустой набор LOCATION у Google значит «все регионы», а не «не прочитали». Флаг ставит КОД —
+    иначе пустые rows читаются как «данных нет» и правка гео уходит с обратным смыслом."""
+    from ads.read import CampaignTargeting
+
+    with _fake_reader(monkeypatch, CampaignTargeting([], ["Крым"], [], [])):
+        env = asyncio.run(tr.read_campaign_targeting(account=DRAFT_ACCOUNT_ID, campaign_id="111"))
+    assert env["error"] is None
+    assert env["all_locations"] is True, (
+        "минус-регион не отменяет «показ во всех регионах» как базу"
+    )
+    assert env["all_languages"] is True
+    assert env["counts"] == {
+        "locations": 0,
+        "negative_locations": 1,
+        "proximity": 0,
+        "languages": 0,
+    }
+    assert env["rows"] == [{"kind": "negative_location", "value": "Крым"}]
+
+    with _fake_reader(monkeypatch, CampaignTargeting(["Киев"], [], [], ["ru"])):
+        env = asyncio.run(tr.read_campaign_targeting(account=DRAFT_ACCOUNT_ID, campaign_id="111"))
+    assert env["all_locations"] is False and env["all_languages"] is False
+
+
+def test_read_campaign_config_found_flag_and_money_pair_offline(monkeypatch):
+    """`found` отдаётся всегда: «нет такой кампании» ≠ «есть, но групп нет». Деньги — парой
+    (micros для черновика + округлённое для цитаты человеку)."""
+    from ads.read import AdGroupConfig, CampaignConfig, KeywordSeed
+
+    cfg = CampaignConfig(
+        id="111",
+        name="Camp A",
+        status="ENABLED",
+        channel_type="SEARCH",
+        budget_micros=500_000_000,
+        ad_groups=[
+            AdGroupConfig(
+                id="9",
+                name="AG",
+                cpc_bid_micros=1_250_000,
+                keywords=[KeywordSeed("ремонт", "PHRASE")],
+                headlines=["H1"],
+                descriptions=["D1"],
+                final_url="https://x.ua",
+                path1="p1",
+                path2=None,
+            )
+        ],
+    )
+    with _fake_reader(monkeypatch, cfg):
+        env = asyncio.run(tr.read_campaign_config(account=DRAFT_ACCOUNT_ID, campaign_name="Camp A"))
+    assert env["found"] is True and env["campaign"] == "Camp A"
+    assert env["budget_micros"] == 500_000_000 and env["budget"] == 500.0
+    assert env["rows"][0]["cpc_bid_micros"] == 1_250_000 and env["rows"][0]["cpc_bid"] == 1.25
+    assert env["rows"][0]["keywords"] == [{"text": "ремонт", "match_type": "PHRASE"}]
+    # «нет в ответе» ≠ «нет в кампании» — перечислено явно
+    assert "targeting" in env["not_included"] and "negatives" in env["not_included"]
+
+    with _fake_reader(monkeypatch, None):  # ридер не нашёл имя
+        env = asyncio.run(tr.read_campaign_config(account=DRAFT_ACCOUNT_ID, campaign_name="нет"))
+    assert env["error"] is None and env["found"] is False and env["rows"] == []
+
+
+def test_get_bidding_strategy_manual_flag_and_filter_offline(monkeypatch):
+    """`manual_bidding` считает КОД (при автостратегии SDK отвергнет правку ставки), а `campaign_id`
+    сужает УЖЕ прочитанные строки — ридер читает аккаунт целиком."""
+    from reports.queries import CampaignBidding
+
+    rows = [
+        CampaignBidding(
+            campaign_id="111", name="Manual", strategy_type="MANUAL_CPC", target_cpa=None
+        ),
+        CampaignBidding(
+            campaign_id="222", name="Auto", strategy_type="TARGET_CPA", target_cpa=12.345
+        ),
+    ]
+    with _fake_reader(monkeypatch, rows):
+        env = asyncio.run(tr.get_bidding_strategy(account=DRAFT_ACCOUNT_ID))
+    assert [r["manual_bidding"] for r in env["rows"]] == [True, False]
+    assert env["rows"][1]["target_cpa"] == 12.35  # округление — код
+
+    with _fake_reader(monkeypatch, rows):
+        env = asyncio.run(tr.get_bidding_strategy(account=DRAFT_ACCOUNT_ID, campaign_id="222"))
+    assert env["total_rows"] == 1 and env["rows"][0]["campaign"] == "Auto"
+
+
+def test_get_report_breakdown_rejects_unknown_dimension_offline(monkeypatch):
+    """Измерение выбирается по ЗАКРЫТОМУ словарю: имя от модели никогда не превращается в вызов.
+    Неизвестное — отказ со списком допустимых, а не молчаливый дефолт («спросил по устройствам,
+    получил по дням» неотличимо от правильного ответа)."""
+
+    async def boom(*args, **kwargs):
+        raise AssertionError("ридер не должен вызваться на неизвестном измерении")
+
+    monkeypatch.setattr(tr, "run_ads_read_call", boom)
+    with _read_allowed():
+        env = asyncio.run(tr.get_report_breakdown(account=DRAFT_ACCOUNT_ID, dimension="__evil__"))
+    assert env["rows"] == [] and env["error_code"] == "invalid_argument"
+    assert "device" in env["error"]  # список допустимых показан
+
+
+def test_get_report_breakdown_dispatches_to_reader_offline(monkeypatch):
+    """Обратная половина: допустимое измерение доезжает до СВОЕГО ридера (не до случайного)."""
+    from reports import queries as rq
+
+    called: dict = {}
+
+    async def fake_client(customer_id=None):
+        return object()
+
+    async def capture(fn, *args, **kwargs):
+        called["fn"] = fn
+        return _sample_breakdown()
+
+    async def fake_account_today(client, customer_id, *, label="acct_tz"):
+        return date(2020, 6, 15)
+
+    monkeypatch.setattr(tr, "build_client_async", fake_client)
+    monkeypatch.setattr(tr, "run_ads_read_call", capture)
+    monkeypatch.setattr(rtz, "account_today", fake_account_today)
+
+    with _read_allowed():
+        env = asyncio.run(
+            tr.get_report_breakdown(account=DRAFT_ACCOUNT_ID, dimension=" Device ", period_days=7)
+        )
+    assert called["fn"] is rq.fetch_by_device, "регистр/пробелы нормализуются, ридер — свой"
+    assert env["error"] is None and env["rows"][0]["metrics"]["cost"] == 5.0
+
+
+def test_audiences_wrappers_serialize_offline(monkeypatch):
+    from ads.read import Audience
+
+    auds = [Audience(resource_name="customers/1/userLists/5", name="Клиенты", size=1200)]
+    with _fake_reader(monkeypatch, auds):
+        env = asyncio.run(tr.list_audiences(account=DRAFT_ACCOUNT_ID))
+    assert env["rows"] == [
+        {"resource_name": "customers/1/userLists/5", "name": "Клиенты", "size": 1200}
+    ]
+
+    with _fake_reader(monkeypatch, auds):
+        env = asyncio.run(tr.list_attached_audiences(account=DRAFT_ACCOUNT_ID, campaign_id="111"))
+    assert env["error"] is None and env["total_rows"] == 1
+
+
+def test_get_quota_hides_other_accounts_offline(monkeypatch):
+    """И6: разрез квоты по аккаунтам наружу не идёт — это перечисление ЧУЖИХ клиентов через
+    служебную телеметрию. Остаток считает КОД, не модель вычитанием."""
+
+    async def fake_snapshot():
+        return {
+            "limit": 1000,
+            "used": 250,
+            "pct": 0.25,
+            "window_hours": 24,
+            "by_account": {DRAFT_ACCOUNT_ID: 40, "628-373-8601": 210},
+        }
+
+    monkeypatch.setattr(tr, "quota_snapshot", fake_snapshot)
+    with _read_allowed():
+        env = asyncio.run(tr.get_quota(account=DRAFT_ACCOUNT_ID))
+    assert env["error"] is None
+    assert env["rows"] == [{"account": DRAFT_ACCOUNT_ID, "ops": 40}]
+    assert env["remaining"] == 750 and env["limit"] == 1000 and env["used"] == 250
+    assert "628-373-8601" not in str(env), "чужой аккаунт утёк в конверт квоты (И6)"
+
+
+# ── период: одна дата из двух — отказ, а не молчаливый last_n_days ───────────────────
+def test_lonely_date_bound_is_refused_not_silently_widened(monkeypatch):
+    """Было fail-open В ЦИФРАХ: `date_from` без `date_to` не проходил `if date_from and date_to`, и
+    окно молча становилось «последние 30 дней». Менеджер спрашивал «с 1 июля», получал месяц и
+    цитировал как заказанное. Теперь — `invalid_argument`, до ридера дело не доходит."""
+
+    async def boom(*args, **kwargs):
+        raise AssertionError("ридер не должен вызваться при неполном периоде")
+
+    monkeypatch.setattr(tr, "run_ads_read_call", boom)
+    with _read_allowed():
+        env = asyncio.run(tr.get_campaign_stats(account=DRAFT_ACCOUNT_ID, date_from="2020-07-01"))
+    assert env["rows"] == [] and env["error_code"] == "invalid_argument"
+    with _read_allowed():
+        env = asyncio.run(tr.get_campaign_stats(account=DRAFT_ACCOUNT_ID, date_to="2020-07-31"))
+    assert env["error_code"] == "invalid_argument"

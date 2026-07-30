@@ -286,3 +286,140 @@ def audit_payload(a) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         "google_recommendations": a.google_recommendations,
     }
     return rows, extra
+
+
+# ── §6.1: структура и настройки кампаний («было» для правок, не метрики) ───────────
+
+
+def campaign_dict(c: dict[str, Any]) -> dict[str, Any]:
+    """ads.read.list_campaigns отдаёт уже dict — копируем ПОЛЯМИ, а не ссылкой.
+
+    Ридер возвращает свой изменяемый список; отдать его наружу как есть значит пустить структуру
+    ридера в конверт целиком и молча начать отдавать любое поле, которое там однажды появится.
+    Явное перечисление — контракт инструмента: он не меняется от правки ридера, а ломается тестом."""
+    return {"id": str(c["id"]), "name": c.get("name", ""), "status": c.get("status", "")}
+
+
+def targeting_payload(t) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """ads.read.CampaignTargeting → (строки-критерии, extra).
+
+    Каждый критерий — отдельная строка (`kind` + `value`), а не четыре списка: `envelope.ok`
+    ПАГИНИРУЕТ первый аргумент (см. `mcc_summary_payload`), и цельный dict туда отдать нельзя.
+
+    `all_locations`/`all_languages` считает КОД, и это не украшение. У Google пустой набор
+    LOCATION/PROXIMITY значит «показ во ВСЕХ регионах», а не «таргетинг не прочитан», — пустые
+    rows модель прочитала бы как «данных нет» и на этом основании предложила бы гео-правку с
+    обратным смыслом. Флаг делает разницу явной.
+
+    Исключения (`negative_location`) в счёт `all_locations` НЕ идут: «все регионы, кроме N» — это
+    по-прежнему «все регионы» как база показа."""
+    rows: list[dict[str, Any]] = [
+        *({"kind": "location", "value": v} for v in t.locations),
+        *({"kind": "negative_location", "value": v} for v in t.negative_locations),
+        *({"kind": "proximity", "value": v} for v in t.proximity),
+        *({"kind": "language", "value": v} for v in t.languages),
+    ]
+    extra = {
+        "counts": {
+            "locations": len(t.locations),
+            "negative_locations": len(t.negative_locations),
+            "proximity": len(t.proximity),
+            "languages": len(t.languages),
+        },
+        "all_locations": not t.locations and not t.proximity,
+        "all_languages": not t.languages,
+    }
+    return rows, extra
+
+
+def campaign_config_payload(cfg) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """ads.read.CampaignConfig | None → (строки-группы, extra-кампания).
+
+    `found` отдаётся ВСЕГДА: «кампания с таким именем не найдена» и «найдена, но групп нет» — разные
+    факты, и различает их флаг, а не пустота rows (та же логика, что у `_mcc_extra`).
+
+    Деньги отдаём ПАРОЙ (`*_micros` + округлённое): micros — то, из чего собирается «было» черновика
+    (правило 4: округление по биллинг-единице делает код мутации, а не читатель), округлённое — то,
+    что агент вправе процитировать человеку."""
+    if cfg is None:
+        return [], {"found": False}
+    rows = [
+        {
+            "id": g.id,
+            "name": g.name,
+            "cpc_bid_micros": int(g.cpc_bid_micros),
+            "cpc_bid": round(int(g.cpc_bid_micros) / 1_000_000, 2),
+            "keywords": [{"text": k.text, "match_type": k.match_type} for k in g.keywords],
+            "headlines": list(g.headlines),
+            "descriptions": list(g.descriptions),
+            "final_url": g.final_url,
+            "path1": g.path1,
+            "path2": g.path2,
+        }
+        for g in cfg.ad_groups
+    ]
+    extra = {
+        "found": True,
+        "campaign_id": cfg.id,
+        "campaign": cfg.name,
+        "status": cfg.status,
+        "channel_type": cfg.channel_type,
+        "budget_micros": int(cfg.budget_micros),
+        "budget": round(int(cfg.budget_micros) / 1_000_000, 2),
+        # Что в конфиг НЕ входит — говорим прямо: ридер собирает клонируемую часть, и гео/минус-слова/
+        # стратегия/аудитории читаются другими инструментами. Без этой строки «нет в ответе» читается
+        # как «нет в кампании» — на чужих деньгах это ошибка, а не неточность.
+        "not_included": ["targeting", "negatives", "bidding_strategy", "audiences"],
+    }
+    return rows, extra
+
+
+def bidding_dict(b) -> dict[str, Any]:
+    """reports.queries.CampaignBidding → dict. `target_cpa` ридер уже отдаёт в валюте аккаунта.
+
+    `manual_bidding` считает КОД: при автостратегии SDK отвергает мутацию ставки
+    (BID_TYPE_AND_BIDDING_STRATEGY_MISMATCH, см. `ads/mutations.py:2103`). Флаг отвечает на «имеет ли
+    смысл предлагать правку CPC» ДО того, как черновик создан и человека спросили.
+
+    Множество ручных стратегий берём из `audit.bidscape`, а не литералом здесь: два независимых
+    списка дали бы инструменту и аудиту разные ответы на «можно ли тут менять ставку»."""
+    from audit.bidscape import MANUAL_BID_STRATEGIES
+
+    return {
+        "campaign_id": b.campaign_id,
+        "campaign": b.name,
+        "strategy_type": b.strategy_type,
+        "target_cpa": round(float(b.target_cpa), 2) if b.target_cpa is not None else None,
+        "manual_bidding": (b.strategy_type or "").upper() in MANUAL_BID_STRATEGIES,
+    }
+
+
+def audience_dict(a) -> dict[str, Any]:
+    """ads.read.Audience → dict. `size` — size_for_display (0 = закрытый список/размер неизвестен)."""
+    return {"resource_name": a.resource_name, "name": a.name, "size": int(a.size)}
+
+
+def quota_payload(
+    snap: dict[str, Any], *, account: str
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """core.quota.snapshot() → (строка запрошенного аккаунта, extra-глобальные счётчики).
+
+    `by_account` целиком наружу НЕ отдаём: квота одна на токен разработчика, но её разрез по
+    аккаунтам — это перечисление ЧУЖИХ аккаунтов и их активности, то есть кросс-клиентская утечка
+    мимо И6 через служебную телеметрию. Инструмент отдаёт расход запрошенного (и уже прошедшего
+    замок чтения) аккаунта плюс общие лимит/расход — их и так видит любой владелец токена.
+
+    `remaining` считает КОД (лимит − расход, не ниже нуля): модель не должна выводить остаток
+    вычитанием сама."""
+    lim = int(snap.get("limit", 0) or 0)
+    used = int(snap.get("used", 0) or 0)
+    per = snap.get("by_account") or {}
+    rows = [{"account": str(account), "ops": int(per.get(str(account), 0) or 0)}]
+    extra = {
+        "limit": lim,
+        "used": used,
+        "remaining": max(0, lim - used),
+        "pct": round(float(snap.get("pct", 0.0) or 0.0), 4),
+        "window_hours": int(snap.get("window_hours", 0) or 0),
+    }
+    return rows, extra
