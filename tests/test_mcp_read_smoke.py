@@ -612,11 +612,17 @@ def test_get_quota_hides_other_accounts_offline(monkeypatch):
 def test_lonely_date_bound_is_refused_not_silently_widened(monkeypatch):
     """Было fail-open В ЦИФРАХ: `date_from` без `date_to` не проходил `if date_from and date_to`, и
     окно молча становилось «последние 30 дней». Менеджер спрашивал «с 1 июля», получал месяц и
-    цитировал как заказанное. Теперь — `invalid_argument`, до ридера дело не доходит."""
+    цитировал как заказанное. Теперь — `invalid_argument`, до ридера дело не доходит.
+
+    `build_client_async` подменён тем же взрывом НАМЕРЕННО, и это не паранойя: пока период считался
+    после клиента, тест был зелёным лишь там, где OAuth рабочий, — в чистом дереве без токенов
+    `RefreshError` опережал разбор и конверт приезжал с `internal`. Требуем, чтобы неполный период
+    не стоил ни одного сетевого вызова: тогда код ответа не зависит от окружения."""
 
     async def boom(*args, **kwargs):
-        raise AssertionError("ридер не должен вызваться при неполном периоде")
+        raise AssertionError("при неполном периоде нельзя трогать ни клиент, ни ридер")
 
+    monkeypatch.setattr(tr, "build_client_async", boom)
     monkeypatch.setattr(tr, "run_ads_read_call", boom)
     with _read_allowed():
         env = asyncio.run(tr.get_campaign_stats(account=DRAFT_ACCOUNT_ID, date_from="2020-07-01"))
@@ -624,3 +630,48 @@ def test_lonely_date_bound_is_refused_not_silently_widened(monkeypatch):
     with _read_allowed():
         env = asyncio.run(tr.get_campaign_stats(account=DRAFT_ACCOUNT_ID, date_to="2020-07-31"))
     assert env["error_code"] == "invalid_argument"
+
+
+def test_args_are_validated_before_the_network():
+    """Разбор аргументов обязан идти ДО клиента — во ВСЕХ инструментах, не только в починенном.
+
+    Разбором в теле после `build_client_async` порядок кодов ошибок становится случайным: тот же
+    неполный период отдаёт `invalid_argument` на машине с рабочим OAuth и `internal` там, где токен
+    не обновился. Модель по второму конверту чинит не свой вызов. Проверяем разбором исходника, а не
+    вызовами: инструмент без обязательного `account`-аргумента вызвать нечем, а порядок строк —
+    ровно то свойство, которое поедет при следующей правке.
+    """
+    import ast
+    import inspect
+
+    # Множество считаем по СИГНАТУРЕ, а не по списку имён: новый инструмент с `date_from` попадает
+    # под гард сам. Требуем ПРЯМОГО вызова `_period` в теле — спрятать разбор в помощник, который
+    # зовётся после клиента, ровно так и получилось в первый раз (`_account_period` считал период
+    # внутри себя, и порядок «клиент → период» был не виден ни в одном теле).
+    with_dates = {
+        n for n, f in tr.READ_TOOL_FUNCS.items() if "date_from" in inspect.signature(f).parameters
+    }
+    assert len(with_dates) >= 10, f"инструментов с периодом стало {len(with_dates)} — гард ослеп"
+
+    src = Path(tr.__file__).read_text(encoding="utf-8")
+    bad: dict[str, str] = {}
+    for node in ast.parse(src).body:
+        if (
+            not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+            or node.name not in with_dates
+        ):
+            continue
+        first: dict[str, int] = {}
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name):
+                first.setdefault(sub.func.id, sub.lineno)
+        if "_period" not in first:
+            bad[node.name] = "`_period` не вызван в теле — разбор спрятан в помощнике"
+        elif first["_period"] > first.get("build_client_async", 1 << 30):
+            bad[node.name] = (
+                f"строка _period {first['_period']} > клиента {first['build_client_async']}"
+            )
+    assert not bad, (
+        "период разбирается не раньше сети — на неполном периоде наружу уедет код чужой аварии "
+        f"вместо invalid_argument: {bad}"
+    )

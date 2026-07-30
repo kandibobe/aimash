@@ -3,7 +3,8 @@
 Каждая обёртка:
   1) проходит замок ЧТЕНИЯ на ГРАНИЦЕ слоя — `_guarded` требует `account=` и зовёт
      `ensure_read_allowed`/`ensure_manager_allowed` ДО тела инструмента (см. ниже);
-  2) строит клиент `build_client_async(account)` и период из `date_from/date_to|period_days`;
+  2) разбирает период из `date_from/date_to|period_days` — ДО клиента, потому что разбор аргументов
+     не имеет права зависеть от сети, — и только потом строит `build_client_async(account)`;
   3) зовёт ридер через `core.resilience.run_ads_read_call` (таймаут/ретрай/квота/to_thread) — как
      это уже делают `_do_read`/`gather_audit`;
   4) сериализует результат (`mcp_server.serialize`) в единый конверт (`mcp_server.envelope.ok`);
@@ -146,15 +147,21 @@ def _period(date_from: str | None, date_to: str | None, period_days: int | None)
     return pperiod.last_n_days(max(1, int(period_days or 30)))
 
 
-async def _account_period(client, account: str, date_from, date_to, period_days):
+async def _account_period(client, account: str, window):
     """Окно, пере-якоренное на «сегодня» АККАУНТА (§8, `reports.tz.account_period`).
 
     Без этого относительное окно строилось от даты ХОСТА: для аккаунта в чужой TZ (UG при вечернем
     прогоне из Европы — `DEFAULT_GEO_COUNTRY_CODE=UG`) последний полный день выпадал из окна, и цифры
     MCP расходились и с интерфейсом Google Ads, и с bot-путём на тех же данных. custom-диапазон (обе
     ISO-даты названы менеджером явно) `account_period` НЕ трогает; относительный (last_n) — пере-
-    якоряет. Best-effort: TZ не прочитана → дата хоста (деградирует как раньше, отчёт не роняем)."""
-    return await account_period(client, str(account), _period(date_from, date_to, period_days))
+    якоряет. Best-effort: TZ не прочитана → дата хоста (деградирует как раньше, отчёт не роняем).
+
+    Готовое `window` аргументом, а НЕ сырые даты: разбор аргументов не имеет права зависеть от сети.
+    Пока `_period` вызывался отсюда, порядок в теле был «клиент → период», и на неполном периоде
+    наружу уезжал код от того, что сломалось РАНЬШЕ, — при недоступном OAuth `internal` вместо
+    `invalid_argument`. Модель по такому конверту чинит не свой вызов, а несуществующую аварию.
+    Порядок держит гард `tests/test_mcp_read_smoke.py::test_args_are_validated_before_the_network`."""
+    return await account_period(client, str(account), window)
 
 
 def _default_manager() -> str:
@@ -199,8 +206,9 @@ async def get_campaign_stats(
     считает КОД). campaign_id сужает до одной кампании. Замок: ensure_read_allowed."""
 
     async def _work() -> dict[str, Any]:
+        window = _period(date_from, date_to, period_days)
         client = await build_client_async(account)
-        period = await _account_period(client, account, date_from, date_to, period_days)
+        period = await _account_period(client, account, window)
         bd = await run_ads_read_call(
             fetch_by_campaign,
             client,
@@ -228,8 +236,9 @@ async def get_adgroup_stats(
     ensure_read_allowed."""
 
     async def _work() -> dict[str, Any]:
+        window = _period(date_from, date_to, period_days)
         client = await build_client_async(account)
-        period = await _account_period(client, account, date_from, date_to, period_days)
+        period = await _account_period(client, account, window)
         bd = await run_ads_read_call(
             fetch_by_ad_group,
             client,
@@ -257,8 +266,9 @@ async def get_keywords(
     Замок: ensure_read_allowed."""
 
     async def _work() -> dict[str, Any]:
+        window = _period(date_from, date_to, period_days)
         client = await build_client_async(account)
-        period = await _account_period(client, account, date_from, date_to, period_days)
+        period = await _account_period(client, account, window)
         bd = await run_ads_read_call(
             fetch_by_keyword,
             client,
@@ -286,8 +296,9 @@ async def get_ads(
     ensure_read_allowed."""
 
     async def _work() -> dict[str, Any]:
+        window = _period(date_from, date_to, period_days)
         client = await build_client_async(account)
-        period = await _account_period(client, account, date_from, date_to, period_days)
+        period = await _account_period(client, account, window)
         bd = await run_ads_read_call(
             fetch_by_ad,
             client,
@@ -316,8 +327,9 @@ async def get_search_terms(
     reader_limit — сколько строк тянуть из GAQL (топ по расходу). Замок: ensure_read_allowed."""
 
     async def _work() -> dict[str, Any]:
+        window = _period(date_from, date_to, period_days)
         client = await build_client_async(account)
-        period = await _account_period(client, account, date_from, date_to, period_days)
+        period = await _account_period(client, account, window)
         rows = await run_ads_read_call(
             fetch_search_terms,
             client,
@@ -403,8 +415,9 @@ async def get_auction_insights(
     ensure_read_allowed."""
 
     async def _work() -> dict[str, Any]:
+        window = _period(date_from, date_to, period_days)
         client = await build_client_async(account)
-        period = await _account_period(client, account, date_from, date_to, period_days)
+        period = await _account_period(client, account, window)
         rows = await run_ads_read_call(
             fetch_impression_share,
             client,
@@ -432,8 +445,9 @@ async def get_account_audit(
     сам асинхронен и внутри проходит замки ЧТЕНИЯ на под-фетчах. rows = находки, extra = сводка."""
 
     async def _work() -> dict[str, Any]:
+        window = _period(date_from, date_to, period_days)
         client = await build_client_async(account)
-        period = await _account_period(client, account, date_from, date_to, period_days)
+        period = await _account_period(client, account, window)
         result = await gather_audit(client, str(account), period, target_cpa=target_cpa)
         rows, extra = audit_payload(result)
         return ok(rows, offset=offset, limit=limit, extra=extra)
@@ -677,8 +691,9 @@ async def get_report_breakdown(
                 f"неизвестное измерение {dimension!r}; допустимы: "
                 f"{', '.join(sorted(_BREAKDOWN_READERS))}"
             )
+        window = _period(date_from, date_to, period_days)
         client = await build_client_async(account)
-        period = await _account_period(client, account, date_from, date_to, period_days)
+        period = await _account_period(client, account, window)
         bd = await run_ads_read_call(
             reader,
             client,
@@ -835,11 +850,11 @@ async def get_mcc_summary(
     async def _work() -> dict[str, Any]:
         from reports.mcc import build_mcc_summary_async
 
-        client = await build_client_async(mid)
         # Базовое окно — от даты хоста, БЕЗ `_account_period`: пере-якорять его на таймзону
         # менеджера незачем (у менеджера своих метрик нет), а каждый дочерний всё равно получает
         # своё окно через `period_for`. База работает фолбэком там, где TZ ребёнка не прочиталась.
         period = _period(date_from, date_to, period_days)
+        client = await build_client_async(mid)
         summary = await build_mcc_summary_async(
             client,
             mid,
@@ -874,8 +889,8 @@ async def get_mcc_deep(
     async def _work() -> dict[str, Any]:
         from reports.mcc import build_mcc_deep_async
 
-        client = await build_client_async(mid)
         period = _period(date_from, date_to, period_days)
+        client = await build_client_async(mid)
         # Общий таймаут, как на bot-пути (`_run_mcc_deep_export`): ~70 запросов под семафором
         # Google Ads легко переживают потолок одного вызова, а MCP-клиент ждёт ответа. Без него
         # зависший обход держит вызов бесконечно; с ним наружу уйдёт честный `timeout`-конверт.
