@@ -2059,6 +2059,8 @@ def fmt_cc_settings_summary(s: dict, lang: str | None = None) -> str:
         return tag_def if key in bd else ""
 
     geo = ", ".join(s.get("geo_locations") or []) or "—"
+    prox = s.get("geo_proximity") or ""
+    geo_line = f"{esc(geo)}" + (f" · Radius: {esc(prox)} km" if prox else "")
     langs = ", ".join(s.get("languages") or []) or "—"
     cur = (s.get("currency") or "").strip()
     cur_s = f" {esc(cur)}" if cur else ""
@@ -2100,7 +2102,7 @@ def fmt_cc_settings_summary(s: dict, lang: str | None = None) -> str:
         return (
             "🆕 <b>Campaign (draft)</b>\n"
             f"Name: {name}\n"
-            f"Geo: {esc(geo)} · Language: {esc(langs)}\n"
+            f"Geo: {geo_line} · Language: {esc(langs)}\n"
             f"Type: Search · Daily budget: {budget}\n"
             f"Bidding: {esc(strat)}{mk('bidding_strategy')} · Payment: {esc(payment)}\n"
             f"{cpc_label}: {cpc_prefix}{cpc}\n"
@@ -2118,7 +2120,7 @@ def fmt_cc_settings_summary(s: dict, lang: str | None = None) -> str:
     return (
         "🆕 <b>Кампания (черновик)</b>\n"
         f"Название: {name}\n"
-        f"ГЕО: {esc(geo)} · Язык: {esc(langs)}\n"
+        f"ГЕО: {geo_line} · Язык: {esc(langs)}\n"
         f"Тип: Search · Бюджет/день: {budget}\n"
         f"Стратегия: {esc(strat)}{mk('bidding_strategy')} · Оплата: {esc(payment)}\n"
         f"{cpc_label}: {cpc_prefix}{cpc}\n"

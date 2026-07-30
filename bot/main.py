@@ -5318,6 +5318,10 @@ async def _cc_present_stage4(target: Message, chat_id: int, session_id: str, sta
     await state.set_state(CreateCampaignWizard.images)
     await state.update_data(cc_session=session_id)
     await target.answer(
+        _cc_crumb(4) + i18n.t("cc_images_notice"),
+        parse_mode=ParseMode.HTML,
+    )
+    await target.answer(
         _cc_crumb(4) + i18n.t("cc_images_prompt"),
         reply_markup=cc_skip_kb(can_forward=_cc_max_step(snap) > 4),
         parse_mode=ParseMode.HTML,

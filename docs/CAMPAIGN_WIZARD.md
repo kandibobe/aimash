@@ -183,8 +183,8 @@ scope `drive.file` / `spreadsheets.readonly`.
   `fmt_cc_settings_summary`; без данных в описании применяются дефолты (24/7, старт сегодня).
 - **Минус-слова — вне визарда**: при генерации показываются как ADVISORY-подсказка
   (`suggest_negative_keywords`), но НЕ добавляются; добавление — отдельной командой агента за гейтом.
-- **Гео-радиус вне UI**: `extract_campaign_settings` поддерживает города/страны; радиус по
-  координатам (proximity) в визарде не собирается.
+- **Гео-радиус**: реализован в `extract_campaign_settings` (поле `geo_proximity`), отображается в
+  сводке Этапа 1, передаётся в `assemble_settings`. Координатный радиус (proximity) в UI не собирается.
 - **§19.7.1 Location / Affiliate** — config-gated заглушки (нужны Business Profile / реестр),
   пропускаются чисто. **Lead form реализован** (`ads/extensions.py:328` `_add_lead_form_via_sdk`).
   App-ассет вне объёма (UAC исключён).
