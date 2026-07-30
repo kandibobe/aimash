@@ -170,7 +170,15 @@ async def propose_budget_change(
     account — id аккаунта (10 цифр). campaign — точное имя кампании.
     mode — increase_by_percent | increase_by_amount | decrease_by_percent | decrease_by_amount | set_to.
     value — всегда положительное число. currency — код валюты (USD/AUD/…) только если явно названа."""
-    return await _propose("update_budget", UpdateBudget, account=account, campaign=campaign, mode=mode, value=value, currency=currency)
+    return await _propose(
+        "update_budget",
+        UpdateBudget,
+        account=account,
+        campaign=campaign,
+        mode=mode,
+        value=value,
+        currency=currency,
+    )
 
 
 async def propose_bid_change(
@@ -184,7 +192,15 @@ async def propose_bid_change(
     MANUAL_CPC/ECPC. Денежная операция: только по прямой команде человека.
 
     mode — increase_by_percent | decrease_by_percent | set_to."""
-    return await _propose("update_bid", UpdateBid, account=account, campaign=campaign, mode=mode, value=value, currency=currency)
+    return await _propose(
+        "update_bid",
+        UpdateBid,
+        account=account,
+        campaign=campaign,
+        mode=mode,
+        value=value,
+        currency=currency,
+    )
 
 
 async def propose_keyword_bid_change(
@@ -198,7 +214,18 @@ async def propose_keyword_bid_change(
     currency: str | None = None,
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК изменения ставки CPC на уровне КЛЮЧА. Денежная операция."""
-    return await _propose("update_keyword_bid", UpdateKeywordBid, account=account, campaign=campaign, keyword=keyword, mode=mode, value=value, ad_group=ad_group, match_type=match_type, currency=currency)
+    return await _propose(
+        "update_keyword_bid",
+        UpdateKeywordBid,
+        account=account,
+        campaign=campaign,
+        keyword=keyword,
+        mode=mode,
+        value=value,
+        ad_group=ad_group,
+        match_type=match_type,
+        currency=currency,
+    )
 
 
 async def propose_set_bidding_strategy(
@@ -212,7 +239,16 @@ async def propose_set_bidding_strategy(
     """Создать ЧЕРНОВИК смены стратегии назначения ставок. Денежная операция.
 
     strategy — manual_cpc | maximize_conversions | maximize_conversion_value | target_spend."""
-    return await _propose("set_bidding_strategy", SetBiddingStrategy, account=account, campaign=campaign, strategy=strategy, target_cpa=target_cpa, target_roas=target_roas, enhanced_cpc=enhanced_cpc)
+    return await _propose(
+        "set_bidding_strategy",
+        SetBiddingStrategy,
+        account=account,
+        campaign=campaign,
+        strategy=strategy,
+        target_cpa=target_cpa,
+        target_roas=target_roas,
+        enhanced_cpc=enhanced_cpc,
+    )
 
 
 # ── Ключевые слова ──
@@ -228,7 +264,15 @@ async def propose_add_keywords(
     """Создать ЧЕРНОВИК добавления ключевых слов в кампанию. >20 ключей → .xlsx-вложение.
 
     match_type — broad | phrase | exact."""
-    return await _propose("add_keywords", AddKeywords, account=account, campaign=campaign, keywords=keywords, match_type=match_type, ad_group=ad_group)
+    return await _propose(
+        "add_keywords",
+        AddKeywords,
+        account=account,
+        campaign=campaign,
+        keywords=keywords,
+        match_type=match_type,
+        ad_group=ad_group,
+    )
 
 
 async def propose_remove_keywords(
@@ -238,7 +282,14 @@ async def propose_remove_keywords(
     match_type: str,
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК удаления ключевых слов из кампании."""
-    return await _propose("remove_keywords", RemoveKeywords, account=account, campaign=campaign, keywords=keywords, match_type=match_type)
+    return await _propose(
+        "remove_keywords",
+        RemoveKeywords,
+        account=account,
+        campaign=campaign,
+        keywords=keywords,
+        match_type=match_type,
+    )
 
 
 # ── Минус-слова ──
@@ -252,7 +303,15 @@ async def propose_add_negative_keywords(
     ad_group: str | None = None,
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК добавления минус-слов на уровень кампании (или группы через ad_group)."""
-    return await _propose("add_negative_keywords", AddNegativeKeywords, account=account, campaign=campaign, keywords=keywords, match_type=match_type, ad_group=ad_group)
+    return await _propose(
+        "add_negative_keywords",
+        AddNegativeKeywords,
+        account=account,
+        campaign=campaign,
+        keywords=keywords,
+        match_type=match_type,
+        ad_group=ad_group,
+    )
 
 
 async def propose_remove_negative_keywords(
@@ -262,7 +321,14 @@ async def propose_remove_negative_keywords(
     match_type: str = "broad",
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК снятия минус-слов кампании."""
-    return await _propose("remove_negative_keywords", RemoveNegativeKeywords, account=account, campaign=campaign, keywords=keywords, match_type=match_type)
+    return await _propose(
+        "remove_negative_keywords",
+        RemoveNegativeKeywords,
+        account=account,
+        campaign=campaign,
+        keywords=keywords,
+        match_type=match_type,
+    )
 
 
 async def propose_add_negatives_to_shared_set(
@@ -272,7 +338,14 @@ async def propose_add_negatives_to_shared_set(
     match_type: str = "broad",
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК добавления минус-слов в ОБЩИЙ СПИСОК аккаунта. Список будет создан если нет."""
-    return await _propose("add_negatives_to_shared_set", AddNegativesToSharedSet, account=account, shared_set=shared_set, keywords=keywords, match_type=match_type)
+    return await _propose(
+        "add_negatives_to_shared_set",
+        AddNegativesToSharedSet,
+        account=account,
+        shared_set=shared_set,
+        keywords=keywords,
+        match_type=match_type,
+    )
 
 
 async def propose_attach_shared_set(
@@ -281,7 +354,13 @@ async def propose_attach_shared_set(
     shared_set: str,
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК привязки существующего shared-списка минус-слов к кампании."""
-    return await _propose("attach_shared_set", AttachSharedSet, account=account, campaign=campaign, shared_set=shared_set)
+    return await _propose(
+        "attach_shared_set",
+        AttachSharedSet,
+        account=account,
+        campaign=campaign,
+        shared_set=shared_set,
+    )
 
 
 # ── Кампании ──
@@ -309,7 +388,9 @@ async def propose_update_campaign(
     new_name: str,
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК переименования кампании."""
-    return await _propose("update_campaign", UpdateCampaign, account=account, campaign=campaign, new_name=new_name)
+    return await _propose(
+        "update_campaign", UpdateCampaign, account=account, campaign=campaign, new_name=new_name
+    )
 
 
 async def propose_remove_campaign(
@@ -326,7 +407,13 @@ async def propose_set_campaign_network(
     search_partners: bool,
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК вкл/выкл поисковых партнёров на кампании."""
-    return await _propose("set_campaign_network", SetCampaignNetwork, account=account, campaign=campaign, search_partners=search_partners)
+    return await _propose(
+        "set_campaign_network",
+        SetCampaignNetwork,
+        account=account,
+        campaign=campaign,
+        search_partners=search_partners,
+    )
 
 
 async def propose_set_campaign_display_network(
@@ -335,7 +422,13 @@ async def propose_set_campaign_display_network(
     display_network: bool,
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК вкл/выкл КМС (контекстно-медийной сети) на поисковой кампании."""
-    return await _propose("set_campaign_display_network", SetCampaignDisplayNetwork, account=account, campaign=campaign, display_network=display_network)
+    return await _propose(
+        "set_campaign_display_network",
+        SetCampaignDisplayNetwork,
+        account=account,
+        campaign=campaign,
+        display_network=display_network,
+    )
 
 
 async def propose_set_campaign_geo_target_type(
@@ -346,7 +439,13 @@ async def propose_set_campaign_geo_target_type(
     """Создать ЧЕРНОВИК изменения типа гео-таргетинга кампании.
 
     geo_target_type — PRESENCE (только физически в регионе) | PRESENCE_OR_INTEREST (Google-дефолт)."""
-    return await _propose("set_campaign_geo_target_type", SetCampaignGeoTargetType, account=account, campaign=campaign, geo_target_type=geo_target_type)
+    return await _propose(
+        "set_campaign_geo_target_type",
+        SetCampaignGeoTargetType,
+        account=account,
+        campaign=campaign,
+        geo_target_type=geo_target_type,
+    )
 
 
 # ── Группы объявлений ──
@@ -358,7 +457,9 @@ async def propose_pause_ad_group(
     ad_group: str,
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК паузы группы объявлений."""
-    return await _propose("pause_ad_group", PauseAdGroup, account=account, campaign=campaign, ad_group=ad_group)
+    return await _propose(
+        "pause_ad_group", PauseAdGroup, account=account, campaign=campaign, ad_group=ad_group
+    )
 
 
 async def propose_resume_ad_group(
@@ -367,7 +468,9 @@ async def propose_resume_ad_group(
     ad_group: str,
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК возобновления группы объявлений."""
-    return await _propose("resume_ad_group", ResumeAdGroup, account=account, campaign=campaign, ad_group=ad_group)
+    return await _propose(
+        "resume_ad_group", ResumeAdGroup, account=account, campaign=campaign, ad_group=ad_group
+    )
 
 
 async def propose_remove_ad_group(
@@ -376,7 +479,9 @@ async def propose_remove_ad_group(
     ad_group: str,
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК удаления группы объявлений (НЕОБРАТИМО)."""
-    return await _propose("remove_ad_group", RemoveAdGroup, account=account, campaign=campaign, ad_group=ad_group)
+    return await _propose(
+        "remove_ad_group", RemoveAdGroup, account=account, campaign=campaign, ad_group=ad_group
+    )
 
 
 # ── Объявления ──
@@ -389,7 +494,9 @@ async def propose_pause_ad(
     ad: str,
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК паузы отдельного объявления. ad — id или фрагмент заголовка."""
-    return await _propose("pause_ad", PauseAd, account=account, campaign=campaign, ad_group=ad_group, ad=ad)
+    return await _propose(
+        "pause_ad", PauseAd, account=account, campaign=campaign, ad_group=ad_group, ad=ad
+    )
 
 
 async def propose_resume_ad(
@@ -399,7 +506,9 @@ async def propose_resume_ad(
     ad: str,
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК возобновления отдельного объявления."""
-    return await _propose("resume_ad", ResumeAd, account=account, campaign=campaign, ad_group=ad_group, ad=ad)
+    return await _propose(
+        "resume_ad", ResumeAd, account=account, campaign=campaign, ad_group=ad_group, ad=ad
+    )
 
 
 async def propose_remove_ad(
@@ -409,7 +518,9 @@ async def propose_remove_ad(
     ad: str,
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК удаления объявления (НЕОБРАТИМО)."""
-    return await _propose("remove_ad", RemoveAd, account=account, campaign=campaign, ad_group=ad_group, ad=ad)
+    return await _propose(
+        "remove_ad", RemoveAd, account=account, campaign=campaign, ad_group=ad_group, ad=ad
+    )
 
 
 # ── ГЕО-таргетинг ──
@@ -427,7 +538,17 @@ async def propose_set_geo_proximity(
     """Создать ЧЕРНОВИК радиус-таргетинга кампании вокруг города.
 
     radius_km — км (1–2000). city_name — название города. country_code — ISO alpha-2 (опц.)."""
-    return await _propose("set_geo_proximity", SetGeoProximity, account=account, campaign=campaign, radius_km=radius_km, city_name=city_name, country_code=country_code, street_address=street_address, postal_code=postal_code)
+    return await _propose(
+        "set_geo_proximity",
+        SetGeoProximity,
+        account=account,
+        campaign=campaign,
+        radius_km=radius_km,
+        city_name=city_name,
+        country_code=country_code,
+        street_address=street_address,
+        postal_code=postal_code,
+    )
 
 
 async def propose_set_geo_location(
@@ -440,7 +561,15 @@ async def propose_set_geo_location(
     """Создать ЧЕРНОВИК гео-таргетинга кампании по стране/городу/региону.
 
     locations — названия локаций (напр. ['Германия', 'Берлин'])."""
-    return await _propose("set_geo_location", SetGeoLocation, account=account, campaign=campaign, locations=locations, country_code=country_code, locale=locale)
+    return await _propose(
+        "set_geo_location",
+        SetGeoLocation,
+        account=account,
+        campaign=campaign,
+        locations=locations,
+        country_code=country_code,
+        locale=locale,
+    )
 
 
 # ── Аудитории ──
@@ -452,7 +581,13 @@ async def propose_attach_audience(
     audience_resource_names: list[str],
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК прикрепления аудиторий (user_list/audience) к кампании."""
-    return await _propose("attach_audience", AttachAudience, account=account, campaign=campaign, audience_resource_names=audience_resource_names)
+    return await _propose(
+        "attach_audience",
+        AttachAudience,
+        account=account,
+        campaign=campaign,
+        audience_resource_names=audience_resource_names,
+    )
 
 
 async def propose_detach_audience(
@@ -461,7 +596,13 @@ async def propose_detach_audience(
     audience_resource_names: list[str],
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК открепления аудиторий от кампании."""
-    return await _propose("detach_audience", DetachAudience, account=account, campaign=campaign, audience_resource_names=audience_resource_names)
+    return await _propose(
+        "detach_audience",
+        DetachAudience,
+        account=account,
+        campaign=campaign,
+        audience_resource_names=audience_resource_names,
+    )
 
 
 # ── RSA ──
@@ -480,7 +621,18 @@ async def propose_create_rsa(
     """Создать ЧЕРНОВИК создания адаптивного поискового объявления (RSA).
 
     headlines — 3–15 заголовков (≤30 символов). descriptions — 2–4 описания (≤90 символов)."""
-    return await _propose("create_rsa", CreateRsa, account=account, campaign=campaign, ad_group_id=ad_group_id, final_url=final_url, headlines=headlines, descriptions=descriptions, path1=path1, path2=path2)
+    return await _propose(
+        "create_rsa",
+        CreateRsa,
+        account=account,
+        campaign=campaign,
+        ad_group_id=ad_group_id,
+        final_url=final_url,
+        headlines=headlines,
+        descriptions=descriptions,
+        path1=path1,
+        path2=path2,
+    )
 
 
 # ── Создание кампаний ──
@@ -505,13 +657,21 @@ async def propose_create_search_campaign(
 
     budget_daily_micros — дневной бюджет в микро-единицах валюты аккаунта."""
     return await _propose(
-        "create_search_campaign", CreateSearchCampaign,
-        account=account, campaign_name=campaign_name, final_url=final_url,
-        headlines=headlines, descriptions=descriptions,
+        "create_search_campaign",
+        CreateSearchCampaign,
+        account=account,
+        campaign_name=campaign_name,
+        final_url=final_url,
+        headlines=headlines,
+        descriptions=descriptions,
         budget_daily_micros=budget_daily_micros,
-        keywords=keywords or [], match_type=match_type,
-        geo_locations=geo_locations or [], languages=languages or [],
-        cpc_bid_micros=cpc_bid_micros, path1=path1, path2=path2,
+        keywords=keywords or [],
+        match_type=match_type,
+        geo_locations=geo_locations or [],
+        languages=languages or [],
+        cpc_bid_micros=cpc_bid_micros,
+        path1=path1,
+        path2=path2,
     )
 
 
@@ -529,11 +689,17 @@ async def propose_create_gdn_campaign(
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК GDN-кампании из фото. Денежная операция."""
     return await _propose(
-        "create_gdn_campaign", CreateGdnCampaign,
-        account=account, campaign_name=campaign_name, headlines=headlines,
-        long_headline=long_headline, descriptions=descriptions,
-        business_name=business_name, final_url=final_url,
-        budget_daily_micros=budget_daily_micros, media_id=media_id,
+        "create_gdn_campaign",
+        CreateGdnCampaign,
+        account=account,
+        campaign_name=campaign_name,
+        headlines=headlines,
+        long_headline=long_headline,
+        descriptions=descriptions,
+        business_name=business_name,
+        final_url=final_url,
+        budget_daily_micros=budget_daily_micros,
+        media_id=media_id,
         geo_locations=geo_locations or [],
     )
 
@@ -554,12 +720,20 @@ async def propose_create_demand_gen_campaign(
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК Demand Gen кампании из YouTube-видео. Денежная операция."""
     return await _propose(
-        "create_demand_gen_campaign", CreateDemandGenCampaign,
-        account=account, campaign_name=campaign_name, youtube_video_id=youtube_video_id,
-        headlines=headlines, long_headline=long_headline, descriptions=descriptions,
-        business_name=business_name, final_url=final_url,
-        budget_daily_micros=budget_daily_micros, goal=goal,
-        logo_media_id=logo_media_id, geo_locations=geo_locations or [],
+        "create_demand_gen_campaign",
+        CreateDemandGenCampaign,
+        account=account,
+        campaign_name=campaign_name,
+        youtube_video_id=youtube_video_id,
+        headlines=headlines,
+        long_headline=long_headline,
+        descriptions=descriptions,
+        business_name=business_name,
+        final_url=final_url,
+        budget_daily_micros=budget_daily_micros,
+        goal=goal,
+        logo_media_id=logo_media_id,
+        geo_locations=geo_locations or [],
     )
 
 
@@ -577,11 +751,18 @@ async def propose_create_video_campaign(
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК Video-кампании (YouTube). Денежная операция."""
     return await _propose(
-        "create_video_campaign", CreateVideoCampaign,
-        account=account, campaign_name=campaign_name, youtube_video_id=youtube_video_id,
-        headlines=headlines, long_headline=long_headline, descriptions=descriptions,
-        business_name=business_name, final_url=final_url,
-        budget_daily_micros=budget_daily_micros, geo_locations=geo_locations or [],
+        "create_video_campaign",
+        CreateVideoCampaign,
+        account=account,
+        campaign_name=campaign_name,
+        youtube_video_id=youtube_video_id,
+        headlines=headlines,
+        long_headline=long_headline,
+        descriptions=descriptions,
+        business_name=business_name,
+        final_url=final_url,
+        budget_daily_micros=budget_daily_micros,
+        geo_locations=geo_locations or [],
     )
 
 
@@ -596,7 +777,9 @@ async def propose_add_sitelinks(
     """Создать ЧЕРНОВИК добавления быстрых ссылок в кампанию.
 
     sitelinks — список [{link_text, final_url, description1?, description2?}], макс 20."""
-    return await _propose("add_sitelinks", AddSitelinks, account=account, campaign=campaign, sitelinks=sitelinks)
+    return await _propose(
+        "add_sitelinks", AddSitelinks, account=account, campaign=campaign, sitelinks=sitelinks
+    )
 
 
 async def propose_add_callouts(
@@ -605,7 +788,9 @@ async def propose_add_callouts(
     callouts: list[str],
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК добавления уточнений (callouts) в кампанию. callouts — список строк ≤25 символов."""
-    return await _propose("add_callouts", AddCallouts, account=account, campaign=campaign, callouts=callouts)
+    return await _propose(
+        "add_callouts", AddCallouts, account=account, campaign=campaign, callouts=callouts
+    )
 
 
 async def propose_add_structured_snippets(
@@ -615,7 +800,14 @@ async def propose_add_structured_snippets(
     values: list[str],
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК добавления структурированных описаний в кампанию."""
-    return await _propose("add_structured_snippets", AddStructuredSnippets, account=account, campaign=campaign, header=header, values=values)
+    return await _propose(
+        "add_structured_snippets",
+        AddStructuredSnippets,
+        account=account,
+        campaign=campaign,
+        header=header,
+        values=values,
+    )
 
 
 async def propose_add_call_asset(
@@ -625,7 +817,14 @@ async def propose_add_call_asset(
     country_code: str = "",
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК добавления номера телефона в кампанию."""
-    return await _propose("add_call_asset", AddCallAsset, account=account, campaign=campaign, phone_number=phone_number, country_code=country_code)
+    return await _propose(
+        "add_call_asset",
+        AddCallAsset,
+        account=account,
+        campaign=campaign,
+        phone_number=phone_number,
+        country_code=country_code,
+    )
 
 
 async def propose_add_promotion(
@@ -643,12 +842,19 @@ async def propose_add_promotion(
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК добавления промо-акции в кампанию."""
     return await _propose(
-        "add_promotion", AddPromotion,
-        account=account, campaign=campaign, occasion=occasion,
-        discount_type=discount_type, discount_value=discount_value,
-        currency=currency, final_url=final_url,
-        promotion_start=promotion_start, promotion_end=promotion_end,
-        headline=headline, description=description,
+        "add_promotion",
+        AddPromotion,
+        account=account,
+        campaign=campaign,
+        occasion=occasion,
+        discount_type=discount_type,
+        discount_value=discount_value,
+        currency=currency,
+        final_url=final_url,
+        promotion_start=promotion_start,
+        promotion_end=promotion_end,
+        headline=headline,
+        description=description,
     )
 
 
@@ -661,7 +867,14 @@ async def propose_add_price_asset(
     """Создать ЧЕРНОВИК добавления прайс-листа в кампанию.
 
     offerings — список [{header, description, price, unit, final_url?}], 3–8 элементов."""
-    return await _propose("add_price_asset", AddPriceAsset, account=account, campaign=campaign, offerings=offerings, currency=currency)
+    return await _propose(
+        "add_price_asset",
+        AddPriceAsset,
+        account=account,
+        campaign=campaign,
+        offerings=offerings,
+        currency=currency,
+    )
 
 
 async def propose_remove_asset_link(
@@ -670,7 +883,13 @@ async def propose_remove_asset_link(
     link_resource_names: list[str],
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК удаления привязки ассетов к кампании."""
-    return await _propose("remove_asset_link", RemoveAssetLink, account=account, campaign=campaign, link_resource_names=link_resource_names)
+    return await _propose(
+        "remove_asset_link",
+        RemoveAssetLink,
+        account=account,
+        campaign=campaign,
+        link_resource_names=link_resource_names,
+    )
 
 
 # ── Исполнение ──
@@ -688,10 +907,8 @@ async def execute_confirmed(
 
     Возвращает: {status: 'executed' | 'failed', operation, summary, error?}"""
     from ads.service import execute_confirmed as _execute
-    from core import i18n as _i18n
     from core.config import normalize_customer_id as _ncid
 
-    lang = _i18n.current_lang()
     cid = _ncid(str(account))
     store = ConfirmStore()
     try:

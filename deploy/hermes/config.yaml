@@ -13,7 +13,24 @@ agent:
   max_turns: 20
   tool_use_enforcement: auto
   disabled_toolsets:
+    - browser
+    - code_execution
+    - computer_use
+    - context_engine
+    - cronjob
+    - delegation
+    - file
+    - homeassistant
+    - memory
+    - session_search
+    - spotify
+    - terminal
+    - video
+    - video_gen
     - vision
+    - web
+    - x_search
+    - yuanbao
     - image_gen
     - tts
   reasoning_overrides:
@@ -92,8 +109,8 @@ privacy:
   redact_pii: true
 
 memory:
-  memory_enabled: true
-  user_profile_enabled: true
+  memory_enabled: false
+  user_profile_enabled: false
 
 delegation:
   model: google/gemini-3.1-flash-lite
@@ -106,7 +123,7 @@ delegation:
 skills:
   inline_shell: false
   guard_agent_created: true
-  write_approval: false
+  write_approval: true
 
 approvals:
   mode: manual

@@ -4,8 +4,6 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
-import re
-import sys
 
 try:
     import yaml
@@ -139,7 +137,11 @@ def main() -> int:
                 )
             )
             continue
-        actual_state = "paused" if not live.get("enabled", True) or live.get("state") == "paused" else live.get("state")
+        actual_state = (
+            "paused"
+            if not live.get("enabled", True) or live.get("state") == "paused"
+            else live.get("state")
+        )
         if reg.get("criticality") == "P0" and actual_state == "paused":
             findings.append(
                 Finding(
@@ -211,8 +213,7 @@ def main() -> int:
         "ok": not findings,
         "finding_count": len(findings),
         "by_severity": {
-            sev: sum(1 for f in findings if f.severity == sev)
-            for sev in ["P0", "P1", "P2", "P3"]
+            sev: sum(1 for f in findings if f.severity == sev) for sev in ["P0", "P1", "P2", "P3"]
         },
         "findings": [asdict(f) for f in findings],
     }
