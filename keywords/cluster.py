@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 from agent.router import chat, finish_reason
 from core.config import settings
+from core.llm_budget import LLMBudgetError
 
 log = logging.getLogger("aimash.keywords")
 
@@ -141,6 +142,8 @@ async def _cluster_batch(batch: list[str], language: str) -> list[Cluster]:
             role="keywords",
             temperature=0.3,
         )
+    except LLMBudgetError:
+        raise  # BZ-4: бюджет-стоп ≠ «модель не сгруппировала» — иначе всё уедет в одну «Прочее»
     except Exception as e:  # noqa: BLE001 — кластеризация не критична, всегда есть fallback
         log.warning(
             "кластеризация: сбой модели (%s) на батче %d ключей", type(e).__name__, len(batch)
@@ -197,6 +200,11 @@ async def cluster_keywords(keywords: list[str], language: str = "ru") -> list[Cl
     results = await asyncio.gather(
         *(_cluster_batch(b, language) for b in batches), return_exceptions=True
     )
+    # BZ-4: `return_exceptions=True` глотает и бюджет-стоп — тогда проброс из `_cluster_batch` был бы
+    # мёртвым кодом, а всё ушло бы в одну группу «Все ключи» как будто модель не сгруппировала.
+    for r in results:
+        if isinstance(r, LLMBudgetError):
+            raise r
     ok = [r for r in results if isinstance(r, list) and r]  # батчи, которые реально разобрались
     clusters = _merge(ok, sample) if ok else []
     if not clusters:  # ни один батч не сгруппировал → прежний fallback (фича не падает)
@@ -341,6 +349,8 @@ async def suggest_negative_keywords(
             temperature=0.3,
         )
         negs = _parse_neg(getattr(msg, "content", "") or "", limit)
+    except LLMBudgetError:
+        raise  # бюджет-стоп виден пользователю, а не «минус-слов не нашлось»
     except Exception:  # noqa: BLE001 — advisory, не критично; всегда есть пустой fallback
         return []
     return _drop_protected(negs, protected)

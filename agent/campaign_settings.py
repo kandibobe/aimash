@@ -20,6 +20,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from agent.router import chat
+from core.llm_budget import LLMBudgetError
 from core.limits import (
     MONEY_MAX_UNITS,
     WIZARD_DEFAULT_MONEY_FALLBACK_UNITS,
@@ -164,6 +165,10 @@ async def extract_campaign_settings(description: str, *, language: str = "ru") -
             temperature=0.2,
         )
         data = _extract_json_object(getattr(msg, "content", "") or "")
+    except LLMBudgetError:
+        # BZ-4: иначе описание пользователя молча теряется, а визард ставит медианы/дефолты — и
+        # человек подтверждает кампанию, собранную НЕ по его словам.
+        raise
     except Exception:  # noqa: BLE001 — разбор не критичен, есть fallback на медианы/дефолты
         data = None
     settings = _coerce(data) if data is not None else CampaignSettings()

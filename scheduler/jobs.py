@@ -27,6 +27,7 @@ from db.session import Session
 from reports.period import last_n_days
 from reports.queries import fetch_totals
 from reports.service import build_account_report_async, summary_text
+from scheduler import transport
 from scheduler.anomaly import detect_anomalies
 
 # 2.6: окна — из core.config (env REPORT_WINDOW_DAYS/ANOMALY_WINDOW_DAYS); алиасы для тестов.
@@ -446,8 +447,10 @@ async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
             header = "🗓 Scheduled report" if lang == "en" else "🗓 Плановый отчёт"
             if not loud:  # тишина везде — одно короткое сообщение вместо простыни
                 try:
-                    await bot.send_message(
-                        chat_id, header + "\n" + i18n.t("sched_digest_all_quiet", lang, n=quiet_n)
+                    await transport.send_bot_message(
+                        bot,
+                        chat_id,
+                        header + "\n" + i18n.t("sched_digest_all_quiet", lang, n=quiet_n),
                     )
                 except Exception as e:  # noqa: BLE001
                     log.warning(
@@ -491,7 +494,7 @@ async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
             if action_txt:
                 digest += "\n\n" + action_txt
             try:
-                await bot.send_message(chat_id, digest, reply_markup=markup)
+                await transport.send_bot_message(bot, chat_id, digest, reply_markup=markup)
             except Exception as e:  # один недоступный чат не должен ронять рассылку
                 log.warning("scheduler: не доставлено в %s: %s: %s", chat_id, type(e).__name__, e)
                 continue  # не доставили → не отмечаем аномалии как показанные
@@ -685,7 +688,8 @@ async def run_anomaly_check(bot) -> None:
             if not acct_alerts:
                 continue
             try:
-                await bot.send_message(
+                await transport.send_bot_message(
+                    bot,
                     chat_id,
                     _format_alerts_multi(acct_alerts, lang=i18n.get_lang(chat_id)),
                     parse_mode="HTML",
@@ -714,7 +718,8 @@ async def run_error_alerts(bot) -> int:
     error_events наполняется всегда (on_error / scheduler / handlers-A2), но был ПАССИВНЫМ — узнать
     об ошибке можно было только вызвав /diag. READ-ONLY (golden rule #3): только чтение таблицы +
     уведомление. Нет админов ⇒ no-op (fail-closed, фича opt-in). ПЕРВЫЙ прогон лишь ставит базлайн
-    (max(id)) и НЕ шлёт — не спамим историей на старте. Возвращает число новых инцидентов."""
+    (max(id)) и НЕ шлёт — не спамим историей на старте. Возвращает число новых инцидентов
+    (0 — если доставить не удалось никому: чек-поинт не двигается, батч повторится, BZ-3)."""
     global _error_alert_last_id
     with request_scope("scheduler:error-alerts"):  # §15: корреляция логов джобы по request_id
         from core.access import admin_ids_all
@@ -747,27 +752,43 @@ async def run_error_alerts(bot) -> int:
             )
         if not rows:
             return 0
-        # Чек-поинт двигаем ДО рассылки (даже если доставка всем упадёт): иначе те же ошибки
-        # переотправлялись бы каждый цикл. Они не теряются — доступны в /diag.
-        _error_alert_last_id = int(rows[-1].id)
         from core import i18n, texts
 
+        delivered = 0
         for chat_id in admins:
             try:
-                await bot.send_message(
+                await transport.send_bot_message(
+                    bot,
                     chat_id,
                     texts.fmt_error_alert(rows, lang=i18n.get_lang(chat_id)),
                     parse_mode="HTML",
                 )
+                delivered += 1
             except (
                 Exception
             ) as e:  # один недоступный админ не роняет остальных; НЕ capture (петля!)
                 log.warning(
                     "scheduler: алерт ошибок не доставлен в %s: %s", chat_id, type(e).__name__
                 )
+        # BZ-3: чек-поинт двигаем ТОЛЬКО после доставки хотя бы одному админу. Раньше он уходил
+        # вперёд ДО рассылки — недоставленный батч не переотправлялся уже никогда (чек-поинт
+        # in-memory, о потере можно было узнать только догадавшись позвать /diag). Доставлено хоть
+        # кому-то ⇒ алерт не потерян, чек-поинт вперёд (повторно не шлём — анти-дубль прежний);
+        # не доставлено НИКОМУ ⇒ чек-поинт стоит, следующий цикл повторит тот же батч (рост
+        # ограничен limit=200 выборки).
+        if not delivered:
+            log.warning(
+                "scheduler: алерты о %d инцидентах не доставлены ни одному из %d админов — "
+                "чек-поинт не двигаем, повтор в следующем цикле",
+                len(rows),
+                len(admins),
+            )
+            return 0
+        _error_alert_last_id = int(rows[-1].id)
         log.info(
-            "scheduler: разослано алертов о %d новых инцидентах (админов %d)",
+            "scheduler: разослано алертов о %d новых инцидентах (доставлено %d из %d админов)",
             len(rows),
+            delivered,
             len(admins),
         )
         return len(rows)
@@ -833,7 +854,7 @@ async def run_weekly_digest(bot) -> int:
                 _DIGEST_MAX,
             )[0]
             try:
-                await bot.send_message(chat_id, text, parse_mode="HTML")
+                await transport.send_bot_message(bot, chat_id, text, parse_mode="HTML")
             except Exception as e:  # noqa: BLE001 — недоступный админ не роняет; НЕ capture (петля!)
                 log.warning(
                     "scheduler: недельный дайджест не доставлен в %s: %s", chat_id, type(e).__name__
@@ -983,7 +1004,9 @@ async def run_recommendations_digest(bot) -> None:
                 continue
             # 4) Отправка: заголовок + карточки с кнопками (пауза между сообщениями — flood).
             try:
-                await bot.send_message(chat_id, i18n.t("advise_digest_header", lang, n=len(top)))
+                await transport.send_bot_message(
+                    bot, chat_id, i18n.t("advise_digest_header", lang, n=len(top))
+                )
             except Exception as e:  # один недоступный чат не роняет остальных
                 log.warning("advise digest не доставлен в %s: %s", chat_id, type(e).__name__)
                 continue
@@ -1001,7 +1024,8 @@ async def run_recommendations_digest(bot) -> None:
                 apply_op = one_tap_op(r)
                 try:
                     await asyncio.sleep(pause)
-                    await bot.send_message(
+                    await transport.send_bot_message(
+                        bot,
                         chat_id,
                         text,
                         reply_markup=delivery.markup(
@@ -1016,7 +1040,7 @@ async def run_recommendations_digest(bot) -> None:
                     )
             try:
                 await asyncio.sleep(pause)
-                await bot.send_message(chat_id, i18n.t("advise_disclaimer", lang))
+                await transport.send_bot_message(bot, chat_id, i18n.t("advise_disclaimer", lang))
             except Exception:  # noqa: BLE001
                 pass
 
@@ -1193,7 +1217,7 @@ async def run_business_digest(bot) -> None:
             if len(text) > _DIGEST_MAX:
                 text = text[:_DIGEST_MAX] + "\n…"
             try:
-                await bot.send_message(chat_id, text)
+                await transport.send_bot_message(bot, chat_id, text)
             except Exception as e:  # один недоступный чат не роняет рассылку
                 log.warning("bizdigest не доставлен в %s: %s", chat_id, type(e).__name__)
 
@@ -1360,7 +1384,8 @@ async def run_threshold_tuning(bot) -> None:
                 )
                 lang = i18n.get_lang(chat_id)
                 try:
-                    await bot.send_message(
+                    await transport.send_bot_message(
+                        bot,
                         chat_id,
                         i18n.t(
                             "thr_tune_offer",
@@ -1395,7 +1420,7 @@ async def _notify_outcome(bot, outcome, verdict: str) -> None:
     key = "advise_outcome_improved" if verdict == "improved" else "advise_outcome_worse"
     campaign = outcome.target_campaign or (rec.target_campaign or "")
     try:
-        await bot.send_message(rec.chat_id, i18n.t(key, lang, campaign=campaign))
+        await transport.send_bot_message(bot, rec.chat_id, i18n.t(key, lang, campaign=campaign))
     except Exception as e:  # один недоступный чат не роняет замер
         log.warning(
             "advise outcome-уведомление не доставлено в %s: %s", rec.chat_id, type(e).__name__
@@ -1713,7 +1738,8 @@ async def cleanup_stale_campaign_drafts(
 
             for chat_id, step, left_h in expiring:
                 try:
-                    await bot.send_message(
+                    await transport.send_bot_message(
+                        bot,
                         chat_id,
                         i18n.t(
                             "cc_draft_expiring",
@@ -1726,7 +1752,8 @@ async def cleanup_stale_campaign_drafts(
                     log.warning("cleanup-drafts: warn не доставлен (chat=%s)", chat_id)
             for chat_id, step in expired:
                 try:
-                    await bot.send_message(
+                    await transport.send_bot_message(
+                        bot,
                         chat_id,
                         i18n.t(
                             "cc_draft_expired", i18n.get_lang(chat_id), step=max(1, min(step, 7))
@@ -1789,7 +1816,8 @@ async def reconcile_stale_executing(
             )
             if bot is not None:
                 try:
-                    await bot.send_message(
+                    await transport.send_bot_message(
+                        bot,
                         chat_id,
                         "⚠️ Операция "
                         f"«{op}» была прервана рестартом бота посреди выполнения — "
@@ -1854,7 +1882,8 @@ async def reconcile_stale_confirmed(
             n += 1
             if bot is not None:
                 try:
-                    await bot.send_message(
+                    await transport.send_bot_message(
+                        bot,
                         chat_id,
                         f"⚠️ Операция «{op}» была прервана рестартом бота ДО обращения к Google "
                         "Ads — изменение НЕ применено. Повтори команду, если оно ещё нужно.",

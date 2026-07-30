@@ -326,9 +326,11 @@ tar tzf "$(ls -1t /root/hermes-backups/*.tgz | head -1)" | grep -E 'state\.db|\.
 
 - **Жёсткий (backstop):** Credit limit `<USD>` + сброс `daily` на самом inference-ключе Hermes
   (`OPENROUTER_API_KEY`). Срабатывает у провайдера независимо от нашего кода — настоящая граница.
-- **Мягкий (наш код, opt-in):** `LLM_DAILY_COST_CAP_USD=<USD>` → `core/llm_budget.check_daily_cost_cap()`
-  читает живую трату (`GET /key` `usage_daily`) и отказывает ДО дорогого прогона. OpenRouter недоступен ⇒
-  fail-open (жёсткий рубеж выше — backstop). Предусловие spend-cap для delegation (Фаза C).
+- **Мягкий (наш код):** `LLM_DAILY_COST_CAP_USD=<USD>` → `core/llm_budget.check_daily_cost_cap()`
+  читает живую трату (`GET /key` `usage_daily`, кэш 60 с) и отказывает ДО дорогого прогона. С 2026-07-30
+  (BZ-4) энфорсится в `agent/router.chat` — единой точке наших LLM-вызовов; в prod `0` автодефолтится
+  в `10` USD (значение D1), в dev остаётся выкл. OpenRouter недоступен ⇒ fail-open (жёсткий рубеж
+  выше — backstop). Предусловие spend-cap для delegation (Фаза C).
 - **Kill-switch:** деактивация ключа в OpenRouter (account-wide — гасит все прогоны). Плюс «мягкий»: `hermes gateway
   stop` (боевой бот при этом жив).
 - Per-день/per-модель траты Hermes поднимает ридер `core/or_activity` (`GET /activity`, нужен

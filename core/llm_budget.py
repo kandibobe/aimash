@@ -30,7 +30,14 @@ _by_chat: dict[int, deque[float]] = {}  # chat_id → времена LLM-выз�
 _warned: set[int] = set()  # чтобы warn-лог не спамил после пересечения 80%
 
 
-class LLMBudgetExceededError(RuntimeError):
+class LLMBudgetError(RuntimeError):
+    """Базовый бюджет-стоп LLM (счётный лимит или долларовый потолок). Это ОТВЕТ ПОЛЬЗОВАТЕЛЮ, не
+    транзиентный сбой: точки «сбой LLM не критичен, есть fallback» обязаны его ПРОБРАСЫВАТЬ
+    (`except LLMBudgetError: raise` ПЕРЕД общим `except Exception`) — иначе результат молча
+    деградирует без слова о причине (досье «собралось» пустым, профиль — без полей)."""
+
+
+class LLMBudgetExceededError(LLMBudgetError):
     """Пер-юзер дневной лимит LLM-вызовов исчерпан — новые запросы к ИИ блокируются (fail-closed)."""
 
     def __init__(self, used: int, limit: int) -> None:
@@ -84,9 +91,15 @@ def consume(chat_id: int | None) -> None:
 
 _COST_WARN_AT = 0.80  # порог лог-предупреждения по дневной стоимости
 _cost_warned = False  # чтобы warn по стоимости не спамил (сбрасывается при падении ниже порога)
+# BZ-4: гейт стоит в agent/router.chat — на КАЖДОМ LLM-вызове. HTTP GET /key на каждый — плата
+# латентностью и рейт-лимитом OpenRouter, поэтому прочитанная трата (и УСПЕХ, и НЕУДАЧА чтения —
+# иначе каждый вызов при лежащем OpenRouter ждал бы таймаут GET) живёт _COST_CACHE_TTL_S секунд.
+# Опоздание отсечки на минуту при потолке в целые доллары — приемлемо: backstop серверный (RB-3).
+_COST_CACHE_TTL_S = 60.0
+_cost_cache: tuple[float, float | None] | None = None  # (monotonic-время чтения, spent | None)
 
 
-class LLMCostCapExceededError(RuntimeError):
+class LLMCostCapExceededError(LLMBudgetError):
     """Дневной потолок СТОИМОСТИ LLM (USD) достигнут — дорогие прогоны блокируются (fail-closed на
     известном превышении). Отдельно от LLMBudgetExceededError: тот про число вызовов пер-chat, этот
     про реальные деньги по всему спенд-пулу (включая автономный Hermes-цикл)."""
@@ -102,9 +115,12 @@ def _cost_cap() -> float:
 
 
 async def check_daily_cost_cap(*, client=None) -> None:
-    """Гейт ПЕРЕД дорогим прогоном / автономным циклом: если РЕАЛЬНАЯ дневная трата (OpenRouter /key
-    usage_daily через core.or_activity) достигла потолка — LLMCostCapExceededError (fail-closed на
-    ИЗВЕСТНОМ превышении). cap=0 ⇒ ВЫКЛ (no-op, opt-in).
+    """Гейт ПЕРЕД LLM-вызовом (BZ-4: живёт в agent/router.chat — единой точке всех наших вызовов,
+    плюс ранний человекочитаемый отказ в bot/main._llm_budget_or_reply): если РЕАЛЬНАЯ дневная
+    трата (OpenRouter /key usage_daily через core.or_activity) достигла потолка —
+    LLMCostCapExceededError (fail-closed на ИЗВЕСТНОМ превышении). cap=0 ⇒ ВЫКЛ (no-op; в prod
+    0 → 10 USD автодефолтом core.config._default_llm_cost_cap_in_prod). Трата кэшируется на
+    _COST_CACHE_TTL_S — не по GET на вызов (см. комментарий у кэша).
 
     ⚠️ Трату прочитать НЕ удалось (OpenRouter недоступен) ⇒ ПРОПУСКАЕМ с warning — fail-OPEN, и это
     осознанно, НЕ нарушение правила 10: (1) это БЮДЖЕТНЫЙ рубеж, не security-гейт — денежные МУТАЦИИ
@@ -115,14 +131,20 @@ async def check_daily_cost_cap(*, client=None) -> None:
     cap = _cost_cap()
     if cap <= 0:
         return
-    global _cost_warned
-    from core import or_activity  # ленивый: без cap-а httpx не нужен
+    global _cost_warned, _cost_cache
+    now = time.monotonic()
+    if _cost_cache is not None and now - _cost_cache[0] < _COST_CACHE_TTL_S:
+        spent = _cost_cache[1]
+    else:
+        from core import or_activity  # ленивый: без cap-а httpx не нужен
 
-    spent = await or_activity.fetch_daily_cost_usd(client=client)
+        spent = await or_activity.fetch_daily_cost_usd(client=client)
+        _cost_cache = (now, spent)
+        if spent is None:
+            log.warning(
+                "llm-budget: дневная трата OpenRouter недоступна — cost-cap пропущен (fail-open)"
+            )
     if spent is None:
-        log.warning(
-            "llm-budget: дневная трата OpenRouter недоступна — cost-cap пропущен (fail-open)"
-        )
         return
     if spent >= cap:
         raise LLMCostCapExceededError(spent, cap)
@@ -169,8 +191,9 @@ def snapshot(chat_id: int) -> dict:
 
 def reset() -> None:
     """Полный сброс счётчиков (для тестов)."""
-    global _cost_warned
+    global _cost_warned, _cost_cache
     with _lock:
         _by_chat.clear()
         _warned.clear()
         _cost_warned = False
+        _cost_cache = None

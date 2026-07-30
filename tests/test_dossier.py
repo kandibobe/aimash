@@ -493,6 +493,42 @@ async def test_normalize_ru_reraises_budget(monkeypatch):
         await normalize_ru(d, chat_id=777, language="ru")
 
 
+@pytest.mark.asyncio
+async def test_map_pages_reraises_cost_cap_from_chat(monkeypatch):
+    """BZ-4: долларовый потолок прилетает ИЗ chat (гейт стоит в agent/router.chat), а не из consume —
+    и обязан пройти сквозь map-фазу насквозь. Раньше `except LLMBudgetExceededError` его не ловил
+    (сиблинг, не предок) → чанк молча превращался в None, досье «собиралось» пустым и пользователь
+    про исчерпанный бюджет не узнавал. Ловим базовый LLMBudgetError."""
+    from clients.dossier_map import map_pages
+    from core.llm_budget import LLMCostCapExceededError
+
+    monkeypatch.setattr(settings, "llm_daily_calls_per_user", 0)  # счётный лимит не при чём
+
+    async def _chat_over_cap(messages, **kw):
+        raise LLMCostCapExceededError(10.5, 10.0)
+
+    monkeypatch.setattr("clients.dossier_map.chat", _chat_over_cap)
+
+    with pytest.raises(LLMCostCapExceededError):
+        await map_pages([_page("О компании. " * 60)], chat_id=777, language="ru")
+
+
+@pytest.mark.asyncio
+async def test_extract_profile_reraises_cost_cap(monkeypatch):
+    """Тот же класс дыры в §20.3-пути: фолбэк «сбой разбора → пустой профиль» не должен глотать
+    бюджет-стоп — иначе менеджер видит «извлечь нечего» вместо «бюджет ИИ исчерпан»."""
+    from clients import profile_extract as pe
+    from core.llm_budget import LLMCostCapExceededError
+
+    async def _chat_over_cap(messages, **kw):
+        raise LLMCostCapExceededError(10.5, 10.0)
+
+    monkeypatch.setattr(pe, "chat", _chat_over_cap)
+
+    with pytest.raises(LLMCostCapExceededError):
+        await pe.extract_profile("Клиент Kasi Motors — автодилер в Найроби")
+
+
 # ── правила 1–2: досье и confirm-гейт ─────────────────────────────────────────────
 async def _confirmed(store: ConfirmStore, *, operation: str, customer_id: str, params: dict) -> str:
     cid = uuid.uuid4().hex

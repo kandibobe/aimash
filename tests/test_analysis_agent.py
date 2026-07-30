@@ -185,6 +185,19 @@ async def test_budget_exceeded_skips_narrative(monkeypatch):
     assert await run_analysis_agent(FACTS, chat_id=1, drill=None) is None
 
 
+async def test_cost_cap_from_chat_skips_narrative(monkeypatch):
+    """BZ-4: долларовый потолок прилетает ИЗ chat (гейт в agent/router.chat), не из consume.
+    Здесь глушим ОСОЗНАННО — карточка аудита собрана кодом и не страдает, теряется только
+    текстовое пояснение. Ветка отдельная от общего `except Exception` ради лога в /diag."""
+    from core import llm_budget
+
+    async def _over_cap(*a, **k):
+        raise llm_budget.LLMCostCapExceededError(10.5, 10.0)
+
+    monkeypatch.setattr("agent.loop.chat", _over_cap)
+    assert await run_analysis_agent(FACTS, chat_id=1, drill=None) is None
+
+
 async def test_unknown_tool_from_model_is_not_executed(monkeypatch):
     """Модель эмитит несуществующий (мутационно-звучащий) тул → drill НЕ вызывается (allow-list)."""
     called = []
