@@ -1569,10 +1569,18 @@ TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "ask_clarification",
-            "description": "Команда неоднозначна (не указана кампания/сумма/направление) — переспросить, НЕ угадывать.",
+            "description": "Команда неоднозначна (не указана кампания/сумма/направление) — переспросить, НЕ угадывать. Если есть понятные варианты ответа, передай их отдельным массивом choices (до 4 пунктов), чтобы бот показал кнопки.",
             "parameters": {
                 "type": "object",
-                "properties": {"question": {"type": "string"}},
+                "properties": {
+                    "question": {"type": "string"},
+                    "choices": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 4,
+                        "description": "Необязательные варианты ответа для UX-кнопок. Каждый вариант — отдельная строка. Не дублируй варианты внутри question.",
+                    },
+                },
                 "required": ["question"],
             },
         },

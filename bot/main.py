@@ -96,6 +96,7 @@ from bot.callbacks import (
     BugCB,
     CampCB,
     CcCB,
+    ClarifyCB,
     ClientCB,
     ConfirmCB,
     DiagCB,
@@ -167,6 +168,7 @@ from bot.keyboards import (
     campaigns_switch_kb,
     cc_accounts_kb,
     client_card_kb,
+    clarify_kb,
     client_input_kb,
     client_save_kb,
     client_show_card_kb,
@@ -317,6 +319,8 @@ _EXT_CACHE: dict[
 ] = {}  # §3-assets: chat_id → текущие ассеты кампании (резолв idx→link rn)
 # ingest: chat_id → {text, source} прочитанного файла, ждущего задачу (в памяти, без секретов).
 _PENDING_CONTEXT: dict[int, dict] = {}
+# pending multi-choice clarify for Telegram inline buttons (free-text clarify keeps working without it)
+_PENDING_CLARIFY: dict[int, dict[str, object]] = {}
 
 # §7: эфемерные сессии «добавить подобранные ключи» (token → {keywords, src}). Список ключей не
 # влезает в callback_data (64 байта) → держим по короткому токену. Кап защищает от роста.
@@ -1568,6 +1572,36 @@ def _build_agent_context(chat_id: int) -> dict:
         "last_account": ctx.get("customer_id") or _LAST_ACCOUNT.get(chat_id) or "",
         "history": list(ctx.get("history") or []),
     }
+
+
+def _store_clarify(chat_id: int, question: str, choices: list[str]) -> str:
+    """Сохранить активный clarify под коротким token для inline-кнопок."""
+    token = uuid.uuid4().hex[:8]
+    _PENDING_CLARIFY[chat_id] = {
+        "token": token,
+        "question": str(question or "").strip(),
+        "choices": [str(c).strip() for c in (choices or []) if str(c).strip()][:4],
+    }
+    return token
+
+
+def _pop_clarify(chat_id: int, token: str) -> dict[str, object] | None:
+    row = _PENDING_CLARIFY.get(chat_id)
+    if not row or row.get("token") != token:
+        return None
+    return _PENDING_CLARIFY.pop(chat_id, None)
+
+
+def _format_clarify(question: str, choices: list[str] | None = None) -> str:
+    """Читаемый HTML-рендер clarify: вопрос + варианты + подсказка про свободный ответ."""
+    parts = [f"❓ <b>{texts.esc(question or i18n.t('loop_clarify_default'))}</b>"]
+    opts = [str(c).strip() for c in (choices or []) if str(c).strip()][:4]
+    if opts:
+        parts.append("")
+        parts.extend(f"• {texts.esc(choice)}" for choice in opts)
+        parts.append("")
+        parts.append("<i>Выбери кнопку ниже или пришли свой ответ текстом.</i>")
+    return "\n".join(parts)
 
 
 def _account_label(cid: str) -> str:
@@ -6719,7 +6753,16 @@ async def _dispatch_command_result(
             period_days=brief.get("period_days"),
         )
     elif t == "clarify":
-        await m.answer("❓ " + res["question"])
+        choices = [str(c).strip() for c in (res.get("choices") or []) if str(c).strip()][:4]
+        if choices:
+            token = _store_clarify(m.chat.id, res["question"], choices)
+            await m.answer(
+                _format_clarify(res["question"], choices),
+                reply_markup=clarify_kb(token, choices, i18n.current_lang()),
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await m.answer(_format_clarify(res["question"]), parse_mode=ParseMode.HTML)
     elif t == "need_account":
         # §8: NL-чтение без аккаунта при нескольких живых — не угадываем и не показываем пустой
         # Draft. Пикер target='status': после тапа — выбор периода → статистика (3.1).
@@ -6758,6 +6801,50 @@ async def _dispatch_command_result(
             log.debug("agent-loop: пустой text в ответе (op=%s)", res.get("type"))
             text = i18n.t("loop_unrecognized")
         await m.answer(text)
+
+
+@dp.callback_query(ClarifyCB.filter(F.action == "other"))
+async def on_clarify_other(cq: CallbackQuery, callback_data: ClarifyCB) -> None:
+    msg = _cq_msg(cq)
+    if msg is None:
+        return
+    row = _PENDING_CLARIFY.get(msg.chat.id)
+    if not row or row.get("token") != callback_data.token:
+        await _safe_answer(cq, i18n.t("model_list_stale"), show_alert=True)
+        return
+    await _safe_answer(cq, i18n.t("cb_done"))
+    await msg.answer("✏️ Пришли свой ответ одним сообщением.")
+
+
+@dp.callback_query(ClarifyCB.filter(F.action == "pick"))
+async def on_clarify_pick(cq: CallbackQuery, callback_data: ClarifyCB, state: FSMContext) -> None:
+    msg = _cq_msg(cq)
+    if msg is None:
+        return
+    row = _pop_clarify(msg.chat.id, callback_data.token)
+    if not row:
+        await _safe_answer(cq, i18n.t("model_list_stale"), show_alert=True)
+        return
+    choices = list(row.get("choices") or [])
+    if callback_data.idx < 0 or callback_data.idx >= len(choices):
+        await _safe_answer(cq, i18n.t("model_list_stale"), show_alert=True)
+        return
+    picked = str(choices[callback_data.idx]).strip()
+    await _safe_answer(cq, i18n.t("cb_done"))
+    await _safe_edit(
+        cq,
+        _format_clarify(str(row.get("question") or ""), choices)
+        + "\n\n✅ <b>Выбрано:</b> "
+        + texts.esc(picked),
+        parse_mode=ParseMode.HTML,
+    )
+    if await _llm_budget_or_reply(msg):
+        return
+    ctx = _build_agent_context(msg.chat.id)
+    async with ux.typing_action(msg):
+        res = await handle_command(picked, chat_id=msg.chat.id, context=ctx)
+    _chat_ctx_note(msg.chat.id, user_text=picked)
+    await _dispatch_command_result(msg, res, state)
 
 
 async def _run_task_with_context(

@@ -1,0 +1,69 @@
+version: 1
+last_verified_at: '2026-07-30T14:41:00Z'
+owner: kandibobe
+purpose: Canonical runtime registry for AdMaster/Hermes. This file is the single source of truth for present-tense runtime/model/provider policy. Any conflicting docs/skills must either reference this file or explicitly mark themselves as historical or pinned exceptions.
+
+primary_runtime:
+  provider: openai-codex
+  model: gpt-5.6-terra
+  status: canonical_current
+  applies_to:
+    - interactive_chat
+    - default_analysis
+  notes:
+    - Use current session context as authoritative for live self-identification.
+    - Do not claim a different active model unless verified from live config/session state.
+
+pinned_exceptions:
+  - scope: cron_legacy_jobs
+    provider: openai-codex
+    model: gpt-5.4
+    status: pinned_exception
+    source_of_truth: /root/.hermes/cron/jobs.json
+    notes:
+      - Live cron jobs are still pinned to gpt-5.4 at time of verification.
+      - This is an operational exception, not the canonical present-tense runtime for chat.
+  - scope: deploy_template_config
+    provider: openrouter
+    model: deepseek/deepseek-v4-pro
+    status: stale_needs_reconciliation
+    source_of_truth: /opt/aimash/deploy/hermes/config.yaml
+    notes:
+      - Deploy template still points at old main runtime and conflicts with current docs and session context.
+
+routing_lanes:
+  dialogue_and_analysis:
+    provider: openai-codex
+    model: gpt-5.6-terra
+    status: canonical_current
+  lightweight_background:
+    provider: openrouter
+    model: google/gemini-3.1-flash-lite
+    status: allowed_lane
+  deep_audit_strategy:
+    provider: openrouter
+    model: deepseek/deepseek-v4-pro
+    status: allowed_lane
+  external_coding_executor:
+    provider: external
+    model: codex-cli
+    status: only_when_explicitly_needed
+
+policy_rules:
+  - Docs and skills must not state a present-tense runtime different from primary_runtime unless labelled as pinned_exception or historical_context.
+  - Cron jobs may pin older models temporarily, but must be listed under pinned_exceptions or cron_registry.yaml.
+  - Memory should store only high-level routing facts, not full policy prose.
+
+known_conflicts:
+  - file: /opt/aimash/deploy/hermes/config.yaml
+    lines: '8-10, 230-239'
+    issue: Main model in deploy template conflicts with canonical runtime.
+  - file: /root/.hermes/cron/jobs.json
+    lines: '11-12, 60-61, 102-103, 142-143, 190-191'
+    issue: Live cron jobs still pinned to gpt-5.4.
+  - file: /root/.hermes/skills/ad-master/ad-master-agent/SKILL.md
+    lines: '11-12'
+    issue: Skill states gpt-5.4 in present tense.
+  - file: /root/.hermes/skills/ad-master/aimash-development/SKILL.md
+    lines: '149-157'
+    issue: Skill cron matrix still states gpt-5.4 as current.

@@ -22,6 +22,7 @@ from bot.callbacks import (
     BugCB,
     CampCB,
     CcCB,
+    ClarifyCB,
     ClientCB,
     ConfirmCB,
     DiagCB,
@@ -54,6 +55,23 @@ from bot.callbacks import (
 )
 
 _NAME_LIMIT = 40
+
+
+def clarify_kb(token: str, choices: list[str], lang: str | None = None) -> InlineKeyboardMarkup:
+    """Кнопки для ask_clarification: до 4 вариантов + «свой ответ» текстом."""
+    en = _lang(lang) == "en"
+    b = InlineKeyboardBuilder()
+    for i, choice in enumerate((choices or [])[:4]):
+        b.button(
+            text=f"{i + 1}. {_ellipsize(str(choice), 48)}",
+            callback_data=ClarifyCB(action="pick", token=token, idx=i),
+        )
+    b.button(
+        text="✏️ My answer" if en else "✏️ Мой ответ",
+        callback_data=ClarifyCB(action="other", token=token),
+    )
+    b.adjust(1)
+    return b.as_markup()
 
 
 def searchterms_kb(

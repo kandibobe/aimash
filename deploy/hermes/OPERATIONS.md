@@ -197,9 +197,9 @@ hermes mcp test aimash
 
 ## 6. Смена модели / провайдера / тулсетов после установки
 
-**Модель/провайдер** — канонически через мастер, он пишет `model.provider`+`model.default` [Certain]:
+**Модель/провайдер** — канонический источник истины: `/opt/aimash/deploy/hermes/runtime_registry.yaml`. Любой live pin для cron или шаблонный deploy-config, который расходится с registry, должен считаться исключением и быть явно помечен. Изменение runtime применять только после сверки с registry:
 ```bash
-hermes model                         # интерактивно: провайдер (OpenRouter), ключ, модель (§15 openai/gpt-5.6-*)
+hermes model                         # интерактивно: провайдер/модель — сверять с runtime_registry.yaml
 hermes gateway restart               # применить к живым сессиям
 hermes config show                   # убедиться, что model — mapping, не скаляр
 ```

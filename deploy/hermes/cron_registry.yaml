@@ -1,0 +1,125 @@
+version: 1
+last_verified_at: '2026-07-30T14:41:00Z'
+owner: kandibobe
+purpose: Canonical registry of AdMaster cron jobs with criticality, expected state, and alert semantics.
+
+default_rules:
+  paused_P0: immediate_alert
+  failed_P0: immediate_alert
+  paused_P1: daily_digest
+  failed_P1: daily_digest
+  failed_P2: tolerate_1_to_2_runs_then_digest
+
+jobs:
+  - job_id: '478eac21bfe6'
+    name: '🚨 Hourly Watchdog — Fire Detector'
+    criticality: P0
+    purpose: Detect spend/conversion/account anomalies during operator hours.
+    provider: openai-codex
+    model: gpt-5.4
+    expected_state: scheduled
+    actual_state: paused
+    enabled_expected: true
+    alert_if_paused: true
+    silent_on_normal: false
+    note: Highest-priority monitoring lane. Current paused state is a live operational risk.
+
+  - job_id: '6e96062d99ad'
+    name: '☀️ Morning Standup (09:00 JST) — Trigger Style'
+    criticality: P1
+    purpose: Daily multi-account operator digest.
+    provider: openai-codex
+    model: gpt-5.4
+    expected_state: scheduled
+    actual_state: scheduled
+    enabled_expected: true
+    silent_on_normal: false
+
+  - job_id: '031080f7bfac'
+    name: 'Shadow Mode Daily (09:00 JST)'
+    criticality: P1
+    purpose: Evaluate recommendation quality in dry-run/shadow mode.
+    provider: openai-codex
+    model: gpt-5.4
+    expected_state: scheduled
+    actual_state: scheduled
+    enabled_expected: true
+    silent_on_normal: false
+
+  - job_id: 'a0cff93f3a2b'
+    name: '🧠 Context Summarization (ежедневно, 18:00 JST)'
+    criticality: P2
+    purpose: Context compression / memory fallback maintenance.
+    provider: openai-codex
+    model: gpt-5.4
+    expected_state: scheduled
+    actual_state: scheduled
+    enabled_expected: true
+    silent_on_normal: false
+
+  - job_id: '82097402013a'
+    name: 'Session Completion Notifier'
+    criticality: P2
+    purpose: Notify about completed Hermes sessions.
+    provider: openai-codex
+    model: gpt-5.4
+    expected_state: scheduled
+    actual_state: scheduled
+    enabled_expected: true
+    silent_on_normal: true
+
+  - job_id: 'e4f1b2ae179d'
+    name: '🧹 Weekly Janitor — Search Term Cleanup'
+    criticality: P1
+    purpose: Weekly search term cleanup / waste detection lane.
+    provider: openai-codex
+    model: gpt-5.4
+    expected_state: scheduled
+    actual_state: scheduled
+    enabled_expected: true
+    silent_on_normal: false
+
+  - job_id: '2a402a32e5ec'
+    name: '📝 Monthly Copywriter — RSA Audit'
+    criticality: P2
+    purpose: Monthly creative/RSA audit.
+    provider: openai-codex
+    model: gpt-5.4
+    expected_state: scheduled
+    actual_state: scheduled
+    enabled_expected: true
+    silent_on_normal: false
+
+  - job_id: 'b44861829e51'
+    name: '🌙 Drift Detection — State Reconciliation'
+    criticality: P1
+    purpose: Detect operational/config/account drift.
+    provider: openai-codex
+    model: gpt-5.4
+    expected_state: scheduled
+    actual_state: scheduled
+    enabled_expected: true
+    silent_on_normal: false
+
+  - job_id: '5db43f3b3d5d'
+    name: '💰 Daily Budget Cap Check (18:00 JST)'
+    criticality: P0
+    purpose: Detect end-of-day budget cap violations / spend safety issues.
+    provider: openai-codex
+    model: gpt-5.4
+    expected_state: scheduled
+    actual_state: scheduled
+    enabled_expected: true
+    alert_if_paused: true
+    silent_on_normal: false
+
+  - job_id: 'c15dd12e50a6'
+    name: '🔄 Git Auto-Sync (каждый час)'
+    criticality: P2
+    purpose: Repository housekeeping sync.
+    provider: openai-codex
+    model: gpt-5.4
+    expected_state: scheduled
+    actual_state: scheduled
+    enabled_expected: true
+    silent_on_normal: true

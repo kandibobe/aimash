@@ -68,11 +68,10 @@ hermes config env-path             # путь ~/.hermes/.env
 
 # 3. Провайдер модели — через интерактивный мастер (он же запускается при первом старте):
 hermes model
-#   Select provider   → OpenRouter (НЕ подсвеченный Nous Portal: у нас рабочий ключ OpenRouter
-#                       и слаги §15 — openai/gpt-5.6-*). Далее: ключ sk-or-… (или подхватит
-#                       OPENROUTER_API_KEY из ~/.hermes/.env), затем модель openai/gpt-5.6-terra.
-#   Мастер пишет в config.yaml ТОЛЬКО блок  model: {provider: openrouter, default: <slug>}
-#   (форма mapping, не скаляр — иначе К10 молча откатит на Nous Portal).
+#   Select provider/model — сверять с `/opt/aimash/deploy/hermes/runtime_registry.yaml`.
+#   На 2026-07-30 canonical current runtime для чата: `gpt-5.6-terra` via `openai-codex`.
+#   Если выбираешь иной runtime для конкретной джобы/исключения — зафиксируй это как pinned exception,
+#   а не как новую безымянную правду.
 #   Select terminal backend → Keep current (local): терминал у Контура A и так гасится (см. тулсеты).
 #   Select platforms        → только Telegram (SPACE, ENTER).
 #   Tools for CLI (тулсеты) → эталон = минимум (skills/todo/clarify + наш MCP). `session_search`
