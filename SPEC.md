@@ -867,7 +867,8 @@ Telegram supergroup агентства
 | `parse_keywords_input` · `read_keyword_sheet` | [keywords/ingest.py](keywords/ingest.py), [reports/sheets.py:657](reports/sheets.py#L657) | 4 способа ввода + round-trip (§3.3.6–3.3.7) |
 | `generate_rsa` · `validate_adcopy` · `build_display_path` | `adcopy/` | §3.4 — **сегодня генерации в реестре нет вовсе** |
 | `get_account_audit` | `advisor/` | скор + список проблем |
-| `get_change_history` | `db/history.py` | история изменений |
+| `get_change_history` | `db/history.py` | история изменений **наших** (что применил бот через гейт) |
+| `get_account_changes` | [reports/queries.py:2027](reports/queries.py#L2027) | журнал правок в САМОМ Google Ads: кто/когда/через какой канал/какой объект (`change_event`). Закрывает Р6 — Google о чужой правке не уведомляет, узнать можно только спросив. Окно ≤29 дней (ресурс живёт 30, сутки — запас на host-date фолбэк; глубже API истории не отдаёт), почты правивших маскированы |
 | `get_client_card` | `clients/store.py` | карточка **с PII** — отдельный код-путь (§3.8.10) |
 | `list_client_facts_structured` | `client_services` / `client_contacts` | услуги и цены **как структура**, из неё код строит price/snippets/call |
 | `list_site_pages` · `get_crawl_status` | `clients/` | карта страниц под sitelinks, статус краула |

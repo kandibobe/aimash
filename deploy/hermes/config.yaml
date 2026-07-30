@@ -227,7 +227,7 @@ mcp_servers:
     timeout: 120           # bootstrap (init_db + обход MCC) занимает секунды
     connect_timeout: 30
     tools:
-      include:             # 23 READ (22 Google Ads + recall_client); PLAN/WRITE — шагом перед автономией
+      include:             # 24 READ (23 Google Ads + recall_client); PLAN/WRITE — шагом перед автономией
         - list_accounts
         - get_campaign_stats
         - get_adgroup_stats
@@ -239,6 +239,9 @@ mcp_servers:
         - get_auction_insights
         - get_account_audit
         - get_change_history
+        # Р6: журнал правок в САМОМ Google Ads (кто/когда/через какой канал) — не путать с
+        # get_change_history, тот про НАШ audit-trail. Google о чужих правках не уведомляет.
+        - get_account_changes
         - keyword_ideas
         # Структура и настройки кампаний («было» для правок, не метрики): список кампаний, гео/языки,
         # настройки по имени с группами и RSA, стратегия ставок, разбивки device/network/day,

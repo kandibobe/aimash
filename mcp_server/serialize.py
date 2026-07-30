@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from core.texts import mask_email  # общая с алертом джобы: одна маскировка на оба выхода наружу
+
 
 def metrics_dict(m) -> dict[str, Any]:
     """reports.queries.Metrics → dict. Производные (ctr/avg_cpc/cpa/roas) считает КОД (свойства m)."""
@@ -135,6 +137,23 @@ def recent_action_dict(a) -> dict[str, Any]:
         "params": a.params,
         "summary": a.summary,
         "decided_at": a.decided_at.isoformat() if a.decided_at else None,
+    }
+
+
+def change_event_dict(r) -> dict[str, Any]:
+    """reports.queries.ChangeEventRow → dict. `user_email` МАСКИРУЕТСЯ (`core.texts.mask_email` —
+    одна маскировка на ОБА выхода наружу: конверт инструмента и алерт джобы в Telegram; пока их было
+    две, дайджест рассылал рабочие почты сотрудников клиента целиком).
+    `via_api` считает КОД (свойство строки), чтобы модель не разбирала enum-строку сама."""
+    return {
+        "changed_at": r.changed_at,  # в таймзоне аккаунта — так отдаёт Google
+        "resource_type": r.resource_type,
+        "operation": r.operation,
+        "client_type": r.client_type,
+        "via_api": bool(r.via_api),
+        "user_email": mask_email(r.user_email),
+        "resource_name": r.resource_name,
+        "changed_fields": list(r.changed_fields),
     }
 
 
