@@ -1,15 +1,15 @@
 # CODEOWNERS — обязательное человеческое ревью денежного пути и гардов.
 #
 # Зачем этот файл (§12 шаг 1 плана, SPEC.md §0.3/§8). Сегодня merge в master ==
-# авто-деплой в прод (.github/workflows/ci.yml:82 → git reset --hard origin/master +
+# авто-деплой в прод (.github/workflows/ci.yml:84 → git reset --hard origin/master +
 # docker compose up на VPS). Значит право мержить == право снять confirm-гейт и потом
 # «подтвердить себе» мутацию. Контур B (агент-билдер) НЕ должен иметь права merge; всё,
 # что он трогает на путях ниже, обязано пройти ревью человека-владельца.
 #
 # ⚠️ CODEOWNERS сам по себе НИЧЕГО не энфорсит. Он вступает в силу только вместе с
-#    branch protection / ruleset на master: «Require review from Code Owners» +
-#    «Require a pull request before merging» + «Do not allow bypassing». Точная
-#    настройка (что включить в UI GitHub) — docs/REPO_GUARDRAILS.md, применяет владелец.
+#    правилом `pull_request` (require_code_owner_review) ruleset'а master-review-gate —
+#    .github/rulesets/master-review-gate.json, разбор в docs/REPO_GUARDRAILS.md §1.2.
+#    Пока тот ruleset не Active, этот файл — декларация, а не рубеж.
 #
 # Замените @kandibobe на команду-ревьюеров, если она появится (напр. @org/money-path).
 # machine-аккаунт билдера в этот файл НЕ добавлять — у него не должно быть прав ревью.
