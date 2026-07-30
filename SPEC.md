@@ -851,10 +851,11 @@ Telegram supergroup агентства
 | `get_campaign_stats` · `get_adgroup_stats` | `ads/read.py` | ТЗ-1 §3 |
 | `get_keywords` · `get_search_terms` · `get_negatives` | `ads/read.py` | ТЗ-1 §3, §7 |
 | `get_ads` · `get_budgets` · `get_auction_insights` | `ads/read.py` | ТЗ-1 §3, §8 |
+| `list_campaigns` | [ads/read.py:220](ads/read.py#L220) | перечень кампаний аккаунта. Не дубль `get_campaign_stats`: тот сегментирует по `segments.date` и кампанию без показов не покажет вовсе — а правят как раз такие; он же даёт ИМЯ для `read_campaign_config` (контракт ридера — имя, не id) |
 | `read_campaign_targeting` | [ads/read.py:325](ads/read.py#L325) | ГЕО / радиус / negative locations / языки — «было» для 6+ гео-операций |
 | `list_audiences` · `list_attached_audiences` | [ads/read.py:171](ads/read.py#L171), [:193](ads/read.py#L193) | аудитории (ТЗ-1 §3) |
 | `read_campaign_config` | [ads/read.py:409](ads/read.py#L409) | настройки кампании + CPC групп |
-| `get_bidding_strategy` | [ads/resolve.py:212](ads/resolve.py#L212) | стратегия ставок, эффективный CPC ключа |
+| `get_bidding_strategy` | [reports/queries.py:591](reports/queries.py#L591) | стратегия ставок, эффективный CPC ключа. Ридер — `read_campaign_bidding`, а НЕ `ads/resolve.py:212` (`campaign_bidding_strategy`, указатель прошлой редакции): тот стоит за замком МУТАЦИЙ (`ensure_allowed`) и на аккаунте с одним лишь грантом чтения отказал бы — то есть ровно там, где чтение и разрешено (правило 9) |
 | `list_account_assets` | [ads/read.py:677](ads/read.py#L677) | переиспользование ассетов account/campaign/adgroup (ТЗ-2 §19.7) |
 | `search_campaign_medians` | [ads/read.py:581](ads/read.py#L581) | медианы «по аналогии» (§3.5.3) |
 | `mcc_summary` · `mcc_deep` | [reports/mcc.py:172](reports/mcc.py#L172), [:109](reports/mcc.py#L109) | сводка по дочерним + детализация (ТЗ-1 §8) |
