@@ -27,7 +27,7 @@ Telegram-агент, который по свободному тексту уп�
 |---|---|
 | 1 · Hermes на VPS + bot-free bootstrap | ✅ пин v0.19.0, тулсет-поверхность заперта, `bot/`-зависимости срезаны, у планировщика свой процесс + advisory-lock. Gateway в Telegram ещё не поднят |
 | 2 · Гарды И1–И5 | ⛔ не сделано — в `tests/test_hermes_isolation.py` 7 `@pytest.mark.skip`; живьём покрыт только И3 (`tests/test_provenance_gate.py`) |
-| 3 · READ-инструменты | ✅ 24 READ-инструмента из 38 по реестру §6.1. Round-trip через Hermes доказан живьём на 15 из них; 8 добавленных 30.07 покрыты только офлайн-смоуком (`tests/test_mcp_read_smoke.py`, SDK подменён) |
+| 3 · READ-инструменты | ✅ 25 READ-инструментов из 38 по реестру §6.1. Round-trip через Hermes доказан живьём на 15 из них; 10 добавленных 30.07 покрыты только офлайн-смоуком (`tests/test_mcp_read_smoke.py`, SDK подменён) |
 | 4 · Память | 🟡 `recall_client` есть; `remember_fact`/`agent_facts` — нет |
 | 5 · Мутации + реплай-гейт | ⛔ **не сделано** — сегодня мутации идут прежним, кнопочным путём |
 | 6–10 · скилы, самообучение, наблюдаемость | ⛔ не начаты |
@@ -145,7 +145,7 @@ clients/      §20: профиль (store), LLM-разбор, краулер с�
 scheduler/    плановые отчёты/аномалии/очистка черновиков (READ-ONLY, правило 3)            ← ядро
 db/           SQLAlchemy модели + Alembic (migrations/)                                     ← ядро
 app/          bootstrap — bot-free старт ads-глобалов                                       ← ядро
-mcp_server/   тул-слой для Hermes: 24 READ ✅, MEMORY/PLAN/WRITE — Волна 1        ← пишется заново
+mcp_server/   тул-слой для Hermes: 25 READ ✅, MEMORY/PLAN/WRITE — Волна 1        ← пишется заново
 deploy/hermes/ конфиг Контура A, плагин-проб, конфиг-линт (К10), RUNBOOK хоста    ← пишется заново
 bot/          aiogram handlers, inline-кнопки, визарды, i18n, throttle    ← архивируется после Волны 1
 agent/        свой цикл: router, system_prompt, tools, loop               ← архивируется после Волны 1

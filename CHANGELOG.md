@@ -88,7 +88,7 @@ merge-base origin/main origin/master` пуст: `main` orphan-ветка, сли
 - **Шаг 1 ✅ дом планировщика**: `python -m scheduler` + сервис в compose. Владелец джоб — не
   env-флаг, а **advisory-lock роли `scheduler`**; забыли снять `SCHEDULER_IN_BOT` — проигравший
   громко отказывает, а не шлёт всё по второму разу.
-- **Шаг 3 ✅ READ через MCP**: 24 READ-инструмента из 38 по реестру §6.1, поверх `ads/read.py` и
+- **Шаг 3 ✅ READ через MCP**: 25 READ-инструментов из 38 по реестру §6.1, поверх `ads/read.py` и
   `ensure_read_allowed`. Round-trip через Hermes доказан живьём на 15 из них; 8 добавленных 30.07 —
   только офлайн (`tests/test_mcp_read_smoke.py`). WRITE физически отсутствует (И4).
 - **Шаг 4 🟡 память**: `recall_client` — PII-free контекст клиента.

@@ -1,4 +1,4 @@
-"""FastMCP-реестр READ + WRITE инструментов + construction-time assert И4 + lifespan-bootstrap.
+"""FastMCP-реестр READ-инструментов + construction-time assert И4 + lifespan-bootstrap.
 
 Импорт этого модуля РОНЯЕТ процесс, если в READ-слой просочилась мутация (assert И4) — это зерно
 инварианта изоляции, тот же паттерн, что защищает `ANALYSIS_TOOLS` в `agent/tools/schemas.py`.
@@ -13,7 +13,6 @@ from contextlib import asynccontextmanager
 from agent.tools.schemas import MUTATION_TOOLS
 from core.guards import require_no_mutations, require_registered_surface
 from mcp_server.tools_read import READ_MCP_TOOLS, READ_TOOL_FUNCS
-from mcp_server.tools_write import PROPOSE_MCP_TOOLS, PROPOSE_TOOL_FUNCS
 
 # ── И4 (зерно): READ-инструменты НЕ пересекаются с мутационными ──────────────────
 require_no_mutations(
@@ -42,10 +41,11 @@ def _registered_tool_names(mcp) -> frozenset[str]:
 
 
 def build_server():
-    """FastMCP с зарегистрированными READ + WRITE инструментами.
+    """FastMCP с зарегистрированными READ-инструментами.
 
-    §15.2: после регистрации сверяем ФАКТИЧЕСКУЮ поверхность с одобренным набором.
-    Любой проскочивший инструмент мимо реестра → старт падает fail-fast."""
+    §15.2: WRITE-код подготовлен отдельно, но не выходит на живую поверхность до доказанного
+    доверенного канала reply-anchor. После регистрации сверяем ФАКТИЧЕСКУЮ поверхность с READ-набором;
+    любой проскочивший инструмент → старт падает fail-fast."""
     from mcp.server.fastmcp import FastMCP
 
     mcp = FastMCP("aimash", lifespan=_lifespan)
@@ -54,15 +54,11 @@ def build_server():
     for name, fn in READ_TOOL_FUNCS.items():
         mcp.tool(name=name, structured_output=False)(fn)
 
-    # WRITE-инструменты (propose_* + execute_confirmed)
-    for name, fn in PROPOSE_TOOL_FUNCS.items():
-        mcp.tool(name=name, structured_output=False)(fn)
-
-    # Проверка: вся живая поверхность внутри одобренного набора
-    approved = READ_MCP_TOOLS | PROPOSE_MCP_TOOLS
+    # Проверка: живая поверхность РОВНО READ-only. Это равенство, не subset: лишний
+    # propose/execute и потерянный READ одинаково роняют старт.
     require_registered_surface(
         _registered_tool_names(mcp),
-        approved,
+        READ_MCP_TOOLS,
         subject="mcp_server.server.build_server (живая MCP-поверхность)",
     )
     return mcp
