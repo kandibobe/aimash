@@ -338,8 +338,9 @@ cron, стоимость прогона (0.7) — живые действия н
 - Архитектура/сложное — Opus 4.8; объём (CRUD, отчёты, тесты, бойлерплейт) — Sonnet 4.6.
 - Скилы: `new-mutation`, `gaql-query`, `check-rsa-copy`, `gads-version`, `confirm-gate-audit`.
 - Slash-команды (`.claude/commands/`): `/verify-live` (единый вход в live-смоук), `/restart-bot`
-  (409/lock/double-import). `/add-bot-command` относится к **архивируемому** слою — новых кнопочных команд
-  не заводить, текстовые инструменты идут в реестр `SPEC.md` §6.
+  (409/lock/double-import). Скаффолда `/add-bot-command` больше нет — удалён 30.07.2026: он заводил
+  кнопочный хендлер в **архивируемом** слое, то есть инструмент подталкивал ровно к тому, что
+  запрещено. Новых кнопочных команд не заводить, текстовые инструменты идут в реестр `SPEC.md` §6.
 - **Windows-консоль:** запускай скрипты с `PYTHONIOENCODING=utf-8` (или зови `scripts/_win_console.enable_utf8()`
   в начале скрипта) — иначе cp1251 роняет emoji/кириллицу `UnicodeEncodeError`.
 - **pre-commit гоча:** `ruff-format` переписывает файлы прямо в хуке → 1-й `git commit` падает («files were

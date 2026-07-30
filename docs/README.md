@@ -59,6 +59,7 @@
   [`OPERATIONS.md`](../deploy/hermes/OPERATIONS.md) — день-2: редеплой↔MCP-reconnect, логи, откат, kill-switch, замеры §12 ·
   [`OPEN_DECISIONS.md`](../deploy/hermes/OPEN_DECISIONS.md) — решения заказчика D1–D7 (**настройка**, у каждого строгий дефолт) ·
   [`RISK_REGISTER.md`](../deploy/hermes/RISK_REGISTER.md) — риски Р1–Р9 (**подпись**, дефолта нет; приложение к договору) ·
+  [`SOUL.md`](../deploy/hermes/SOUL.md) — **слот №1 системного промпта** (деплоится в `~/.hermes/SOUL.md`): идентичность агента, а НЕ граница безопасности — границы дают отсутствие WRITE-инструментов, confirm-гейт в коде и таинт через недоступность инструментов ·
   [`host-a/RUNBOOK.md`](../deploy/hermes/host-a/RUNBOOK.md) — двухсерверная схема; ⚠️ **ни один шаг не выполнялся живьём**.
 
 ## Архив

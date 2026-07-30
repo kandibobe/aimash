@@ -10,6 +10,13 @@
 обязана резолвиться в существующий путь. Второй заход того же класса — упоминания переехавших
 путей ВНЕ markdown-ссылок (бэктики, комментарии): `test_no_references_to_moved_paths` ниже.
 
+Третий заход, обратная сторона того же (2026-07-30): ссылка ведёт куда надо, но её НЕТ.
+`docs/REPO_GUARDRAILS.md` (ruleset на ветку == право снять confirm-гейт) прожил с нулём входящих
+ссылок; `deploy/hermes/SOUL.md` — слот №1 системного промпта — не значился в индексе вовсе. Дока,
+которую нельзя найти из индекса, не существует для читающего, и никакая проверка ссылок этого не
+видит: битых ссылок нет ровно потому, что ссылок нет. `test_docs_index_covers_every_doc` требует
+обратного включения — каждый документ достижим из `docs/README.md` ССЫЛКОЙ, не упоминанием.
+
 Границы. Проверяются только markdown-ссылки `[текст](путь)` — там ложных срабатываний нет
 (130 ссылок, 0 битых на момент написания). Пути в бэктиках намеренно НЕ проверяются: спека
 `deploy/hermes/HERMES_SPEC.md` осознанно упоминает несуществующие пути — файлы вышестоящего
@@ -64,6 +71,42 @@ def test_markdown_links_resolve(doc):
         }
     )
     assert not broken, f"{doc.relative_to(ROOT).as_posix()}: ссылки в пустоту: {broken}"
+
+
+def test_docs_index_covers_every_doc():
+    """Каждый документ `docs/` и `deploy/hermes/` достижим ССЫЛКОЙ из индекса `docs/README.md`.
+
+    Обратное включение к `test_markdown_links_resolve`: тот ловит ссылку в пустоту, этот — пустоту
+    вместо ссылки. Второе тише: битых ссылок нет ровно потому, что документ никто не упомянул.
+
+    Достижимость считается по РЕЗОЛВУ ссылки, не по вхождению имени в текст: «см. SOUL.md» в prose
+    находится подстрокой и никуда не ведёт, а требование индекса — чтобы вело.
+
+    Вне требования: сам индекс и `docs/archive/**` (архив вне зоны инвариантов, `_SKIP_DIRS`).
+    """
+    index = ROOT / "docs" / "README.md"
+    linked = set()
+    for target in _internal_targets(index.read_text(encoding="utf-8")):
+        for base in (index.parent, ROOT):
+            resolved = (base / target).resolve()
+            if resolved.exists():
+                linked.add(resolved)
+
+    expected = sorted((ROOT / "docs").glob("*.md")) + sorted(
+        (ROOT / "deploy" / "hermes").rglob("*.md")
+    )
+    missing = sorted(
+        p.relative_to(ROOT).as_posix()
+        for p in expected
+        if p != index and "archive" not in p.parts and p.resolve() not in linked
+    )
+    assert not missing, (
+        "не сослан из индекса docs/README.md: "
+        + ", ".join(missing)
+        + ". Дока, которой нет в индексе, не существует для читающего — добавь строку "
+        "«- [имя](путь) — о чём» в подходящий раздел. Если документ намеренно не для индекса, "
+        "переезд ему в docs/archive/ (там инварианты не действуют), а не молчание."
+    )
 
 
 @pytest.mark.parametrize("old,new", sorted(MOVED_PATHS.items()))
