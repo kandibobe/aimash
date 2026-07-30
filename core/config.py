@@ -142,9 +142,10 @@ class Settings(BaseSettings):
     google_ads_login_customer_ids: str = ""
     # Белый список аккаунтов для МУТАЦИЙ (см. ads.client.ensure_allowed). Сентинел «all»/«*» =
     # мутации на ПОЛНОМ видимом наборе (allowed_ceiling(): Draft ∪ read-list ∪ обнаруженные
-    # дочерние MCC) — см. allow_all_visible. В ПРОД пусто => дефолт «all» (prod готов из коробки,
-    # _default_mutations_all_in_prod); в dev/test пусто => fail-closed (мутаций нет). Замок
-    # видимости и confirm-гейт остаются: чужой аккаунт вне MCC немутируем, «да» обязателен.
+    # дочерние MCC) — см. allow_all_visible; в prod это ЯВНОЕ значение env (решение владельца),
+    # а не дефолт. Пусто => fail-closed в ЛЮБОМ окружении, включая prod (BZ-1, 2026-07-30):
+    # мутаций нет, чтение работает — «очистить env» ЗАКРЫВАЕТ мутации, а не открывает.
+    # Замок видимости и confirm-гейт остаются: чужой аккаунт вне MCC немутируем, «да» обязателен.
     google_ads_allowed_customer_ids: str = ""
     # §8: аккаунты, доступные ТОЛЬКО на чтение (сводка по дочерним MCC) ПОМИМО мутационного списка.
     # fail-closed; мутации этим НЕ затрагиваются (свой узкий замок). Пусто => чтение, как и мутации,
@@ -171,6 +172,20 @@ class Settings(BaseSettings):
     # фактически без лимита (ставь высоким). core.quota предупреждает на 80% и БЛОКИРУЕТ новые
     # МУТАЦИИ на 95% (чтение не блокируем). 0 ⇒ трекинг выключен (без гарда).
     google_ads_daily_op_limit: int = 15000
+
+    # BZ-1: аварийный рубильник мутаций (core.killswitch). Существование файла по этому пути
+    # (относительно CWD процесса; в контейнере — /app) останавливает ВСЕ мутации БЕЗ рестарта:
+    # `docker exec aimash-bot touch /app/KILL_SWITCH`. Пусто = файл-канал выключен (остаётся env
+    # DISABLE_ALL_MUTATIONS — тот читается живьём из os.environ, мимо этого синглтона).
+    kill_switch_file: str = "KILL_SWITCH"
+    # B1-4: суточный blast-radius ПОВЫШЕНИЙ бюджета на аккаунт (окно 24 ч по исполненным строкам
+    # proposals; понижения не ограничиваются никогда). Проверка — ДО claim, в
+    # ads.mutations._require_budget_blast_radius (отказ не сжигает подтверждение). 0 = выключено;
+    # в prod max_ops автоподнимается до 10 (_default_budget_blast_radius_in_prod) — молча
+    # выключенным счётный кап в prod не остаётся. Кап по сумме — в ЕДИНИЦАХ валюты аккаунта
+    # (не micros); универсального дефолта нет (зависит от валюты), задаёт владелец.
+    daily_budget_increase_max_ops: int = 0
+    daily_budget_increase_cap_units: float = 0.0
 
     # §12 2FA (опц. в ТЗ): PIN-подтверждение ОПАСНЫХ операций ПЕРЕД исполнением. Opt-in, дефолт
     # OFF, fail-closed: включён без PIN ⇒ опасные операции БЛОКИРУЮТСЯ (не fail-open). PIN сверяет
@@ -258,6 +273,13 @@ class Settings(BaseSettings):
     # 2.6: окна планового отчёта/сравнения аномалий (дни) — раньше зашиты в scheduler/jobs.
     report_window_days: int = 7
     anomaly_window_days: int = 7
+    # Р6: алерт о правках, сделанных в аккаунте МИМО бота (change_event). Opt-in: 0 = выкл, потому
+    # что на чужом аккаунте с активным агентством это шумный поток, а не сигнал. Окно шире интервала
+    # НАМЕРЕННО (после простоя событие не должно выпасть из выборки) — дубли отсекает per-chat
+    # курсор, а не узость окна. Потолок окна — 29 дней (ресурс живёт 30, сутки — запас, см.
+    # reports.queries.CHANGE_EVENT_MAX_DAYS).
+    external_changes_interval_hours: int = 0
+    external_changes_window_days: int = 7
     # 2.6: таймауты денежного пути (сек) — крутятся без пересборки образа (env ADS_TIMEOUT_S/
     # LLM_TIMEOUT_S); влияют на деградацию OpenRouter/Google Ads.
     ads_timeout_s: float = 60.0
@@ -392,9 +414,12 @@ class Settings(BaseSettings):
     # #10 Наблюдаемость / spend-cap НИЖЕ агента (предусловие delegation, config.yaml:75-78): дневной
     # потолок СТОИМОСТИ (USD), не числа вызовов. llm_daily_calls_per_user ограничивает наш NL-путь
     # пер-chat, но НЕ покрывает автономный Hermes-цикл (идёт мимо процесса). Этот потолок сверяется с
-    # реальными тратами из core.or_activity (OpenRouter /key usage_daily или /activity). 0.0 ⇒ ВЫКЛ
-    # (opt-in). Это МЯГКИЙ рубеж в нашем коде; ЖЁСТКИЙ — limit+limit_reset:daily на самом ключе
-    # OpenRouter (серверный enforcement, RB-3, руки владельца). Оба нужны: наш — раньше и с контекстом.
+    # реальными тратами из core.or_activity (OpenRouter /key usage_daily или /activity); энфорсится
+    # в agent/router.chat (BZ-4, единая точка всех наших LLM-вызовов) + ранний человекочитаемый отказ
+    # в bot/main._llm_budget_or_reply. 0.0 ⇒ ВЫКЛ (в prod автодефолт 10 USD —
+    # _default_llm_cost_cap_in_prod). Это МЯГКИЙ рубеж в нашем коде; ЖЁСТКИЙ — limit+limit_reset:daily
+    # на самом ключе OpenRouter (серверный enforcement, RB-3, руки владельца). Оба нужны: наш — раньше
+    # и с контекстом.
     llm_daily_cost_cap_usd: float = 0.0
 
     @property
@@ -433,7 +458,8 @@ class Settings(BaseSettings):
     def allow_all_visible(self) -> bool:
         """Сентинел «all»/«*» в GOOGLE_ADS_ALLOWED_CUSTOMER_IDS — мутации разрешены на ПОЛНОМ
         видимом наборе (ads.client.allowed_ceiling(): Draft ∪ read-list ∪ дочерние, обнаруженные
-        обходом MCC). Это prod-дефолт (см. _default_mutations_all_in_prod). НЕ снимает две
+        обходом MCC). С 2026-07-30 (BZ-1) это ЯВНОЕ значение env, не prod-дефолт
+        (коэрция пустого значения снята — см. _warn_mutations_closed_in_prod). НЕ снимает две
         страховки: (1) confirm-гейт («да» + confirmation_id, ensure_allowed на исполнении),
         (2) потолок видимости — аккаунт вне MCC мутировать нельзя (бот его не видит). Динамически
         ограничен фактически обнаруженным набором: сбой discovery ⇒ мутабелен только пол потолка
@@ -556,15 +582,68 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _default_mutations_all_in_prod(self) -> "Settings":
-        """Решение владельца 2026-07: Draft-only доктрина СНЯТА — в prod бот готов к работе на
-        ВСЕХ видимых аккаунтах по умолчанию. Если ENV=prod и GOOGLE_ADS_ALLOWED_CUSTOMER_IDS
-        пуст ⇒ выставляем сентинел «all» (мутации на allowed_ceiling(): Draft ∪ read-list ∪
-        обнаруженные дочерние; всё так же ⊆ видимости + confirm-гейт). Владелец может СУЗИТЬ
-        явным списком id. В dev/test пусто остаётся fail-closed (не открываем локаль/CI). Должен
-        идти ДО _require_google_ads_in_prod, чтобы тот увидел уже заполненное значение."""
+    def _default_llm_cost_cap_in_prod(self) -> "Settings":
+        """BZ-4: в prod долларовый потолок дня НЕ должен быть выключен молча — до 2026-07-30
+        check_daily_cost_cap не звался нигде, а решение D1 («$10/сутки кредитным лимитом на ключе
+        OpenRouter») замером 29.07 опровергнуто: limit=null на живом ключе. 0 в prod → 10 USD/сутки
+        (значение из D1; env переопределяет явно — тот же паттерн, что _default_llm_cap_in_prod).
+        В dev дефолт остаётся 0 (не мешаем отладке; тестам не нужен httpx-мок в каждом вызове)."""
+        if self.env == "prod" and float(self.llm_daily_cost_cap_usd or 0.0) <= 0:
+            self.llm_daily_cost_cap_usd = 10.0
+        return self
+
+    @model_validator(mode="after")
+    def _warn_mutations_closed_in_prod(self) -> "Settings":
+        """BZ-1 (2026-07-30): пустой GOOGLE_ADS_ALLOWED_CUSTOMER_IDS больше НЕ коэрцится в «all».
+        Прежний дефолт («prod готов из коробки», решение владельца 2026-07) делал «выключить
+        мутации очисткой env» операцией, которая их ОТКРЫВАЕТ на все видимые аккаунты, — инверсия
+        правила 10 в самой опасной точке конфигурации. Теперь пусто = fail-closed в любом
+        окружении: prod поднимается read-only (ensure_allowed отказывает каждой мутации), о чём
+        предупреждаем на старте — молчаливым это состояние быть не должно. Сентинел «all» остаётся
+        валидным ЯВНЫМ значением env: прежнее поведение возвращается одной строкой, но как решение
+        владельца, а не тихий дефолт."""
         if self.env == "prod" and not self.google_ads_allowed_customer_ids.strip():
-            self.google_ads_allowed_customer_ids = "all"
+            import logging  # stdlib напрямую: core.logging импортирует этот модуль (цикл)
+
+            logging.getLogger("aimash.config").warning(
+                "GOOGLE_ADS_ALLOWED_CUSTOMER_IDS пуст — мутации ВЫКЛЮЧЕНЫ (fail-closed, "
+                "read-only режим). Включить: =all (все видимые) или явный список id."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _default_budget_blast_radius_in_prod(self) -> "Settings":
+        """B1-4: в prod счётный кап повышений бюджета НЕ должен быть выключен молча — серию
+        подтверждённых «+20%» за день больше ничто не ограничивает (тиры L1/L3 презентационные,
+        quota считает операции, MONEY_MAX — потолок ОДНОЙ операции). 0 в prod → 10 повышений на
+        аккаунт в сутки (ручная работа не упирается; env переопределяет явно — тот же паттерн,
+        что _default_llm_cap_in_prod). Денежный кап (units) дефолтом не трогаем: сумма зависит
+        от валюты аккаунта, универсального числа нет."""
+        if self.env == "prod" and int(self.daily_budget_increase_max_ops or 0) <= 0:
+            self.daily_budget_increase_max_ops = 10
+        return self
+
+    @model_validator(mode="after")
+    def _clamp_external_changes_window(self) -> "Settings":
+        """Р6: окно журнала правок вне 1..29 дней → откат на 7 с ГРОМКИМ логом.
+
+        Ресурс `change_event` хранит 30 дней, и ридер (`check_change_event_days`) на выходе за
+        границу отказывает — правильно для вызова инструмента, но для фоновой джобы это значило бы
+        отказ на каждом аккаунте каждый цикл: опечатка в env превратилась бы в «алертов нет» вместо
+        «алерты сломаны». Расписание — не гейт безопасности, поэтому здесь тот же fail-safe, что у
+        невалидного REPORT_SCHEDULE: работаем на дефолте и говорим об этом вслух. Потолок 29, а не
+        30, — сутки запаса на host-date фолбэк чтения таймзоны (см. CHANGE_EVENT_MAX_DAYS); число
+        продублировано литералом (импорт `reports.queries` отсюда = цикл), совпадение держит тест."""
+        days = int(self.external_changes_window_days or 0)
+        if not 1 <= days <= 29:
+            import logging  # stdlib напрямую: core.logging импортирует этот модуль (цикл)
+
+            logging.getLogger("aimash.config").warning(
+                "EXTERNAL_CHANGES_WINDOW_DAYS=%s вне 1..29 (ретенция change_event минус сутки "
+                "запаса) — беру 7",
+                self.external_changes_window_days,
+            )
+            self.external_changes_window_days = 7
         return self
 
     @model_validator(mode="after")
@@ -581,24 +660,16 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _require_google_ads_in_prod(self) -> "Settings":
-        """Fail-fast: в prod без developer token / allowed_customer_ids бот всё равно не сможет
-        работать с Google Ads. Падаем на СТАРТЕ (тут), а не на первом вызове API: ensure_allowed
-        и так fail-closed на пустой allow-list, но это срабатывает позже — лучше не подняться с
-        неполной конфигурацией. В dev/тестах не требуем (работа на фейках/без живых кредов)."""
-        if self.env == "prod":
-            missing = []
-            if not self.google_ads_developer_token.get_secret_value():
-                missing.append("GOOGLE_ADS_DEVELOPER_TOKEN")
-            # Сентинел «all» (allow_all_visible) — валидная конфигурация мутаций (полный видимый
-            # набор). В prod он проставляется дефолтом (_default_mutations_all_in_prod), так что
-            # эта ветка практически недостижима пустой; проверка остаётся как явный инвариант.
-            if not (self.allow_all_visible or self.allowed_customer_ids):
-                missing.append("GOOGLE_ADS_ALLOWED_CUSTOMER_IDS")
-            if missing:
-                raise ValueError(
-                    f"В prod обязательны: {', '.join(missing)} — иначе бот не сможет работать с "
-                    "Google Ads (fail-fast на старте, а не на первом вызове API)."
-                )
+        """Fail-fast: в prod без developer token бот не сможет работать с Google Ads ВООБЩЕ (даже
+        читать). Падаем на СТАРТЕ (тут), а не на первом вызове API. Пустой allowed_customer_ids
+        старт больше НЕ роняет (BZ-1, 2026-07-30): это валидная read-only конфигурация — мутации
+        выключены fail-closed (ensure_allowed), чтение/отчёты/алерты работают; предупреждение
+        пишет _warn_mutations_closed_in_prod. В dev/тестах не требуем (работа на фейках)."""
+        if self.env == "prod" and not self.google_ads_developer_token.get_secret_value():
+            raise ValueError(
+                "В prod обязателен GOOGLE_ADS_DEVELOPER_TOKEN — иначе бот не сможет работать с "
+                "Google Ads (fail-fast на старте, а не на первом вызове API)."
+            )
         return self
 
     @model_validator(mode="after")

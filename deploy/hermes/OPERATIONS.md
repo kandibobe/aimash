@@ -140,7 +140,7 @@ hermes doctor --fix                  # health self-check с авто-фиксо�
 ```
 
 **Кавеат `mcp test`:** доки подтверждают, что он тестирует **коннект**, но не сказано, что печатает список/счётчик
-инструментов [Likely]. Чтобы позитивно убедиться, что 15 READ-инструментов живые — в чате `/reload-mcp` и спросить агента
+инструментов [Likely]. Чтобы позитивно убедиться, что 25 READ-инструментов живые — в чате `/reload-mcp` и спросить агента
 «какие MCP-инструменты доступны», либо смотреть стартовый баннер в `gateway.log`. MCP-инструменты регистрируются с
 префиксом `mcp_<server>_<tool>`.
 
@@ -221,6 +221,14 @@ hermes config show                   # убедиться, что model — mapp
 проза в памяти агента (issue #26568) [Certain]. Гоча: один инструмент может входить в **несколько** тулсетов — чтобы
 погасить, выключи **все** тулсеты, которые его дают (напр. `web_search` живёт и в `web`, и в `browser`), и начни
 **свежую** сессию [Certain]. После правки — `hermes gateway restart`.
+
+⚠️ **Харднинг тулсетов не переживает пересборку конфига — накатывать процедурой, а не руками.** 24.07 поверхность
+закрыли вручную, 27.07 конфиг развалился (авария со слагом модели) и был пересобран из дефолта, 29.07 замер показал
+`terminal`/`file`/`code_execution`/`computer_use` снова **включёнными** на боевом gateway. Восстановление —
+`python scripts/hermes_restore_toolsets.py` (`--dry-run` покажет команды): список берёт из
+[`config.yaml`](config.yaml) (тот же, что проверяет `lint_config.check_toolset_allowlist`), снимает бэкап живого
+конфига, гасит, рестартует gateway и **проверяет результат по `hermes tools list`** — при любом лишнем включённом
+тулсете возвращает ненулевой код и печатает команду отката.
 
 ---
 
@@ -318,9 +326,11 @@ tar tzf "$(ls -1t /root/hermes-backups/*.tgz | head -1)" | grep -E 'state\.db|\.
 
 - **Жёсткий (backstop):** Credit limit `<USD>` + сброс `daily` на самом inference-ключе Hermes
   (`OPENROUTER_API_KEY`). Срабатывает у провайдера независимо от нашего кода — настоящая граница.
-- **Мягкий (наш код, opt-in):** `LLM_DAILY_COST_CAP_USD=<USD>` → `core/llm_budget.check_daily_cost_cap()`
-  читает живую трату (`GET /key` `usage_daily`) и отказывает ДО дорогого прогона. OpenRouter недоступен ⇒
-  fail-open (жёсткий рубеж выше — backstop). Предусловие spend-cap для delegation (Фаза C).
+- **Мягкий (наш код):** `LLM_DAILY_COST_CAP_USD=<USD>` → `core/llm_budget.check_daily_cost_cap()`
+  читает живую трату (`GET /key` `usage_daily`, кэш 60 с) и отказывает ДО дорогого прогона. С 2026-07-30
+  (BZ-4) энфорсится в `agent/router.chat` — единой точке наших LLM-вызовов; в prod `0` автодефолтится
+  в `10` USD (значение D1), в dev остаётся выкл. OpenRouter недоступен ⇒ fail-open (жёсткий рубеж
+  выше — backstop). Предусловие spend-cap для delegation (Фаза C).
 - **Kill-switch:** деактивация ключа в OpenRouter (account-wide — гасит все прогоны). Плюс «мягкий»: `hermes gateway
   stop` (боевой бот при этом жив).
 - Per-день/per-модель траты Hermes поднимает ридер `core/or_activity` (`GET /activity`, нужен
@@ -530,7 +540,7 @@ grep 'pre_tool_call.block' ~/.hermes/aimash_probe.log | tail -1
 
 | V | Действие | Проверка |
 |---|---|---|
-| **V18** | Удалить `~/.hermes/plugins/aimash_probe`, **убрать `aimash_probe` из `plugins.enabled`**, удалить запись `mcp_servers.aimash-probe`, все `AIMASH_PROBE_*` из окружения, **вернуть `vision` в `disabled_toolsets`** (если снимался под R6); restart | `hermes plugins` → `aimash_probe` отсутствует; `hermes mcp list` → только `aimash`; `hermes config show` → 15 READ-инструментов, `vision` погашен; `hermes gateway status` → active |
+| **V18** | Удалить `~/.hermes/plugins/aimash_probe`, **убрать `aimash_probe` из `plugins.enabled`**, удалить запись `mcp_servers.aimash-probe`, все `AIMASH_PROBE_*` из окружения, **вернуть `vision` в `disabled_toolsets`** (если снимался под R6); restart | `hermes plugins` → `aimash_probe` отсутствует; `hermes mcp list` → только `aimash`; `hermes config show` → 25 READ-инструментов, `vision` погашен; `hermes gateway status` → active |
 | **V19** | Гигиена вывода — команды ниже | `aimash_probe.log` вывезти в защищённое место или удалить: у хука своя редакция по ФОРМЕ секрета, чужие поля она гарантировать не может |
 
 **V19 — паттерны файлом, и обязательно с положительным контролем.** «Пусто» само по себе ничего не

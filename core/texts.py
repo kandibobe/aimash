@@ -1235,8 +1235,9 @@ def fmt_mutready(r: dict, lang: str | None = None) -> str:
         )
     else:
         lines.append(
-            "⏭ финальный шаг (ВЛАДЕЛЕЦ, руками): GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (все видимые; "
-            "прод-дефолт) или явный список id (docs/DEPLOYMENT.md §2.1). Бот этот конфиг сам НЕ меняет."
+            "⏭ финальный шаг (ВЛАДЕЛЕЦ, руками): GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (все видимые) "
+            "или явный список id (docs/DEPLOYMENT.md §2.1). Пусто = мутации выключены (fail-closed). "
+            "Бот этот конфиг сам НЕ меняет."
         )
     return "\n".join(lines)
 
@@ -1270,11 +1271,11 @@ def fmt_mutready_all(results: list[dict], lang: str | None = None) -> str:
             mut_s = "мут: ВКЛ" if mut else "мут: выкл"
         lines.append(f"{'✅' if ready else '⚠️'} <b>{title}</b> — {flags} · {mut_s}")
     tail = (
-        "Enable all: GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (prod default). The bot never changes this "
-        "config. Every mutation still needs confirmation."
+        "Enable all: GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (explicit; empty = mutations off, "
+        "fail-closed). The bot never changes this config. Every mutation still needs confirmation."
         if en
-        else "Включить все: GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (прод-дефолт). Бот конфиг НЕ меняет. "
-        "Любая мутация — только через подтверждение «да»."
+        else "Включить все: GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (явно; пусто = мутации выключены, "
+        "fail-closed). Бот конфиг НЕ меняет. Любая мутация — только через подтверждение «да»."
     )
     lines.append("")
     lines.append(tail)
@@ -1774,6 +1775,152 @@ def fmt_error_alert(rows, lang: str | None = None) -> str:
         )
     if len(order) > 15:
         L.append("…")
+    return "\n".join(L)
+
+
+# Р6: как назвать канал правки и объект по-человечески. Неизвестный enum отдаём КАК ЕСТЬ — новый
+# канал Google не должен превращаться в «прочее» и терять единственный факт, ради которого алерт и
+# шлётся («правка пришла оттуда, откуда мы не ждали»).
+_CHANGE_CLIENT_RU = {
+    "GOOGLE_ADS_WEB_CLIENT": "веб-интерфейс",
+    "GOOGLE_ADS_EDITOR": "Google Ads Editor",
+    "GOOGLE_ADS_MOBILE_APP": "мобильное приложение",
+    "GOOGLE_ADS_SCRIPTS": "скрипт аккаунта",
+    "GOOGLE_ADS_BULK_UPLOAD": "массовая загрузка",
+    "GOOGLE_ADS_AUTOMATED_RULE": "авто-правило",
+    "GOOGLE_ADS_RECOMMENDATIONS": "авто-применение рекомендаций Google",
+    "SEARCH_ADS_360": "Search Ads 360",
+    "GOOGLE_ADS_API": "API",
+}
+_CHANGE_CLIENT_EN = {
+    "GOOGLE_ADS_WEB_CLIENT": "web UI",
+    "GOOGLE_ADS_EDITOR": "Google Ads Editor",
+    "GOOGLE_ADS_MOBILE_APP": "mobile app",
+    "GOOGLE_ADS_SCRIPTS": "account script",
+    "GOOGLE_ADS_BULK_UPLOAD": "bulk upload",
+    "GOOGLE_ADS_AUTOMATED_RULE": "automated rule",
+    "GOOGLE_ADS_RECOMMENDATIONS": "Google auto-apply",
+    "SEARCH_ADS_360": "Search Ads 360",
+    "GOOGLE_ADS_API": "API",
+}
+_CHANGE_RESOURCE_RU = {
+    "CAMPAIGN": "кампания",
+    "CAMPAIGN_BUDGET": "бюджет кампании",
+    "CAMPAIGN_CRITERION": "таргетинг кампании",
+    "AD_GROUP": "группа объявлений",
+    "AD_GROUP_AD": "объявление",
+    "AD_GROUP_CRITERION": "ключ/критерий группы",
+    "AD_GROUP_BID_MODIFIER": "корректировка ставок",
+    "AD_GROUP_ASSET": "ассет группы",
+    "ASSET": "ассет",
+    "FEED": "фид",
+}
+_CHANGE_RESOURCE_EN = {
+    "CAMPAIGN": "campaign",
+    "CAMPAIGN_BUDGET": "campaign budget",
+    "CAMPAIGN_CRITERION": "campaign targeting",
+    "AD_GROUP": "ad group",
+    "AD_GROUP_AD": "ad",
+    "AD_GROUP_CRITERION": "ad group keyword/criterion",
+    "AD_GROUP_BID_MODIFIER": "bid modifier",
+    "AD_GROUP_ASSET": "ad group asset",
+    "ASSET": "asset",
+    "FEED": "feed",
+}
+_CHANGE_OP_RU = {"CREATE": "создано", "UPDATE": "изменено", "REMOVE": "удалено"}
+_CHANGE_OP_EN = {"CREATE": "created", "UPDATE": "updated", "REMOVE": "removed"}
+# Бюджет строк дайджеста. Делит его между аккаунтами ДЖОБА (scheduler.jobs), а не форматтер, и это
+# принципиально: глобальный потолок здесь означал бы «первые аккаунты съели квоту, последние не
+# показаны», а курсор «уже показано» при этом двигался бы для ВСЕХ — правки хвостовых аккаунтов
+# исчезали бы навсегда. Форматтер рисует ровно то, что ему дали, и ничего не режет.
+EXT_CHANGES_MAX_LINES = 20
+_EXT_CHANGES_MAX_FIELDS_CHARS = 110  # хвост FieldMask обрезаем: 4096 на сообщение — общий бюджет
+
+
+def mask_email(value: str) -> str:
+    """`manager@agency.example` → `m***@agency.example`. Пусто → пусто, не-почта → `n***`.
+
+    Журнал правок Google несёт РАБОЧИЕ ПОЧТЫ сотрудников клиента. Домена и первой буквы хватает,
+    чтобы отличить «правил кто-то из агентства» от «правил кто-то со стороны клиента» и развести
+    двух людей между собой; полный адрес не нужен ни одному выводу — ни конверту инструмента
+    (уезжает в модель, а значит к третьей стороне), ни алерту в Telegram (рассылка идёт по
+    whitelist, а `core.access.accessible_accounts_for_user` в режиме `auto` при пустой таблице
+    доступов возвращает ВСЕ аккаунты — то есть менеджер клиента A прочитал бы почты сотрудников
+    клиента B; И6 + золотое правило 5).
+
+    Незнакомая форма маскируется, а не пропускается как есть: Google обещает в этом поле адрес, и
+    если однажды придёт что-то другое, это всё равно ИДЕНТИФИКАТОР человека. Пустая строка —
+    единственное исключение: она уже ничего не сообщает, а вызывающий отличает её от значения."""
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    local, sep, domain = s.partition("@")
+    if not sep or not domain:
+        return f"{s[0]}***"
+    return f"{local[:1]}***@{domain}"
+
+
+def _change_resource_id(resource_name: str) -> str:
+    """`customers/123/campaignBudgets/456` → `456`. Имени объекта журнал не отдаёт, но без ЛЮБОГО
+    идентификатора строка «изменён бюджет кампании» не говорит, КАКОЙ именно, — а по id правку
+    находят и в веб-интерфейсе, и нашим же ридером."""
+    tail = str(resource_name or "").rsplit("/", 1)[-1]
+    return tail[:40]
+
+
+def fmt_external_changes(acct_events, lang: str | None = None, pending: int = 0) -> str:
+    """Р6: дайджест правок, сделанных в аккаунте МИМО бота (scheduler.jobs.run_external_change_alerts).
+
+    `acct_events` — [(customer_id, [ChangeEventRow, …]), …]: уже отфильтрованные, свежие и УЖЕ
+    отобранные вызывающим — форматтер рисует их все, ничего не отбрасывая (см. `EXT_CHANGES_MAX_LINES`
+    о том, почему потолок живёт в джобе). `pending` — сколько свежих правок в этот батч не вошло;
+    они не потеряны, курсор до них не двинут, и следующий цикл начнёт с них.
+
+    Google об этих правках не уведомляет — узнать можно только спросив, а «отмена возвращает
+    настройку, но не потраченные деньги» (deploy/hermes/RISK_REGISTER.md, Р6), поэтому текст зовёт
+    СВЕРИТЬ, а не просто сообщает. Значений «было → стало» здесь нет — ресурс отдаёт имена полей
+    (см. reports.queries.fetch_change_events), и обещать в тексте больше, чем мы знаем, нельзя.
+
+    Почта правившего МАСКИРУЕТСЯ (`mask_email`): рассылка идёт по whitelist операторов, а не
+    персонально владельцу аккаунта."""
+    en = _lang(lang) == "en"
+    clients = _CHANGE_CLIENT_EN if en else _CHANGE_CLIENT_RU
+    resources = _CHANGE_RESOURCE_EN if en else _CHANGE_RESOURCE_RU
+    ops = _CHANGE_OP_EN if en else _CHANGE_OP_RU
+    shown = sum(len(evs) for _, evs in acct_events)
+    L = [
+        f"⚠️ <b>Changes made outside the bot: {shown}</b>"
+        if en
+        else f"⚠️ <b>Правки мимо бота: {shown}</b>",
+        "Google does not notify about these — check that each one is expected."
+        if en
+        else "Google о них не уведомляет — сверьте, что каждая ожидаема.",
+    ]
+    for acct, evs in acct_events:
+        if not evs:
+            continue  # заголовок аккаунта без строк — мусор
+        L.append("")
+        L.append(f"<b>{'Account' if en else 'Аккаунт'} {esc(acct)}</b>")
+        for e in evs:
+            when = (e.changed_at or "")[:16]  # 'YYYY-MM-DD HH:MM' — секунды тут ничего не решают
+            what = resources.get(e.resource_type, e.resource_type)
+            op = ops.get(e.operation, e.operation)
+            via = clients.get(e.client_type, e.client_type)
+            who = mask_email(e.user_email) or ("unknown" if en else "неизвестно")
+            rid = _change_resource_id(getattr(e, "resource_name", ""))
+            obj = f"{esc(what)} <code>{esc(rid)}</code>" if rid else esc(what)
+            line = f"• {esc(when)} · <b>{obj}</b> — {esc(op)} · {esc(via)} · {esc(who)}"
+            if e.changed_fields:
+                fields = ", ".join(e.changed_fields[:6])[:_EXT_CHANGES_MAX_FIELDS_CHARS]
+                line += f"\n  <code>{esc(fields)}</code>"
+            L.append(line)
+    if pending > 0:
+        L.append("")
+        L.append(
+            f"… and {pending} more — in the next run"
+            if en
+            else f"… и ещё {pending} — покажу следующим циклом"
+        )
     return "\n".join(L)
 
 

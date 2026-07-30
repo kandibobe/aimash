@@ -264,3 +264,9 @@ async def test_negative_value_refused(propose_env):
             account=DRAFT_ACCOUNT_ID, campaign="Camp A", mode="set_to", value=-5
         )
     assert env["status"] == "refused" and env["error_code"] == "invalid_argument"
+
+
+def test_propose_registry_excludes_execute_confirmed():
+    """§15.2: модель может создать черновик, но executor не существует на MCP-поверхности до
+    доверенного reply-anchor канала. Это отдельный реестр, не надежда на config include."""
+    assert "execute_confirmed" not in tw.PROPOSE_MCP_TOOLS

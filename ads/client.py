@@ -12,10 +12,12 @@ Draft-only доктрина СНЯТА — бот готов менять ВСЕ
   4) членство — `customer_id` обязан быть в мутационном наборе ⊆ потолок.
 Мутационный набор:
   • сентинел `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all` (или `*`, `settings.allow_all_visible`) ⇒ набор =
-    ВЕСЬ эффективный потолок `allowed_ceiling()` (все видимые). Это ПРОД-ДЕФОЛТ (см.
-    core.config._default_mutations_all_in_prod) — прод готов из коробки;
+    ВЕСЬ эффективный потолок `allowed_ceiling()` (все видимые). В prod это ЯВНОЕ значение env
+    (BZ-1, 2026-07-30: прежний тихий прод-дефолт «all» на пустом env снят — очистка env ЗАКРЫВАЕТ);
   • иначе — явный список id (`settings.allowed_customer_ids`), чтобы СУЗИТЬ набор;
-  • в dev/test пусто ⇒ мутаций нет (fail-closed).
+  • пусто ⇒ мутаций нет НИГДЕ, включая prod (fail-closed; prod поднимается read-only).
+Поверх набора — аварийный рубильник BZ-1 (core.killswitch): env `DISABLE_ALL_MUTATIONS` или
+файл-флаг `KILL_SWITCH` останавливают ВСЕ мутации без рестарта (проверка №0 в ensure_allowed).
 Две несменяемые страховки поверх набора: confirm-гейт (мутация только после «да» + confirmation_id,
 ensure_allowed перепроверяется на исполнении, tests/test_execute_account_binding.py) и потолок
 видимости (аккаунт вне MCC немутируем). Бюджет из scheduler остаётся заблокирован всегда
@@ -31,6 +33,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from core.config import normalize_customer_id, settings
+from core.killswitch import ensure_mutations_enabled  # BZ-1: аварийный стоп, проверка №0 замка
 
 if TYPE_CHECKING:
     from google.ads.googleads.client import GoogleAdsClient
@@ -44,13 +47,14 @@ DRAFT_ACCOUNT_ID = "7753643025"
 # (settings.allowed_customer_ids) ⊆ эффективного потолка (см. ensure_allowed).
 #
 # ✅ МУТАЦИИ на всех видимых аккаунтах (решение владельца 2026-07, Draft-only доктрина снята):
-#   • ПРОД-ДЕФОЛТ — `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all` (settings.allow_all_visible) ⇒ мутационный
-#     набор = ВЕСЬ allowed_ceiling() (Draft + read-list + дочерние обхода MCC). Аккаунт под ДРУГИМ
-#     MCC требует per-account OAuth-токена (scripts/register_account.py → oauth_tokens), иначе
-#     build_client его не аутентифицирует (видим для замка, но не подключён).
+#   • `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all` (settings.allow_all_visible) ⇒ мутационный набор =
+#     ВЕСЬ allowed_ceiling() (Draft + read-list + дочерние обхода MCC). С 2026-07-30 (BZ-1) это
+#     ЯВНОЕ значение env, а не прод-дефолт. Аккаунт под ДРУГИМ MCC требует per-account
+#     OAuth-токена (scripts/register_account.py → oauth_tokens), иначе build_client его не
+#     аутентифицирует (видим для замка, но не подключён).
 #   • СУЗИТЬ — явный список id в `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS` (каждый обязан быть ВИДИМ боту,
 #     иначе allowed_ceiling() отсекает — защита от опечатки в чужой боевой id).
-#   • dev/test пусто ⇒ мутаций нет (fail-closed).
+#   • пусто ⇒ мутаций нет в ЛЮБОМ окружении (fail-closed; prod = read-only).
 # Исполнение привязано к proposal.customer_id и ЗАНОВО ensure_allowed(cid) на исполнении
 # (tests/test_execute_account_binding.py); _present_proposal штампует АКТИВНЫЙ аккаунт (G2).
 # Бюджет из scheduler остаётся заблокирован всегда (user_initiated).
@@ -478,12 +482,17 @@ def ensure_allowed(customer_id: str) -> None:
     цифры), поэтому '775-364-3025' и '7753643025' эквивалентны.
 
     Мутационный набор (решение владельца 2026-07, Draft-only доктрина снята):
-      • `settings.allow_all_visible` (сентинел `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all`, прод-дефолт)
-        ⇒ набор = ВЕСЬ `allowed_ceiling()` (все видимые: Draft ∪ read-list ∪ дочерние обхода MCC);
+      • `settings.allow_all_visible` (сентинел `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all` — явное
+        значение env) ⇒ набор = ВЕСЬ `allowed_ceiling()` (Draft ∪ read-list ∪ дочерние обхода MCC);
       • иначе — явный `settings.allowed_customer_ids`, ограниченный тем же потолком (способ СУЗИТЬ).
     Потолок видимости и confirm-гейт остаются несменяемыми страховками: аккаунт вне MCC немутируем,
-    «да» + confirmation_id обязательны (перепроверка на исполнении). В dev/test пусто ⇒ fail-closed.
+    «да» + confirmation_id обязательны (перепроверка на исполнении). Пусто ⇒ fail-closed в ЛЮБОМ
+    окружении (BZ-1: тихий прод-дефолт «all» снят 2026-07-30). Проверка №0 — аварийный рубильник
+    (core.killswitch: env `DISABLE_ALL_MUTATIONS` / файл-флаг, без рестарта).
     """
+    # (0) BZ-1: аварийный рубильник — раньше любых разрешений. Env и файл-флаг читаются на КАЖДОМ
+    # вызове (без кэша): стоп срабатывает без рестарта процесса (`touch /app/KILL_SWITCH`).
+    ensure_mutations_enabled()
     cid = normalize_customer_id(customer_id)
     ceiling = allowed_ceiling()
     # Сентинел «all» ⇒ мутационный набор = весь видимый потолок (динамически ограничен фактически

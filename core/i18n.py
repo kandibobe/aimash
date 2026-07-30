@@ -399,6 +399,16 @@ CATALOG: dict[str, dict[str, str]] = {
             "account with /account for full, sorted results."
         ),
     },
+    "kw_ai_budget_note": {
+        "ru": (
+            "⚠️ ИИ-слой подбора не отработал: кластеры, минус-слова и релевантность моделью НЕ "
+            "проверены — список ниже сырой, из Keyword Planner.\n{err}"
+        ),
+        "en": (
+            "⚠️ The AI layer didn't run: clusters, negatives and relevance were NOT checked by the "
+            "model — the list below is raw Keyword Planner output.\n{err}"
+        ),
+    },
     "kw_bad_input": {
         "ru": texts.KW_BAD_INPUT,
         "en": "I need seed words or a link. Send, for example: <code>buy phone, smartphone</code>",
@@ -1334,6 +1344,16 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": texts.FAILED,
         "en": "⚠️ Failed to execute: {err}",
     },
+    # BZ-1/B1-4 (GateRefusal): политика отказала ДО claim — черновик жив, карточка восстановлена.
+    # НЕ «failed»: мутация не дефектна, причина внешняя и временная (рубильник/суточный кап).
+    "gate_refused": {
+        "ru": "⏸ <b>Не выполнено:</b> {err}",
+        "en": "⏸ <b>Not executed:</b> {err}",
+    },
+    "gate_refused_retry": {
+        "ru": "Черновик не сожжён — когда причина устранена, нажмите ✅ ещё раз.",
+        "en": "The draft is intact — once the cause is cleared, press ✅ again.",
+    },
     # Денежный путь: исход мутации НЕИЗВЕСТЕН (таймаут/INTERNAL/DEADLINE во время SDK — могла
     # примениться на сервере). НЕ «failed» — иначе повтор задвоил бы. Просим сверить перед повтором.
     "needs_review": {
@@ -1954,6 +1974,16 @@ CATALOG: dict[str, dict[str, str]] = {
             "Try again tomorrow or ask an admin to raise the limit."
         ),
     },
+    "llm_cost_cap_exceeded": {
+        "ru": (
+            "🚦 Дневной бюджет на ИИ исчерпан (${spent} из ${cap}). "
+            "Сброс в полночь UTC; поднять потолок может админ (LLM_DAILY_COST_CAP_USD)."
+        ),
+        "en": (
+            "🚦 Daily AI spend cap reached (${spent} of ${cap}). "
+            "Resets at midnight UTC; an admin can raise the cap (LLM_DAILY_COST_CAP_USD)."
+        ),
+    },
     "err_campaigns": {
         "ru": "⚠️ Не удалось получить кампании: {err}",
         "en": "⚠️ Couldn't fetch campaigns: {err}",
@@ -2403,6 +2433,16 @@ CATALOG: dict[str, dict[str, str]] = {
             "Site pages are saved — run the crawl tomorrow to build the dossier."
         ),
     },
+    "cli_crawl_dossier_cost_cap": {
+        "ru": (
+            "📄 Досье не собрано: дневной бюджет на ИИ исчерпан (${spent} из ${cap}). "
+            "Страницы сайта сохранены — запусти обход после сброса в полночь UTC."
+        ),
+        "en": (
+            "📄 Dossier not built: daily AI budget spent (${spent} of ${cap}). "
+            "Site pages are saved — run the crawl after the midnight UTC reset."
+        ),
+    },
     "cli_crawl_profile_updated": {
         "ru": "Профиль клиента обновлён. Готов использовать в кампаниях и объявлениях.",
         "en": "Client profile updated. Ready to use in campaigns and ads.",
@@ -2683,9 +2723,9 @@ CATALOG: dict[str, dict[str, str]] = {
     },
     "cc_images_notice": {
         "ru": "⚠️ Image assets в Search показываются не на всех аккаунтах. "
-              "Если неприменимы — ассет будет пропущен при создании кампании.",
+        "Если неприменимы — ассет будет пропущен при создании кампании.",
         "en": "⚠️ Image assets in Search may not be available for this account. "
-              "If inapplicable, the asset will be skipped during campaign creation.",
+        "If inapplicable, the asset will be skipped during campaign creation.",
     },
     "cc_image_saved": {
         "ru": "🖼 Изображение добавлено к черновику ({n} шт.).",

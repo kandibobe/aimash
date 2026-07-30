@@ -71,6 +71,71 @@ async def test_error_alerts_no_admins_noop(monkeypatch):
     assert bot.sent == []
 
 
+async def test_error_alerts_checkpoint_survives_total_delivery_failure(monkeypatch):
+    """BZ-3: доставить не удалось НИКОМУ ⇒ чек-поинт НЕ двигается — тот же батч уходит следующим
+    циклом, когда Telegram оживёт (раньше чек-поинт двигался ДО рассылки и батч терялся навсегда).
+    После успешной доставки — анти-дубль как прежде: повторный прогон молчит."""
+    from core.config import settings
+    from db.models import ErrorEvent
+    from db.session import Session, init_db
+    from scheduler import jobs
+
+    await init_db()
+    monkeypatch.setattr(settings, "admin_chat_ids", "1,2")
+    jobs._error_alert_last_id = None
+    assert await jobs.run_error_alerts(FakeBot()) == 0  # базлайн
+
+    async with Session() as s:
+        s.add(ErrorEvent(request_id="rz", where="cmd:x", exc_type="ValueError", message="m"))
+        await s.commit()
+
+    class DeadBot:
+        async def send_message(self, chat_id, text, **kw):
+            raise RuntimeError("telegram down")
+
+    assert await jobs.run_error_alerts(DeadBot()) == 0  # 0 доставок → чек-поинт стоит
+
+    bot = FakeBot()  # канал ожил — ТОТ ЖЕ батч доезжает
+    assert await jobs.run_error_alerts(bot) == 1
+    assert {c for c, _ in bot.sent} == {1, 2}
+
+    bot2 = FakeBot()  # анти-дубль не сломан: чек-поинт продвинут, повтора нет
+    assert await jobs.run_error_alerts(bot2) == 0
+    assert bot2.sent == []
+
+
+async def test_error_alerts_partial_delivery_advances_checkpoint(monkeypatch):
+    """BZ-3: доставлено хотя бы ОДНОМУ админу ⇒ батч считается доставленным, чек-поинт вперёд —
+    иначе живой админ получал бы дубли каждые 15 минут из-за одного заблокировавшего бот коллеги."""
+    from core.config import settings
+    from db.models import ErrorEvent
+    from db.session import Session, init_db
+    from scheduler import jobs
+
+    await init_db()
+    monkeypatch.setattr(settings, "admin_chat_ids", "1,2")
+    jobs._error_alert_last_id = None
+    assert await jobs.run_error_alerts(FakeBot()) == 0  # базлайн
+
+    async with Session() as s:
+        s.add(ErrorEvent(request_id="rp", where="cmd:y", exc_type="KeyError", message="m"))
+        await s.commit()
+
+    class HalfBot(FakeBot):
+        async def send_message(self, chat_id, text, **kw):
+            if chat_id == 1:
+                raise RuntimeError("blocked by admin 1")
+            await super().send_message(chat_id, text, **kw)
+
+    bot = HalfBot()
+    assert await jobs.run_error_alerts(bot) == 1  # один из двух получил — батч закрыт
+    assert {c for c, _ in bot.sent} == {2}
+
+    bot2 = FakeBot()  # повтора нет даже для недоставленного chat 1 (осознанно: не спамим живых)
+    assert await jobs.run_error_alerts(bot2) == 0
+    assert bot2.sent == []
+
+
 # ── C2: ретеншн-purge растущих таблиц (audit_log НЕ трогаем) ───────────────────────
 async def test_purge_deletes_old_keeps_running_and_audit(monkeypatch):
     from core.config import settings

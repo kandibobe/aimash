@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from agent.router import chat
 from clients.dossier_schema import DossierExtract
 from core.config import settings
-from core.llm_budget import LLMBudgetExceededError, consume, snapshot
+from core.llm_budget import LLMBudgetError, LLMBudgetExceededError, consume, snapshot
 from core.logging import log
 
 # Потолок числа map-вызовов на ОДИН сайт. Литерал, а не настройка: опечатка в .env (`1000`) не должна
@@ -324,8 +324,8 @@ async def map_pages(
             consume(chat_id)  # дневной лимит списывается НА КАЖДЫЙ вызов, не на команду
             try:
                 return await _map_one(c, language=language)
-            except LLMBudgetExceededError:
-                raise
+            except LLMBudgetError:
+                raise  # бюджет-стоп (счётный или долларовый) — ответ пользователю, не «плохой чанк»
             except Exception as e:  # noqa: BLE001 — один чанк не стоит всего досье
                 log.warning("dossier: чанк не разобран (%s)", type(e).__name__)
                 return None

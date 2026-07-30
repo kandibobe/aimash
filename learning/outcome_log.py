@@ -76,9 +76,7 @@ async def record_outcome(
             await sess.commit()
             logger.info("Outcome recorded: %s (%s)", confirmation_id, operation)
     except Exception:
-        logger.warning(
-            "Failed to record outcome for %s", confirmation_id, exc_info=True
-        )
+        logger.warning("Failed to record outcome for %s", confirmation_id, exc_info=True)
 
 
 # ── Outcome Checker ───────────────────────────────────────────────────────────
@@ -106,16 +104,20 @@ async def check_pending_outcomes(
             cutoff = cutoff - timedelta(days=min_age_days)
 
             rows = (
-                await sess.execute(
-                    select(OutcomeLog)
-                    .where(
-                        OutcomeLog.verdict == "pending",
-                        OutcomeLog.applied_at <= cutoff,
+                (
+                    await sess.execute(
+                        select(OutcomeLog)
+                        .where(
+                            OutcomeLog.verdict == "pending",
+                            OutcomeLog.applied_at <= cutoff,
+                        )
+                        .order_by(OutcomeLog.applied_at)
+                        .limit(limit)
                     )
-                    .order_by(OutcomeLog.applied_at)
-                    .limit(limit)
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
 
         results = []
         for row in rows:
@@ -132,9 +134,7 @@ async def check_pending_outcomes(
                         await sess.commit()
                 results.append(verdict_data)
             except Exception:
-                logger.warning(
-                    "Failed to evaluate outcome id=%s", row.id, exc_info=True
-                )
+                logger.warning("Failed to evaluate outcome id=%s", row.id, exc_info=True)
                 # Пометить как error чтобы не зацикливаться
                 async with Session() as sess:
                     r = await sess.get(OutcomeLog, row.id)
@@ -200,9 +200,7 @@ async def _evaluate_outcome(
             )
         else:
             verdict = "neutral"
-            reason = (
-                f"CPA Δ {cpa_delta:+.1f}%, ROAS Δ {roas_delta:+.1f}%"
-            )
+            reason = f"CPA Δ {cpa_delta:+.1f}%, ROAS Δ {roas_delta:+.1f}%"
     elif cpa_delta is not None:
         if cpa_delta <= -10:
             verdict = "success"
@@ -252,12 +250,16 @@ async def extract_patterns(min_sample: int = 3) -> list[dict]:
     try:
         async with Session() as sess:
             rows = (
-                await sess.execute(
-                    select(OutcomeLog).where(
-                        OutcomeLog.verdict.in_(["success", "failure", "neutral"])
+                (
+                    await sess.execute(
+                        select(OutcomeLog).where(
+                            OutcomeLog.verdict.in_(["success", "failure", "neutral"])
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
 
         if not rows:
             return []
@@ -268,13 +270,15 @@ async def extract_patterns(min_sample: int = 3) -> list[dict]:
         groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
         for r in rows:
             key = (r.operation, r.platform)
-            groups[key].append({
-                "verdict": r.verdict,
-                "account_id": r.account_id,
-                "account_name": r.account_name,
-                "reason": r.reason,
-                "delta_percent": r.delta_percent,
-            })
+            groups[key].append(
+                {
+                    "verdict": r.verdict,
+                    "account_id": r.account_id,
+                    "account_name": r.account_name,
+                    "reason": r.reason,
+                    "delta_percent": r.delta_percent,
+                }
+            )
 
         patterns = []
         for (operation, platform), entries in groups.items():
@@ -288,26 +292,31 @@ async def extract_patterns(min_sample: int = 3) -> list[dict]:
 
             if success_rate >= 70:
                 accounts = list({e["account_name"] for e in entries if e["account_name"]})
-                avg_delta = sum(
-                    e["delta_percent"] for e in entries if e["delta_percent"] is not None
-                ) / total if entries else 0
+                avg_delta = (
+                    sum(e["delta_percent"] for e in entries if e["delta_percent"] is not None)
+                    / total
+                    if entries
+                    else 0
+                )
 
-                patterns.append({
-                    "operation": operation,
-                    "platform": platform,
-                    "total": total,
-                    "successes": successes,
-                    "failures": failures,
-                    "success_rate": round(success_rate, 1),
-                    "avg_delta": round(avg_delta, 1),
-                    "accounts": accounts,
-                    "memory_rule": (
-                        f"outcome:{operation}:{platform}: "
-                        f"Успех в {success_rate:.0f}% ({successes}/{total}). "
-                        f"Средний Δ: {avg_delta:+.1f}%. "
-                        f"Аккаунты: {', '.join(accounts)}"
-                    ),
-                })
+                patterns.append(
+                    {
+                        "operation": operation,
+                        "platform": platform,
+                        "total": total,
+                        "successes": successes,
+                        "failures": failures,
+                        "success_rate": round(success_rate, 1),
+                        "avg_delta": round(avg_delta, 1),
+                        "accounts": accounts,
+                        "memory_rule": (
+                            f"outcome:{operation}:{platform}: "
+                            f"Успех в {success_rate:.0f}% ({successes}/{total}). "
+                            f"Средний Δ: {avg_delta:+.1f}%. "
+                            f"Аккаунты: {', '.join(accounts)}"
+                        ),
+                    }
+                )
 
         return patterns
     except Exception:

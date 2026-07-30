@@ -23,7 +23,16 @@ ROOT = Path(__file__).resolve().parents[1]
 # env-ключи в .env.example, читаемые НЕ через Settings (os.getenv напрямую) — легитимно не-поля.
 # POSTGRES_*_PASSWORD читает docker-compose.yml (подставляет в postgres/DATABASE_URL/бэкап) —
 # в Python они не приходят, приложение видит уже собранный DATABASE_URL.
-_NON_SETTINGS_KEYS = {"LOG_LEVEL", "LOG_FORMAT", "POSTGRES_PASSWORD", "POSTGRES_RO_PASSWORD"}
+# DISABLE_ALL_MUTATIONS (BZ-1) полем Settings быть НЕ ДОЛЖЕН: settings — снимок, взятый один раз на
+# старте, а аварийный рубильник обязан действовать без рестарта, поэтому `core.killswitch` читает
+# его живьём из os.environ. Стань он полем — рубильник молча получил бы задержку в один рестарт.
+_NON_SETTINGS_KEYS = {
+    "LOG_LEVEL",
+    "LOG_FORMAT",
+    "POSTGRES_PASSWORD",
+    "POSTGRES_RO_PASSWORD",
+    "DISABLE_ALL_MUTATIONS",
+}
 
 
 # ── B5: валидация имени ENV ────────────────────────────────────────────────────────

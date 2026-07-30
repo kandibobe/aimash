@@ -27,6 +27,7 @@ from db.session import Session
 from reports.period import last_n_days
 from reports.queries import fetch_totals
 from reports.service import build_account_report_async, summary_text
+from scheduler import transport
 from scheduler.anomaly import detect_anomalies
 
 # 2.6: окна — из core.config (env REPORT_WINDOW_DAYS/ANOMALY_WINDOW_DAYS); алиасы для тестов.
@@ -446,8 +447,10 @@ async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
             header = "🗓 Scheduled report" if lang == "en" else "🗓 Плановый отчёт"
             if not loud:  # тишина везде — одно короткое сообщение вместо простыни
                 try:
-                    await bot.send_message(
-                        chat_id, header + "\n" + i18n.t("sched_digest_all_quiet", lang, n=quiet_n)
+                    await transport.send_bot_message(
+                        bot,
+                        chat_id,
+                        header + "\n" + i18n.t("sched_digest_all_quiet", lang, n=quiet_n),
                     )
                 except Exception as e:  # noqa: BLE001
                     log.warning(
@@ -491,7 +494,7 @@ async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
             if action_txt:
                 digest += "\n\n" + action_txt
             try:
-                await bot.send_message(chat_id, digest, reply_markup=markup)
+                await transport.send_bot_message(bot, chat_id, digest, reply_markup=markup)
             except Exception as e:  # один недоступный чат не должен ронять рассылку
                 log.warning("scheduler: не доставлено в %s: %s: %s", chat_id, type(e).__name__, e)
                 continue  # не доставили → не отмечаем аномалии как показанные
@@ -685,7 +688,8 @@ async def run_anomaly_check(bot) -> None:
             if not acct_alerts:
                 continue
             try:
-                await bot.send_message(
+                await transport.send_bot_message(
+                    bot,
                     chat_id,
                     _format_alerts_multi(acct_alerts, lang=i18n.get_lang(chat_id)),
                     parse_mode="HTML",
@@ -703,6 +707,259 @@ async def run_anomaly_check(bot) -> None:
                 log.warning("scheduler: анти-спам аномалий не сохранён (%s)", type(e).__name__)
 
 
+# Р6: курсор «уже показанных» правок аккаунта — per-chat блоб {customer_id: {"at": …, "tz": …}}.
+# В ui_prefs, а не в памяти модуля (как у error-алертов): пропустить чужую правку бюджета из-за
+# рестарта нельзя — «отмена возвращает настройку, но не потраченные деньги».
+#
+# Рядом с отметкой хранится ТАЙМЗОНА, в которой она снята, и это не украшение: `changed_at` Google
+# отдаёт местным временем аккаунта БЕЗ указания зоны, поэтому смена таймзоны аккаунта сдвигает всю
+# шкалу разом. Kyiv → New_York — минус 7 часов: новые события получают местное время МЕНЬШЕ старого
+# курсора и молча читаются как «уже показанные». Не совпала зона — курсор недействителен, сбрасываем
+# в базлайн (пропустить один цикл честнее, чем потерять сутки правок незаметно).
+_EXT_CHANGES_SEEN_KEY = "ext_changes_seen"
+# Сколько строк журнала берём за прогон. Читать надо ШИРЕ, чем показываем: `ORDER BY … DESC` + LIMIT
+# отдаёт самые свежие, а фильтр канала (`_is_external_change`) применяется уже ПОСЛЕ выборки — на
+# аккаунте с активным API-клиентом узкий лимит выел бы весь бюджет служебным шумом, и ровно та
+# ручная правка бюджета, ради которой всё делается, в выборку не попала бы. 2000 при потолке ресурса
+# 10000: с запасом для активного аккаунта и без выкачивания журнала целиком. Упёрлись в потолок —
+# пишем warning: усечение должно быть видно, а не выглядеть как «правок больше нет».
+_EXT_CHANGES_READER_LIMIT = 2000
+
+
+def _is_external_change(row) -> bool:
+    """Правка сделана НЕ через API — то есть точно не нашим слоем.
+
+    Правки по каналу API отсекаем целиком, и это сознательный размен: наши собственные мутации
+    проходят гейт и уже репортятся из audit-row (правило 15), а отличить их от правок ЧУЖОГО
+    API-клиента нам нечем — `change_event` не несёт признака приложения, а в `audit_log` нет
+    `resource_name`, по которому можно было бы сопоставить. Альтернатива «слать всё» означала бы
+    алерт «кто-то поменял бюджет» на каждую собственную операцию — оператор перестанет их читать, и
+    Р6 закроется формально, а не по существу. Сколько событий отсеяно, джоба пишет в лог: тихого
+    усечения тут нет."""
+    return not row.via_api
+
+
+async def _account_tz(client, acct: str) -> str:
+    """Таймзона аккаунта, best-effort ('' — не прочитана). Тот же кэш, что у `account_today`
+    (`ads.read._TIMEZONE_CACHE`), поэтому второго GAQL за прогон не стоит. Провал чтения зоны не
+    имеет права уронить алерт: без зоны курсор просто помечается неизвестной."""
+    from ads.read import account_timezone
+
+    try:
+        tz = await run_ads_read_call(
+            account_timezone, client, acct, account=acct, label=f"extchg_tz_{acct}"
+        )
+        return str(tz or "")
+    except Exception:  # noqa: BLE001 — зона необязательна, правки важнее
+        return ""
+
+
+def _cursor_entry(entry, tz: str) -> tuple[str, bool]:
+    """Разбор записи курсора → (отметка, снята_ли_в_ЭТОЙ_таймзоне).
+
+    Запись без зоны (формат до её появления) принимаем как свою: переигрывать историю из-за смены
+    ФОРМАТА нечестно, речь о смене ЧАСОВОГО ПОЯСА."""
+    if isinstance(entry, dict):
+        return str(entry.get("at") or ""), str(entry.get("tz") or "") == str(tz or "")
+    return str(entry or ""), True
+
+
+def _split_line_budget(fresh: list[tuple[str, list]]) -> tuple[list[tuple[str, list]], int]:
+    """Разделить бюджет строк дайджеста МЕЖДУ аккаунтами и вернуть (батч, сколько осталось).
+
+    Две вещи, каждая из которых по отдельности даёт молчаливую потерю правок:
+
+    1. **Поровну, минимум по строке каждому.** Общий потолок «первые N строк» + курсор, который
+       двигался бы на максимум окна, — это гарантированное голодание: аккаунты перебираются в
+       устойчивом порядке (`sorted`), значит хвостовой аккаунт не показывается НИКОГДА, а его
+       правки при этом помечаются показанными. Ровно тот отказ, ради которого заведён Р6.
+    2. **Берём САМЫЕ СТАРЫЕ из свежих**, а не самые новые. Курсор двигается на максимум
+       ПОКАЗАННОГО, поэтому непоказанный хвост обязан лежать ВЫШЕ курсора — иначе он окажется
+       «старше показанного» и выпадет навсегда. Так очередь честно разбирается с головы."""
+    if not fresh:
+        return [], 0
+    from core.texts import EXT_CHANGES_MAX_LINES
+
+    share = max(1, EXT_CHANGES_MAX_LINES // len(fresh))
+    batch: list[tuple[str, list]] = []
+    pending = 0
+    for acct, evs in fresh:
+        head = sorted(evs, key=lambda e: str(e.changed_at))[:share]
+        pending += len(evs) - len(head)
+        batch.append((acct, head))
+    return batch, pending
+
+
+def _fresh_changes(events: list, cursor: str) -> list:
+    """События строго новее курсора. `changed_at` — 'YYYY-MM-DD HH:MM:SS.ffffff' фиксированной
+    ширины, поэтому лексикографическое сравнение здесь совпадает с хронологическим (парсить в
+    datetime не нужно и вредно: таймзона аккаунта в строке не указана). Пустой курсор = базлайн,
+    отдаём пусто — историей на первом прогоне не спамим (как run_error_alerts).
+
+    Известная граница (осознанная, не дефект по недосмотру): время местное для аккаунта, и при
+    ПЕРЕВОДЕ ЧАСОВ НАЗАД повторённый час читается как «старше курсора» — правки этого часа алертом
+    не пойдут. Раз в год, до часа, только у аккаунтов с DST. Закрывать это вторым слоем дедупа
+    (набор ключей показанных событий в блобе) дороже, чем стоит: журнал остаётся доступен
+    инструментом `get_account_changes` и в веб-интерфейсе Google. Зафиксировано в RISK_REGISTER Р6.
+    Назад курсор при этом не откатывается: события выпадают из окна строго от старых к новым, а
+    значит max по окну не может стать меньше уже сохранённого — повтора уведомлений не будет."""
+    if not cursor:
+        return []
+    return [e for e in events if str(e.changed_at) > cursor]
+
+
+async def run_external_change_alerts(bot) -> int:
+    """Р6: плановый алерт о правках, сделанных в аккаунте МИМО бота. READ-ONLY (golden rule #3).
+
+    Требование Р6 дословно: «алерты о произошедших изменениях шлёт наш код по расписанию, а не
+    агент». Отсюда джоба, а не инструмент: агент читает журнал, когда его спросили, — а ошибка,
+    сделанная в аккаунте ночью, должна найтись сама.
+
+    Дедуп — per-chat курсор `_EXT_CHANGES_SEEN_KEY` (последний ПОКАЗАННЫЙ `changed_at` на аккаунт
+    плюс таймзона, в которой отметка снята). Первый прогон по (чат, аккаунт) ТОЛЬКО ставит базлайн:
+    рассылать недельную историю на старте — верный способ научить оператора не читать эти сообщения.
+
+    Курсор двигается ПОСЛЕ успешной доставки и ровно на ПОКАЗАННОЕ (BZ-3) — два разных требования, и
+    второе не менее важно: бюджет строк делится между аккаунтами (`_split_line_budget`), поэтому
+    непоказанный хвост обязан остаться выше курсора и прийти следующим циклом. Помечать показанным
+    то, что не поместилось в сообщение, — это молчаливая потеря чужой правки бюджета.
+
+    Возвращает число разосланных сообщений (0 — никому не слали/нечего слать)."""
+    with request_scope("scheduler:ext-changes"):  # §15: корреляция логов джобы по request_id
+        recipients = await _recipients()
+        if not recipients:
+            return 0
+        accounts = _scheduled_accounts()
+        if not accounts:
+            return 0
+        window = int(settings.external_changes_window_days)
+        # Окно шире интервала джобы НАМЕРЕННО: после простоя/рестарта событие не должно выпасть из
+        # выборки. Дубли отсекает курсор, а не узость окна.
+        from reports.queries import fetch_change_events
+        from reports.tz import account_today
+
+        by_account: list[tuple[str, list, str]] = []
+        for acct in accounts:
+            tok = set_context(customer_id=acct)  # §8: per-account атрибуция ошибок/логов
+            try:
+                client = await build_client_async(acct)
+                tz = await _account_tz(client, acct)
+                today = await account_today(client, acct, label=f"extchg_tz_{acct}")
+                events = await run_ads_read_call(
+                    fetch_change_events,
+                    client,
+                    acct,
+                    days=window,
+                    today=today,
+                    limit=_EXT_CHANGES_READER_LIMIT,
+                    account=acct,
+                    label=f"extchg_{acct}",
+                )
+                if len(events) >= _EXT_CHANGES_READER_LIMIT:
+                    log.warning(
+                        "scheduler ext-changes: %s — журнал упёрся в потолок ридера (%d строк за "
+                        "%d дн.), часть правок в этот прогон не попала: сузьте окно",
+                        acct,
+                        _EXT_CHANGES_READER_LIMIT,
+                        window,
+                    )
+                external = [e for e in events if _is_external_change(e)]
+                if len(external) != len(events):
+                    log.info(
+                        "scheduler ext-changes: %s — %d событий по каналу API не показываем "
+                        "(наши мутации репортятся из audit-row)",
+                        acct,
+                        len(events) - len(external),
+                    )
+                if external:
+                    by_account.append((acct, external, tz))
+            except Exception as e:  # сеть/доступ/SDK — остальные аккаунты живут (как в аномалиях)
+                if is_account_access_error(e):
+                    log.info(
+                        "scheduler ext-changes: аккаунт %s недоступен на чтение (ожидаемо): %s",
+                        acct,
+                        type(e).__name__,
+                    )
+                else:
+                    await capture_exception(e, where=f"scheduler:ext-changes:{acct}")
+            finally:
+                reset_context(tok)
+        if not by_account:
+            return 0
+
+        from core import i18n, texts
+        from core.access import accessible_accounts_for_user
+
+        sent = 0
+        for chat_id in sorted(recipients):
+            # C2: правки аккаунта не уходят оператору без доступа к нему (enforced-режим).
+            allowed = set(
+                await accessible_accounts_for_user(chat_id, [a for a, _, _ in by_account])
+            )
+            seen = dict(await _ui_pref_blob(chat_id, _EXT_CHANGES_SEEN_KEY) or {})
+            fresh: list[tuple[str, list]] = []
+            cursor: dict[str, dict[str, str]] = {}
+            for acct, events, tz in by_account:
+                if acct not in allowed:
+                    continue
+                entry = seen.get(acct)
+                at, same_tz = _cursor_entry(entry, tz)
+                if entry is None:
+                    new = []  # базлайн: первый прогон по (чат, аккаунт) историей не спамит
+                elif not same_tz:
+                    # Зона аккаунта сменилась ⇒ шкала `changed_at` сдвинулась целиком и курсор
+                    # сравнивать не с чем. Показываем окно заново: дубль здесь дешевле пропуска,
+                    # а очередь разберётся по `share` за цикл.
+                    log.warning(
+                        "scheduler ext-changes: %s — таймзона аккаунта сменилась, курсор чата %s "
+                        "недействителен, показываем окно заново",
+                        acct,
+                        chat_id,
+                    )
+                    new = list(events)
+                else:
+                    new = _fresh_changes(events, at)
+                if new:
+                    fresh.append((acct, new))
+                else:  # показывать нечего ⇒ отметку можно ставить сразу на максимум окна
+                    cursor[acct] = {"at": max(str(e.changed_at) for e in events), "tz": tz}
+            batch, pending = _split_line_budget(fresh)
+            tz_of = {a: t for a, _, t in by_account}
+            for acct, head in batch:
+                # Ровно на показанное: непоказанный хвост обязан остаться ВЫШЕ курсора (BZ-3 —
+                # двигаем чек-поинт только по тому, что реально доставлено).
+                cursor[acct] = {"at": max(str(e.changed_at) for e in head), "tz": tz_of[acct]}
+            if not cursor:
+                continue
+            if batch:
+                text = texts.fmt_external_changes(
+                    batch, lang=i18n.get_lang(chat_id), pending=pending
+                )
+                try:
+                    # Нарезка по строкам: батч ограничен строками, а не символами, и упереться в
+                    # 4096 он может (длинные FieldMask). Недоставленный дайджест из-за длины —
+                    # это ровно «алерт молчит навсегда»: курсор бы не двигался, и следующий цикл
+                    # собрал бы то же самое сообщение той же длины.
+                    for chunk in texts.split_by_lines(text):
+                        await transport.send_bot_message(bot, chat_id, chunk, parse_mode="HTML")
+                    sent += 1
+                except Exception as e:  # один недоступный чат не роняет остальных
+                    log.warning(
+                        "scheduler: алерт о чужих правках не доставлен в %s: %s",
+                        chat_id,
+                        type(e).__name__,
+                    )
+                    continue  # курсор НЕ двигаем — повторим в следующем цикле (BZ-3)
+            merged = {**seen, **cursor}
+            if merged == seen:
+                continue  # ничего не сдвинулось — не трогаем БД каждый цикл
+            try:
+                await _save_ui_pref_blob(chat_id, _EXT_CHANGES_SEEN_KEY, merged)
+            except Exception as e:  # noqa: BLE001 — БД-сбой не роняет рассылку (в худшем случае дубль)
+                log.warning("scheduler: курсор чужих правок не сохранён (%s)", type(e).__name__)
+        return sent
+
+
 # A1 (§15): чек-поинт проактивных алертов — id последней уже разосланной error_events. Модульный
 # (переживает рестарт через max(id) на ПЕРВОМ прогоне: историю не спамим ретроспективно). id
 # (autoincrement PK) вместо created_at — монотонный и tz-нейтральный (SQLite наивный/Postgres aware).
@@ -714,7 +971,8 @@ async def run_error_alerts(bot) -> int:
     error_events наполняется всегда (on_error / scheduler / handlers-A2), но был ПАССИВНЫМ — узнать
     об ошибке можно было только вызвав /diag. READ-ONLY (golden rule #3): только чтение таблицы +
     уведомление. Нет админов ⇒ no-op (fail-closed, фича opt-in). ПЕРВЫЙ прогон лишь ставит базлайн
-    (max(id)) и НЕ шлёт — не спамим историей на старте. Возвращает число новых инцидентов."""
+    (max(id)) и НЕ шлёт — не спамим историей на старте. Возвращает число новых инцидентов
+    (0 — если доставить не удалось никому: чек-поинт не двигается, батч повторится, BZ-3)."""
     global _error_alert_last_id
     with request_scope("scheduler:error-alerts"):  # §15: корреляция логов джобы по request_id
         from core.access import admin_ids_all
@@ -747,27 +1005,43 @@ async def run_error_alerts(bot) -> int:
             )
         if not rows:
             return 0
-        # Чек-поинт двигаем ДО рассылки (даже если доставка всем упадёт): иначе те же ошибки
-        # переотправлялись бы каждый цикл. Они не теряются — доступны в /diag.
-        _error_alert_last_id = int(rows[-1].id)
         from core import i18n, texts
 
+        delivered = 0
         for chat_id in admins:
             try:
-                await bot.send_message(
+                await transport.send_bot_message(
+                    bot,
                     chat_id,
                     texts.fmt_error_alert(rows, lang=i18n.get_lang(chat_id)),
                     parse_mode="HTML",
                 )
+                delivered += 1
             except (
                 Exception
             ) as e:  # один недоступный админ не роняет остальных; НЕ capture (петля!)
                 log.warning(
                     "scheduler: алерт ошибок не доставлен в %s: %s", chat_id, type(e).__name__
                 )
+        # BZ-3: чек-поинт двигаем ТОЛЬКО после доставки хотя бы одному админу. Раньше он уходил
+        # вперёд ДО рассылки — недоставленный батч не переотправлялся уже никогда (чек-поинт
+        # in-memory, о потере можно было узнать только догадавшись позвать /diag). Доставлено хоть
+        # кому-то ⇒ алерт не потерян, чек-поинт вперёд (повторно не шлём — анти-дубль прежний);
+        # не доставлено НИКОМУ ⇒ чек-поинт стоит, следующий цикл повторит тот же батч (рост
+        # ограничен limit=200 выборки).
+        if not delivered:
+            log.warning(
+                "scheduler: алерты о %d инцидентах не доставлены ни одному из %d админов — "
+                "чек-поинт не двигаем, повтор в следующем цикле",
+                len(rows),
+                len(admins),
+            )
+            return 0
+        _error_alert_last_id = int(rows[-1].id)
         log.info(
-            "scheduler: разослано алертов о %d новых инцидентах (админов %d)",
+            "scheduler: разослано алертов о %d новых инцидентах (доставлено %d из %d админов)",
             len(rows),
+            delivered,
             len(admins),
         )
         return len(rows)
@@ -833,7 +1107,7 @@ async def run_weekly_digest(bot) -> int:
                 _DIGEST_MAX,
             )[0]
             try:
-                await bot.send_message(chat_id, text, parse_mode="HTML")
+                await transport.send_bot_message(bot, chat_id, text, parse_mode="HTML")
             except Exception as e:  # noqa: BLE001 — недоступный админ не роняет; НЕ capture (петля!)
                 log.warning(
                     "scheduler: недельный дайджест не доставлен в %s: %s", chat_id, type(e).__name__
@@ -983,7 +1257,9 @@ async def run_recommendations_digest(bot) -> None:
                 continue
             # 4) Отправка: заголовок + карточки с кнопками (пауза между сообщениями — flood).
             try:
-                await bot.send_message(chat_id, i18n.t("advise_digest_header", lang, n=len(top)))
+                await transport.send_bot_message(
+                    bot, chat_id, i18n.t("advise_digest_header", lang, n=len(top))
+                )
             except Exception as e:  # один недоступный чат не роняет остальных
                 log.warning("advise digest не доставлен в %s: %s", chat_id, type(e).__name__)
                 continue
@@ -1001,7 +1277,8 @@ async def run_recommendations_digest(bot) -> None:
                 apply_op = one_tap_op(r)
                 try:
                     await asyncio.sleep(pause)
-                    await bot.send_message(
+                    await transport.send_bot_message(
+                        bot,
                         chat_id,
                         text,
                         reply_markup=delivery.markup(
@@ -1016,7 +1293,7 @@ async def run_recommendations_digest(bot) -> None:
                     )
             try:
                 await asyncio.sleep(pause)
-                await bot.send_message(chat_id, i18n.t("advise_disclaimer", lang))
+                await transport.send_bot_message(bot, chat_id, i18n.t("advise_disclaimer", lang))
             except Exception:  # noqa: BLE001
                 pass
 
@@ -1193,7 +1470,7 @@ async def run_business_digest(bot) -> None:
             if len(text) > _DIGEST_MAX:
                 text = text[:_DIGEST_MAX] + "\n…"
             try:
-                await bot.send_message(chat_id, text)
+                await transport.send_bot_message(bot, chat_id, text)
             except Exception as e:  # один недоступный чат не роняет рассылку
                 log.warning("bizdigest не доставлен в %s: %s", chat_id, type(e).__name__)
 
@@ -1360,7 +1637,8 @@ async def run_threshold_tuning(bot) -> None:
                 )
                 lang = i18n.get_lang(chat_id)
                 try:
-                    await bot.send_message(
+                    await transport.send_bot_message(
+                        bot,
                         chat_id,
                         i18n.t(
                             "thr_tune_offer",
@@ -1395,7 +1673,7 @@ async def _notify_outcome(bot, outcome, verdict: str) -> None:
     key = "advise_outcome_improved" if verdict == "improved" else "advise_outcome_worse"
     campaign = outcome.target_campaign or (rec.target_campaign or "")
     try:
-        await bot.send_message(rec.chat_id, i18n.t(key, lang, campaign=campaign))
+        await transport.send_bot_message(bot, rec.chat_id, i18n.t(key, lang, campaign=campaign))
     except Exception as e:  # один недоступный чат не роняет замер
         log.warning(
             "advise outcome-уведомление не доставлено в %s: %s", rec.chat_id, type(e).__name__
@@ -1713,7 +1991,8 @@ async def cleanup_stale_campaign_drafts(
 
             for chat_id, step, left_h in expiring:
                 try:
-                    await bot.send_message(
+                    await transport.send_bot_message(
+                        bot,
                         chat_id,
                         i18n.t(
                             "cc_draft_expiring",
@@ -1726,7 +2005,8 @@ async def cleanup_stale_campaign_drafts(
                     log.warning("cleanup-drafts: warn не доставлен (chat=%s)", chat_id)
             for chat_id, step in expired:
                 try:
-                    await bot.send_message(
+                    await transport.send_bot_message(
+                        bot,
                         chat_id,
                         i18n.t(
                             "cc_draft_expired", i18n.get_lang(chat_id), step=max(1, min(step, 7))
@@ -1789,7 +2069,8 @@ async def reconcile_stale_executing(
             )
             if bot is not None:
                 try:
-                    await bot.send_message(
+                    await transport.send_bot_message(
+                        bot,
                         chat_id,
                         "⚠️ Операция "
                         f"«{op}» была прервана рестартом бота посреди выполнения — "
@@ -1854,7 +2135,8 @@ async def reconcile_stale_confirmed(
             n += 1
             if bot is not None:
                 try:
-                    await bot.send_message(
+                    await transport.send_bot_message(
+                        bot,
                         chat_id,
                         f"⚠️ Операция «{op}» была прервана рестартом бота ДО обращения к Google "
                         "Ads — изменение НЕ применено. Повтори команду, если оно ещё нужно.",

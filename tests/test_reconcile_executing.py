@@ -15,7 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import select, update  # noqa: E402
+import pytest  # noqa: E402
+from sqlalchemy import delete, select, update  # noqa: E402
 
 from confirm.store import ConfirmStore, list_recent_audit  # noqa: E402
 from db.models import AuditLog, ErrorEvent, Proposal  # noqa: E402
@@ -23,6 +24,26 @@ from db.session import Session, init_db  # noqa: E402
 from scheduler.jobs import reconcile_stale_executing  # noqa: E402
 
 DRAFT = "7753643025"
+
+
+@pytest.fixture(autouse=True)
+async def _no_foreign_executing():
+    """Джоба сканирует ВСЮ таблицу — значит предусловие «чужих зависших executing нет» обязан
+    установить тест, а не надеяться на девственную БД.
+
+    БД в прогоне одна на процесс (conftest), и соседние модули законно оставляют после себя
+    executing-черновики со состаренным `decided_at`: `test_budget_blast_radius._backdate_decided`
+    старит траты на 25 ч именно для того, чтобы проверить выпадение из суточного окна капа. При
+    случайном порядке (`pytest-randomly`) такой сосед иногда идёт раньше — и `assert n == 1` ловил
+    ЕГО черновик вместе с нашим: падало только в полном прогоне, в изоляции было зелено.
+
+    Чистим ДО каждого теста и модуля целиком: `n == 0`-тесты («свежий не тронут», «pending и
+    терминальные не тронуты») ломались бы тем же соседом.
+    """
+    await init_db()
+    async with Session() as s:
+        await s.execute(delete(Proposal).where(Proposal.status == "executing"))
+        await s.commit()
 
 
 class _FakeBot:

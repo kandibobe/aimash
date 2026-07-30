@@ -39,6 +39,8 @@
 > Все шесть **[переписываются]**: функции остаются, кнопочная механика переезжает в текстовую модель (`SPEC.md` §3.3–§3.8). Не выбрасывать — это единственное подробное описание того, что именно должно работать.
 
 - [CAMPAIGN_WIZARD.md](CAMPAIGN_WIZARD.md) — §19 визард `/newcampaign`: 8 этапов, черновики, Sheets round-trip → диалог + состояние черновика (§3.5).
+- [section19-spec.md](section19-spec.md) — исходная детализация заказчиком флоу §19 (legacy-визард и критерии переноса в Hermes).
+- [gap-analysis-section19.md](gap-analysis-section19.md) — снимок gap-анализа §19 на 2026-07-30; не заменяет `SPEC.md` и текущий статус кода.
 - [CLIENTS_KB.md](CLIENTS_KB.md) — §20 `/clients`: профиль клиента, LLM-разбор текста, краулер сайта → §3.8 (memory-инструменты, топик = клиент).
 - [REPORTS.md](REPORTS.md) — `/report` `/export` `/sheets` `/mcc`: периоды, метрики, разбивки, экспорт → §3.7.
 - [KEYWORD_RESEARCH.md](KEYWORD_RESEARCH.md) — `/keywords`: подбор идей, метрики, AI-кластеризация, `.xlsx` → §3.3.

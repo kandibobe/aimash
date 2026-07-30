@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 
 from ads.client import ensure_read_allowed
 
@@ -1965,3 +1965,115 @@ def fetch_pmax_asset_groups(client, customer_id: str, period) -> list[PmaxAssetG
         elif (getattr(r.asset_group_signal.audience, "audience", "") or "").strip():
             row.audiences += 1
     return list(rows.values())
+
+
+# ── Р6: журнал ЧУЖИХ правок (change_event) ───────────────────────────────────────────
+# Google не уведомляет «в вашем аккаунте кто-то поменял бюджет» — узнать можно только СПРОСИВ.
+# Поэтому дыра Р6 (deploy/hermes/RISK_REGISTER.md) закрывается не «агент посмотрит, если
+# догадается», а нашим ридером + плановой джобой: freshness-гейт ловит чужую правку лишь в
+# момент исполнения нашего черновика, а правку, сделанную помимо нас, не видит никто.
+
+CHANGE_EVENT_RETENTION_DAYS = 30  # ресурс живёт 30 дней: окно ≤30 И целиком внутри них (док Google)
+# Разрешаем на СУТКИ меньше ретенции, и это не перестраховка. Верхняя граница окна — `today + 1`, а
+# `today` — «сегодня аккаунта» best-effort: при недоступной TZ `reports.tz.account_today` берёт дату
+# ХОСТА (:52-54). На аккаунте, чья дата на сутки впереди хостовой, окно ровно в 30 дней вылезает за
+# ретенцию — сервер отвергает запрос ЦЕЛИКОМ (START_DATE_TOO_OLD), то есть алерт молчит каждый цикл
+# и шумит `capture_exception`. Сутки запаса стоят одного дня истории.
+CHANGE_EVENT_MAX_DAYS = 29
+CHANGE_EVENT_MAX_LIMIT = 10_000  # LIMIT обязателен, верхняя граница задана Google
+
+
+@dataclass
+class ChangeEventRow:
+    changed_at: str  # 'YYYY-MM-DD HH:MM:SS.ffffff' в ЧАСОВОМ ПОЯСЕ АККАУНТА (так отдаёт Google)
+    resource_type: str  # CAMPAIGN | CAMPAIGN_BUDGET | AD_GROUP | AD_GROUP_CRITERION | AD | …
+    operation: str  # CREATE | UPDATE | REMOVE
+    client_type: str  # GOOGLE_ADS_WEB_CLIENT | GOOGLE_ADS_API | GOOGLE_ADS_EDITOR | …
+    user_email: str  # кто правил. PII: наружу к модели уходит замаскированным (mcp_server)
+    resource_name: str  # какой объект правили
+    changed_fields: tuple[str, ...] = ()  # какие поля затронуты (FieldMask.paths)
+
+    @property
+    def via_api(self) -> bool:
+        """Правка сделана через API — то есть, возможно, нами же (или другим API-клиентом)."""
+        return self.client_type == "GOOGLE_ADS_API"
+
+
+def check_change_event_days(days: int) -> int:
+    """Валидация окна — ОТДЕЛЬНОЙ функцией, чтобы обёртки (MCP, джоба) могли отказать ДО сети:
+    иначе на бессмысленном `days` наружу уедет код той аварии, которая случилась раньше (недоступный
+    OAuth ⇒ `internal` вместо `invalid_argument`), и вызывающий чинит не свою ошибку.
+
+    Отказ, а не тихое подрезание: молча укоротив окно, мы вернули бы «изменений нет» там, где их
+    просто не искали, — а на этом ридере стоит алерт о чужих правках."""
+    days = int(days)
+    if not 1 <= days <= CHANGE_EVENT_MAX_DAYS:
+        raise ValueError(f"окно change_event — 1..{CHANGE_EVENT_MAX_DAYS} дней, получено {days}")
+    return days
+
+
+def _change_events_query(start: date, end: date, limit: int) -> str:
+    # old_resource/new_resource НЕ выбираем: это oneof по 15+ типам ресурсов, разбор каждого —
+    # отдельная работа, а leaf-пути внутрь композитов сервер отвергает (шрам recommendation.impact,
+    # :440). Имён изменённых полей хватает, чтобы сказать «правили бюджет кампании X», а текущее
+    # значение читается обычным ридером.
+    fields = (
+        "change_event.change_date_time, change_event.change_resource_type, "
+        "change_event.change_resource_name, change_event.resource_change_operation, "
+        "change_event.client_type, change_event.user_email, change_event.changed_fields"
+    )
+    return (
+        f"SELECT {fields} FROM change_event "
+        f"WHERE change_event.change_date_time >= '{start.isoformat()}' "
+        f"AND change_event.change_date_time <= '{end.isoformat()}' "
+        f"ORDER BY change_event.change_date_time DESC LIMIT {int(limit)}"
+    )
+
+
+def fetch_change_events(
+    client,
+    customer_id: str,
+    *,
+    days: int = 7,
+    today: date | None = None,
+    limit: int = 200,
+) -> list[ChangeEventRow]:
+    """Р6: КТО, КОГДА, ЧЕРЕЗ ЧТО и КАКОЙ объект правил в аккаунте. READ-ONLY.
+
+    Три требования ресурса, без которых сервер отвергает запрос целиком:
+      • `LIMIT` обязателен, максимум 10000;
+      • `WHERE change_event.change_date_time` обязателен;
+      • окно ≤30 дней и целиком внутри последних 30 — глубже история через API недоступна
+        (в веб-интерфейсе она за 2 года, это не одно и то же); мы разрешаем 29, см.
+        `CHANGE_EVENT_MAX_DAYS`.
+
+    `today` — «сегодня» В ЧАСОВОМ ПОЯСЕ АККАУНТА (в нём же Google отдаёт `change_date_time`);
+    передаёт вызывающий — иначе на аккаунте в другом поясе край окна уедет на сутки. Верхняя
+    граница — ЗАВТРА, а не сегодня: `change_date_time` — момент времени, сравнение с 'YYYY-MM-DD'
+    берёт полночь, и сегодняшние правки — ровно те, ради которых всё делается, — не попали бы.
+
+    Значений «было → стало» здесь НЕТ (см. `_change_events_query`) — только имена изменённых полей.
+    """
+    ensure_read_allowed(customer_id)
+    days = check_change_event_days(days)
+    limit = max(1, min(int(limit), CHANGE_EVENT_MAX_LIMIT))  # тут подрезание безвредно: усечение
+    # хвоста, а не окна — самые свежие события идут первыми (ORDER BY … DESC).
+
+    end = (today or date.today()) + timedelta(days=1)
+    start = end - timedelta(days=days)  # ширина окна ровно `days` суток — влезает в лимит 30
+    out: list[ChangeEventRow] = []
+    for r in _search(client, customer_id, _change_events_query(start, end, limit)):
+        ev = r.change_event
+        paths = getattr(getattr(ev, "changed_fields", None), "paths", ()) or ()
+        out.append(
+            ChangeEventRow(
+                changed_at=str(getattr(ev, "change_date_time", "") or ""),
+                resource_type=_enum_name(getattr(ev, "change_resource_type", "")),
+                operation=_enum_name(getattr(ev, "resource_change_operation", "")),
+                client_type=_enum_name(getattr(ev, "client_type", "")),
+                user_email=str(getattr(ev, "user_email", "") or ""),
+                resource_name=str(getattr(ev, "change_resource_name", "") or ""),
+                changed_fields=tuple(str(p) for p in paths),
+            )
+        )
+    return out

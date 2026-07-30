@@ -380,6 +380,41 @@ class ConfirmStore:
             for p in rows
         }
 
+    async def recent_money_params(
+        self, customer_id: str, *, operations: tuple[str, ...], window_hours: int = 24
+    ) -> list[dict]:
+        """B1-4: params черновиков, УШЕДШИХ В ИСПОЛНЕНИЕ по аккаунту за окно, — источник учёта
+        суточного blast-radius капа (`ads.mutations._require_budget_blast_radius`). Read-only.
+
+        Считаются статусы `executing`, `applied` И `needs_review`: executing — уже застолблено
+        CAS-ом и, скорее всего, ушло в SDK; needs_review — исход НЕИЗВЕСТЕН или пост-проверка
+        разошлась (реконсиляция зависших executing ~через 30 мин, mark_needs_review,
+        record_verification) — «могло примениться» для капа значит «применилось» (консервативно
+        ТРАТА, иначе каждая зависшая мутация возвращала бы кап). `failed` не считается: SDK
+        отказал, бюджет не изменился. `pending`/`confirmed`/`rejected` капа не тратят —
+        исполнения не было.
+
+        Окно — по `decided_at` (его штампует claim: func.now()), не по created_at: капом меряется
+        момент ИСПОЛНЕНИЯ, а не создания карточки. `db_dt` — как в _ttl_boundary: наивный UTC
+        SQLite против timestamptz Postgres."""
+        since = datetime.now(timezone.utc) - timedelta(hours=int(window_hours))
+        async with Session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(Proposal.params).where(
+                            Proposal.customer_id == customer_id,
+                            Proposal.operation.in_(operations),
+                            Proposal.status.in_(("executing", "applied", "needs_review")),
+                            Proposal.decided_at >= db_dt(since),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return [p or {} for p in rows]
+
     async def claim(self, confirmation_id: str, *, operation: str) -> ConfirmedProposal | None:
         """Атомарно «застолбить» подтверждённый черновик под исполнение: confirmed → executing
         (одноразово, с проверкой операции). Возвращает снимок, если застолбил, иначе None.
@@ -713,6 +748,41 @@ class ConfirmStore:
                     result={"error": msg, "verification": verification},
                 )
             )
+            await s.commit()
+            return True
+
+    async def reopen(self, confirmation_id: str, *, reason: str) -> bool:
+        """confirmed → pending (АТОМАРНО): гейт отказал ДО claim по ВНЕШНЕЙ причине (GateRefusal:
+        рубильник BZ-1 / кап B1-4) — черновик НЕ дефектен и не должен сжигаться.
+
+        Возврат именно в 'pending', а не «оставить confirmed»: CAS `confirm` требует
+        WHERE status='pending' — только из pending повторный ✅ проходит штатной дорогой
+        (2FA-гейт, владелец, TTL, L3-свежесть проверяются ЗАНОВО). TTL при этом не продлевается
+        (created_at не трогаем): просроченную карточку reopen не воскресит.
+
+        CAS: UPDATE … WHERE status='confirmed' — гонку с живым claim выигрывает первый: claim
+        победил → 'executing', наш rowcount=0 → False (исполняемое не трогаем); мы победили →
+        'pending', параллельный claim даст rowcount=0 → None → double-spend невозможен.
+        decided_at сбрасывается в NULL (его штампует confirm/claim — у pending-строки его нет).
+        Пишет audit-строку 'reopened' с редактированной причиной (golden rule #5) — след
+        «заявка была и почему не исполнилась» не теряется."""
+        async with Session() as s:
+            res = await s.execute(
+                update(Proposal)
+                .where(
+                    Proposal.confirmation_id == confirmation_id,
+                    Proposal.status == "confirmed",
+                )
+                .values(status="pending", decided_at=None)
+            )
+            # cast: DML возвращает CursorResult (есть .rowcount); async-стаб видит общий Result.
+            if cast(CursorResult, res).rowcount != 1:  # janitor/гонка успели раньше
+                await s.rollback()
+                return False
+            p = (
+                await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
+            ).scalar_one()
+            s.add(_audit(p, p.chat_id, "reopened", result={"error": redact_text(str(reason))}))
             await s.commit()
             return True
 
