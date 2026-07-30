@@ -1334,6 +1334,16 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": texts.FAILED,
         "en": "⚠️ Failed to execute: {err}",
     },
+    # BZ-1/B1-4 (GateRefusal): политика отказала ДО claim — черновик жив, карточка восстановлена.
+    # НЕ «failed»: мутация не дефектна, причина внешняя и временная (рубильник/суточный кап).
+    "gate_refused": {
+        "ru": "⏸ <b>Не выполнено:</b> {err}",
+        "en": "⏸ <b>Not executed:</b> {err}",
+    },
+    "gate_refused_retry": {
+        "ru": "Черновик не сожжён — когда причина устранена, нажмите ✅ ещё раз.",
+        "en": "The draft is intact — once the cause is cleared, press ✅ again.",
+    },
     # Денежный путь: исход мутации НЕИЗВЕСТЕН (таймаут/INTERNAL/DEADLINE во время SDK — могла
     # примениться на сервере). НЕ «failed» — иначе повтор задвоил бы. Просим сверить перед повтором.
     "needs_review": {
