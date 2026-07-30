@@ -31,7 +31,7 @@ from typing import Any, Awaitable, Callable
 
 from ads.client import build_client_async, ensure_manager_allowed, ensure_read_allowed
 from ads.keyword_plan import generate_keyword_ideas
-from ads.read import account_timezone, list_child_accounts
+from ads.read import account_timezone, list_audiences as _list_audiences, list_campaigns as _list_campaigns, list_child_accounts, list_negative_shared_sets as _list_shared_sets
 from audit.collect import gather_audit
 from clients.store import ClientProfileStore
 from core import observe  # Волна 3: вызов инструмента — прогон в журнале событий
@@ -618,6 +618,71 @@ async def get_mcc_deep(
     return await _guarded(_work, account=mid, manager=True)
 
 
+# ── Дополнительные READ-инструменты ──────────────────────────────────────────────
+
+
+async def list_campaigns(
+    account: str,
+    channel_type: str | None = None,
+    offset: int = 0,
+    limit: int = DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Список кампаний аккаунта: id, имя, статус. channel_type сужает до SEARCH/DISPLAY и т.д.
+    Активные (ENABLED) — первыми, затем PAUSED, затем прочие. Без периода.
+
+    Замок: ensure_read_allowed."""
+    async def _work() -> dict[str, Any]:
+        client = await build_client_async(account)
+        campaigns = await run_ads_read_call(
+            _list_campaigns, client, str(account), account=str(account),
+            channel_type=channel_type,
+            label="mcp.list_campaigns",
+        )
+        return ok(campaigns, offset=offset, limit=limit)
+    return await _guarded(_work, account=str(account))
+
+
+async def list_audiences(
+    account: str,
+    offset: int = 0,
+    limit: int = DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Доступные аудитории (user_list) аккаунта для прикрепления к кампании.
+    Каждая: resource_name, name, size (размер аудитории для показа).
+
+    Замок: ensure_read_allowed."""
+    async def _work() -> dict[str, Any]:
+        client = await build_client_async(account)
+        audiences = await run_ads_read_call(
+            _list_audiences, client, str(account), account=str(account),
+            label="mcp.list_audiences",
+        )
+        rows = [{"resource_name": a.resource_name, "name": a.name, "size": int(a.size or 0)}
+                for a in audiences]
+        return ok(rows, offset=offset, limit=limit)
+    return await _guarded(_work, account=str(account))
+
+
+async def list_negative_shared_sets(
+    account: str,
+    offset: int = 0,
+    limit: int = DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Общие списки минус-слов аккаунта (NEGATIVE_KEYWORDS shared sets).
+    Каждый: id, name, member_count, reference_count (к скольким кампаниям привязан).
+    Нужен для propose_add_negatives_to_shared_set / propose_attach_shared_set.
+
+    Замок: ensure_read_allowed."""
+    async def _work() -> dict[str, Any]:
+        client = await build_client_async(account)
+        sets = await run_ads_read_call(
+            _list_shared_sets, client, str(account), account=str(account),
+            label="mcp.list_negative_shared_sets",
+        )
+        return ok(sets, offset=offset, limit=limit)
+    return await _guarded(_work, account=str(account))
+
+
 # Реестр: имя инструмента → функция. server.py регистрирует по нему в FastMCP и проверяет И4
 # (READ_MCP_TOOLS ∩ MUTATION_TOOLS == ∅). Имена подобраны заведомо непересекающимися с 39
 # мутационными (agent.tools.schemas.MUTATION_TOOLS).
@@ -637,6 +702,9 @@ READ_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "recall_client": recall_client,
     "get_mcc_summary": get_mcc_summary,
     "get_mcc_deep": get_mcc_deep,
+    "list_campaigns": list_campaigns,
+    "list_audiences": list_audiences,
+    "list_negative_shared_sets": list_negative_shared_sets,
 }
 
 READ_MCP_TOOLS: frozenset[str] = frozenset(READ_TOOL_FUNCS)
