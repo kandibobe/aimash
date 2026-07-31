@@ -30,6 +30,17 @@ def _turn(*, reply: bool = True) -> TrustedTurn:
 
 
 class _Store:
+    applied_audit = SimpleNamespace(
+        operation="update_campaign",
+        customer_id="7753643025",
+        result={
+            "customer_id": "7753643025",
+            "campaign_id": "23995782408",
+            "new_name": "Доставка цветов [UAT]",
+            "applied": True,
+        },
+    )
+
     async def bind_card_message_id_from_verified_reply(
         self, confirmation_id, message_id, *, actor_user_id, actor_chat_id
     ):
@@ -42,6 +53,9 @@ class _Store:
 
     async def get_confirmed(self, confirmation_id):  # noqa: ARG002
         return SimpleNamespace(customer_id="7753643025", status="pending", summary="audit preview")
+
+    async def get_applied_audit_result(self, confirmation_id):  # noqa: ARG002
+        return self.applied_audit
 
 
 async def test_execute_facade_rejects_non_reply_before_service(monkeypatch):
@@ -68,7 +82,11 @@ async def test_execute_facade_uses_only_verified_reply_metadata(monkeypatch):
 
     async def _execute(store, **kwargs):
         seen.update(kwargs)
-        return {"operation": "update_budget", "display": "audit-backed result"}
+        return {
+            "customer_id": "forged-by-service",
+            "operation": "forged-by-service",
+            "display": "forged-by-service",
+        }
 
     monkeypatch.setattr(tools_write, "ConfirmStore", _Store)
     monkeypatch.setattr(ads.service, "confirm_and_execute_by_reply", _execute)
@@ -78,8 +96,14 @@ async def test_execute_facade_uses_only_verified_reply_metadata(monkeypatch):
 
     assert result == {
         "status": "executed",
-        "operation": "update_budget",
-        "summary": "audit-backed result",
+        "operation": "update_campaign",
+        "summary": "• campaign_id: 23995782408\n• new_name: Доставка цветов [UAT]",
+        "audit_result": {
+            "customer_id": "7753643025",
+            "campaign_id": "23995782408",
+            "new_name": "Доставка цветов [UAT]",
+            "applied": True,
+        },
         "customer_id": "7753643025",
         "confirmation_id": "a" * 32,
     }
@@ -89,6 +113,27 @@ async def test_execute_facade_uses_only_verified_reply_metadata(monkeypatch):
         "actor_chat_id": -202,
         "reply_to_message_id": 404,
         "actor_username": "operator",
+    }
+
+
+async def test_execute_facade_never_reports_executed_without_applied_audit(monkeypatch):
+    class _NoAuditStore(_Store):
+        applied_audit = None
+
+    async def _execute(*args, **kwargs):  # noqa: ARG001
+        return {"applied": True, "display": "must not escape"}
+
+    monkeypatch.setattr(tools_write, "ConfirmStore", _NoAuditStore)
+    monkeypatch.setattr(ads.service, "confirm_and_execute_by_reply", _execute)
+
+    with trusted_turn_scope(_turn()):
+        result = await tools_write.execute_confirmed()
+
+    assert result == {
+        "status": "needs_review",
+        "error": "Изменение могло примениться, но подтверждённый итог audit недоступен. Нужна проверка оператором.",
+        "error_code": "audit_unavailable",
+        "confirmation_id": "a" * 32,
     }
 
 

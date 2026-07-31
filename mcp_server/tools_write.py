@@ -926,6 +926,7 @@ async def execute_confirmed() -> dict[str, Any]:
     на ``proposal.customer_id`` с повторным allow-list gate и audit-row.
     """
     from ads.service import confirm_and_execute_by_reply
+    from core.texts import fmt_mutation_result
     from mcp_server.trusted_transport import TrustedTransportError, get_trusted_turn
 
     store = ConfirmStore()
@@ -948,7 +949,6 @@ async def execute_confirmed() -> dict[str, Any]:
             or proposal.summary not in turn.reply_to_text
         ):
             raise PermissionError("reply не содержит неизменённый diff подтверждаемого черновика")
-        proposal_customer_id = str(proposal.customer_id)
         if not await store.bind_card_message_id_from_verified_reply(
             confirmation_id,
             turn.reply_to_message_id,
@@ -956,7 +956,7 @@ async def execute_confirmed() -> dict[str, Any]:
             actor_chat_id=turn.actor_chat_id,
         ):
             raise PermissionError("не удалось привязать доверенный reply-якорь")
-        result = await confirm_and_execute_by_reply(
+        await confirm_and_execute_by_reply(
             store,
             confirmation_id=confirmation_id,
             actor_user_id=turn.actor_user_id,
@@ -964,11 +964,34 @@ async def execute_confirmed() -> dict[str, Any]:
             reply_to_message_id=turn.reply_to_message_id,
             actor_username=turn.actor_username,
         )
+        applied = await store.get_applied_audit_result(confirmation_id)
+        if applied is None:
+            log.error("execute_confirmed: applied audit недоступен cid=%s", confirmation_id)
+            return {
+                "status": "needs_review",
+                "error": "Изменение могло примениться, но подтверждённый итог audit недоступен. Нужна проверка оператором.",
+                "error_code": "audit_unavailable",
+                "confirmation_id": confirmation_id,
+            }
+        summary = fmt_mutation_result(
+            applied.operation,
+            applied.result,
+            lang=turn.language_code,
+        )
+        if not summary.strip():
+            log.error("execute_confirmed: пустой audit summary cid=%s", confirmation_id)
+            return {
+                "status": "needs_review",
+                "error": "Изменение могло примениться, но итог audit не удалось отобразить. Нужна проверка оператором.",
+                "error_code": "audit_unrenderable",
+                "confirmation_id": confirmation_id,
+            }
         return {
             "status": "executed",
-            "operation": result.get("operation", ""),
-            "summary": result.get("display", ""),
-            "customer_id": proposal_customer_id,
+            "operation": applied.operation,
+            "summary": summary,
+            "audit_result": applied.result,
+            "customer_id": applied.customer_id,
             "confirmation_id": confirmation_id,
         }
     except ValueError as e:
