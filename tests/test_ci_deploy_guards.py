@@ -20,6 +20,19 @@ def test_deploy_reconnects_hermes_only_after_compose_health_gate():
     assert "sync_aimash_surface.py" in body
 
 
+def test_deploy_proves_gateway_pid_changed_and_has_systemd_fallback():
+    body = WORKFLOW.read_text(encoding="utf-8")
+    restart = body.index("hermes gateway restart")
+    fallback = body.index("systemctl --user restart hermes-gateway.service", restart)
+    mcp_test = body.index("hermes mcp test aimash", fallback)
+
+    assert "GW_PID_BEFORE=" in body
+    assert body.count("GW_PID_AFTER=") >= 2
+    assert "GW_STATE=$(systemctl --user is-active hermes-gateway.service || true)" in body
+    assert '[ "$GW_PID_AFTER" = "$GW_PID_BEFORE" ]' in body
+    assert restart < fallback < mcp_test
+
+
 def test_deploy_checks_both_telegram_pollers_for_conflicts():
     body = WORKFLOW.read_text(encoding="utf-8")
     reconnect = body.split("hermes gateway restart", 1)[1]
