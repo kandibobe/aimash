@@ -1,8 +1,11 @@
 # Планировщик: отчёты, аномалии, очистка (ТЗ §3, golden rule #3)
 
-Фоновые задачи на APScheduler в общем event loop бота. **READ-ONLY + уведомления.** Планировщик
-**никогда не меняет аккаунт**: он не импортирует `ads.mutations` и не зовёт `execute_confirmed`/
-`apply_*` (golden rule #3 — это гард в коде, не в промпте). Реализация:
+> **[переход]** Бизнес-логика джоб — сохраняемое ядро. Кнопки feedback/применения ниже описывают legacy-доставку;
+> в целевом Hermes-контуре плановые отчёты доставляет cron Hermes, а факт аномалии по-прежнему определяет код (`SPEC.md` §3.9).
+
+Фоновые задачи запускаются отдельным процессом `python -m scheduler`; исторический запуск внутри `bot.main` оставлен только как
+совместимость на время перехода и взаимно исключается advisory-lock роли `scheduler`. **READ-ONLY + уведомления.** Планировщик
+**никогда не меняет аккаунт**: он не импортирует `ads.mutations` и не зовёт `execute_confirmed`/`apply_*` (golden rule #3). Реализация:
 [`scheduler/service.py`](../scheduler/service.py) (запуск), [`scheduler/jobs.py`](../scheduler/jobs.py)
 (задачи), [`scheduler/anomaly.py`](../scheduler/anomaly.py) (детектор). Тесты —
 [`tests/test_scheduler.py`](../tests/test_scheduler.py).

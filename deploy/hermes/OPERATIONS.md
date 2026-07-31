@@ -997,4 +997,220 @@ tailscale serve status                    # tailnet only
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9119/api/status   # 200
 systemctl set-property hermes-dashboard MemoryHigh=3G MemoryMax=4G MemorySwapMax=2G
 ```
+Вместо ручного чеклиста — один скрипт, он же используется после переезда и после любого ребута:
+```
+EXPECT_RAM_GB=16 sh /opt/aimash/scripts/vps_migrate_verify.sh --deep    # exit≠0 ⇒ машина НЕ принята
+```
+⚠️ **Вендор CPU не выбирается.** Hetzner: «hardware is automatically allocated based on
+availability … the CPU type (Intel® or AMD) **may change** during a rescale». Значит на вендоре
+ничего строить нельзя (ни в сравнении бенчмарков, ни в конфигах); линейка (CX/CPX/CCX/CAX) —
+выбирается, конкретный чип — нет.
+
 Источник правил rescale — [Hetzner Cloud FAQ](https://docs.hetzner.com/cloud/servers/faq/).
+**Нужен именно переезд на другую машину, а не rescale — §16** (там же критерий: когда переезд
+оправдан, а когда это лишняя работа с риском для данных).
+
+---
+
+## 16. Переезд на ДРУГУЮ машину — когда rescale не подходит
+
+### 16.0. Сначала — критерий: нужен ли переезд вообще
+
+**Rescale (§15) сохраняет всё:** диск, IP `167.233.48.243`, tailnet-узел и URL дашборда,
+docker-тома (включая Postgres), `~/.hermes`, systemd-юниты, GitHub-секреты CI. Даунтайм 2–5 мин,
+данные не двигаются вовсе. Переезд означает воспроизвести **шесть групп состояния** (16.2) и
+пройти **пять мин** (16.3) — часы работы и реальный риск потери `state.db`/`oauth_tokens`.
+
+Переезд оправдан ровно в четырёх случаях — все проверены по
+[Hetzner Cloud FAQ](https://docs.hetzner.com/cloud/servers/faq/) 2026-07-30:
+
+| Причина | Цитата/факт из FAQ |
+|---|---|
+| Нужна другая **локация** | «It is not possible to change the location of an existing server» — только снапшот → новый сервер |
+| Нужен **Arm64 (CAX)** | «you can only change to a server plan with the same architecture type»; снапшот тоже обязан совпадать по архитектуре |
+| Целевой план с **меньшим диском** | «only rescale to server plans with a disk size equal to or larger» — уменьшить нельзя никогда |
+| Нужна **чистая ОС** | накопленный мусор/сомнения в целостности хоста (эта машина уже проходила OS rebuild 24.07) |
+
+Во всех остальных случаях («хочу мощнее») правильный ответ — **§15, а не §16**: CX/CPX ↔ CCX
+rescale разрешён («you can also rescale to and from a plan with shared resources»), то есть даже
+переход на dedicated vCPU переездом не требует.
+
+**Целевой размер.** Узкое место здесь — **память, не CPU** (§14.1: 152 oom-kill за 14 дней при
+3.9 GiB; нагрузка по CPU никогда не была проблемой). Поэтому цель — **16 GiB RAM** (`CPX41` ≈ 8
+vCPU/16 GiB или `CCX23` ≈ 4 dedicated vCPU/16 GiB) — [Likely, спеки и цены сверить в консоли
+Hetzner: линейки меняются]. 8 GiB (`CPX31`/`CX32`) — минимум, который лечит текущий OOM, но не
+оставляет запаса под Hermes-сессии с MCP-детьми и пересборку web UI. Диск: занят 47% из 38 GiB —
+при rescale брать **«keep current disk size»**, при переезде хватит 80 GiB.
+
+### 16.1. Три способа. Выбрать ОДИН до начала работ
+
+| | **A. Rescale (§15)** | **B. Снапшот → новый сервер** | **C. Чистая установка + restore** |
+|---|---|---|---|
+| Что происходит | тот же сервер, другой тариф | побайтовая копия диска на новой машине | новая ОС, состояние восстанавливается из архива |
+| Даунтайм | 2–5 мин | 10–20 мин | 1–3 часа |
+| IP | **сохраняется** | новый (или Floating IP, если заведён заранее) | новый |
+| Переносится само | всё | всё, включая docker-тома, юниты, Caddy, `~/.hermes` | **ничего** — только то, что собрал `vps_migrate_export.sh` |
+| Смена архитектуры (x86→Arm) | ⛔ запрещена | ⛔ запрещена | ✅ единственный способ |
+| Риск для данных | ~нулевой | низкий (старый сервер остаётся откатом) | средний: забытая группа состояния = потеря |
+| Когда выбирать | «нужно мощнее» | переезд без смены ОС/архитектуры — **дефолт для §16** | Arm64, смена дистрибутива, недоверие к хосту |
+
+Вариант **B — дефолт**. Он выигрывает у C не удобством, а тем, что не полагается на полноту
+чеклиста: диск копируется целиком, поэтому «забыл drop-in с `MemoryMax`» в нём невозможно.
+
+### 16.2. Карта состояния машины — шесть групп, четыре из них НЕ в git
+
+| # | Группа | Где | В git? | Как переносится |
+|---|---|---|---|---|
+| 1 | Код | `/opt/aimash` | ✅ | `git clone` + `git reset --hard origin/master` |
+| 2 | Секреты приложения | `/opt/aimash/.env` | ❌ | архив экспорта. **`SECRETS_ENCRYPTION_KEY` — без него `oauth_tokens` из дампа мертвы** (docs/BACKUP.md) |
+| 3 | Данные Postgres | docker volume `aimash_pgdata` | ❌ | B: сам; C: `pg_dump -Fc` → `pg_restore` |
+| 4 | Состояние агента | `/root/.hermes` | ❌ | `state.db` (история топиков = история решений, в Postgres её НЕТ), `.env`, `config.yaml`, `skills/`, `cron/jobs.json` |
+| 5 | Обвязка пульта | `/etc/systemd/system/hermes-*`, `/etc/systemd/system.control/hermes-*.d` (MemoryMax!), `/etc/caddy/Caddyfile`, `tailscale serve`, `linger` | ❌ | архив экспорта; tailnet-узел — только вручную |
+| 6 | Внешние привязки | GitHub secret `VPS_SSH_HOST`, tailnet-имя `hermes-vps`, Hetzner firewall/backup-политика, SSH-ключ деплоя | ❌ | вручную, 16.3 |
+
+### 16.3. Пять мин переезда — каждая ломает МОЛЧА
+
+**M1. Двойной поллер Telegram.** Токен допускает один `getUpdates`. Пока старый `aimash-bot`
+(и/или старый gateway) жив, поднятый новый даёт `409 Conflict`, и **сообщения теряются**, а не
+дублируются. Поэтому: `vps_migrate_import.sh` не поднимает ни бота, ни gateway без явных
+`--start-app`/`--start-gateway`, а `vps_migrate_verify.sh` ищет 409 в логах за 10 мин.
+На старой машине гасить **и `restart: unless-stopped`, и юниты**: `docker compose down` +
+`systemctl disable --now hermes-dashboard hermes-dash-proxy` — иначе после её ребута контур оживёт.
+
+**M2. URL дашборда завязан на tailnet-имя.** Новый узел, поднятый пока старый `hermes-vps` ещё в
+tailnet, получит имя `hermes-vps-1` → ссылка `https://hermes-vps.tailfd4d95.ts.net` уедет, а вместе
+с ней MCP `hermes_ops` (§14.2) и все закладки. Порядок обязателен: **сначала** удалить старый узел
+(admin-консоль Tailscale → Machines → Remove, либо `tailscale logout` на старой машине), **потом**
+`tailscale up --hostname hermes-vps` на новой.
+
+**M3. Автодеплой стреляет в старую машину — или в новую посередине переезда.** Job `deploy`
+(`.github/workflows/ci.yml`) по push в `master` идёт SSH-ем на `secrets.VPS_SSH_HOST` и делает
+`git reset --hard` + `compose up -d --build`. Пока секрет указывает на старый IP, любой push
+поднимает то, что вы только что погасили (M1). Порядок: не пушить в `master` в окне переезда →
+после приёмки новой машины сменить `VPS_SSH_HOST` (и при новом ключе — `VPS_SSH_KEY`) → сделать
+контрольный push и убедиться, что job зелёный.
+
+**M4. Ключ шифрования отдельно от дампа.** Дамп Postgres несёт `oauth_tokens` **зашифрованными**;
+восстановление БЕЗ того же `SECRETS_ENCRYPTION_KEY` = аккаунты придётся регистрировать заново
+(`scripts/register_account.py`). Экспорт кладёт `.env` в тот же архив — и именно поэтому архив
+целиком секрет (права 600, вывоз только `gpg`/`age`, правило 5).
+
+**M5. То, что живёт вне видимых мест.** `MemoryMax` дашборда лежит в
+`/etc/systemd/system.control/hermes-dashboard.service.d/` (его пишет `systemctl set-property`, а не
+человек) — без него машина возвращается к oom-kill (§14.1). `loginctl enable-linger root` — без
+него user-юнит gateway умирает при выходе из SSH (§2). Обе вещи не «конфиг», а условие работы;
+`vps_migrate_import.sh` восстанавливает их явно, `vps_migrate_verify.sh` проверяет.
+
+### 16.4. Вариант B — снапшот-клон (пошагово)
+
+```bash
+# 1. РЕПЕТИЦИЯ (прод работает, ничего не гасим): проверить, что экспорт вообще собирается.
+#    Архив пригодится и как офсайт-бэкап, и как страховка на случай битого снапшота.
+sh /opt/aimash/scripts/vps_migrate_export.sh
+gpg -c --cipher-algo AES256 /root/vps-migration/aimash-migration-<ts>.tgz   # вывозить только .gpg
+#    → забрать .gpg на локальную машину (scp), проверить, что открывается.
+
+# 2. ОКНО. Погасить прод (снапшот живой БД технически возможен, но это crash-consistent копия —
+#    Postgres придётся восстанавливать по WAL; выключенный сервер даёт чистую копию).
+cd /opt/aimash && docker compose stop bot scheduler && hermes gateway stop
+sh /opt/aimash/scripts/vps_migrate_export.sh --cutover      # финальный архив УЖЕ погашенного прода
+docker compose down                                          # включая postgres
+shutdown -h now                                              # снапшот снимаем с выключенной машины
+```
+```
+# 3. Консоль Hetzner → старый сервер → Snapshots → Take snapshot (имя: pre-migration-<дата>).
+# 4. Images → снапшот → Create Server: целевой тип (16.0), ТА ЖЕ локация (или новая — здесь можно),
+#    тот же SSH-ключ. Архитектура снапшота и плана обязаны совпадать (x86 → CX/CPX/CCX).
+# 5. Новый сервер загрузился. Firewall: если на старом висел Hetzner Firewall — приложить тот же.
+```
+```bash
+# 6. На НОВОЙ машине (по новому IP), ДО подъёма прода:
+hostnamectl set-hostname aimash-prod        # снапшот принёс имя старой машины
+systemctl stop tailscaled                   # у клона тот же node-key, что у старого узла
+rm -f /var/lib/tailscale/tailscaled.state   # иначе два узла спорят за одну identity (M2)
+systemctl start tailscaled
+docker ps                                   # контейнеры подняты из томов; при `down` перед снапшотом — пусто
+```
+```bash
+# 7. Tailnet (M2): сначала УДАЛИТЬ старый узел в admin-консоли Tailscale, затем здесь:
+tailscale up --hostname hermes-vps
+tailscale serve --bg 9120                   # цепочка §14; serve-конфиг узла не переносится
+tailscale funnel status                     # обязано быть выключено (К3)
+
+# 8. Поднять прод — только теперь, когда старая машина погашена и не поллит (M1):
+cd /opt/aimash && export GIT_SHA="$(git rev-parse --short HEAD)" && docker compose up -d
+systemctl enable --now hermes-dashboard hermes-dash-proxy hermes-backup.timer
+loginctl enable-linger root && hermes gateway start
+
+# 9. Приёмка:
+EXPECT_RAM_GB=16 sh /opt/aimash/scripts/vps_migrate_verify.sh --deep
+```
+```
+# 10. M3: GitHub → Settings → Secrets → VPS_SSH_HOST = новый IP. Контрольный push в master,
+#     job `deploy` обязан быть зелёным (он же прогоняет пост-деплойную проверку контейнеров).
+```
+
+### 16.5. Вариант C — чистая установка (Arm64, смена дистрибутива, недоверие к хосту)
+
+```bash
+# 1–2. Как в 16.4: репетиция экспорта, затем окно + `--cutover`, архив вывезти шифрованным.
+# 3. Новый сервер в консоли Hetzner: Ubuntu 24.04, целевой тип, тот же SSH-ключ, Firewall.
+# 4. База хоста:
+apt-get update && apt-get install -y ca-certificates curl git sqlite3
+curl -fsSL https://get.docker.com | sh          # версию сверить с MANIFEST (docker/compose)
+git clone <репозиторий> /opt/aimash && cd /opt/aimash && git checkout master
+
+# 5. Перенести архив (.gpg), расшифровать на новой машине в /root (НЕ в /opt/aimash — правило 5):
+gpg -d aimash-migration-<ts>.tgz.gpg > /root/aimash-migration-<ts>.tgz && chmod 600 /root/*.tgz
+
+# 6. Механическая часть — одним скриптом (он же проверяет sha256, отказывается работать на
+#    машине-источнике и НЕ поднимает поллеры Telegram без явного флага):
+sh /opt/aimash/scripts/vps_migrate_import.sh --from /root/aimash-migration-<ts>.tgz
+
+# 7. Hermes — установка с ПИНОМ (версия из deploy/hermes/PIN.json, коммит — из MANIFEST архива):
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash    # + пин, RB-1 (README.md)
+hermes version                                  # обязано совпасть с PIN.json release
+#    config.yaml/.env/SOUL.md/skills НЕ настраивать заново — их принёс шаг 6 (/root/.hermes).
+
+# 8. Caddy той же версии (бинарь в архив не кладётся осознанно — тянуть чужой бинарь через tgz
+#    хуже, чем поставить из источника): версия — в MANIFEST, строка «caddy binary».
+
+# 9. Tailscale: установить, затем M2-порядок (удалить старый узел → up --hostname hermes-vps →
+#    serve --bg 9120 → funnel обязан быть off).
+
+# 10. Поднять прод и gateway, когда старая машина погашена:
+sh /opt/aimash/scripts/vps_migrate_import.sh --from /root/aimash-migration-<ts>.tgz --start-app --start-gateway
+
+# 11. Приёмка + M3 (GitHub secret), как в 16.4 шаги 9–10.
+```
+
+⚠️ **Arm64 (CAX) — не «просто дешевле».** Снапшот-путь там закрыт по построению (архитектуры обязаны
+совпадать), то есть только вариант C. Плюс до решения обязательно проверить сборку на самой машине:
+базовые образы (`python:3.12-slim`, `postgres:16`, `caddy`) multi-arch, но `grpcio`/`google-ads`
+тянут бинарные колёса, а установщик Hermes под `aarch64` **никем не проверялся** — сначала
+собрать образ и `hermes version` на пробной машине, только потом переезжать. [Не проверено]
+
+### 16.6. Гейт выхода — что должно быть зелёным ДО удаления старой машины
+
+1. `vps_migrate_verify.sh --deep` → `FAIL=0` (RAM ≥ цели, оба контейнера без роста RestartCount,
+   409 в логах нет, `alembic_version` совпадает с источником, порты пульта только на loopback,
+   funnel off, дашборд 200, версия Hermes = пин, MCP отдаёт инструменты).
+2. Живой READ через Telegram: в топике клиента спросить статистику — ответ пришёл, в audit/логах
+   нет ошибок расшифровки токенов (то есть `SECRETS_ENCRYPTION_KEY` действительно тот).
+3. Job `deploy` зелёный на новый `VPS_SSH_HOST`.
+4. Бэкапы на новой машине реально идут: `ls -1t /opt/aimash/backups | head -2` и
+   `systemctl list-timers hermes-backup.timer` (NEXT/LEFT непусто).
+5. **Сутки наблюдения**: `journalctl -k --since -24h | grep -c oom-kill` = 0.
+
+Только после этого: старый сервер — Delete (снапшот `pre-migration-*` подержать ещё неделю, он
+платный, но дешевле повторного переезда), старые архивы экспорта — стереть (`shred -u`, в них
+секреты открытым текстом).
+
+### 16.7. Откат
+
+До шага «Delete старого сервера» откат стоит минут: погасить новую машину (`docker compose down`,
+`hermes gateway stop`, `systemctl stop hermes-dashboard hermes-dash-proxy`), удалить её узел из
+tailnet, включить старый сервер, `tailscale up --hostname hermes-vps`, `docker compose up -d`,
+`hermes gateway start`, вернуть `VPS_SSH_HOST` на старый IP. Единственное, что при этом теряется, —
+данные, записанные новой машиной после cutover; поэтому окно переезда держать коротким, а не
+«поработаем недельку на новой и решим».

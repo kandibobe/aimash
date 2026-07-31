@@ -1,5 +1,9 @@
 # §20 «Информация про клиентов» — база знаний по клиентам + краулинг сайта
 
+> **[legacy-референс]** Схема данных, краулер, memory-домен, confirm-гейт и изоляция по `customer_id` переносятся.
+> Меню, callback-имена, FSM-буферы и прямые вызовы `bot.main` — только текущий aiogram-UX. Целевая точка входа — MEMORY/PLAN
+> инструменты MCP (`SPEC.md` §3.8, §6.2–§6.4).
+
 Документация для разработчика/ревьюера. Источник истины — `ТЗ.md` §20. Код: пакет `clients/`,
 хендлеры `bot/main.py` (`cli_*`, `_cli_*`, `_run_client_crawl`, `_spawn_crawl`), модели `db/models.py`,
 миграции `migrations/versions/0013_client_kb.py` и `0014_site_page_hash.py`.

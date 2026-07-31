@@ -1,5 +1,9 @@
 # Keyword research (`/keywords`, ТЗ §7/§13)
 
+> **[legacy-референс]** Keyword Planner, фильтрация, кластеры, интенты, минус-слова, match type и экспорт — сохраняемый конвейер.
+> `/keywords`, кнопки отбора и callback-состояние — legacy UX. В Hermes каждый шаг становится отдельным READ/PLAN-инструментом, а порядок выбирает агент
+> (`SPEC.md` §3.3, §6.1).
+
 Подбор ключевых слов с объёмом/конкуренцией + AI-кластеризация по интенту + выгрузка `.xlsx`.
 **READ-ONLY, advisory** — ничего в аккаунте не меняется, confirm-гейт не нужен (как и отчёты).
 Реализация: [`ads/keyword_plan.py`](../ads/keyword_plan.py) (идеи + метрики) и
@@ -7,7 +11,7 @@
 [`tests/test_keyword_plan.py`](../tests/test_keyword_plan.py).
 
 ## Подбор идей — `generate_keyword_ideas`
-Источник — **KeywordPlanIdeaService** (Google Ads API v24). Сиды:
+Источник — **KeywordPlanIdeaService** (Google Ads API v25). Сиды:
 - **ключи** (`seeds`) и/или **URL** — можно комбинировать (`keyword_and_url_seed`; только ключи →
   `keyword_seed`; только URL → `url_seed`);
 - **язык**: `ru`=1031, `uk`=1036, `en`=1000 (по умолчанию `ru`);

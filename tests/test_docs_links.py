@@ -127,13 +127,14 @@ def test_no_references_to_moved_paths(old, new):
     assert not offenders, f"ссылки на переехавший `{old}` (теперь `{new}`): {offenders}"
 
 
-def test_claude_md_declares_the_tz():
-    """`CLAUDE.md` объявляет источник истины — проверка работает и без самого файла.
+@pytest.mark.parametrize("rulebook", ["CLAUDE.md", "AGENTS.md"])
+def test_agent_rulebook_declares_the_tz(rulebook):
+    """Оба агентских rulebook объявляют источник истины — проверка работает без самого файла.
 
     Отдельно от параметризованного теста: тот зелёный и в случае, если ссылку на ТЗ просто
     удалить, а это ровно та «починка», которую делать нельзя."""
-    text = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
-    assert "ТЗ.md" in text, "CLAUDE.md больше не указывает на ТЗ — источник истины потерян"
+    text = (ROOT / rulebook).read_text(encoding="utf-8")
+    assert "ТЗ.md" in text, f"{rulebook} больше не указывает на ТЗ — источник истины потерян"
 
 
 def test_tz_is_generated_where_sources_are_available():

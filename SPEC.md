@@ -282,7 +282,7 @@
 
 ### 3.1 Чтение и аналитика
 
-**3.1.1 Интеграция** [Есть]. Официальный Google Ads API v24. OAuth 2.0 с refresh-токеном. Developer token: basic access получен; заявка на standard — подать немедленно (недели календаря, 0 ч разработки). Обработка rate limits и квот, пагинация, батчинг. Работа на уровне MCC с обходом иерархии.
+**3.1.1 Интеграция** [Есть]. Официальный Google Ads API v25 через Python SDK `google-ads` 31.2.x. OAuth 2.0 с refresh-токеном. Developer token: basic access получен; заявка на standard — подать немедленно (недели календаря, 0 ч разработки). Обработка rate limits и квот, пагинация, батчинг. Работа на уровне MCC с обходом иерархии.
 
 **3.1.2 Что читается** [Есть]. Кампании, группы, объявления, ключевые слова, минус-слова, бюджеты, ГЕО (страна/город/радиус по координатам), языки, аудитории, стратегии ставок, настройки кампании; статистика: impressions, clicks, CTR, CPC, conversions, cost, conversion value, CPA, ROAS.
 
@@ -441,7 +441,7 @@
 
 **3.5.8 Инвариант PAUSED** [Есть]. Кампания, группа, RSA и ключи создаются **приостановленными**, расход 0. Статусы зашиты **в коде, не в промпте**. Запуск — **отдельная прямая команда** со своим подтверждением. На сценарий приходится два подтверждения. Приёмка П25.
 
-**3.5.9 Карта «этап → сервис Google Ads API v24»** [Есть]. CustomerService (выбор аккаунта) → KeywordPlanIdeaService (ключи) → CampaignBudgetService + CampaignService (кампания) → CampaignCriterionService (гео, языки, сети) → AdGroupService + AdGroupCriterionService (группы, ключи) → AdGroupAdService (RSA) → AssetService + AssetSetService (ассеты) → GoogleAdsService (чтение и батч-мутации).
+**3.5.9 Карта «этап → сервис Google Ads API v25»** [Есть]. CustomerService (выбор аккаунта) → KeywordPlanIdeaService (ключи) → CampaignBudgetService + CampaignService (кампания) → CampaignCriterionService (гео, языки, сети) → AdGroupService + AdGroupCriterionService (группы, ключи) → AdGroupAdService (RSA) → AssetService + AssetSetService (ассеты) → GoogleAdsService (чтение и батч-мутации).
 
 ### 3.6 Медиа-кампании и ассеты
 
@@ -798,9 +798,9 @@ Telegram supergroup агентства
 
 **Переносится без изменений** (не переписывать): `ads/` (auth, client, read, mutations, resolve, keyword_plan, assets, service) · `confirm/` · `core/` (config, secrets, logging, access, limits, quota, twofa, usage) · `adcopy/` · `keywords/` · `clients/` · `reports/` · `advisor/` · `scheduler/` · `db/` + Alembic.
 
-**Архивируется:** кнопочный слой интерфейса — клавиатуры, inline-кнопки, FSM-визарды, обработчики callback-запросов; свой агентский цикл (`agent/loop.py`, `agent/router.py`, `agent/system_prompt.py`) — Hermes несёт своё.
+**Архивируется после гейтированного cutover:** кнопочный слой интерфейса — клавиатуры, inline-кнопки, FSM-визарды, обработчики callback-запросов; из `agent/` — только свой цикл (`loop.py`, `campaign_edit.py`, `campaign_settings.py`, `openrouter_account.py`), который заменяет Hermes. `agent/router.py` и `agent/tools/schemas.py` нужны сохраняемым пакетам и переезжают в bot-free пакет; `agent/system_prompt.py` не существует.
 
-**Пишется заново:** слой подключения инструментов к Hermes · инструменты памяти · распознавание реплай-подтверждения · роли поверх безролевого Hermes · стартовая библиотека скилов · гарды И1–И8 · артефактная память · гарды самообучения Г1–Г8.
+**Достраивается:** слой подключения инструментов к Hermes (24 READ live; два `propose_*` и reply/execute ready-dark) · полный PLAN/WRITE и доверенный транспорт реплай-подтверждения · инструменты памяти · роли поверх безролевого Hermes · стартовая библиотека скилов · гарды И1–И8 · артефактная память · гарды самообучения Г1–Г8.
 
 ### 5.3 Что уносит с собой кнопочный слой — и что надо заменить
 
@@ -838,11 +838,11 @@ Telegram supergroup агентства
 
 > **Исправлено 2026-07-23 по фактическому состоянию сервера.** Прежняя редакция рекомендовала «плагин вместо MCP». Это противоречит развёрнутой реальности **и** самому §5.1. Ниже — как есть.
 
-**Реальность:** на сервере Hermes уже зовёт **наш MCP-сервер** `mcp_server/` (READ-инструменты `tools_read.py`), конфиг `deploy/hermes/config.yaml:68-75` (`docker exec -i aimash-bot python -m mcp_server`). Это развёрнуто и работает. **Оставляем.**
+**Реальность:** на сервере Hermes уже зовёт **наш MCP-сервер** `mcp_server/` (READ-инструменты `tools_read.py`), конфиг `deploy/hermes/config.yaml:213-220` (`docker exec -i aimash-bot python -m mcp_server`). Это развёрнуто и работает. **Оставляем.**
 
 **Два слоя — их нельзя путать:**
 
-- **Слой 1 — инструменты (транспорт до Google Ads): MCP-сервер.** Как Hermes дотягивается до `ads/`/`confirm/`. Сейчас READ; PLAN/WRITE дописываются (шаг 5).
+- **Слой 1 — инструменты (транспорт до Google Ads): MCP-сервер.** Как Hermes дотягивается до `ads/`/`confirm/`. Сейчас live-поверхность READ; два `propose_*` и reply/execute facade существуют ready-dark, остальной PLAN/WRITE дописывается (шаг 5).
 - **Слой 2 — автономный агентский цикл** (многошаговость, память, скилы, самообучение, проактив): Hermes-цикл + скилы/память + scheduler + гейт (Волны 1–3). **Не относится к выбору транспорта.** MCP-сервер этого не даёт и не должен.
 
 **Почему MCP, а не плагин — и это сильнее прежней рекомендации:**
@@ -984,7 +984,13 @@ Telegram supergroup агентства
 ### 6.4 Исполнение — единственная точка
 
 ```python
-execute_confirmed(proposal_id, confirmation_id, actor_chat_id, reply_to_message_id)
+confirm_and_execute_by_reply(
+    store,
+    confirmation_id=...,
+    actor_user_id=...,
+    actor_chat_id=...,
+    reply_to_message_id=...,
+)
 ```
 
 Девять проверок — §2.2. Инвариант транспорта — §2.3.
@@ -1151,7 +1157,7 @@ ads/mutations.py + audit-row                 ← существующий код
 | `account_health_snapshot`, `auction_insight_row`, `error_events` | тренды аудита, конкуренция, ошибки | §3.1.7 |
 | `whitelist`, `oauth_tokens` | доступ и токены | **активны**, не dead-schema |
 
-### 9.2 Новые таблицы
+### 9.2 Плановые таблицы Hermes-пивота
 
 ```
 agent_threads      id, chat_id, message_thread_id, client_id→client_profiles,

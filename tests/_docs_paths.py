@@ -65,8 +65,8 @@ _SKIP_DIRS = {
 
 
 def doc_files() -> list[pathlib.Path]:
-    """`CLAUDE.md`, `README.md`, `ТЗ.md`, весь `docs/` и весь `deploy/hermes/`."""
-    files = [ROOT / "CLAUDE.md", ROOT / "README.md", ROOT / "ТЗ.md"]
+    """`CLAUDE.md`, `AGENTS.md`, `README.md`, `ТЗ.md`, весь `docs/` и `deploy/hermes/`."""
+    files = [ROOT / "CLAUDE.md", ROOT / "AGENTS.md", ROOT / "README.md", ROOT / "ТЗ.md"]
     files += sorted((ROOT / "docs").glob("*.md"))
     files += sorted((ROOT / "deploy" / "hermes").rglob("*.md"))
     return [f for f in files if f.exists()]

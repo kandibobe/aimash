@@ -1,0 +1,31 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \".codex/hooks/money_path_guard.py\"",
+            "commandWindows": "python \".codex/hooks/money_path_guard.py\"",
+            "timeout": 10,
+            "statusMessage": "Строгий режим: проверка денежного пути"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \".codex/hooks/money_path_guard.py\"",
+            "commandWindows": "python \".codex/hooks/money_path_guard.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

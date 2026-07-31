@@ -18,6 +18,11 @@
 `bot/` целиком (~151 хендлер, клавиатуры, визарды, i18n 3139 строк), детерминированная маршрутизация aiogram, слэш-команды, inline-кнопки визардов. **Тянет за собой 110 из 214 тестовых файлов.**
 Из `agent/` архивируется **только** свой агент-цикл: `loop.py` (в нём же `SYSTEM`-промпт), `campaign_edit.py`, `campaign_settings.py`, `openrouter_account.py`. **НЕ архивируются** `agent/router.py` и `agent/tools/schemas.py` — они bot-free/agent-free и переиспользуются (см. карту фаз ниже), при архивации `agent/` **переезжают** в bot-free пакет. Файлов `agent/system_prompt.py` и `agent/tools.py` **не существует** (в `agent/tools/` только `schemas.py`).
 
+> Это целевая судьба каталогов, не разрешение удалить их сейчас. Волна 1 шаг 1 уже выполнена,
+> но архивация допускается только после bot-free runtime MCP, приёмки gateway/READ и WRITE/reply,
+> удаления тестовых импортов `bot.main`, тега `pre-hermes` и прохождения runbook из
+> `deploy/hermes/OPERATIONS.md`.
+
 ---
 
 ## Карта по 7 фазам
@@ -47,7 +52,7 @@
 |---|---|---|
 | 24 READ-инструмента Google Ads, envelope+error-codes, redaction | **[R]** | `mcp_server/` (`server.py`, `tools_read.py`, `envelope.py`, `redact.py`) |
 | ~41 Google Ads skill, резолверы, post-apply verify | **[R]** | `ads/service.py` (`SUPPORTED_OPERATIONS`), `ads/mutations.py`, `ads/resolve.py` |
-| WRITE-MCP: `propose_budget_change`/`propose_campaign_status`/`propose_bid_adjustment`/`execute_approved_action` | **[B]** | `mcp_server/` (write), поверх `ads/service.execute_confirmed` |
+| WRITE-MCP: два `propose_*` + reply/execute facade ready-dark; полный реестр и live-регистрация | **[R]+[B]** | готовое — `mcp_server/tools_write.py`, `confirm/store.py`, `ads/service.py`; остальное — `mcp_server/` поверх `execute_confirmed` |
 | Self-correction (ошибка API → JSON модели, цикл продолжается) | **[Ф]+[R]** | цикл — фреймворк; понятный JSON ошибки — `mcp_server/envelope.err` |
 
 ### Фаза 4 — Guardrails / PolicyEngine
@@ -67,8 +72,8 @@
 | Требование | Источник | Где |
 |---|---|---|
 | `Proposal` + `build_summary` + `confirmation_id` | **[R]** | `confirm/gate.py` |
-| `ConfirmStore` (CAS claim/confirm/finalize, TTL-в-CAS, one-shot, needs_review) | **[R]** | `confirm/store.py` |
-| Исполнение после «да» | **[R]** | `ads/service.py` (`execute_confirmed`) |
+| `ConfirmStore` (CAS claim/confirm/finalize, TTL-в-CAS, one-shot, needs_review, `confirm_by_reply`) | **[R]** | `confirm/store.py` |
+| Исполнение после доверенного reply | **[R]** | `ads/service.py` (`confirm_and_execute_by_reply` → `execute_confirmed`) |
 | Провенанс `origin_human_turn` для агентного actor | **[B]** | мост в `confirm/store.py` / `core/provenance.py` |
 | Карточка 🎯/📊/⚠️ + reply-подтверждение (кнопки архив.) | **[B]** | скил + `gateway.platforms.telegram` |
 
@@ -97,7 +102,7 @@
 ---
 
 ## Топ гэпов (то, что реально строим)
-1. **WRITE-MCP инструменты** — `propose_*` + `execute_approved_action` поверх `execute_confirmed` (в `mcp_server/` их нет by construction).
+1. **Завершить WRITE-MCP** — два `propose_*` и reply/execute facade уже ready-dark; нужны остальные обёртки, live-регистрация и доверенный Telegram-транспорт мимо LLM.
 2. **`PolicyEngine`** — единый слой + бизнес-лимиты (≤20% за шаг, D5-порог, дневные лимиты, опц. no-delete).
 3. **Провенанс-мост** для агентного actor (иначе денежные `apply_*` заблокируются fail-closed).
 4. **RAG бизнес-правил + компрессия диалога** (если не покрыто фреймворком) и таблица истории сообщений.
