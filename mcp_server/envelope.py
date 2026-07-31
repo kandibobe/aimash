@@ -210,7 +210,11 @@ def proposed(
 
     marker = proposal_marker(confirmation_id)
     anchored_preview = (
-        f"🔐 {marker}\n\n{preview}\n\nЧтобы подтвердить, ответьте реплаем на это сообщение."
+        "🧾 Черновик изменения\n\n"
+        f"{preview}\n\n"
+        "⚠️ Google Ads пока не изменён.\n\n"
+        f"||{marker}||\n\n"
+        "✅ Нажмите «Подтвердить» или ответьте «да» реплаем на всю карточку."
     )
     return {
         "confirmation_id": confirmation_id,

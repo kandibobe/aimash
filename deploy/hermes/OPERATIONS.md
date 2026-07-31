@@ -163,8 +163,9 @@ docker exec -i aimash-bot python -m mcp_server   # должен поднятьс
 `code_numbers` MCP, не из головы модели.
 
 WRITE проверять только на Draft `7753643025`: попросить изменить приостановленную тестовую кампанию,
-убедиться, что пришёл полный diff с `AIMASH_CONFIRM:…`, и ответить обычным Telegram reply на всю
-карточку. Selected quote, ответ без reply, reply другого пользователя, повторное «да» и подмена
+убедиться, что пришёл полный diff с кнопками `✅ Подтвердить / ✏️ Изменить / ❌ Отмена`, и нажать ✅.
+Отдельно проверить fallback: новый черновик подтвердить обычным Telegram reply «да» на всю карточку.
+Selected quote, ответ без reply, reply другого пользователя, повторное «да» и подмена
 account/args обязаны отказать. После успеха сверить audit-row и повторным READ фактическое значение.
 
 ---
@@ -285,35 +286,23 @@ Compose-бэкап-сервиса. Внутри — секреты (`.env`: `OPE
 
 Скрипт: [`scripts/backup_hermes.sh`](../../scripts/backup_hermes.sh) — host-скрипт, **не** сервис Compose
 (примонтировать `/root/.hermes` в сайдкар = положить `.env` Hermes в `./backups` рядом с репозиторием,
-правило 5). Берёт консистентный снимок `state.db` через `sqlite3 .backup`; **поставь `sqlite3`**, иначе скрипт
-громко предупредит и скопирует базу как есть, без гарантии целостности:
+правило 5). Берёт консистентный снимок `state.db`: системным `sqlite3 .backup`, а при отсутствии CLI —
+через stdlib `sqlite3` из пинованного Hermes venv. Неконсистентный cp+WAL остаётся только аварийным
+fallback, если недоступны оба механизма:
 
 ```bash
-apt-get install -y sqlite3
 sh /opt/aimash/scripts/backup_hermes.sh          # → /root/hermes-backups/hermes-<ts>.tgz, права 600
 ```
 
 **Ставить таймером, а не в host-crontab.** Ровно на этом хосте бэкап Postgres переехал в Compose-сайдкар
 потому, что host-cron «часто НЕ был запущен» (`docker-compose.yml`, комментарий C1) — тот же провал повторится
-здесь. systemd-таймер работает независимо от crontab:
+здесь. Версионированные unit-файлы — `deploy/hermes/hermes-backup.{service,timer}`; production deploy
+устанавливает их, включает timer, запускает контрольный backup и проверяет наличие `.env` + `state.db`
+в архиве. Ручное восстановление timer после аварийного обслуживания:
 
 ```bash
-cat >/etc/systemd/system/hermes-backup.service <<'EOF'
-[Unit]
-Description=Backup /root/.hermes (config + secrets + state.db)
-[Service]
-Type=oneshot
-ExecStart=/bin/sh /opt/aimash/scripts/backup_hermes.sh
-EOF
-cat >/etc/systemd/system/hermes-backup.timer <<'EOF'
-[Unit]
-Description=Daily backup of /root/.hermes
-[Timer]
-OnCalendar=daily
-Persistent=true
-[Install]
-WantedBy=timers.target
-EOF
+install -m 0644 /opt/aimash/deploy/hermes/hermes-backup.service /etc/systemd/system/
+install -m 0644 /opt/aimash/deploy/hermes/hermes-backup.timer /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now hermes-backup.timer
 systemctl list-timers hermes-backup.timer      # NEXT/LEFT — проверить, что таймер реально взведён
 ```

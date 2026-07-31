@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+from datetime import datetime, timezone
 import sys
 import types
 import uuid
@@ -123,6 +124,181 @@ def test_execute_requires_reply_to_own_marker_message(monkeypatch):
     )
     assert turn.reply_to_message_id == 404
     assert turn.reply_to_is_own_message is True
+    assert turn.reply_confirmation_id == marker
+
+
+def test_plan_state_tools_receive_trusted_token(monkeypatch):
+    plugin = _load(monkeypatch, _env())
+    plugin._capture_gateway_event(event=_event())
+    args = {"confirmation_id": "a" * 32}
+
+    allowed = plugin._pre_tool_call(
+        tool_name="mcp__aimash__cancel_proposal",
+        args=args,
+        session_id="s-plan",
+        turn_id="t-plan",
+    )
+
+    assert allowed is None
+    turn = verify_turn_token(
+        args["trusted_turn_token"],
+        expected_tool="cancel_proposal",
+        tool_args={"confirmation_id": "a" * 32},
+    )
+    assert (turn.actor_user_id, turn.actor_chat_id) == (101, -202)
+
+
+async def test_confirmation_button_becomes_exact_trusted_reply(monkeypatch):
+    env = _env()
+    plugin = _load(monkeypatch, env)
+
+    class _Button:
+        def __init__(self, text, callback_data):
+            self.text = text
+            self.callback_data = callback_data
+
+    class _Markup:
+        def __init__(self, rows):
+            self.inline_keyboard = rows
+
+    telegram = types.ModuleType("telegram")
+    telegram.InlineKeyboardButton = _Button
+    telegram.InlineKeyboardMarkup = _Markup
+    monkeypatch.setitem(sys.modules, "telegram", telegram)
+
+    class _MessageEvent(SimpleNamespace):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+
+    class _MessageType:
+        TEXT = "text"
+
+    platforms = types.ModuleType("gateway.platforms")
+    base = types.ModuleType("gateway.platforms.base")
+    base.MessageEvent = _MessageEvent
+    base.MessageType = _MessageType
+    monkeypatch.setitem(sys.modules, "gateway.platforms", platforms)
+    monkeypatch.setitem(sys.modules, "gateway.platforms.base", base)
+
+    sent_events = []
+    attached = []
+
+    class _Bot:
+        async def edit_message_reply_markup(self, **kwargs):
+            attached.append(kwargs)
+
+    class _Result:
+        success = True
+        message_id = "404"
+
+    class _Adapter:
+        _aimash_button_bridge = False
+
+        def __init__(self):
+            self._bot = _Bot()
+
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            return _Result()
+
+        async def edit_message(
+            self, chat_id, message_id, content, *, finalize=False, metadata=None
+        ):
+            return _Result()
+
+        async def _handle_callback_query(self, update, context):
+            raise AssertionError("Aimash callback must not reach the Hermes catch-all")
+
+        def _is_callback_user_authorized(self, *args, **kwargs):
+            return True
+
+        def build_source(self, **kwargs):
+            return SimpleNamespace(platform="telegram", **kwargs)
+
+        async def handle_message(self, event):
+            sent_events.append(event)
+
+    adapter_module = types.ModuleType("plugins.platforms.telegram.adapter")
+    adapter_module.TelegramAdapter = _Adapter
+    adapter_module.normalize_telegram_chat_id = int
+    plugins = types.ModuleType("plugins")
+    plugin_platforms = types.ModuleType("plugins.platforms")
+    plugin_telegram = types.ModuleType("plugins.platforms.telegram")
+    monkeypatch.setitem(sys.modules, "plugins", plugins)
+    monkeypatch.setitem(sys.modules, "plugins.platforms", plugin_platforms)
+    monkeypatch.setitem(sys.modules, "plugins.platforms.telegram", plugin_telegram)
+    monkeypatch.setitem(sys.modules, "plugins.platforms.telegram.adapter", adapter_module)
+
+    assert plugin._install_telegram_button_bridge() is True
+    adapter = _Adapter()
+    marker = "a" * 32
+    card = f"🧾 Черновик изменения\n\npreview\n\nAIMASH_CONFIRM:{marker}"
+    await adapter.send("-202", card, metadata={"notify": True})
+    keyboard = attached[0]["reply_markup"].inline_keyboard
+    assert [button.text for row in keyboard for button in row] == [
+        "✅ Подтвердить",
+        "✏️ Изменить",
+        "❌ Отмена",
+    ]
+
+    answers = []
+
+    async def _answer(*, text):
+        answers.append(text)
+
+    async def _remove_markup(*, reply_markup):
+        attached.append({"reply_markup": reply_markup})
+
+    user = SimpleNamespace(
+        id=101,
+        first_name="Operator",
+        full_name="Operator",
+        username="operator",
+        language_code="ru",
+    )
+    bot_user = SimpleNamespace(id=9001, full_name="Aimash")
+    message = SimpleNamespace(
+        message_id=404,
+        message_thread_id=7,
+        chat_id=-202,
+        chat=SimpleNamespace(id=-202, type="supergroup", title="Ops"),
+        text=card,
+        caption=None,
+        from_user=bot_user,
+        date=datetime.now(timezone.utc),
+    )
+    query = SimpleNamespace(
+        data=f"am:yes:{marker}",
+        message=message,
+        from_user=user,
+        answer=_answer,
+        edit_message_reply_markup=_remove_markup,
+    )
+    update = SimpleNamespace(update_id=505, callback_query=query)
+
+    await adapter._handle_callback_query(update, None)
+
+    assert answers == ["✅ Подтверждение принято"]
+    assert len(sent_events) == 1
+    event = sent_events[0]
+    assert event.text == "да"
+    assert event.reply_to_message_id == "404"
+    assert event.reply_to_is_own_message is True
+    plugin._capture_gateway_event(event=event)
+    env["HERMES_SESSION_MESSAGE_ID"] = "505"
+    args = {}
+    assert (
+        plugin._pre_tool_call(
+            tool_name="mcp__aimash__execute_confirmed",
+            args=args,
+            session_id="s-button",
+            turn_id="t-button",
+        )
+        is None
+    )
+    turn = verify_turn_token(
+        args["trusted_turn_token"], expected_tool="execute_confirmed", tool_args={}
+    )
+    assert turn.reply_to_message_id == 404
     assert turn.reply_confirmation_id == marker
 
 

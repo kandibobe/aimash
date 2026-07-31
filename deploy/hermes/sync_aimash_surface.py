@@ -24,6 +24,32 @@ import yaml
 PLUGIN_NAME = "aimash_trusted_transport"
 
 
+def sanitize_pinned_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Remove keys proven inert in pinned Hermes v0.19.0, preserving host-local choices."""
+    config.pop("model_routing", None)
+
+    browser = config.get("browser")
+    if isinstance(browser, dict):
+        browser.pop("use_gateway", None)
+
+    openrouter = config.get("openrouter")
+    if isinstance(openrouter, dict):
+        openrouter.pop("extra_headers", None)
+        if not openrouter:
+            config.pop("openrouter", None)
+
+    guardrails = config.get("tool_loop_guardrails")
+    if isinstance(guardrails, dict):
+        for key in ("exact_failure", "same_tool_failure", "idempotent_no_progress"):
+            guardrails.pop(key, None)
+
+    disabled = config.get("agent", {}).get("disabled_toolsets", [])
+    if isinstance(disabled, list) and "delegation" in {str(item) for item in disabled}:
+        # Preserve the operator's disabled-toolset decision; remove only the inert config block.
+        config.pop("delegation", None)
+    return config
+
+
 def _container_surface(container: str) -> dict[str, Any]:
     code = (
         "import hashlib,json;"
@@ -176,6 +202,7 @@ def main() -> int:
         raise RuntimeError("live Hermes config must be a mapping")
     _install_plugin(args.plugin_source, args.plugin_target)
     _atomic_copy(args.soul_source, args.soul_target)
+    config = sanitize_pinned_config(config)
     _atomic_yaml(args.config, reconcile_config(config, enabled=enabled, tools=tools))
     print(
         f"Aimash Hermes surface reconciled: mode={'WRITE' if enabled else 'READ'}, tools={len(tools)}"

@@ -37,8 +37,8 @@ MCC. Топик супергруппы = клиент. Агент — **испо
   ↓ агентский цикл: get_stats → get_search_terms → get_auction_insights → …
   ↓ уточняет текстом, продолжает после ответа
   ↓ propose_change → черновик в БД с diff «было → станет»   ← Google Ads НЕ тронут
-  ↓ сводка текстом, БЕЗ кнопок
-  ↓ менеджер РЕПЛАЕМ на это сообщение: «да»                 ← распознаёт КОД по закрытому списку
+  ↓ карточка с ✅ Подтвердить / ✏️ Изменить / ❌ Отмена
+  ↓ менеджер нажимает ✅ или РЕПЛАЕМ пишет «да»               ← один trusted reply-CAS
   ↓ 9 проверок fail-closed (§2.2) → ads/mutations.py → audit-row
   ↓ отчёт «выполнено» ИЗ AUDIT-ROW, не из текста агента
 ```
@@ -72,8 +72,9 @@ MCC. Топик супергруппы = клиент. Агент — **испо
    правкой §2.2 как agent-first: список слов не останавливает подставленное «да» из внешнего текста —
    останавливает только якорь.)
    ⚠️ **Статус реализации:** кнопочный слой `bot/` остаётся отдельным легаси-контуром. Для Hermes
-   реализован feature-gated HMAC-транспорт: 39 PLAN + 1 WRITE импортируются только при
-   `HERMES_WRITE_ENABLED=true`; плагин связывает trusted Telegram reply с точным tool+args, а MCP
+   реализован feature-gated HMAC-транспорт: 42 PLAN + 1 WRITE импортируются только при
+   `HERMES_WRITE_ENABLED=true`; плагин прикрепляет кнопки к карточке и преобразует callback либо
+   ручной Telegram reply в один trusted event, связанный с точным tool+args, а MCP
    сверяет полный DB-diff и вызывает `confirm_by_reply`/`execute_confirmed`. ⛔ Это не заменяется через
    `bot/main.py:300 _LAST_PENDING` (chat_id →
    последний `confirmation_id`): «да» → подтвердить последний черновик не удовлетворяет ни одному пункту §2.2.
@@ -181,7 +182,7 @@ Telegram), delegation/субагенты, curator. **Что Hermes НЕ даёт
 ## Транспорт инструментов — MCP (тул-слой) + плагин-хук (только гейт)
 
 - **MCP-сервер `mcp_server/`** — как Hermes дотягивается до `ads/`/`confirm/`. Отдельный процесс ⇒ OAuth
-  изолирован от Hermes (ровно то, чего требует топология). Сейчас 25 READ + flag-gated 39 PLAN и
+  изолирован от Hermes (ровно то, чего требует топология). Сейчас 25 READ + flag-gated 42 PLAN и
   1 trusted WRITE. «MCP не нужно» заказчика относится к **сторонним** MCP; свой сервер над своим кодом — это
   наши инструменты, не сторонняя зависимость.
 - **Плагин-хук — ТОЛЬКО доверенный канал метаданных гейта.** `actor_chat_id`/`reply_to_message_id` в
@@ -198,7 +199,7 @@ Telegram), delegation/субагенты, curator. **Что Hermes НЕ даёт
 - Hermes ходит в Google Ads **через него**: `docker exec -i aimash-bot python -m mcp_server`
   ([deploy/hermes/config.yaml:213-220](deploy/hermes/config.yaml#L213-L220)). Только READ.
 - **WRITE/PLAN через Hermes имеют отдельный cutover-флаг.** Без него live-поверхность остаётся ровно
-  25 READ; с ним — 39 PLAN + 1 WRITE только через `aimash_trusted_transport`. Легаси-мутации не удалены.
+  25 READ; с ним — 42 PLAN + 1 WRITE только через `aimash_trusted_transport`. Легаси-мутации не удалены.
 - ⛔ **`bot/` и `agent/` не удалять «в лоб» — только гейтированной процедурой архивации** (предусловия →
   верификация прода → удаление; полный ранбук — [`deploy/hermes/OPERATIONS.md`](deploy/hermes/OPERATIONS.md),
   раздел «Архивация bot/+agent/»). Сегодня перенос/удаление убил бы развёрнутый READ-путь (Hermes ходит в
@@ -262,7 +263,7 @@ Python 3.12 · Hermes v0.19.0 (ядро агента) · MCP-сервер (ту�
 - `adcopy/` (генерация+валидация текстов; не `copy` — не затенять stdlib), `keywords/`, `clients/`
   (§20 профиль + краулер сайта), `reports/`, `advisor/`, `scheduler/`, `db/` + Alembic, `app/bootstrap.py`.
 
-**Достраивается:** `mcp_server/` (25 READ + flag-gated 39 PLAN/1 WRITE с trusted reply) · роли поверх безролевого Hermes · стартовая библиотека скилов · гарды И1–И8 ·
+**Достраивается:** `mcp_server/` (25 READ + flag-gated 42 PLAN/1 WRITE с trusted reply) · роли поверх безролевого Hermes · стартовая библиотека скилов · гарды И1–И8 ·
 артефактная память · гарды самообучения Г1–Г8.
 
 **Архивируется только после гейтированного cutover (сегодня — живое, не трогать):** Волна 1 шаг 1
@@ -312,11 +313,11 @@ cron, стоимость прогона (0.7) — живые действия н
 
 | Шаг | Состояние |
 |---|---|
-| 1 · Hermes на VPS + bot-free bootstrap (C1, C3) | ✅ пин v0.19.0, тулсет-поверхность заперта, ни один из 14 пакетов ядра не импортирует `bot/`, у планировщика свой процесс + advisory-lock. Telegram-gateway ещё не поднят (`inactive`) |
+| 1 · Hermes на VPS + bot-free bootstrap (C1, C3) | ✅ пин v0.19.0, тулсет-поверхность заперта, ни один из 14 пакетов ядра не импортирует `bot/`, у планировщика свой процесс + advisory-lock. Telegram-gateway активен |
 | 2 · **Гарды И1–И8 до появления мутаций** | ✅ 68 тестов `tests/test_hermes_isolation.py`, без WRITE-заглушек: exact-args, provenance, client isolation, И7 phase-lock, И8 DB-counter |
 | 3 · READ поверх `ads/read.py` | ✅ 25 READ-инструментов. Round-trip через Hermes доказан живьём; structural/shared-list ридеры покрыты офлайн (`tests/test_mcp_read_smoke.py`) |
 | 4 · Память | 🟡 `recall_client` есть (`4b28017`); `remember_fact`/`agent_facts` — нет |
-| 5 · Мутации + реплай-гейт | 🟡 код и rollout-механика готовы: 39 PLAN + 1 WRITE, HMAC trusted reply, точный diff/anchor и CAS; до архивирования legacy нужен принятый Draft live-UAT |
+| 5 · Мутации + confirm-гейт | 🟡 код и rollout-механика готовы: 42 PLAN + 1 WRITE, кнопка/reply через HMAC trusted anchor и CAS; до архивирования legacy нужен полный Draft live-UAT |
 | 6–10 · скилы, самонаписание, обучение, наблюдаемость | ⛔ не начаты |
 
 **Серия хардненинга 27.07** (своя нумерация, вне §12) — четыре контура денежного пути:

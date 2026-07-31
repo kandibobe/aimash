@@ -175,8 +175,8 @@ wall-clock. Прогон, ждущий реплая «да» (человек о�
   ↓ агентский цикл, READ-MCP: get_stats → get_search_terms → get_competitors
   ↓ уточняет текстом: «бюджет держим или можно снизить на 15%?»  ← reply менеджера, цикл продолжается
   ↓ propose_change ×N → Proposal'ы в БД с diff «было→станет»
-  ↓ агент пишет сводку текстом, без кнопок
-  ↓ менеджер РЕПЛАЕМ на это сообщение: «да»
+  ↓ агент пишет карточку с ✅ Подтвердить / ✏️ Изменить / ❌ Отмена
+  ↓ менеджер нажимает ✅ (или РЕПЛАЕМ пишет «да» как fallback)
   ↓ MCP execute_confirmed → ensure_allowed → ads/mutations.py → audit-row
   ↓ через 7/14/30 дней: RecommendationOutcome, замер delta
 ```
@@ -840,10 +840,12 @@ digest обычных args, actor/chat/message/thread, reply, TTL и nonce; MCP 
 Ошибка/отсутствие hook или ключа ⇒ токена нет ⇒ отказ до proposal/CAS/SDK, несмотря на fail-open
 семантику Hermes hooks. `execute_confirmed` вообще не принимает account/confirmation/actor/reply от LLM.
 
-Исходящий message id Hermes v0.19 hook не сообщает. Карточка поэтому содержит
-`AIMASH_CONFIRM:<confirmation_id>`; фактический Telegram reply приносит message id и полный текст
-карточки. MCP сверяет marker + неизменённый DB-summary, одноразово штампует якорь и только затем
-делегирует существующим `confirm_by_reply` → `execute_confirmed`.
+Исходящий message id официальный Hermes v0.19 hook не сообщает. Плагин пинованного Telegram-adapter
+прикрепляет inline-клавиатуру после успешного send/final edit; callback преобразуется в trusted
+reply-event с фактическими user/chat/thread/message id и полным текстом карточки. Ручной reply остаётся
+fallback. Карточка содержит `AIMASH_CONFIRM:<confirmation_id>`; MCP сверяет marker + неизменённый
+DB-summary, одноразово штампует якорь и только затем делегирует существующим
+`confirm_by_reply` → `execute_confirmed`.
 
 Порядок проверок — **фиксированный, каждая fail-closed**:
 
@@ -2313,7 +2315,7 @@ MCP-WRITE.
 | 4 | Ассет **Affiliate location** (ТЗ-2 §19.7) | Невозможен | Удалён из Google Ads API v24 — техническое ограничение, не выбор |
 | 5 | Ассет **Location** через Google Business Profile | Заглушка `NotImplementedError` | В v24 — через AssetSet + `place_id`, аккаунт-зависимо; отдельный объём работ либо вне объёма. Решить явно |
 | 6 | **Нормализация валют** в сводном MCC-отчёте (ТЗ-1 §8) | Подытоги по валютам, **FX нет** | Нет доверенного источника курсов; деньги считает код, а не модель. Единый total = выдуманное число в отчёте клиенту. Если total нужен — отдельное решение об источнике курса и ответственном за расхождение |
-| 7 | Подтверждение **кнопками** (✅/❌, кнопочные визарды) | Реплай текстом | Выбор заказчика при пивоте на Hermes. Следствия — R1, R4, §26.5, §27.1 |
+| 7 | Подтверждение **кнопками** (✅/❌) | **Требование восстановлено 2026-07-31:** кнопки на карточке + reply fallback | Плагин пинованного Telegram-adapter преобразует callback в trusted reply-event; CAS/allow-list/audit едины. FSM-визарды остаются текстовыми |
 | 8 | Тип соответствия по умолчанию **Phrase** (ТЗ-2 §19.4) | Медиана аккаунта → phrase как fallback | Сам исходник противоречив (в одном месте phrase, в другом «по аналогии»); код разрешил в пользу медианы, зафиксировано как «НЕ хардкод phrase (баг B6)» |
 | 9 | **10** seed-ключей (ТЗ-2 §19.4) | **15** | Больше сидов → богаче набор идей; проверено на прогонах |
 | 10 | Лимит краула **50–100** страниц (ТЗ-3 §20.4, помечено «уточнить при внедрении») | 1000 страниц / глубина 3 / 240 с | Прод-конфиг. **Незаложенная статья OPEX:** 1000 страниц × LLM-структурирование. Либо снижать лимит, либо закладывать расход — вопрос в §14 |
@@ -2423,7 +2425,7 @@ existing propose → trusted reply → ConfirmStore.claim → ads/mutations → 
 10. CRM/SSO identifiers — domain-separated HMAC-SHA256; без отдельного
     `PSEUDONYMIZATION_HMAC_KEY` ingest/mapping отказывает.
 
-**Статус публикации:** 40 PLAN + 1 WRITE зарегистрированы только при `HERMES_WRITE_ENABLED=true`;
+**Статус публикации:** 42 PLAN + 1 WRITE зарегистрированы только при `HERMES_WRITE_ENABLED=true`;
 без флага модуль WRITE физически не импортируется. Продовый sync меняет только Aimash include-list и
 активацию `aimash_trusted_transport`, сохраняя host-local Hermes config. Наличие `0038` или одного
 только плагина не является разрешением обойти HMAC/cutover. Функциональный контракт — `SPEC.md` §3.11,

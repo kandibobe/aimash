@@ -194,7 +194,7 @@ mcp_servers:
     timeout: 120
     connect_timeout: 30
     tools:
-      include:             # 25 READ + 40 PLAN + 1 trusted reply-execute
+      include:             # 25 READ + 42 PLAN + 1 trusted reply-execute
         - list_accounts
         - get_campaign_stats
         - get_adgroup_stats
@@ -271,6 +271,8 @@ mcp_servers:
         - propose_add_promotion
         - propose_add_price_asset
         - propose_remove_asset_link
+        - list_pending_proposals
+        - cancel_proposal
         - execute_confirmed
   tavily:
     command: npx

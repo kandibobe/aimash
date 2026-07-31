@@ -56,6 +56,38 @@ def test_disable_removes_plugin_and_keeps_read_manifest():
     assert got["mcp_servers"]["aimash"]["tools"]["include"] == ["read"]
 
 
+def test_sanitize_pinned_config_removes_only_proven_inert_keys():
+    cfg = {
+        "model": {"provider": "openai-codex", "default": "gpt-5.6"},
+        "model_routing": {"r1": {"provider": "openai-codex", "model": "gpt-5.4"}},
+        "browser": {"cloud_provider": "local", "use_gateway": False},
+        "openrouter": {"extra_headers": "ignored"},
+        "tool_loop_guardrails": {
+            "warnings_enabled": True,
+            "hard_stop_after": {"exact_failure": 3},
+            "exact_failure": 3,
+            "same_tool_failure": 4,
+            "idempotent_no_progress": 3,
+        },
+        "agent": {"disabled_toolsets": ["delegation", "terminal"]},
+        "delegation": {"provider": "openai-codex", "model": "gpt-5.6"},
+        "dashboard": {"theme": "dark"},
+    }
+
+    result = SYNC.sanitize_pinned_config(cfg)
+
+    assert result["model"] == {"provider": "openai-codex", "default": "gpt-5.6"}
+    assert "model_routing" not in result
+    assert result["browser"] == {"cloud_provider": "local"}
+    assert "openrouter" not in result
+    assert result["tool_loop_guardrails"] == {
+        "warnings_enabled": True,
+        "hard_stop_after": {"exact_failure": 3},
+    }
+    assert "delegation" not in result
+    assert result["dashboard"] == {"theme": "dark"}
+
+
 def test_env_parser_never_needs_to_source_shell(tmp_path: Path):
     env = tmp_path / ".env"
     env.write_text("# x\nexport AIMASH_TRUST_HMAC_KEY='" + "k" * 32 + "'\n", encoding="utf-8")

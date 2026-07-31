@@ -68,8 +68,9 @@ provenance, 2FA, freshness и audit остаются обязательны.
 
 ## Что ещё требует live-cutover
 
-Код и схема не равны включённому продукту. Hermes по-прежнему публикует только READ-набор; новые
-операционные функции не зарегистрированы как WRITE. Живой scheduler подключает Telegram adapter;
+Код и схема не равны включённому продукту. Hermes публикует 25 READ + 42 PLAN + 1 WRITE для Ads,
+но новые операционные функции Decision Layer пока не зарегистрированы как исполняющий WRITE.
+Живой scheduler подключает Telegram adapter;
 Slack/email/Teams требуют настроенных transport adapters и uppercase config refs
 (`SLACK_OPS_CHANNEL`), не raw URL/token. Перед transport title/body проходят `redact_text`. SSO
 требует проверки подписи/issuer/audience в доверенном gateway — модуль

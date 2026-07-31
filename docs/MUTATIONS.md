@@ -3,7 +3,7 @@
 > **Статус перехода на Hermes.** Этот документ описывает денежное ядро и его инварианты,
 > а не целевой Telegram-интерфейс. Сейчас эти операции доступны через legacy aiogram;
 > Hermes всегда получает 25 READ-инструментов. При `HERMES_WRITE_ENABLED=true` добавляются
-> 40 PLAN + 1 WRITE; каждый вызов проходит HMAC trusted Telegram transport, а исполнение —
+> 42 PLAN + 1 WRITE; каждый вызов проходит HMAC trusted Telegram transport, а исполнение —
 > одноразовый reply-CAS и существующий `ads.service.execute_confirmed`.
 
 Документ фиксирует **каждую** мутацию, которую код реально способен выполнить над

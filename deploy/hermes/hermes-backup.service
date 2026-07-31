@@ -1,0 +1,6 @@
+[Unit]
+Description=Backup /root/.hermes (config + secrets + state.db)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /opt/aimash/scripts/backup_hermes.sh

@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily backup of /root/.hermes
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target

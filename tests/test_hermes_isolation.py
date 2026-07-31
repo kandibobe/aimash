@@ -259,6 +259,7 @@ def test_reference_hermes_config_exposes_exactly_the_enabled_registry():
     """
     import yaml
 
+    from mcp_server.tools_plan import PLAN_STATE_MCP_TOOLS
     from mcp_server.tools_read import READ_MCP_TOOLS
     from mcp_server.tools_write import PLAN_WRITE_MCP_TOOLS
 
@@ -272,7 +273,7 @@ def test_reference_hermes_config_exposes_exactly_the_enabled_registry():
             include = set(inc)
             break
     assert include is not None, f"в {cfg_path.name} не нашёлся tools.include — эталон разошёлся"
-    expected = set(READ_MCP_TOOLS | PLAN_WRITE_MCP_TOOLS)
+    expected = set(READ_MCP_TOOLS | PLAN_WRITE_MCP_TOOLS | PLAN_STATE_MCP_TOOLS)
     missing, extra = sorted(expected - include), sorted(include - expected)
     assert not missing and not extra, (
         f"tools.include эталона разошёлся с реестром. Дописать: {missing}; лишние: {extra}. "

@@ -51,8 +51,9 @@ def expected_tool_names() -> frozenset[str]:
     if not settings.hermes_write_enabled:
         return READ_MCP_TOOLS
     from mcp_server.tools_write import PLAN_WRITE_MCP_TOOLS
+    from mcp_server.tools_plan import PLAN_STATE_MCP_TOOLS
 
-    return READ_MCP_TOOLS | PLAN_WRITE_MCP_TOOLS
+    return READ_MCP_TOOLS | PLAN_WRITE_MCP_TOOLS | PLAN_STATE_MCP_TOOLS
 
 
 def build_server():
@@ -69,10 +70,11 @@ def build_server():
         mcp.tool(name=name, structured_output=False)(fn)
 
     if settings.hermes_write_enabled:
+        from mcp_server.tools_plan import PLAN_STATE_TOOL_FUNCS
         from mcp_server.tools_write import PLAN_WRITE_TOOL_FUNCS
         from mcp_server.trusted_transport import trusted_tool
 
-        for name, fn in PLAN_WRITE_TOOL_FUNCS.items():
+        for name, fn in {**PLAN_WRITE_TOOL_FUNCS, **PLAN_STATE_TOOL_FUNCS}.items():
             mcp.tool(name=name, structured_output=False)(trusted_tool(name, fn))
 
     # Проверка на РАВЕНСТВО: ни allow-list клиента, ни wrapper не скрывают случайно лишний tool.

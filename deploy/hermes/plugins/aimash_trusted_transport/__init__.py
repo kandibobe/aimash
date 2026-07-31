@@ -11,6 +11,7 @@ invalid tokens are rejected by ``mcp_server.trusted_transport`` before proposal 
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import hmac
 import json
@@ -32,8 +33,15 @@ _EVENT_TTL_S = 600
 _MCP_PREFIX = "mcp__aimash__"
 _EXECUTE_TOOL = f"{_MCP_PREFIX}execute_confirmed"
 _PROPOSE_PREFIX = f"{_MCP_PREFIX}propose_"
+_PLAN_STATE_TOOLS = frozenset(
+    {
+        f"{_MCP_PREFIX}list_pending_proposals",
+        f"{_MCP_PREFIX}cancel_proposal",
+    }
+)
 _TAINTED_AIMASH_TOOLS = frozenset({f"{_MCP_PREFIX}recall_client"})
 _CONFIRM_RE = re.compile(r"\bAIMASH_CONFIRM:([0-9a-fA-F]{32})\b")
+_CALLBACK_RE = re.compile(r"^am:(yes|edit|no):([0-9a-fA-F]{32})$")
 _SAFE_NATIVE_TOOLS = frozenset({"clarify"})
 
 
@@ -221,7 +229,188 @@ def _signed_token(tool_name: str, tool_args: dict, inbound: _Inbound) -> str | N
 
 
 def _is_aimash_write(tool_name: str) -> bool:
-    return tool_name == _EXECUTE_TOOL or tool_name.startswith(_PROPOSE_PREFIX)
+    return (
+        tool_name == _EXECUTE_TOOL
+        or tool_name.startswith(_PROPOSE_PREFIX)
+        or tool_name in _PLAN_STATE_TOOLS
+    )
+
+
+async def _attach_confirmation_keyboard(adapter, chat_id, message_id, content: str) -> None:
+    """Attach UX-only buttons; a failure leaves the secure reply fallback intact."""
+    match = _CONFIRM_RE.search(str(content or ""))
+    if match is None or not message_id or getattr(adapter, "_bot", None) is None:
+        return
+    try:
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        from plugins.platforms.telegram.adapter import normalize_telegram_chat_id
+
+        confirmation_id = match.group(1).lower()
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "✅ Подтвердить", callback_data=f"am:yes:{confirmation_id}"
+                    ),
+                    InlineKeyboardButton("✏️ Изменить", callback_data=f"am:edit:{confirmation_id}"),
+                ],
+                [InlineKeyboardButton("❌ Отмена", callback_data=f"am:no:{confirmation_id}")],
+            ]
+        )
+        await adapter._bot.edit_message_reply_markup(
+            chat_id=normalize_telegram_chat_id(chat_id),
+            message_id=int(message_id),
+            reply_markup=keyboard,
+        )
+    except Exception as exc:  # noqa: BLE001 - reply fallback must remain available
+        log.warning("Aimash confirmation keyboard was not attached: %s", type(exc).__name__)
+
+
+def _telegram_chat_type(chat) -> str:
+    value = str(getattr(chat, "type", "")).split(".")[-1].lower()
+    if value in {"group", "supergroup"}:
+        return "group"
+    if value == "channel":
+        return "channel"
+    return "dm"
+
+
+async def _dispatch_confirmation_callback(adapter, update, query, choice: str) -> bool:
+    """Turn a Telegram button tap into the same trusted reply event as typed text."""
+    message = getattr(query, "message", None)
+    user = getattr(query, "from_user", None)
+    chat = getattr(message, "chat", None)
+    update_id = _as_int(getattr(update, "update_id", None), positive=True)
+    message_id = _as_int(getattr(message, "message_id", None), positive=True)
+    chat_id = _as_int(getattr(message, "chat_id", None))
+    user_id = _as_int(getattr(user, "id", None), positive=True)
+    card_text = str(getattr(message, "text", None) or getattr(message, "caption", None) or "")
+    marker = _CONFIRM_RE.search(card_text)
+    if None in (update_id, message_id, chat_id, user_id) or marker is None:
+        await query.answer(text="⚠️ Карточка устарела — создайте новый черновик.")
+        return True
+
+    data_match = _CALLBACK_RE.fullmatch(str(getattr(query, "data", "")))
+    if data_match is None or not hmac.compare_digest(
+        marker.group(1).lower(), data_match.group(2).lower()
+    ):
+        await query.answer(text="⛔ Кнопка не соответствует карточке.")
+        return True
+
+    if not adapter._is_callback_user_authorized(
+        str(user_id),
+        chat_id=chat_id,
+        chat_type=str(getattr(chat, "type", None)),
+        thread_id=str(getattr(message, "message_thread_id", None))
+        if getattr(message, "message_thread_id", None) is not None
+        else None,
+        user_name=getattr(user, "first_name", None),
+    ):
+        await query.answer(text="⛔ У вас нет права подтверждать этот черновик.")
+        return True
+
+    from gateway.platforms.base import MessageEvent, MessageType
+
+    thread_id = getattr(message, "message_thread_id", None)
+    source = adapter.build_source(
+        chat_id=str(chat_id),
+        chat_name=getattr(chat, "title", None) or getattr(chat, "full_name", None),
+        chat_type=_telegram_chat_type(chat),
+        user_id=str(user_id),
+        user_name=getattr(user, "full_name", None) or getattr(user, "first_name", None),
+        thread_id=str(thread_id) if thread_id is not None else None,
+        message_id=str(update_id),
+        is_bot=False,
+    )
+    text_by_choice = {
+        "yes": "да",
+        "edit": "хочу изменить этот черновик",
+        "no": "нет, отмени этот черновик",
+    }
+    event = MessageEvent(
+        text=text_by_choice[choice],
+        message_type=MessageType.TEXT,
+        source=source,
+        raw_message=query,
+        message_id=str(update_id),
+        platform_update_id=update_id,
+        reply_to_message_id=str(message_id),
+        reply_to_text=card_text,
+        reply_to_author_id=str(getattr(getattr(message, "from_user", None), "id", "") or ""),
+        reply_to_author_name=getattr(getattr(message, "from_user", None), "full_name", None),
+        reply_to_is_own_message=True,
+        metadata={"aimash_confirmation_callback": choice},
+        timestamp=getattr(message, "date", None),
+    )
+    await query.answer(
+        text={
+            "yes": "✅ Подтверждение принято",
+            "edit": "✏️ Напишите, что изменить",
+            "no": "❌ Черновик отменяется",
+        }[choice]
+    )
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001 - CAS still makes a repeated click harmless
+        pass
+    await adapter.handle_message(event)
+    return True
+
+
+def _install_telegram_button_bridge() -> bool:
+    """Patch the pinned Telegram adapter without adding Ads credentials to Hermes."""
+    try:
+        from plugins.platforms.telegram.adapter import TelegramAdapter
+    except Exception as exc:  # noqa: BLE001 - secure reply flow remains the fallback
+        log.warning("Aimash Telegram button bridge unavailable: %s", type(exc).__name__)
+        return False
+    if getattr(TelegramAdapter, "_aimash_button_bridge", False):
+        return True
+
+    original_send = TelegramAdapter.send
+    original_edit = TelegramAdapter.edit_message
+    original_callback = TelegramAdapter._handle_callback_query
+
+    @functools.wraps(original_send)
+    async def send(adapter, chat_id, content, reply_to=None, metadata=None):
+        result = await original_send(
+            adapter, chat_id, content, reply_to=reply_to, metadata=metadata
+        )
+        if getattr(result, "success", False):
+            await _attach_confirmation_keyboard(
+                adapter, chat_id, getattr(result, "message_id", None), content
+            )
+        return result
+
+    @functools.wraps(original_edit)
+    async def edit_message(adapter, chat_id, message_id, content, *, finalize=False, metadata=None):
+        result = await original_edit(
+            adapter,
+            chat_id,
+            message_id,
+            content,
+            finalize=finalize,
+            metadata=metadata,
+        )
+        if finalize and getattr(result, "success", False):
+            await _attach_confirmation_keyboard(adapter, chat_id, message_id, content)
+        return result
+
+    @functools.wraps(original_callback)
+    async def handle_callback(adapter, update, context):
+        query = getattr(update, "callback_query", None)
+        match = _CALLBACK_RE.fullmatch(str(getattr(query, "data", "") or ""))
+        if match is not None:
+            await _dispatch_confirmation_callback(adapter, update, query, match.group(1))
+            return
+        await original_callback(adapter, update, context)
+
+    TelegramAdapter.send = send
+    TelegramAdapter.edit_message = edit_message
+    TelegramAdapter._handle_callback_query = handle_callback
+    TelegramAdapter._aimash_button_bridge = True
+    log.info("Aimash Telegram confirmation buttons enabled")
+    return True
 
 
 def _pre_tool_call(*args, **kwargs):
@@ -287,6 +476,7 @@ def _pre_tool_call(*args, **kwargs):
 
 
 def register(ctx):  # noqa: ANN001 - runtime-owned plugin API
+    _install_telegram_button_bridge()
     ctx.register_hook("pre_gateway_dispatch", _capture_gateway_event)
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     if len(os.environ.get("AIMASH_TRUST_HMAC_KEY", "").encode("utf-8")) < 32:

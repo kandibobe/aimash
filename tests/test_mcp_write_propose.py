@@ -156,6 +156,9 @@ async def test_propose_budget_creates_pending_draft_without_touching_ads(propose
     assert env["customer_id"] == DRAFT_ACCOUNT_ID
     assert env["confirmation_marker"] == f"AIMASH_CONFIRM:{env['confirmation_id']}"
     assert env["confirmation_marker"] in env["preview"]
+    assert "🧾 Черновик изменения" in env["preview"]
+    assert "⚠️ Google Ads пока не изменён." in env["preview"]
+    assert "✅ Нажмите «Подтвердить»" in env["preview"]
     assert "→" in env["preview"]  # реальный diff «было → станет», собранный confirm.render (КОД)
     assert propose_env.calls == 1  # снимок «было» прочитан ровно раз; мутаций — ноль (propose-only)
 

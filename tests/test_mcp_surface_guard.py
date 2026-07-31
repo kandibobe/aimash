@@ -32,11 +32,14 @@ def test_build_server_exposes_exactly_the_read_surface() -> None:
 
 
 def test_write_mode_exposes_only_trusted_plan_write_surface(monkeypatch) -> None:
+    from mcp_server.tools_plan import PLAN_STATE_MCP_TOOLS
     from mcp_server.tools_write import PLAN_WRITE_MCP_TOOLS
 
     monkeypatch.setattr(settings, "hermes_write_enabled", True)
     mcp = build_server()
-    assert _registered_tool_names(mcp) == READ_MCP_TOOLS | PLAN_WRITE_MCP_TOOLS
+    assert _registered_tool_names(mcp) == (
+        READ_MCP_TOOLS | PLAN_WRITE_MCP_TOOLS | PLAN_STATE_MCP_TOOLS
+    )
     for name in PLAN_WRITE_MCP_TOOLS:
         tool = next(t for t in mcp._tool_manager.list_tools() if t.name == name)
         assert TOKEN_PARAM in tool.parameters["properties"]

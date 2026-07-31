@@ -24,6 +24,7 @@
 #   HERMES_DIR            — каталог Hermes                   (по умолч. /root/.hermes)
 #   HERMES_BACKUP_DIR     — куда складывать                  (по умолч. /root/hermes-backups)
 #   HERMES_BACKUP_RETAIN  — сколько архивов хранить          (по умолч. 14)
+#   HERMES_PYTHON         — Python с stdlib sqlite3           (по умолч. Hermes venv)
 #
 # ⚠️ Архив несёт СЕКРЕТЫ. Он создаётся с правами 600 и НЕ должен попадать в /opt/aimash (репозиторий),
 #    в общие логи и в git. Выгрузка наружу — только шифрованной (gpg/age), см. хвост скрипта.
@@ -32,6 +33,7 @@ set -e
 HERMES_DIR="${HERMES_DIR:-/root/.hermes}"
 OUT_DIR="${HERMES_BACKUP_DIR:-/root/hermes-backups}"
 RETAIN="${HERMES_BACKUP_RETAIN:-14}"
+HERMES_PYTHON="${HERMES_PYTHON:-/usr/local/lib/hermes-agent/venv/bin/python}"
 
 [ -d "$HERMES_DIR" ] || { echo "[hermes-backup] нет каталога $HERMES_DIR — Hermes здесь не установлен?" >&2; exit 1; }
 
@@ -65,6 +67,20 @@ if [ -f "$DB" ]; then
   if command -v sqlite3 >/dev/null 2>&1; then
     sqlite3 "$DB" ".backup '$STAGE/$BASE/state.db'"
     echo "[hermes-backup] state.db — консистентный снимок (sqlite3 .backup)"
+  elif [ -x "$HERMES_PYTHON" ]; then
+    "$HERMES_PYTHON" - "$DB" "$STAGE/$BASE/state.db" <<'PY'
+import sqlite3
+import sys
+
+source = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+target = sqlite3.connect(sys.argv[2])
+try:
+    source.backup(target)
+finally:
+    target.close()
+    source.close()
+PY
+    echo "[hermes-backup] state.db — консистентный снимок (Python sqlite3 backup)"
   else
     # Фолбэк: копируем базу ВМЕСТЕ с -wal/-shm — врозь они бесполезны. Целостность не гарантирована,
     # поэтому говорим об этом вслух, а не молчим: молчаливая деградация бэкапа хуже её отсутствия.
@@ -73,8 +89,7 @@ if [ -f "$DB" ]; then
     cp -p "$DB" "$STAGE/$BASE/state.db"
     if [ -f "$DB-wal" ]; then cp -p "$DB-wal" "$STAGE/$BASE/state.db-wal"; fi
     if [ -f "$DB-shm" ]; then cp -p "$DB-shm" "$STAGE/$BASE/state.db-shm"; fi
-    echo "[hermes-backup] ⚠️ sqlite3 не установлен — снимок state.db БЕЗ гарантии целостности."
-    echo "[hermes-backup]    Поставь: apt-get install -y sqlite3 (и перезапусти бэкап)."
+    echo "[hermes-backup] ⚠️ нет sqlite3 и $HERMES_PYTHON — снимок state.db БЕЗ гарантии целостности."
   fi
 else
   echo "[hermes-backup] ⚠️ $DB не найден. Путь state.db на v0.17 подтверждён не был — проверь:"
