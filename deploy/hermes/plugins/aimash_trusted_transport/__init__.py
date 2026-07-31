@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -184,8 +185,23 @@ def _current_inbound() -> _Inbound | None:
     return inbound
 
 
+def _canonical_json_value(value):
+    """Match FastMCP's JSON integer -> annotated float coercion before HMAC verification."""
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("non-finite number")
+        if value.is_integer():
+            return int(value)
+        return value
+    if isinstance(value, list):
+        return [_canonical_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _canonical_json_value(item) for key, item in value.items()}
+    return value
+
+
 def _canonical_digest(args: dict) -> str:
-    clean = {str(k): v for k, v in args.items() if str(k) != _TOKEN_PARAM}
+    clean = _canonical_json_value({str(k): v for k, v in args.items() if str(k) != _TOKEN_PARAM})
     encoded = json.dumps(
         clean,
         ensure_ascii=False,

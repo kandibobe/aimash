@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import inspect
 import json
+import math
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -70,9 +71,24 @@ _TRUSTED_TURN: contextvars.ContextVar[TrustedTurn | None] = contextvars.ContextV
 )
 
 
+def _canonical_json_value(value: Any) -> Any:
+    """Normalize harmless JSON number coercion performed by FastMCP."""
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("non-finite number")
+        if value.is_integer():
+            return int(value)
+        return value
+    if isinstance(value, list):
+        return [_canonical_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _canonical_json_value(item) for key, item in value.items()}
+    return value
+
+
 def canonical_args_digest(args: dict[str, Any]) -> str:
-    """Digest the model-controlled arguments exactly as the gateway plugin does."""
-    clean = {str(k): v for k, v in args.items() if str(k) != TOKEN_PARAM}
+    """Digest arguments identically before and after typed FastMCP validation."""
+    clean = _canonical_json_value({str(k): v for k, v in args.items() if str(k) != TOKEN_PARAM})
     try:
         encoded = json.dumps(
             clean,

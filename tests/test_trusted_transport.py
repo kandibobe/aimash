@@ -89,6 +89,26 @@ def test_token_is_bound_to_exact_tool_and_arguments():
         verify_turn_token(token, expected_tool="execute_confirmed", tool_args={}, now=1_050)
 
 
+def test_digest_accepts_fastmcp_integer_to_float_coercion_but_not_value_change():
+    token = _token(
+        "propose_budget_change",
+        {"account": "7753643025", "value": 20, "nested": [1, {"ratio": 2}]},
+    )
+    verify_turn_token(
+        token,
+        expected_tool="propose_budget_change",
+        tool_args={"account": "7753643025", "value": 20.0, "nested": [1.0, {"ratio": 2.0}]},
+        now=1_050,
+    )
+    with pytest.raises(TrustedTransportError):
+        verify_turn_token(
+            token,
+            expected_tool="propose_budget_change",
+            tool_args={"account": "7753643025", "value": 20.01, "nested": [1, {"ratio": 2}]},
+            now=1_050,
+        )
+
+
 def test_forged_or_expired_token_is_rejected():
     forged = _token("execute_confirmed", {}, key="x" * 32)
     with pytest.raises(TrustedTransportError):
