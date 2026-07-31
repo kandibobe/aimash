@@ -14,8 +14,8 @@
 > Модель-мозг агента: **`openai/gpt-5.6-terra`** через OpenRouter (pluggable через конфиг гейтвея).
 >
 > **Как читать статус:** целевая архитектура уже выбрана — Hermes является агентным ядром.
-> При этом текущий прод остаётся переходным: 25 READ-инструментов опубликованы через MCP,
-> а полный PLAN/WRITE и доверенный Telegram reply-транспорт ещё не включены. Кнопочный aiogram
+> Переходный прод сохраняет aiogram как отдельный легаси-контур. Hermes MCP всегда имеет 25 READ;
+> 39 PLAN + 1 WRITE включаются только вместе с HMAC trusted Telegram reply-транспортом. Кнопочный aiogram
 > ниже упоминается только как действующий legacy-вход и источник переиспользуемой бизнес-логики.
 
 ---
@@ -29,7 +29,7 @@
 | «Hermes 3 — модель через OpenRouter» | **«Hermes» = агент-ФРЕЙМВОРК `NousResearch/hermes-agent` v0.19.0** (не модель). Решение о полном пивоте принято 2026-07-23 ([AGENTIC_VS_TZ.md:28-33](../deploy/hermes/AGENTIC_VS_TZ.md)). | Мозг агента — фреймворк, не «модель Hermes». |
 | Модель `hermes-3-llama-3.1-405b/70b` | Hermes-4 70b/405b дали **0/11 function-calling** через OpenRouter («No endpoints found that support tool use»), `docs/ab-results.md`. Гейтвей работает на **`openai/gpt-5.6-terra`** ([config.yaml:22-24](../deploy/hermes/config.yaml)). | Модель-мозг = gpt-5.6-terra, pluggable. Hermes-модели — только при самохостинге на vLLM с `--tool-call-parser hermes`. |
 | «Node/TS или Python с нуля» | Зрелый Python-код уже есть; денежное ядро (`ads/mutations.py`, `ads/client.py`, `confirm/**`, `core/secrets.py`) «**лучшая часть кодовой базы, не трогается**» (HERMES_SPEC §Прочтение A). | Не greenfield. Переиспользуем денежное ядро; фреймворк ставится сверху. |
-| «MCP-серверы — на будущее (best practice)» | MCP — **уже реальный и единственный канал** Hermes→Google Ads: 25 READ-инструментов через `docker exec -i aimash-bot python -m mcp_server` ([config.yaml](../deploy/hermes/config.yaml)). На live-поверхности WRITE отсутствует by construction; полный PLAN/WRITE-код существует ready-dark. | Принимаем доверенный reply-transport и только затем публикуем WRITE-MCP поверх готового `execute_confirmed`. |
+| «MCP-серверы — на будущее (best practice)» | MCP — **реальный и единственный канал** Hermes→Google Ads: 25 READ и flag-gated 39 PLAN + 1 WRITE через `docker exec -i aimash-bot python -m mcp_server` ([config.yaml](../deploy/hermes/config.yaml)). | WRITE требует HMAC trusted reply-transport и делегирует готовому `execute_confirmed`; флаг без ключа не стартует. |
 | «ReAct-цикл, Max Iterations = 5, State Machine своими руками» | Агент-цикл, оркестрация, маршрутизация интентов, tool-calling, память, скилы — **встроены во фреймворк**: «встроенная машинерия автономии — брать готовым, не строить» (SPEC §5.6). | TriageAgent/state-machine/ReAct **не пишем** — конфигурируем фреймворк. |
 | «Human-in-the-loop построить» | Confirm-гейт с CAS/TTL/one-shot и провенансом **уже готов** (`confirm/store.py`, `confirm/gate.py`). Approvals самого Hermes **не гейтят MCP** («Approval flows do not govern MCP tool invocations»); хуки Hermes **fail-OPEN**. | HITL держится в НАШЕМ коде (`execute_confirmed`, правило 10), не в хуках фреймворка. |
 | «Guardrails построить» | Замки аккаунтов, capability-ceiling, freshness/TOCTOU, 2FA, денежные диапазоны — **уже есть**, но размазаны по 6 местам; бизнес-лимита «≤20% за шаг» и дневных лимитов — **нет**. | Достраиваем: единый `PolicyEngine` + бизнес-лимиты. |
@@ -57,9 +57,8 @@
                 ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  aimash money-code (контейнер aimash-bot, Python)            │
-│  • live: 25 READ-инструментов, read-only BY CONSTRUCTION     │
-│  • ready-dark: 2 propose_* + reply-CAS; полный WRITE          │
-│    и доверенный транспорт ещё не опубликованы                 │
+│  • всегда: 25 READ-инструментов                              │
+│  • flag-gated: 39 PLAN + 1 WRITE, HMAC trusted reply-CAS     │
 │  • PolicyEngine, замки аккаунтов, confirm-гейт, 2FA           │
 │  • OAuth (Fernet at-rest), audit_log, freshness/TOCTOU        │
 └───────────────┬──────────────────────────────────────────────┘
@@ -102,7 +101,7 @@
 
 ### Фаза 3 — Tool design / Google Ads skills / self-correction (ШАГ 4)
 - **Переиспользуем:** READ-MCP — 25 READ-инструментов (envelope+error-codes, redaction); ~41 Google Ads skill (`ads/service.py` `SUPPORTED_OPERATIONS`), резолверы, post-apply verify.
-- **Достраиваем:** два ready-dark инструмента (`propose_budget_change`, `propose_bid_change`) уже есть в `mcp_server/tools_write.py`; остаются остальные PLAN/WRITE-обёртки, live-регистрация и доверенный вызов `confirm_and_execute_by_reply` поверх готового `execute_confirmed` (`ads/service.py`). Self-correction: ошибка API → понятный JSON модели (`INVALID_ARGUMENT: budget must be a multiple of 100 …`) без прерывания цикла; во фреймворке цикл продолжается сам.
+- **Реализовано за feature-flag:** 39 `propose_*`, HMAC wrapper и безаргументный trusted `execute_confirmed` поверх `confirm_and_execute_by_reply` (`ads/service.py`). Self-correction: ошибка API → понятный JSON модели (`INVALID_ARGUMENT: budget must be a multiple of 100 …`) без прерывания цикла; во фреймворке цикл продолжается сам.
 - Ссылки: SPEC §6.3 (PLAN — готовят, не исполняют), §6.4 (исполнение — единственная точка), HERMES_SPEC §8 (реестр MCP-инструментов).
 
 ### Фаза 4 — Guardrails / PolicyEngine (ШАГ 4)

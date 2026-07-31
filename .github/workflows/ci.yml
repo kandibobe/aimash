@@ -165,14 +165,17 @@ jobs:
             fi
             export XDG_RUNTIME_DIR=/run/user/0
             command -v hermes >/dev/null
+            /usr/local/lib/hermes-agent/venv/bin/python \
+              deploy/hermes/sync_aimash_surface.py
+            EXPECTED_TOOLS=$(docker exec -i aimash-bot python -c \
+              "from mcp_server.server import expected_tool_names; print(len(expected_tool_names()))")
             docker exec -i aimash-bot python -c \
-              "import sys; import mcp_server.server; assert 'mcp_server.tools_write' not in sys.modules"
-            EXPECTED_READ=$(docker exec -i aimash-bot python -c \
-              "from mcp_server.tools_read import READ_MCP_TOOLS; print(len(READ_MCP_TOOLS))")
+              "import sys; from core.config import settings; import mcp_server.server; \
+              assert settings.hermes_write_enabled == ('mcp_server.tools_write' in sys.modules)"
             hermes gateway restart
             MCP_TEST=$(hermes mcp test aimash)
             echo "$MCP_TEST"
-            echo "$MCP_TEST" | grep -Fq "Tools discovered: $EXPECTED_READ"
+            echo "$MCP_TEST" | grep -Fq "Tools discovered: $EXPECTED_TOOLS"
             sleep 5
             if docker logs --since 2m aimash-bot 2>&1 | grep -Fq "409 Conflict"; then
               echo "::error::legacy Telegram bot получил 409 Conflict после deploy"
@@ -183,4 +186,4 @@ jobs:
               echo "::error::Hermes Telegram gateway получил 409 Conflict после deploy"
               exit 1
             fi
-            echo "✅ Hermes gateway reconnected: $EXPECTED_READ READ tools, no Telegram 409"
+            echo "✅ Hermes gateway reconnected: $EXPECTED_TOOLS tools, no Telegram 409"

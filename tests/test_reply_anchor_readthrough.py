@@ -179,6 +179,50 @@ async def test_set_card_message_id_unknown_cid_is_false():
     assert await store.set_card_message_id("нет-такого", CARD_MSG) is False
 
 
+async def test_verified_reply_binding_is_idempotent_only_for_same_anchor():
+    store = ConfirmStore()
+    cid = await _mk(store, actor=ACTOR, tg_message_id=None)
+
+    kwargs = {"actor_user_id": ACTOR, "actor_chat_id": OWNER}
+    assert await store.bind_card_message_id_from_verified_reply(cid, CARD_MSG, **kwargs) is True
+    assert await store.bind_card_message_id_from_verified_reply(cid, CARD_MSG, **kwargs) is True
+    assert (
+        await store.bind_card_message_id_from_verified_reply(cid, CARD_MSG + 1, **kwargs) is False
+    )
+
+
+async def test_verified_reply_binding_cannot_be_hijacked_by_another_operator():
+    store = ConfirmStore()
+    cid = await _mk(store, actor=ACTOR, tg_message_id=None)
+
+    assert (
+        await store.bind_card_message_id_from_verified_reply(
+            cid, CARD_MSG, actor_user_id=ACTOR + 1, actor_chat_id=OWNER
+        )
+        is False
+    )
+    snap = await store.get_confirmed(cid)
+    assert snap is not None and snap.tg_message_id is None
+    assert (
+        await store.bind_card_message_id_from_verified_reply(
+            cid, CARD_MSG, actor_user_id=ACTOR, actor_chat_id=OWNER
+        )
+        is True
+    )
+
+
+async def test_verified_reply_binding_refuses_non_pending_or_unknown():
+    store = ConfirmStore()
+    cid = await _mk(store, actor=ACTOR, tg_message_id=None)
+    assert await store.confirm(cid, chat_id=OWNER, actor_user_id=ACTOR) is True
+
+    kwargs = {"actor_user_id": ACTOR, "actor_chat_id": OWNER}
+    assert await store.bind_card_message_id_from_verified_reply(cid, CARD_MSG, **kwargs) is False
+    assert (
+        await store.bind_card_message_id_from_verified_reply("f" * 32, CARD_MSG, **kwargs) is False
+    )
+
+
 async def test_null_author_user_id_surfaces_as_none():
     """Симметрично `author_user_id`: ход без известного актора (`human_turn(actor_user_id=None)`)
     даёт NULL в БД, а снимок — `None`, не `0`. Актор-часть якоря (actor==author, шаг 3) на таком

@@ -149,6 +149,8 @@ async def test_propose_budget_creates_pending_draft_without_touching_ads(propose
     assert isinstance(env["confirmation_id"], str) and env["confirmation_id"]
     assert env["operation"] == "update_budget"
     assert env["customer_id"] == DRAFT_ACCOUNT_ID
+    assert env["confirmation_marker"] == f"AIMASH_CONFIRM:{env['confirmation_id']}"
+    assert env["confirmation_marker"] in env["preview"]
     assert "→" in env["preview"]  # реальный diff «было → станет», собранный confirm.render (КОД)
     assert propose_env.calls == 1  # снимок «было» прочитан ровно раз; мутаций — ноль (propose-only)
 
@@ -157,6 +159,7 @@ async def test_propose_budget_creates_pending_draft_without_touching_ads(propose
     # Провенанс: оба бита пришли из доверенного контекста хода, не из аргумента (правило 3, И3).
     assert row.origin_human_turn is True and row.user_initiated is True
     assert row.author_user_id == ACTOR and row.run_id == "wp_happy_budget"
+    assert row.summary in env["preview"]  # reply проверяет именно неизменённый DB-diff
 
 
 async def test_propose_bid_creates_pending_draft(propose_env):

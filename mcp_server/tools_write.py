@@ -895,37 +895,59 @@ async def propose_remove_asset_link(
 # ── Исполнение ──
 
 
-async def execute_confirmed(
-    account: str,
-    confirmation_id: str,
-) -> dict[str, Any]:
-    """Выполнить ПОДТВЕРЖДЁННЫЙ черновик мутации. Вызывать ТОЛЬКО после явного подтверждения
-    пользователем («да», «подтверждаю», ✅). ДО вызова обязательно показать preview черновика
-    и дождаться подтверждения.
+async def execute_confirmed() -> dict[str, Any]:
+    """Подтвердить и выполнить черновик только по доверенному Telegram reply-якорю.
 
-    account — id аккаунта (10 цифр). confirmation_id — из ответа propose_*.
+    У инструмента намеренно нет ``account``/``confirmation_id`` аргументов модели. Идентичность,
+    chat/message namespace и confirmation marker берутся из HMAC-проверенного gateway envelope;
+    затем существующий атомарный reply-CAS подтверждает автора и якорь, а сервис исполняет черновик
+    на ``proposal.customer_id`` с повторным allow-list gate и audit-row.
+    """
+    from ads.service import confirm_and_execute_by_reply
+    from mcp_server.trusted_transport import TrustedTransportError, get_trusted_turn
 
-    Возвращает: {status: 'executed' | 'failed', operation, summary, error?}"""
-    from ads.service import execute_confirmed as _execute
-    from core.config import normalize_customer_id as _ncid
-
-    cid = _ncid(str(account))
     store = ConfirmStore()
     try:
+        turn = get_trusted_turn()
+        confirmation_id = turn.reply_confirmation_id
+        if not (
+            turn.reply_to_is_own_message
+            and turn.reply_to_message_id is not None
+            and confirmation_id is not None
+            and turn.reply_to_text is not None
+        ):
+            raise TrustedTransportError(
+                "подтверждение должно быть реплаем на карточку Aimash с confirmation marker"
+            )
         proposal = await store.get_confirmed(confirmation_id)
-        if proposal is None:
-            raise PermissionError("черновик не подтверждён или уже исполнен")
-        proposal_cid = _ncid(str(proposal.customer_id))
-        if proposal_cid != cid:
-            # `ads.service.execute_confirmed` правильно берёт account из proposal. Сверка здесь
-            # нужна, чтобы MCP-фасад не исполнил B, а отчитался как будто исполнил переданный A.
-            raise PermissionError("аккаунт вызова не совпадает с подтверждённым черновиком")
-        result = await _execute(store, confirmation_id)
+        if (
+            proposal is None
+            or proposal.status != "pending"
+            or proposal.summary not in turn.reply_to_text
+        ):
+            raise PermissionError("reply не содержит неизменённый diff подтверждаемого черновика")
+        proposal_customer_id = str(proposal.customer_id)
+        if not await store.bind_card_message_id_from_verified_reply(
+            confirmation_id,
+            turn.reply_to_message_id,
+            actor_user_id=turn.actor_user_id,
+            actor_chat_id=turn.actor_chat_id,
+        ):
+            raise PermissionError("не удалось привязать доверенный reply-якорь")
+        result = await confirm_and_execute_by_reply(
+            store,
+            confirmation_id=confirmation_id,
+            actor_user_id=turn.actor_user_id,
+            actor_chat_id=turn.actor_chat_id,
+            reply_to_message_id=turn.reply_to_message_id,
+            actor_username=turn.actor_username,
+        )
         return {
             "status": "executed",
             "operation": result.get("operation", ""),
             "summary": result.get("display", ""),
-            "customer_id": proposal_cid,
+            "customer_id": proposal_customer_id,
+            "confirmation_id": confirmation_id,
         }
     except ValueError as e:
         # Не найден / не в статусе confirmed
@@ -980,8 +1002,12 @@ PROPOSE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "propose_add_promotion": propose_add_promotion,
     "propose_add_price_asset": propose_add_price_asset,
     "propose_remove_asset_link": propose_remove_asset_link,
+}
+
+EXECUTE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "execute_confirmed": execute_confirmed,
 }
+PLAN_WRITE_TOOL_FUNCS = {**PROPOSE_TOOL_FUNCS, **EXECUTE_TOOL_FUNCS}
 
 # И4 / construction-time: имена propose-инструментов НЕ пересекаются с мутационными.
 require_no_mutations(
@@ -992,3 +1018,5 @@ require_no_mutations(
 )
 
 PROPOSE_MCP_TOOLS: frozenset[str] = frozenset(PROPOSE_TOOL_FUNCS)
+EXECUTE_MCP_TOOLS: frozenset[str] = frozenset(EXECUTE_TOOL_FUNCS)
+PLAN_WRITE_MCP_TOOLS: frozenset[str] = frozenset(PLAN_WRITE_TOOL_FUNCS)

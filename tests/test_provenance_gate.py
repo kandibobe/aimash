@@ -192,17 +192,24 @@ def test_save_proposal_has_no_provenance_kwargs():
 
 
 def test_human_turn_call_sites_are_allow_listed():
-    """`human_turn(` в проде — ровно два call-site'а: доверенный слой Telegram и одна точка в
-    `scripts/`. Мета-гард на класс: новый вход, поднимающий человеческий бит (MCP-инструмент,
-    скрипт, self-improvement-форк), ломает тест и требует осознанного решения, а не проходит ревью
-    незамеченным.
+    """`human_turn(` в проде — только доверенные Telegram-входы и operator-only scripts.
+
+    Legacy middleware поднимает бит после whitelist. Hermes-вход поднимает его только после HMAC
+    exact-tool/args verification и повторной проверки whitelist в `trusted_tool`; сам plugin этого
+    сделать не может. Новый MCP-инструмент, скрипт или self-improvement-форк ломает тест и требует
+    осознанного решения, а не проходит ревью незамеченным.
 
     `scripts/` из `skip` УБРАН намеренно: там была слепая зона, и не гипотетическая — девять
     скриптов создают черновики (`exec_demo*`, `live_smoke_*`), в том числе денежные, и ни один не
     поднимал бит, то есть с Волны 1.4 молча упирался в `_require_user_command`."""
     root = pathlib.Path(__file__).resolve().parents[1]
-    # определение + доверенный вход Telegram + единственная точка для запуска руками из консоли
-    allowed = {"core/provenance.py", "bot/main.py", "scripts/_operator_turn.py"}
+    # определение + два доверенных Telegram-входа + точка для запуска руками из консоли
+    allowed = {
+        "core/provenance.py",
+        "bot/main.py",
+        "mcp_server/trusted_transport.py",
+        "scripts/_operator_turn.py",
+    }
     skip = ("tests", "migrations", ".git", "__pycache__", "deploy", "docs", "venv")
     found: set[str] = set()
     for py in root.rglob("*.py"):
