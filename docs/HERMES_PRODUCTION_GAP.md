@@ -19,10 +19,10 @@
 | Отмена черновика | `cancel_proposal` включён в trusted live surface | H3 |
 | Строгий Hermes config | Deploy удаляет только доказанно inert v0.19-ключи, сохраняя host-local модель/dashboard | lint: 0 ошибок |
 | Backup Hermes state | Версионированный systemd timer + контрольный архив `.env`/`state.db` на каждом deploy | timer active; archive test |
-| Получатель аварийных алертов | **Не настроен:** `ADMIN_CHAT_IDS` пуст | Владелец задаёт chat/user ids; тест kill-switch/quota alert |
+| Получатель аварийных алертов | `ADMIN_CHAT_IDS` настроен на двух владельцев; host-level события отдельно доставляются Hermes-ботом в `OPS_ALERT_CHAT_ID` | Live alert-test пройден; kill-switch/quota alert проверить отдельным UAT без изменения Ads |
 | Полный UAT денежного пути | Проверен rename; остальные классы мутаций не приняты живьём через Hermes | бюджет, ставка, pause/resume, create PAUSED, launch отдельно, replay/TTL/чужой actor |
 | Два Telegram-контура | Legacy и Hermes работают параллельно | Явно назначить основной токен; scheduler/alerts должны приходить в выбранный контур до архивации legacy |
-| Off-host backup | Локальный защищённый архив есть; вывоз с VPS не настроен | Зашифрованная копия + restore drill |
+| Off-host backup | AES-256 ciphertext вынесен с VPS, SHA-256 и расшифровка сверены; recovery-секрет хранится отдельно, открытый `.tgz` с VPS удалён | Полный restore drill на отдельном чистом хосте ещё не выполнен |
 
 ## P1 — функциональный объём исходных DOCX ещё не перенесён в Hermes целиком
 
