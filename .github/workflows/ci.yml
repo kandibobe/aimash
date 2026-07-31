@@ -172,7 +172,27 @@ jobs:
             docker exec -i aimash-bot python -c \
               "import sys; from core.config import settings; import mcp_server.server; \
               assert settings.hermes_write_enabled == ('mcp_server.tools_write' in sys.modules)"
+            # `hermes gateway restart` can return 0 after refreshing an outdated unit while the
+            # old gateway process is still serving.  A successful CLI exit is therefore not a
+            # restart proof: require a new systemd MainPID and use the documented unit fallback.
+            GW_PID_BEFORE=$(systemctl --user show -p MainPID --value hermes-gateway.service)
             hermes gateway restart
+            sleep 2
+            GW_PID_AFTER=$(systemctl --user show -p MainPID --value hermes-gateway.service)
+            if [ "$GW_PID_AFTER" = "$GW_PID_BEFORE" ] || [ "$GW_PID_AFTER" = "0" ]; then
+              echo "::warning::Hermes CLI restart did not replace PID $GW_PID_BEFORE; using systemd fallback"
+              systemctl --user restart hermes-gateway.service
+              sleep 2
+              GW_PID_AFTER=$(systemctl --user show -p MainPID --value hermes-gateway.service)
+            fi
+            GW_STATE=$(systemctl --user is-active hermes-gateway.service || true)
+            if [ "$GW_STATE" != "active" ] || [ "$GW_PID_AFTER" = "0" ] \
+              || [ "$GW_PID_AFTER" = "$GW_PID_BEFORE" ]; then
+              echo "::error::Hermes gateway was not replaced (state=$GW_STATE, before=$GW_PID_BEFORE, after=$GW_PID_AFTER)"
+              journalctl --user -u hermes-gateway.service --since '-3 minutes' --no-pager || true
+              exit 1
+            fi
+            echo "Hermes gateway replaced: PID $GW_PID_BEFORE -> $GW_PID_AFTER"
             MCP_TEST=$(hermes mcp test aimash)
             echo "$MCP_TEST"
             echo "$MCP_TEST" | grep -Fq "Tools discovered: $EXPECTED_TOOLS"
