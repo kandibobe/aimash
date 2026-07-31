@@ -233,15 +233,6 @@ mcp_servers:
         - tavily_search
         - tavily_extract
         - tavily_research
-  github:
-    command: npx
-    args:
-      - -y
-      - '@modelcontextprotocol/server-github'
-    timeout: 60
-    env:
-      GITHUB_PERSONAL_ACCESS_TOKEN: '${GITHUB_TOKEN}'
-
 platform_toolsets:
   cli:
     - browser
