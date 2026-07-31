@@ -48,7 +48,10 @@ jobs:
       # падает РАНЬШЕ 2400 тестов — по сообщению сразу видно, какой ключ разошёлся.
       # Гард на сам линт (включая отрицательные контроли) — tests/test_hermes_config_lint.py.
       - name: Hermes config lint (К10)
-        run: python deploy/hermes/lint_config.py deploy/hermes/config.yaml deploy/hermes/host-a/config.yaml
+        run: python deploy/hermes/lint_config.py deploy/hermes/config.yaml deploy/hermes/host-a/config.yaml --strict
+
+      - name: Hermes runtime registry drift (static)
+        run: python scripts/check_admaster_drift.py --static
 
       # Типы — advisory (continue-on-error): в bot/main.py есть долг типизации aiogram
       # (cq.message: Message|InaccessibleMessage|None). Делает долг видимым, но не блокирует

@@ -10,7 +10,7 @@ confirm/execute/propose не выходят на живую поверхност
 одиночный `mcp.tool()(execute_confirmed)`); её видно только в фактическом реестре сервера.
 
 Существующий module-level гард `require_no_mutations(READ_MCP_TOOLS, MUTATION_TOOLS)` этот класс НЕ
-ловит: execute_confirmed/confirm_by_reply в `MUTATION_TOOLS` нет (это гейт/исполнение, не 39 мутаций
+ловит: execute_confirmed/confirm_by_reply в `MUTATION_TOOLS` нет (это гейт/исполнение, не 40 мутаций
 Google Ads). Ровно эту брешь и закрывает гард поверхности.
 """
 

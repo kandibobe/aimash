@@ -205,9 +205,77 @@ def test_keyword_ideas_forwards_only_set_kwargs(monkeypatch):
     assert captured["seeds"] == ["a", "b"]
     assert captured["geo_ids"] == (2840,)
     assert captured["limit"] == 10
-    assert "url" not in captured and "language" not in captured and "network" not in captured
+    assert (
+        "url" not in captured
+        and "language" not in captured
+        and "network" not in captured
+        and "months" not in captured
+    )
     # служебные метки run_ads_read_call (account/label) не в счёт — это не kwargs ридера
     assert captured.get("account") == DRAFT_ACCOUNT_ID
+
+
+def test_keyword_ideas_maps_network_and_forwards_months(monkeypatch):
+    captured: dict = {}
+
+    async def fake_client(customer_id=None):
+        return object()
+
+    async def capture(fn, *args, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(tr, "build_client_async", fake_client)
+    monkeypatch.setattr(tr, "run_ads_read_call", capture)
+
+    with _read_allowed():
+        env = asyncio.run(
+            tr.keyword_ideas(
+                account=DRAFT_ACCOUNT_ID,
+                seeds=["seed"],
+                network="search_partners",
+                months=48,
+            )
+        )
+
+    assert env["error"] is None
+    assert captured["network"] == "GOOGLE_SEARCH_AND_PARTNERS"
+    assert captured["months"] == 48
+
+
+def test_keyword_ideas_rejects_invalid_months_before_client(monkeypatch):
+    called = {"client": False}
+
+    async def fake_client(customer_id=None):
+        called["client"] = True
+        return object()
+
+    monkeypatch.setattr(tr, "build_client_async", fake_client)
+
+    with _read_allowed():
+        env = asyncio.run(tr.keyword_ideas(account=DRAFT_ACCOUNT_ID, seeds=["seed"], months=49))
+
+    assert env["error_code"] == "invalid_argument"
+    assert called["client"] is False
+
+
+def test_keyword_idea_serializes_monthly_curve():
+    idea = SimpleNamespace(
+        text="seed",
+        avg_monthly_searches=100,
+        competition="HIGH",
+        competition_index=80,
+        low_bid=1.0,
+        high_bid=2.0,
+        avg_cpc=0.5,
+        peak_month="dec 2025",
+        monthly=[(2025, 1, 10), (2025, 12, 100)],
+    )
+
+    assert serialize.keyword_idea_dict(idea)["monthly"] == [
+        {"year": 2025, "month": 1, "searches": 10},
+        {"year": 2025, "month": 12, "searches": 100},
+    ]
 
 
 # ── §8: окно пере-якорено на TZ АККАУНТА, а не хоста ────────────────────────────────
@@ -245,6 +313,42 @@ def test_relative_period_reanchored_to_account_today(monkeypatch):
     # last 7 дней от 15 июня: [08 июня .. 14 июня] — «вчера» аккаунта, без неполного сегодня
     assert p.date_from == date(2020, 6, 8) and p.date_to == date(2020, 6, 14) and p.days == 7
     assert called["tz"] is True  # относительное окно ⇒ TZ аккаунта прочитана
+
+
+def test_period_preset_mtd_reanchored_to_account_today(monkeypatch):
+    captured, called = _capture_period(monkeypatch, tz_returns=date(2020, 6, 15))
+
+    with _read_allowed():
+        env = asyncio.run(tr.get_campaign_stats(account=DRAFT_ACCOUNT_ID, period_preset="MTD"))
+
+    p = captured["period"]
+    assert env["error"] is None
+    assert p.date_from == date(2020, 6, 1) and p.date_to == date(2020, 6, 14)
+    assert p.kind == "mtd"
+    assert called["tz"] is True
+
+
+def test_period_preset_rejects_explicit_dates_before_client(monkeypatch):
+    called = {"client": False}
+
+    async def fake_client(customer_id=None):
+        called["client"] = True
+        return object()
+
+    monkeypatch.setattr(tr, "build_client_async", fake_client)
+
+    with _read_allowed():
+        env = asyncio.run(
+            tr.get_campaign_stats(
+                account=DRAFT_ACCOUNT_ID,
+                period_preset="7",
+                date_from="2026-01-01",
+                date_to="2026-01-07",
+            )
+        )
+
+    assert env["error_code"] == "invalid_argument"
+    assert called["client"] is False
 
 
 def test_custom_period_not_reanchored_and_skips_tz_read(monkeypatch):
@@ -344,6 +448,108 @@ def test_list_accounts_enumerates_children_offline(monkeypatch):
     assert [r["id"] for r in env["rows"]] == ["111", "222"]  # ОБА дочерних, ничего не потеряно
     assert env["rows"][0]["currency"] == "USD" and env["rows"][1]["name"] == "Client B"
     assert env["rows"][0]["manager"] is False and env["rows"][0]["level"] == 1
+
+
+def test_list_accounts_filters_name_and_profile_before_pagination(monkeypatch):
+    children = [
+        SimpleNamespace(
+            id="111", name="Alpha Motors", currency="USD", manager=False, level=1, status="ENABLED"
+        ),
+        SimpleNamespace(
+            id="222", name="Beta Parts", currency="EUR", manager=False, level=1, status="ENABLED"
+        ),
+    ]
+
+    class FakeProfiles:
+        async def accounts_with_profile(self, customer_ids):
+            assert customer_ids == ["111"]
+            return {"111"}
+
+    async def fake_client(customer_id=None):
+        return object()
+
+    async def fake_read(*args, **kwargs):
+        return children
+
+    monkeypatch.setattr(tr, "build_client_async", fake_client)
+    monkeypatch.setattr(tr, "run_ads_read_call", fake_read)
+    monkeypatch.setattr(tr, "ClientProfileStore", FakeProfiles)
+
+    with _manager_allowed(DRAFT_ACCOUNT_ID):
+        env = asyncio.run(
+            tr.list_accounts(
+                manager_id=DRAFT_ACCOUNT_ID,
+                name_like="alpha",
+                has_profile=True,
+                limit=50,
+            )
+        )
+
+    assert env["total_rows"] == 1
+    assert env["rows"] == [
+        {
+            "id": "111",
+            "name": "Alpha Motors",
+            "currency": "USD",
+            "manager": False,
+            "level": 1,
+            "status": "ENABLED",
+            "has_profile": True,
+        }
+    ]
+
+
+def test_list_accounts_with_metrics_marks_coverage(monkeypatch):
+    from reports import mcc as rmcc
+
+    child_a = SimpleNamespace(
+        id="111", name="Alpha", currency="USD", manager=False, level=1, status="ENABLED"
+    )
+    child_b = SimpleNamespace(
+        id="222", name="Beta", currency="USD", manager=False, level=1, status="ENABLED"
+    )
+
+    async def fake_client(customer_id=None):
+        return object()
+
+    async def fake_read(*args, **kwargs):
+        return [child_a, child_b]
+
+    async def fake_summary(client, manager_id, period, **kwargs):
+        return SimpleNamespace(
+            manager_id=manager_id,
+            period=period,
+            skipped=["222"],
+            managers=[],
+            inactive=[],
+            errors=[],
+            children=[
+                SimpleNamespace(
+                    account=child_a,
+                    totals=Metrics(100, 10, 5_000_000, 2.0, 20.0),
+                    active_campaigns=3,
+                    campaign_status={"ENABLED": 3},
+                    health_score=None,
+                )
+            ],
+            subtotals=[],
+        )
+
+    monkeypatch.setattr(tr, "build_client_async", fake_client)
+    monkeypatch.setattr(tr, "run_ads_read_call", fake_read)
+    monkeypatch.setattr(rmcc, "build_mcc_summary_async", fake_summary)
+
+    with _manager_allowed(DRAFT_ACCOUNT_ID):
+        env = asyncio.run(
+            tr.list_accounts(manager_id=DRAFT_ACCOUNT_ID, with_metrics=True, period_days=14)
+        )
+
+    assert env["error"] is None
+    assert env["rows"][0]["metrics_available"] is True
+    assert env["rows"][0]["totals"]["cpa"] == 2.5
+    assert env["rows"][0]["active_campaigns"] == 3
+    assert env["rows"][1]["metrics_available"] is False
+    assert env["metrics_skipped"] == ["222"]
 
 
 def test_list_accounts_denies_foreign_manager_offline(monkeypatch):

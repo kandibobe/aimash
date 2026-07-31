@@ -51,6 +51,7 @@ from agent.tools.schemas import (
     CreateSearchCampaign,
     CreateVideoCampaign,
     DetachAudience,
+    LaunchCampaign,
     PauseAd,
     PauseAdGroup,
     PauseCampaign,
@@ -84,6 +85,19 @@ from core.provenance import get_provenance
 from mcp_server.envelope import classify_error, proposed, refused
 from mcp_server.propose import ProposalRefused, build_proposal
 from mcp_server.redact import redact_error
+
+
+# Операции, которые начинают или меняют расход, разрешены только из доверенного
+# человеческого хода. Исполнитель повторяет эту проверку после confirm-claim;
+# здесь ранний отказ не даёт scheduler/self-improve создать заведомо неисполнимый
+# или опасный черновик.
+_HUMAN_ONLY_OPS = frozenset(MONEY_OPS) | {
+    "launch_campaign",
+    "create_search_campaign",
+    "create_gdn_campaign",
+    "create_demand_gen_campaign",
+    "create_video_campaign",
+}
 
 
 def _validation_text(exc: ValidationError) -> str:
@@ -120,7 +134,7 @@ async def _propose(
         return refused(_validation_text(e), error_code="invalid_argument")
 
     prov = get_provenance()
-    if operation in MONEY_OPS and not prov.human_turn:
+    if operation in _HUMAN_ONLY_OPS and not prov.human_turn:
         return refused(i18n.t("propose_requires_human", lang), error_code="refused")
     chat_id = get_context().chat_id
     if chat_id is None:
@@ -380,6 +394,14 @@ async def propose_resume_campaign(
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК возобновления кампании."""
     return await _propose("resume_campaign", ResumeCampaign, account=account, campaign=campaign)
+
+
+async def propose_launch_campaign(
+    account: str,
+    campaign: str,
+) -> dict[str, Any]:
+    """Создать ЧЕРНОВИК полного запуска кампании, её групп и объявлений."""
+    return await _propose("launch_campaign", LaunchCampaign, account=account, campaign=campaign)
 
 
 async def propose_update_campaign(
@@ -953,6 +975,7 @@ PROPOSE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "propose_attach_shared_set": propose_attach_shared_set,
     "propose_pause_campaign": propose_pause_campaign,
     "propose_resume_campaign": propose_resume_campaign,
+    "propose_launch_campaign": propose_launch_campaign,
     "propose_update_campaign": propose_update_campaign,
     "propose_remove_campaign": propose_remove_campaign,
     "propose_set_campaign_network": propose_set_campaign_network,
@@ -980,7 +1003,6 @@ PROPOSE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "propose_add_promotion": propose_add_promotion,
     "propose_add_price_asset": propose_add_price_asset,
     "propose_remove_asset_link": propose_remove_asset_link,
-    "execute_confirmed": execute_confirmed,
 }
 
 # И4 / construction-time: имена propose-инструментов НЕ пересекаются с мутационными.
@@ -992,3 +1014,16 @@ require_no_mutations(
 )
 
 PROPOSE_MCP_TOOLS: frozenset[str] = frozenset(PROPOSE_TOOL_FUNCS)
+
+# Исполнение отделено от PLAN физически: plan_server импортирует только
+# PROPOSE_TOOL_FUNCS. Этот реестр нужен доверенному transport/executor-коду,
+# но не публикуется модели.
+EXECUTE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
+    "execute_confirmed": execute_confirmed,
+}
+EXECUTE_MCP_TOOLS: frozenset[str] = frozenset(EXECUTE_TOOL_FUNCS)
+WRITE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
+    **PROPOSE_TOOL_FUNCS,
+    **EXECUTE_TOOL_FUNCS,
+}
+WRITE_MCP_TOOLS: frozenset[str] = frozenset(WRITE_TOOL_FUNCS)

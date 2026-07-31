@@ -116,6 +116,10 @@ def keyword_idea_dict(k) -> dict[str, Any]:
         "high_bid": round(float(k.high_bid), 2),
         "avg_cpc": round(float(k.avg_cpc), 2),
         "peak_month": k.peak_month,
+        "monthly": [
+            {"year": int(year), "month": int(month), "searches": int(searches)}
+            for year, month, searches in k.monthly
+        ],
     }
 
 

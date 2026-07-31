@@ -63,6 +63,11 @@ class _ReadStateSpy:
                     "n_groups": 1,
                 },
             )
+        if operation == "launch_campaign":
+            return Snapshot(
+                SnapshotKind.OK,
+                {"kind": "status", "before_status": "PAUSED"},
+            )
         return Snapshot(
             SnapshotKind.OK,
             {
@@ -169,6 +174,34 @@ async def test_propose_bid_creates_pending_draft(propose_env):
     assert env["status"] == "pending" and env["operation"] == "update_bid"
     assert "→" in env["preview"]
     assert (await _row(env["confirmation_id"])).status == "pending"
+
+
+async def test_propose_launch_creates_pending_draft_from_human_turn(propose_env):
+    with _human_turn(run_id="wp_happy_launch", chat_id=OWNER):
+        env = await tw.propose_launch_campaign(
+            account=DRAFT_ACCOUNT_ID,
+            campaign="Draft Search",
+        )
+
+    assert env["status"] == "pending" and env["operation"] == "launch_campaign"
+    row = await _row(env["confirmation_id"])
+    assert row.status == "pending"
+    assert row.user_initiated is True and row.origin_human_turn is True
+
+
+async def test_machine_turn_launch_propose_refused_before_ads(propose_env):
+    tok = set_context(request_id="wp_machine_launch", chat_id=OWNER)
+    try:
+        env = await tw.propose_launch_campaign(
+            account=DRAFT_ACCOUNT_ID,
+            campaign="Draft Search",
+        )
+    finally:
+        reset_context(tok)
+
+    assert env["status"] == "refused" and env["error_code"] == "refused"
+    assert env["error"] == i18n.t("propose_requires_human", "ru")
+    assert propose_env.calls == 0
 
 
 # ── И8 (правило 13): не более одного черновика на ассистентский ход ─────────────────────────────────

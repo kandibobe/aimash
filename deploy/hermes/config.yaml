@@ -1,13 +1,20 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Hermes Agent — ЭТАЛОН конфига (ДЕФОЛТНЫЙ профиль).
-# ⚠️ ЭТОТ ФАЙЛ — ПРЯМАЯ КОПИЯ ~/.hermes/config.yaml С VPS.
-#    Правится ТОЛЬКО через Claude Code → git push → VPS auto-pull.
-#    Если меняешь руками на VPS — сделай commit & push, иначе рассинхрон.
+# Hermes Agent — ЭТАЛОН деплоя (ДЕФОЛТНЫЙ профиль).
+# После применения обязан совпасть с ~/.hermes/config.yaml на VPS; факт проверяется
+# `hermes config show` и `lint_config.py --strict`, а не этой шапкой.
 # ─────────────────────────────────────────────────────────────────────────────
 
 model:
   provider: openrouter
   default: deepseek/deepseek-v4-pro
+
+# Официальная цепочка Hermes v0.19.0. Это смена модели внутри того же OpenRouter-ключа:
+# переживает отказ конкретной модели/эндпоинта, но не падение самого OpenRouter.
+fallback_providers:
+  - provider: openrouter
+    model: deepseek/deepseek-v4-flash
+  - provider: openrouter
+    model: google/gemini-3.1-flash-lite
 
 agent:
   max_turns: 20
@@ -18,7 +25,6 @@ agent:
     - computer_use
     - context_engine
     - cronjob
-    - delegation
     - file
     - homeassistant
     - memory
@@ -41,7 +47,6 @@ agent:
 
 browser:
   cloud_provider: local
-  use_gateway: false
 
 tool_loop_guardrails:
   warnings_enabled: true
@@ -50,9 +55,6 @@ tool_loop_guardrails:
     exact_failure: 3
     same_tool_failure: 4
     idempotent_no_progress: 3
-  exact_failure: 3
-  same_tool_failure: 4
-  idempotent_no_progress: 3
 
 compression:
   enabled: true
@@ -60,9 +62,6 @@ compression:
   target_ratio: 0.2
   protect_last_n: 20
   protect_first_n: 3
-
-openrouter:
-  extra_headers: '{"HTTP-Referer": "https://admaster.local", "X-Title": "AdMaster"}'
 
 auxiliary:
   transient_retries: 2
@@ -115,10 +114,13 @@ memory:
 delegation:
   model: google/gemini-3.1-flash-lite
   provider: openrouter
+  inherit_mcp_toolsets: true
   max_iterations: 30
   reasoning_effort: none
   max_concurrent_children: 3
   max_spawn_depth: 1
+  orchestrator_enabled: true
+  subagent_auto_approve: false
 
 skills:
   inline_shell: false
@@ -256,21 +258,3 @@ platform_toolsets:
 known_plugin_toolsets:
   cli:
     - spotify
-
-model_routing:
-  gemini:
-    provider: openrouter
-    model: google/gemini-3.1-flash-lite
-  v3:
-    provider: openrouter
-    model: deepseek/deepseek-v4-flash
-  r1:
-    provider: openrouter
-    model: deepseek/deepseek-v4-pro
-
-# ── Fallback Model ────────────────────────────────────────────────────
-# Automatic provider failover when primary is unavailable.
-# Uncomment and configure to enable.
-# fallback_model:
-#   provider: openrouter
-#   model: anthropic/claude-sonnet-4

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import ads.service
 import mcp_server.tools_write as tools_write
+from agent.tools.schemas import LaunchCampaign, MUTATION_TOOLS
 
 
 class _Store:
@@ -48,3 +49,27 @@ async def test_execute_facade_redacts_expected_errors(monkeypatch):
     assert result["status"] == "failed"
     assert result["error_code"] == "invalid_argument"
     assert secret not in result["error"]
+
+
+async def test_launch_campaign_is_proposal_only_agent_capability(monkeypatch):
+    captured = {}
+
+    async def _propose(operation, model_cls, **kwargs):
+        captured.update(operation=operation, model_cls=model_cls, kwargs=kwargs)
+        return {"status": "pending", "operation": operation}
+
+    monkeypatch.setattr(tools_write, "_propose", _propose)
+
+    result = await tools_write.propose_launch_campaign("7753643025", "Draft Search")
+
+    assert result == {"status": "pending", "operation": "launch_campaign"}
+    assert captured == {
+        "operation": "launch_campaign",
+        "model_cls": LaunchCampaign,
+        "kwargs": {"account": "7753643025", "campaign": "Draft Search"},
+    }
+    assert "launch_campaign" in MUTATION_TOOLS
+    assert (
+        tools_write.PROPOSE_TOOL_FUNCS["propose_launch_campaign"]
+        is tools_write.propose_launch_campaign
+    )

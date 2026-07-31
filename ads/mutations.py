@@ -496,8 +496,8 @@ async def apply_resume_campaign(
 # ВСЕ в PAUSED (0 расхода до запуска); включение одной кампании оставило бы группу и объявление
 # на паузе ⇒ показов НОЛЬ, а менеджер думал бы, что кампания идёт (тихий дефект). «Запустить» =
 # включить кампанию + ВСЕ её (не-REMOVED) группы + ВСЕ (не-REMOVED) объявления. Идемпотентно
-# (повторный ENABLED — no-op). НЕ денежная (бюджет задан при создании) → user_initiated НЕ требуется,
-# как resume/pause. Оба обязательных гейта на месте: ensure_allowed (замок аккаунта) + _require_confirmation.
+# (повторный ENABLED — no-op). Запуск открывает расход, поэтому кроме замка аккаунта и атомарного
+# confirm-claim требует прямую человеческую команду с двумя битами провенанса.
 async def apply_launch_campaign(
     *,
     customer_id: str,
@@ -507,7 +507,8 @@ async def apply_launch_campaign(
     ads_client: object,
 ) -> dict:
     ensure_allowed(customer_id)
-    await _require_confirmation(confirm_store, confirmation_id, "launch_campaign")
+    proposal = await _require_confirmation(confirm_store, confirmation_id, "launch_campaign")
+    _require_user_command(proposal, "запуск кампании")
     result = await run_ads_call(_launch_campaign_via_sdk, ads_client, customer_id, campaign_id)
     await confirm_store.finalize(confirmation_id, result=result)
     return result

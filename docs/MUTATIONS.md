@@ -75,8 +75,9 @@ Google Ads, где она объявлена и какими гейтами за
 
 ## Таблица покрытия
 
-Все 39 операций ниже присутствуют одновременно в `SUPPORTED_OPERATIONS`
-(`ads/service.py`) и имеют ветку в `execute_confirmed`. Столбец «в
+Все 41 операция ниже присутствует одновременно в `SUPPORTED_OPERATIONS`
+(`ads/service.py`) и имеет ветку в `execute_confirmed`. Из них 40 разрешены модели через
+`MUTATION_TOOLS`; `attach_image_asset` пока остаётся transport/UI-only. Столбец «в
 MUTATION_TOOLS?» отмечает членство в наборе, разрешённом LLM-агенту
 (`agent/tools/schemas.py`); часть операций, будучи в наборе, всё же минтуется
 только ботом-визардом (нет tool-схемы для модели) — это отмечено в ячейке.
@@ -98,7 +99,7 @@ MUTATION_TOOLS?» отмечает членство в наборе, разре�
 | `attach_shared_set` | `apply_attach_shared_set` (:739) | 3.2б: привязывает СУЩЕСТВУЮЩИЙ общий список минус-слов к кампании (CampaignSharedSet); нет списка — отказ | Нет | Да |
 | `pause_campaign` | `apply_pause_campaign` (:143) | Ставит кампанию на паузу (status=PAUSED) | Нет | Да |
 | `resume_campaign` | `apply_resume_campaign` (:162) | Включает кампанию (status=ENABLED) | Нет | Да |
-| `launch_campaign` | `apply_launch_campaign` (:189) | Запуск созданной визардом кампании (PAUSED → ENABLED) | Нет | В наборе нет: минтует бот (§19 визард) |
+| `launch_campaign` | `apply_launch_campaign` (:501) | Полный запуск созданной PAUSED-кампании: кампания + группы + объявления | **Да** | Да; MCP создаёт только proposal, исполнение после confirm |
 | `remove_campaign` | `apply_remove_campaign` (:424) | Необратимое удаление кампании (status→REMOVED) | Нет | Да (в UI — двойное подтверждение) |
 | `update_campaign` | `apply_update_campaign` (:207) | Переименовывает кампанию (§3 «изменение»); имя ≤255, уникально в аккаунте | Нет | Да |
 | `set_campaign_network` | `apply_set_campaign_network` (:237) | Поисковые партнёры Google (`target_search_network`) вкл/выкл | Нет | Да |

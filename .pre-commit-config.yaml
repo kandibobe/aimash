@@ -38,9 +38,16 @@ repos:
       # Профиль каждому файлу выводится из пути, поэтому `pass_filenames` оставлен включённым.
       - id: hermes-config-lint
         name: Hermes config lint (К10)
-        entry: python deploy/hermes/lint_config.py
+        entry: python deploy/hermes/lint_config.py --strict
         language: system
         files: ^deploy/hermes/(host-a/)?config\.yaml$
+
+      - id: hermes-runtime-drift
+        name: Hermes runtime registry drift (static)
+        entry: python scripts/check_admaster_drift.py --static
+        language: system
+        pass_filenames: false
+        files: ^(scripts/check_admaster_drift\.py|deploy/hermes/(runtime_registry|cron_registry|config)\.yaml|README\.md|docs/TZ-Aimash-Hermes-Agent\.md|deploy/hermes/(README|OPERATIONS)\.md)$
 
       # Типы — manual-стадия (не блокирует обычный коммит из-за долга типов в bot/main.py).
       # Запуск: `pre-commit run --hook-stage manual mypy` или `make typecheck`.

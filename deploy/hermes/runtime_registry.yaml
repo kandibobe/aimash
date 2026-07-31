@@ -1,18 +1,18 @@
-version: 1
-last_verified_at: '2026-07-30T14:41:00Z'
+version: 2
+last_verified_at: '2026-07-31T00:00:00Z'
 owner: kandibobe
 purpose: Canonical runtime registry for AdMaster/Hermes. This file is the single source of truth for present-tense runtime/model/provider policy. Any conflicting docs/skills must either reference this file or explicitly mark themselves as historical or pinned exceptions.
 
 primary_runtime:
-  provider: openai-codex
-  model: gpt-5.6-terra
+  provider: openrouter
+  model: deepseek/deepseek-v4-pro
   status: canonical_current
   applies_to:
     - interactive_chat
     - default_analysis
   notes:
-    - Use current session context as authoritative for live self-identification.
-    - Do not claim a different active model unless verified from live config/session state.
+    - Repository truth is deploy/hermes/config.yaml; live truth still requires `hermes model` after deploy.
+    - Automatic semantic model_routing is not supported by the pinned Hermes runtime.
 
 pinned_exceptions:
   - scope: cron_legacy_jobs
@@ -23,27 +23,27 @@ pinned_exceptions:
     notes:
       - Live cron jobs are still pinned to gpt-5.4 at time of verification.
       - This is an operational exception, not the canonical present-tense runtime for chat.
-  - scope: deploy_template_config
-    provider: openrouter
-    model: deepseek/deepseek-v4-pro
-    status: stale_needs_reconciliation
-    source_of_truth: /opt/aimash/deploy/hermes/config.yaml
-    notes:
-      - Deploy template still points at old main runtime and conflicts with current docs and session context.
-
 routing_lanes:
   dialogue_and_analysis:
-    provider: openai-codex
-    model: gpt-5.6-terra
+    provider: openrouter
+    model: deepseek/deepseek-v4-pro
     status: canonical_current
+  primary_fallback:
+    provider: openrouter
+    model: deepseek/deepseek-v4-flash
+    status: configured_fallback
   lightweight_background:
     provider: openrouter
     model: google/gemini-3.1-flash-lite
-    status: allowed_lane
+    status: configured_fallback_and_auxiliary
+  delegated_subagents:
+    provider: openrouter
+    model: google/gemini-3.1-flash-lite
+    status: configured_read_profile
   deep_audit_strategy:
     provider: openrouter
     model: deepseek/deepseek-v4-pro
-    status: allowed_lane
+    status: explicit_workflow_only
   external_coding_executor:
     provider: external
     model: codex-cli
@@ -55,9 +55,6 @@ policy_rules:
   - Memory should store only high-level routing facts, not full policy prose.
 
 known_conflicts:
-  - file: /opt/aimash/deploy/hermes/config.yaml
-    lines: '8-10, 230-239'
-    issue: Main model in deploy template conflicts with canonical runtime.
   - file: /root/.hermes/cron/jobs.json
     lines: '11-12, 60-61, 102-103, 142-143, 190-191'
     issue: Live cron jobs still pinned to gpt-5.4.

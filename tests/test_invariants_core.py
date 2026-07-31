@@ -51,6 +51,7 @@ _EXPECTED_MONEY_OPS = {
     "apply_create_gdn_campaign",
     "apply_create_demand_gen_campaign",  # §11: кампания из видео (Demand Gen) — задаёт бюджет
     "apply_create_video_campaign",  # §11: видеокампания — задаёт бюджет
+    "apply_launch_campaign",  # включает ранее PAUSED-структуру и тем самым открывает расход
 }
 
 
@@ -368,7 +369,6 @@ async def test_google_ads_exception_with_token_redacted_in_chat_and_audit():
 # сможет её вызвать по NL), ЕСЛИ она не внесена сюда осознанно как UI-only.
 _UI_ONLY_OPS = {
     "attach_image_asset",  # §3-assets: изображение приходит как media_id из UI, не по NL агента
-    "launch_campaign",  # §19.8: кнопка «🚀 Запустить» визарда (включает кампанию+группы+объявления)
 }
 
 

@@ -65,6 +65,13 @@ model:
   provider: openrouter
   default: openai/gpt-5.6-terra
 
+# Фолбэк модели, а не границы безопасности: оба маршрута остаются внутри OpenRouter.
+fallback_providers:
+  - provider: openrouter
+    model: deepseek/deepseek-v4-pro
+  - provider: openrouter
+    model: google/gemini-3.1-flash-lite
+
 # Рероут OpenRouter на провайдера, который не принимает `tools`, молча срезает tool-calling —
 # агент «отвечает текстом» вместо вызова MCP, и выглядит это как деградация модели, не как сбой.
 provider_routing:

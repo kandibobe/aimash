@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import json
+import os
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -10,24 +12,6 @@ try:
 except Exception as e:  # pragma: no cover
     print(json.dumps({"error": f"PyYAML import failed: {e}"}, ensure_ascii=False, indent=2))
     raise
-
-ROOT = Path("/opt/aimash")
-RUNTIME_REGISTRY = ROOT / "deploy/hermes/runtime_registry.yaml"
-CRON_REGISTRY = ROOT / "deploy/hermes/cron_registry.yaml"
-DEPLOY_CONFIG = ROOT / "deploy/hermes/config.yaml"
-LIVE_JOBS = Path("/root/.hermes/cron/jobs.json")
-
-SKILL_FILES = [
-    Path("/root/.hermes/skills/ad-master/ad-master-agent/SKILL.md"),
-    Path("/root/.hermes/skills/ad-master/aimash-development/SKILL.md"),
-    Path("/root/.hermes/skills/ad-master/ad-master-cron-ops/SKILL.md"),
-]
-DOC_FILES = [
-    ROOT / "README.md",
-    ROOT / "docs/TZ-Aimash-Hermes-Agent.md",
-    ROOT / "deploy/hermes/README.md",
-    ROOT / "deploy/hermes/OPERATIONS.md",
-]
 
 MODEL_PATTERNS = [
     "gpt-5.4",
@@ -74,11 +58,52 @@ def maybe_add(findings: list[Finding], condition: bool, finding: Finding) -> Non
         findings.append(finding)
 
 
-def main() -> int:
-    runtime = load_yaml(RUNTIME_REGISTRY)
-    cron_registry = load_yaml(CRON_REGISTRY)
-    deploy = load_yaml(DEPLOY_CONFIG)
-    jobs = load_json(LIVE_JOBS).get("jobs", [])
+def _args(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(description="Check Aimash runtime/config/cron drift")
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=Path(os.getenv("AIMASH_ROOT", Path(__file__).resolve().parents[1])),
+        help="Aimash checkout/deploy root (default: checkout containing this script)",
+    )
+    parser.add_argument(
+        "--hermes-home",
+        type=Path,
+        default=Path(os.getenv("HERMES_HOME", Path.home() / ".hermes")),
+        help="Hermes state directory (default: HERMES_HOME or ~/.hermes)",
+    )
+    parser.add_argument(
+        "--static",
+        action="store_true",
+        help="Check repository registries/config/docs only; skip live jobs and installed skills",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _args(argv)
+    root = args.root.resolve()
+    hermes_home = args.hermes_home.resolve()
+    runtime_registry = root / "deploy/hermes/runtime_registry.yaml"
+    cron_registry_path = root / "deploy/hermes/cron_registry.yaml"
+    deploy_config = root / "deploy/hermes/config.yaml"
+    live_jobs = hermes_home / "cron/jobs.json"
+    skill_files = [
+        hermes_home / "skills/ad-master/ad-master-agent/SKILL.md",
+        hermes_home / "skills/ad-master/aimash-development/SKILL.md",
+        hermes_home / "skills/ad-master/ad-master-cron-ops/SKILL.md",
+    ]
+    doc_files = [
+        root / "README.md",
+        root / "docs/TZ-Aimash-Hermes-Agent.md",
+        root / "deploy/hermes/README.md",
+        root / "deploy/hermes/OPERATIONS.md",
+    ]
+
+    runtime = load_yaml(runtime_registry)
+    cron_registry = load_yaml(cron_registry_path)
+    deploy = load_yaml(deploy_config)
+    jobs = [] if args.static else load_json(live_jobs).get("jobs", [])
 
     findings: list[Finding] = []
 
@@ -93,8 +118,8 @@ def main() -> int:
         Finding(
             drift_code="DRIFT-RUNTIME-001",
             severity="P1",
-            source_a=str(RUNTIME_REGISTRY),
-            source_b=str(DEPLOY_CONFIG),
+            source_a=str(runtime_registry),
+            source_b=str(deploy_config),
             current_live=f"registry={canonical_provider}/{canonical_model}; deploy={deploy_provider}/{deploy_model}",
             issue="Canonical runtime registry disagrees with deploy template main model/provider.",
             recommended_fix="Either reconcile deploy/hermes/config.yaml to the canonical runtime or explicitly label it as a template-only stale exception.",
@@ -112,8 +137,8 @@ def main() -> int:
                 Finding(
                     drift_code="DRIFT-RUNTIME-002",
                     severity="P1",
-                    source_a=str(RUNTIME_REGISTRY),
-                    source_b=str(LIVE_JOBS),
+                    source_a=str(runtime_registry),
+                    source_b=str(live_jobs),
                     current_live=f"unlisted live job runtime={provider}/{model}",
                     issue="A live cron runtime differs from canonical runtime and is not listed as pinned_exception.",
                     recommended_fix="Add the live runtime to pinned_exceptions or migrate the affected jobs to the canonical runtime.",
@@ -129,8 +154,8 @@ def main() -> int:
                 Finding(
                     drift_code="DRIFT-CRON-001",
                     severity="P1",
-                    source_a=str(CRON_REGISTRY),
-                    source_b=str(LIVE_JOBS),
+                    source_a=str(cron_registry_path),
+                    source_b=str(live_jobs),
                     current_live=f"missing job_id={job_id} name={live.get('name')}",
                     issue="Live cron job is missing from cron_registry.yaml.",
                     recommended_fix="Add this live job to cron_registry.yaml with criticality and expected state.",
@@ -147,8 +172,8 @@ def main() -> int:
                 Finding(
                     drift_code="DRIFT-CRON-002",
                     severity="P0",
-                    source_a=str(CRON_REGISTRY),
-                    source_b=str(LIVE_JOBS),
+                    source_a=str(cron_registry_path),
+                    source_b=str(live_jobs),
                     current_live=f"job_id={job_id} actual_state={actual_state}",
                     issue="P0 cron job is paused in live scheduler state.",
                     recommended_fix="Resume the P0 job immediately or explicitly downgrade/remove its criticality if the pause is intentional.",
@@ -159,15 +184,15 @@ def main() -> int:
                 Finding(
                     drift_code="DRIFT-CRON-003",
                     severity="P2",
-                    source_a=str(CRON_REGISTRY),
-                    source_b=str(LIVE_JOBS),
+                    source_a=str(cron_registry_path),
+                    source_b=str(live_jobs),
                     current_live=f"job_id={job_id} registry_expected={reg.get('expected_state')} actual={actual_state}",
                     issue="Cron registry expected state differs from live state.",
                     recommended_fix="Update cron_registry.yaml or change the live job state so they match.",
                 )
             )
 
-    for path in SKILL_FILES:
+    for path in [] if args.static else skill_files:
         rows = extract_lines_with_patterns(path, MODEL_PATTERNS)
         text = path.read_text(encoding="utf-8")
         has_old_runtime = "gpt-5.4" in text and canonical_model != "gpt-5.4"
@@ -186,7 +211,7 @@ def main() -> int:
                 Finding(
                     drift_code="DRIFT-SKILL-001",
                     severity="P1",
-                    source_a=str(RUNTIME_REGISTRY),
+                    source_a=str(runtime_registry),
                     source_b=str(path),
                     current_live=f"found gpt-5.4 in {path.name} at lines {[n for n, _ in rows if 'gpt-5.4' in _]}",
                     issue="Skill contains present-tense old runtime wording that conflicts with canonical runtime registry.",
@@ -194,14 +219,14 @@ def main() -> int:
                 )
             )
 
-    for path in DOC_FILES:
+    for path in doc_files:
         text = path.read_text(encoding="utf-8")
         if canonical_model in text and deploy_model in text and canonical_model != deploy_model:
             findings.append(
                 Finding(
                     drift_code="DRIFT-DOC-001",
                     severity="P2",
-                    source_a=str(RUNTIME_REGISTRY),
+                    source_a=str(runtime_registry),
                     source_b=str(path),
                     current_live=f"doc mentions canonical model {canonical_model} and deploy-template model {deploy_model}",
                     issue="Document mixes canonical current runtime and stale/deploy-template runtime without clear status separation.",
@@ -211,6 +236,9 @@ def main() -> int:
 
     summary = {
         "ok": not findings,
+        "mode": "static" if args.static else "live",
+        "root": str(root),
+        "checks_skipped": ["live_jobs", "installed_skills"] if args.static else [],
         "finding_count": len(findings),
         "by_severity": {
             sev: sum(1 for f in findings if f.severity == sev) for sev in ["P0", "P1", "P2", "P3"]

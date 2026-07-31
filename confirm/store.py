@@ -157,6 +157,18 @@ class PendingAttachment:
     chat_id: int
 
 
+@dataclass(frozen=True, slots=True)
+class PendingProposal:
+    """Безопасная проекция pending-черновика для операторского PLAN-инструмента."""
+
+    confirmation_id: str
+    operation: str
+    customer_id: str
+    summary: str
+    risk_tier: str | None
+    created_at: datetime
+
+
 class ConfirmStore:
     """confirm_store на SQLAlchemy. Все методы async (apply_* их await-ят)."""
 
@@ -234,6 +246,44 @@ class ConfirmStore:
                 )
             ).scalar_one()
         return int(n)
+
+    async def list_pending_for_actor(
+        self,
+        *,
+        chat_id: int,
+        actor_user_id: int,
+        customer_id: str | None = None,
+        limit: int = 20,
+    ) -> list[PendingProposal]:
+        """Pending-черновики только текущего автора в текущем чате."""
+        safe_limit = max(1, min(int(limit), 50))
+        where = [
+            Proposal.status == "pending",
+            Proposal.chat_id == int(chat_id),
+            Proposal.author_user_id == int(actor_user_id),
+        ]
+        if customer_id is not None:
+            where.append(Proposal.customer_id == str(customer_id))
+        async with Session() as s:
+            rows = (
+                await s.execute(
+                    select(Proposal)
+                    .where(*where)
+                    .order_by(Proposal.created_at.desc(), Proposal.id.desc())
+                    .limit(safe_limit)
+                )
+            ).scalars()
+            return [
+                PendingProposal(
+                    confirmation_id=p.confirmation_id,
+                    operation=p.operation,
+                    customer_id=p.customer_id,
+                    summary=p.summary,
+                    risk_tier=p.risk_tier,
+                    created_at=p.created_at,
+                )
+                for p in rows
+            ]
 
     async def set_card_message_id(self, confirmation_id: str, tg_message_id: int) -> bool:
         """Проштамповать реплай-якорь: message_id опубликованной карточки «было→станет». True если
@@ -652,6 +702,44 @@ class ConfirmStore:
                     chat_id,
                     "rejected",
                     actor_user_id=actor_user_id,
+                    actor_username=actor_username,
+                )
+            )
+            await s.commit()
+            return True
+
+    async def reject_by_actor(
+        self,
+        confirmation_id: str,
+        *,
+        chat_id: int,
+        actor_user_id: int,
+        actor_username: str | None = None,
+    ) -> bool:
+        """pending → rejected только автором в исходном чате, одним CAS."""
+        async with Session() as s:
+            res = await s.execute(
+                update(Proposal)
+                .where(
+                    Proposal.confirmation_id == confirmation_id,
+                    Proposal.status == "pending",
+                    Proposal.chat_id == int(chat_id),
+                    Proposal.author_user_id == int(actor_user_id),
+                )
+                .values(status="rejected", decided_at=func.now())
+            )
+            if cast(CursorResult, res).rowcount != 1:
+                await s.rollback()
+                return False
+            p = (
+                await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
+            ).scalar_one()
+            s.add(
+                _audit(
+                    p,
+                    int(chat_id),
+                    "rejected",
+                    actor_user_id=int(actor_user_id),
                     actor_username=actor_username,
                 )
             )

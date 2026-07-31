@@ -128,6 +128,30 @@ async def test_apply_update_bid_blocked_when_not_user_initiated():
     assert store.finalized is False
 
 
+async def test_apply_launch_campaign_blocked_without_human_provenance():
+    store = FakeConfirmStore(
+        FakeProposal(
+            "launch_campaign",
+            "confirmed",
+            user_initiated=False,
+            origin_human_turn=False,
+        )
+    )
+    with allowed_ids(DRAFT_ACCOUNT_ID):
+        try:
+            await mut.apply_launch_campaign(
+                customer_id=DRAFT_ACCOUNT_ID,
+                campaign_id="7",
+                confirmation_id="launch-machine",
+                confirm_store=store,
+                ads_client=object(),
+            )
+            raise AssertionError("ожидался PermissionError: запуск не был прямой командой человека")
+        except PermissionError:
+            pass
+    assert store.finalized is False
+
+
 async def test_apply_update_bid_rejects_foreign_account():
     store = FakeConfirmStore(FakeProposal("update_bid", "confirmed", user_initiated=True))
     with allowed_ids(DRAFT_ACCOUNT_ID):

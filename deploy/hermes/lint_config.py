@@ -24,7 +24,7 @@
     python deploy/hermes/lint_config.py deploy/hermes/{config,host-a/config}.yaml   # оба разом
     python deploy/hermes/lint_config.py ~/.hermes/config.yaml --profile host-a   # на живой ВМ
 
-Код возврата: 1 — есть ERROR хотя бы в одном файле; 0 — только WARN или чисто.
+Код возврата: 1 — есть ERROR хотя бы в одном файле (или WARN с `--strict`); 0 — чисто.
 
 Автоматика (иначе линт снова умрёт незамеченным — именно так он и прожил сломанным):
 `tests/test_hermes_config_lint.py` в общем прогоне, хук `hermes-config-lint` в pre-commit,
@@ -53,10 +53,6 @@ _OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 _ENDPOINTS_URL_TMPL = "https://openrouter.ai/api/v1/models/{slug}/endpoints"
 _CATALOG_TIMEOUT = 6.0
 
-# Имена тиров, которые вообще может вернуть `classify_turn` (`agent/router.py:42-44` пиновой
-# версии). Всё остальное в `model_routing` — ключ, который рантайм не запросит ни разу.
-_ROUTER_TIERS = frozenset({"gemini", "v3", "r1"})
-
 # ── Аттестации ────────────────────────────────────────────────────────────────
 # Дословная цитата + откуда взята. Таблица НЕ читает эталонные конфиги этого репозитория:
 # оракул, сверяющий файл сам с собой, доказывает только собственную непротиворечивость.
@@ -71,6 +67,7 @@ class Attested:
 
 _ATTESTED: dict[str, Attested] = {
     "model": Attested("user-guide/configuration.md", "model:\n  provider: openrouter"),
+    "fallback_providers": Attested("hermes_cli/config.py:910-914", '"fallback_providers": []'),
     "provider_routing.require_parameters": Attested(
         "cli-config.yaml.example:163",
         "#   # require_parameters: true",
@@ -169,7 +166,57 @@ _ATTESTED: dict[str, Attested] = {
     "auxiliary.compression": Attested(
         "user-guide/configuration.md:753", "auxiliary:\n  compression:"
     ),
+    "delegation": Attested("hermes_cli/config.py:2364", '"delegation": {'),
+    "_config_version": Attested("hermes_cli/config.py", '"_config_version"'),
+    "agent.reasoning_overrides": Attested("hermes_cli/config.py:1193", '"reasoning_overrides": {}'),
+    "browser.cloud_provider": Attested(
+        "hermes_cli/tools_config.py:3057", 'cfg_get(config, "browser", "cloud_provider")'
+    ),
+    "command_allowlist": Attested("hermes_cli/config.py", '"command_allowlist": []'),
+    "compression.enabled": Attested("hermes_cli/config.py", '"enabled": True'),
+    "compression.threshold": Attested("hermes_cli/config.py", '"threshold"'),
+    "compression.target_ratio": Attested("hermes_cli/config.py", '"target_ratio"'),
+    "compression.protect_last_n": Attested("hermes_cli/config.py", '"protect_last_n"'),
+    "compression.protect_first_n": Attested("hermes_cli/config.py", '"protect_first_n"'),
+    "display.show_cost": Attested("hermes_cli/config.py", '"show_cost": False'),
+    "display.runtime_footer": Attested("hermes_cli/config.py", '"runtime_footer": {'),
+    "auxiliary.transient_retries": Attested("hermes_cli/config.py", '"transient_retries"'),
+    "auxiliary.vision": Attested("hermes_cli/config.py", '"vision": {'),
+    "auxiliary.web_extract": Attested("hermes_cli/config.py", '"web_extract": {'),
+    "auxiliary.approval": Attested("hermes_cli/config.py", '"approval": {'),
+    "auxiliary.title_generation": Attested("hermes_cli/config.py", '"title_generation": {'),
+    "auxiliary.memory_query_rewrite": Attested("hermes_cli/config.py", '"memory_query_rewrite": {'),
+    "auxiliary.curator": Attested("hermes_cli/config.py", '"curator": {'),
+    "dashboard.basic_auth": Attested("hermes_cli/config.py", '"basic_auth": {'),
+    "onboarding.seen": Attested("hermes_cli/config.py", '"seen": {'),
 }
+
+# В этих поддеревьях имена ниже точки динамические (имя MCP-сервера, платформа, model slug)
+# либо валидируются отдельным профильным правилом. Для остальных путей аттестация только точная:
+# опечатка `agent.max_turn` не должна пройти потому, что `agent` как раздел существует.
+_ATTESTED_SUBTREES = frozenset(
+    {
+        "model",
+        "mcp_servers",
+        "gateway.platforms",
+        "display.platforms",
+        "platform_toolsets",
+        "known_plugin_toolsets",
+        "agent.reasoning_overrides",
+        "display.runtime_footer",
+        "dashboard.basic_auth",
+        "onboarding.seen",
+        "auxiliary.vision",
+        "auxiliary.web_extract",
+        "auxiliary.approval",
+        "auxiliary.title_generation",
+        "auxiliary.memory_query_rewrite",
+        "auxiliary.curator",
+        "auxiliary.compression",
+        "delegation",
+        "tool_loop_guardrails.hard_stop_after",
+    }
+)
 
 # Ключи, читаемые С УРОВНЯ БЛОКА платформы. Именно они конвертируются в env
 # (`plugins/platforms/telegram/adapter.py:9391/9396/9401`), а решение о доступе принимает
@@ -220,7 +267,7 @@ _KNOWN_TOOLSETS = frozenset(
 # закрывается тем, что её нет, а не перечислением запретов). Так и случилось: 27.07 конфиг на VPS
 # пересобрался из дефолта, и `terminal`/`file`/`code_execution`/`computer_use` вернулись, а линт
 # смотрел только на то, что перечислено в `disabled_toolsets`.
-_ALLOWED_ENABLED_TOOLSETS = frozenset({"skills", "todo", "clarify"})
+_ALLOWED_ENABLED_TOOLSETS = frozenset({"skills", "todo", "clarify", "delegation"})
 
 # Production Telegram gateway may see only our bounded Ads READ server plus the explicitly
 # allow-listed research server. Every server must declare tools.include: an unbounded MCP server
@@ -232,10 +279,31 @@ _ALLOWED_VPS_MCP_SERVERS = frozenset({"aimash", "tavily"})
 # решения (Р2), поэтому линт держит их списком, а не комментарием.
 _MUST_DISABLE = {
     "cronjob": "агент заводит расписание сам ⇒ мутация без команды человека (правило 3)",
-    "delegation": "субагент наследует MCP родителя и никогда не спрашивает человека",
     "memory": "MEMORY.md/USER.md — один комплект на инстанс, а топик = клиент (Р2)",
     "session_search": "FTS5 по всей state.db = по переписке всех клиентов (К9/И6)",
     "context_engine": "индексация ФС втягивает в контекст всё, до чего дотянется, включая .env",
+}
+
+# Эти пути похожи на реальные настройки, но у пина v2026.7.20 нет ни одного runtime-read.
+# Именно такие ключи опаснее синтаксической ошибки: YAML валиден, Hermes стартует, оператор
+# видит «настроенный» блок и принимает дефолтное поведение за задуманное.
+_INERT_CONFIG_PATHS = {
+    "model_routing": (
+        "в Hermes v0.19.0 нет runtime model router; используйте явную main-модель, "
+        "fallback_providers и delegation.model"
+    ),
+    "smart_model_routing": (
+        "setup-wizard записывает этот маркер, но пиновый runtime его не читает"
+    ),
+    "browser.use_gateway": "browser читает cloud_provider; use_gateway относится к web/image/video",
+    "openrouter.extra_headers": (
+        "этот блок не читается; для заголовков поддержаны model.default_headers или providers.*"
+    ),
+    "tool_loop_guardrails.exact_failure": "порог должен быть внутри hard_stop_after/warn_after",
+    "tool_loop_guardrails.same_tool_failure": "порог должен быть внутри hard_stop_after/warn_after",
+    "tool_loop_guardrails.idempotent_no_progress": (
+        "порог должен быть внутри hard_stop_after/warn_after"
+    ),
 }
 
 # Похоже на утёкший секрет. Правило 5: в конфиге допустимы только ${VAR}.
@@ -316,22 +384,24 @@ def _as_dict(value: Any) -> dict:
 
 
 def _flatten(cfg: Any, prefix: str = "") -> list[str]:
+    """Return effective leaf settings, not structural YAML containers."""
     out: list[str] = []
     if not isinstance(cfg, dict):
         return out
     for key, val in cfg.items():
         path = f"{prefix}.{key}" if prefix else str(key)
-        out.append(path)
-        if isinstance(val, dict):
+        if isinstance(val, dict) and val:
             out.extend(_flatten(val, path))
+        else:
+            out.append(path)
     return out
 
 
 def _is_attested(path: str) -> bool:
-    """Аттестован сам ключ или любой его предок (поддеревья вроде `mcp_servers.*` и
-    `gateway.platforms.telegram.*` разбираются отдельными правилами, а не таблицей)."""
-    parts = path.split(".")
-    return any(".".join(parts[: i + 1]) in _ATTESTED for i in range(len(parts)))
+    """Exact by default; only explicitly dynamic subtrees accept descendants."""
+    if path in _ATTESTED:
+        return True
+    return any(path.startswith(f"{prefix}.") for prefix in _ATTESTED_SUBTREES)
 
 
 # ── Правила ───────────────────────────────────────────────────────────────────
@@ -347,6 +417,13 @@ def check_unknown_keys(cfg: dict, rep: Report) -> None:
                 "[НЕ АТТЕСТОВАН] ключ не сверен первичным источником — проверить "
                 "по докам пиновой версии и дописать в _ATTESTED либо убрать",
             )
+
+
+def check_inert_keys(cfg: dict, rep: Report) -> None:
+    """Reject settings proven to have no consumer in the pinned runtime."""
+    for path, explanation in _INERT_CONFIG_PATHS.items():
+        if _get(cfg, path) is not _MISSING:
+            rep.error(path, f"ключ не читается пиновым runtime: {explanation}")
 
 
 def check_enum_values(cfg: dict, rep: Report) -> None:
@@ -460,6 +537,33 @@ def check_toolsets(cfg: dict, rep: Report) -> None:
             rep.error("agent.disabled_toolsets", f"{slug} обязан быть погашен: {why}")
 
 
+def check_delegation(cfg: dict, rep: Report) -> None:
+    """A configured-but-disabled orchestrator is a silent no-op; an enabled one is explicit."""
+    disabled = set(_as_list(_get(cfg, "agent.disabled_toolsets")))
+    delegation = _get(cfg, "delegation")
+    if "delegation" in disabled:
+        if isinstance(delegation, dict) and delegation:
+            rep.error(
+                "delegation",
+                "блок настроен, но toolset delegation выключен в agent.disabled_toolsets",
+            )
+        return
+
+    if not isinstance(delegation, dict) or not delegation:
+        rep.error("delegation", "toolset включён, но его модель и лимиты не заданы явно")
+        return
+    for key in ("provider", "model"):
+        if not str(delegation.get(key) or "").strip():
+            rep.error(f"delegation.{key}", "обязателен для явной модели субагентов")
+    if delegation.get("orchestrator_enabled") is not True:
+        rep.error("delegation.orchestrator_enabled", "должен быть true для agent orchestration")
+    if delegation.get("subagent_auto_approve") is not False:
+        rep.error(
+            "delegation.subagent_auto_approve",
+            "должен быть false: субагент не получает автоматическое одобрение terminal-команд",
+        )
+
+
 def check_toolset_allowlist(cfg: dict, rep: Report) -> None:
     """Поверхность агента — от РАЗРЕШЁННОГО, а не от запрещённого (профиль `vps-read`).
 
@@ -557,20 +661,39 @@ def fetch_openrouter_catalog(timeout: float = _CATALOG_TIMEOUT) -> set[str] | No
 def _model_specs(cfg: dict) -> list[tuple[str, str, str]]:
     """`(путь, provider, model)` для КАЖДОГО места, где конфиг называет модель.
 
-    Мест три, и опасны именно два последних: глобальный `model:` виден в `hermes model` и в
-    дашборде, а `auxiliary.*` и `model_routing.*` не показывает никто.
+    Глобальный `model:` виден в `hermes model`; auxiliary/delegation/fallback-цепь легко
+    протухают незаметно, поэтому проверяются тем же живым каталогом.
     """
     root = _as_dict(_get(cfg, "model"))
     default_provider = str(root.get("provider") or "").strip()
     out: list[tuple[str, str, str]] = []
     if root:
         out.append(("model", default_provider, str(root.get("default") or "").strip()))
-    for section in ("auxiliary", "model_routing"):
-        for role, spec in _as_dict(_get(cfg, section)).items():
-            if not isinstance(spec, dict) or "model" not in spec:
-                continue
+    for role, spec in _as_dict(_get(cfg, "auxiliary")).items():
+        if isinstance(spec, dict) and "model" in spec:
             provider = str(spec.get("provider") or "").strip() or default_provider
-            out.append((f"{section}.{role}", provider, str(spec.get("model") or "").strip()))
+            out.append((f"auxiliary.{role}", provider, str(spec.get("model") or "").strip()))
+    delegation = _as_dict(_get(cfg, "delegation"))
+    if "model" in delegation:
+        provider = str(delegation.get("provider") or "").strip() or default_provider
+        out.append(("delegation", provider, str(delegation.get("model") or "").strip()))
+
+    fallbacks = _as_list(_get(cfg, "fallback_providers"))
+    legacy = _get(cfg, "fallback_model")
+    if legacy is not _MISSING:
+        fallbacks.extend(_as_list(legacy))
+    for index, spec in enumerate(fallbacks):
+        if not isinstance(spec, dict):
+            out.append((f"fallback_providers[{index}]", "", ""))
+            continue
+        provider = str(spec.get("provider") or "").strip() or default_provider
+        out.append(
+            (
+                f"fallback_providers[{index}]",
+                provider,
+                str(spec.get("model") or "").strip(),
+            )
+        )
     return out
 
 
@@ -655,19 +778,23 @@ def fetch_endpoint_params(slug: str, timeout: float = _CATALOG_TIMEOUT) -> list[
 def _tool_turn_models(cfg: dict) -> list[tuple[str, str]]:
     """`(путь, слаг)` каждой модели, которой достанется ход С ИНСТРУМЕНТАМИ.
 
-    Это глобальный дефолт плюс КАЖДЫЙ тир `model_routing`: роутер перебивает дефолт на тир,
-    так что негодный тир кладёт прод ровно так же, как негодный дефолт, — просто не сразу, а
-    на первом ходу нужного класса. `auxiliary.*` сюда не входит: инструментов эти роли не
-    получают, и требовать от них `tools` значит краснеть на том, что им не нужно.
+    Это глобальный дефолт и fallback-цепь: после отказа основной модели fallback продолжает
+    тот же агентский ход с теми же инструментами. `auxiliary.*` сюда не входит.
     """
     root = _as_dict(_get(cfg, "model"))
     default_provider = str(root.get("provider") or "").strip()
     specs = [("model.default", default_provider, str(root.get("default") or "").strip())]
-    for tier, spec in _as_dict(_get(cfg, "model_routing")).items():
+    for index, spec in enumerate(_as_list(_get(cfg, "fallback_providers"))):
         if not isinstance(spec, dict):
             continue
         provider = str(spec.get("provider") or "").strip() or default_provider
-        specs.append((f"model_routing.{tier}", provider, str(spec.get("model") or "").strip()))
+        specs.append(
+            (
+                f"fallback_providers[{index}]",
+                provider,
+                str(spec.get("model") or "").strip(),
+            )
+        )
     # чужой провайдер и кривой формат слага — забота check_model_slugs, второй жалобы не нужно
     return [
         (path, model)
@@ -718,37 +845,6 @@ def check_tool_turn_model_endpoints(cfg: dict, rep: Report) -> None:
             "HTTP 404 «No endpoints found» на КАЖДОМ ходу с инструментами, а не деградация "
             "качества",
         )
-
-
-def check_model_routing_tiers(cfg: dict, rep: Report) -> None:
-    """Тир, которого рантайм не знает, — молчаливый холостой ход: тот же класс, что К10.
-
-    `select_model_for_turn` берёт ровно `routing.get(tier)` по имени из `classify_turn`, а имён
-    всего три — `gemini`/`v3`/`r1` (`agent/router.py:42-44`). Лишний ключ не ошибка для YAML и
-    не ошибка для Hermes: он просто никогда не выбирается, и «я же настроил модель для аудита»
-    остаётся неправдой без единой строчки в логе.
-
-    Выключателя у роутера нет вовсе: `smart_model_routing.enabled` пишет только setup-wizard, а
-    рантайм смотрит исключительно на наличие ключа `model_routing` (`agent/router.py:287`:
-    `routing = config.get("model_routing", {})` → пусто ⇒ `(None, None)` ⇒ дефолт). Значит
-    «выключено» = ключа нет; галочка в визарде роутинг не гасит и гасить не может.
-    """
-    routing = _get(cfg, "model_routing")
-    if routing is _MISSING:
-        return
-    if not isinstance(routing, dict) or not routing:
-        rep.error("model_routing", "блок пуст или не словарь — роутинг молча не действует")
-        return
-    for tier, spec in routing.items():
-        if tier not in _ROUTER_TIERS:
-            rep.error(
-                f"model_routing.{tier}",
-                f"тир {tier!r} рантайму неизвестен (есть только {sorted(_ROUTER_TIERS)}) ⇒ "
-                "выбран не будет никогда, а выглядит настроенным",
-            )
-            continue
-        if not isinstance(spec, dict) or not str(spec.get("model") or "").strip():
-            rep.error(f"model_routing.{tier}", "нет `model:` ⇒ тир вырождается в дефолт молча")
 
 
 def check_no_secrets(raw_text: str, rep: Report) -> None:
@@ -841,13 +937,14 @@ def lint(cfg: dict, raw_text: str = "", profile: str = "host-a") -> Report:
         return rep
     for check in (
         check_unknown_keys,
+        check_inert_keys,
         check_enum_values,
         check_telegram_gates,
         check_toolsets,
+        check_delegation,
         check_hardening,
         check_model_slugs,
         check_tool_turn_model_endpoints,
-        check_model_routing_tiers,
     ):
         check(cfg, rep)
     for check in _PROFILE_CHECKS.get(profile, ()):

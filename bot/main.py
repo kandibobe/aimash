@@ -361,6 +361,7 @@ _CREATE_CAMPAIGN_OPS = frozenset(
         "create_gdn_campaign",
         "create_demand_gen_campaign",
         "create_video_campaign",
+        "launch_campaign",
     }
 )
 # §20: chat_id → аккаунты MCC для раздела «Клиенты» (резолв idx→ChildAccount); буфер накопления
@@ -1513,6 +1514,7 @@ _MONEY_OPS_UI: frozenset[str] = frozenset(
         "create_gdn_campaign",
         "create_demand_gen_campaign",
         "create_video_campaign",
+        "launch_campaign",
     }
 )
 

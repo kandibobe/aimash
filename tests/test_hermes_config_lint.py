@@ -140,6 +140,29 @@ def test_lint_survives_config_without_display_block():
     )
 
 
+def test_unknown_nested_leaf_does_not_hide_behind_a_known_section():
+    """`agent` существует, но опечатка его дочернего ключа всё равно блокирует strict lint."""
+    rep = _LINT.Report()
+    _LINT.check_unknown_keys({"agent": {"max_turnz": 20}}, rep)
+    assert any(f.path == "agent.max_turnz" for f in rep.warnings), [str(f) for f in rep.findings]
+
+
+def test_runtime_registry_matches_deploy_model_and_fallbacks():
+    """Два источника модели не могут снова тихо объявить разные canonical runtime."""
+    registry = _load_cfg(HERMES_DIR / "runtime_registry.yaml")
+    deploy = _load_cfg(HERMES_DIR / "config.yaml")
+    assert (
+        registry["primary_runtime"]["provider"],
+        registry["primary_runtime"]["model"],
+    ) == (deploy["model"]["provider"], deploy["model"]["default"])
+    configured = [(item["provider"], item["model"]) for item in deploy["fallback_providers"]]
+    registered = [
+        (registry["routing_lanes"][name]["provider"], registry["routing_lanes"][name]["model"])
+        for name in ("primary_fallback", "lightweight_background")
+    ]
+    assert registered == configured
+
+
 def test_lint_reports_display_tool_progress_typo():
     """Позитив на то самое правило, из-за которого линт и падал: значение, съедаемое молча.
 
@@ -285,30 +308,40 @@ def test_vps_lint_rejects_extra_or_unbounded_mcp_servers():
 
 
 @pytest.mark.parametrize(
-    ("section", "role"),
-    [("model_routing", "v3"), ("auxiliary", "compression")],
+    ("extra", "path"),
+    [
+        (
+            {"fallback_providers": [{"provider": "openrouter", "model": "deepseek/deepseek-v3"}]},
+            "fallback_providers[0]",
+        ),
+        (
+            {
+                "auxiliary": {
+                    "compression": {"provider": "openrouter", "model": "deepseek/deepseek-v3"}
+                }
+            },
+            "auxiliary.compression",
+        ),
+    ],
 )
-def test_lint_catches_a_dead_model_slug(section, role):
+def test_lint_catches_a_dead_model_slug(extra, path):
     """Регресс инцидента 27.07.2026: прод молчал сутки на несуществующем слаге.
 
-    В `~/.hermes/config.yaml` лежал `model_routing`, скопированный из докстринга
-    `agent/router.py:264` установленного Hermes, а там `deepseek/deepseek-v3` — слага нет у
-    OpenRouter с 2025 года. `classify_turn()` уводит в тир `v3` любой ход с доступными
-    инструментами, то есть каждый наш → HTTP 400 non-retryable на каждом сообщении. Ни в
-    `hermes model`, ни в дашборде эти два блока не видны: единственный шанс поймать — линт.
+    Скрытые модели auxiliary/fallback не видны в `hermes model`; мёртвый слаг проявится только
+    при компрессии или после отказа основной модели. Единственный шанс поймать раньше — линт.
     """
     cfg = {
         "model": {"provider": "openrouter", "default": "deepseek/deepseek-v4-flash"},
-        section: {role: {"provider": "openrouter", "model": "deepseek/deepseek-v3"}},
+        **extra,
     }
     rep = _LINT.lint(cfg, profile="vps-read")
-    assert any(f.path == f"{section}.{role}" for f in rep.errors), (
-        f"мёртвый слаг в {section}.{role} прошёл мимо линта: {[str(f) for f in rep.findings]}"
+    assert any(f.path == path for f in rep.errors), (
+        f"мёртвый слаг в {path} прошёл мимо линта: {[str(f) for f in rep.findings]}"
     )
 
 
 def test_lint_accepts_live_slugs_everywhere():
-    """Отрицательный контроль: на живых слагах правило обязано МОЛЧАТЬ во всех трёх местах.
+    """Отрицательный контроль: живые main/aux/fallback/delegation слаги проходят.
 
     Без него предыдущий тест не отличает «поймало мёртвый слаг» от «ругается на любой».
     """
@@ -318,7 +351,8 @@ def test_lint_accepts_live_slugs_everywhere():
             "transient_retries": 2,  # скаляр среди mapping'ов — не должен ломать разбор
             "compression": {"provider": "openrouter", "model": "google/gemini-3.1-flash-lite"},
         },
-        "model_routing": {"r1": {"model": "deepseek/deepseek-v4-pro"}},  # provider наследуется
+        "fallback_providers": [{"model": "deepseek/deepseek-v4-pro"}],
+        "delegation": {"model": "google/gemini-3.1-flash-lite"},
     }
     # Правило зовём напрямую: на минимальном cfg штатно ругаются соседние правила (хардненинг,
     # тулсеты, неаттестованные ключи), и через `lint()` их шум утопил бы предмет проверки.
@@ -386,81 +420,51 @@ def test_lint_reddens_when_a_tool_turn_model_has_no_reasoning_provider():
         )
 
 
-def test_lint_checks_routing_tiers_by_the_same_yardstick_as_the_default():
-    """Третий завал 27.07.2026 пришёл из тира, а не из дефолта — правило обязано их равнять.
-
-    Визард «умного роутинга» разложил тиры на `deepseek-chat` (0 эндпоинтов с reasoning) и
-    `deepseek-r1` (1 из 2). Тир `r1` включается по словам «аудит»/«стратегия»/«оптимизация»,
-    то есть на первом же профильном вопросе менеджера, а не на старте — поймать это может
-    только линт до деплоя.
-    """
+def test_lint_checks_fallbacks_by_the_same_yardstick_as_the_default():
+    """Fallback продолжает tool-turn и обязан поддерживать те же tools/reasoning параметры."""
     cfg = {
         "model": {"provider": "openrouter", "default": "deepseek/deepseek-v4-flash"},
         "agent": {"reasoning_effort": "high"},
-        "model_routing": {"r1": {"provider": "openrouter", "model": "deepseek/deepseek-chat"}},
+        "fallback_providers": [{"provider": "openrouter", "model": "deepseek/deepseek-chat"}],
     }
     rep = _LINT.Report()
     _LINT.check_tool_turn_model_endpoints(cfg, rep)
-    assert any(f.path == "model_routing.r1" for f in rep.errors), (
-        f"негодный тир прошёл мимо: {[str(f) for f in rep.findings]}"
+    assert any(f.path == "fallback_providers[0]" for f in rep.errors), (
+        f"негодный fallback прошёл мимо: {[str(f) for f in rep.findings]}"
     )
     assert not any(f.path == "model.default" for f in rep.errors), (
         "дефолт исправен — правило не должно ругаться заодно и на него"
     )
 
-    # Отрицательный контроль: рабочая раскладка тиров (та, что стоит на проде) — молчит.
+    # Отрицательный контроль: рабочая fallback-цепь молчит.
     rep_ok = _LINT.Report()
     _LINT.check_tool_turn_model_endpoints(
         {
             **cfg,
-            "model_routing": {
-                "gemini": {"provider": "openrouter", "model": "google/gemini-3.1-flash-lite"},
-                "v3": {"provider": "openrouter", "model": "deepseek/deepseek-v4-flash"},
-                "r1": {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"},
-            },
+            "fallback_providers": [
+                {"provider": "openrouter", "model": "deepseek/deepseek-v4-flash"},
+                {"provider": "openrouter", "model": "google/gemini-3.1-flash-lite"},
+            ],
         },
         rep_ok,
     )
     assert not rep_ok.findings, (
-        f"ложное срабатывание на рабочих тирах: {[str(f) for f in rep_ok.findings]}"
+        f"ложное срабатывание на рабочих fallback: {[str(f) for f in rep_ok.findings]}"
     )
 
 
-def test_lint_catches_a_tier_name_the_runtime_never_asks_for():
-    """Опечатка в имени тира — К10 в чистом виде: YAML валиден, Hermes молчит, тир мёртв.
-
-    `select_model_for_turn` берёт `routing.get(tier)` по имени из `classify_turn`, а имён ровно
-    три. Лишний ключ не выбирается никогда, но выглядит настроенным — самый дорогой класс
-    ошибки в этом конфиге.
-    """
-    cfg = {
-        "model": {"provider": "openrouter", "default": "deepseek/deepseek-v4-flash"},
-        "model_routing": {"audit": {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"}},
-    }
+@pytest.mark.parametrize("path", _LINT._INERT_CONFIG_PATHS)
+def test_lint_rejects_inert_pinned_config_keys(path):
+    """Каждый доказанно мёртвый ключ краснит линт, а не остаётся advisory warning."""
+    cfg: dict = {}
+    cursor = cfg
+    parts = path.split(".")
+    for part in parts[:-1]:
+        cursor = cursor.setdefault(part, {})
+    cursor[parts[-1]] = True
     rep = _LINT.Report()
-    _LINT.check_model_routing_tiers(cfg, rep)
-    assert any(f.path == "model_routing.audit" for f in rep.errors), (
-        f"неизвестный тир прошёл мимо: {[str(f) for f in rep.findings]}"
-    )
-
-    # Отрицательный контроль: три законных имени — молчание; блока нет — тоже молчание.
-    rep_ok = _LINT.Report()
-    _LINT.check_model_routing_tiers(
-        {
-            **cfg,
-            "model_routing": {
-                t: {"model": "deepseek/deepseek-v4-pro"} for t in _LINT._ROUTER_TIERS
-            },
-        },
-        rep_ok,
-    )
-    assert not rep_ok.findings, (
-        f"ложное срабатывание на живых тирах: {[str(f) for f in rep_ok.findings]}"
-    )
-
-    rep_off = _LINT.Report()
-    _LINT.check_model_routing_tiers({"model": cfg["model"]}, rep_off)
-    assert not rep_off.findings, "без блока правило обязано молчать"
+    _LINT.check_inert_keys(cfg, rep)
+    assert any(f.path == path for f in rep.errors), [str(f) for f in rep.findings]
 
 
 def test_lint_warns_on_a_second_provider_in_the_gateway():

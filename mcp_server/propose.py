@@ -60,6 +60,7 @@ MONEY_OPS_UI: frozenset[str] = frozenset(
         "create_gdn_campaign",
         "create_demand_gen_campaign",
         "create_video_campaign",
+        "launch_campaign",
     }
 )
 

@@ -19,13 +19,13 @@
   "ref_kind": "git tag",
   "release_name": "The Quicksilver Release",
   "released_at": "2026-07-20",
-  "attested_at": "2026-07-23",
+  "attested_at": "2026-07-31",
   "version_source": "pyproject.toml @ v2026.7.20 → version = \"0.19.0\"",
   "verify_on_host": "hermes version   # субкоманда, НЕ --version; это замер V1 (OPERATIONS.md §12)",
-  "host_matches": null,
+  "host_matches": true,
   "_host_matches": [
-    "null = НЕ ПРОВЕРЕНО. Замер V1 не снят: OPERATIONS.md:9 и шапка config.yaml говорят",
-    "v0.17, SPEC.md и CLAUDE.md — v0.19.0. Пока здесь null, любая аттестация означает",
-    "«сверено с докой v0.19.0», а не «сверено с тем, что стоит на VPS». После V1 — true/false."
+    "true = замер V1 снят 29.07.2026: Hermes Agent v0.19.0 (2026.7.20) · local 3ef6bbd2.",
+    "Ключи повторно сверены 31.07.2026 с исходниками тега v2026.7.20; CI и pre-commit",
+    "запускают линтер с --strict, поэтому неаттестованный ключ блокирует изменение."
   ]
 }

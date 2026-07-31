@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Literal
 
 from ads.client import build_client_async, ensure_manager_allowed, ensure_read_allowed
 from ads.keyword_plan import generate_keyword_ideas
@@ -94,6 +94,8 @@ from reports.queries import (
     read_campaign_bidding,
 )
 
+PeriodPreset = Literal["7", "14", "30", "90", "MTD", "LM"]
+
 
 async def _guarded(
     work: Callable[[], Awaitable[dict[str, Any]]],
@@ -131,7 +133,12 @@ async def _guarded(
         return err(e)
 
 
-def _period(date_from: str | None, date_to: str | None, period_days: int | None):
+def _period(
+    date_from: str | None,
+    date_to: str | None,
+    period_days: int | None,
+    period_preset: PeriodPreset | None = None,
+):
     """ISO-даты `date_from`+`date_to` (обе) → custom-период; ни одной → последние N дней (period_days).
     Арифметику дат считает КОД (reports.period), не модель.
 
@@ -140,6 +147,8 @@ def _period(date_from: str | None, date_to: str | None, period_days: int | None)
     его как запрошенный — расхождение окна нигде не видно, потому что конверт отдаёт метрики без
     жалоб. Про чужие деньги такая тишина дороже отказа: `invalid_argument` заставляет назвать окно
     целиком (`envelope.classify_error`: ValueError → invalid_argument)."""
+    if period_preset and (date_from or date_to):
+        raise ValueError("period_preset cannot be combined with date_from/date_to")
     if bool(date_from) != bool(date_to):
         raise ValueError(
             "период задаётся ЛИБО обеими датами (date_from и date_to), ЛИБО ни одной "
@@ -147,6 +156,8 @@ def _period(date_from: str | None, date_to: str | None, period_days: int | None)
         )
     if date_from and date_to:
         return pperiod.custom(date.fromisoformat(date_from), date.fromisoformat(date_to))
+    if period_preset:
+        return pperiod.from_preset(period_preset)
     return pperiod.last_n_days(max(1, int(period_days or 30)))
 
 
@@ -186,7 +197,13 @@ def _default_manager() -> str:
 
 
 async def list_accounts(
-    manager_id: str | None = None, offset: int = 0, limit: int = DEFAULT_LIMIT
+    manager_id: str | None = None,
+    name_like: str | None = None,
+    has_profile: bool | None = None,
+    with_metrics: bool = False,
+    period_days: int = 30,
+    offset: int = 0,
+    limit: int = DEFAULT_LIMIT,
 ) -> dict[str, Any]:
     """Дочерние аккаунты MCC (id/имя/валюта/статус/уровень). manager_id пуст ⇒ настроенный MCC.
     Замок: ensure_manager_allowed (перечисление чужого менеджера запрещено, GR#9)."""
@@ -194,11 +211,59 @@ async def list_accounts(
     mid = str(manager_id) if manager_id else _default_manager()
 
     async def _work() -> dict[str, Any]:
+        if with_metrics and not 1 <= int(period_days) <= 400:
+            raise ValueError("period_days must be between 1 and 400")
         client = await build_client_async(mid)
         rows = await run_ads_read_call(
             list_child_accounts, client, mid, account=mid, label="mcp.list_accounts"
         )
-        return ok([child_account_dict(c) for c in rows], offset=offset, limit=limit)
+        needle = (name_like or "").strip().casefold()
+        if needle:
+            rows = [c for c in rows if needle in (c.name or "").casefold()]
+
+        profile_ids: set[str] = set()
+        if has_profile is not None:
+            profile_ids = await ClientProfileStore().accounts_with_profile(
+                [str(c.id) for c in rows]
+            )
+            rows = [c for c in rows if (str(c.id) in profile_ids) == bool(has_profile)]
+
+        payload = [child_account_dict(c) for c in rows]
+        if has_profile is not None:
+            for row in payload:
+                row["has_profile"] = row["id"] in profile_ids
+
+        extra: dict[str, Any] = {}
+        if with_metrics:
+            from reports.mcc import build_mcc_summary_async
+
+            period = pperiod.last_n_days(int(period_days))
+            summary = await build_mcc_summary_async(
+                client,
+                mid,
+                period,
+                list_children=lambda _client, _manager_id: rows,
+                tz_of=account_timezone,
+                period_for=_child_period_factory(period),
+            )
+            metric_rows, metric_extra = mcc_summary_payload(summary)
+            metrics_by_id = {str(r["account"]["id"]): r for r in metric_rows}
+            errors_by_id = {
+                str(item["account_id"]): item["reason"] for item in metric_extra.get("errors", [])
+            }
+            for row in payload:
+                metric = metrics_by_id.get(row["id"])
+                row["metrics_available"] = metric is not None
+                if metric is not None:
+                    row["totals"] = metric["totals"]
+                    row["active_campaigns"] = metric.get("active_campaigns")
+                    row["campaign_status"] = metric.get("campaign_status")
+                elif row["id"] in errors_by_id:
+                    row["metrics_error"] = errors_by_id[row["id"]]
+            extra["metrics_period"] = metric_extra["period"]
+            extra["metrics_skipped"] = metric_extra.get("skipped", [])
+
+        return ok(payload, offset=offset, limit=limit, extra=extra)
 
     return await _guarded(_work, account=mid, manager=True)
 
@@ -208,6 +273,7 @@ async def get_campaign_stats(
     date_from: str | None = None,
     date_to: str | None = None,
     period_days: int = 30,
+    period_preset: PeriodPreset | None = None,
     campaign_id: str | None = None,
     offset: int = 0,
     limit: int = DEFAULT_LIMIT,
@@ -216,7 +282,7 @@ async def get_campaign_stats(
     считает КОД). campaign_id сужает до одной кампании. Замок: ensure_read_allowed."""
 
     async def _work() -> dict[str, Any]:
-        window = _period(date_from, date_to, period_days)
+        window = _period(date_from, date_to, period_days, period_preset)
         client = await build_client_async(account)
         period = await _account_period(client, account, window)
         bd = await run_ads_read_call(
@@ -238,6 +304,7 @@ async def get_adgroup_stats(
     date_from: str | None = None,
     date_to: str | None = None,
     period_days: int = 30,
+    period_preset: PeriodPreset | None = None,
     campaign_id: str | None = None,
     offset: int = 0,
     limit: int = DEFAULT_LIMIT,
@@ -246,7 +313,7 @@ async def get_adgroup_stats(
     ensure_read_allowed."""
 
     async def _work() -> dict[str, Any]:
-        window = _period(date_from, date_to, period_days)
+        window = _period(date_from, date_to, period_days, period_preset)
         client = await build_client_async(account)
         period = await _account_period(client, account, window)
         bd = await run_ads_read_call(
@@ -268,6 +335,7 @@ async def get_keywords(
     date_from: str | None = None,
     date_to: str | None = None,
     period_days: int = 30,
+    period_preset: PeriodPreset | None = None,
     campaign_id: str | None = None,
     offset: int = 0,
     limit: int = DEFAULT_LIMIT,
@@ -276,7 +344,7 @@ async def get_keywords(
     Замок: ensure_read_allowed."""
 
     async def _work() -> dict[str, Any]:
-        window = _period(date_from, date_to, period_days)
+        window = _period(date_from, date_to, period_days, period_preset)
         client = await build_client_async(account)
         period = await _account_period(client, account, window)
         bd = await run_ads_read_call(
@@ -298,6 +366,7 @@ async def get_ads(
     date_from: str | None = None,
     date_to: str | None = None,
     period_days: int = 30,
+    period_preset: PeriodPreset | None = None,
     campaign_id: str | None = None,
     offset: int = 0,
     limit: int = DEFAULT_LIMIT,
@@ -306,7 +375,7 @@ async def get_ads(
     ensure_read_allowed."""
 
     async def _work() -> dict[str, Any]:
-        window = _period(date_from, date_to, period_days)
+        window = _period(date_from, date_to, period_days, period_preset)
         client = await build_client_async(account)
         period = await _account_period(client, account, window)
         bd = await run_ads_read_call(
@@ -328,6 +397,7 @@ async def get_search_terms(
     date_from: str | None = None,
     date_to: str | None = None,
     period_days: int = 30,
+    period_preset: PeriodPreset | None = None,
     campaign_id: str | None = None,
     reader_limit: int = 200,
     offset: int = 0,
@@ -337,7 +407,7 @@ async def get_search_terms(
     reader_limit — сколько строк тянуть из GAQL (топ по расходу). Замок: ensure_read_allowed."""
 
     async def _work() -> dict[str, Any]:
-        window = _period(date_from, date_to, period_days)
+        window = _period(date_from, date_to, period_days, period_preset)
         client = await build_client_async(account)
         period = await _account_period(client, account, window)
         rows = await run_ads_read_call(
@@ -416,6 +486,7 @@ async def get_auction_insights(
     date_from: str | None = None,
     date_to: str | None = None,
     period_days: int = 30,
+    period_preset: PeriodPreset | None = None,
     campaign_id: str | None = None,
     offset: int = 0,
     limit: int = DEFAULT_LIMIT,
@@ -425,7 +496,7 @@ async def get_auction_insights(
     ensure_read_allowed."""
 
     async def _work() -> dict[str, Any]:
-        window = _period(date_from, date_to, period_days)
+        window = _period(date_from, date_to, period_days, period_preset)
         client = await build_client_async(account)
         period = await _account_period(client, account, window)
         rows = await run_ads_read_call(
@@ -447,6 +518,7 @@ async def get_account_audit(
     date_from: str | None = None,
     date_to: str | None = None,
     period_days: int = 30,
+    period_preset: PeriodPreset | None = None,
     target_cpa: float | None = None,
     offset: int = 0,
     limit: int = DEFAULT_LIMIT,
@@ -455,7 +527,7 @@ async def get_account_audit(
     сам асинхронен и внутри проходит замки ЧТЕНИЯ на под-фетчах. rows = находки, extra = сводка."""
 
     async def _work() -> dict[str, Any]:
-        window = _period(date_from, date_to, period_days)
+        window = _period(date_from, date_to, period_days, period_preset)
         client = await build_client_async(account)
         period = await _account_period(client, account, window)
         result = await gather_audit(client, str(account), period, target_cpa=target_cpa)
@@ -541,7 +613,8 @@ async def keyword_ideas(
     language: str | None = None,
     geo_ids: list[int] | None = None,
     reader_limit: int | None = None,
-    network: str | None = None,
+    network: Literal["search", "search_partners"] | None = None,
+    months: int | None = None,
     offset: int = 0,
     limit: int = DEFAULT_LIMIT,
 ) -> dict[str, Any]:
@@ -550,6 +623,14 @@ async def keyword_ideas(
     ensure_read_allowed."""
 
     async def _work() -> dict[str, Any]:
+        if months is not None and not 1 <= int(months) <= 48:
+            raise ValueError("months must be between 1 and 48")
+        network_map = {
+            "search": "GOOGLE_SEARCH",
+            "search_partners": "GOOGLE_SEARCH_AND_PARTNERS",
+        }
+        if network is not None and network not in network_map:
+            raise ValueError("network must be search or search_partners")
         client = await build_client_async(account)
         kw: dict[str, Any] = {}
         if seeds is not None:
@@ -563,7 +644,9 @@ async def keyword_ideas(
         if reader_limit:
             kw["limit"] = int(reader_limit)
         if network:
-            kw["network"] = network
+            kw["network"] = network_map[network]
+        if months is not None:
+            kw["months"] = int(months)
         ideas = await run_ads_read_call(
             generate_keyword_ideas,
             client,
@@ -727,6 +810,7 @@ async def get_report_breakdown(
     date_from: str | None = None,
     date_to: str | None = None,
     period_days: int = 30,
+    period_preset: PeriodPreset | None = None,
     campaign_id: str | None = None,
     offset: int = 0,
     limit: int = DEFAULT_LIMIT,
@@ -745,7 +829,7 @@ async def get_report_breakdown(
                 f"неизвестное измерение {dimension!r}; допустимы: "
                 f"{', '.join(sorted(_BREAKDOWN_READERS))}"
             )
-        window = _period(date_from, date_to, period_days)
+        window = _period(date_from, date_to, period_days, period_preset)
         client = await build_client_async(account)
         period = await _account_period(client, account, window)
         bd = await run_ads_read_call(
@@ -886,6 +970,7 @@ async def get_mcc_summary(
     date_from: str | None = None,
     date_to: str | None = None,
     period_days: int = 30,
+    period_preset: PeriodPreset | None = None,
     offset: int = 0,
     limit: int = DEFAULT_LIMIT,
 ) -> dict[str, Any]:
@@ -907,7 +992,7 @@ async def get_mcc_summary(
         # Базовое окно — от даты хоста, БЕЗ `_account_period`: пере-якорять его на таймзону
         # менеджера незачем (у менеджера своих метрик нет), а каждый дочерний всё равно получает
         # своё окно через `period_for`. База работает фолбэком там, где TZ ребёнка не прочиталась.
-        period = _period(date_from, date_to, period_days)
+        period = _period(date_from, date_to, period_days, period_preset)
         client = await build_client_async(mid)
         summary = await build_mcc_summary_async(
             client,
@@ -927,6 +1012,7 @@ async def get_mcc_deep(
     date_from: str | None = None,
     date_to: str | None = None,
     period_days: int = 30,
+    period_preset: PeriodPreset | None = None,
     offset: int = 0,
     limit: int = DEFAULT_LIMIT,
 ) -> dict[str, Any]:
@@ -943,7 +1029,7 @@ async def get_mcc_deep(
     async def _work() -> dict[str, Any]:
         from reports.mcc import build_mcc_deep_async
 
-        period = _period(date_from, date_to, period_days)
+        period = _period(date_from, date_to, period_days, period_preset)
         client = await build_client_async(mid)
         # Общий таймаут, как на bot-пути (`_run_mcc_deep_export`): ~70 запросов под семафором
         # Google Ads легко переживают потолок одного вызова, а MCP-клиент ждёт ответа. Без него
@@ -990,7 +1076,7 @@ async def list_negative_shared_sets(
 
 
 # Реестр: имя инструмента → функция. server.py регистрирует по нему в FastMCP и проверяет И4
-# (READ_MCP_TOOLS ∩ MUTATION_TOOLS == ∅). Имена подобраны заведомо непересекающимися с 39
+# (READ_MCP_TOOLS ∩ MUTATION_TOOLS == ∅). Имена подобраны заведомо непересекающимися с 40
 # мутационными (agent.tools.schemas.MUTATION_TOOLS).
 READ_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "list_accounts": list_accounts,

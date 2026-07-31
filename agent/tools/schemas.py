@@ -125,6 +125,7 @@ MUTATION_TOOLS = {
     "attach_shared_set",
     "pause_campaign",
     "resume_campaign",
+    "launch_campaign",
     "update_campaign",
     "set_campaign_network",
     "set_campaign_display_network",
@@ -367,9 +368,8 @@ class ResumeCampaign(BaseModel):
 
 
 class LaunchCampaign(BaseModel):
-    # §19.8/§11 «Запустить»: включить кампанию ПОЛНОСТЬЮ (кампания + группы + объявления). Только
-    # UI-кнопка визарда (как attach_image_asset — не в MUTATION_TOOLS/TOOLS, агент её не вызывает
-    # сам). Отдельная от resume_campaign, которая включает лишь кампанию (см. ads.mutations).
+    # §19.8/§11 «Запустить»: включить кампанию ПОЛНОСТЬЮ (кампания + группы + объявления).
+    # Отдельная от resume_campaign, которая включает лишь кампанию (см. ads.mutations).
     campaign: str
 
 
@@ -1390,6 +1390,13 @@ TOOLS: list[dict] = [
     ),
     _tool("pause_campaign", "Поставить кампанию на паузу.", PauseCampaign),
     _tool("resume_campaign", "Возобновить (включить) кампанию из паузы.", ResumeCampaign),
+    _tool(
+        "launch_campaign",
+        "Полностью запустить ранее созданную PAUSED-кампанию: включить кампанию, все её группы "
+        "и объявления. Использовать только по прямой команде пользователя; сначала создаётся "
+        "черновик для подтверждения.",
+        LaunchCampaign,
+    ),
     _tool(
         "update_campaign",
         "Переименовать кампанию: campaign — текущее имя, new_name — новое. Для команд вида "
