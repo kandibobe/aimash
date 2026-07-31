@@ -123,6 +123,13 @@ def test_verify_is_a_gate_not_a_report() -> None:
     ):
         assert marker in body, f"verify перестал проверять {why}"
 
+    # BusyBox/POSIX grep -E не понимает PCRE-классы \s/\w. Проверка должна сравнивать
+    # официальный счётчик pinned Hermes с фактическим registry live-контейнера.
+    assert "Tools discovered:" in body
+    assert "expected_tool_names" in body
+    assert '"$DISCOVERED" = "$EXPECTED"' in body
+    assert "grep -coE 'mcp__aimash__|^\\s*-\\s+\\w+'" not in body
+
 
 def test_runbook_mentions_every_migration_script() -> None:
     text = OPERATIONS.read_text(encoding="utf-8")

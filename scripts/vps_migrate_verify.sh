@@ -147,10 +147,15 @@ else warn "hermes не в PATH"; fi
 if [ "$DEEP" = "1" ] && command -v hermes >/dev/null 2>&1; then
   head_ "7. READ-путь через Hermes (--deep)"
   OUT=$(hermes mcp test aimash 2>&1 || true)
-  N=$(echo "$OUT" | grep -coE 'mcp__aimash__|^\s*-\s+\w+' || true)
-  echo "$OUT" | tail -3
-  [ "${N:-0}" -ge 20 ] && ok "MCP aimash отвечает (найдено ~$N инструментов; ожидается 23)" \
-    || fail "MCP aimash не отдал инструменты — READ-путь мёртв (проверь, что образ aimash-bot несёт mcp_server)"
+  DISCOVERED=$(printf '%s\n' "$OUT" | sed -n 's/.*Tools discovered: \([0-9][0-9]*\).*/\1/p' | head -1)
+  EXPECTED=$(docker exec aimash-bot python -c \
+    'from mcp_server.server import expected_tool_names; print(len(expected_tool_names()))' 2>/dev/null || true)
+  printf '%s\n' "$OUT" | tail -4
+  if [ -n "$DISCOVERED" ] && [ -n "$EXPECTED" ] && [ "$DISCOVERED" = "$EXPECTED" ]; then
+    ok "MCP aimash отвечает: Tools discovered=$DISCOVERED, runtime expected=$EXPECTED"
+  else
+    fail "MCP surface расходится: discovered=${DISCOVERED:-none}, expected=${EXPECTED:-none} (проверь live-образ и allowlist)"
+  fi
 fi
 
 echo
