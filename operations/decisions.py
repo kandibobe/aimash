@@ -179,7 +179,12 @@ async def list_decisions(
                     select(OperationalDecision)
                     .where(*conditions)
                     .order_by(
-                        OperationalDecision.severity.asc(), OperationalDecision.last_seen_at.desc()
+                        case(
+                            (OperationalDecision.severity == "critical", 0),
+                            (OperationalDecision.severity == "warning", 1),
+                            else_=2,
+                        ),
+                        OperationalDecision.last_seen_at.desc(),
                     )
                     .limit(max(1, min(int(limit), 500)))
                 )
@@ -194,6 +199,7 @@ async def transition_decision(
     target: str,
     *,
     actor_user_id: int,
+    customer_id: str | None = None,
     note: str | None = None,
     snoozed_until: datetime | None = None,
     assigned_to: int | None = None,
@@ -221,14 +227,16 @@ async def transition_decision(
     if target in TERMINAL:
         values["active_fingerprint"] = None
 
+    conditions = [
+        OperationalDecision.decision_uid == decision_uid,
+        OperationalDecision.status.in_(_TRANSITIONS[target]),
+    ]
+    if customer_id is not None:
+        conditions.append(OperationalDecision.customer_id == customer_id)
+
     async with Session() as session:
         result = await session.execute(
-            update(OperationalDecision)
-            .where(
-                OperationalDecision.decision_uid == decision_uid,
-                OperationalDecision.status.in_(_TRANSITIONS[target]),
-            )
-            .values(**values)
+            update(OperationalDecision).where(*conditions).values(**values)
         )
         if int(getattr(result, "rowcount", 0) or 0) == 1:
             await session.commit()

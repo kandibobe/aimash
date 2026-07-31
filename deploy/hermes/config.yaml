@@ -194,7 +194,8 @@ mcp_servers:
     timeout: 120
     connect_timeout: 30
     tools:
-      include:             # 25 READ + 42 PLAN + 1 trusted reply-execute
+      include:             # 25 READ + 1 META + 46 PLAN/state + 1 trusted reply-execute
+        - get_bridge_capabilities
         - list_accounts
         - get_campaign_stats
         - get_adgroup_stats
@@ -273,6 +274,11 @@ mcp_servers:
         - propose_remove_asset_link
         - list_pending_proposals
         - cancel_proposal
+        # Operational control plane: trusted HMAC turn + per-account RBAC + scoped atomic transition.
+        - list_decisions
+        - update_decision
+        - list_incidents
+        - update_incident
         - execute_confirmed
   tavily:
     command: npx

@@ -1,8 +1,8 @@
 # Ранбук: поднять Hermes (Контур A) рядом с боевым ботом на VPS
 
 READ-пилот пивота Aimash → Hermes. Hermes-агент отвечает в Telegram и через
-MCP-сервер `aimash` (пакет `mcp_server/`) всегда отдаёт 25 READ-инструментов. При явном
-`HERMES_WRITE_ENABLED=true` он добавляет 42 PLAN + 1 WRITE через HMAC trusted Telegram transport;
+MCP-сервер `aimash` (пакет `mcp_server/`) всегда отдаёт 25 READ-инструментов + 1 META. При явном
+`HERMES_WRITE_ENABLED=true` он добавляет 46 PLAN/state + 1 WRITE через HMAC trusted Telegram transport;
 при false модуль WRITE физически не импортируется.
 
 **Где что написано:** требования и приёмка — [`/SPEC.md`](../../SPEC.md); архитектура (топология,

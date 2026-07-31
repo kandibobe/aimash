@@ -269,8 +269,19 @@ async def test_decision_and_incident_lifecycles_are_persistent_and_deduplicated(
     second = await create_or_refresh_decision(spec)
     assert second.decision_uid == first.decision_uid
     assert second.occurrence_count == 2
+    assert not await transition_decision(
+        first.decision_uid,
+        "acknowledged",
+        actor_user_id=100,
+        customer_id="9999999999",
+        note="wrong account",
+    )
     assert await transition_decision(
-        first.decision_uid, "acknowledged", actor_user_id=100, note="checking"
+        first.decision_uid,
+        "acknowledged",
+        actor_user_id=100,
+        customer_id=DRAFT,
+        note="checking",
     )
 
     incident_spec = IncidentInput(
@@ -284,7 +295,18 @@ async def test_decision_and_incident_lifecycles_are_persistent_and_deduplicated(
     repeated = await record_incident(incident_spec)
     assert repeated.incident_uid == incident.incident_uid
     assert repeated.occurrence_count == 2
-    assert await transition_incident(incident.incident_uid, "acknowledged", actor_user_id=100)
+    assert not await transition_incident(
+        incident.incident_uid,
+        "acknowledged",
+        actor_user_id=100,
+        customer_id="9999999999",
+    )
+    assert await transition_incident(
+        incident.incident_uid,
+        "acknowledged",
+        actor_user_id=100,
+        customer_id=DRAFT,
+    )
 
 
 def test_experiment_uses_pre_registered_threshold_and_window():

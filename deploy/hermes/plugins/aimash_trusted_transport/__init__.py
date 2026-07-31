@@ -37,6 +37,10 @@ _PLAN_STATE_TOOLS = frozenset(
     {
         f"{_MCP_PREFIX}list_pending_proposals",
         f"{_MCP_PREFIX}cancel_proposal",
+        f"{_MCP_PREFIX}list_decisions",
+        f"{_MCP_PREFIX}update_decision",
+        f"{_MCP_PREFIX}list_incidents",
+        f"{_MCP_PREFIX}update_incident",
     }
 )
 _TAINTED_AIMASH_TOOLS = frozenset({f"{_MCP_PREFIX}recall_client"})

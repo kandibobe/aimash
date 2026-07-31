@@ -80,13 +80,15 @@ def test_i4_seed_read_tools_disjoint_from_mutations():
 
 
 def test_i4_seed_server_builds_and_registers_only_read():
-    # Сервер строится и регистрирует РОВНО READ-набор — ни одного лишнего/мутационного имени.
+    # Сервер строится и регистрирует РОВНО READ+META-набор — ни одного мутационного имени.
     from mcp_server.server import build_server
+    from mcp_server.tools_meta import META_MCP_TOOLS
     from mcp_server.tools_read import READ_MCP_TOOLS
 
     srv = build_server()
     names = {t.name for t in asyncio.run(srv.list_tools())}
-    assert names == set(READ_MCP_TOOLS), f"реестр FastMCP разошёлся с READ_MCP_TOOLS: {names}"
+    expected = set(READ_MCP_TOOLS | META_MCP_TOOLS)
+    assert names == expected, f"реестр FastMCP разошёлся с READ+META surface: {names}"
 
 
 # ── read-lock на границе MCP: параметризованный инвариант по ВСЕМ обёрткам ───────────
@@ -259,6 +261,7 @@ def test_reference_hermes_config_exposes_exactly_the_enabled_registry():
     """
     import yaml
 
+    from mcp_server.tools_meta import META_MCP_TOOLS
     from mcp_server.tools_plan import PLAN_STATE_MCP_TOOLS
     from mcp_server.tools_read import READ_MCP_TOOLS
     from mcp_server.tools_write import PLAN_WRITE_MCP_TOOLS
@@ -273,7 +276,7 @@ def test_reference_hermes_config_exposes_exactly_the_enabled_registry():
             include = set(inc)
             break
     assert include is not None, f"в {cfg_path.name} не нашёлся tools.include — эталон разошёлся"
-    expected = set(READ_MCP_TOOLS | PLAN_WRITE_MCP_TOOLS | PLAN_STATE_MCP_TOOLS)
+    expected = set(READ_MCP_TOOLS | META_MCP_TOOLS | PLAN_WRITE_MCP_TOOLS | PLAN_STATE_MCP_TOOLS)
     missing, extra = sorted(expected - include), sorted(include - expected)
     assert not missing and not extra, (
         f"tools.include эталона разошёлся с реестром. Дописать: {missing}; лишние: {extra}. "

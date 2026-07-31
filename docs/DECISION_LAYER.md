@@ -68,8 +68,15 @@ provenance, 2FA, freshness и audit остаются обязательны.
 
 ## Что ещё требует live-cutover
 
-Код и схема не равны включённому продукту. Hermes публикует 25 READ + 42 PLAN + 1 WRITE для Ads,
-но новые операционные функции Decision Layer пока не зарегистрированы как исполняющий WRITE.
+Кодовая MCP-поверхность публикует 25 READ + 1 META + 46 PLAN/state + 1 WRITE при включённом
+`HERMES_WRITE_ENABLED`: `list_decisions`, `update_decision`, `list_incidents`, `update_incident`
+проходят через тот же HMAC trusted-turn wrapper и per-account RBAC. Переходы статусов атомарны и
+дополнительно привязаны к `customer_id`; они управляют операционным состоянием, но не выполняют Google
+Ads mutation. `approved` остаётся только решением оператора — Ads-изменение по-прежнему требует
+отдельного proposal, reply-якоря, CAS и audit-row.
+
+Код и схема не равны включённому продукту: до завершения live deploy/surface probe этот реестр нельзя
+считать принятым на проде.
 Живой scheduler подключает Telegram adapter;
 Slack/email/Teams требуют настроенных transport adapters и uppercase config refs
 (`SLACK_OPS_CHANNEL`), не raw URL/token. Перед transport title/body проходят `redact_text`. SSO

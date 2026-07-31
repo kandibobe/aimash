@@ -22,7 +22,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import wraps
-from typing import Any, Awaitable, Callable, Iterator
+from typing import Any, Awaitable, Callable, Iterator, get_type_hints
 
 from core import i18n
 from core.config import settings
@@ -241,7 +241,15 @@ def trusted_tool(name: str, fn: Callable[..., Awaitable[dict[str, Any]]]):
     this exact tool name and every ordinary argument.  A missing hook/key/token therefore refuses
     before proposal creation, confirmation CAS or Google Ads SDK use.
     """
-    signature = inspect.signature(fn)
+    raw_signature = inspect.signature(fn)
+    resolved_hints = get_type_hints(fn)
+    signature = raw_signature.replace(
+        parameters=[
+            parameter.replace(annotation=resolved_hints.get(parameter.name, parameter.annotation))
+            for parameter in raw_signature.parameters.values()
+        ],
+        return_annotation=resolved_hints.get("return", raw_signature.return_annotation),
+    )
     if TOKEN_PARAM in signature.parameters:
         raise RuntimeError(f"{name}: зарезервированный параметр {TOKEN_PARAM} уже занят")
     token_parameter = inspect.Parameter(
@@ -299,5 +307,5 @@ def trusted_tool(name: str, fn: Callable[..., Awaitable[dict[str, Any]]]):
     wrapped.__signature__ = signature.replace(  # type: ignore[attr-defined]
         parameters=[*signature.parameters.values(), token_parameter]
     )
-    wrapped.__annotations__ = {**getattr(fn, "__annotations__", {}), TOKEN_PARAM: str}
+    wrapped.__annotations__ = {**resolved_hints, TOKEN_PARAM: str}
     return wrapped

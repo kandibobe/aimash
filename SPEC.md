@@ -747,7 +747,7 @@ cross-channel mutations отсутствуют намеренно.
 rollback shadow-контура — `docs/SHADOW_MODE_EVAL.md`.
 
 **3.11.11 Граница live-готовности.** Миграция `0038` и сервисы не публикуют WRITE в Hermes: живой
-MCP-поверхность переключается между 25 READ и 25 READ + 42 PLAN + 1 WRITE флагом
+MCP-поверхность переключается между 25 READ + 1 META и 25 READ + 1 META + 46 PLAN/state + 1 WRITE флагом
 `HERMES_WRITE_ENABLED`; WRITE требует общий ≥32-byte `AIMASH_TRUST_HMAC_KEY` и trusted plugin.
 Slack/email/Teams, OIDC/SAML и
 Meta/Microsoft/TikTok требуют credentials и transport/ingestion adapters. Считать наличие схемы
@@ -821,7 +821,7 @@ Telegram supergroup агентства
 
 **Архивируется после гейтированного cutover:** кнопочный слой интерфейса — клавиатуры, inline-кнопки, FSM-визарды, обработчики callback-запросов; из `agent/` — только свой цикл (`loop.py`, `campaign_edit.py`, `campaign_settings.py`, `openrouter_account.py`), который заменяет Hermes. `agent/router.py` и `agent/tools/schemas.py` нужны сохраняемым пакетам и переезжают в bot-free пакет; `agent/system_prompt.py` не существует.
 
-**Достраивается:** слой подключения инструментов к Hermes (25 READ; 42 PLAN + 1 WRITE реализованы
+**Достраивается:** слой подключения инструментов к Hermes (25 READ + 1 META; 46 PLAN/state + 1 WRITE реализованы
 за feature-flag и HMAC trusted reply-transport, live-статус проверяется по §15.2) · инструменты памяти · роли поверх безролевого Hermes ·
 стартовая библиотека скилов · гарды И1–И8 · артефактная память · гарды самообучения Г1–Г8.
 
@@ -865,7 +865,7 @@ Telegram supergroup агентства
 
 **Два слоя — их нельзя путать:**
 
-- **Слой 1 — инструменты (транспорт до Google Ads): MCP-сервер.** Как Hermes дотягивается до `ads/`/`confirm/`. Реестр: 25 READ + 42 PLAN + 1 WRITE; PLAN/WRITE физически импортируются только при `HERMES_WRITE_ENABLED=true` и каждый вызов проходит trusted wrapper.
+- **Слой 1 — инструменты (транспорт до Google Ads): MCP-сервер.** Как Hermes дотягивается до `ads/`/`confirm/` и операционного контура. Реестр: 25 READ + 1 META + 46 PLAN/state + 1 WRITE; PLAN/state/WRITE физически импортируются только при `HERMES_WRITE_ENABLED=true` и каждый изменяющий state вызов проходит trusted wrapper.
 - **Слой 2 — автономный агентский цикл** (многошаговость, память, скилы, самообучение, проактив): Hermes-цикл + скилы/память + scheduler + гейт (Волны 1–3). **Не относится к выбору транспорта.** MCP-сервер этого не даёт и не должен.
 
 **Почему MCP, а не плагин — и это сильнее прежней рекомендации:**
@@ -996,6 +996,8 @@ Telegram supergroup агентства
 |---|---|
 | `propose_change` | Валидирует диапазоны → строит diff «было → станет» → пишет черновик в БД → возвращает `proposal_id` и сводку. **Google Ads не трогает** |
 | `list_pending_proposals` · `cancel_proposal` | Управление активными предложениями |
+| `list_decisions` · `update_decision` | Просмотр и account-scoped ACK/approve/reject/snooze очереди решений; это не Ads mutation |
+| `list_incidents` · `update_incident` | Просмотр и account-scoped ACK/snooze/resolve инцидентов; trusted turn + RBAC |
 | `curation_start` / `curation_state` / `curation_apply` / `curation_finalize` | Сессия курации RSA (§3.4.4). **Не черновик подтверждения и не мутация** — слот не занимает, исполнить нечем |
 
 **Три дыры в allow-list, которые надо закрыть явно:**

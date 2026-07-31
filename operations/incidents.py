@@ -133,6 +133,7 @@ async def transition_incident(
     target: str,
     *,
     actor_user_id: int,
+    customer_id: str | None = None,
     snoozed_until: datetime | None = None,
     assigned_to: int | None = None,
 ) -> bool:
@@ -163,15 +164,15 @@ async def transition_incident(
             acknowledged_at=None,
         )
 
+    conditions = [
+        OpsIncident.incident_uid == incident_uid,
+        OpsIncident.status.in_(_TRANSITIONS[target]),
+    ]
+    if customer_id is not None:
+        conditions.append(OpsIncident.customer_id == customer_id)
+
     async with Session() as session:
-        result = await session.execute(
-            update(OpsIncident)
-            .where(
-                OpsIncident.incident_uid == incident_uid,
-                OpsIncident.status.in_(_TRANSITIONS[target]),
-            )
-            .values(**values)
-        )
+        result = await session.execute(update(OpsIncident).where(*conditions).values(**values))
         if int(getattr(result, "rowcount", 0) or 0) == 1:
             if target in {"resolved", "snoozed"}:
                 await session.execute(
@@ -210,7 +211,14 @@ async def list_incidents(
                         OpsIncident.customer_id == customer_id,
                         OpsIncident.status.in_(chosen),
                     )
-                    .order_by(OpsIncident.last_seen_at.desc())
+                    .order_by(
+                        case(
+                            (OpsIncident.severity == "critical", 0),
+                            (OpsIncident.severity == "warning", 1),
+                            else_=2,
+                        ),
+                        OpsIncident.last_seen_at.desc(),
+                    )
                     .limit(max(1, min(int(limit), 500)))
                 )
             )

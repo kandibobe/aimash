@@ -21,9 +21,11 @@ from db.session import Session, db_dt
 ROLES = frozenset({"viewer", "operator", "approver", "admin"})
 ROLE_CAPABILITIES: dict[str, frozenset[str]] = {
     "viewer": frozenset({"read"}),
-    "operator": frozenset({"read", "propose", "ack", "snooze"}),
-    "approver": frozenset({"read", "approve", "reject", "ack", "snooze"}),
-    "admin": frozenset({"read", "propose", "approve", "reject", "ack", "snooze", "manage_roles"}),
+    "operator": frozenset({"read", "propose", "ack", "snooze", "resolve"}),
+    "approver": frozenset({"read", "approve", "reject", "ack", "snooze", "resolve"}),
+    "admin": frozenset(
+        {"read", "propose", "approve", "reject", "ack", "snooze", "resolve", "manage_roles"}
+    ),
 }
 
 

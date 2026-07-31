@@ -800,6 +800,8 @@ SSRF-пиннингом IP и robots fail-closed — тем же каранти�
 | `propose_change` | Валидирует диапазоны → строит diff «было→станет» → пишет `Proposal` в БД → возвращает `proposal_id` и человекочитаемую сводку. **Google Ads не трогает** |
 | `list_pending_proposals` | Активные предложения прогона |
 | `cancel_proposal` | Снять предложение |
+| `list_decisions` / `list_incidents` | Очередь решений и дедуплицированные инциденты текущего аккаунта; trusted turn + RBAC |
+| `update_decision` / `update_incident` | ACK/snooze/approve/reject/resolve как account-scoped atomic transition; Google Ads не трогает |
 
 `propose_change` принимает `operation` из **жёсткого allow-list** — те же операции, что сегодня
 в `MUTATION_TOOLS` (40 шт.). Расширение списка — правка кода и ревью, не конфига и не скила.
@@ -2425,7 +2427,7 @@ existing propose → trusted reply → ConfirmStore.claim → ads/mutations → 
 10. CRM/SSO identifiers — domain-separated HMAC-SHA256; без отдельного
     `PSEUDONYMIZATION_HMAC_KEY` ingest/mapping отказывает.
 
-**Статус публикации:** 42 PLAN + 1 WRITE зарегистрированы только при `HERMES_WRITE_ENABLED=true`;
+**Статус публикации:** 46 PLAN/state + 1 WRITE зарегистрированы только при `HERMES_WRITE_ENABLED=true`;
 без флага модуль WRITE физически не импортируется. Продовый sync меняет только Aimash include-list и
 активацию `aimash_trusted_transport`, сохраняя host-local Hermes config. Наличие `0038` или одного
 только плагина не является разрешением обойти HMAC/cutover. Функциональный контракт — `SPEC.md` §3.11,

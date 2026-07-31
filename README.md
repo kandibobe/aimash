@@ -17,7 +17,7 @@ Telegram-агент, который по свободному тексту уп�
 | Состояние | Что является ядром | Что доступно |
 |---|---|---|
 | **Целевое** | Hermes ведёт диалог и агентский цикл; Aimash MCP исполняет типизированные инструменты; scheduler работает отдельным процессом | свободный текст, READ/MEMORY/PLAN/WRITE, кнопка карточки + reply fallback |
-| **Переходное сейчас** | Hermes подключён к MCP через контейнер `aimash-bot`; trusted transport принят | 25 READ + flag-gated 42 PLAN + 1 WRITE; кнопка и reply сходятся в HMAC-доверенном якоре |
+| **Переходное сейчас** | Hermes подключён к MCP через контейнер `aimash-bot`; trusted transport принят | 25 READ + 1 META + flag-gated 46 PLAN/state + 1 WRITE; кнопка и reply сходятся в HMAC-доверенном якоре |
 | **Legacy aiogram** | `python -m bot.main` | кнопки, визарды и действующий путь мутаций; это источник переиспользуемой бизнес-логики, а не целевая архитектура |
 
 ⚠️ **Две независимые нумерации «волн», их легко перепутать** — это и есть источник расхождений в старых заметках:
@@ -37,7 +37,7 @@ Telegram-агент, который по свободному тексту уп�
 | 2 · Гарды И1–И5 | ✅ И1–И8 покрыты construction/runtime-тестами; skipped-гардов в `tests/test_hermes_isolation.py` нет |
 | 3 · READ-инструменты | ✅ 25 READ-инструментов. Round-trip через Hermes доказан живьём на 15; добавленные structural/shared-list ридеры покрыты офлайн-смоуком (`tests/test_mcp_read_smoke.py`, SDK подменён) |
 | 4 · Память | 🟡 `recall_client` есть; `remember_fact`/`agent_facts` — нет |
-| 5 · Мутации + confirm-гейт | ✅ 42 PLAN + 1 WRITE регистрируются только при `HERMES_WRITE_ENABLED=true`; кнопка карточки и reply проходят HMAC trusted transport и единый reply-CAS |
+| 5 · Мутации + confirm-гейт | ✅ 46 PLAN/state + 1 WRITE регистрируются только при `HERMES_WRITE_ENABLED=true`; операционный state требует RBAC, кнопка карточки и reply проходят HMAC trusted transport и единый reply-CAS |
 | 6–10 · скилы, самообучение, наблюдаемость | ⛔ не начаты |
 
 **Серия хардненинга 27.07** (вне нумерации §12) — легли четыре контура денежного пути: распределённый размыкатель с арендой пробы (`core/resilience.py`), event-sourcing журнала прогонов, наблюдение за применённой мутацией (режим `shadow`), тиры риска L1/L2/L3 — **презентационные по построению**, AST-гард запрещает `ads/**` импортировать `confirm.risk`.
@@ -153,7 +153,7 @@ clients/      §20: профиль (store), LLM-разбор, краулер с�
 scheduler/    плановые отчёты/аномалии/очистка черновиков (READ-ONLY, правило 3)            ← ядро
 db/           SQLAlchemy модели + Alembic (migrations/)                                     ← ядро
 app/          bootstrap — bot-free старт ads-глобалов                                       ← ядро
-mcp_server/   тул-слой Hermes: 25 READ + flag-gated 42 PLAN + 1 WRITE через trusted transport
+mcp_server/   тул-слой Hermes: 25 READ + 1 META + flag-gated 46 PLAN/state + 1 WRITE через trusted transport
 deploy/hermes/ конфиг Контура A, плагин-проб, конфиг-линт (К10), RUNBOOK хоста    ← пишется заново
 bot/          aiogram handlers, inline-кнопки, визарды, i18n, throttle    ← архивируется после гейтированного cutover
 agent/        свой цикл архивируется; router.py и tools/schemas.py переезжают в bot-free пакет

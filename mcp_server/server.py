@@ -19,6 +19,7 @@ from agent.tools.schemas import MUTATION_TOOLS
 from core.config import settings
 from core.guards import require_no_mutations, require_registered_surface
 from mcp_server.tools_read import READ_MCP_TOOLS, READ_TOOL_FUNCS
+from mcp_server.tools_meta import META_MCP_TOOLS, META_TOOL_FUNCS
 
 # ── И4 (зерно): READ-инструменты НЕ пересекаются с мутационными ──────────────────
 require_no_mutations(
@@ -49,11 +50,11 @@ def _registered_tool_names(mcp) -> frozenset[str]:
 def expected_tool_names() -> frozenset[str]:
     """Authoritative live surface for the configured server mode."""
     if not settings.hermes_write_enabled:
-        return READ_MCP_TOOLS
+        return READ_MCP_TOOLS | META_MCP_TOOLS
     from mcp_server.tools_write import PLAN_WRITE_MCP_TOOLS
     from mcp_server.tools_plan import PLAN_STATE_MCP_TOOLS
 
-    return READ_MCP_TOOLS | PLAN_WRITE_MCP_TOOLS | PLAN_STATE_MCP_TOOLS
+    return READ_MCP_TOOLS | META_MCP_TOOLS | PLAN_WRITE_MCP_TOOLS | PLAN_STATE_MCP_TOOLS
 
 
 def build_server():
@@ -67,6 +68,8 @@ def build_server():
 
     # READ-инструменты
     for name, fn in READ_TOOL_FUNCS.items():
+        mcp.tool(name=name, structured_output=False)(fn)
+    for name, fn in META_TOOL_FUNCS.items():
         mcp.tool(name=name, structured_output=False)(fn)
 
     if settings.hermes_write_enabled:

@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from db.models import Base
+from mcp_server.tools_meta import META_TOOL_FUNCS
 from mcp_server.tools_read import READ_TOOL_FUNCS
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -49,7 +50,7 @@ _READ_COUNT_DOCS = (
 # Канонические формы: «15 READ-инструментов», «15 READ ✅». Форма обязана быть узкой — рядом живёт
 # «12 READ-вызовов» (HERMES_SPEC.md:1338, оценка ИТЕРАЦИЙ прогона, а не размера реестра), и regex
 # по одному слову READ принял бы её за счётчик инструментов и потребовал бы сломать смету.
-_READ_COUNT_RE = re.compile(r"(\d+)\s+READ(?:-инструмент\w*|\s+✅)")
+_READ_COUNT_RE = re.compile(r"(\d+)\s+READ(?:(/meta)-инструмент\w*|-инструмент\w*|\s+✅)")
 
 
 def _migration_head_num() -> int:
@@ -169,14 +170,21 @@ def test_docs_read_tool_count_matches_registry(rel):
     assert expected, "READ_TOOL_FUNCS пуст — сверять число в доках не с чем"
 
     text = (_ROOT / rel).read_text(encoding="utf-8")
-    found = [(int(m.group(1)), m.group(0)) for m in _READ_COUNT_RE.finditer(text)]
+    found = [
+        (
+            int(m.group(1)),
+            expected + len(META_TOOL_FUNCS) if m.group(2) else expected,
+            m.group(0),
+        )
+        for m in _READ_COUNT_RE.finditer(text)
+    ]
 
     assert found, (
         f"{rel} не называет число READ-инструментов ни в одной из канонических форм "
         f"(«N READ-инструментов» / «N READ ✅»). Либо число вернуть, либо файл убрать из "
         "_READ_COUNT_DOCS: молча ненаблюдаемая дока — то же, что дока, которая врёт."
     )
-    wrong = sorted({frag for n, frag in found if n != expected})
+    wrong = sorted({frag for n, target, frag in found if n != target})
     assert not wrong, (
         f"{rel}: заявлено {wrong}, а в реестре mcp_server.tools_read.READ_TOOL_FUNCS "
         f"{expected} инструментов ({', '.join(sorted(READ_TOOL_FUNCS))}). Реестр — истина, "
