@@ -28,6 +28,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _win_console import enable_utf8  # noqa: E402
 
@@ -41,13 +43,17 @@ _STATUS_RE = re.compile(r"^\s*\S+\s+(enabled|disabled)\s+(\S+)")
 
 
 def read_reference_slugs() -> list[str]:
-    """Слаги из flow-списка agent.disabled_toolsets эталонного конфига."""
-    m = re.search(r"disabled_toolsets:\s*\[(.*?)\]", REFERENCE.read_text(encoding="utf-8"), re.S)
-    if not m:
-        raise SystemExit(
-            f"В {REFERENCE} не найден flow-список agent.disabled_toolsets — эталон изменил форму"
-        )
-    slugs = [s.strip() for s in m.group(1).split(",") if s.strip()]
+    """Слаги из agent.disabled_toolsets независимо от YAML-стиля списка."""
+    try:
+        cfg = yaml.safe_load(REFERENCE.read_text(encoding="utf-8")) or {}
+        raw_slugs = (cfg.get("agent") or {}).get("disabled_toolsets")
+    except (OSError, yaml.YAMLError) as exc:
+        raise SystemExit(f"Не удалось прочитать {REFERENCE}: {type(exc).__name__}") from exc
+    if not isinstance(raw_slugs, list) or not all(isinstance(s, str) for s in raw_slugs):
+        raise SystemExit(f"В {REFERENCE} agent.disabled_toolsets должен быть YAML-списком строк")
+    slugs = [s.strip() for s in raw_slugs if s.strip()]
+    if len(slugs) != len(set(slugs)):
+        raise SystemExit(f"В {REFERENCE} agent.disabled_toolsets содержит дубли")
     if len(slugs) < 10:
         raise SystemExit(f"Из эталона разобрано всего {len(slugs)} слагов — похоже на сбой разбора")
     return slugs
@@ -99,18 +105,21 @@ def main() -> int:
     disable_argv = ["hermes", "tools", "disable", "--platform", args.platform, *slugs]
     if args.dry_run:
         print(f"\n[dry-run] ssh {args.host} {' '.join(disable_argv)}")
-        print(f"[dry-run] ssh {args.host} systemctl restart hermes-gateway")
+        print(f"[dry-run] ssh {args.host} env XDG_RUNTIME_DIR=/run/user/0 hermes gateway restart")
         print(f"[dry-run] ssh {args.host} hermes tools list --platform {args.platform}")
         return 0
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     backup = f"/root/.hermes/config.yaml.bak-{stamp}"
-    rollback = f'ssh {args.host} "cp -a {backup} /root/.hermes/config.yaml; systemctl restart hermes-gateway"'
+    rollback = (
+        f'ssh {args.host} "cp -a {backup} /root/.hermes/config.yaml; '
+        'XDG_RUNTIME_DIR=/run/user/0 hermes gateway restart"'
+    )
     ssh(args.host, "cp", "-a", "/root/.hermes/config.yaml", backup)
     print(f"Бэкап: {backup}\nОткат: {rollback}")
 
     ssh(args.host, *disable_argv)
-    ssh(args.host, "systemctl", "restart", "hermes-gateway")
+    ssh(args.host, "env", "XDG_RUNTIME_DIR=/run/user/0", "hermes", "gateway", "restart")
 
     listing = ssh(args.host, "hermes", "tools", "list", "--platform", args.platform)
     print(listing)

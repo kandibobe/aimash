@@ -222,6 +222,12 @@ _KNOWN_TOOLSETS = frozenset(
 # смотрел только на то, что перечислено в `disabled_toolsets`.
 _ALLOWED_ENABLED_TOOLSETS = frozenset({"skills", "todo", "clarify"})
 
+# Production Telegram gateway may see only our bounded Ads READ server plus the explicitly
+# allow-listed research server. Every server must declare tools.include: an unbounded MCP server
+# silently exposes all current and future tools, including mutations (observed with GitHub MCP on
+# the live gateway 2026-07-31).
+_ALLOWED_VPS_MCP_SERVERS = frozenset({"aimash", "tavily"})
+
 # Тулсеты, гашение которых — решение архитектуры, а не вкус. Снятие любого требует письменного
 # решения (Р2), поэтому линт держит их списком, а не комментарием.
 _MUST_DISABLE = {
@@ -476,6 +482,33 @@ def check_toolset_allowlist(cfg: dict, rep: Report) -> None:
             "disabled_toolsets, либо (осознанно, письменным решением) — в "
             "_ALLOWED_ENABLED_TOOLSETS линта",
         )
+
+
+def check_mcp_server_allowlists(cfg: dict, rep: Report) -> None:
+    """Fail closed on extra or unbounded MCP servers in the production Telegram gateway."""
+    servers = _get(cfg, "mcp_servers")
+    if not isinstance(servers, dict):
+        rep.error("mcp_servers", "production gateway must declare an explicit MCP server mapping")
+        return
+    for name, server in servers.items():
+        path = f"mcp_servers.{name}"
+        if name not in _ALLOWED_VPS_MCP_SERVERS:
+            rep.error(
+                path,
+                f"server is outside the production allow-list {sorted(_ALLOWED_VPS_MCP_SERVERS)}",
+            )
+            continue
+        tools = server.get("tools") if isinstance(server, dict) else None
+        include = tools.get("include") if isinstance(tools, dict) else None
+        if (
+            not isinstance(include, list)
+            or not include
+            or not all(isinstance(tool, str) and tool.strip() for tool in include)
+        ):
+            rep.error(
+                f"{path}.tools.include",
+                "must be a non-empty list; absent include exposes every MCP tool by default",
+            )
 
 
 def check_hardening(cfg: dict, rep: Report) -> None:
@@ -778,7 +811,7 @@ def check_terminal_backend(cfg: dict, rep: Report) -> None:
 
 _PROFILE_CHECKS = {
     "host-a": (check_credential_boundary, check_terminal_backend),
-    "vps-read": (check_toolset_allowlist,),
+    "vps-read": (check_toolset_allowlist, check_mcp_server_allowlists),
 }
 
 

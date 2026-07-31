@@ -260,6 +260,27 @@ def test_the_pinned_toolset_list_covers_the_live_surface():
     assert not missing, f"пин тулсетов отстал от замера живой поверхности: {missing}"
 
 
+def test_vps_lint_rejects_extra_or_unbounded_mcp_servers():
+    """An MCP server without include exposes every tool, including future mutations."""
+    path, profile = _REFERENCE_CONFIGS[0]
+    assert profile == "vps-read"
+    cfg = copy.deepcopy(_load_cfg(path))
+    cfg["mcp_servers"]["github"] = {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"],
+    }
+
+    rep = _LINT.lint(cfg, profile=profile)
+    assert any(f.path == "mcp_servers.github" for f in rep.errors), [str(f) for f in rep.errors]
+
+    cfg = copy.deepcopy(_load_cfg(path))
+    cfg["mcp_servers"]["tavily"].pop("tools")
+    rep = _LINT.lint(cfg, profile=profile)
+    assert any(f.path == "mcp_servers.tavily.tools.include" for f in rep.errors), [
+        str(f) for f in rep.errors
+    ]
+
+
 # ── Слаги моделей: тот же класс, что К10 — «рабочий на вид и не работает» ─────
 
 
