@@ -675,7 +675,7 @@ credit cap на OpenRouter в первый же день.
 
 Транспорт: stdio, локальный процесс. Hermes и MCP-сервер на одной машине, наружу порт не смотрит.
 Регистрация в конфиге — ключ **`mcp_servers.<name>`** (не `mcp.*`), с per-server фильтром
-`tools.include`: на пилоте Hermes отдаются **только READ-инструменты**, PLAN/WRITE добавляются на
+`tools.include`: в безопасном дефолте Hermes отдаёт **только READ-инструменты**; PLAN/WRITE добавляются на
 шаге 5. Approvals Hermes MCP-инструменты **не покрывают** (только терминальные команды) —
 подтверждение живёт целиком в нашем слое; это инвариант, а не выбор.
 
@@ -830,25 +830,29 @@ confirm-гейт на весь цикл — на финальном `create_rsa`
 ### 8.4 Исполнение — единственная точка
 
 ```python
-execute_confirmed(proposal_id, confirmation_id, actor_chat_id, reply_to_message_id)
+execute_confirmed(*, trusted_turn_token: str = "")
 ```
 
-**Инвариант транспорта (главный).** `actor_chat_id` и `reply_to_message_id` обязаны поступать в наш
-код из **доверенного канала рантайма Hermes** — хук `pre_tool_call` с контекстом gateway-сообщения
-или elicitation-ответ на уровне MCP-протокола (v0.18.0) — и **никогда из аргументов инструмента**:
-аргументы генерирует LLM, то есть сигнатура выше в наивной реализации позволяет модели сфабриковать
-подтверждение (нарушение золотых правил 1/2 и И3). Прототип на шаге 3 проверяет ровно два критерия:
-**(a)** доходят ли реальные reply-метаданные в наш код мимо LLM; **(b)** переживает ли подтверждение
-40-минутную паузу человека — elicitation блокирует живой прогон и может умереть по idle-таймауту.
-Реплай-гейт допустим **только при (a)**; без доверенного канала write-слой в прод не выпускается.
+**Инвариант транспорта (главный).** Identity/reply никогда не являются аргументами модели.
+`pre_gateway_dispatch` сохраняет доверенный Telegram event, `pre_tool_call` коррелирует его через
+task-local session context и перезаписывает только opaque HMAC token. Подпись связывает exact tool,
+digest обычных args, actor/chat/message/thread, reply, TTL и nonce; MCP проверяет её независимо.
+Ошибка/отсутствие hook или ключа ⇒ токена нет ⇒ отказ до proposal/CAS/SDK, несмотря на fail-open
+семантику Hermes hooks. `execute_confirmed` вообще не принимает account/confirmation/actor/reply от LLM.
+
+Исходящий message id Hermes v0.19 hook не сообщает. Карточка поэтому содержит
+`AIMASH_CONFIRM:<confirmation_id>`; фактический Telegram reply приносит message id и полный текст
+карточки. MCP сверяет marker + неизменённый DB-summary, одноразово штампует якорь и только затем
+делегирует существующим `confirm_by_reply` → `execute_confirmed`.
 
 Порядок проверок — **фиксированный, каждая fail-closed**:
 
 1. `proposal` существует и в статусе `pending`;
 2. `reply_to_message_id == proposal.tg_message_id` — реплай на то самое сообщение (**явный**, не
    неявный топиковый reply на корень форум-топика — см. §2, тест-корпус реплай-семантики);
-3. `actor_chat_id == proposal.author_chat_id` — подтверждает автор задачи;
-4. `actor_chat_id` в whitelist (`core.access`, объединение env и таблицы `whitelist`);
+3. `actor_user_id == proposal.author_user_id` — подтверждает автор; `actor_chat_id == proposal.chat_id`
+   только неймспейсит Telegram message id;
+4. `actor_user_id` в whitelist (`core.access`, объединение env и таблицы `whitelist`);
 5. `now - proposal.created_at < TTL (60 мин)` — не протух — **плюс freshness-recheck**: перед
    исполнением re-fetch текущего значения и re-diff для diffable-операций; «было» уехало → отказ и
    пересборка. Без recheck длинный TTL нельзя: существующий `_assert_no_drift` (`ads/service.py:291`)
@@ -1120,7 +1124,7 @@ mcp_servers:                      # именно mcp_servers, не mcp: (К10)
     args: ["-m", "mcp_server"]
     tools:
       include: [list_accounts, get_campaign_stats, get_search_terms, get_ads, recall_facts]
-      # пилот: только READ; PLAN/WRITE добавляются шагом 5
+      # безопасный дефолт: READ; PLAN/WRITE добавляет feature-gated trusted cutover
 ```
 
 После любой правки эталона — сверка каждого ключа с `cli-config.yaml.example` **пиновой** версии
@@ -2419,7 +2423,8 @@ existing propose → trusted reply → ConfirmStore.claim → ads/mutations → 
 10. CRM/SSO identifiers — domain-separated HMAC-SHA256; без отдельного
     `PSEUDONYMIZATION_HMAC_KEY` ingest/mapping отказывает.
 
-**Статус публикации:** сервисы и таблицы готовы в коде, но в live Hermes не зарегистрированы как
-PLAN/WRITE. До принятого trusted reply-канала реестр остаётся READ-only (И4, §15.2). Наличие `0038`
-не является разрешением обойти cutover. Функциональный контракт — `SPEC.md` §3.11,
+**Статус публикации:** 40 PLAN + 1 WRITE зарегистрированы только при `HERMES_WRITE_ENABLED=true`;
+без флага модуль WRITE физически не импортируется. Продовый sync меняет только Aimash include-list и
+активацию `aimash_trusted_transport`, сохраняя host-local Hermes config. Наличие `0038` или одного
+только плагина не является разрешением обойти HMAC/cutover. Функциональный контракт — `SPEC.md` §3.11,
 эксплуатационный — `docs/DECISION_LAYER.md`.

@@ -315,6 +315,50 @@ class ConfirmStore:
             await s.commit()
             return True
 
+    async def bind_card_message_id_from_verified_reply(
+        self,
+        confirmation_id: str,
+        tg_message_id: int,
+        *,
+        actor_user_id: int,
+        actor_chat_id: int,
+    ) -> bool:
+        """Idempotently bind the proposal anchor from a cryptographically verified Telegram reply.
+
+        Hermes v0.19.0 has no post-delivery hook exposing the outgoing message id.  The trusted
+        gateway therefore signs the id of the *actual message being replied to* together with the
+        confirmation marker present in that message.  Only that verified path may call this helper.
+        A first call stamps the pending row only when actor and chat already match the immutable
+        proposal author/namespace; otherwise an early reply by another operator could permanently
+        hijack the empty anchor and denial-of-service the real author. A retry succeeds only for the
+        exact same anchor and identity. A different anchor, absent proposal or non-pending row fails.
+        """
+        async with Session() as s:
+            res = await s.execute(
+                update(Proposal)
+                .where(
+                    Proposal.confirmation_id == confirmation_id,
+                    Proposal.status == "pending",
+                    Proposal.tg_message_id.is_(None),
+                    Proposal.author_user_id.isnot(None),
+                    Proposal.author_user_id == actor_user_id,
+                    Proposal.chat_id == actor_chat_id,
+                )
+                .values(tg_message_id=tg_message_id)
+            )
+            if cast(CursorResult, res).rowcount == 1:
+                await s.commit()
+                return True
+            await s.rollback()
+        proposal = await self.get_confirmed(confirmation_id)
+        return bool(
+            proposal is not None
+            and proposal.status == "pending"
+            and proposal.tg_message_id == tg_message_id
+            and proposal.author_user_id == actor_user_id
+            and proposal.chat_id == actor_chat_id
+        )
+
     async def list_pending_attachments(self, limit: int = 10) -> list[PendingAttachment]:
         """Черновики, которым ОБЕЩАНО .xlsx-вложение и оно ещё не доставлено. Read-only.
 

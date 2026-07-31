@@ -216,6 +216,10 @@ class Settings(BaseSettings):
     # Stable keyed pseudonymization for CRM and identity ids. Separate from Fernet intentionally:
     # rotating the encryption key must not invalidate historical dedup/identity hashes.
     pseudonymization_hmac_key: SecretStr = SecretStr("")
+    # Hermes PLAN/WRITE stays physically absent unless this flag is explicit. The HMAC key is
+    # shared only with the trusted gateway plugin; Hermes still has no Google OAuth credentials.
+    hermes_write_enabled: bool = False
+    aimash_trust_hmac_key: SecretStr = SecretStr("")
     # SecretStr: DSN несёт пароль БД — маскируем в repr/логах/трейсбеках (golden rule #5).
     # Реальное значение — только через .get_secret_value() (db.session, migrations.env).
     database_url: SecretStr = SecretStr("postgresql+asyncpg://aimash:aimash@localhost:5432/aimash")
@@ -629,6 +633,17 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "SECRETS_ENCRYPTION_KEY невалиден (нужен ключ Fernet.generate_key())"
                 ) from e
+        return self
+
+    @model_validator(mode="after")
+    def _require_hermes_trusted_transport(self) -> "Settings":
+        """PLAN/WRITE without a signing key would let a fail-open hook erase actor provenance."""
+        if self.hermes_write_enabled:
+            key = self.aimash_trust_hmac_key.get_secret_value().encode("utf-8")
+            if len(key) < 32:
+                raise ValueError(
+                    "HERMES_WRITE_ENABLED=true requires AIMASH_TRUST_HMAC_KEY of at least 32 bytes"
+                )
         return self
 
     @model_validator(mode="after")

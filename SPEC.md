@@ -224,8 +224,9 @@
 
 1. Черновик существует и в статусе `pending`;
 2. `reply_to_message_id == proposal.tg_message_id` — реплай **на то самое** сообщение;
-3. `actor_chat_id == proposal.author_chat_id` — подтверждает автор задачи;
-4. `actor_chat_id` в списке подтверждающих (§1);
+3. `actor_user_id == proposal.author_user_id` — подтверждает автор задачи; `actor_chat_id` только
+   неймспейсит Telegram `message_id` и обязан совпасть с `proposal.chat_id`;
+4. `actor_user_id` в списке подтверждающих (§1);
 5. Не протух (TTL 60 мин) **+ freshness-recheck**: перед исполнением заново читается текущее значение и пересчитывается diff; «было» уехало ⇒ отказ и пересборка;
 6. `ConfirmStore.claim(confirmation_id)` — атомарно, одноразово;
 7. `ensure_allowed(proposal.customer_id)` — **заново**, аккаунт берётся из черновика, не из аргумента и не из контекста разговора;
@@ -240,13 +241,23 @@
 
 **И-Т1. Метаданные реплая никогда не приходят из аргументов инструмента.** `actor_chat_id` и `reply_to_message_id` обязаны поступать в наш код из доверенного канала рантайма. Аргументы инструмента генерирует LLM — значит наивная сигнатура позволяет модели **сфабриковать подтверждение**.
 
-**Канал подтверждён по докам v0.19** [Certain, `user-guide/features/hooks.md`]: хук **`pre_gateway_dispatch`** получает **полный `MessageEvent` до авторизации и диспатча** — `event.source.chat_id`, `event.message_id`, `source.chat_type`, `user_id` — и умеет вернуть `{"action": "skip|rewrite|allow"}`. Хук `pre_tool_call` умеет `{"action": "block", "message": "…"}`. Всего 17 плагин-хуков и три системы: gateway (`~/.hermes/hooks/`, `HOOK.yaml`+`handler.py`), плагинные (`ctx.register_hook`), shell (`~/.hermes/agent-hooks/`).
+**Канал подтверждён по исходнику и живой пробе v0.19** [Certain]: `pre_gateway_dispatch` получает
+полный `MessageEvent`, включая `reply_to_message_id`/`reply_to_text`; `pre_tool_call` получает тот же
+mutable args-dict, но не получает identity. Плагин `aimash_trusted_transport` коррелирует оба хука
+через task-local `gateway.session_context`, перезаписывает служебный `trusted_turn_token` и подписывает
+HMAC: actor/chat/message/thread, reply, точное имя инструмента, SHA-256 всех обычных аргументов, TTL и
+nonce. MCP независимо проверяет подпись; identity/reply полей в публичной execute-сигнатуре нет.
 
 > ⚠️ **Хуки фейлятся OPEN.** Дословно: «All three systems are non-blocking — errors in any hook are caught and logged, never crashing the agent». Исключение внутри хука не блокирует действие, а **пропускает** его. Для денежного гейта это недопустимо, отсюда правило:
 >
 > **Хук поставляет МЕТАДАННЫЕ. Решение выносит наш MCP-слой.** Хук не является рубежом безопасности — он источник доверенной личности. Даже если хук не отработал, `execute_confirmed` обязан отказать при отсутствии доверенной записи. Два рубежа, а не надежда на один.
 
-Осталось проверить эмпирически только одно: несёт ли нормализованный `MessageEvent` поле **`reply_to_message_id`** (в докадаптеров перечислены `text`, `message_type`, `source`, `message_id`; поле реплая не документировано). Если нет — подтверждение переходит на **одноразовый код** в тексте вместо реплая (личность даёт `user_id`, который есть). §15.2.
+Hermes v0.19 не даёт post-delivery hook с id исходящего сообщения. Поэтому карточка несёт маркер
+`AIMASH_CONFIRM:<confirmation_id>`; при реальном реплае gateway подписывает фактический
+`reply_to_message_id`, маркер и полный `reply_to_text`. MCP требует, чтобы текст реплая содержал
+неизменённый DB-summary черновика, лениво и одноразово штампует этот message id, после чего вызывает
+существующий `ConfirmStore.confirm_by_reply`. Маркер без diff, реплай на чужого бота, selected quote
+вместо полной карточки, другой автор/чат, просрочка или повтор — отказ до SDK.
 
 **И-Т2. Черновик живёт в нашей БД, не в живом прогоне.** Таймаут Hermes считает простой, а не wall-clock; прогон, ждущий реплая 10–40 минут, — это чистый простой, и он умрёт. Плюс компрессор контекста первым делом вырезает результаты вызовов инструментов — то есть ровно диффы «было → станет». Реплай «да» приходит в **новый** прогон, который поднимает черновик по `proposal_id`.
 
@@ -728,7 +739,9 @@ cross-channel mutations отсутствуют намеренно.
 rollback shadow-контура — `docs/SHADOW_MODE_EVAL.md`.
 
 **3.11.11 Граница live-готовности.** Миграция `0038` и сервисы не публикуют WRITE в Hermes: живой
-MCP остаётся READ-only до trusted reply transport/cutover §15.2. Slack/email/Teams, OIDC/SAML и
+MCP-поверхность переключается между 25 READ и 25 READ + 40 PLAN + 1 WRITE флагом
+`HERMES_WRITE_ENABLED`; WRITE требует общий ≥32-byte `AIMASH_TRUST_HMAC_KEY` и trusted plugin.
+Slack/email/Teams, OIDC/SAML и
 Meta/Microsoft/TikTok требуют credentials и transport/ingestion adapters. Считать наличие схемы
 «включённой интеграцией» запрещено. Детальный контракт — `docs/DECISION_LAYER.md`.
 
@@ -800,9 +813,8 @@ Telegram supergroup агентства
 
 **Архивируется после гейтированного cutover:** кнопочный слой интерфейса — клавиатуры, inline-кнопки, FSM-визарды, обработчики callback-запросов; из `agent/` — только свой цикл (`loop.py`, `campaign_edit.py`, `campaign_settings.py`, `openrouter_account.py`), который заменяет Hermes. `agent/router.py` и `agent/tools/schemas.py` нужны сохраняемым пакетам и переезжают в bot-free пакет; `agent/system_prompt.py` не существует.
 
-**Достраивается:** слой подключения инструментов к Hermes (25 READ live; полный PLAN/WRITE-код
-ready-dark и физически не зарегистрирован production entrypoint до доверенного reply-transport) ·
-доверенный транспорт реплай-подтверждения · инструменты памяти · роли поверх безролевого Hermes ·
+**Достраивается:** слой подключения инструментов к Hermes (25 READ; 40 PLAN + 1 WRITE реализованы
+за feature-flag и HMAC trusted reply-transport, live-статус проверяется по §15.2) · инструменты памяти · роли поверх безролевого Hermes ·
 стартовая библиотека скилов · гарды И1–И8 · артефактная память · гарды самообучения Г1–Г8.
 
 ### 5.3 Что уносит с собой кнопочный слой — и что надо заменить
@@ -845,7 +857,7 @@ ready-dark и физически не зарегистрирован production 
 
 **Два слоя — их нельзя путать:**
 
-- **Слой 1 — инструменты (транспорт до Google Ads): MCP-сервер.** Как Hermes дотягивается до `ads/`/`confirm/`. Сейчас live-поверхность READ; два `propose_*` и reply/execute facade существуют ready-dark, остальной PLAN/WRITE дописывается (шаг 5).
+- **Слой 1 — инструменты (транспорт до Google Ads): MCP-сервер.** Как Hermes дотягивается до `ads/`/`confirm/`. Реестр: 25 READ + 40 PLAN + 1 WRITE; PLAN/WRITE физически импортируются только при `HERMES_WRITE_ENABLED=true` и каждый вызов проходит trusted wrapper.
 - **Слой 2 — автономный агентский цикл** (многошаговость, память, скилы, самообучение, проактив): Hermes-цикл + скилы/память + scheduler + гейт (Волны 1–3). **Не относится к выбору транспорта.** MCP-сервер этого не даёт и не должен.
 
 **Почему MCP, а не плагин — и это сильнее прежней рекомендации:**
@@ -871,7 +883,7 @@ ready-dark и физически не зарегистрирован production 
 **Что не меняется:**
 
 - **Approvals Hermes MCP-инструменты не покрывают** (только терминальные команды) — подтверждение живёт **целиком в нашем слое**. Инвариант.
-- Пилот: только READ; PLAN/WRITE — шаг 5.
+- Rollout: READ — дефолт; PLAN/WRITE включается флагом только вместе с плагином и совпадающим HMAC-ключом.
 - Все девять проверок §2.2, восемь инвариантов §8.1, правило тонкого слоя §5.5 — без изменений.
 
 **Версия Hermes для пина: `v0.19.0` (тег `v2026.7.20`).** Каденция ~5–10 дней, автообновление на проде не включается.

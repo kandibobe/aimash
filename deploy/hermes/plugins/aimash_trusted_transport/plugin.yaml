@@ -1,0 +1,3 @@
+name: aimash_trusted_transport
+version: 1.0.0
+description: Trusted Telegram metadata signer for Aimash PLAN/WRITE MCP calls

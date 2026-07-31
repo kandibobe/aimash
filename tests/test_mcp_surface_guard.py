@@ -18,15 +18,28 @@ from __future__ import annotations
 
 import pytest
 
+from core.config import settings
 from core.guards import require_registered_surface
 from mcp_server.server import _registered_tool_names, build_server
 from mcp_server.tools_read import READ_MCP_TOOLS
+from mcp_server.trusted_transport import TOKEN_PARAM
 
 
 def test_build_server_exposes_exactly_the_read_surface() -> None:
     """Позитив: собранный сервер несёт РОВНО READ-набор — ни больше (WRITE/confirm/execute), ни меньше."""
     mcp = build_server()
     assert _registered_tool_names(mcp) == READ_MCP_TOOLS
+
+
+def test_write_mode_exposes_only_trusted_plan_write_surface(monkeypatch) -> None:
+    from mcp_server.tools_write import PLAN_WRITE_MCP_TOOLS
+
+    monkeypatch.setattr(settings, "hermes_write_enabled", True)
+    mcp = build_server()
+    assert _registered_tool_names(mcp) == READ_MCP_TOOLS | PLAN_WRITE_MCP_TOOLS
+    for name in PLAN_WRITE_MCP_TOOLS:
+        tool = next(t for t in mcp._tool_manager.list_tools() if t.name == name)
+        assert TOKEN_PARAM in tool.parameters["properties"]
 
 
 def test_surface_guard_rejects_confirm_execute_leak() -> None:

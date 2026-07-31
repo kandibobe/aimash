@@ -156,3 +156,58 @@ jobs:
               done
               echo "✅ $CNT running (деплой здоров)"
             done
+
+            # Контур A держит MCP как stdio-child `docker exec` внутри aimash-bot. Пересборка
+            # контейнера обрывает pipe, даже когда оба compose-сервиса healthy. SSH deploy user
+            # на production VPS измерен как root (31.07.2026), то есть он управляет тем же root
+            # systemd --user gateway; если это когда-либо изменят, деплой обязан упасть, а не
+            # оставить Hermes в тихо деградировавшем состоянии.
+            if [ "$(id -u)" -ne 0 ]; then
+              echo "::error::Hermes gateway принадлежит root, а deploy user=$(id -un)"
+              exit 1
+            fi
+            export XDG_RUNTIME_DIR=/run/user/0
+            command -v hermes >/dev/null
+            /usr/local/lib/hermes-agent/venv/bin/python \
+              deploy/hermes/sync_aimash_surface.py
+            EXPECTED_TOOLS=$(docker exec -i aimash-bot python -c \
+              "from mcp_server.server import expected_tool_names; print(len(expected_tool_names()))")
+            docker exec -i aimash-bot python -c \
+              "import sys; from core.config import settings; \
+              from mcp_server.server import expected_tool_names; expected_tool_names(); \
+              assert settings.hermes_write_enabled == ('mcp_server.tools_write' in sys.modules)"
+            # `hermes gateway restart` can return 0 after refreshing an outdated unit while the
+            # old gateway process is still serving.  A successful CLI exit is therefore not a
+            # restart proof: require a new systemd MainPID and use the documented unit fallback.
+            GW_PID_BEFORE=$(systemctl --user show -p MainPID --value hermes-gateway.service)
+            hermes gateway restart
+            sleep 2
+            GW_PID_AFTER=$(systemctl --user show -p MainPID --value hermes-gateway.service)
+            if [ "$GW_PID_AFTER" = "$GW_PID_BEFORE" ] || [ "$GW_PID_AFTER" = "0" ]; then
+              echo "::warning::Hermes CLI restart did not replace PID $GW_PID_BEFORE; using systemd fallback"
+              systemctl --user restart hermes-gateway.service
+              sleep 2
+              GW_PID_AFTER=$(systemctl --user show -p MainPID --value hermes-gateway.service)
+            fi
+            GW_STATE=$(systemctl --user is-active hermes-gateway.service || true)
+            if [ "$GW_STATE" != "active" ] || [ "$GW_PID_AFTER" = "0" ] \
+              || [ "$GW_PID_AFTER" = "$GW_PID_BEFORE" ]; then
+              echo "::error::Hermes gateway was not replaced (state=$GW_STATE, before=$GW_PID_BEFORE, after=$GW_PID_AFTER)"
+              journalctl --user -u hermes-gateway.service --since '-3 minutes' --no-pager || true
+              exit 1
+            fi
+            echo "Hermes gateway replaced: PID $GW_PID_BEFORE -> $GW_PID_AFTER"
+            MCP_TEST=$(hermes mcp test aimash)
+            echo "$MCP_TEST"
+            echo "$MCP_TEST" | grep -Fq "Tools discovered: $EXPECTED_TOOLS"
+            sleep 5
+            if docker logs --since 2m aimash-bot 2>&1 | grep -Fq "409 Conflict"; then
+              echo "::error::legacy Telegram bot получил 409 Conflict после deploy"
+              exit 1
+            fi
+            if journalctl --user -u hermes-gateway.service --since '-2 minutes' --no-pager 2>&1 \
+              | grep -Fq "409 Conflict"; then
+              echo "::error::Hermes Telegram gateway получил 409 Conflict после deploy"
+              exit 1
+            fi
+            echo "✅ Hermes gateway reconnected: $EXPECTED_TOOLS tools, no Telegram 409"
