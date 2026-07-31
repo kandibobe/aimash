@@ -317,6 +317,31 @@ tar tzf "$(ls -1t /root/hermes-backups/*.tgz | head -1)" | grep -E 'state\.db|\.
 **только шифрованной** (`gpg`/`age`, заготовка в хвосте скрипта). НЕ коммитить, НЕ в общие логи. Локальные
 архивы гибнут вместе с сервером — вывоз в отдельное хранилище остаётся за владельцем.
 
+### Инфраструктурные уведомления в общий топик
+
+`scheduler` не может сообщить о собственном падении. Поэтому `aimash-ops-watch.timer` раз в минуту
+запускает host-level [`scripts/ops_alert.py`](../../scripts/ops_alert.py) и сравнивает состояние с
+предыдущим атомарным snapshot в `/var/lib/aimash-ops-watch/state.json`. Он уведомляет о:
+
+- остановке, unhealthy-состоянии, рестарте и восстановлении `aimash-bot`, `aimash-scheduler`,
+  `aimash-pg`, `aimash-backup`;
+- остановке/смене PID/восстановлении `hermes-gateway.service`;
+- неактивном `hermes-backup.timer`, заполнении диска ≥85%/≥95% и Telegram `409 Conflict`;
+- успешном или проваленном production deploy (отдельный сигнал из CI после live-гейтов).
+
+В серверном `/opt/aimash/.env` обязательны `OPS_ALERT_CHAT_ID`; для forum supergroup задаётся
+`OPS_ALERT_THREAD_ID` (общий топик текущей группы — `1`). Токен повторно не хранится: используется
+существующий `TELEGRAM_BOT_TOKEN`, в лог/состояние он не попадает. Первый тик только сохраняет baseline,
+недоставленный transition состояние не продвигает и повторяется на следующей минуте.
+
+```bash
+systemctl status aimash-ops-watch.timer --no-pager
+systemctl start aimash-ops-watch.service          # ручной тик
+journalctl -u aimash-ops-watch.service -n 50 --no-pager
+python3 /opt/aimash/scripts/ops_alert.py send \
+  --severity info --title "Aimash alert test" --body "Проверка общего топика"
+```
+
 ---
 
 ## 9. Kill-switch и лимиты трат

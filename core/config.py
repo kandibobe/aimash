@@ -118,6 +118,12 @@ class Settings(BaseSettings):
     # Telegram
     telegram_bot_token: SecretStr = SecretStr("")
     telegram_whitelist_chat_ids: str = ""  # "123,456"
+    # Host-level watcher (`scripts/ops_alert.py`): отдельный адрес назначения, потому что
+    # ADMIN_CHAT_IDS — пользователи/лички, а инфраструктурные события нужны в общем топике.
+    # Строки намеренно: пустой OPS_ALERT_THREAD_ID валиден и означает General topic по умолчанию;
+    # числовой формат fail-closed проверяет сам sender перед сетью.
+    ops_alert_chat_id: str = ""
+    ops_alert_thread_id: str = ""
     # Пер-пользовательская изоляция аккаунтов ЧТЕНИЯ (core.access, таблица account_access):
     #   auto (дефолт) — пустая таблица грантов ⇒ legacy-проход (все whitelisted видят весь
     #                   read-list; поведение одно-операторного режима), ПЕРВЫЙ грант включает

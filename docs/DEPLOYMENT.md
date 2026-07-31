@@ -77,6 +77,8 @@ cp .env.example .env
 | `DOSSIER_MAX_PAGES_PER_TYPE` / `PROFILE_CTX_CHARS` | нет | `12` / `3000` — страниц одного типа в досье; сколько символов профиля подаётся контекстом в §19/§10 |
 | `CLIENT_TEXT_IDLE_S` | нет | `60` — авто-сохранение накопленного текста профиля по таймауту (§20.3); `0` = выкл. |
 | `ADMIN_CHAT_IDS` | нет | CSV chat_id админов (`/whoami`). Пусто ⇒ нет алертов об ошибках и readiness-пинга, `/grant`/`/adduser`/`/addadmin` недоступны никому |
+| `OPS_ALERT_CHAT_ID` | нет | `chat_id` супергруппы для независимых host-level алертов о deploy/restart/down/recovery. Пусто ⇒ watcher работает, но доставка отключена |
+| `OPS_ALERT_THREAD_ID` | нет | ID общего forum-топика. Пусто ⇒ Telegram отправляет в General topic по умолчанию |
 | `ERROR_ALERT_INTERVAL_MINUTES` | нет | `0` (выкл) — период алерта админам о НОВЫХ `error_events` (§15). На проде `15` (в `.env.defaults`); без `ADMIN_CHAT_IDS` — no-op |
 | `EXTERNAL_CHANGES_INTERVAL_HOURS` / `EXTERNAL_CHANGES_WINDOW_DAYS` | нет | `0` (выкл) / `7` — Р6: опрос `change_event` и алерт о правках, сделанных МИМО бота (веб-интерфейс, Editor, чужой API-клиент). Google о них не уведомляет. Окно 1..29 (ретенция ресурса минус сутки запаса на host-date фолбэк), вне диапазона ⇒ 7 с warning. Прод: `6` |
 | `LLM_KEYWORDS` / `LLM_CLUSTERING` / `LLM_EXTRACT` / `LLM_DOSSIER` / `LLM_ANALYST` | нет | модели по ролям (сменяемы). Ключи/копирайт — `claude-opus-4.8` (решение владельца 2026-07); **старый пин в `.env` перебьёт это — строку удалить, не править** |

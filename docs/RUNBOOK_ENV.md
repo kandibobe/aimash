@@ -63,6 +63,11 @@ nano .env
 # не приходит readiness-пинг после деплоя, а /grant /adduser /addadmin недоступны никому.
 ADMIN_CHAT_IDS=<chat_id>,<chat_id>
 
+# Независимые инфраструктурные уведомления в общий топик супергруппы. Эти значения читает
+# host-level watcher, поэтому он может сообщить даже о падении контейнера scheduler/bot.
+OPS_ALERT_CHAT_ID=-1004443550627
+OPS_ALERT_THREAD_ID=1
+
 # Страна ГЕО по умолчанию (агентство льёт на Уганду). Пусто ⇒ кампания без явного гео в брифе
 # не создастся: код осознанно НЕ угадывает страну.
 DEFAULT_GEO_COUNTRY_CODE=UG
@@ -108,6 +113,10 @@ docker compose logs --tail=20 scheduler   # «планировщик запущ�
 сервиса `bot`. Молча мёртвый планировщик = зависшие в `executing` черновики никто не поднимет.
 В Telegram: пришёл readiness-пинг «✅ Aimash запущен…» (он же доказывает, что `ADMIN_CHAT_IDS`
 прочитан), `/diag` без инцидентов, `/whoami` отвечает.
+
+Host watcher проверяется отдельно: `systemctl start aimash-ops-watch.service` сохраняет baseline
+без спама, следующий deploy присылает `Aimash deploy completed`. Статус и ближайший тик:
+`systemctl status aimash-ops-watch.timer --no-pager`.
 
 **Откат:** `cp .env.bak.<ts> .env && docker compose up -d --force-recreate bot`.
 

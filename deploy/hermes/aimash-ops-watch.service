@@ -1,0 +1,16 @@
+[Unit]
+Description=Aimash host-level operational health watcher
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=OPS_ALERT_STATE_PATH=/var/lib/aimash-ops-watch/state.json
+ExecStart=/usr/bin/python3 /opt/aimash/scripts/ops_alert.py check
+StateDirectory=aimash-ops-watch
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/aimash-ops-watch

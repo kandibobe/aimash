@@ -104,11 +104,27 @@ jobs:
           script: |
             set -e
             cd /opt/aimash
+            DEPLOY_STAGE="git fetch"
+            notify_deploy_exit() {
+              CODE=$?
+              trap - EXIT
+              if [ "$CODE" -ne 0 ] && [ -f scripts/ops_alert.py ]; then
+                SHA=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+                python3 scripts/ops_alert.py send \
+                  --severity critical \
+                  --title "Deploy Aimash failed" \
+                  --body "SHA $SHA; этап: $DEPLOY_STAGE; GitHub Actions завершится с ошибкой." \
+                  || true
+              fi
+              exit "$CODE"
+            }
+            trap notify_deploy_exit EXIT
             git fetch --prune origin master
             git reset --hard origin/master
             # Маркер версии внутрь образа: `.dockerignore` исключает `.git`, поэтому иначе коммит
             # в контейнере узнать нечем. Берём ПОСЛЕ reset — то есть ровно то, что задеплоено.
             export GIT_SHA="$(git rev-parse --short HEAD)"
+            DEPLOY_STAGE="docker build/start"
             docker compose up -d --build
             docker image prune -f
             # `image prune` НЕ трогает кэш сборок BuildKit — а он растёт ~600 МБ за КАЖДЫЙ деплой
@@ -127,6 +143,7 @@ jobs:
             # живёт `reconcile_stale_executing` (зависшие мутации → needs_review). Мёртвый
             # aimash-scheduler = денежные черновики молча остаются в `executing`, никого не уведомив,
             # а деплой при этом зелёный — ровно тот класс ошибки, который проект уже ловил.
+            DEPLOY_STAGE="container healthcheck"
             echo "⏳ Пост-деплой проверка здоровья контейнеров..."
             sleep 20
             for PAIR in aimash-bot:bot aimash-scheduler:scheduler; do
@@ -168,16 +185,21 @@ jobs:
             fi
             export XDG_RUNTIME_DIR=/run/user/0
             command -v hermes >/dev/null
+            DEPLOY_STAGE="Hermes surface sync"
             /usr/local/lib/hermes-agent/venv/bin/python \
               deploy/hermes/sync_aimash_surface.py
             # Hermes state/config/.env live outside Compose and outside the PostgreSQL backup.
             # Install the versioned timer on every deploy so a rebuilt VPS cannot silently lose it.
             install -m 0644 deploy/hermes/hermes-backup.service /etc/systemd/system/hermes-backup.service
             install -m 0644 deploy/hermes/hermes-backup.timer /etc/systemd/system/hermes-backup.timer
+            install -m 0644 deploy/hermes/aimash-ops-watch.service /etc/systemd/system/aimash-ops-watch.service
+            install -m 0644 deploy/hermes/aimash-ops-watch.timer /etc/systemd/system/aimash-ops-watch.timer
             chmod 0700 /root/.hermes
             test ! -f /root/.hermes/state.db || chmod 0600 /root/.hermes/state.db
             systemctl daemon-reload
             systemctl enable --now hermes-backup.timer
+            systemctl enable --now aimash-ops-watch.timer
+            DEPLOY_STAGE="Hermes backup"
             systemctl start hermes-backup.service
             HERMES_BACKUP=$(ls -1t /root/hermes-backups/hermes-*.tgz | head -1)
             test -n "$HERMES_BACKUP"
@@ -192,6 +214,7 @@ jobs:
             # `hermes gateway restart` can return 0 after refreshing an outdated unit while the
             # old gateway process is still serving.  A successful CLI exit is therefore not a
             # restart proof: require a new systemd MainPID and use the documented unit fallback.
+            DEPLOY_STAGE="Hermes gateway restart"
             GW_PID_BEFORE=$(systemctl --user show -p MainPID --value hermes-gateway.service)
             hermes gateway restart
             sleep 2
@@ -224,3 +247,10 @@ jobs:
               exit 1
             fi
             echo "✅ Hermes gateway reconnected: $EXPECTED_TOOLS tools, no Telegram 409"
+            DEPLOY_STAGE="operational notification"
+            systemctl start aimash-ops-watch.service || true
+            python3 scripts/ops_alert.py send \
+              --severity success \
+              --title "Aimash deploy completed" \
+              --body "SHA $GIT_SHA; bot и scheduler healthy; Hermes gateway PID $GW_PID_AFTER; MCP tools: $EXPECTED_TOOLS."
+            trap - EXIT
