@@ -153,3 +153,34 @@ jobs:
               done
               echo "✅ $CNT running (деплой здоров)"
             done
+
+            # Контур A держит MCP как stdio-child `docker exec` внутри aimash-bot. Пересборка
+            # контейнера обрывает pipe, даже когда оба compose-сервиса healthy. SSH deploy user
+            # на production VPS измерен как root (31.07.2026), то есть он управляет тем же root
+            # systemd --user gateway; если это когда-либо изменят, деплой обязан упасть, а не
+            # оставить Hermes в тихо деградировавшем состоянии.
+            if [ "$(id -u)" -ne 0 ]; then
+              echo "::error::Hermes gateway принадлежит root, а deploy user=$(id -un)"
+              exit 1
+            fi
+            export XDG_RUNTIME_DIR=/run/user/0
+            command -v hermes >/dev/null
+            docker exec -i aimash-bot python -c \
+              "import sys; import mcp_server.server; assert 'mcp_server.tools_write' not in sys.modules"
+            EXPECTED_READ=$(docker exec -i aimash-bot python -c \
+              "from mcp_server.tools_read import READ_MCP_TOOLS; print(len(READ_MCP_TOOLS))")
+            hermes gateway restart
+            MCP_TEST=$(hermes mcp test aimash)
+            echo "$MCP_TEST"
+            echo "$MCP_TEST" | grep -Fq "Tools discovered: $EXPECTED_READ"
+            sleep 5
+            if docker logs --since 2m aimash-bot 2>&1 | grep -Fq "409 Conflict"; then
+              echo "::error::legacy Telegram bot получил 409 Conflict после deploy"
+              exit 1
+            fi
+            if journalctl --user -u hermes-gateway.service --since '-2 minutes' --no-pager 2>&1 \
+              | grep -Fq "409 Conflict"; then
+              echo "::error::Hermes Telegram gateway получил 409 Conflict после deploy"
+              exit 1
+            fi
+            echo "✅ Hermes gateway reconnected: $EXPECTED_READ READ tools, no Telegram 409"
