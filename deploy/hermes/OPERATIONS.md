@@ -60,7 +60,7 @@ systemctl --user list-units 'hermes-gateway-*'
 |---|---|
 | `model.context_length`, `compression.*` | **Hot-reload** — со следующего сообщения, без рестарта [Certain] |
 | Смена `model.provider`/`model.default` | Новые сессии подхватят; живым — `hermes gateway restart` (issue #13146) [Certain] |
-| `mcp_servers.*` (наш `aimash`) | `hermes gateway restart` (или `/reload-mcp` в чате) [Certain] |
+| `mcp_servers.*` / `plugins.enabled` (наш `aimash`) | `deploy/hermes/sync_aimash_surface.py` + `hermes gateway restart` [Certain] |
 | `gateway.platforms.telegram.*` (auth, топики, mention) | `hermes gateway restart`; **добавление** нового топика подхватывается на след. cache-miss, **изменение/удаление** привязки — только рестарт [Likely] |
 | `.env` (ротация ключей) | `/reload` (сессионный, только CLI) или `hermes gateway restart` для gateway-wide [Certain] |
 | `agent.disabled_toolsets`, `approvals.*` | `hermes gateway restart` [Likely] |
@@ -140,7 +140,8 @@ hermes doctor --fix                  # health self-check с авто-фиксо�
 ```
 
 **Кавеат `mcp test`:** доки подтверждают, что он тестирует **коннект**, но не сказано, что печатает список/счётчик
-инструментов [Likely]. Чтобы позитивно убедиться, что 25 READ-инструментов живые — в чате `/reload-mcp` и спросить агента
+инструментов [Likely]. Чтобы позитивно убедиться, что поверхность жива — сравнить `Tools discovered`
+с `mcp_server.server.expected_tool_names()` (25 READ либо 65 после WRITE-cutover), затем в чате спросить агента
 «какие MCP-инструменты доступны», либо смотреть стартовый баннер в `gateway.log`. MCP-инструменты регистрируются с
 префиксом `mcp_<server>_<tool>`.
 
@@ -161,6 +162,11 @@ docker exec -i aimash-bot python -m mcp_server   # должен поднятьс
 
 В форум-топике супергруппы с упоминанием бота: «покажи статистику за неделю по &lt;аккаунт&gt;» → числа из
 `code_numbers` MCP, не из головы модели.
+
+WRITE проверять только на Draft `7753643025`: попросить изменить приостановленную тестовую кампанию,
+убедиться, что пришёл полный diff с `AIMASH_CONFIRM:…`, и ответить обычным Telegram reply на всю
+карточку. Selected quote, ответ без reply, reply другого пользователя, повторное «да» и подмена
+account/args обязаны отказать. После успеха сверить audit-row и повторным READ фактическое значение.
 
 ---
 
@@ -188,8 +194,9 @@ hermes mcp test aimash
 
 > ✅ **Reconnect автоматизирован 31.07.2026.** Замер auth-журнала подтвердил, что production deploy входит root —
 > тем же пользователем, которому принадлежит `hermes-gateway.service`. SSH-шаг CI после healthcheck обоих
-> контейнеров проверяет физическое отсутствие WRITE-импорта, вычисляет ожидаемое число READ из реестра,
-> перезапускает gateway, выполняет `hermes mcp test aimash` и валит deploy при несовпадении числа инструментов
+> контейнеров синхронизирует только Aimash surface/plugin/SOUL (не затирая host-local config), проверяет
+> соответствие WRITE-импорта feature-flag, вычисляет ожидаемое число инструментов из реестра,
+> перезапускает gateway, выполняет `hermes mcp test aimash` и валит deploy при несовпадении числа
 > или `409 Conflict` в любом Telegram-поллере. Смена `VPS_SSH_USER` с root теперь намеренно красит deploy, пока
 > владение gateway не будет перенесено явно.
 

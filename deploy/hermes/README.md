@@ -1,8 +1,9 @@
 # Ранбук: поднять Hermes (Контур A) рядом с боевым ботом на VPS
 
 READ-пилот пивота Aimash → Hermes. Hermes-агент отвечает в Telegram и через
-MCP-сервер `aimash` (пакет `mcp_server/`, 25 READ-инструментов) читает Google Ads. Денежное ядро не
-затрагивается: слой **READ-only by construction** — WRITE-инструментов физически нет.
+MCP-сервер `aimash` (пакет `mcp_server/`) всегда отдаёт 25 READ-инструментов. При явном
+`HERMES_WRITE_ENABLED=true` он добавляет 39 PLAN + 1 WRITE через HMAC trusted Telegram transport;
+при false модуль WRITE физически не импортируется.
 
 **Где что написано:** требования и приёмка — [`/SPEC.md`](../../SPEC.md); архитектура (топология,
 И1–И8, К1–К10, реестр инструментов) — [`HERMES_SPEC.md`](HERMES_SPEC.md); почему так —
@@ -83,19 +84,17 @@ hermes model
 
 # 4. Долить НЕ-модельные блоки из эталона репо (мастер их не трогает):
 #    mcp_servers.aimash (без него нет доступа к Google Ads), gateway…group_topics (топик→скил),
-#    approvals: manual. Эталон: /opt/aimash/deploy/hermes/config.yaml — подставить REPLACE_* (user
-#    id, id супергруппы, thread_id топиков). НЕ мёржить agent.disabled_toolsets из эталона, если на
-#    экране тулсетов выбрал более широкий набор — иначе он снова погасит выбранное.
+#    approvals: manual. Эталон: /opt/aimash/deploy/hermes/config.yaml — справочный: live model/dashboard
+#    настройки не заменять целиком.
 hermes config edit
-#   (альтернатива «с нуля из файла»: cp /opt/aimash/deploy/hermes/config.yaml ~/.hermes/config.yaml,
-#    затем hermes model — мастер перезапишет только model-блок.)
+#   Aimash surface/plugin/SOUL синхронизируются выборочно:
+/usr/local/lib/hermes-agent/venv/bin/python /opt/aimash/deploy/hermes/sync_aimash_surface.py
 
 # 4b. Идентичность агента → ~/.hermes/SOUL.md (слот №1 системного промпта, автозагрузка Hermes;
 #     head/tail-усечение на context_file_max_chars, дефолт 20000 — эталон умещается с запасом).
 #     Плейсхолдеров нет, секретов нет: копируется как есть, применяется со следующей сессии агента.
 cp /opt/aimash/deploy/hermes/SOUL.md ~/.hermes/SOUL.md
-#   ⚠️ SOUL.md описывает READ-фазу («ничего не меняю»). При выпуске WRITE (Волна 1 шаг 5) обновить
-#      раздел «Чего ты НЕ делаешь» — иначе персона расходится с реально подключёнными инструментами.
+#   Обычно вручную не нужно: sync_aimash_surface.py делает атомарную копию и backup.
 
 # 5. Проверка конфига до старта. ВАЖНО: `hermes config check` про «missing/stale», он НЕ ловит
 #    неизвестные/опечатанные ключи — Hermes их молча игнорирует (К10). Единственный надёжный контроль:
@@ -117,7 +116,7 @@ hermes gateway status              # active; в логах — коннект MC
 #          (подробнее про логи/linger — OPERATIONS.md §0/§3)
 
 # 7. Быстрая проверка MCP-коннекта до Telegram.
-hermes mcp test aimash             # должен отдать 25 READ-инструментов
+hermes mcp test aimash             # 25 в READ-режиме, 65 при принятом WRITE-cutover
 #   (`aimash` здесь — имя MCP-сервера из config.yaml, НЕ профиля)
 ```
 
@@ -210,6 +209,5 @@ MCP READ-слой (`mcp_server/`) отдаёт чистые редактиров
 локально, 8 добавленных 30.07 (кампании · таргетинг · настройки · стратегия ставок · разбивки ·
 аудитории · квота) — **только офлайн** (`tests/test_mcp_read_smoke.py`, SDK подменён). Живой Draft-прогон
 этих восьми не делался: конверт и сериализация доказаны, ответ реального API — нет.
-Шаги на VPS (RB-0…RB-3) выполняет владелец — SSH к боевому серверу
-и `git push` в среде агента недоступны. Артефакты этого каталога приезжают на сервер штатным
-авто-деплоем (push master → CI green → `git reset --hard` → `docker compose up -d --build`).
+Артефакты этого каталога приезжают на сервер штатным авто-деплоем
+(push master → CI green → `git reset --hard` → `docker compose up -d --build` → selective Hermes sync).

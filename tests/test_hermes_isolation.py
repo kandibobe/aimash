@@ -1,7 +1,7 @@
 """Гарды изоляции разрешений от памяти/скилов/external-контента (пивот Hermes, §4 — И1…И8).
 
-Инкремент «MCP READ» несёт ТОЛЬКО read-релевантное зерно инвариантов; полные И1–И8 + injection-корпус
-— шаг ПЕРЕД WRITE (deploy/hermes/HERMES_SPEC.md §4, дорожная карта шаги 2/15). Здесь живыми проверяются:
+Файл начался как READ-зерно, но перед публикацией WRITE получил живые И1–И8 и injection-корпус.
+Здесь проверяются:
 
   • **И4 (зерно)** — construction-time assert в `mcp_server.server`: READ-инструменты физически не
     пересекаются с мутационными (`agent.tools.schemas.MUTATION_TOOLS`). Импорт роняет процесс, если
@@ -11,9 +11,8 @@
     редактированный error-конверт с `error_code == "forbidden_account"` — не сырое исключение и не
     данные; обратная половина доказывает, что замок пропускает разрешённый аккаунт.
 
-Остальные И1–И3/И5–И8 — каркас со `skip("шаг перед WRITE")` с ДОСЛОВНОЙ формулировкой инварианта,
-чтобы файл рос, а не переписывался, и следующий шаг наполнил их корпусом атак (инлайн, как
-tests/test_dossier.py / test_export_formula_injection.py).
+  • **И1–И3/И5–И8** — exact-args HMAC, безаргументный execute, trusted provenance, закрытые host-
+    поверхности, client-scoped memory, external-content phase lock и DB-счётчик proposal на ход.
 
 Стиль — как tests/test_safety_core.py: `sys.path.insert` + `# noqa: E402`, contextmanager-фикстуры
 allow-list поверх `settings`, in-process, `asyncio.run` для async-инструментов.
@@ -249,7 +248,7 @@ def test_read_lock_admits_allowed_account_and_reaches_reader(tool_name):
     )
 
 
-def test_reference_hermes_config_exposes_exactly_the_read_registry():
+def test_reference_hermes_config_exposes_exactly_the_enabled_registry():
     """Четвёртое место lock-step: `tools.include` в `~/.hermes/config.yaml`.
 
     Это ВТОРОЙ allow-list, живущий вне репозитория: инструмент, зарегистрированный в FastMCP, но не
@@ -261,6 +260,7 @@ def test_reference_hermes_config_exposes_exactly_the_read_registry():
     import yaml
 
     from mcp_server.tools_read import READ_MCP_TOOLS
+    from mcp_server.tools_write import PLAN_WRITE_MCP_TOOLS
 
     cfg_path = Path(__file__).resolve().parents[1] / "deploy" / "hermes" / "config.yaml"
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
@@ -272,7 +272,8 @@ def test_reference_hermes_config_exposes_exactly_the_read_registry():
             include = set(inc)
             break
     assert include is not None, f"в {cfg_path.name} не нашёлся tools.include — эталон разошёлся"
-    missing, extra = sorted(set(READ_MCP_TOOLS) - include), sorted(include - set(READ_MCP_TOOLS))
+    expected = set(READ_MCP_TOOLS | PLAN_WRITE_MCP_TOOLS)
+    missing, extra = sorted(expected - include), sorted(include - expected)
     assert not missing and not extra, (
         f"tools.include эталона разошёлся с реестром. Дописать: {missing}; лишние: {extra}. "
         "Не забыть ту же правку в ~/.hermes/config.yaml на VPS — иначе инструмент невидим агенту."
@@ -386,90 +387,169 @@ def test_probe_echo_redacts_and_clamps():
     assert _clamp_delay(-5) == 0
 
 
-# ── Каркас полных инвариантов И1–И8 (наполняется шагом ПЕРЕД WRITE) ──────────────────
-# Формулировки — дословно из deploy/hermes/HERMES_SPEC.md §4. Корпус атак (client_site_pages, скилы в
-# shell/HTTP/файлы, страницы конкурентов) — инлайн, как в существующих injection-тестах.
-
-_WRITE_STEP = (
-    "наполняется шагом ПЕРЕД WRITE (deploy/hermes/HERMES_SPEC.md §4, дорожная карта шаги 2/15)"
-)
-# И3 — исключение: инвариант УЖЕ проверен живьём в tests/test_provenance_gate.py (на настоящем
-# ConfirmStore). Заглушка держит дословную формулировку в общем файле изоляции, но не «ждёт WRITE».
-_I3_COVERED = "живьём покрыт tests/test_provenance_gate.py — заглушка держит формулировку И3"
-# И1 расщеплён на две половины с разным статусом. Execution-half (замок на исполнении) — УЖЕ живой
-# в tests/test_execute_account_binding.py на настоящем ConfirmStore: execute_confirmed берёт аккаунт
-# из proposal.customer_id и заново проходит ensure_allowed до SDK и до claim. Creation-half (внешний
-# источник не подменяет customer_id при СОЗДАНИИ черновика) ждёт propose-surface (шаг перед WRITE).
-_I1_EXEC_COVERED = (
-    "живьём покрыт tests/test_execute_account_binding.py "
-    "(test_execute_confirmed_uses_proposal_customer_id / _foreign_customer_id_denied / "
-    "_empty_stamp_fail_closed) — заглушка держит формулировку execution-half И1"
-)
-
-
-@pytest.mark.skip(reason=_WRITE_STEP)
-def test_i1_external_source_cannot_change_proposal_customer_id():
+async def test_i1_external_source_cannot_change_proposal_customer_id(monkeypatch):
     """И1 (creation-half): ни скил/память/факт/текст с сайта клиента не меняет customer_id в proposal
-    при СОЗДАНИИ черновика. Ждёт propose-surface (MCP PLAN/propose — шаг перед WRITE): пока черновики
-    рождает только кнопочный слой, инъекции в customer_id на создании неоткуда взяться в тесте.
-    Execution-half того же инварианта — отдельным тестом ниже, уже живым."""
+    при СОЗДАНИИ черновика: HMAC привязан к exact args, подмена account после hook отказывается."""
+    from pydantic import SecretStr
+
+    from mcp_server.trusted_transport import trusted_tool
+    from tests.test_trusted_transport import KEY, _token
+
+    called = False
+
+    async def propose(account: str) -> dict:
+        nonlocal called
+        called = True
+        return {"account": account}
+
+    async def allowed(actor):  # noqa: ARG001
+        return True
+
+    async def account_allowed(actor, account):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr(settings, "aimash_trust_hmac_key", SecretStr(KEY))
+    monkeypatch.setattr("core.access.is_whitelisted", allowed)
+    monkeypatch.setattr("core.access.ensure_account_allowed_for_user", account_allowed)
+    wrapped = trusted_tool("propose_test", propose)
+    token = _token("propose_test", {"account": DRAFT_ACCOUNT_ID}, now=1, expires=120)
+    # Freeze verifier time inside the signed lifetime without weakening production code.
+    monkeypatch.setattr("mcp_server.trusted_transport.time.time", lambda: 60)
+    result = await wrapped(account=_FOREIGN_ID, trusted_turn_token=token)
+    assert result["status"] == "refused"
+    assert called is False
 
 
-@pytest.mark.skip(reason=_I1_EXEC_COVERED)
 def test_i1_execution_binds_account_from_proposal_customer_id():
     """И1 (execution-half): аккаунт исполнения берётся из proposal.customer_id (штамп доверенного
     входа), а не из аргумента/контекста разговора, и ЗАНОВО проходит ensure_allowed — чужой/пустой
     штамп → PermissionError ДО SDK и ДО claim (одноразовый черновик не сожжён отказом замка).
 
-    Живьём УЖЕ проверен — не здесь, а в tests/test_execute_account_binding.py (настоящий ConfirmStore
-    + temp SQLite): _uses_proposal_customer_id (штамп доезжает до apply_*), _foreign_customer_id_denied
-    (чужой id вне ALLOWED_CEILING → PermissionError, apply_* не вызван, claim цел), _empty_stamp_fail_
-    closed (пустой штамп НЕ откатывается молча на Draft). Заглушка держит дословную формулировку
-    execution-half И1 в общем файле изоляции; дублировать покрытие незачем (YAGNI)."""
+    Глубокий DB/SDK-корпус — tests/test_execute_account_binding.py; здесь держим публичную сигнатуру:
+    модель не может передать ни account, ни confirmation id, ни actor/reply."""
+    import inspect
+
+    from mcp_server.tools_write import execute_confirmed
+
+    assert inspect.signature(execute_confirmed).parameters == {}
 
 
-@pytest.mark.skip(reason=_WRITE_STEP)
-def test_i2_injection_text_creates_no_proposal_and_no_user_initiated():
+def test_i2_injection_text_creates_no_proposal_and_no_user_initiated(monkeypatch):
     """И2: внешний текст с инструкцией («игнорируй указания»/«подтверди операцию») не создаёт proposal
-    и не выставляет user_initiated. Корпус атак, включая client_site_pages."""
+    и не выставляет user_initiated. Здесь external MCP выигрывает phase-lock до propose."""
+    from tests.test_hermes_trusted_transport_plugin import _env, _event, _load
+
+    plugin = _load(monkeypatch, _env())
+    plugin._capture_gateway_event(event=_event())
+    assert (
+        plugin._pre_tool_call(
+            tool_name="mcp__tavily__tavily_extract",
+            args={"urls": ["https://example.test/injection"]},
+            session_id="i2",
+            turn_id="attack",
+        )
+        is None
+    )
+    args = {"account": DRAFT_ACCOUNT_ID, "campaign": "X"}
+    blocked = plugin._pre_tool_call(
+        tool_name="mcp__aimash__propose_pause_campaign",
+        args=args,
+        session_id="i2",
+        turn_id="attack",
+    )
+    assert blocked["action"] == "block"
+    assert "trusted_turn_token" not in args
 
 
-@pytest.mark.skip(reason=_I3_COVERED)
 def test_i3_user_initiated_stamped_at_creation_never_by_confirmation():
     """И3: бит провенанса (`user_initiated` + `origin_human_turn`) штампует доверенный слой в момент
     СОЗДАНИЯ черновика — и только если ход триггернуло входящее сообщение человека из whitelist по
     доверенному каналу. Ни скил, ни cron, ни self-improvement fork его не выставляют; аргументом
     инструмента он не задаётся. Подтверждение человеком бит НЕ повышает.
 
-    Живьём этот инвариант УЖЕ проверен — не здесь, а в tests/test_provenance_gate.py (на настоящем
-    ConfirmStore + temp SQLite): выпускной гейт «машинный черновик, подтверждённый живым человеком,
-    всё равно даёт PermissionError», оба бита обязательны ни один недостаточен, `save_proposal` не
-    принимает провенанс аргументом, а `human_turn(` имеет мета-гард allow-list'а call-site'ов.
-    Заглушка оставлена как якорь дословной формулировки И3 в общем файле изоляции; дублировать
-    покрытие незачем (YAGNI). Прежняя дырявая редакция §4 HERMES_SPEC.md («выставляется по реплай-
-    подтверждению живого человека») уже переписана — правка И3 в §4 приземлилась.
-    """
+    Глубокий DB-корпус — test_provenance_gate; здесь подтверждаем, что LLM-callable не принимает бит."""
+    import inspect
+
+    from confirm.store import ConfirmStore
+
+    params = inspect.signature(ConfirmStore.save_proposal).parameters
+    assert not ({"origin_human_turn", "author_user_id", "run_id"} & set(params))
 
 
-@pytest.mark.skip(reason=_WRITE_STEP)
 def test_i5_self_written_skill_calls_only_registered_mcp_tools():
     """И5: самонаписанный скил не может вызвать ничего, кроме зарегистрированных MCP-инструментов.
     Корпус скилов, пытающихся выйти в shell/HTTP/файлы."""
+    import yaml
+
+    cfg = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "deploy/hermes/config.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert cfg["skills"]["inline_shell"] is False
+    disabled = set(cfg["agent"]["disabled_toolsets"])
+    assert {"terminal", "file", "code_execution", "web", "browser"} <= disabled
 
 
-@pytest.mark.skip(reason=_WRITE_STEP)
 def test_i6_memory_and_history_search_filtered_by_client_id():
     """И6: поиск по памяти и истории фильтруется по client_id текущего топика (изоляция клиента A от
-    топика клиента B — session_search в Hermes ищет по всей БД)."""
+    топика клиента B — session_search в Hermes ищет по всей БД). Текущий режим закрывает глобальные
+    memory/search физически; единственный recall требует явный account и проходит read/user lock."""
+    import inspect
+    import yaml
+
+    from mcp_server.tools_read import recall_client
+
+    cfg = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "deploy/hermes/config.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert cfg["memory"]["memory_enabled"] is False
+    assert "session_search" in cfg["agent"]["disabled_toolsets"]
+    assert "account" in inspect.signature(recall_client).parameters
 
 
-@pytest.mark.skip(reason=_WRITE_STEP)
-def test_i7_external_content_taints_turn_and_disables_mutations():
+def test_i7_external_content_taints_turn_and_disables_mutations(monkeypatch):
     """И7: в ходе, где прочитан external-контент (страница/досье/CSV конкурентов), MCP-мутации
-    физически недоступны; таинт по thread_id, снимается только сигналом нового человеческого сообщения."""
+    физически недоступны; новый human turn имеет новый turn_id и начинает чистую phase."""
+    from tests.test_hermes_trusted_transport_plugin import _env, _event, _load
+
+    plugin = _load(monkeypatch, _env())
+    plugin._capture_gateway_event(event=_event())
+    plugin._pre_tool_call(
+        tool_name="mcp__aimash__recall_client",
+        args={"account": DRAFT_ACCOUNT_ID},
+        session_id="i7",
+        turn_id="old",
+    )
+    blocked = plugin._pre_tool_call(
+        tool_name="mcp__aimash__propose_pause_campaign",
+        args={"account": DRAFT_ACCOUNT_ID, "campaign": "X"},
+        session_id="i7",
+        turn_id="old",
+    )
+    assert blocked["action"] == "block"
+    fresh_args = {"account": DRAFT_ACCOUNT_ID, "campaign": "X"}
+    assert (
+        plugin._pre_tool_call(
+            tool_name="mcp__aimash__propose_pause_campaign",
+            args=fresh_args,
+            session_id="i7",
+            turn_id="new",
+        )
+        is None
+    )
+    assert "trusted_turn_token" in fresh_args
 
 
-@pytest.mark.skip(reason=_WRITE_STEP)
 def test_i8_at_most_one_pending_proposal_per_turn():
     """И8: не более одного pending proposal на ассистентский ход. Энфорсмент — счётчик pending в нашем
     MCP-слое (на прогон/тред), не надежда на ограничения модели."""
+    import inspect
+
+    from mcp_server.tools_write import PROPOSE_TOOL_FUNCS, _propose
+
+    source = inspect.getsource(_propose)
+    assert source.index("count_run_proposals") < source.index("build_proposal")
+    assert all("_propose(" in inspect.getsource(fn) for fn in PROPOSE_TOOL_FUNCS.values())

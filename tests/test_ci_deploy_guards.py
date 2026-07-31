@@ -14,9 +14,10 @@ def test_deploy_reconnects_hermes_only_after_compose_health_gate():
     mcp_test = body.index("hermes mcp test aimash")
 
     assert health < restart < mcp_test
-    assert "EXPECTED_READ=" in body
-    assert 'grep -Fq "Tools discovered: $EXPECTED_READ"' in body
-    assert "'mcp_server.tools_write' not in sys.modules" in body
+    assert "EXPECTED_TOOLS=" in body
+    assert 'grep -Fq "Tools discovered: $EXPECTED_TOOLS"' in body
+    assert "settings.hermes_write_enabled == ('mcp_server.tools_write' in sys.modules)" in body
+    assert "sync_aimash_surface.py" in body
 
 
 def test_deploy_checks_both_telegram_pollers_for_conflicts():

@@ -206,12 +206,19 @@ def proposed(
     Здесь НЕТ ни `code_numbers`, ни пагинации: propose ничего не читает из Google Ads наружу для
     цитирования — весь текст уже в `preview`. `error`/`error_code` держим для симметрии с READ-скелетом
     (на успехе оба None), чтобы клиент не различал READ/PROPOSE структурно."""
+    from mcp_server.trusted_transport import proposal_marker
+
+    marker = proposal_marker(confirmation_id)
+    anchored_preview = (
+        f"🔐 {marker}\n\n{preview}\n\nЧтобы подтвердить, ответьте реплаем на это сообщение."
+    )
     return {
         "confirmation_id": confirmation_id,
+        "confirmation_marker": marker,
         "operation": operation,
         "customer_id": str(customer_id),
         "status": "pending",
-        "preview": preview,
+        "preview": anchored_preview,
         "error": None,
         "error_code": None,
     }

@@ -1,8 +1,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Hermes Agent — ЭТАЛОН конфига (ДЕФОЛТНЫЙ профиль).
-# ⚠️ ЭТОТ ФАЙЛ — ПРЯМАЯ КОПИЯ ~/.hermes/config.yaml С VPS.
-#    Правится ТОЛЬКО через Claude Code → git push → VPS auto-pull.
-#    Если меняешь руками на VPS — сделай commit & push, иначе рассинхрон.
+# ⚠️ ЭТО ЭТАЛОН СТРУКТУРЫ, не файл для слепой замены live-конфига: на VPS есть host-local model/
+#    dashboard settings и закрытые поля. Деплой меняет только Aimash surface + trusted plugin через
+#    `sync_aimash_surface.py`, сохраняя остальные live-ключи.
 # ─────────────────────────────────────────────────────────────────────────────
 
 model:
@@ -125,6 +125,10 @@ skills:
   guard_agent_created: true
   write_approval: true
 
+plugins:
+  enabled:
+    - aimash_trusted_transport
+
 approvals:
   mode: manual
   cron_mode: deny
@@ -187,7 +191,7 @@ mcp_servers:
     timeout: 120
     connect_timeout: 30
     tools:
-      include:             # 25 READ (24 Google Ads + recall_client); PLAN/WRITE — только ready-dark
+      include:             # 25 READ + 39 PLAN + 1 trusted reply-execute
         - list_accounts
         - get_campaign_stats
         - get_adgroup_stats
@@ -222,6 +226,48 @@ mcp_servers:
         - get_mcc_deep
         # Общие списки минус-слов нужны PLAN-обёрткам как READ-контекст; сам инструмент не мутирует.
         - list_negative_shared_sets
+        # PLAN создаёт только pending proposal. Каждый вызов проходит HMAC trusted-turn wrapper;
+        # execute не принимает identity/id от модели и требует реальный Telegram reply-якорь.
+        - propose_budget_change
+        - propose_bid_change
+        - propose_keyword_bid_change
+        - propose_set_bidding_strategy
+        - propose_add_keywords
+        - propose_remove_keywords
+        - propose_add_negative_keywords
+        - propose_remove_negative_keywords
+        - propose_add_negatives_to_shared_set
+        - propose_attach_shared_set
+        - propose_pause_campaign
+        - propose_resume_campaign
+        - propose_update_campaign
+        - propose_remove_campaign
+        - propose_set_campaign_network
+        - propose_set_campaign_display_network
+        - propose_set_campaign_geo_target_type
+        - propose_pause_ad_group
+        - propose_resume_ad_group
+        - propose_remove_ad_group
+        - propose_pause_ad
+        - propose_resume_ad
+        - propose_remove_ad
+        - propose_set_geo_proximity
+        - propose_set_geo_location
+        - propose_attach_audience
+        - propose_detach_audience
+        - propose_create_rsa
+        - propose_create_search_campaign
+        - propose_create_gdn_campaign
+        - propose_create_demand_gen_campaign
+        - propose_create_video_campaign
+        - propose_add_sitelinks
+        - propose_add_callouts
+        - propose_add_structured_snippets
+        - propose_add_call_asset
+        - propose_add_promotion
+        - propose_add_price_asset
+        - propose_remove_asset_link
+        - execute_confirmed
   tavily:
     command: npx
     args:
