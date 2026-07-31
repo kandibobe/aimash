@@ -170,7 +170,8 @@ jobs:
             EXPECTED_TOOLS=$(docker exec -i aimash-bot python -c \
               "from mcp_server.server import expected_tool_names; print(len(expected_tool_names()))")
             docker exec -i aimash-bot python -c \
-              "import sys; from core.config import settings; import mcp_server.server; \
+              "import sys; from core.config import settings; \
+              from mcp_server.server import expected_tool_names; expected_tool_names(); \
               assert settings.hermes_write_enabled == ('mcp_server.tools_write' in sys.modules)"
             # `hermes gateway restart` can return 0 after refreshing an outdated unit while the
             # old gateway process is still serving.  A successful CLI exit is therefore not a
