@@ -67,6 +67,27 @@ async def test_list_recent_audit_outcomes_with_actor_resolution():
     assert isinstance(by_cid[cid_f].result, dict) and by_cid[cid_f].result.get("error")
 
 
+async def test_applied_audit_result_requires_current_applied_status():
+    await init_db()
+    store = ConfirmStore()
+    cid = await _mk(store, "update_campaign")
+    assert await store.confirm(cid, chat_id=100, actor_user_id=7, actor_username="anton")
+    await store.claim(cid, operation="update_campaign")
+    await store.finalize(cid, result={"campaign_id": "42", "new_name": "X [UAT]", "applied": True})
+
+    applied = await store.get_applied_audit_result(cid)
+    assert applied is not None
+    assert applied.operation == "update_campaign"
+    assert applied.customer_id == DRAFT
+    assert applied.result == {"campaign_id": "42", "new_name": "X [UAT]", "applied": True}
+
+    assert await store.record_verification(
+        cid,
+        verification={"verified": False, "expected": "X [UAT]", "actual": "X"},
+    )
+    assert await store.get_applied_audit_result(cid) is None
+
+
 def test_fmt_journal_empty():
     out = texts.fmt_journal([])
     assert "Журнал изменений" in out

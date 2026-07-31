@@ -157,6 +157,15 @@ class PendingAttachment:
     chat_id: int
 
 
+@dataclass(frozen=True, slots=True)
+class AppliedAuditResult:
+    """Точный applied audit-row для детерминированного отчёта об исполнении."""
+
+    operation: str
+    customer_id: str
+    result: dict
+
+
 class ConfirmStore:
     """confirm_store на SQLAlchemy. Все методы async (apply_* их await-ят)."""
 
@@ -729,6 +738,35 @@ class ConfirmStore:
             p.decided_at = func.now()
             s.add(_audit(p, p.chat_id, "applied", result=result))
             await s.commit()
+
+    async def get_applied_audit_result(self, confirmation_id: str) -> AppliedAuditResult | None:
+        """Вернуть итог только когда proposal всё ещё applied и точный applied audit-row существует.
+
+        Пост-проверка может перевести уже применённую операцию в needs_review. Поэтому одной старой
+        строки audit status=applied недостаточно: финальный пользовательский отчёт обязан fail-closed
+        учитывать и текущее состояние proposal.
+        """
+        async with Session() as s:
+            row = (
+                await s.execute(
+                    select(AuditLog)
+                    .join(Proposal, Proposal.confirmation_id == AuditLog.confirmation_id)
+                    .where(
+                        AuditLog.confirmation_id == confirmation_id,
+                        AuditLog.status == "applied",
+                        Proposal.status == "applied",
+                    )
+                    .order_by(AuditLog.id.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        if row is None or not isinstance(row.result, dict):
+            return None
+        return AppliedAuditResult(
+            operation=str(row.operation),
+            customer_id=str(row.customer_id),
+            result=dict(row.result),
+        )
 
     async def mark_needs_review(self, confirmation_id: str, *, error: str) -> bool:
         """executing → needs_review (АТОМАРНО, одноразово; для реконсиляции зависших мутаций).
