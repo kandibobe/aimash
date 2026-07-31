@@ -50,6 +50,19 @@ class _StepStore:
         self.result = dict(result)
 
 
+def _ordered_steps(operations: list[dict[str, Any]]) -> list[tuple[int, dict[str, Any]]]:
+    """Preserve user order except that identity-changing renames execute last.
+
+    Composite children currently address campaigns by their pre-change name.  Executing a rename
+    first makes every later freshness read against that name fail as ``not_found``.  A rename is
+    reversible and does not affect the semantics of the other children, so defer it while keeping
+    the original proposal index for audit/reporting.
+    """
+
+    indexed = list(enumerate(operations, start=1))
+    return sorted(indexed, key=lambda pair: pair[1].get("operation") == "update_campaign")
+
+
 async def _rebuilt_reverse(
     parent: ConfirmedProposal,
     operation: str,
@@ -77,7 +90,7 @@ async def execute_confirmed_composite(store, confirmation_id: str) -> dict[str, 
 
     completed: list[dict[str, Any]] = []
     try:
-        for index, item in enumerate(operations, start=1):
+        for index, item in _ordered_steps(operations):
             operation = str(item["operation"])
             params = dict(item["params"])
             step_store = _StepStore(claimed, operation, params)

@@ -24,5 +24,18 @@ def test_live_write_surface_includes_owned_proposal_state(monkeypatch):
     monkeypatch.setattr(settings, "hermes_write_enabled", True)
     expected = expected_tool_names()
     assert {"list_pending_proposals", "cancel_proposal", "execute_confirmed"} <= expected
-    assert len(expected) == 101  # 38 READ + 1 META + 61 PLAN/state + 1 WRITE
+    assert len(expected) == 93  # 38 READ + 1 META + 53 agent-first PLAN/state + 1 WRITE
+    assert (
+        not {
+            "curation_start",
+            "curation_state",
+            "curation_apply",
+            "curation_finalize",
+            "search_wizard_start",
+            "search_wizard_state",
+            "search_wizard_update",
+            "search_wizard_finalize",
+        }
+        & expected
+    )
     assert _registered_tool_names(build_server()) == expected

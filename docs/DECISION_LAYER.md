@@ -68,7 +68,7 @@ provenance, 2FA, freshness и audit остаются обязательны.
 
 ## Что ещё требует live-cutover
 
-Кодовая MCP-поверхность публикует 38 READ + 1 META + 61 PLAN/state + 1 WRITE при включённом
+Кодовая MCP-поверхность публикует 38 READ + 1 META + 53 agent-first PLAN/state + 1 WRITE при включённом
 `HERMES_WRITE_ENABLED`: `list_decisions`, `update_decision`, `list_incidents`, `update_incident`
 проходят через тот же HMAC trusted-turn wrapper и per-account RBAC. Переходы статусов атомарны и
 дополнительно привязаны к `customer_id`; они управляют операционным состоянием, но не выполняют Google

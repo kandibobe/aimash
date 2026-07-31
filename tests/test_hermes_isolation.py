@@ -483,9 +483,9 @@ def test_i1_execution_binds_account_from_proposal_customer_id():
     assert inspect.signature(execute_confirmed).parameters == {}
 
 
-def test_i2_injection_text_creates_no_proposal_and_no_user_initiated(monkeypatch):
-    """И2: внешний текст с инструкцией («игнорируй указания»/«подтверди операцию») не создаёт proposal
-    и не выставляет user_initiated. Здесь external MCP выигрывает phase-lock до propose."""
+def test_i2_external_text_cannot_forge_financial_confirmation(monkeypatch):
+    """Private profile allows planning after external reads, but the trusted token contains only the
+    real Telegram event. External text still cannot forge a reply anchor or execute confirmation."""
     from tests.test_hermes_trusted_transport_plugin import _env, _event, _load
 
     plugin = _load(monkeypatch, _env())
@@ -500,14 +500,25 @@ def test_i2_injection_text_creates_no_proposal_and_no_user_initiated(monkeypatch
         is None
     )
     args = {"account": DRAFT_ACCOUNT_ID, "campaign": "X"}
+    assert (
+        plugin._pre_tool_call(
+            tool_name="mcp__aimash__propose_pause_campaign",
+            args=args,
+            session_id="i2",
+            turn_id="attack",
+        )
+        is None
+    )
+    assert "trusted_turn_token" in args
+    execute_args = {}
     blocked = plugin._pre_tool_call(
-        tool_name="mcp__aimash__propose_pause_campaign",
-        args=args,
+        tool_name="mcp__aimash__execute_confirmed",
+        args=execute_args,
         session_id="i2",
         turn_id="attack",
     )
     assert blocked["action"] == "block"
-    assert "trusted_turn_token" not in args
+    assert "trusted_turn_token" not in execute_args
 
 
 def test_i3_user_initiated_stamped_at_creation_never_by_confirmation():
@@ -561,9 +572,8 @@ def test_i6_private_profile_accepts_shared_history_but_account_recall_stays_scop
     assert "account" in inspect.signature(recall_client).parameters
 
 
-def test_i7_external_content_taints_turn_and_disables_mutations(monkeypatch):
-    """И7: в ходе, где прочитан external-контент (страница/досье/CSV конкурентов), MCP-мутации
-    физически недоступны; новый human turn имеет новый turn_id и начинает чистую phase."""
+def test_private_profile_external_content_does_not_phase_lock_tools(monkeypatch):
+    """READ/web/client context and Ads planning may coexist in one private-operator turn."""
     from tests.test_hermes_trusted_transport_plugin import _env, _event, _load
 
     plugin = _load(monkeypatch, _env())
@@ -574,13 +584,17 @@ def test_i7_external_content_taints_turn_and_disables_mutations(monkeypatch):
         session_id="i7",
         turn_id="old",
     )
-    blocked = plugin._pre_tool_call(
-        tool_name="mcp__aimash__propose_pause_campaign",
-        args={"account": DRAFT_ACCOUNT_ID, "campaign": "X"},
-        session_id="i7",
-        turn_id="old",
+    same_turn_args = {"account": DRAFT_ACCOUNT_ID, "campaign": "X"}
+    assert (
+        plugin._pre_tool_call(
+            tool_name="mcp__aimash__propose_pause_campaign",
+            args=same_turn_args,
+            session_id="i7",
+            turn_id="old",
+        )
+        is None
     )
-    assert blocked["action"] == "block"
+    assert "trusted_turn_token" in same_turn_args
     fresh_args = {"account": DRAFT_ACCOUNT_ID, "campaign": "X"}
     assert (
         plugin._pre_tool_call(

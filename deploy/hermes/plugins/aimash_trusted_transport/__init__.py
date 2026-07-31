@@ -61,14 +61,8 @@ _PLAN_STATE_TOOLS = frozenset(
     }
 )
 _INGEST_MEDIA_TOOL = f"{_MCP_PREFIX}ingest_media"
-_TAINTED_AIMASH_TOOLS = frozenset({f"{_MCP_PREFIX}recall_client"})
 _CONFIRM_RE = re.compile(r"\bAIMASH_CONFIRM:([0-9a-fA-F]{32})\b")
 _CALLBACK_RE = re.compile(r"^am:(yes|edit|no):([0-9a-fA-F]{32})$")
-# Local, read-only orchestration primitives do not import untrusted external content.  In
-# particular, Google Ads turns normally load the pinned/guarded safety skills before proposing a
-# change; treating skill_view as external made every such proposal fail И7.  skill_manage stays
-# tainted: changing the agent's own instructions and touching Ads must be separate human turns.
-_SAFE_NATIVE_TOOLS = frozenset({"clarify", "skills_list", "skill_view", "todo"})
 _ARTIFACT_MARKER = "AIMASH_ARTIFACT:"
 _ARTIFACT_VERSION = 1
 _ARTIFACT_MAX_BYTES = 20 * 1024 * 1024
@@ -119,7 +113,6 @@ class _Artifact:
 
 _lock = threading.RLock()
 _events: dict[tuple[str, int, int], _Inbound] = {}
-_turn_phase: dict[tuple[str, str], str] = {}
 _pending_artifacts: dict[tuple[int, str | None], list[str]] = {}
 
 
@@ -175,8 +168,6 @@ def _prune(now: float) -> None:
         _events.pop(key, None)
     while len(_events) > _MAX_EVENTS:
         _events.pop(next(iter(_events)), None)
-    while len(_turn_phase) > _MAX_EVENTS:
-        _turn_phase.pop(next(iter(_turn_phase)), None)
 
 
 def _capture_gateway_event(*args, **kwargs) -> None:
@@ -691,6 +682,18 @@ def _install_telegram_button_bridge() -> bool:
     original_send = TelegramAdapter.send
     original_edit = TelegramAdapter.edit_message
     original_callback = TelegramAdapter._handle_callback_query
+    original_should_attempt_rich = getattr(TelegramAdapter, "_should_attempt_rich", None)
+
+    if callable(original_should_attempt_rich):
+
+        @functools.wraps(original_should_attempt_rich)
+        def should_attempt_rich(adapter, content, metadata=None):
+            # Confirmation cards need an inline keyboard.  Keep this one small message on the
+            # ordinary sendMessage path: Telegram's new rich/streaming path can finalize through
+            # a different message id, which made the post-send keyboard edit target stale output.
+            if _CONFIRM_RE.search(str(content or "")):
+                return False
+            return original_should_attempt_rich(adapter, content, metadata=metadata)
 
     @functools.wraps(original_send)
     async def send(adapter, chat_id, content, reply_to=None, metadata=None):
@@ -716,7 +719,13 @@ def _install_telegram_button_bridge() -> bool:
             metadata=metadata,
         )
         if finalize and getattr(result, "success", False):
-            await _attach_confirmation_keyboard(adapter, chat_id, message_id, content)
+            effective_message_id = getattr(result, "message_id", None) or message_id
+            await _attach_confirmation_keyboard(adapter, chat_id, effective_message_id, content)
+            if (metadata or {}).get("notify"):
+                # Final answers are commonly completed through edit_message rather than send().
+                # Without this symmetric hook signed XLSX/media stayed queued forever while the
+                # model incorrectly reported that Telegram delivery had happened.
+                await _deliver_pending_artifacts(adapter, chat_id, metadata)
         return result
 
     @functools.wraps(original_callback)
@@ -731,6 +740,8 @@ def _install_telegram_button_bridge() -> bool:
     TelegramAdapter.send = send
     TelegramAdapter.edit_message = edit_message
     TelegramAdapter._handle_callback_query = handle_callback
+    if callable(original_should_attempt_rich):
+        TelegramAdapter._should_attempt_rich = should_attempt_rich
     TelegramAdapter._aimash_button_bridge = True
     log.info("Aimash Telegram confirmation buttons enabled")
     return True
@@ -744,7 +755,6 @@ def _pre_tool_call(*args, **kwargs):
     tool_args = tool_args if isinstance(tool_args, dict) else {}
     session_id = str(kwargs.get("session_id") or "")
     turn_id = str(kwargs.get("turn_id") or "")
-    turn_key = (session_id, turn_id)
 
     if _is_aimash_write(tool_name):
         if not session_id or not turn_id:
@@ -761,15 +771,6 @@ def _pre_tool_call(*args, **kwargs):
                 "action": "block",
                 "message": "Aimash WRITE: подтверждение должно быть реплаем на карточку с кодом",
             }
-        with _lock:
-            phase = _turn_phase.get(turn_key, "clean")
-            if phase == "external":
-                return {
-                    "action": "block",
-                    "message": "Aimash WRITE недоступен в ходе с внешним контентом (И7)",
-                }
-            _turn_phase[turn_key] = "write"
-            _prune(time.time())
         inbound_media = (
             _copy_trusted_inbound_media(inbound) if tool_name == _INGEST_MEDIA_TOOL else []
         )
@@ -780,24 +781,9 @@ def _pre_tool_call(*args, **kwargs):
         tool_args[_TOKEN_PARAM] = token
         return None
 
-    if (
-        tool_name.startswith(_MCP_PREFIX) and tool_name not in _TAINTED_AIMASH_TOOLS
-    ) or tool_name in _SAFE_NATIVE_TOOLS:
-        return None
-
-    # Any other tool is an external/host surface for the purposes of И7.  A lock gives sequential
-    # semantics even when the provider emits parallel calls: either external wins and WRITE blocks,
-    # or WRITE wins and the external call is blocked before it can influence the proposal.
-    if session_id and turn_id:
-        with _lock:
-            phase = _turn_phase.get(turn_key, "clean")
-            if phase == "write":
-                return {
-                    "action": "block",
-                    "message": "Внешний инструмент недоступен после PLAN/WRITE в этом ходе (И7)",
-                }
-            _turn_phase[turn_key] = "external"
-            _prune(time.time())
+    # Private trusted-operator profile: READ, audit, web, memory, skills and native tools never
+    # phase-lock one another. External content remains marked as data in MCP envelopes, while
+    # financial execution is protected by the independent trusted Telegram confirmation path.
     return None
 
 

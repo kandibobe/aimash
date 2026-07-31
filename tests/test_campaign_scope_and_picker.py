@@ -174,8 +174,10 @@ async def test_read_account_rows_filters_by_grant_when_enforced(monkeypatch):
     """2B: при активном enforcement (есть гранты) пикер показывает не-Draft ТОЛЬКО грантованным."""
     import bot.main as bm
     from core.access import grant_account_access, revoke_account_access
+    from core.config import settings
     from db.session import init_db
 
+    monkeypatch.setattr(settings, "account_access_mode", "enforced")
     await init_db()
     extra = "6764040266"
     granted_chat, other_chat = 77_101, 77_102

@@ -12,9 +12,9 @@
 Draft (DRAFT_ACCOUNT_ID) доступен всем whitelisted без отдельного гранта в ЛЮБОМ режиме.
 
 Режимы enforcement (env ACCOUNT_ACCESS_MODE, см. core.config):
-  auto (дефолт) — пустая таблица account_access ⇒ legacy-проход (все whitelisted видят весь
+  auto — пустая таблица account_access ⇒ legacy-проход (все whitelisted видят весь
   read-list — текущее одно-операторное поведение); ПЕРВЫЙ грант включает enforcement для всех.
-  enforced — строгий даже с пустой таблицей. legacy — пер-юзер замок выключен осознанно.
+  enforced — строгий даже с пустой таблицей. legacy (дефолт private profile) — пер-юзер замок выключен.
 """
 
 from __future__ import annotations
@@ -41,14 +41,15 @@ def _invalidate_enforcement_cache() -> None:
 
 
 async def per_user_enforcement_active() -> bool:
-    """Активна ли пер-пользовательская изоляция. enforced → True; legacy → False; auto → есть ли
-    хоть один грант в account_access (кэш _ENF_TTL_S; grant/revoke инвалидируют). Невалидный режим
-    трактуем как auto (warning один раз на процесс не делаем — значение читается часто)."""
+    """Активна ли пер-пользовательская изоляция. enforced → True; legacy/unknown → False; auto →
+    есть ли хоть один грант в account_access. Глобальный read-ceiling остаётся обязательным."""
     global _enf_cache
-    mode = (settings.account_access_mode or "auto").strip().lower()
+    mode = (settings.account_access_mode or "legacy").strip().lower()
     if mode == "enforced":
         return True
     if mode == "legacy":
+        return False
+    if mode != "auto":
         return False
     now = time.monotonic()
     if _enf_cache is not None and _enf_cache[0] > now:

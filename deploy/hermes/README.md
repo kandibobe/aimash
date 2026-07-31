@@ -2,12 +2,11 @@
 
 READ-пилот пивота Aimash → Hermes. Hermes-агент отвечает в Telegram и через
 MCP-сервер `aimash` (пакет `mcp_server/`) всегда отдаёт 38 READ-инструментов + 1 META. При явном
-`HERMES_WRITE_ENABLED=true` он добавляет 61 PLAN/state + 1 WRITE через HMAC trusted Telegram transport;
+`HERMES_WRITE_ENABLED=true` он добавляет 53 agent-first PLAN/state + 1 WRITE через HMAC trusted Telegram transport;
 при false модуль WRITE физически не импортируется.
 
-**Где что написано:** требования и приёмка — [`/SPEC.md`](../../SPEC.md); архитектура (топология,
-И1–И8, К1–К10, реестр инструментов) — [`HERMES_SPEC.md`](HERMES_SPEC.md); почему так —
-[`AGENTIC_VS_TZ.md`](AGENTIC_VS_TZ.md). Этот файл — **как поставить**, а не что и почему.
+**Где что написано:** единое ТЗ и границы автономии — [`/SPEC.md`](../../SPEC.md). Этот файл — только
+про установку; исторические архитектурные документы перенесены в `docs/archive/pre-single-spec-2026-07/`.
 
 **Топология.** Текущий aiogram-бот (`aimash-bot` в Docker Compose) остаётся жив — он же окружение для
 MCP-сервера. Hermes ставится рядом отдельным systemd user-сервисом и зовёт MCP через `docker exec` в

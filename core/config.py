@@ -125,13 +125,13 @@ class Settings(BaseSettings):
     ops_alert_chat_id: str = ""
     ops_alert_thread_id: str = ""
     # Пер-пользовательская изоляция аккаунтов ЧТЕНИЯ (core.access, таблица account_access):
-    #   auto (дефолт) — пустая таблица грантов ⇒ legacy-проход (все whitelisted видят весь
+    #   auto          — пустая таблица грантов ⇒ legacy-проход (все whitelisted видят весь
     #                   read-list; поведение одно-операторного режима), ПЕРВЫЙ грант включает
     #                   enforcement для всех;
     #   enforced      — строгий режим даже с пустой таблицей (не-Draft только по гранту);
-    #   legacy        — осознанное отключение пер-юзер изоляции (только глобальный read-замок).
-    # Draft доступен всем whitelisted в любом режиме. Невалидное значение → warning + auto.
-    account_access_mode: str = "auto"
+    #   legacy (дефолт private profile) — все trusted operators видят весь глобальный read-ceiling.
+    # Draft доступен всем whitelisted в любом режиме. Невалидное значение → warning + legacy.
+    account_access_mode: str = "legacy"
     # Админы бота (CSV chat_id): им доступны /grant /revoke (управление грантами account_access).
     # Пусто ⇒ админ-команды недоступны НИКОМУ (fail-closed; фича опциональна — не роняем prod).
     admin_chat_ids: str = ""

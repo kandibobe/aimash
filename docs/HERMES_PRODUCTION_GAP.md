@@ -63,7 +63,7 @@ UAC исключён; без утверждённого источника ку�
 | H7 | Другой Telegram-user нажимает кнопку чужой карточки | Отказ; Ads не изменён; попытка видна в audit |
 | H8 | Попросить изменить бюджет без единицы/валюты или в чужой валюте | Уточнение/отказ; никакой молчаливой конвертации |
 | H9 | Включить kill-switch и подтвердить Draft-изменение | Отказ до SDK; после снятия нужен новый безопасный прогон |
-| H10 | После deploy проверить gateway, 101 MCP tool, bot/scheduler контейнеры, timer и свежий Hermes archive | Всё active/healthy, restart count не растёт, Telegram 409 отсутствует |
+| H10 | После deploy проверить gateway, 93 MCP tools, bot/scheduler контейнеры, timer и свежий Hermes archive | Всё active/healthy, restart count не растёт, Telegram 409 отсутствует |
 
 После H4/H5 обязательно повторно прочитать объект через Google Ads API, а не доверять только тексту
 агента.

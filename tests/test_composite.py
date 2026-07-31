@@ -61,6 +61,38 @@ async def test_composite_executes_in_order_and_finalizes_parent(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_composite_defers_rename_until_name_based_steps_finish(monkeypatch):
+    calls = []
+
+    async def apply(step_store, confirmation_id):
+        calls.append(step_store._pending.operation)
+        return {"applied": True}
+
+    parent = _parent()
+    parent.params = {
+        "operations": [
+            {
+                "operation": "update_campaign",
+                "params": {"campaign": "Before", "new_name": "After"},
+            },
+            {
+                "operation": "update_budget",
+                "params": {"campaign": "Before", "mode": "set_to", "value": 1.1},
+            },
+        ]
+    }
+    monkeypatch.setattr(composite, "execute_confirmed_step", apply)
+    store = _ParentStore()
+    store.parent = parent
+    store._p = parent
+
+    result = await composite.execute_confirmed_composite(store, "c" * 32)
+
+    assert calls == ["update_budget", "update_campaign"]
+    assert [item["index"] for item in result["operations"]] == [2, 1]
+
+
+@pytest.mark.asyncio
 async def test_composite_compensates_completed_steps_on_failure(monkeypatch):
     calls = []
 

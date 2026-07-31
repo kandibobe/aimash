@@ -201,6 +201,35 @@ async def test_propose_launch_creates_pending_draft_from_human_turn(propose_env)
     assert row.user_initiated is True and row.origin_human_turn is True
 
 
+async def test_non_spend_update_executes_autonomously_and_reports_from_audit(
+    propose_env, monkeypatch
+):
+    import ads.service
+
+    async def execute_from_confirmed_store(store, confirmation_id):
+        assert await store.claim(confirmation_id, operation="update_campaign") is not None
+        await store.finalize(
+            confirmation_id,
+            result={"campaign": "Old", "new_name": "New", "status": "updated"},
+        )
+        return {"status": "updated"}
+
+    monkeypatch.setattr(ads.service, "execute_confirmed", execute_from_confirmed_store)
+    with _human_turn(run_id="wp_autonomous_rename", chat_id=OWNER):
+        env = await tw.propose_update_campaign(
+            account=DRAFT_ACCOUNT_ID,
+            campaign="Old",
+            new_name="New",
+        )
+
+    assert env["status"] == "executed"
+    assert env["operation"] == "update_campaign"
+    assert env["preview"] is None
+    assert env["summary"]
+    row = await _row(env["confirmation_id"])
+    assert row.status == "applied"
+
+
 async def test_machine_turn_launch_propose_refused_before_ads(propose_env):
     tok = set_context(request_id="wp_machine_launch", chat_id=OWNER)
     try:

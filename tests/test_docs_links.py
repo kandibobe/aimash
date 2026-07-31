@@ -95,10 +95,18 @@ def test_docs_index_covers_every_doc():
     expected = sorted((ROOT / "docs").glob("*.md")) + sorted(
         (ROOT / "deploy" / "hermes").rglob("*.md")
     )
+    historical_redirects = {
+        "deploy/hermes/AGENTIC_VS_TZ.md",
+        "deploy/hermes/HERMES_SPEC.md",
+        "docs/TZ-Aimash-Hermes-Agent.md",
+    }
     missing = sorted(
         p.relative_to(ROOT).as_posix()
         for p in expected
-        if p != index and "archive" not in p.parts and p.resolve() not in linked
+        if p != index
+        and "archive" not in p.parts
+        and p.relative_to(ROOT).as_posix() not in historical_redirects
+        and p.resolve() not in linked
     )
     assert not missing, (
         "не сослан из индекса docs/README.md: "

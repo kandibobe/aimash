@@ -1,6 +1,6 @@
 """mcp_server/ — Контур A (Hermes/пивот): тонкий MCP-слой поверх существующих READ-функций.
 
-Инкремент «MCP READ» (`deploy/hermes/HERMES_SPEC.md`): 38 READ-инструментов над `reports.queries` /
+MCP-мост из единого `SPEC.md`: 38 READ-инструментов над `reports.queries` /
 `ads.read` / `ads.keyword_plan` / `audit.collect` / `db.history`, запускаемых `python -m mcp_server`
 по stdio. Пакет АДДИТИВЕН: `bot/**` и денежное ядро (`ads/mutations.py`, `ads/client.py`,
 `confirm/**`, `core/secrets.py`) он НЕ трогает и НЕ импортирует `bot`/`aiogram` (гард

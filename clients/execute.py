@@ -1,4 +1,4 @@
-"""§20: исполнитель подтверждённых memory-операций (профиль клиента) за confirm-гейтом.
+"""Account-scoped profile executor for confirmed clears and autonomous save/update operations.
 
 Домен «memory» отделён от домена «google-ads» (ads.service.execute_confirmed): операции профиля
 (save/update/clear) — это ЛОКАЛЬНАЯ БД, а не Google Ads. МУТАЦИОННЫЙ замок (ads.client.

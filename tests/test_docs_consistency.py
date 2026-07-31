@@ -36,15 +36,12 @@ _DATABASE_DOC = _ROOT / "docs" / "DATABASE.md"
 # числом aimash случайное, и обход репозитория целиком краснел бы на правде.
 _READ_COUNT_DOCS = (
     "README.md",
-    "CLAUDE.md",
-    "AGENTS.md",
     "CHANGELOG.md",
     "mcp_server/__init__.py",
     "deploy/hermes/README.md",
     "deploy/hermes/OPERATIONS.md",
     "docs/AUDIT-open-source.md",
     "docs/REUSE-MAP.md",
-    "docs/TZ-Aimash-Hermes-Agent.md",
 )
 
 # Канонические формы: «15 READ-инструментов», «15 READ ✅». Форма обязана быть узкой — рядом живёт

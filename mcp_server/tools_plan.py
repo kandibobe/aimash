@@ -13,6 +13,29 @@ from mcp_server.tools_write import PROPOSE_TOOL_FUNCS
 from mcp_server.tools_workflow_state import WORKFLOW_STATE_TOOL_FUNCS
 
 
+# Hermes already owns dialogue state and can orchestrate the primitive keyword/RSA/campaign tools.
+# Publish only state that must survive outside model context or crosses a trusted transport boundary.
+# The legacy workflow implementations remain importable for compatibility/tests, but keeping their
+# start/state/update/finalize machinery out of the live registry reduces tool-selection noise.
+_AGENT_FIRST_WORKFLOW_NAMES = frozenset(
+    {
+        "start_keyword_research",  # XLSX/Sheets export + ownership round-trip
+        "read_keyword_sheet",
+        "ingest_media",  # trusted Telegram attachment path
+        "propose_profile_change",
+        "propose_profile_clear",
+        "start_client_crawl",
+    }
+)
+AGENT_FIRST_WORKFLOW_STATE_TOOL_FUNCS = {
+    name: fn
+    for name, fn in WORKFLOW_STATE_TOOL_FUNCS.items()
+    if name in _AGENT_FIRST_WORKFLOW_NAMES
+}
+if AGENT_FIRST_WORKFLOW_STATE_TOOL_FUNCS.keys() != _AGENT_FIRST_WORKFLOW_NAMES:
+    raise RuntimeError("agent-first workflow registry is incomplete")
+
+
 def _trusted_actor() -> tuple[int, int] | None:
     prov = get_provenance()
     chat_id = get_context().chat_id
@@ -81,7 +104,7 @@ PLAN_STATE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "list_pending_proposals": list_pending_proposals,
     "cancel_proposal": cancel_proposal,
     **OPS_STATE_TOOL_FUNCS,
-    **WORKFLOW_STATE_TOOL_FUNCS,
+    **AGENT_FIRST_WORKFLOW_STATE_TOOL_FUNCS,
 }
 
 PLAN_STATE_MCP_TOOLS: frozenset[str] = frozenset(PLAN_STATE_TOOL_FUNCS)

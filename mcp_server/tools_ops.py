@@ -5,22 +5,19 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any, Awaitable, Callable, Literal
 
-from core.access import is_admin
 from core.config import normalize_customer_id
 from mcp_server.envelope import ok
 from mcp_server.trusted_transport import get_trusted_turn
 from operations.decisions import list_decisions as _list_decisions
 from operations.decisions import transition_decision
-from operations.governance import has_capability
 from operations.incidents import list_incidents as _list_incidents
 from operations.incidents import transition_incident, utcnow
 
 
-async def _require_capability(account: str, capability: str) -> int:
-    actor = get_trusted_turn().actor_user_id
-    if not await is_admin(actor) and not await has_capability(actor, account, capability):
-        raise PermissionError(f"операция требует RBAC capability: {capability}")
-    return actor
+def _trusted_actor() -> int:
+    """All Telegram-whitelisted users are trusted operators in the private profile."""
+
+    return get_trusted_turn().actor_user_id
 
 
 def _iso(value) -> str | None:
@@ -73,9 +70,9 @@ async def list_decisions(
     offset: int = 0,
     limit: int = 50,
 ) -> dict[str, Any]:
-    """List the account decision queue; requires a trusted operator with read capability."""
+    """List the account decision queue for any trusted private operator."""
     customer_id = normalize_customer_id(account)
-    await _require_capability(customer_id, "read")
+    _trusted_actor()
     rows = await _list_decisions(
         customer_id,
         statuses=set(statuses) if statuses else None,
@@ -95,14 +92,7 @@ async def update_decision(
 ) -> dict[str, Any]:
     """Atomically ACK/approve/reject/snooze/reopen one scoped advisory decision."""
     customer_id = normalize_customer_id(account)
-    capability = {
-        "acknowledged": "ack",
-        "approved": "approve",
-        "rejected": "reject",
-        "snoozed": "snooze",
-        "new": "ack",
-    }[action]
-    actor = await _require_capability(customer_id, capability)
+    actor = _trusted_actor()
     snoozed_until = None
     if action == "snoozed":
         minutes = int(snooze_minutes or 0)
@@ -136,9 +126,9 @@ async def list_incidents(
     offset: int = 0,
     limit: int = 50,
 ) -> dict[str, Any]:
-    """List deduplicated incidents for the account; requires trusted read capability."""
+    """List deduplicated incidents for any trusted private operator."""
     customer_id = normalize_customer_id(account)
-    await _require_capability(customer_id, "read")
+    _trusted_actor()
     rows = await _list_incidents(
         customer_id,
         statuses=set(statuses) if statuses else None,
@@ -156,13 +146,7 @@ async def update_incident(
 ) -> dict[str, Any]:
     """Atomically ACK/snooze/resolve/reopen one account-scoped incident."""
     customer_id = normalize_customer_id(account)
-    capability = {
-        "acknowledged": "ack",
-        "snoozed": "snooze",
-        "resolved": "resolve",
-        "open": "resolve",
-    }[action]
-    actor = await _require_capability(customer_id, capability)
+    actor = _trusted_actor()
     snoozed_until = None
     if action == "snoozed":
         minutes = int(snooze_minutes or 0)

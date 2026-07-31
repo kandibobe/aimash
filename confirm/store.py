@@ -573,6 +573,38 @@ class ConfirmStore:
             await s.commit()
             return snap
 
+    async def authorize_autonomous(self, confirmation_id: str, *, operation: str) -> bool:
+        """Atomically authorize an explicitly non-spend proposal: pending -> confirmed.
+
+        This is not a generic confirmation bypass.  The store independently checks the immutable
+        operation against ``confirm.policy.AUTONOMOUS_ADS_OPS`` before the CAS. Unknown, financial,
+        delivery-state and destructive operations return False and remain pending.
+        """
+        from confirm.policy import may_execute_autonomously
+
+        if not may_execute_autonomously(operation):
+            return False
+        async with Session() as s:
+            res = await s.execute(
+                update(Proposal)
+                .where(
+                    Proposal.confirmation_id == confirmation_id,
+                    Proposal.operation == operation,
+                    Proposal.status == "pending",
+                    Proposal.created_at >= db_dt(_ttl_boundary()),
+                )
+                .values(status="confirmed", decided_at=func.now())
+            )
+            if cast(CursorResult, res).rowcount != 1:
+                await s.rollback()
+                return False
+            p = (
+                await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
+            ).scalar_one()
+            s.add(_audit(p, p.chat_id, "auto_authorized", actor_user_id=p.author_user_id))
+            await s.commit()
+            return True
+
     async def confirm(
         self,
         confirmation_id: str,

@@ -279,23 +279,14 @@ mcp_servers:
         - propose_profile_clear
         - list_pending_proposals
         - cancel_proposal
-        # Operational control plane: trusted HMAC turn + per-account RBAC + scoped atomic transition.
+        # Private control plane: trusted HMAC turn + account scope + atomic transition; no RBAC blocker.
         - list_decisions
         - update_decision
         - list_incidents
         - update_incident
-        # Durable non-Ads workflows. Trusted Telegram identity scopes sheet/session ownership;
-        # only curation_finalize mints a real create_rsa proposal, still behind normal confirm CAS.
+        # Only durable/transport state that Hermes cannot keep in its own dialogue context.
         - start_keyword_research
         - read_keyword_sheet
-        - curation_start
-        - curation_state
-        - curation_apply
-        - curation_finalize
-        - search_wizard_start
-        - search_wizard_state
-        - search_wizard_update
-        - search_wizard_finalize
         - ingest_media
         - start_client_crawl
         - execute_confirmed

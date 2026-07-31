@@ -41,16 +41,10 @@ async def test_list_decisions_requires_trusted_turn() -> None:
 async def test_update_decision_scopes_atomic_transition_to_account(monkeypatch) -> None:
     captured: dict = {}
 
-    async def allow(account: str, capability: str) -> int:
-        assert account == DRAFT
-        assert capability == "snooze"
-        return 101
-
     async def transition(uid: str, action: str, **kwargs) -> bool:
         captured.update(uid=uid, action=action, **kwargs)
         return True
 
-    monkeypatch.setattr(tools_ops, "_require_capability", allow)
     monkeypatch.setattr(tools_ops, "transition_decision", transition)
     with trusted_turn_scope(_turn()):
         result = await tools_ops.update_decision(
@@ -90,16 +84,12 @@ async def test_list_incidents_has_machine_pagination(monkeypatch) -> None:
         for i in range(3)
     ]
 
-    async def allow(account: str, capability: str) -> int:
-        assert (account, capability) == (DRAFT, "read")
-        return 101
-
     async def list_rows(*args, **kwargs):
         return rows
 
-    monkeypatch.setattr(tools_ops, "_require_capability", allow)
     monkeypatch.setattr(tools_ops, "_list_incidents", list_rows)
-    result = await tools_ops.list_incidents(DRAFT, offset=1, limit=1)
+    with trusted_turn_scope(_turn()):
+        result = await tools_ops.list_incidents(DRAFT, offset=1, limit=1)
     assert [row["incident_uid"] for row in result["rows"]] == ["inc-1"]
     assert result["has_more"] is True
     assert result["next_offset"] == 2

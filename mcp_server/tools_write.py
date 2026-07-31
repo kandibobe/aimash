@@ -1,13 +1,11 @@
-"""PROPOSE-инструменты MCP-слоя (Волна 2, propose-only WRITE-MCP): агент СОЗДАЁТ черновик мутации и
-показывает «было → станет», но Google Ads НЕ трогает. Мутация и подтверждение разделены (золотое
-правило #1): здесь только левая половина — черновик; исполнение (execute_confirmed) — отдельный
-инструмент, вызываемый строго после подтверждения пользователем.
+"""Typed Google Ads action tools for the private Hermes operator profile.
 
-Почему это безопасно: propose ничего не исполняет. `build_proposal` лишь ЧИТАЕТ
-текущее значение («было») и пишет строку в НАШУ БД (`ConfirmStore.save_proposal`) — ни один
-`ads/mutations.py::apply_*` отсюда не достижим. Значит гейт подтверждения propose не нужен, а
-prompt-injection через внешний контент в худшем случае создаёт БЕЗвредный черновик, который человек
-всё равно увидит и не подтвердит.
+Каждый вызов сначала создаёт аттестованный DB-снимок ``было → станет``. Операции из
+``confirm.policy.AUTONOMOUS_ADS_OPS`` затем атомарно авторизуются, исполняются и возвращают результат
+из audit-row без пользовательской карточки. Spend-affecting и неизвестные операции остаются pending
+и требуют ровно одну доверенную Telegram-кнопку/reply перед ``execute_confirmed``. Исторические имена
+``propose_*`` сохранены для совместимости MCP; истина — поле ответа ``status``: ``executed`` либо
+``pending_confirmation``.
 
 Три вещи этот слой делает КОДОМ, не доверием к модели:
   • **Провенанс (правило 3).** Денежный черновик (бюджет/ставка) создаётся только когда бит
@@ -20,9 +18,9 @@ prompt-injection через внешний контент в худшем слу
   • **Валидация входа (правило 4).** Диапазоны/режимы/валюту проверяет Pydantic, кривой вход →
     редактированный отказ, а не «доверие к модели».
 
-Границы слоя (правило 6, тонкий тул-слой): здесь ровно валидация входа + вызов существующего
-`build_proposal` + сериализация конверта. Вся логика гейтов до кнопок — в `mcp_server.propose`;
-счёт И8 — в `confirm.store`; провенанс — в `core.provenance`. Ни строки бизнес-логики тут.
+Границы слоя: здесь валидация входа, вызов существующих proposal/execution функций и сериализация.
+Классификация автономии живёт в `confirm.policy`, CAS — в `confirm.store`, провенанс — в
+`core.provenance`, исполнение — в `ads.service`.
 """
 
 from __future__ import annotations
@@ -77,6 +75,7 @@ from agent.tools.schemas import (
     UpdateKeywordBid,
 )
 from ads.resolve import MONEY_OPS
+from confirm.policy import AUTONOMOUS_ADS_OPS as _AUTONOMOUS_ADS_OPS
 from confirm.reverse import ROLLBACKABLE_OPS, reverse_spec
 from confirm.risk import TIERS, risk_tier
 from confirm.store import ConfirmStore
@@ -86,7 +85,7 @@ from core.context import get_context
 from core.guards import require_no_mutations
 from core.logging import log
 from core.provenance import get_provenance
-from mcp_server.envelope import classify_error, proposed, refused
+from mcp_server.envelope import autonomously_applied, classify_error, proposed, refused
 from mcp_server.propose import ProposalRefused, build_proposal
 from mcp_server.redact import redact_error
 
@@ -121,15 +120,18 @@ async def _propose(
     account: str,
     **fields: Any,
 ) -> dict[str, Any]:
-    """Общая механика propose-инструмента. ЛЮБОЙ отказ — редактированный `refused()`-конверт (правило
-    5: сырой str(e) наружу не идёт). Успех — `proposed()`-конверт с `preview` «было → станет».
+    """Собрать аттестованное действие и автономно исполнить либо вернуть одну confirm-card.
+
+    ЛЮБОЙ отказ — редактированный `refused()`-конверт: сырой str(e) наружу не идёт. Успех —
+    `executed` с audit-backed summary для allow-list либо `pending_confirmation` с preview.
 
     Порядок гейтов fail-closed и значим:
       1) валидация входа моделью (диапазоны/режимы/валюта — КОД, не доверие);
       2) провенанс: денежный черновик только человеческим ходом (правило 3);
       3) контекст хода: черновику нужен чат доставки/подтверждения (fail-closed);
       4) И8: не более одного черновика на ход (счёт из хранилища по run-корреляции);
-      5) сборка+сохранение черновика (Google Ads не тронут).
+      5) сборка+сохранение черновика;
+      6) autonomous allow-list: CAS → execute → audit/readback; иначе одна карточка подтверждения.
     """
     lang = i18n.current_lang()
     try:
@@ -171,6 +173,32 @@ async def _propose(
     except Exception as e:  # noqa: BLE001
         log.warning("mcp propose tool failed: %s", type(e).__name__)
         return refused(redact_error(e), error_code=classify_error(e))
+    from confirm.policy import may_execute_autonomously
+
+    if may_execute_autonomously(operation):
+        try:
+            if not await store.authorize_autonomous(cid, operation=operation):
+                raise PermissionError("autonomous authorization rejected")
+            from ads.service import execute_confirmed as _execute_autonomous
+            from core.texts import fmt_mutation_result
+
+            await _execute_autonomous(store, cid)
+            applied = await store.get_applied_audit_result(cid)
+            if applied is None:
+                raise RuntimeError("applied audit row is unavailable")
+            summary = fmt_mutation_result(applied.operation, applied.result, lang=lang)
+            if not summary.strip():
+                raise RuntimeError("applied audit result is not renderable")
+            return autonomously_applied(
+                confirmation_id=cid,
+                operation=applied.operation,
+                customer_id=applied.customer_id,
+                summary=summary,
+            )
+        except Exception as e:  # noqa: BLE001 - MCP boundary; never leak raw exception text
+            log.warning("mcp autonomous mutation failed: %s", type(e).__name__)
+            return refused(redact_error(e), error_code=classify_error(e))
+
     return proposed(
         confirmation_id=built.cid,
         operation=built.operation,
@@ -1223,6 +1251,26 @@ PROPOSE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "propose_remove_asset_link": propose_remove_asset_link,
     "propose_composite_change": propose_composite_change,
 }
+
+# Public MCP names are retained for rolling compatibility, but their old ``propose_*`` prefix must
+# not make Hermes invent an extra approval step. Keep this presentation map in lockstep with the
+# code policy and prepend an explicit execution contract to the schema description FastMCP exposes.
+_AUTONOMOUS_TOOL_OPERATIONS: dict[str, str] = {
+    "propose_update_campaign": "update_campaign",
+    "propose_create_search_campaign": "create_search_campaign",
+    "propose_create_gdn_campaign": "create_gdn_campaign",
+    "propose_create_demand_gen_campaign": "create_demand_gen_campaign",
+    "propose_create_video_campaign": "create_video_campaign",
+}
+
+if frozenset(_AUTONOMOUS_TOOL_OPERATIONS.values()) != _AUTONOMOUS_ADS_OPS:
+    raise RuntimeError("MCP autonomous tool descriptions diverged from confirm.policy")
+for _tool_name in _AUTONOMOUS_TOOL_OPERATIONS:
+    _fn = PROPOSE_TOOL_FUNCS[_tool_name]
+    _fn.__doc__ = (
+        "АВТОНОМНОЕ ДЕЙСТВИЕ: в приватном контуре выполняется сразу, без карточки подтверждения, "
+        "и возвращает status=executed с результатом из audit/readback.\n\n" + (_fn.__doc__ or "")
+    )
 
 EXECUTE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "execute_confirmed": execute_confirmed,

@@ -1,4 +1,4 @@
-"""Pinned Hermes hook behavior: trusted event correlation, token overwrite and И7 phase lock."""
+"""Pinned Hermes hook behavior: trusted event correlation without an external-content phase lock."""
 
 from __future__ import annotations
 
@@ -236,6 +236,9 @@ async def test_confirmation_button_becomes_exact_trusted_reply(monkeypatch):
         async def _handle_callback_query(self, update, context):
             raise AssertionError("Aimash callback must not reach the Hermes catch-all")
 
+        def _should_attempt_rich(self, content, metadata=None):
+            return True
+
         def _is_callback_user_authorized(self, *args, **kwargs):
             return True
 
@@ -266,6 +269,24 @@ async def test_confirmation_button_becomes_exact_trusted_reply(monkeypatch):
         "✅ Да",
         "❌ Нет",
     ]
+    assert adapter._should_attempt_rich(card, metadata={"notify": True}) is False
+    assert adapter._should_attempt_rich("обычный отчёт", metadata={"notify": True}) is True
+
+    delivered = []
+
+    async def _deliver(adapter_arg, chat_id, metadata):
+        delivered.append((adapter_arg, chat_id, metadata))
+
+    monkeypatch.setattr(plugin, "_deliver_pending_artifacts", _deliver)
+    await adapter.edit_message(
+        "-202",
+        "303",
+        card,
+        finalize=True,
+        metadata={"notify": True, "thread_id": "7"},
+    )
+    assert attached[1]["message_id"] == 404
+    assert delivered == [(adapter, "-202", {"notify": True, "thread_id": "7"})]
 
     answers = []
 
@@ -329,20 +350,28 @@ async def test_confirmation_button_becomes_exact_trusted_reply(monkeypatch):
     assert turn.reply_confirmation_id == marker
 
 
-def test_external_tool_and_write_are_mutually_exclusive_per_turn(monkeypatch):
+def test_external_tool_does_not_block_private_operator_write(monkeypatch):
     plugin = _load(monkeypatch, _env())
     plugin._capture_gateway_event(event=_event())
     assert (
         plugin._pre_tool_call(tool_name="web_search", args={}, session_id="s4", turn_id="t4")
         is None
     )
-    blocked = plugin._pre_tool_call(
-        tool_name="mcp__aimash__propose_pause_campaign",
-        args={"account": "7753643025", "campaign": "X"},
-        session_id="s4",
-        turn_id="t4",
+    args_after_web = {"account": "7753643025", "campaign": "X"}
+    assert (
+        plugin._pre_tool_call(
+            tool_name="mcp__aimash__propose_pause_campaign",
+            args=args_after_web,
+            session_id="s4",
+            turn_id="t4",
+        )
+        is None
     )
-    assert blocked["action"] == "block"
+    verify_turn_token(
+        args_after_web["trusted_turn_token"],
+        expected_tool="propose_pause_campaign",
+        tool_args={"account": "7753643025", "campaign": "X"},
+    )
 
     args = {"account": "7753643025", "campaign": "Y"}
     assert (
@@ -354,10 +383,10 @@ def test_external_tool_and_write_are_mutually_exclusive_per_turn(monkeypatch):
         )
         is None
     )
-    blocked_external = plugin._pre_tool_call(
-        tool_name="web_search", args={}, session_id="s5", turn_id="t5"
+    assert (
+        plugin._pre_tool_call(tool_name="web_search", args={}, session_id="s5", turn_id="t5")
+        is None
     )
-    assert blocked_external["action"] == "block"
 
 
 def test_guarded_local_skill_reads_do_not_taint_ads_proposal(monkeypatch):
@@ -391,7 +420,7 @@ def test_guarded_local_skill_reads_do_not_taint_ads_proposal(monkeypatch):
     )
 
 
-def test_skill_write_still_taints_ads_proposal(monkeypatch):
+def test_skill_write_does_not_phase_lock_private_operator_proposal(monkeypatch):
     plugin = _load(monkeypatch, _env())
     plugin._capture_gateway_event(event=_event())
     assert (
@@ -403,16 +432,20 @@ def test_skill_write_still_taints_ads_proposal(monkeypatch):
         )
         is None
     )
-    blocked = plugin._pre_tool_call(
-        tool_name="mcp__aimash__propose_pause_campaign",
-        args={"account": "7753643025", "campaign": "X"},
-        session_id="s-skill-write",
-        turn_id="t-skill-write",
+    args = {"account": "7753643025", "campaign": "X"}
+    assert (
+        plugin._pre_tool_call(
+            tool_name="mcp__aimash__propose_pause_campaign",
+            args=args,
+            session_id="s-skill-write",
+            turn_id="t-skill-write",
+        )
+        is None
     )
-    assert blocked["action"] == "block"
+    assert "trusted_turn_token" in args
 
 
-def test_recall_client_is_tainted_external_content(monkeypatch):
+def test_recall_client_does_not_phase_lock_private_operator_proposal(monkeypatch):
     plugin = _load(monkeypatch, _env())
     plugin._capture_gateway_event(event=_event())
     assert (
@@ -424,13 +457,17 @@ def test_recall_client_is_tainted_external_content(monkeypatch):
         )
         is None
     )
-    blocked = plugin._pre_tool_call(
-        tool_name="mcp__aimash__propose_pause_campaign",
-        args={"account": "7753643025", "campaign": "X"},
-        session_id="s6",
-        turn_id="t6",
+    args = {"account": "7753643025", "campaign": "X"}
+    assert (
+        plugin._pre_tool_call(
+            tool_name="mcp__aimash__propose_pause_campaign",
+            args=args,
+            session_id="s6",
+            turn_id="t6",
+        )
+        is None
     )
-    assert blocked["action"] == "block"
+    assert "trusted_turn_token" in args
 
 
 def test_signed_artifact_is_queued_for_exact_topic_and_hidden_from_model(monkeypatch):

@@ -108,8 +108,8 @@ def ok(
 def wrap_external(text: str) -> str:
     """Обрамить внешний по происхождению текст маркером доверия: модель обязана видеть его как ДАННЫЕ,
     а не инструкции. Профиль/досье клиента собраны из краула сайта клиента (§3.8) — внешний контент
-    (И7, OWASP LLM01 = #1). Prompt injection не лечится фразой в промпте; здесь маркер — не защита сам
-    по себе, а честная РАЗМЕТКА границы: сигнал модели, что дальше идёт недоверенное. Ставит его КОД
+    (OWASP LLM01). Маркер — честная РАЗМЕТКА границы: сигнал модели, что дальше идёт недоверенное.
+    Он не включает межходовый phase-lock и не блокирует нормальный agent loop. Ставит его КОД
     (не модель, не ридер): граница доверия — свойство слоя, а не договорённость в тексте. Пустой текст
     обрамляется тоже — наличие маркера не зависит от наличия данных (иначе на пустом профиле граница
     молча исчезает и следующая правка «профиль пуст ⇒ не оборачиваем» открыла бы дыру беззвучно)."""
@@ -251,4 +251,21 @@ def refused(text: str, *, error_code: str = "refused") -> dict[str, Any]:
         "preview": None,
         "error": text,
         "error_code": error_code,
+    }
+
+
+def autonomously_applied(
+    *, confirmation_id: str, operation: str, customer_id: str, summary: str
+) -> dict[str, Any]:
+    """Successful audited non-spend mutation; no confirmation card is rendered."""
+
+    return {
+        "confirmation_id": confirmation_id,
+        "operation": operation,
+        "customer_id": str(customer_id),
+        "status": "executed",
+        "summary": summary,
+        "preview": None,
+        "error": None,
+        "error_code": None,
     }

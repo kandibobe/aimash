@@ -919,16 +919,14 @@ async def recall_client(account: str, max_chars: int | None = None) -> dict[str,
     Замок: ensure_read_allowed на границе `_guarded` — `ClientProfileStore` НАШЕЙ БД своего замка не
     имеет (как `db/history`, `audit/`), и граница здесь — ЕДИНСТВЕННАЯ защита И6: чужого клиента не
     прочитать. Текст — под маркером `<client_data trust=external>` (`envelope.client_context`): он
-    собран из внешнего контента (И7), и модель обязана видеть его как данные. Маркер и замок ставит
+    собран из внешнего контента, и модель обязана видеть его как данные. Маркер и замок ставит
     КОД, не модель.
 
     Конверт — `client_context` (без `code_numbers`): контекст потенциально tainted, число из него не
     смеет стать «проверенным» для factguard (обоснование — в `envelope.client_context`).
 
-    ⚠️ Когда появится taint-контур WRITE (правило 12, И7): пересмотреть, ставит ли чтение сохранённого
-    (санированного) профиля thread-taint. Сегодня WRITE на поверхности недоступен (гард §15.2,
-    `server.build_server`) — мутацию блокировать нечем и не от чего, маркера достаточно; при подключении
-    мутаций решить это ЯВНО, а не унаследовать молчанием."""
+    Сохранённый профиль не включает межходовый phase-lock: приватный агент продолжает нормальный
+    цикл, но внешний текст не может создать trusted Telegram confirmation или денежный provenance."""
 
     async def _work() -> dict[str, Any]:
         text = await ClientProfileStore().profile_context_text(str(account), max_chars=max_chars)
