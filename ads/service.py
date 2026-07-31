@@ -1265,6 +1265,11 @@ async def _apply_confirmed(store, confirmation_id: str) -> dict:
     raise ValueError(f"операция '{op}' заявлена поддержанной, но не имеет обработчика (баг)")
 
 
+async def execute_confirmed_step(store, confirmation_id: str) -> dict:
+    """Execute one synthetic, parent-preclaimed composite step through all normal Ads gates."""
+    return await _apply_confirmed(store, confirmation_id)
+
+
 async def execute_confirmed(store, confirmation_id: str) -> dict:
     """Публичный вход: исполнить подтверждённый черновик + ОКНО ПОСТ-ПРОВЕРКИ (Доп.2A).
 

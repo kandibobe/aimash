@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Atomically reconcile only the Aimash MCP surface and trusted plugin on a live Hermes host.
+"""Atomically reconcile the Aimash surface and pinned trusted-operator policy on a live host.
 
 The live config contains host-local provider/dashboard settings and secrets, so deploying the repo
-template wholesale is unsafe.  This script preserves every unrelated key, derives the exact tool
-surface from the running ``aimash-bot`` container, installs the repository plugin, and enables it
-iff the application-side ``HERMES_WRITE_ENABLED`` flag is true.
+template wholesale is unsafe. This script preserves provider/dashboard/secrets, derives the exact
+tool surface from the running ``aimash-bot`` container, installs the repository plugin, and pins
+the explicitly approved private-team permissions so a dashboard edit or deploy cannot drift them.
 """
 
 from __future__ import annotations
@@ -22,6 +22,52 @@ from typing import Any
 import yaml
 
 PLUGIN_NAME = "aimash_trusted_transport"
+TRUSTED_OPERATOR_DISABLED_TOOLSETS = (
+    "homeassistant",
+    "spotify",
+    "video_gen",
+    "x_search",
+    "yuanbao",
+    "tts",
+)
+
+
+def reconcile_trusted_operator_policy(config: dict[str, Any]) -> dict[str, Any]:
+    """Pin the owner-approved private-team tool, memory, delegation and skill policy."""
+    agent = config.setdefault("agent", {})
+    if not isinstance(agent, dict):
+        raise RuntimeError("live Hermes config: agent must be a mapping")
+    agent["disabled_toolsets"] = list(TRUSTED_OPERATOR_DISABLED_TOOLSETS)
+
+    memory = config.setdefault("memory", {})
+    if not isinstance(memory, dict):
+        raise RuntimeError("live Hermes config: memory must be a mapping")
+    memory["memory_enabled"] = True
+    memory["user_profile_enabled"] = True
+
+    skills = config.setdefault("skills", {})
+    if not isinstance(skills, dict):
+        raise RuntimeError("live Hermes config: skills must be a mapping")
+    skills.update(
+        {
+            "inline_shell": False,
+            "guard_agent_created": True,
+            "write_approval": True,
+        }
+    )
+
+    config["delegation"] = {
+        "model": "google/gemini-3.1-flash-lite",
+        "provider": "openrouter",
+        "inherit_mcp_toolsets": True,
+        "max_iterations": 30,
+        "reasoning_effort": "none",
+        "max_concurrent_children": 3,
+        "max_spawn_depth": 1,
+        "orchestrator_enabled": True,
+        "subagent_auto_approve": False,
+    }
+    return config
 
 
 def sanitize_pinned_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -202,7 +248,7 @@ def main() -> int:
         raise RuntimeError("live Hermes config must be a mapping")
     _install_plugin(args.plugin_source, args.plugin_target)
     _atomic_copy(args.soul_source, args.soul_target)
-    config = sanitize_pinned_config(config)
+    config = reconcile_trusted_operator_policy(sanitize_pinned_config(config))
     _atomic_yaml(args.config, reconcile_config(config, enabled=enabled, tools=tools))
     print(
         f"Aimash Hermes surface reconciled: mode={'WRITE' if enabled else 'READ'}, tools={len(tools)}"

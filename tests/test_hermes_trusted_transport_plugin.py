@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import importlib.util
+import base64
+import hashlib
+import hmac
+import json
 from datetime import datetime, timezone
 import sys
 import types
 import uuid
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -73,6 +78,29 @@ def _env() -> dict[str, str]:
         "HERMES_SESSION_MESSAGE_ID": "303",
         "HERMES_SESSION_USER_ID": "101",
     }
+
+
+def _artifact_token(*, content: bytes = b"xlsx") -> str:
+    now = int(time.time())
+    payload = {
+        "v": 1,
+        "iat": now,
+        "exp": now + 900,
+        "container": "aimash-bot",
+        "path": "/tmp/aimash_artifacts/" + "a" * 32 + ".xlsx",
+        "filename": "report.xlsx",
+        "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "size": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "nonce": "b" * 32,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    sig = hmac.new(KEY.encode(), raw, hashlib.sha256).digest()
+
+    def enc(value: bytes) -> str:
+        return base64.urlsafe_b64encode(value).decode().rstrip("=")
+
+    return f"{enc(raw)}.{enc(sig)}"
 
 
 def test_plugin_overwrites_model_token_with_verified_event(monkeypatch):
@@ -235,9 +263,8 @@ async def test_confirmation_button_becomes_exact_trusted_reply(monkeypatch):
     await adapter.send("-202", card, metadata={"notify": True})
     keyboard = attached[0]["reply_markup"].inline_keyboard
     assert [button.text for row in keyboard for button in row] == [
-        "✅ Подтвердить",
-        "✏️ Изменить",
-        "❌ Отмена",
+        "✅ Да",
+        "❌ Нет",
     ]
 
     answers = []
@@ -404,3 +431,40 @@ def test_recall_client_is_tainted_external_content(monkeypatch):
         turn_id="t6",
     )
     assert blocked["action"] == "block"
+
+
+def test_signed_artifact_is_queued_for_exact_topic_and_hidden_from_model(monkeypatch):
+    plugin = _load(monkeypatch, _env())
+    plugin._capture_gateway_event(event=_event())
+    token = _artifact_token()
+    result = json.dumps(
+        {
+            "artifact": {
+                "filename": "report.xlsx",
+                "token": token,
+                "marker": f"AIMASH_ARTIFACT:{token}",
+            }
+        }
+    )
+
+    plugin._post_tool_call(tool_name="mcp__aimash__build_report", result=result)
+    transformed = plugin._transform_tool_result(
+        tool_name="mcp__aimash__build_report", result=result
+    )
+
+    assert plugin._pending_artifacts[(-202, "7")] == [token]
+    assert token not in transformed
+    assert "report.xlsx" in transformed
+
+
+def test_forged_artifact_is_not_queued(monkeypatch):
+    plugin = _load(monkeypatch, _env())
+    plugin._capture_gateway_event(event=_event())
+    token = _artifact_token()[:-1] + "x"
+
+    plugin._post_tool_call(
+        tool_name="mcp__aimash__build_report",
+        result=json.dumps({"artifact": {"token": token}}),
+    )
+
+    assert plugin._pending_artifacts == {}

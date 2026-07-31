@@ -199,6 +199,7 @@ def proposed(
     operation: str,
     customer_id: str,
     preview: str,
+    unchanged_label: str = "Google Ads",
 ) -> dict[str, Any]:
     """Успешный конверт propose-инструмента: черновик СОЗДАН (status='pending'), Google Ads НЕ тронут.
 
@@ -216,9 +217,10 @@ def proposed(
     anchored_preview = (
         "🧾 Черновик изменения\n\n"
         f"{preview}\n\n"
-        "⚠️ Google Ads пока не изменён.\n\n"
+        f"⚠️ {unchanged_label} пока не изменён.\n\n"
         f"||{marker}||\n\n"
-        "✅ Нажмите «Подтвердить» или ответьте «да» реплаем на всю карточку."
+        "❓ Сделать так?\n\n"
+        "Нажмите «Да» или «Нет». Также можно ответить «да» или «нет» реплаем на всю карточку."
     )
     return {
         "confirmation_id": confirmation_id,

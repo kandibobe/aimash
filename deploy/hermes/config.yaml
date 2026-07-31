@@ -21,24 +21,11 @@ agent:
   max_turns: 20
   tool_use_enforcement: auto
   disabled_toolsets:
-    - browser
-    - code_execution
-    - computer_use
-    - context_engine
-    - cronjob
-    - file
     - homeassistant
-    - memory
-    - session_search
     - spotify
-    - terminal
-    - video
     - video_gen
-    - vision
-    - web
     - x_search
     - yuanbao
-    - image_gen
     - tts
   reasoning_overrides:
     google/gemini-3.1-flash-lite: none
@@ -109,8 +96,8 @@ privacy:
   redact_pii: true
 
 memory:
-  memory_enabled: false
-  user_profile_enabled: false
+  memory_enabled: true
+  user_profile_enabled: true
 
 delegation:
   model: google/gemini-3.1-flash-lite
@@ -194,7 +181,7 @@ mcp_servers:
     timeout: 120
     connect_timeout: 30
     tools:
-      include:             # 25 READ + 1 META + 46 PLAN/state + 1 trusted reply-execute
+      include:             # exact registry; guarded by tests/test_hermes_isolation.py
         - get_bridge_capabilities
         - list_accounts
         - get_campaign_stats
@@ -230,6 +217,21 @@ mcp_servers:
         - get_mcc_deep
         # Общие списки минус-слов нужны PLAN-обёрткам как READ-контекст; сам инструмент не мутирует.
         - list_negative_shared_sets
+        # Bot-free professional workflows: artifact report delivery, keyword/RSA primitives and
+        # structured client-profile/crawl reads. Every function keeps the same read-account lock.
+        - build_report
+        - seed_keywords
+        - cluster_keywords
+        - filter_keyword_relevance
+        - suggest_negatives
+        - parse_keywords_input
+        - generate_rsa
+        - validate_adcopy
+        - build_display_path
+        - get_client_card
+        - list_client_facts_structured
+        - list_site_pages
+        - get_crawl_status
         # PLAN создаёт только pending proposal. Каждый вызов проходит HMAC trusted-turn wrapper;
         # execute не принимает identity/id от модели и требует реальный Telegram reply-якорь.
         - propose_budget_change
@@ -272,6 +274,9 @@ mcp_servers:
         - propose_add_promotion
         - propose_add_price_asset
         - propose_remove_asset_link
+        - propose_composite_change
+        - propose_profile_change
+        - propose_profile_clear
         - list_pending_proposals
         - cancel_proposal
         # Operational control plane: trusted HMAC turn + per-account RBAC + scoped atomic transition.
@@ -279,6 +284,20 @@ mcp_servers:
         - update_decision
         - list_incidents
         - update_incident
+        # Durable non-Ads workflows. Trusted Telegram identity scopes sheet/session ownership;
+        # only curation_finalize mints a real create_rsa proposal, still behind normal confirm CAS.
+        - start_keyword_research
+        - read_keyword_sheet
+        - curation_start
+        - curation_state
+        - curation_apply
+        - curation_finalize
+        - search_wizard_start
+        - search_wizard_state
+        - search_wizard_update
+        - search_wizard_finalize
+        - ingest_media
+        - start_client_crawl
         - execute_confirmed
   tavily:
     command: npx

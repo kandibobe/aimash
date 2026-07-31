@@ -180,9 +180,8 @@ class Settings(BaseSettings):
     google_ads_daily_op_limit: int = 15000
 
     # BZ-1: аварийный рубильник мутаций (core.killswitch). Существование файла по этому пути
-    # (относительно CWD процесса; в контейнере — /app) останавливает ВСЕ мутации БЕЗ рестарта:
-    # `docker exec aimash-bot touch /app/KILL_SWITCH`. Пусто = файл-канал выключен (остаётся env
-    # DISABLE_ALL_MUTATIONS — тот читается живьём из os.environ, мимо этого синглтона).
+    # В Compose переопределён общим `/run/aimash-safety/KILL_SWITCH`, смонтированным read-only в
+    # bot/scheduler. Пусто = файл-канал выключен (остаётся живой env-канал).
     kill_switch_file: str = "KILL_SWITCH"
     # B1-4: суточный blast-radius ПОВЫШЕНИЙ бюджета на аккаунт (окно 24 ч по исполненным строкам
     # proposals; понижения не ограничиваются никогда). Проверка — ДО claim, в

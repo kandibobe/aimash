@@ -85,6 +85,9 @@ services:
       # флаг не даст двойных дайджестов/двойного reconcile, а даст громкий отказ у проигравшего.
       # Дефолт в коде — `true` (историческое поведение), здесь снимаем осознанно.
       SCHEDULER_IN_BOT: "false"
+      KILL_SWITCH_FILE: /run/aimash-safety/KILL_SWITCH
+    volumes:
+      - ./runtime/safety:/run/aimash-safety:ro
     restart: unless-stopped
     # Потолок ресурсов одного инстанса (long-poll бот лёгкий; лимит ловит утечку/раздувание).
     # docker compose v2 (не-swarm) применяет deploy.resources.limits для memory/cpus.
@@ -136,6 +139,9 @@ services:
       # роли молча: этот процесс владеет джобами независимо от значения (энфорсмент — lock).
       SCHEDULER_IN_BOT: "true"
       PYTHONIOENCODING: utf-8
+      KILL_SWITCH_FILE: /run/aimash-safety/KILL_SWITCH
+    volumes:
+      - ./runtime/safety:/run/aimash-safety:ro
     command: ["python", "-m", "scheduler"]
     restart: unless-stopped
     # Тот же HEALTHCHECK из образа (свежесть heartbeat) — энтрипоинт планировщика поднимает
@@ -177,6 +183,9 @@ services:
       DATABASE_URL: postgresql+asyncpg://aimash:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD обязателен — задай в .env}@postgres:5432/aimash
       TZ: UTC
       PYTHONIOENCODING: utf-8    # Windows/utf8 не при чём здесь, но stdout MCP — строго utf-8
+      KILL_SWITCH_FILE: /run/aimash-safety/KILL_SWITCH
+    volumes:
+      - ./runtime/safety:/run/aimash-safety:ro
     command: ["python", "-m", "mcp_server"]
     restart: "no"               # запускается через `run --rm` на сессию Hermes, не long-running
 

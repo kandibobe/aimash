@@ -62,7 +62,7 @@ cp .env.example .env
 | `DEFAULT_GEO_LOCALE` | нет | D7: язык названий локаций по умолчанию. Дефолт `ru`. **Пусто** ⇒ язык выводится из страны (UG→en) и совпадает с гео-таргетами Google; явное значение (`en`) побеждает |
 | `GOOGLE_ADS_DAILY_OP_LIMIT` | нет | `15000` — дневной лимит операций API; на 95% мутации блокируются (`/quota`) |
 | `DISABLE_ALL_MUTATIONS` | нет | BZ-1 аварийный рубильник: НЕ пусто и не `0/false/no/off` ⇒ ВСЕ мутации остановлены (чтение работает). Fail-closed: опечатка = ВКЛЮЧЁН. Читается живьём из окружения (мимо кэша настроек) — `docker compose up -d` после правки `.env`, рестарта кода не надо |
-| `KILL_SWITCH_FILE` | нет | `KILL_SWITCH` — файл-флаг рубильника: `docker exec aimash-bot touch /app/KILL_SWITCH` = стоп мутаций БЕЗ рестарта, `rm` = обратно. Пусто = файловый канал выключен осознанно. ⚠️ пересоздание контейнера файл снимает — стойкий стоп через env-канал |
+| `KILL_SWITCH_FILE` | нет | Local/dev: `KILL_SWITCH`. В Compose переопределён общим `/run/aimash-safety/KILL_SWITCH`: `touch /opt/aimash/runtime/safety/KILL_SWITCH` на хосте = стоп bot/Hermes MCP + scheduler БЕЗ рестарта; `rm` = обратно. Флаг переживает recreate. |
 | `DAILY_BUDGET_INCREASE_MAX_OPS` | нет | B1-4: сколько ПОВЫШЕНИЙ бюджета на аккаунт за 24 ч (понижения не считаются). `0` = выкл; **в prod автодефолт `10`**. Проверка до claim — отказ не сжигает подтверждение |
 | `DAILY_BUDGET_INCREASE_CAP_UNITS` | нет | B1-4: суммарный ПРИРОСТ бюджета на аккаунт за 24 ч, в единицах валюты. `0` = выкл (дефолта нет и в prod — включается явно) |
 | `SENTRY_DSN` / `SENTRY_TRACES_SAMPLE_RATE` | DSN — да | опц. телеметрия ошибок (`""` = выкл.) |
@@ -364,8 +364,8 @@ docker image prune -f
       (сузить). Пусто = мутаций нет (fail-closed, prod поднимется read-only). Мутации только среди
       видимых (код-минимум `ALLOWED_CEILING`={Draft} зашит в `ads/client.py`, `.env` его не понизит)
       и только за confirm-гейтом. Перед включением — `/mutready all`. См. §2.1.
-- [ ] Аварийный рубильник знаком дежурному: `docker exec aimash-bot touch /app/KILL_SWITCH` = стоп
-      мутаций сразу; стойко — `DISABLE_ALL_MUTATIONS=1` в `.env` + `docker compose up -d`. См. §2.
+- [ ] Аварийный рубильник знаком дежурному: `touch /opt/aimash/runtime/safety/KILL_SWITCH` = стоп
+      мутаций bot/Hermes MCP + scheduler сразу; стойкий env-дубль — `DISABLE_ALL_MUTATIONS=1`. См. §2.
 - [ ] B1-4 кап бюджета: `DAILY_BUDGET_INCREASE_MAX_OPS` (prod-автодефолт 10) устраивает; кап суммы
       `DAILY_BUDGET_INCREASE_CAP_UNITS` — включить по решению владельца.
 - [ ] 2FA (`TWO_FACTOR_ENABLED=true` + PIN) рекомендуется до работы с боевыми аккаунтами (§2.2).

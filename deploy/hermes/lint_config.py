@@ -262,12 +262,29 @@ _KNOWN_TOOLSETS = frozenset(
     }
 )
 
-# Единственные тулсеты, которым позволено быть ВКЛЮЧЁННЫМИ. Список задан от разрешённого, а не от
-# запрещённого, — иначе новый тулсет апгрейда приезжает включённым и молча (правило 8: возможность
-# закрывается тем, что её нет, а не перечислением запретов). Так и случилось: 27.07 конфиг на VPS
-# пересобрался из дефолта, и `terminal`/`file`/`code_execution`/`computer_use` вернулись, а линт
-# смотрел только на то, что перечислено в `disabled_toolsets`.
-_ALLOWED_ENABLED_TOOLSETS = frozenset({"skills", "todo", "clarify", "delegation"})
+# Private trusted-operator profile approved by the owner on 2026-07-31. Keep this as an allow-list:
+# a new toolset shipped by a future Hermes version must still require an explicit decision.
+_ALLOWED_ENABLED_TOOLSETS = frozenset(
+    {
+        "browser",
+        "clarify",
+        "code_execution",
+        "computer_use",
+        "context_engine",
+        "cronjob",
+        "delegation",
+        "file",
+        "image_gen",
+        "memory",
+        "session_search",
+        "skills",
+        "terminal",
+        "todo",
+        "video",
+        "vision",
+        "web",
+    }
+)
 
 # Production Telegram gateway may see only our bounded Ads READ server plus the explicitly
 # allow-listed research server. Every server must declare tools.include: an unbounded MCP server
@@ -275,13 +292,14 @@ _ALLOWED_ENABLED_TOOLSETS = frozenset({"skills", "todo", "clarify", "delegation"
 # the live gateway 2026-07-31).
 _ALLOWED_VPS_MCP_SERVERS = frozenset({"aimash", "tavily"})
 
-# Тулсеты, гашение которых — решение архитектуры, а не вкус. Снятие любого требует письменного
-# решения (Р2), поэтому линт держит их списком, а не комментарием.
+# Toolsets explicitly kept inactive in the same fixed profile.
 _MUST_DISABLE = {
-    "cronjob": "агент заводит расписание сам ⇒ мутация без команды человека (правило 3)",
-    "memory": "MEMORY.md/USER.md — один комплект на инстанс, а топик = клиент (Р2)",
-    "session_search": "FTS5 по всей state.db = по переписке всех клиентов (К9/И6)",
-    "context_engine": "индексация ФС втягивает в контекст всё, до чего дотянется, включая .env",
+    "homeassistant": "в проекте нет Home Assistant",
+    "spotify": "в проекте нет Spotify-сценариев",
+    "video_gen": "генерация видео не входит в текущий контур",
+    "x_search": "X Search не настроен",
+    "yuanbao": "Yuanbao не используется",
+    "tts": "text-to-speech не входит в текущий контур",
 }
 
 # Эти пути похожи на реальные настройки, но у пина v2026.7.20 нет ни одного runtime-read.
@@ -532,9 +550,24 @@ def check_toolsets(cfg: dict, rep: Report) -> None:
             f"{slug!r} нет в списке тулсетов установленной версии — строка гасит НИЧТО "
             "(проверить по `platform_toolsets.cli` живого конфига)",
         )
+
+
+def check_vps_trusted_operator_policy(cfg: dict, rep: Report) -> None:
+    """Exact owner-approved policy for the private production Telegram gateway."""
+    disabled = set(_as_list(_get(cfg, "agent.disabled_toolsets")))
     for slug, why in _MUST_DISABLE.items():
         if slug not in disabled:
             rep.error("agent.disabled_toolsets", f"{slug} обязан быть погашен: {why}")
+    expected = {
+        "memory.memory_enabled": True,
+        "memory.user_profile_enabled": True,
+    }
+    for path, want in expected.items():
+        value = _get(cfg, path)
+        if value is _MISSING:
+            rep.error(path, f"не задан явно; private trusted-operator profile требует {want!r}")
+        elif value is not want:
+            rep.error(path, f"{value!r}, ожидалось {want!r} для private trusted-operator profile")
 
 
 def check_delegation(cfg: dict, rep: Report) -> None:
@@ -619,8 +652,6 @@ def check_hardening(cfg: dict, rep: Report) -> None:
     """Ключи, у которых дефолт апстрима работает ПРОТИВ нас. Все обязаны стоять явно —
     дефолт в 0.x не обещание (Р7), и его смена не даст ни ошибки, ни строки в логе."""
     expected = {
-        "memory.memory_enabled": (False, "память — один комплект на инстанс, топик = клиент (Р2)"),
-        "memory.user_profile_enabled": (False, "«профиль пользователя» один на всю команду"),
         "skills.write_approval": (True, "дефолт false = агент правит свои постоянные инструкции"),
         "skills.guard_agent_created": (True, "дефолт false"),
         "skills.inline_shell": (False, "скил исполняет shell из своего markdown в обход approvals"),
@@ -907,7 +938,11 @@ def check_terminal_backend(cfg: dict, rep: Report) -> None:
 
 _PROFILE_CHECKS = {
     "host-a": (check_credential_boundary, check_terminal_backend),
-    "vps-read": (check_toolset_allowlist, check_mcp_server_allowlists),
+    "vps-read": (
+        check_vps_trusted_operator_policy,
+        check_toolset_allowlist,
+        check_mcp_server_allowlists,
+    ),
 }
 
 

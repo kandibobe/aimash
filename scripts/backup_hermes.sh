@@ -100,7 +100,9 @@ echo "[hermes-backup] tar $HERMES_DIR → $OUT"
 tar czf "$OUT" -C "$STAGE" "$BASE"
 chmod 600 "$OUT"
 
-# (опц.) шифрование и выгрузка наружу — локальный том вместе с сервером не спасёт:
+# (опц.) шифрование и выгрузка наружу — локальный том вместе с сервером не спасёт.
+# Если GPG/age на VPS нет: скопировать архив на доверенную workstation и использовать
+# `python scripts/backup_crypto.py encrypt/check`; recovery-key держать отдельно от ciphertext.
 #   gpg --batch --yes --encrypt --recipient ops@example.com "$OUT" && rm -f "$OUT"
 #   rclone copy "$OUT.gpg" remote:aimash-hermes/
 

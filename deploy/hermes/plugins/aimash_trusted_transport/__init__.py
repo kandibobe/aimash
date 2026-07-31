@@ -11,6 +11,7 @@ invalid tokens are rejected by ``mcp_server.trusted_transport`` before proposal 
 from __future__ import annotations
 
 import base64
+import asyncio
 import functools
 import hashlib
 import hmac
@@ -20,9 +21,12 @@ import math
 import os
 import re
 import secrets
+import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -42,8 +46,21 @@ _PLAN_STATE_TOOLS = frozenset(
         f"{_MCP_PREFIX}update_decision",
         f"{_MCP_PREFIX}list_incidents",
         f"{_MCP_PREFIX}update_incident",
+        f"{_MCP_PREFIX}start_keyword_research",
+        f"{_MCP_PREFIX}read_keyword_sheet",
+        f"{_MCP_PREFIX}curation_start",
+        f"{_MCP_PREFIX}curation_state",
+        f"{_MCP_PREFIX}curation_apply",
+        f"{_MCP_PREFIX}curation_finalize",
+        f"{_MCP_PREFIX}search_wizard_start",
+        f"{_MCP_PREFIX}search_wizard_state",
+        f"{_MCP_PREFIX}search_wizard_update",
+        f"{_MCP_PREFIX}search_wizard_finalize",
+        f"{_MCP_PREFIX}ingest_media",
+        f"{_MCP_PREFIX}start_client_crawl",
     }
 )
+_INGEST_MEDIA_TOOL = f"{_MCP_PREFIX}ingest_media"
 _TAINTED_AIMASH_TOOLS = frozenset({f"{_MCP_PREFIX}recall_client"})
 _CONFIRM_RE = re.compile(r"\bAIMASH_CONFIRM:([0-9a-fA-F]{32})\b")
 _CALLBACK_RE = re.compile(r"^am:(yes|edit|no):([0-9a-fA-F]{32})$")
@@ -52,6 +69,22 @@ _CALLBACK_RE = re.compile(r"^am:(yes|edit|no):([0-9a-fA-F]{32})$")
 # change; treating skill_view as external made every such proposal fail И7.  skill_manage stays
 # tainted: changing the agent's own instructions and touching Ads must be separate human turns.
 _SAFE_NATIVE_TOOLS = frozenset({"clarify", "skills_list", "skill_view", "todo"})
+_ARTIFACT_MARKER = "AIMASH_ARTIFACT:"
+_ARTIFACT_VERSION = 1
+_ARTIFACT_MAX_BYTES = 20 * 1024 * 1024
+_ARTIFACT_TOKEN_RE = re.compile(r"\bAIMASH_ARTIFACT:([A-Za-z0-9_.-]{40,12000})")
+_ARTIFACT_PATH_RE = re.compile(r"^/tmp/aimash_artifacts/[0-9a-f]{32}\.[a-z0-9]{1,8}$")
+_ARTIFACT_MIME = frozenset(
+    {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "text/csv",
+        "text/plain",
+        "application/pdf",
+        "image/jpeg",
+        "image/png",
+        "video/mp4",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,16 +96,31 @@ class _Inbound:
     chat_type: str
     thread_id: str | None
     message_id: int
+    message_text: str | None
     language_code: str
     reply_to_message_id: int | None
     reply_to_is_own_message: bool
     reply_confirmation_id: str | None
     reply_to_text: str | None
+    media_urls: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _Artifact:
+    token: str
+    container: str
+    path: str
+    filename: str
+    media_type: str
+    size: int
+    sha256: str
+    expires_at: int
 
 
 _lock = threading.RLock()
 _events: dict[tuple[str, int, int], _Inbound] = {}
 _turn_phase: dict[tuple[str, str], str] = {}
+_pending_artifacts: dict[tuple[int, str | None], list[str]] = {}
 
 
 def _as_int(value, *, positive: bool = False):
@@ -153,11 +201,15 @@ def _capture_gateway_event(*args, **kwargs) -> None:
         chat_type=_platform_name(getattr(source, "chat_type", None)),
         thread_id=_optional_text(getattr(source, "thread_id", None)),
         message_id=message_id,
+        message_text=_optional_text(getattr(event, "content", None), limit=8_000),
         language_code=language_code,
         reply_to_message_id=_as_int(getattr(event, "reply_to_message_id", None), positive=True),
         reply_to_is_own_message=_reply_is_from_this_bot(raw, event),
         reply_confirmation_id=_extract_reply_confirmation_id(event),
         reply_to_text=_optional_text(getattr(event, "reply_to_text", None), limit=8_000),
+        media_urls=tuple(str(item) for item in (getattr(event, "media_urls", None) or []) if item)[
+            :10
+        ],
     )
     with _lock:
         _prune(inbound.captured_at)
@@ -220,7 +272,252 @@ def _b64url(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
 
 
-def _signed_token(tool_name: str, tool_args: dict, inbound: _Inbound) -> str | None:
+def _b64url_decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _verify_artifact_token(token: str, *, now: int | None = None) -> _Artifact:
+    """Verify MCP artifact provenance and constrain docker-copy to one temp directory."""
+    if not isinstance(token, str) or len(token) > 12_000:
+        raise ValueError("invalid artifact token")
+    payload_part, signature_part = token.split(".", 1)
+    payload_bytes = _b64url_decode(payload_part)
+    supplied = _b64url_decode(signature_part)
+    key = os.environ.get("AIMASH_TRUST_HMAC_KEY", "").encode("utf-8")
+    if len(key) < 32:
+        raise ValueError("artifact signing key unavailable")
+    expected = hmac.new(key, payload_bytes, hashlib.sha256).digest()
+    if not hmac.compare_digest(supplied, expected):
+        raise ValueError("artifact signature mismatch")
+    payload = json.loads(payload_bytes.decode("utf-8"))
+    current = int(time.time()) if now is None else int(now)
+    if not isinstance(payload, dict) or payload.get("v") != _ARTIFACT_VERSION:
+        raise ValueError("artifact version mismatch")
+    issued_at = int(payload.get("iat") or 0)
+    expires_at = int(payload.get("exp") or 0)
+    if issued_at <= 0 or expires_at <= issued_at or expires_at < current:
+        raise ValueError("artifact expired")
+    if expires_at - issued_at > 15 * 60 + 5:
+        raise ValueError("artifact lifetime invalid")
+    path = str(payload.get("path") or "")
+    filename = Path(str(payload.get("filename") or "")).name
+    media_type = str(payload.get("media_type") or "")
+    size = int(payload.get("size") or 0)
+    digest = str(payload.get("sha256") or "")
+    if payload.get("container") != "aimash-bot" or not _ARTIFACT_PATH_RE.fullmatch(path):
+        raise ValueError("artifact source invalid")
+    if not filename or filename != str(payload.get("filename") or "") or len(filename) > 120:
+        raise ValueError("artifact filename invalid")
+    if media_type not in _ARTIFACT_MIME or not 0 < size <= _ARTIFACT_MAX_BYTES:
+        raise ValueError("artifact type or size invalid")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("artifact digest invalid")
+    return _Artifact(
+        token=token,
+        container="aimash-bot",
+        path=path,
+        filename=filename,
+        media_type=media_type,
+        size=size,
+        sha256=digest,
+        expires_at=expires_at,
+    )
+
+
+def _artifact_tokens(value) -> list[str]:
+    """Extract only valid signed tokens from one MCP result."""
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            parsed = None
+        if parsed is not None:
+            return _artifact_tokens(parsed)
+        candidates = [match.group(1) for match in _ARTIFACT_TOKEN_RE.finditer(value)]
+    elif isinstance(value, dict):
+        candidates = []
+        token = value.get("token")
+        if isinstance(token, str):
+            candidates.append(token)
+        for item in value.values():
+            candidates.extend(_artifact_tokens(item))
+    elif isinstance(value, list):
+        candidates = [token for item in value for token in _artifact_tokens(item)]
+    else:
+        candidates = []
+    valid: list[str] = []
+    for token in candidates:
+        try:
+            _verify_artifact_token(token)
+        except Exception:  # noqa: BLE001 - forged/expired descriptors are ignored fail-closed
+            continue
+        if token not in valid:
+            valid.append(token)
+    return valid
+
+
+def _post_tool_call(*args, **kwargs) -> None:
+    tool_name = str(kwargs.get("tool_name") or (args[0] if args else ""))
+    if not tool_name.startswith(_MCP_PREFIX):
+        return
+    tokens = _artifact_tokens(kwargs.get("result"))
+    inbound = _current_inbound()
+    if not tokens or inbound is None:
+        return
+    key = (inbound.actor_chat_id, inbound.thread_id)
+    with _lock:
+        queued = _pending_artifacts.setdefault(key, [])
+        for token in tokens:
+            if token not in queued:
+                queued.append(token)
+
+
+def _strip_artifact_secrets(value):
+    """Remove transport tokens before the tool result is appended to model context."""
+    if isinstance(value, dict):
+        return {
+            key: _strip_artifact_secrets(item)
+            for key, item in value.items()
+            if key not in {"token", "marker"}
+        }
+    if isinstance(value, list):
+        return [_strip_artifact_secrets(item) for item in value]
+    if isinstance(value, str):
+        return _ARTIFACT_TOKEN_RE.sub("[artifact queued for Telegram delivery]", value)
+    return value
+
+
+def _transform_tool_result(*args, **kwargs):
+    result = kwargs.get("result") if "result" in kwargs else (args[0] if args else None)
+    if not _artifact_tokens(result):
+        return None
+    try:
+        parsed = json.loads(result) if isinstance(result, str) else result
+        return json.dumps(_strip_artifact_secrets(parsed), ensure_ascii=False)
+    except Exception:  # noqa: BLE001 - fail-open hook; original result remains available
+        return None
+
+
+def _copy_artifact(artifact: _Artifact, destination: Path) -> None:
+    """Copy by argv (no shell), then verify exact size and digest before Telegram sees it."""
+    subprocess.run(
+        ["docker", "cp", f"{artifact.container}:{artifact.path}", str(destination)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=30,
+    )
+    if destination.stat().st_size != artifact.size:
+        raise ValueError("artifact size changed during delivery")
+    if hashlib.sha256(destination.read_bytes()).hexdigest() != artifact.sha256:
+        raise ValueError("artifact digest changed during delivery")
+
+
+def _remove_container_artifact(artifact: _Artifact) -> None:
+    subprocess.run(
+        ["docker", "exec", artifact.container, "rm", "-f", "--", artifact.path],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+    )
+
+
+async def _deliver_pending_artifacts(adapter, chat_id, metadata=None) -> None:
+    parsed_chat = _as_int(chat_id)
+    if parsed_chat is None or getattr(adapter, "_bot", None) is None:
+        return
+    thread_id = _optional_text((metadata or {}).get("thread_id"))
+    exact = (parsed_chat, thread_id)
+    with _lock:
+        tokens = _pending_artifacts.pop(exact, [])
+        if not tokens:
+            matches = [key for key in _pending_artifacts if key[0] == parsed_chat]
+            if len(matches) == 1:
+                tokens = _pending_artifacts.pop(matches[0], [])
+                thread_id = matches[0][1]
+    if not tokens:
+        return
+    from plugins.platforms.telegram.adapter import normalize_telegram_chat_id
+    from telegram import InputFile
+
+    for token in tokens:
+        try:
+            artifact = _verify_artifact_token(token)
+            with tempfile.TemporaryDirectory(prefix="aimash_artifact_") as tmp:
+                target = Path(tmp) / artifact.filename
+                await asyncio.to_thread(_copy_artifact, artifact, target)
+                kwargs = {
+                    "chat_id": normalize_telegram_chat_id(chat_id),
+                    "caption": f"📎 {artifact.filename}",
+                }
+                if thread_id is not None:
+                    kwargs["message_thread_id"] = int(thread_id)
+                with target.open("rb") as stream:
+                    media = InputFile(stream, filename=artifact.filename)
+                    if artifact.media_type.startswith("image/"):
+                        await adapter._bot.send_photo(photo=media, **kwargs)
+                    elif artifact.media_type == "video/mp4":
+                        await adapter._bot.send_video(video=media, **kwargs)
+                    else:
+                        await adapter._bot.send_document(document=media, **kwargs)
+            await asyncio.to_thread(_remove_container_artifact, artifact)
+        except Exception as exc:  # noqa: BLE001 - text response survives failed attachment
+            log.warning("Aimash artifact delivery failed: %s", type(exc).__name__)
+
+
+_INBOUND_MEDIA_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov"})
+_INBOUND_CONTAINER_RE = re.compile(
+    r"^/tmp/aimash_inbound/[0-9a-f]{32}\.(?:jpg|jpeg|png|webp|mp4|mov)$"
+)
+
+
+def _copy_trusted_inbound_media(inbound: _Inbound) -> list[dict]:
+    """Copy gateway-resolved media into MCP container without accepting a model path."""
+    copied: list[dict] = []
+    for raw in inbound.media_urls:
+        source = Path(raw)
+        try:
+            if source.is_symlink():
+                continue
+            resolved = source.resolve(strict=True)
+            suffix = resolved.suffix.lower()
+            size = resolved.stat().st_size
+            if not resolved.is_file() or suffix not in _INBOUND_MEDIA_SUFFIXES:
+                continue
+            if not 0 < size <= _ARTIFACT_MAX_BYTES:
+                continue
+            digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+            destination = f"/tmp/aimash_inbound/{secrets.token_hex(16)}{suffix}"
+            if not _INBOUND_CONTAINER_RE.fullmatch(destination):
+                continue
+            subprocess.run(
+                ["docker", "exec", "aimash-bot", "mkdir", "-p", "/tmp/aimash_inbound"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+            subprocess.run(
+                ["docker", "cp", str(resolved), f"aimash-bot:{destination}"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
+            copied.append({"path": destination, "suffix": suffix, "size": size, "sha256": digest})
+        except (OSError, subprocess.SubprocessError):
+            log.warning("Aimash inbound media copy failed")
+    return copied
+
+
+def _signed_token(
+    tool_name: str,
+    tool_args: dict,
+    inbound: _Inbound,
+    *,
+    inbound_media: list[dict] | None = None,
+) -> str | None:
     key = os.environ.get("AIMASH_TRUST_HMAC_KEY", "").encode("utf-8")
     if len(key) < 32:
         return None
@@ -232,6 +529,7 @@ def _signed_token(tool_name: str, tool_args: dict, inbound: _Inbound) -> str | N
         "platform": "telegram",
         "tool": tool_name,
         "args_sha256": _canonical_digest(tool_args),
+        "arg_keys": sorted(str(key) for key in tool_args if str(key) != _TOKEN_PARAM),
         "nonce": secrets.token_hex(16),
         "actor_user_id": inbound.actor_user_id,
         "actor_chat_id": inbound.actor_chat_id,
@@ -239,11 +537,13 @@ def _signed_token(tool_name: str, tool_args: dict, inbound: _Inbound) -> str | N
         "chat_type": inbound.chat_type,
         "thread_id": inbound.thread_id,
         "message_id": inbound.message_id,
+        "message_text": inbound.message_text,
         "language_code": inbound.language_code,
         "reply_to_message_id": inbound.reply_to_message_id,
         "reply_to_is_own_message": inbound.reply_to_is_own_message,
         "reply_confirmation_id": inbound.reply_confirmation_id,
         "reply_to_text": inbound.reply_to_text,
+        "inbound_media": inbound_media or [],
     }
     payload_bytes = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -273,12 +573,9 @@ async def _attach_confirmation_keyboard(adapter, chat_id, message_id, content: s
         keyboard = InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton(
-                        "✅ Подтвердить", callback_data=f"am:yes:{confirmation_id}"
-                    ),
-                    InlineKeyboardButton("✏️ Изменить", callback_data=f"am:edit:{confirmation_id}"),
+                    InlineKeyboardButton("✅ Да", callback_data=f"am:yes:{confirmation_id}"),
+                    InlineKeyboardButton("❌ Нет", callback_data=f"am:no:{confirmation_id}"),
                 ],
-                [InlineKeyboardButton("❌ Отмена", callback_data=f"am:no:{confirmation_id}")],
             ]
         )
         await adapter._bot.edit_message_reply_markup(
@@ -404,6 +701,8 @@ def _install_telegram_button_bridge() -> bool:
             await _attach_confirmation_keyboard(
                 adapter, chat_id, getattr(result, "message_id", None), content
             )
+            if (metadata or {}).get("notify"):
+                await _deliver_pending_artifacts(adapter, chat_id, metadata)
         return result
 
     @functools.wraps(original_edit)
@@ -471,7 +770,10 @@ def _pre_tool_call(*args, **kwargs):
                 }
             _turn_phase[turn_key] = "write"
             _prune(time.time())
-        token = _signed_token(tool_name, tool_args, inbound)
+        inbound_media = (
+            _copy_trusted_inbound_media(inbound) if tool_name == _INGEST_MEDIA_TOOL else []
+        )
+        token = _signed_token(tool_name, tool_args, inbound, inbound_media=inbound_media)
         if token is None:
             return {"action": "block", "message": "Aimash trusted transport не настроен"}
         # Model-supplied values are never honored: overwrite after hashing ordinary args.
@@ -503,6 +805,8 @@ def register(ctx):  # noqa: ANN001 - runtime-owned plugin API
     _install_telegram_button_bridge()
     ctx.register_hook("pre_gateway_dispatch", _capture_gateway_event)
     ctx.register_hook("pre_tool_call", _pre_tool_call)
+    ctx.register_hook("post_tool_call", _post_tool_call)
+    ctx.register_hook("transform_tool_result", _transform_tool_result)
     if len(os.environ.get("AIMASH_TRUST_HMAC_KEY", "").encode("utf-8")) < 32:
         log.warning("aimash_trusted_transport loaded without a valid signing key; WRITE will block")
     else:

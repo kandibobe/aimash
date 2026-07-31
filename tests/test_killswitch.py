@@ -81,7 +81,7 @@ def test_refusal_is_gate_refusal_and_hides_env_value(monkeypatch):
 # ── Канал файл-флага: стоп без рестарта ─────────────────────────────────────────────
 def test_file_flag_toggles_without_restart(monkeypatch, tmp_path):
     """Появление файла останавливает мутации НА СЛЕДУЮЩЕМ ЖЕ вызове (кэша нет), удаление —
-    возвращает. Это и есть «docker exec … touch /app/KILL_SWITCH» без рестарта процесса."""
+    возвращает. Это и есть общий host safety flag без рестарта процесса."""
     flag = tmp_path / "KILL_SWITCH"
     monkeypatch.setattr(settings, "kill_switch_file", str(flag))
     assert mutations_disabled() is None  # файла нет — работаем
@@ -99,6 +99,20 @@ def test_empty_file_setting_disables_file_channel(monkeypatch):
     fail-open: «канала нет» задаёт владелец конфигом, а не сбой среды."""
     monkeypatch.setattr(settings, "kill_switch_file", "")
     assert mutations_disabled() is None
+
+
+def test_compose_uses_one_persistent_read_only_safety_flag():
+    import yaml
+
+    root = Path(__file__).resolve().parents[1]
+    compose = yaml.safe_load((root / "docker-compose.yml").read_text(encoding="utf-8"))
+    expected_path = "/run/aimash-safety/KILL_SWITCH"
+    expected_mount = "./runtime/safety:/run/aimash-safety:ro"
+    for service in ("bot", "scheduler", "mcp"):
+        cfg = compose["services"][service]
+        assert cfg["environment"]["KILL_SWITCH_FILE"] == expected_path
+        assert expected_mount in cfg["volumes"]
+    assert (root / "runtime" / "safety" / ".gitkeep").is_file()
 
 
 # ── Врезка в замок аккаунта: проверка №0 ────────────────────────────────────────────

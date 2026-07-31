@@ -1,0 +1,235 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+from ads.client import DRAFT_ACCOUNT_ID
+from ads.keyword_plan import KeywordIdea
+from mcp_server import tools_workflow_state as ws
+from mcp_server.trusted_transport import TrustedMedia, TrustedTurn, trusted_turn_scope
+
+
+def _turn(chat_id: int = 100) -> TrustedTurn:
+    return TrustedTurn(
+        actor_user_id=777,
+        actor_chat_id=chat_id,
+        actor_username="operator",
+        chat_type="supergroup",
+        thread_id="7",
+        message_id=10,
+        language_code="ru",
+        reply_to_message_id=None,
+        reply_to_is_own_message=False,
+        reply_confirmation_id=None,
+        reply_to_text=None,
+        issued_at=1,
+        expires_at=2,
+    )
+
+
+@pytest.mark.asyncio
+async def test_rsa_curation_15_4_round_trip_to_one_proposal(monkeypatch):
+    headlines = [f"Заголовок {idx}" for idx in range(1, 16)]
+    descriptions = [f"Описание объявления {idx}" for idx in range(1, 5)]
+    captured = {}
+
+    async def fake_propose(**kwargs):
+        captured.update(kwargs)
+        return {"status": "pending", "confirmation_id": "c" * 32}
+
+    monkeypatch.setattr("mcp_server.tools_write.propose_create_rsa", fake_propose)
+    with trusted_turn_scope(_turn()):
+        started = await ws.curation_start(
+            DRAFT_ACCOUNT_ID,
+            "Campaign",
+            "123",
+            "Group",
+            "https://example.com",
+            headlines,
+            descriptions,
+        )
+        session_id = started["session_id"]
+        for index in range(1, 16):
+            state = await ws.curation_apply(
+                DRAFT_ACCOUNT_ID, session_id, "headline", index, "approve"
+            )
+        for index in range(1, 5):
+            state = await ws.curation_apply(
+                DRAFT_ACCOUNT_ID, session_id, "description", index, "approve"
+            )
+        result = await ws.curation_finalize(DRAFT_ACCOUNT_ID, session_id)
+
+    assert state["can_finalize"] is True
+    assert result["confirmation_id"] == "c" * 32
+    assert captured["headlines"] == headlines
+    assert captured["descriptions"] == descriptions
+    assert captured["account"] == DRAFT_ACCOUNT_ID
+
+
+@pytest.mark.asyncio
+async def test_curation_is_scoped_to_chat_and_account():
+    with trusted_turn_scope(_turn(chat_id=100)):
+        started = await ws.curation_start(
+            DRAFT_ACCOUNT_ID,
+            "Campaign",
+            "123",
+            "Group",
+            "https://example.com",
+            ["A", "B", "C"],
+            ["Description A", "Description B"],
+        )
+    with trusted_turn_scope(_turn(chat_id=200)):
+        with pytest.raises(PermissionError):
+            await ws.curation_state(DRAFT_ACCOUNT_ID, started["session_id"])
+
+
+@pytest.mark.asyncio
+async def test_keyword_research_builds_signed_delivery_artifact(monkeypatch, tmp_path):
+    ideas = [KeywordIdea("купить цветы", 100), KeywordIdea("цветы бесплатно", 20)]
+    cluster = SimpleNamespace(
+        name="Покупка", intent="транзакционный", keywords=[item.text for item in ideas], priority=0
+    )
+
+    monkeypatch.setattr(ws, "ensure_read_allowed", lambda account: None)
+    monkeypatch.setattr(ws, "artifact_path", lambda suffix: tmp_path / f"keywords{suffix}")
+    monkeypatch.setattr(
+        ws,
+        "publish_artifact",
+        lambda path, **kwargs: {"filename": kwargs["filename"], "token": "signed"},
+    )
+    monkeypatch.setattr(ws, "build_client_async", lambda account: _async_value(object()))
+    monkeypatch.setattr(
+        ws, "generate_seed_keywords", lambda **kwargs: _async_value(["цветы", "букет"])
+    )
+    monkeypatch.setattr(
+        ws.ClientProfileStore,
+        "profile_context_text",
+        lambda self, account: _async_value("Бренд Flowers"),
+    )
+    monkeypatch.setattr(
+        ws.ClientProfileStore,
+        "protected_negative_terms",
+        lambda self, account: _async_value({"flowers"}),
+    )
+
+    async def fake_read(fn, *args, **kwargs):
+        return "UAH" if fn is ws.account_currency else ideas
+
+    monkeypatch.setattr(ws, "run_ads_read_call", fake_read)
+    monkeypatch.setattr(
+        ws,
+        "filter_relevance",
+        lambda **kwargs: _async_value({ideas[0].text: True, ideas[1].text: False}),
+    )
+    monkeypatch.setattr(ws, "cluster_keywords", lambda *args, **kwargs: _async_value([cluster]))
+    monkeypatch.setattr(
+        ws, "suggest_negative_keywords", lambda *args, **kwargs: _async_value(["бесплатно"])
+    )
+    monkeypatch.setattr(ws, "rank_clusters", lambda clusters, *args: clusters)
+
+    def fake_write(_clusters, _ideas, path, **kwargs):
+        from pathlib import Path
+
+        Path(path).write_bytes(b"xlsx")
+        return path
+
+    monkeypatch.setattr(ws, "write_keywords_xlsx", fake_write)
+
+    with trusted_turn_scope(_turn()):
+        result = await ws.start_keyword_research(DRAFT_ACCOUNT_ID, "доставка цветов", output="xlsx")
+
+    assert result["artifact"]["token"] == "signed"
+    assert result["ideas"] == 2
+    assert result["relevant"] == 1
+    assert result["negative_suggestions"] == ["бесплатно"]
+
+
+@pytest.mark.asyncio
+async def test_keyword_sheet_rejects_substitution(monkeypatch):
+    monkeypatch.setattr(ws, "ensure_read_allowed", lambda account: None)
+    monkeypatch.setattr(ws, "parse_spreadsheet_id", lambda value: "sheet-id")
+
+    async def not_owned(**kwargs):
+        return False
+
+    monkeypatch.setattr(ws.sheets_registry, "is_owned_keyword_sheet", not_owned)
+    with trusted_turn_scope(_turn()):
+        with pytest.raises(PermissionError):
+            await ws.read_keyword_sheet(DRAFT_ACCOUNT_ID, "sheet-id")
+
+
+@pytest.mark.asyncio
+async def test_ingest_image_uses_only_trusted_media_and_deletes_copy(monkeypatch, tmp_path):
+    import hashlib
+
+    payload = b"trusted-image"
+    path = tmp_path / "input.jpg"
+    path.write_bytes(payload)
+    media = TrustedMedia(
+        path=str(path), suffix=".jpg", size=len(payload), sha256=hashlib.sha256(payload).hexdigest()
+    )
+    turn = _turn()
+    turn = TrustedTurn(
+        **{
+            name: getattr(turn, name)
+            for name in turn.__dataclass_fields__
+            if name != "inbound_media"
+        },
+        inbound_media=(media,),
+    )
+    saved = {}
+    monkeypatch.setattr(ws, "ensure_read_allowed", lambda account: None)
+    monkeypatch.setattr("ads.assets.prepare_display_images", lambda data: (b"landscape", b"square"))
+    monkeypatch.setattr(
+        "ads.assets.save_pending_media",
+        lambda media_id, landscape, square: saved.update(
+            {"media_id": media_id, "landscape": landscape, "square": square}
+        ),
+    )
+
+    with trusted_turn_scope(turn):
+        result = await ws.ingest_media(DRAFT_ACCOUNT_ID, "image")
+
+    assert result["google_ads_ready"] is True
+    assert result["rows"][0]["media_id"] == saved["media_id"]
+    assert saved["landscape"] == b"landscape" and saved["square"] == b"square"
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_ingest_video_is_received_but_requires_youtube_id(monkeypatch, tmp_path):
+    import hashlib
+
+    payload = b"trusted-video"
+    path = tmp_path / "input.mp4"
+    path.write_bytes(payload)
+    base = _turn()
+    turn = TrustedTurn(
+        **{
+            name: getattr(base, name)
+            for name in base.__dataclass_fields__
+            if name != "inbound_media"
+        },
+        inbound_media=(
+            TrustedMedia(
+                path=str(path),
+                suffix=".mp4",
+                size=len(payload),
+                sha256=hashlib.sha256(payload).hexdigest(),
+            ),
+        ),
+    )
+    monkeypatch.setattr(ws, "ensure_read_allowed", lambda account: None)
+
+    with trusted_turn_scope(turn):
+        result = await ws.ingest_media(DRAFT_ACCOUNT_ID, "video")
+
+    assert result["received"] is True
+    assert result["google_ads_ready"] is False
+    assert result["required_next"] == "youtube_video_id"
+    assert not path.exists()
+
+
+async def _async_value(value):
+    return value

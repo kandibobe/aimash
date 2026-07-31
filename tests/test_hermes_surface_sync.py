@@ -88,6 +88,32 @@ def test_sanitize_pinned_config_removes_only_proven_inert_keys():
     assert result["dashboard"] == {"theme": "dark"}
 
 
+def test_trusted_operator_policy_is_pinned_without_touching_host_secrets():
+    cfg = _config()
+    cfg.update(
+        {
+            "agent": {"disabled_toolsets": ["terminal"]},
+            "memory": {"memory_enabled": False, "user_profile_enabled": False},
+            "skills": {"inline_shell": True, "custom": "survives"},
+        }
+    )
+
+    got = SYNC.reconcile_trusted_operator_policy(cfg)
+
+    assert got["agent"]["disabled_toolsets"] == list(SYNC.TRUSTED_OPERATOR_DISABLED_TOOLSETS)
+    assert got["memory"] == {"memory_enabled": True, "user_profile_enabled": True}
+    assert got["skills"] == {
+        "inline_shell": False,
+        "guard_agent_created": True,
+        "write_approval": True,
+        "custom": "survives",
+    }
+    assert got["delegation"]["orchestrator_enabled"] is True
+    assert got["delegation"]["subagent_auto_approve"] is False
+    assert got["model"] == {"provider": "host-local", "default": "host-model"}
+    assert got["dashboard"] == {"secret": "must-survive"}
+
+
 def test_env_parser_never_needs_to_source_shell(tmp_path: Path):
     env = tmp_path / ".env"
     env.write_text("# x\nexport AIMASH_TRUST_HMAC_KEY='" + "k" * 32 + "'\n", encoding="utf-8")

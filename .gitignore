@@ -61,6 +61,10 @@ backups/
 .hermes/
 cache/
 
+# Host runtime state. The directory is mounted read-only into bot/scheduler/MCP.
+runtime/safety/*
+!runtime/safety/.gitkeep
+
 # A/B test outputs (могут содержать данные)
 ab_results/
 *.ab.json

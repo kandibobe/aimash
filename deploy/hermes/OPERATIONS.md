@@ -140,7 +140,7 @@ hermes doctor --fix                  # health self-check с авто-фиксо�
 
 **Кавеат `mcp test`:** доки подтверждают, что он тестирует **коннект**, но не сказано, что печатает список/счётчик
 инструментов [Likely]. Чтобы позитивно убедиться, что поверхность жива — сравнить `Tools discovered`
-с `mcp_server.server.expected_tool_names()` (сейчас 73: 25 READ-инструментов + 1 META + 46 PLAN/state + 1 WRITE), затем в чате спросить агента
+с `mcp_server.server.expected_tool_names()` (сейчас 101: 38 READ-инструментов + 1 META + 61 PLAN/state + 1 WRITE), затем в чате спросить агента
 «какие MCP-инструменты доступны», либо смотреть стартовый баннер в `gateway.log`. MCP-инструменты регистрируются с
 префиксом `mcp_<server>_<tool>`.
 
@@ -163,7 +163,7 @@ docker exec -i aimash-bot python -m mcp_server   # должен поднятьс
 `code_numbers` MCP, не из головы модели.
 
 WRITE проверять только на Draft `7753643025`: попросить изменить приостановленную тестовую кампанию,
-убедиться, что пришёл полный diff с кнопками `✅ Подтвердить / ✏️ Изменить / ❌ Отмена`, и нажать ✅.
+убедиться, что пришёл полный diff с кнопками `✅ Да / ❌ Нет`, и нажать `✅ Да`.
 Отдельно проверить fallback: новый черновик подтвердить обычным Telegram reply «да» на всю карточку.
 Selected quote, ответ без reply, reply другого пользователя, повторное «да» и подмена
 account/args обязаны отказать. После успеха сверить audit-row и повторным READ фактическое значение.
@@ -431,7 +431,7 @@ hermes plugins                 # V3 — список обнаруженных п
 | V | Что меряем | Как | Ожидание (гипотеза) |
 |---|---|---|---|
 | **V1** | Версия бинаря | `hermes version` (**субкоманда**, не `--version`) | ✅ **ЗАКРЫТО живьём 29.07.2026:** `Hermes Agent v0.19.0 (2026.7.20) · local 3ef6bbd2` — совпало с пином проекта (`SPEC.md:777`, `CLAUDE.md`, `deploy/hermes/PIN.json`), противоречившая цифра `v0.17` из шапок снята. Три решения об объёме (`SPEC.md:225`, `:661`, `:785`) разблокированы. ⚠️ **Остаток замера:** «номер подтверждён» не равно «ключи пересверены» — аттестация ключей делалась против доков v0.17, пересверка по К10 не проводилась (`lint_config.py` → 10 ключей `[НЕ АТТЕСТОВАН]`) |
-| **V2** | Эффективный конфиг | `hermes config show` | `model` — mapping (`provider`+`default`), `approvals: manual`, `session_search` в `disabled_toolsets`, `mcp_servers.aimash` есть, `tools.include` — ровно 12 имён |
+| **V2** | Эффективный конфиг | `hermes config show` | `model` — mapping (`provider`+`default`), `approvals: manual`, private tool policy совпадает с `sync_aimash_surface.py`, `mcp_servers.aimash` есть |
 | **V3** | Схема манифеста плагина и факт включения | `hermes plugins` | Схема **больше не вслепую**: сверена с `plugins.md` на пиновом теге (манифест = `name`/`version`/`description`, код в `__init__.py`, подписка только из `register(ctx)`). Здесь проверяем ФАКТ: `aimash_probe` в списке, и он **enabled**. Обнаружение показывает плагин даже выключенным, а хуки при этом не грузятся — по К10 неверный ключ игнорируется молча |
 | **V4** | Имена и сигнатуры хуков | доки/CLI пиновой версии (номер даёт V1) | **Закрыто по исходникам на теге `v2026.7.20`, эмпирике осталась только сверка «доки против кода»** (детали и цитаты — в шапке `plugins/aimash_probe/__init__.py`): `pre_gateway_dispatch(event, gateway, session_store, **kwargs)` → `None`/`{"action": "skip\|rewrite\|allow"}`; `pre_tool_call(tool_name, args, task_id, **kwargs)` → только `{"action": "block", "message": …}`, **идентичности актора в сигнатуре НЕТ ВООБЩЕ**; `VALID_HOOKS` пиновой версии — ровно **23 имени** (дословно снят в `__init__.py:_VALID_HOOKS` из `hermes_cli/plugins.py`), прибор подписан на все 23 и печатает `unknown`/`not_covered`; `MessageEvent` НЕСЁТ `reply_to_message_id` (исходник `gateway/platforms/base.py`) ⇒ открытый вопрос `SPEC.md:1435` закрывается положительно, идентичность лежит в `event.source` (`user_id`, `chat_id`, `chat_type`, `thread_id`). Прибор печатает фактические `dir(event)`/`dir(source)` — расхождение доков с кодом будет видно строкой, а не выведено из молчания. Строки `tool_request` в проекте нет — если всплывёт, это ошибка памяти, не источник |
 
@@ -558,15 +558,15 @@ grep 'pre_tool_call.block' ~/.hermes/aimash_probe.log | tail -1
 
 | V | Что меряем | Как | Ожидание |
 |---|---|---|---|
-| **V15** | `session_search` погашен (К9/И6) | «найди, о чём мы говорили в прошлой сессии» | Инструмента нет. Он ищет по всей `state.db` = по всем топикам = по всем клиентам |
-| **V16** | Host-мощное погашено | «прочитай /etc/passwd», «выполни ls» | Инструментов нет (`disabled_toolsets`, эталон :50-52) |
+| **V15** | Shared history работает (К9/И6) | «найди, о чём мы говорили в прошлой сессии» | `session_search` включён; общая история допустима только для private trusted-team |
+| **V16** | Host native tools работают | безопасная read-only команда | `terminal/file/code_execution` включены; принятый residual risk записан в SPEC §0.0 |
 | **V17** | Замок чтения на MCP-границе | «покажи статистику по 1234567890» (чужой id) | Error-конверт; в тексте ошибки **нет сырого `str(e)`** (правило 5). Кавеат: сегодня `envelope.err` байт-в-байт одинаков для любого исключения — этот шаг подтверждает отказ, но не его причину; машиночитаемый `error_code` — Волна 3.2 |
 
 ### G. Снятие прибора — обязательно (V18–V19)
 
 | V | Действие | Проверка |
 |---|---|---|
-| **V18** | Удалить `~/.hermes/plugins/aimash_probe`, **убрать `aimash_probe` из `plugins.enabled`**, удалить запись `mcp_servers.aimash-probe`, все `AIMASH_PROBE_*` из окружения, **вернуть `vision` в `disabled_toolsets`** (если снимался под R6); restart | `hermes plugins` → `aimash_probe` отсутствует; `hermes mcp list` → только `aimash`; `hermes config show` → 25 READ + 1 META, `vision` погашен; `hermes gateway status` → active |
+| **V18** | Удалить `~/.hermes/plugins/aimash_probe`, **убрать `aimash_probe` из `plugins.enabled`**, удалить запись `mcp_servers.aimash-probe`, все `AIMASH_PROBE_*` из окружения; restart | `hermes plugins` → `aimash_probe` отсутствует; `hermes mcp list` → только `aimash`; private tool policy не изменилась; `hermes gateway status` → active |
 | **V19** | Гигиена вывода — команды ниже | `aimash_probe.log` вывезти в защищённое место или удалить: у хука своя редакция по ФОРМЕ секрета, чужие поля она гарантировать не может |
 
 **V19 — паттерны файлом, и обязательно с положительным контролем.** «Пусто» само по себе ничего не

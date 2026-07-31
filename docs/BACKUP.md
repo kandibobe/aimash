@@ -18,6 +18,21 @@
 PostgreSQL целиком (`postgres:16` из `docker-compose.yml`, БД `aimash`). Формат `-Fc` (custom,
 сжатый, выборочный restore).
 
+## Off-host шифрование без GPG/age
+
+`scripts/backup_crypto.py` использует потоковый AES-256-GCM: ciphertext аутентифицирован, а
+32-байтный recovery-key хранится отдельно от каталога архивов. Скрипт не перезаписывает существующие
+файлы и умеет проверить полную расшифровку без сохранения plaintext:
+
+```powershell
+python scripts/backup_crypto.py keygen "$env:USERPROFILE\.ssh\aimash_backup_aes256.key"
+python scripts/backup_crypto.py encrypt .\backup.tgz .\backup.tgz.aes256 --key "$env:USERPROFILE\.ssh\aimash_backup_aes256.key"
+python scripts/backup_crypto.py check .\backup.tgz.aes256 --key "$env:USERPROFILE\.ssh\aimash_backup_aes256.key"
+```
+
+Plaintext удаляется только после успешного `check`. Сам key не коммитить и не хранить рядом с
+`.aes256`; сделай ещё одну offline-копию key в менеджере секретов/на отдельном носителе.
+
 ## Ручной бэкап (на VPS, /opt/aimash)
 ```bash
 docker exec aimash-pg pg_dump -U aimash -Fc aimash > "/opt/aimash/backups/aimash_$(date +%F_%H%M).dump"
@@ -66,6 +81,19 @@ docker exec aimash-pg psql -U aimash -d aimash -c "SELECT max(created_at) FROM a
 ```
 Сверь, что последняя `created_at` соответствует ожидаемому моменту дампа, а распределение статусов
 (`applied/failed/rejected/confirmed`) не выглядит усечённым.
+
+### Clean-container drill, 2026-07-31
+
+В одноразовых Linux-контейнерах с `--network none` реально восстановлены оба слоя, production БД и
+живой `/root/.hermes` не изменялись:
+
+- Hermes archive → `/root/.hermes`: `state.db PRAGMA integrity_check=ok`, 22 таблицы, `.env` и
+  `config.yaml` на месте;
+- PostgreSQL `pg_restore --no-owner --no-privileges` → чистый `postgres:16` на tmpfs: 43 таблицы,
+  Alembic `0039_notification_outbox`, 4 audit-row.
+
+Hermes-архив содержит абсолютные symlink runtime, поэтому его нужно восстанавливать в целевой
+`/root/.hermes`, а не произвольный префикс Windows. Проверку делай в Linux-контейнере/чистом Linux-host.
 
 ## Миграции: один head (защита от two-heads)
 Деплой падает (fail-fast в entrypoint), если в `migrations/versions/` два head'а (параллельные

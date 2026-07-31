@@ -491,7 +491,7 @@ def ensure_allowed(customer_id: str) -> None:
     (core.killswitch: env `DISABLE_ALL_MUTATIONS` / файл-флаг, без рестарта).
     """
     # (0) BZ-1: аварийный рубильник — раньше любых разрешений. Env и файл-флаг читаются на КАЖДОМ
-    # вызове (без кэша): стоп срабатывает без рестарта процесса (`touch /app/KILL_SWITCH`).
+    # вызове (без кэша): стоп срабатывает без рестарта процесса (host safety flag).
     ensure_mutations_enabled()
     cid = normalize_customer_id(customer_id)
     ceiling = allowed_ceiling()

@@ -33,6 +33,7 @@ def _token(
     now: int = 1_000,
     expires: int = 1_100,
     key: str = KEY,
+    include_arg_keys: bool = True,
 ) -> str:
     payload = {
         "v": 1,
@@ -54,6 +55,8 @@ def _token(
         "reply_confirmation_id": None,
         "reply_to_text": None,
     }
+    if include_arg_keys:
+        payload["arg_keys"] = sorted(args)
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     sig = hmac.new(key.encode(), raw, hashlib.sha256).digest()
 
@@ -160,7 +163,9 @@ async def test_wrapper_requires_token_and_opens_human_context(monkeypatch):
 
     now = int(time.time())
     token = _token("propose_test", {"account": "7753643025"}, now=now, expires=now + 120)
-    result = await wrapped(account="7753643025", trusted_turn_token=token)
+    # FastMCP supplies omitted schema defaults to the wrapper.  They are safe only while equal to
+    # the function's declared defaults and must not invalidate the hook's exact argument binding.
+    result = await wrapped(account="7753643025", currency=None, trusted_turn_token=token)
     assert result == {
         "account": "7753643025",
         "currency": None,
@@ -168,6 +173,34 @@ async def test_wrapper_requires_token_and_opens_human_context(monkeypatch):
         "actor": 101,
         "chat": -202,
     }
+
+    called = False
+    changed_default = await wrapped(account="7753643025", currency="USD", trusted_turn_token=token)
+    assert changed_default["status"] == "refused"
+    assert "TrustedTransportError" not in changed_default["error"]
+    assert called is False
+
+
+def test_legacy_token_keeps_exact_argument_binding():
+    token = _token(
+        "propose_test",
+        {"account": "7753643025"},
+        include_arg_keys=False,
+    )
+    verify_turn_token(
+        token,
+        expected_tool="propose_test",
+        tool_args={"account": "7753643025"},
+        now=1_050,
+    )
+    with pytest.raises(TrustedTransportError):
+        verify_turn_token(
+            token,
+            expected_tool="propose_test",
+            tool_args={"account": "7753643025", "currency": None},
+            default_args={"currency": None},
+            now=1_050,
+        )
 
 
 def test_wrapper_schema_never_accepts_model_identity_fields():

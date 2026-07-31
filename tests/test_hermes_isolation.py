@@ -72,11 +72,11 @@ def test_i4_seed_read_tools_disjoint_from_mutations():
         "И4: READ-инструменты MCP пересеклись с мутационными: "
         f"{sorted(READ_MCP_TOOLS & MUTATION_TOOLS)}"
     )
-    # 25 = 24 Google Ads READ (в т.ч. shared negative sets, §8 MCC и служебный get_quota —
-    # счётчик наш, Ads не опрашивается) + recall_client (память клиента §20). Точный счёт держит
+    # 38 = прежние 25 Google Ads/profile READ + 13 bot-free workflow readers (report artifact,
+    # keyword/RSA primitives and structured client/crawl reads). Точный счёт держит
     # реестр от тихого разрастания: новая обёртка обязана осознанно бампнуть его вместе с
     # config.yaml/_ACCOUNT_ARG.
-    assert len(READ_MCP_TOOLS) == 25, f"ожидалось 25 READ-инструментов, стало {len(READ_MCP_TOOLS)}"
+    assert len(READ_MCP_TOOLS) == 38, f"ожидалось 38 READ-инструментов, стало {len(READ_MCP_TOOLS)}"
 
 
 def test_i4_seed_server_builds_and_registers_only_read():
@@ -130,6 +130,19 @@ _ACCOUNT_ARG: dict[str, str] = {
     "get_mcc_summary": "manager_id",
     "get_mcc_deep": "manager_id",
     "list_negative_shared_sets": "account",
+    "build_report": "account",
+    "seed_keywords": "account",
+    "cluster_keywords": "account",
+    "filter_keyword_relevance": "account",
+    "suggest_negatives": "account",
+    "parse_keywords_input": "account",
+    "generate_rsa": "account",
+    "validate_adcopy": "account",
+    "build_display_path": "account",
+    "get_client_card": "account",
+    "list_client_facts_structured": "account",
+    "list_site_pages": "account",
+    "get_crawl_status": "account",
 }
 
 
@@ -144,6 +157,14 @@ _EXTRA_ARGS: dict[str, dict[str, object]] = {
     # dimension валидируется ДО выхода наружу — фиктивное имя дало бы invalid_argument вместо
     # internal, то есть обратная половина инварианта не доказала бы прохода замка. Нужно допустимое.
     "get_report_breakdown": {"dimension": "device"},
+    "seed_keywords": {"topic": "X"},
+    "cluster_keywords": {"keywords": ["X"]},
+    "filter_keyword_relevance": {"topic": "X", "keywords": ["X"]},
+    "suggest_negatives": {"topic": "X", "keywords": ["X"]},
+    "parse_keywords_input": {"text": "X"},
+    "generate_rsa": {"topic": "X"},
+    "validate_adcopy": {"headlines": ["A", "B", "C"], "descriptions": ["D", "E"]},
+    "get_crawl_status": {"job_id": "x"},
 }
 
 
@@ -156,6 +177,7 @@ def _readers_explode():
     """Заменить ВСЕ выходы `tools_read` наружу на взрыв. Замок обязан сработать раньше любого из них;
     заодно тест офлайн и детерминирован (ни SDK, ни БД не поднимаются)."""
     from mcp_server import tools_read as tr
+    from mcp_server import tools_workflows as tw
 
     names = (
         "build_client_async",
@@ -166,17 +188,34 @@ def _readers_explode():
         "quota_snapshot",  # get_quota: Ads не опрашивает, но за границу (наша БД) выходит
     )
     saved = {n: getattr(tr, n) for n in names}
+    workflow_names = (
+        "build_client_async",
+        "run_ads_read_call",
+        "ClientProfileStore",
+        "crawl_jobs",
+        "_generate_rsa",
+        "_cluster_keywords",
+        "filter_relevance",
+        "suggest_negative_keywords",
+        "generate_seed_keywords",
+        "parse_keywords_text",
+    )
+    workflow_saved = {n: getattr(tw, n) for n in workflow_names}
 
     def _boom(*_a, **_kw):
         raise _ReaderCalled("ридер вызван — замок не отработал до выхода наружу")
 
     for n in names:
         setattr(tr, n, _boom)
+    for n in workflow_names:
+        setattr(tw, n, _boom)
     try:
         yield
     finally:
         for n, fn in saved.items():
             setattr(tr, n, fn)
+        for n, fn in workflow_saved.items():
+            setattr(tw, n, fn)
 
 
 def test_every_read_tool_declares_account_arg():
@@ -244,6 +283,12 @@ def test_read_lock_admits_allowed_account_and_reaches_reader(tool_name):
     ):
         env = asyncio.run(fn(**_call_args(tool_name, DRAFT_ACCOUNT_ID)))
 
+    local_only = {"build_display_path", "validate_adcopy"}
+    if tool_name in local_only:
+        assert env["error_code"] is None, (
+            f"{tool_name}: разрешённый аккаунт не прошёл локальную валидацию: {env}"
+        )
+        return
     assert env["error_code"] == "internal", (
         f"{tool_name}: разрешённый аккаунт не дошёл до ридера (код {env['error_code']!r}) — "
         "замок отказывает всем, инвариант отказа выше это не поймал бы"
@@ -480,9 +525,9 @@ def test_i3_user_initiated_stamped_at_creation_never_by_confirmation():
     assert not ({"origin_human_turn", "author_user_id", "run_id"} & set(params))
 
 
-def test_i5_self_written_skill_calls_only_registered_mcp_tools():
-    """И5: самонаписанный скил не может вызвать ничего, кроме зарегистрированных MCP-инструментов.
-    Корпус скилов, пытающихся выйти в shell/HTTP/файлы."""
+def test_i5_self_written_skills_stay_reviewed_and_cannot_inline_shell():
+    """И5 для private-profile: native tools доступны доверенным операторам, но самонаписанный
+    markdown-скил не исполняет inline shell и остаётся в review-контуре."""
     import yaml
 
     cfg = yaml.safe_load(
@@ -491,14 +536,15 @@ def test_i5_self_written_skill_calls_only_registered_mcp_tools():
         )
     )
     assert cfg["skills"]["inline_shell"] is False
+    assert cfg["skills"]["guard_agent_created"] is True
+    assert cfg["skills"]["write_approval"] is True
     disabled = set(cfg["agent"]["disabled_toolsets"])
-    assert {"terminal", "file", "code_execution", "web", "browser"} <= disabled
+    assert {"terminal", "file", "code_execution", "web", "browser"}.isdisjoint(disabled)
 
 
-def test_i6_memory_and_history_search_filtered_by_client_id():
-    """И6: поиск по памяти и истории фильтруется по client_id текущего топика (изоляция клиента A от
-    топика клиента B — session_search в Hermes ищет по всей БД). Текущий режим закрывает глобальные
-    memory/search физически; единственный recall требует явный account и проходит read/user lock."""
+def test_i6_private_profile_accepts_shared_history_but_account_recall_stays_scoped():
+    """И6 осознанно ослаблен: все пользователи — доверенная внутренняя команда, поэтому Hermes
+    memory/session_search общие. Проектная память клиента по-прежнему требует явный account."""
     import inspect
     import yaml
 
@@ -509,8 +555,9 @@ def test_i6_memory_and_history_search_filtered_by_client_id():
             encoding="utf-8"
         )
     )
-    assert cfg["memory"]["memory_enabled"] is False
-    assert "session_search" in cfg["agent"]["disabled_toolsets"]
+    assert cfg["memory"]["memory_enabled"] is True
+    assert cfg["memory"]["user_profile_enabled"] is True
+    assert "session_search" not in cfg["agent"]["disabled_toolsets"]
     assert "account" in inspect.signature(recall_client).parameters
 
 
@@ -552,8 +599,13 @@ def test_i8_at_most_one_pending_proposal_per_turn():
     MCP-слое (на прогон/тред), не надежда на ограничения модели."""
     import inspect
 
-    from mcp_server.tools_write import PROPOSE_TOOL_FUNCS, _propose
+    from mcp_server.tools_write import PROPOSE_TOOL_FUNCS, _propose, propose_composite_change
 
     source = inspect.getsource(_propose)
     assert source.index("count_run_proposals") < source.index("build_proposal")
-    assert all("_propose(" in inspect.getsource(fn) for fn in PROPOSE_TOOL_FUNCS.values())
+    ordinary = [fn for fn in PROPOSE_TOOL_FUNCS.values() if fn is not propose_composite_change]
+    assert all("_propose(" in inspect.getsource(fn) for fn in ordinary)
+    composite_source = inspect.getsource(propose_composite_change)
+    assert composite_source.index("count_run_proposals") < composite_source.index(
+        "store.save_proposal"
+    )

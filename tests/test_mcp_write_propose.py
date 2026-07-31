@@ -68,6 +68,11 @@ class _ReadStateSpy:
                 SnapshotKind.OK,
                 {"kind": "status", "before_status": "PAUSED"},
             )
+        if operation in {"pause_campaign", "resume_campaign"}:
+            return Snapshot(
+                SnapshotKind.OK,
+                {"kind": "status", "before_status": "ENABLED"},
+            )
         return Snapshot(
             SnapshotKind.OK,
             {
@@ -158,7 +163,8 @@ async def test_propose_budget_creates_pending_draft_without_touching_ads(propose
     assert env["confirmation_marker"] in env["preview"]
     assert "🧾 Черновик изменения" in env["preview"]
     assert "⚠️ Google Ads пока не изменён." in env["preview"]
-    assert "✅ Нажмите «Подтвердить»" in env["preview"]
+    assert "❓ Сделать так?" in env["preview"]
+    assert "Нажмите «Да» или «Нет»" in env["preview"]
     assert "→" in env["preview"]  # реальный diff «было → станет», собранный confirm.render (КОД)
     assert propose_env.calls == 1  # снимок «было» прочитан ровно раз; мутаций — ноль (propose-only)
 
@@ -303,3 +309,41 @@ async def test_negative_value_refused(propose_env):
             account=DRAFT_ACCOUNT_ID, campaign="Camp A", mode="set_to", value=-5
         )
     assert env["status"] == "refused" and env["error_code"] == "invalid_argument"
+
+
+async def test_composite_creates_one_parent_for_two_reversible_changes(propose_env):
+    with _human_turn(run_id="wp_composite", chat_id=OWNER):
+        env = await tw.propose_composite_change(
+            DRAFT_ACCOUNT_ID,
+            [
+                {"operation": "pause_campaign", "params": {"campaign": "Camp A"}},
+                {"operation": "pause_campaign", "params": {"campaign": "Camp B"}},
+            ],
+        )
+
+    assert env["status"] == "pending"
+    assert env["operation"] == "composite"
+    assert await _count("wp_composite") == 1
+    row = await _row(env["confirmation_id"])
+    assert row.operation == "composite"
+    assert [item["operation"] for item in row.params["operations"]] == [
+        "pause_campaign",
+        "pause_campaign",
+    ]
+    assert all("_freshness" in item["params"] for item in row.params["operations"])
+
+
+async def test_composite_rejects_nonrollbackable_operation_before_read(propose_env):
+    with _human_turn(run_id="wp_composite_bad", chat_id=OWNER):
+        env = await tw.propose_composite_change(
+            DRAFT_ACCOUNT_ID,
+            [
+                {"operation": "pause_campaign", "params": {"campaign": "Camp A"}},
+                {"operation": "remove_campaign", "params": {"campaign": "Camp B"}},
+            ],
+        )
+
+    assert env["status"] == "refused"
+    assert env["error_code"] == "invalid_argument"
+    assert await _count("wp_composite_bad") == 0
+    assert propose_env.calls == 0

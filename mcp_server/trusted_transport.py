@@ -19,6 +19,7 @@ import hmac
 import inspect
 import json
 import math
+import re
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -37,6 +38,10 @@ TOKEN_MAX_LIFETIME_S = 300
 TOKEN_FUTURE_SKEW_S = 30
 MCP_TOOL_PREFIX = "mcp__aimash__"
 CONFIRM_MARKER_PREFIX = "AIMASH_CONFIRM:"
+TRANSPORT_REFUSAL_MESSAGE = (
+    "Не удалось безопасно связать действие с текущим сообщением Telegram. "
+    "Отправьте команду ещё раз отдельным сообщением."
+)
 
 
 class TrustedTransportError(PermissionError):
@@ -58,6 +63,8 @@ class TrustedTurn:
     reply_to_text: str | None
     issued_at: int
     expires_at: int
+    message_text: str | None = None
+    inbound_media: tuple["TrustedMedia", ...] = ()
 
     @property
     def run_id(self) -> str:
@@ -68,6 +75,19 @@ class TrustedTurn:
 
 _TRUSTED_TURN: contextvars.ContextVar[TrustedTurn | None] = contextvars.ContextVar(
     "aimash_trusted_turn", default=None
+)
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedMedia:
+    path: str
+    suffix: str
+    size: int
+    sha256: str
+
+
+_INBOUND_MEDIA_PATH_RE = re.compile(
+    r"^/tmp/aimash_inbound/[0-9a-f]{32}\.(?:jpg|jpeg|png|webp|mp4|mov)$"
 )
 
 
@@ -148,6 +168,7 @@ def verify_turn_token(
     *,
     expected_tool: str,
     tool_args: dict[str, Any],
+    default_args: dict[str, Any] | None = None,
     now: int | None = None,
 ) -> TrustedTurn:
     """Verify authenticity and bind the token to one exact MCP call."""
@@ -176,7 +197,32 @@ def verify_turn_token(
     exact_tool = f"{MCP_TOOL_PREFIX}{expected_tool}"
     if payload.get("tool") != exact_tool:
         raise TrustedTransportError("trusted token выпущен для другого инструмента")
-    if payload.get("args_sha256") != canonical_args_digest(tool_args):
+
+    # FastMCP materializes omitted schema defaults before invoking the wrapped function.  The hook
+    # signs the model's original JSON, so compare only its signed keys and allow additional runtime
+    # keys solely when they are declared defaults whose values were not changed.  Older tokens did
+    # not carry arg_keys and retain the previous exact-dictionary behavior during rolling deploys.
+    signed_keys = payload.get("arg_keys")
+    digest_args = tool_args
+    if signed_keys is not None:
+        if (
+            not isinstance(signed_keys, list)
+            or any(not isinstance(key, str) or key == TOKEN_PARAM for key in signed_keys)
+            or len(signed_keys) != len(set(signed_keys))
+        ):
+            raise TrustedTransportError("trusted token содержит неверный список аргументов")
+        signed_key_set = set(signed_keys)
+        if not signed_key_set.issubset(tool_args):
+            raise TrustedTransportError("аргументы инструмента изменились после доверенного hook")
+        defaults = default_args or {}
+        runtime_only = set(tool_args) - signed_key_set
+        if not runtime_only.issubset(defaults) or any(
+            _canonical_json_value(tool_args[key]) != _canonical_json_value(defaults[key])
+            for key in runtime_only
+        ):
+            raise TrustedTransportError("аргументы инструмента изменились после доверенного hook")
+        digest_args = {key: tool_args[key] for key in signed_keys}
+    if payload.get("args_sha256") != canonical_args_digest(digest_args):
         raise TrustedTransportError("аргументы инструмента изменились после доверенного hook")
 
     issued_at = _required_int(payload, "iat", positive=True)
@@ -206,6 +252,33 @@ def verify_turn_token(
     ):
         raise TrustedTransportError("trusted token содержит недопустимый текст reply")
 
+    message_text = payload.get("message_text")
+    if message_text is not None and (
+        not isinstance(message_text, str) or len(message_text.encode("utf-8")) > 12_000
+    ):
+        raise TrustedTransportError("trusted token contains invalid message text")
+
+    raw_media = payload.get("inbound_media") or []
+    if not isinstance(raw_media, list) or len(raw_media) > 10:
+        raise TrustedTransportError("trusted token contains invalid inbound media")
+    inbound_media: list[TrustedMedia] = []
+    for item in raw_media:
+        if not isinstance(item, dict):
+            raise TrustedTransportError("trusted token contains invalid inbound media")
+        path = str(item.get("path") or "")
+        suffix = str(item.get("suffix") or "").lower()
+        size = _required_int(item, "size", positive=True)
+        digest = str(item.get("sha256") or "")
+        if (
+            not _INBOUND_MEDIA_PATH_RE.fullmatch(path)
+            or suffix not in {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov"}
+            or not path.endswith(suffix)
+            or size > 20 * 1024 * 1024
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            raise TrustedTransportError("trusted token contains invalid inbound media")
+        inbound_media.append(TrustedMedia(path=path, suffix=suffix, size=size, sha256=digest))
+
     return TrustedTurn(
         actor_user_id=_required_int(payload, "actor_user_id", positive=True),
         actor_chat_id=_required_int(payload, "actor_chat_id"),
@@ -213,6 +286,7 @@ def verify_turn_token(
         chat_type=chat_type,
         thread_id=str(thread_id)[:128] if thread_id else None,
         message_id=_required_int(payload, "message_id", positive=True),
+        message_text=message_text or None,
         language_code=str(payload.get("language_code") or "ru")[:8],
         reply_to_message_id=_optional_positive_int(payload, "reply_to_message_id"),
         reply_to_is_own_message=payload["reply_to_is_own_message"],
@@ -220,6 +294,7 @@ def verify_turn_token(
         reply_to_text=reply_to_text or None,
         issued_at=issued_at,
         expires_at=expires_at,
+        inbound_media=tuple(inbound_media),
     )
 
 
@@ -274,6 +349,11 @@ def trusted_tool(name: str, fn: Callable[..., Awaitable[dict[str, Any]]]):
         default="",
         annotation=str,
     )
+    declared_defaults = {
+        parameter.name: parameter.default
+        for parameter in signature.parameters.values()
+        if parameter.default is not inspect.Parameter.empty
+    }
 
     @wraps(fn)
     async def wrapped(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -286,7 +366,12 @@ def trusted_tool(name: str, fn: Callable[..., Awaitable[dict[str, Any]]]):
         try:
             bound = signature.bind(*args, **kwargs)
             ordinary_args = dict(bound.arguments)
-            turn = verify_turn_token(token, expected_tool=name, tool_args=ordinary_args)
+            turn = verify_turn_token(
+                token,
+                expected_tool=name,
+                tool_args=ordinary_args,
+                default_args=declared_defaults,
+            )
             bound.apply_defaults()
             if not await is_whitelisted(turn.actor_user_id):
                 raise TrustedTransportError("оператор не входит в whitelist")
@@ -297,7 +382,16 @@ def trusted_tool(name: str, fn: Callable[..., Awaitable[dict[str, Any]]]):
                 )
             with trusted_turn_scope(turn):
                 return await fn(*bound.args, **bound.kwargs)
-        except (TrustedTransportError, PermissionError, TypeError, ValueError) as exc:
+        except TrustedTransportError:
+            # The model and Telegram user must never see HMAC/hook implementation details.
+            if name == "execute_confirmed":
+                return {
+                    "status": "failed",
+                    "error": TRANSPORT_REFUSAL_MESSAGE,
+                    "error_code": "refused",
+                }
+            return refused(TRANSPORT_REFUSAL_MESSAGE, error_code="refused")
+        except (PermissionError, TypeError, ValueError) as exc:
             # The execute facade has its own stable result shape; proposals use refused().
             if name == "execute_confirmed":
                 return {

@@ -1,4 +1,4 @@
-"""25 READ-обёрток MCP-слоя над существующими ридерами (Контур A, инкремент «MCP READ»).
+"""Базовые READ-обёртки MCP-слоя над существующими ридерами (38 вместе с workflow readers).
 
 Каждая обёртка:
   1) проходит замок ЧТЕНИЯ на ГРАНИЦЕ слоя — `_guarded` требует `account=` и зовёт
@@ -1105,5 +1105,12 @@ READ_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "get_mcc_deep": get_mcc_deep,
     "list_negative_shared_sets": list_negative_shared_sets,
 }
+
+# Bot-free workflow readers. Imported only after this module has defined shared period helpers;
+# ``tools_workflows.build_report`` resolves ``_period`` lazily at call time, so there is no import
+# cycle during construction of the authoritative MCP registry.
+from mcp_server.tools_workflows import WORKFLOW_READ_TOOL_FUNCS  # noqa: E402
+
+READ_TOOL_FUNCS.update(WORKFLOW_READ_TOOL_FUNCS)
 
 READ_MCP_TOOLS: frozenset[str] = frozenset(READ_TOOL_FUNCS)

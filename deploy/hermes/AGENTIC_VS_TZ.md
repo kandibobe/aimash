@@ -161,10 +161,14 @@ trusted reply-якорем (`SPEC.md` §2.2, §5.2).
 
 ### Поправка 30.07.2026: operational maturity
 
-Decision queue, pacing, conversion integrity, incidents, experiments, RBAC/four-eyes, CRM feedback,
+Decision queue, pacing, conversion integrity, incidents, experiments, CRM feedback,
 playbooks и cross-channel portfolio **усиливают тот же вывод**, а не опровергают его. Модель может
 написать диагноз и рекомендацию; она не может быть хранилищем lifecycle, атомарным дедупом,
-месячным ceiling, независимым approver, PII-free ingest, версионным rule evaluator или источником
+месячным ceiling, PII-free ingest, версионным rule evaluator или источником
 факта `applied`. Поэтому реализация приземлена в `operations/` + миграцию `0038`, а live Hermes
 остаётся READ-only до принятого trusted reply transport. Это не «меньше агентности»: выбор и
 объяснение остаются модели, enforcement и деньги — коду.
+
+**Уточнение 31.07.2026:** текущий прод — приватный контур владельца и 1–2 доверенных операторов.
+RBAC/four-eyes/SSO отложены до появления недоверенных или клиентских пользователей и не являются критерием
+готовности текущего релиза.

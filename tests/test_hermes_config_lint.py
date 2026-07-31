@@ -213,10 +213,8 @@ def test_lint_reddens_when_a_hardening_key_disappears(dotted, why):
 def test_lint_reddens_when_a_must_disable_toolset_is_enabled():
     """Включение любого тулсета из `_MUST_DISABLE` обязано давать ERROR по каждому.
 
-    Список не пуст по построению и держит `cronjob`/`delegation`: первый даёт мутацию без
-    команды человека (правило 3), второй — субагента, который наследует MCP родителя и никогда
-    не спрашивает человека. Снятие любого из них требует письменного решения (Р2), а не правки
-    рабочего дерева.
+    Список не пуст по построению и фиксирует ровно ту неактивную поверхность, которую утвердил владелец
+    31.07.2026. `cronjob`, `delegation`, memory и native work tools для private-profile разрешены.
     """
     path, profile = _REFERENCE_CONFIGS[0]
     cfg = copy.deepcopy(_load_cfg(path))

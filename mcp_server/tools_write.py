@@ -34,6 +34,7 @@ from pydantic import BaseModel, ValidationError
 
 from agent.tools.schemas import (
     MUTATION_TOOLS,
+    SCHEMAS,
     AddCallAsset,
     AddCallouts,
     AddKeywords,
@@ -76,8 +77,11 @@ from agent.tools.schemas import (
     UpdateKeywordBid,
 )
 from ads.resolve import MONEY_OPS
+from confirm.reverse import ROLLBACKABLE_OPS, reverse_spec
+from confirm.risk import TIERS, risk_tier
 from confirm.store import ConfirmStore
 from core import i18n
+from core.config import settings
 from core.context import get_context
 from core.guards import require_no_mutations
 from core.logging import log
@@ -144,6 +148,13 @@ async def _propose(
         return refused(i18n.t("propose_draft_limit", lang), error_code="refused")
     cid = uuid.uuid4().hex
     try:
+        from mcp_server.trusted_transport import TrustedTransportError, get_trusted_turn
+
+        try:
+            trusted_user_text = get_trusted_turn().message_text or ""
+        except TrustedTransportError:
+            trusted_user_text = ""
+
         built = await build_proposal(
             store=store,
             operation=operation,
@@ -151,7 +162,7 @@ async def _propose(
             cid=cid,
             chat_id=chat_id,
             customer_id=str(account),
-            user_text=str(getattr(model, "currency", "") or ""),
+            user_text=trusted_user_text if prov.human_turn else "",
             lang=lang,
             user_initiated=prov.human_turn,
         )
@@ -674,6 +685,18 @@ async def propose_create_search_campaign(
     cpc_bid_micros: int | None = None,
     path1: str | None = None,
     path2: str | None = None,
+    keyword_match_types: list[str] | None = None,
+    geo_country_code: str | None = None,
+    geo_locale: str | None = None,
+    bidding: dict[str, Any] | None = None,
+    url_options: dict[str, Any] | None = None,
+    asset_specs: list[dict[str, Any]] | None = None,
+    existing_asset_links: list[dict[str, Any]] | None = None,
+    image_media_ids: list[str] | None = None,
+    networks: str | None = None,
+    ad_schedule_blocks: list[dict[str, Any]] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict[str, Any]:
     """Создать ЧЕРНОВИК поисковой (Search) кампании. Денежная операция.
 
@@ -689,11 +712,23 @@ async def propose_create_search_campaign(
         budget_daily_micros=budget_daily_micros,
         keywords=keywords or [],
         match_type=match_type,
+        keyword_match_types=keyword_match_types or [],
         geo_locations=geo_locations or [],
+        geo_country_code=geo_country_code or settings.geo_default_country,
+        geo_locale=geo_locale or settings.geo_default_locale,
         languages=languages or [],
         cpc_bid_micros=cpc_bid_micros,
+        bidding=bidding,
         path1=path1,
         path2=path2,
+        url_options=url_options,
+        asset_specs=asset_specs or [],
+        existing_asset_links=existing_asset_links or [],
+        image_media_ids=image_media_ids or [],
+        networks=networks,
+        ad_schedule_blocks=ad_schedule_blocks or [],
+        start_date=start_date,
+        end_date=end_date,
     )
 
 
@@ -914,6 +949,107 @@ async def propose_remove_asset_link(
     )
 
 
+async def propose_composite_change(
+    account: str,
+    operations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Создать ОДИН черновик для 2–10 обратимых изменений одного аккаунта.
+
+    Каждый элемент: ``{"operation": "pause_campaign", "params": {...}}``. В пакет допускаются
+    только операции с детерминированной компенсацией; создание и удаление сущностей отклоняются.
+    """
+    from ads.composite import CaptureStore
+    from mcp_server.trusted_transport import TrustedTransportError, get_trusted_turn
+
+    lang = i18n.current_lang()
+    if not isinstance(operations, list) or not 2 <= len(operations) <= 10:
+        return refused(
+            "Пакет должен содержать от 2 до 10 изменений.", error_code="invalid_argument"
+        )
+
+    normalized: list[tuple[str, BaseModel]] = []
+    try:
+        for index, item in enumerate(operations, start=1):
+            if not isinstance(item, dict):
+                raise ValueError(f"operations.{index}: expected object")
+            operation = str(item.get("operation") or "").strip()
+            if operation not in ROLLBACKABLE_OPS:
+                raise ValueError(
+                    f"operations.{index}.operation: {operation or '?'} is not safely rollbackable"
+                )
+            params = item.get("params")
+            if not isinstance(params, dict):
+                raise ValueError(f"operations.{index}.params: expected object")
+            normalized.append((operation, SCHEMAS[operation](**params)))
+    except ValidationError as e:
+        return refused(_validation_text(e), error_code="invalid_argument")
+    except (KeyError, TypeError, ValueError) as e:
+        return refused(redact_error(e), error_code="invalid_argument")
+
+    prov = get_provenance()
+    if any(operation in _HUMAN_ONLY_OPS for operation, _ in normalized) and not prov.human_turn:
+        return refused(i18n.t("propose_requires_human", lang), error_code="refused")
+    chat_id = get_context().chat_id
+    if chat_id is None:
+        return refused(i18n.t("propose_no_turn_context", lang), error_code="refused")
+    store = ConfirmStore()
+    if await store.count_run_proposals(prov.run_id) >= 1:
+        return refused(i18n.t("propose_draft_limit", lang), error_code="refused")
+
+    try:
+        try:
+            trusted_user_text = get_trusted_turn().message_text or ""
+        except TrustedTransportError:
+            trusted_user_text = ""
+        children: list[dict[str, Any]] = []
+        previews: list[str] = []
+        tiers: list[str] = []
+        for index, (operation, model) in enumerate(normalized, start=1):
+            built = await build_proposal(
+                store=CaptureStore(),
+                operation=operation,
+                params=model.model_dump(exclude_none=True),
+                cid=f"composite-{index}",
+                chat_id=chat_id,
+                customer_id=str(account),
+                user_text=trusted_user_text if prov.human_turn else "",
+                lang=lang,
+                user_initiated=prov.human_turn,
+            )
+            if reverse_spec(operation, built.params, built.params.get("_before")) is None:
+                raise ProposalRefused(
+                    f"Изменение {index} ({operation}) нельзя надёжно откатить по текущему снимку."
+                )
+            children.append({"operation": operation, "params": built.params})
+            previews.append(f"{index}. {built.display}")
+            tiers.append(risk_tier(operation, built.params))
+
+        cid = uuid.uuid4().hex
+        summary = "Пакет изменений:\n\n" + "\n\n".join(previews)
+        max_tier = max(tiers, key=TIERS.index)
+        await store.save_proposal(
+            confirmation_id=cid,
+            operation="composite",
+            customer_id=str(account),
+            params={"operations": children},
+            summary=summary,
+            chat_id=chat_id,
+            user_initiated=prov.human_turn,
+            risk_tier=max_tier,
+        )
+    except ProposalRefused as e:
+        return refused(e.text, error_code="refused")
+    except Exception as e:  # noqa: BLE001
+        log.warning("mcp composite propose failed: %s", type(e).__name__)
+        return refused(redact_error(e), error_code=classify_error(e))
+    return proposed(
+        confirmation_id=cid,
+        operation="composite",
+        customer_id=str(account),
+        preview=summary,
+    )
+
+
 # ── Исполнение ──
 
 
@@ -925,7 +1061,9 @@ async def execute_confirmed() -> dict[str, Any]:
     затем существующий атомарный reply-CAS подтверждает автора и якорь, а сервис исполняет черновик
     на ``proposal.customer_id`` с повторным allow-list gate и audit-row.
     """
+    from ads.composite import execute_confirmed_composite
     from ads.service import confirm_and_execute_by_reply
+    from clients.execute import MEMORY_OPERATIONS, execute_confirmed_memory
     from core.texts import fmt_mutation_result
     from mcp_server.trusted_transport import TrustedTransportError, get_trusted_turn
 
@@ -956,14 +1094,30 @@ async def execute_confirmed() -> dict[str, Any]:
             actor_chat_id=turn.actor_chat_id,
         ):
             raise PermissionError("не удалось привязать доверенный reply-якорь")
-        await confirm_and_execute_by_reply(
-            store,
-            confirmation_id=confirmation_id,
-            actor_user_id=turn.actor_user_id,
-            actor_chat_id=turn.actor_chat_id,
-            reply_to_message_id=turn.reply_to_message_id,
-            actor_username=turn.actor_username,
-        )
+        operation = getattr(proposal, "operation", "")
+        if operation in MEMORY_OPERATIONS or operation == "composite":
+            confirmed = await store.confirm_by_reply(
+                confirmation_id,
+                actor_user_id=turn.actor_user_id,
+                actor_chat_id=turn.actor_chat_id,
+                reply_to_message_id=turn.reply_to_message_id,
+                actor_username=turn.actor_username,
+            )
+            if not confirmed:
+                raise PermissionError("trusted reply confirmation was rejected")
+            if operation == "composite":
+                await execute_confirmed_composite(store, confirmation_id)
+            else:
+                await execute_confirmed_memory(store, confirmation_id)
+        else:
+            await confirm_and_execute_by_reply(
+                store,
+                confirmation_id=confirmation_id,
+                actor_user_id=turn.actor_user_id,
+                actor_chat_id=turn.actor_chat_id,
+                reply_to_message_id=turn.reply_to_message_id,
+                actor_username=turn.actor_username,
+            )
         applied = await store.get_applied_audit_result(confirmation_id)
         if applied is None:
             log.error("execute_confirmed: applied audit недоступен cid=%s", confirmation_id)
@@ -973,11 +1127,30 @@ async def execute_confirmed() -> dict[str, Any]:
                 "error_code": "audit_unavailable",
                 "confirmation_id": confirmation_id,
             }
-        summary = fmt_mutation_result(
-            applied.operation,
-            applied.result,
-            lang=turn.language_code,
-        )
+        if applied.operation == "composite":
+            count = int((applied.result or {}).get("operation_count") or 0)
+            summary = (
+                f"✅ Composite change applied: {count} operations"
+                if str(turn.language_code).lower().startswith("en")
+                else f"✅ Пакет изменений выполнен: {count} операций"
+            )
+        elif applied.operation in MEMORY_OPERATIONS:
+            action = {
+                "profile_save": ("saved", "сохранён"),
+                "profile_update": ("updated", "обновлён"),
+                "profile_clear": ("cleared", "очищен"),
+            }[applied.operation]
+            summary = (
+                f"✅ Client profile {action[0]}: {applied.customer_id}"
+                if str(turn.language_code).lower().startswith("en")
+                else f"✅ Профиль клиента {applied.customer_id}: {action[1]}"
+            )
+        else:
+            summary = fmt_mutation_result(
+                applied.operation,
+                applied.result,
+                lang=turn.language_code,
+            )
         if not summary.strip():
             log.error("execute_confirmed: пустой audit summary cid=%s", confirmation_id)
             return {
@@ -1048,6 +1221,7 @@ PROPOSE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "propose_add_promotion": propose_add_promotion,
     "propose_add_price_asset": propose_add_price_asset,
     "propose_remove_asset_link": propose_remove_asset_link,
+    "propose_composite_change": propose_composite_change,
 }
 
 EXECUTE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {

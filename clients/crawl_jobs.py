@@ -58,9 +58,10 @@ async def mark_failed(job_id: str, *, error: str) -> None:
             await s.commit()
 
 
-async def get_status(job_id: str) -> str | None:
+async def get_status(job_id: str, *, customer_id: str | None = None) -> str | None:
     """Текущий статус задачи (для тестов/диагностики). None — задачи нет."""
+    conditions = [CrawlJob.job_id == job_id]
+    if customer_id is not None:
+        conditions.append(CrawlJob.customer_id == str(customer_id))
     async with Session() as s:
-        return (
-            await s.execute(select(CrawlJob.status).where(CrawlJob.job_id == job_id))
-        ).scalar_one_or_none()
+        return (await s.execute(select(CrawlJob.status).where(*conditions))).scalar_one_or_none()

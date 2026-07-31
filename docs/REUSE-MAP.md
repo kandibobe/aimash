@@ -50,7 +50,7 @@
 ### Фаза 3 — Tool design / self-correction
 | Требование | Источник | Где |
 |---|---|---|
-| 25 READ-инструментов (24 Google Ads + `recall_client`), envelope+error-codes, redaction | **[R]** | `mcp_server/` (`server.py`, `tools_read.py`, `envelope.py`, `redact.py`) |
+| 38 READ-инструментов (Ads, reports, keywords/RSA, client/crawl), envelope+error-codes, redaction | **[R]** | `mcp_server/` (`server.py`, `tools_read.py`, `tools_workflows.py`, `envelope.py`, `redact.py`) |
 | ~41 Google Ads skill, резолверы, post-apply verify | **[R]** | `ads/service.py` (`SUPPORTED_OPERATIONS`), `ads/mutations.py`, `ads/resolve.py` |
 | WRITE-MCP: два `propose_*` + reply/execute facade ready-dark; полный реестр и live-регистрация | **[R]+[B]** | готовое — `mcp_server/tools_write.py`, `confirm/store.py`, `ads/service.py`; остальное — `mcp_server/` поверх `execute_confirmed` |
 | Self-correction (ошибка API → JSON модели, цикл продолжается) | **[Ф]+[R]** | цикл — фреймворк; понятный JSON ошибки — `mcp_server/envelope.err` |

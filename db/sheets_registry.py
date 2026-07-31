@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -86,3 +86,30 @@ async def list_recent(chat_id: int, limit: int = 10) -> list[SheetExportRow]:
         )
         for r in rows
     ]
+
+
+async def is_owned_keyword_sheet(
+    *, chat_id: int, customer_id: str, spreadsheet_id: str, max_age_days: int = 14
+) -> bool:
+    """True only for a keyword sheet minted for this Telegram chat and Ads account.
+
+    This is the anti-substitution anchor for the long keyword-review round-trip: a model-supplied
+    link to an arbitrary sheet must not be accepted as "the sheet the manager reviewed".
+    """
+    async with Session() as s:
+        row = (
+            await s.execute(
+                select(SheetExport.created_at)
+                .where(
+                    SheetExport.chat_id == int(chat_id),
+                    SheetExport.customer_id == str(customer_id),
+                    SheetExport.kind == "keywords",
+                    SheetExport.spreadsheet_id == str(spreadsheet_id),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    if row is None:
+        return False
+    stamp = row if row.tzinfo is not None else row.replace(tzinfo=timezone.utc)
+    return stamp >= datetime.now(timezone.utc) - timedelta(days=max(1, int(max_age_days)))

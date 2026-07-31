@@ -47,7 +47,8 @@
 **Куда идём.** Ядром становится [Hermes Agent](https://github.com/NousResearch/hermes-agent) —
 он даёт то, чего в проекте нет и что дорого писать: агентский цикл, память между сессиями,
 библиотеку скилов с самонаписанием и курированием, глубокую интеграцию с Telegram-группами и
-forum-топиками. Кнопки уходят полностью: общение текстом, подтверждение — реплаем «да».
+forum-топиками. Основной вход — свободный текст; кнопки остаются для конечного выбора и
+единственного Ads-подтверждения; reply «да» — равноценный fallback.
 
 **Что Hermes НЕ даёт и что остаётся нашим.** Ни в ~70+ встроенных скилах, ни в ~100+ опциональных
 (73/104 на 20.07, числа плавают между релизами) **нет ни одного рекламного скила**; списки
@@ -77,7 +78,7 @@ mutation-gate без исполнителя, 85–90% объёма — markdown-
 |---|---|
 | Память = два markdown-файла: `MEMORY.md` **2200 симв.**, `USER.md` **1375 симв.**, без автосжатия | Долговременное знание о клиентах агентства туда **не влезет физически**. Держим в нашем Postgres, подаём MCP-инструментом |
 | `MEMORY.md`/`USER.md` — **одни на профиль**, per-user памяти внутри профиля нет | Агент строит один «профиль пользователя» на всю команду. Изоляция клиентов — только через нашу БД |
-| **Ролей и прав нет.** Одобренный юзер = владелец, включая терминал на сервере | **Блокер.** Терминал отключаем, право подтверждения строим в MCP-слое |
+| **Ролей и прав нет.** Одобренный юзер = владелец, включая терминал на сервере | **Принято для private trusted-operator profile.** В whitelist только владелец и 1–2 доверенных сотрудника; клиентов нет. Полный native toolset — осознанный residual risk, а не блокер |
 | Сессии: SQLite `~/.hermes/state.db` + FTS5; ключ DM — `agent:main:telegram:dm:{chat_id}` (**без** thread_id), thread_id есть только в group-ключах форум-топиков | Топик = изолированная сессия. Ложится на «клиент = топик» точно; вся личка одного человека — одна сессия |
 | Forum topics поддержаны, `observe_unmentioned_group_messages`, `require_mention` | Групповой режим закрыт платформой, писать не надо |
 | Скилы = markdown по [agentskills.io](https://agentskills.io), самонаписание = генерация markdown | **Точно совпадает** с выбором «скилы — только инструкции» |
@@ -175,7 +176,7 @@ wall-clock. Прогон, ждущий реплая «да» (человек о�
   ↓ агентский цикл, READ-MCP: get_stats → get_search_terms → get_competitors
   ↓ уточняет текстом: «бюджет держим или можно снизить на 15%?»  ← reply менеджера, цикл продолжается
   ↓ propose_change ×N → Proposal'ы в БД с diff «было→станет»
-  ↓ агент пишет карточку с ✅ Подтвердить / ✏️ Изменить / ❌ Отмена
+  ↓ агент пишет карточку с diff и кнопками ✅ Да / ❌ Нет
   ↓ менеджер нажимает ✅ (или РЕПЛАЕМ пишет «да» как fallback)
   ↓ MCP execute_confirmed → ensure_allowed → ads/mutations.py → audit-row
   ↓ через 7/14/30 дней: RecommendationOutcome, замер delta
@@ -279,14 +280,14 @@ MCP-сервер (тонкий слой над существующими фун
 (реплай-гейт + whitelist), и И3/И8 конфигом Hermes не снимаются. Осталось проверить на живой
 установке: кто вправе отвечать на approve-запросы в группе.
 
-### Конфигурация Hermes — обязательный минимум (Контур A)
+### Конфигурация Hermes — private trusted-operator profile (Контур A)
 
 ```yaml
 skills:
   write_approval: true          # ПО УМОЛЧАНИЮ ВЫКЛЮЧЕН — включить
 agent:
-  # ЕДИНСТВЕННЫЙ настоящий способ закрыть возможность: тулсет не регистрируется вовсе.
-  disabled_toolsets: [terminal, browser, file, code_execution, web, ...]
+  # Зафиксировано решением 31.07.2026; остальные native tools включены.
+  disabled_toolsets: [homeassistant, spotify, video_gen, x_search, yuanbao, tts]
 approvals:
   mode: manual                  # не smart: вспомогательная LLM не решает за нас
   # ⚠️ deny — fnmatch-глобы КОМАНД, а НЕ имена тулсетов (К10: имя тулсета здесь молча
@@ -298,10 +299,8 @@ telegram:
   require_mention: true
   observe_unmentioned_group_messages: true
 memory:
-  provider: none                # ЕД. ЧИСЛО (К10): ключ `providers` молча игнорируется — сторонние
-                                # Honcho/Mem0/Supermemory остались бы доступны и слали реплики
-                                # (customer_id, бюджеты) третьей стороне
-  write_approval: true
+  memory_enabled: true
+  user_profile_enabled: true   # общий профиль доверенной внутренней команды
 auxiliary:                      # фоновые расходы (компрессия, approval-модель, vision, web_extract…)
   compression: { model: google/gemini-3.1-flash-lite }  # слаги сверять с cli-config.yaml.example
                                 # пиновой версии (К10): слагов curator/background_review НЕ существует
@@ -309,8 +308,9 @@ curator:
   consolidate: false            # по умолчанию и так off — не включать без надобности (см. Г2, §18)
 ```
 
-**Терминал отключается.** Без ролей одобренный пользователь = владелец с shell на сервере,
-где лежат OAuth-токены Google Ads. Это несовместимо с золотым правилом №5.
+**Терминал включён осознанно.** В private-profile каждый допущенный пользователь считается владельцем.
+Заказчик принял, что root shell и Docker делают MCP confirm-гейт прикладным, а не необходимым рубежом всего хоста;
+до отдельной изоляции Hermes это принятый residual risk.
 
 ### Конфиг-инварианты К1–К10 (аудит 20.07: тихие fail-open и RCE-пути)
 
@@ -324,7 +324,7 @@ curator:
 | **К6** | Только long-polling; webhook-поверхность не открывается вовсе | Нечего атаковать — вебхука нет. `TELEGRAM_WEBHOOK_SECRET` нужен лишь в webhook-режиме |
 | **К7** | «Выполнено» пользователю репортит **наш код из audit-row**, не текст агента | Issue #54722: Hermes не сверяет финальный ответ со статусом tool-вызовов — «успешно» при провале |
 | **К8** | Политика данных: `state.db` **и journald** (`journalctl --user -u hermes-gateway`) | В обоих осядут `customer_id`/бюджеты/тексты клиентов: права на файл и журнал, `SystemMaxUse`, ретеншен, шифрование тома |
-| **К9** | `session_search`: при >1 пользователя профиля — гард (`pre_tool_call` block) или раздельные профили | Поиск идёт по всей `state.db` без изоляции по пользователям — любой допущенный вытащит чужие сессии |
+| **К9** | `session_search` разрешён только в private trusted-operator profile; при допуске клиентов гасится или разносится по инстансам | Поиск идёт по всей `state.db`; для доверенной внутренней команды это функция, для клиентского доступа — утечка |
 | **К10** | Каждый ключ конфиг-эталона сверяется с `cli-config.yaml.example` **пиновой версии**; конфиг-линт — часть деплой-процедуры | Неизвестные ключи Hermes молча игнорирует: `memory.providers` вместо `provider`, несуществующий слаг `auxiliary.*` — конфиг «выглядит безопасным», но не работает |
 
 Пин версии — ещё и защита от известных дыр: CVE-2026-53869 (DNS rebinding в WebSocket
@@ -625,12 +625,12 @@ credit cap на OpenRouter в первый же день.
 |---|---|
 | Денежный путь не ослаб | `pytest tests/test_safety_core.py tests/test_write_layer.py tests/test_invariants_core.py -q` + скил `confirm-gate-audit` — на каждом шаге |
 | Скилы и память не влияют на разрешения | `pytest tests/test_hermes_isolation.py -q` — И1–И8 зелёные |
-| Кросс-клиентская изоляция памяти | Поиск/recall в топике клиента A не возвращает данные клиента B (И6) |
+| Account-scoped project memory | `recall_client` требует account и read-lock; общие Hermes memory/session search приняты для private-team (И6) |
 | Мутации выключены при external-контенте | Ход, прочитавший страницу/CSV, не может вызвать `execute_confirmed` (И7) |
 | Не более 1 pending proposal на ход | Модель не создаёт два proposal за один ассистентский ход (И8) |
 | Мутация не в read-фазе | Импорт MCP-реестра падает при нарушении (construction-time assert) |
 | Реплай-гейт | Реплай не на то сообщение → отказ; чужой автор → отказ + `audit_log`; протухший proposal → пересборка |
-| Терминал закрыт | Тулсет `terminal` отсутствует в живом `hermes config show` (он в `agent.disabled_toolsets`) ⇒ вызывать нечего. **Не** через `approvals.deny`: там глобы команд, имя тулсета молча игнорируется (К10) |
+| Private tool policy | `terminal/file/code_execution` включены; `homeassistant/spotify/video_gen/x_search/yuanbao/tts` погашены. Линт и deploy-sync держат точный набор |
 | Секреты не текут | Корпус исключений google-ads/OpenRouter через MCP → наружу только `redact_text` |
 | Диалог персистентен | Рестарт Hermes → продолжение разговора в топике |
 | Живой прогон | Скил `verify-live` (read-only); мутации только Draft `7753643025` |
@@ -1103,15 +1103,15 @@ skills:
   write_approval: true            # ПО УМОЛЧАНИЮ ВЫКЛЮЧЕН — включить обязательно
   inline_shell: false             # К1: иначе !`cmd` из SKILL.md исполняется на хосте без approval
 agent:
-  # Возможность закрывается ЗДЕСЬ — тулсет не регистрируется, вызвать нечего.
-  disabled_toolsets: [terminal, browser, file, code_execution, web, ...]
+  # Private trusted-operator policy; остальные native tools включены.
+  disabled_toolsets: [homeassistant, spotify, video_gen, x_search, yuanbao, tts]
 approvals:
   mode: manual                    # не smart: вспомогательная LLM не решает за деньги клиента
   # ⚠️ deny — fnmatch-глобы КОМАНД, не имена тулсетов (К10). Defense-in-depth, не граница.
   deny: ["rm -rf *", "sudo *", "docker *", "git push*"]
 memory:
-  write_approval: true
-  provider: none                  # ЕД. ЧИСЛО: ключ providers Hermes молча игнорирует (К10)
+  memory_enabled: true
+  user_profile_enabled: true      # общий профиль доверенной внутренней команды
 telegram:
   require_mention: true           # К4: не group-wide доступ
   observe_unmentioned_group_messages: true
@@ -1176,7 +1176,7 @@ Telegram кэширует состояние. Топики нельзя вклю
 | П8 | Память переживает рестарт | Перезапустить сервис → продолжить разговор в топике |
 | П9 | Правило запоминается | «У этого клиента бренд не трогаем» → через день предложение не затрагивает бренд |
 | П10 | Скил утверждается человеком | После сложной задачи `/skills pending` показывает предложенный скил |
-| П11 | Терминал закрыт | Попросить агента выполнить команду на сервере → отказ |
+| П11 | Private tool policy зафиксирована | `hermes tools list --platform telegram`: включены approved native tools, выключены ровно шесть зафиксированных toolsets |
 | П12 | Инъекция не проходит | Тест с текстом на сайте клиента, содержащим команду → мутация не создана |
 | П13 | Секрет не утекает | Спровоцировать ошибку авторизации → в чате и логах нет токена |
 | П14 | Стоимость видна | Отчёт: сколько стоил прогон, сколько группа за месяц |
@@ -2427,7 +2427,7 @@ existing propose → trusted reply → ConfirmStore.claim → ads/mutations → 
 10. CRM/SSO identifiers — domain-separated HMAC-SHA256; без отдельного
     `PSEUDONYMIZATION_HMAC_KEY` ingest/mapping отказывает.
 
-**Статус публикации:** 46 PLAN/state + 1 WRITE зарегистрированы только при `HERMES_WRITE_ENABLED=true`;
+**Статус публикации:** 61 PLAN/state + 1 WRITE зарегистрированы только при `HERMES_WRITE_ENABLED=true`;
 без флага модуль WRITE физически не импортируется. Продовый sync меняет только Aimash include-list и
 активацию `aimash_trusted_transport`, сохраняя host-local Hermes config. Наличие `0038` или одного
 только плагина не является разрешением обойти HMAC/cutover. Функциональный контракт — `SPEC.md` §3.11,

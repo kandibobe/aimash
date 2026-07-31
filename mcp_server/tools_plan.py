@@ -10,6 +10,7 @@ from core.provenance import get_provenance
 from mcp_server.envelope import ok, refused
 from mcp_server.tools_ops import OPS_STATE_MCP_TOOLS, OPS_STATE_TOOL_FUNCS
 from mcp_server.tools_write import PROPOSE_TOOL_FUNCS
+from mcp_server.tools_workflow_state import WORKFLOW_STATE_TOOL_FUNCS
 
 
 def _trusted_actor() -> tuple[int, int] | None:
@@ -80,6 +81,7 @@ PLAN_STATE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "list_pending_proposals": list_pending_proposals,
     "cancel_proposal": cancel_proposal,
     **OPS_STATE_TOOL_FUNCS,
+    **WORKFLOW_STATE_TOOL_FUNCS,
 }
 
 PLAN_STATE_MCP_TOOLS: frozenset[str] = frozenset(PLAN_STATE_TOOL_FUNCS)
