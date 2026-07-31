@@ -330,8 +330,9 @@ tar tzf "$(ls -1t /root/hermes-backups/*.tgz | head -1)" | grep -E 'state\.db|\.
 - успешном или проваленном production deploy (отдельный сигнал из CI после live-гейтов).
 
 В серверном `/opt/aimash/.env` обязательны `OPS_ALERT_CHAT_ID`; для forum supergroup задаётся
-`OPS_ALERT_THREAD_ID` (общий топик текущей группы — `1`). Токен повторно не хранится: используется
-существующий `TELEGRAM_BOT_TOKEN`, в лог/состояние он не попадает. Первый тик только сохраняет baseline,
+`OPS_ALERT_THREAD_ID` только для отдельного forum-топика; для General он остаётся пустым. Токен повторно
+не хранится: используется `TELEGRAM_BOT_TOKEN` Hermes из `/root/.hermes/.env` (не legacy-бота из
+`/opt/aimash/.env`), в лог/состояние он не попадает. Первый тик только сохраняет baseline,
 недоставленный transition состояние не продвигает и повторяется на следующей минуте.
 
 ```bash

@@ -65,7 +65,7 @@ def test_compare_reports_gateway_down_disk_backup_and_409():
     assert "409 Conflict" in text
 
 
-def test_send_telegram_targets_general_topic_without_leaking_token(monkeypatch):
+def test_send_telegram_targets_explicit_topic_without_leaking_token(monkeypatch):
     captured = {}
 
     class Response:
@@ -93,6 +93,43 @@ def test_send_telegram_targets_general_topic_without_leaking_token(monkeypatch):
     assert ops.send_telegram("Deploy", "готово", "success", env=env)
     assert "message_thread_id=1" in captured["data"]
     assert "chat_id=-1004443550627" in captured["data"]
+
+
+def test_send_telegram_omits_thread_for_general_topic(monkeypatch):
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"ok": true}'
+
+    def fake_urlopen(request, timeout):
+        captured["data"] = request.data.decode()
+        return Response()
+
+    monkeypatch.setattr(ops.urllib.request, "urlopen", fake_urlopen)
+    env = {
+        "TELEGRAM_BOT_TOKEN": "secret-token",
+        "OPS_ALERT_CHAT_ID": "-1004443550627",
+        "OPS_ALERT_THREAD_ID": "",
+    }
+    assert ops.send_telegram("Deploy", "ready", "success", env=env)
+    assert "message_thread_id" not in captured["data"]
+
+
+def test_default_env_files_prefer_hermes_bot_token(tmp_path):
+    legacy = tmp_path / "legacy.env"
+    hermes = tmp_path / "hermes.env"
+    legacy.write_text("TELEGRAM_BOT_TOKEN=legacy\nOPS_ALERT_CHAT_ID=-10012345\n", encoding="utf-8")
+    hermes.write_text("TELEGRAM_BOT_TOKEN=hermes\n", encoding="utf-8")
+    env = ops._read_env((legacy, hermes))
+    assert env["TELEGRAM_BOT_TOKEN"] == "hermes"
+    assert env["OPS_ALERT_CHAT_ID"] == "-10012345"
 
 
 def test_failed_delivery_does_not_advance_state(monkeypatch, tmp_path):

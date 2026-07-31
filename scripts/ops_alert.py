@@ -24,7 +24,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-ENV_FILES = (Path("/opt/aimash/.env.defaults"), Path("/opt/aimash/.env"))
+ENV_FILES = (
+    Path("/opt/aimash/.env.defaults"),
+    Path("/opt/aimash/.env"),
+    # The operational supergroup belongs to the Hermes contour.  Keep this last so its
+    # TELEGRAM_BOT_TOKEN wins over the separate legacy bot token from /opt/aimash/.env.
+    Path("/root/.hermes/.env"),
+)
 STATE_PATH = Path("/var/lib/aimash-ops-watch/state.json")
 CONTAINERS = ("aimash-bot", "aimash-scheduler", "aimash-pg", "aimash-backup")
 _CHAT_ID_RE = re.compile(r"-?[1-9][0-9]{4,19}")
@@ -92,6 +98,16 @@ def send_telegram(title: str, body: str, severity: str, *, env: dict[str, str]) 
         with urllib.request.urlopen(request, timeout=12) as response:  # noqa: S310 - fixed Telegram API
             result = json.loads(response.read().decode("utf-8"))
         return bool(result.get("ok"))
+    except urllib.error.HTTPError as exc:
+        description = "Telegram rejected the request"
+        try:
+            error = json.loads(exc.read().decode("utf-8"))
+            if isinstance(error.get("description"), str):
+                description = error["description"][:240]
+        except (OSError, UnicodeError, ValueError):
+            pass
+        print(f"[ops-alert] Telegram HTTP {exc.code}: {description}", file=sys.stderr)
+        return False
     except (OSError, ValueError, urllib.error.URLError) as exc:
         print(f"[ops-alert] delivery failed: {type(exc).__name__}", file=sys.stderr)
         return False
