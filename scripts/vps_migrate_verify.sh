@@ -33,9 +33,16 @@ head_() { echo; echo "── $* ────────────────
 
 head_ "1. Ресурсы машины (корень аварий §14.1 — не туннель, а память)"
 RAM_MB=$(free -m | awk '/^Mem:/{print $2}')
-RAM_GB=$((RAM_MB / 1024))
-if [ "$RAM_GB" -ge "$EXPECT_RAM_GB" ]; then ok "RAM ${RAM_GB}G (ожидалось ≥ ${EXPECT_RAM_GB}G)"
-else fail "RAM ${RAM_GB}G < ожидаемых ${EXPECT_RAM_GB}G — rescale/переезд не применился"; fi
+# Облачный план «8 GB» виден гостевой ОС как ~7.6 GiB: часть адресного пространства
+# резервирует гипервизор/ядро. Целочисленное `RAM_MB / 1024` превращало штатные 7.6 в 7
+# и ложно валило rescale. Сравниваем MiB с 90% номинала: этого достаточно, чтобы принять
+# системный резерв, но 4 GiB вместо 8 GiB по-прежнему не пройдут.
+MIN_RAM_MB=$((EXPECT_RAM_GB * 1024 * 90 / 100))
+if [ "$RAM_MB" -ge "$MIN_RAM_MB" ]; then
+  ok "RAM ${RAM_MB}MiB (план ≥ ${EXPECT_RAM_GB}GiB; gate 90% = ${MIN_RAM_MB}MiB)"
+else
+  fail "RAM ${RAM_MB}MiB < gate ${MIN_RAM_MB}MiB для плана ${EXPECT_RAM_GB}GiB — rescale/переезд не применился"
+fi
 SWAP_MB=$(free -m | awk '/^Swap:/{print $2}')
 [ "${SWAP_MB:-0}" -gt 0 ] && ok "swap ${SWAP_MB}M" || warn "swap отсутствует — пик xlsx-отчёта упрётся в OOM жёстче"
 USE=$(df / | awk 'NR==2{gsub("%","",$5); print $5}')

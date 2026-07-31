@@ -129,6 +129,9 @@ def test_verify_is_a_gate_not_a_report() -> None:
     assert "expected_tool_names" in body
     assert '"$DISCOVERED" = "$EXPECTED"' in body
     assert "grep -coE 'mcp__aimash__|^\\s*-\\s+\\w+'" not in body
+    assert "MIN_RAM_MB=$((EXPECT_RAM_GB * 1024 * 90 / 100))" in body
+    assert '"$RAM_MB" -ge "$MIN_RAM_MB"' in body
+    assert "RAM_GB=$((RAM_MB / 1024))" not in body
 
 
 def test_runbook_mentions_every_migration_script() -> None:
