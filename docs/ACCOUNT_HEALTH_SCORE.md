@@ -33,4 +33,6 @@ structure 5, bidding 4, assets 3, PMax 3. Competition и Google recommendations 
 Снапшот не хранит PII или имена кампаний и очищается по `ACCOUNT_HEALTH_RETAIN_DAYS`.
 
 Portfolio triage использует score вместе с critical incidents и decision queue, а не заменяет ими
-доказательства. Проверки: `tests/test_audit_engine.py`, `tests/test_health_snapshot.py`.
+доказательства. В standup выводятся band и три главных отрицательных driver, но сами drivers всегда
+ссылаются на детерминированные находки. Проверки: `tests/test_audit_engine.py`,
+`tests/test_health_snapshot.py`.

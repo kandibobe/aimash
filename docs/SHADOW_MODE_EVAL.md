@@ -22,4 +22,8 @@
 - rollback proposal с полным обычным confirm/freshness/account/audit контуром;
 - staged rollout только на Draft/test, затем per-account opt-in и kill-switch.
 
+Еженедельная оценка дополнительно хранит число рекомендаций, useful/wasted alerts,
+false-positive rate, кандидаты в false-negative и actionability score. Эти метрики используются
+только для настройки порогов и снижения шума; они не разрешают auto-rollback.
+
 Проверки: `tests/test_rollback.py` и `tests/test_rollback_watch.py`.

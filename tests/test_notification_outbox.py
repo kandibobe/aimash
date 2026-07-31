@@ -31,15 +31,19 @@ def _customer_id() -> str:
 
 @pytest.fixture(autouse=True)
 async def _cleanup_test_routes():
+    async def _clear() -> None:
+        async with Session() as session:
+            # enqueue_due_escalations намеренно сканирует ВСЕ due incidents. Значит тест обязан
+            # изолировать эти три глобальные очереди целиком, а не только свои route_uid: иначе
+            # результат зависит от порядка запуска с tests/test_operations_layer.py.
+            await session.execute(delete(NotificationOutbox))
+            await session.execute(delete(OpsIncident))
+            await session.execute(delete(NotificationRoute))
+            await session.commit()
+
+    await _clear()
     yield
-    async with Session() as session:
-        await session.execute(
-            delete(NotificationOutbox).where(NotificationOutbox.route_uid.like("outtest_%"))
-        )
-        await session.execute(
-            delete(NotificationRoute).where(NotificationRoute.route_uid.like("outtest_%"))
-        )
-        await session.commit()
+    await _clear()
 
 
 async def _incident(

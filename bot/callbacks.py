@@ -159,6 +159,15 @@ class ModelCB(CallbackData, prefix="mdl"):
     idx: int = -1
 
 
+class ClarifyCB(CallbackData, prefix="clq"):
+    """Inline-ответ на ask_clarification. token защищает от stale-кнопок, idx указывает на
+    позицию варианта в последнем clarify чата. action='other' просит ввести свой ответ текстом."""
+
+    action: str  # "pick" | "other"
+    token: str
+    idx: int = -1
+
+
 class KwAddCB(CallbackData, prefix="kwadd"):
     """§7: добавить подобранные ключи (из результатов /keywords) в кампанию — только по команде,
     после показа списка + типа соответствия и «да» (confirm-гейт). token — ключ серверной сессии

@@ -251,9 +251,16 @@ async def _classify_tool_call(
     """Разбор ОДНОГО tool-call модели в структуру результата (clarify|read|proposal|intent|text).
     Вынесено из handle_command, чтобы обработку «несколько вызовов» (A5) держать в одном месте."""
     if name == "ask_clarification":
+        raw_choices = args.get("choices")
+        choices = None
+        if isinstance(raw_choices, list):
+            cleaned = [str(x).strip() for x in raw_choices if str(x).strip()]
+            if cleaned:
+                choices = cleaned[:4]
         return {
             "type": "clarify",
             "question": args.get("question") or i18n.t("loop_clarify_default"),
+            "choices": choices,
         }
 
     if name in READ_TOOLS:

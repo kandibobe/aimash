@@ -1,7 +1,7 @@
 # Ранбук: поднять Hermes (Контур A) рядом с боевым ботом на VPS
 
 READ-пилот пивота Aimash → Hermes. Hermes-агент отвечает в Telegram и через
-MCP-сервер `aimash` (пакет `mcp_server/`, 24 READ-инструмента) читает Google Ads. Денежное ядро не
+MCP-сервер `aimash` (пакет `mcp_server/`, 25 READ-инструментов) читает Google Ads. Денежное ядро не
 затрагивается: слой **READ-only by construction** — WRITE-инструментов физически нет.
 
 **Где что написано:** требования и приёмка — [`/SPEC.md`](../../SPEC.md); архитектура (топология,
@@ -68,11 +68,10 @@ hermes config env-path             # путь ~/.hermes/.env
 
 # 3. Провайдер модели — через интерактивный мастер (он же запускается при первом старте):
 hermes model
-#   Select provider   → OpenRouter (НЕ подсвеченный Nous Portal: у нас рабочий ключ OpenRouter
-#                       и слаги §15 — openai/gpt-5.6-*). Далее: ключ sk-or-… (или подхватит
-#                       OPENROUTER_API_KEY из ~/.hermes/.env), затем модель openai/gpt-5.6-terra.
-#   Мастер пишет в config.yaml ТОЛЬКО блок  model: {provider: openrouter, default: <slug>}
-#   (форма mapping, не скаляр — иначе К10 молча откатит на Nous Portal).
+#   Select provider/model — сверять с `/opt/aimash/deploy/hermes/runtime_registry.yaml`.
+#   На 2026-07-30 canonical current runtime для чата: `gpt-5.6-terra` via `openai-codex`.
+#   Если выбираешь иной runtime для конкретной джобы/исключения — зафиксируй это как pinned exception,
+#   а не как новую безымянную правду.
 #   Select terminal backend → Keep current (local): терминал у Контура A и так гасится (см. тулсеты).
 #   Select platforms        → только Telegram (SPACE, ENTER).
 #   Tools for CLI (тулсеты) → эталон = минимум (skills/todo/clarify + наш MCP). `session_search`
@@ -118,7 +117,7 @@ hermes gateway status              # active; в логах — коннект MC
 #          (подробнее про логи/linger — OPERATIONS.md §0/§3)
 
 # 7. Быстрая проверка MCP-коннекта до Telegram.
-hermes mcp test aimash             # должен отдать 24 READ-инструмента
+hermes mcp test aimash             # должен отдать 25 READ-инструментов
 #   (`aimash` здесь — имя MCP-сервера из config.yaml, НЕ профиля)
 ```
 
@@ -206,7 +205,7 @@ hermes mcp test aimash             # должен отдать 24 READ-инст�
 
 ## Что прогнано, что нет
 
-MCP READ-слой (`mcp_server/`) отдаёт чистые редактированные конверты на всех 24 READ-инструментах, но
+MCP READ-слой (`mcp_server/`) отдаёт чистые редактированные конверты на всех 25 READ-инструментах, но
 прогоны РАЗНОЙ силы, и разница существенна: 15 инструментов прогнаны **вживую** на Draft `7753643025`
 локально, 8 добавленных 30.07 (кампании · таргетинг · настройки · стратегия ставок · разбивки ·
 аудитории · квота) — **только офлайн** (`tests/test_mcp_read_smoke.py`, SDK подменён). Живой Draft-прогон

@@ -1,4 +1,4 @@
-"""24 READ-обёртки MCP-слоя над существующими ридерами (Контур A, инкремент «MCP READ»).
+"""25 READ-обёрток MCP-слоя над существующими ридерами (Контур A, инкремент «MCP READ»).
 
 Каждая обёртка:
   1) проходит замок ЧТЕНИЯ на ГРАНИЦЕ слоя — `_guarded` требует `account=` и зовёт
@@ -42,6 +42,7 @@ from ads.read import (
     list_audiences as _read_audiences,
     list_campaigns as _read_campaigns,
     list_child_accounts,
+    list_negative_shared_sets as _read_shared_sets,
     read_campaign_config as _read_config,
     read_campaign_targeting as _read_targeting,
 )
@@ -963,6 +964,31 @@ async def get_mcc_deep(
     return await _guarded(_work, account=mid, manager=True)
 
 
+async def list_negative_shared_sets(
+    account: str,
+    offset: int = 0,
+    limit: int = DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Общие списки минус-слов аккаунта (NEGATIVE_KEYWORDS shared sets).
+    Каждый: id, name, member_count, reference_count (к скольким кампаниям привязан).
+    Нужен для propose_add_negatives_to_shared_set / propose_attach_shared_set.
+
+    Замок: ensure_read_allowed."""
+
+    async def _work() -> dict[str, Any]:
+        client = await build_client_async(account)
+        sets = await run_ads_read_call(
+            _read_shared_sets,
+            client,
+            str(account),
+            account=str(account),
+            label="mcp.list_negative_shared_sets",
+        )
+        return ok(sets, offset=offset, limit=limit)
+
+    return await _guarded(_work, account=str(account))
+
+
 # Реестр: имя инструмента → функция. server.py регистрирует по нему в FastMCP и проверяет И4
 # (READ_MCP_TOOLS ∩ MUTATION_TOOLS == ∅). Имена подобраны заведомо непересекающимися с 39
 # мутационными (agent.tools.schemas.MUTATION_TOOLS).
@@ -991,6 +1017,7 @@ READ_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "recall_client": recall_client,
     "get_mcc_summary": get_mcc_summary,
     "get_mcc_deep": get_mcc_deep,
+    "list_negative_shared_sets": list_negative_shared_sets,
 }
 
 READ_MCP_TOOLS: frozenset[str] = frozenset(READ_TOOL_FUNCS)

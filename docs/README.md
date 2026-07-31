@@ -55,12 +55,16 @@ Google Ads READ через MCP внутри этого контейнера, а 
 - [DECISION_LAYER.md](DECISION_LAYER.md) — decision queue, incidents, pacing, experiments, RBAC/four-eyes, CRM, portfolio, playbooks и граница live-cutover.
 - [ACCOUNT_HEALTH_SCORE.md](ACCOUNT_HEALTH_SCORE.md) — формула 0–100, семейные веса, grades и версия модели.
 - [SHADOW_MODE_EVAL.md](SHADOW_MODE_EVAL.md) — что реально измеряет rollback shadow, критерии до auto-cutover.
+- [DAILY_OPERATOR_BRIEF.md](DAILY_OPERATOR_BRIEF.md) — формат утреннего portfolio triage и приоритетов оператора.
+- [WASTE_MINING_LANE.md](WASTE_MINING_LANE.md) — отдельный контур поиска потерь и его граница с мутациями.
 
 ## Фичи — источники функционального объёма
 > Это **[legacy-референсы]**. Они фиксируют уже написанные бизнес-правила, форматы данных и тесты. В Hermes переносятся функция и
 > приёмка, но не кнопки, callback-имена, FSM-этапы и не старый агентский цикл (`SPEC.md` §3.3–§3.8).
 
 - [CAMPAIGN_WIZARD.md](CAMPAIGN_WIZARD.md) — §19 визард `/newcampaign`: 8 этапов, черновики, Sheets round-trip → диалог + состояние черновика (§3.5).
+- [section19-spec.md](section19-spec.md) — дополнение §19 по созданию Search-кампании через Telegram.
+- [gap-analysis-section19.md](gap-analysis-section19.md) — расхождения реализации с §19 и план закрытия.
 - [CLIENTS_KB.md](CLIENTS_KB.md) — §20 `/clients`: профиль клиента, LLM-разбор текста, краулер сайта → §3.8 (memory-инструменты, топик = клиент).
 - [REPORTS.md](REPORTS.md) — `/report` `/export` `/sheets` `/mcc`: периоды, метрики, разбивки, экспорт → §3.7.
 - [KEYWORD_RESEARCH.md](KEYWORD_RESEARCH.md) — `/keywords`: подбор идей, метрики, AI-кластеризация, `.xlsx` → §3.3.
@@ -79,6 +83,8 @@ Google Ads READ через MCP внутри этого контейнера, а 
 - Эксплуатация ядра Hermes живёт рядом с самим ядром, в [`deploy/hermes/`](../deploy/hermes/):
   [`README.md`](../deploy/hermes/README.md) — установка (RB-0…RB-3) ·
   [`OPERATIONS.md`](../deploy/hermes/OPERATIONS.md) — день-2: редеплой↔MCP-reconnect, логи, откат, kill-switch, замеры §12 ·
+  [`SAFE_RESTART.md`](../deploy/hermes/SAFE_RESTART.md) — безопасный restart двух Telegram-контуров без второго poller ·
+  [`DRIFT_AUDIT.md`](../deploy/hermes/DRIFT_AUDIT.md) — сверка repo/runtime/cron drift перед эксплуатационными изменениями ·
   [`OPEN_DECISIONS.md`](../deploy/hermes/OPEN_DECISIONS.md) — решения заказчика D1–D7 (**настройка**, у каждого строгий дефолт) ·
   [`RISK_REGISTER.md`](../deploy/hermes/RISK_REGISTER.md) — риски Р1–Р9 (**подпись**, дефолта нет; приложение к договору) ·
   [`SOUL.md`](../deploy/hermes/SOUL.md) — **слот №1 системного промпта** (деплоится в `~/.hermes/SOUL.md`): идентичность агента, а НЕ граница безопасности — границы дают отсутствие WRITE-инструментов, confirm-гейт в коде и таинт через недоступность инструментов ·

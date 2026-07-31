@@ -41,7 +41,7 @@
 - **Версия/SDK:** проект на официальном **Python SDK `google-ads` 31.2.x → API v25** (пин `>=31.2,<32`). Сохраняем. [Certain] SDK-версия ≠ API-версия; релизы и сансеты перепроверяются ежемесячно (скил `gads-version`, `docs/gads-api-refs.md`).
 - **Node/Opteo `google-ads-api` — НЕ берём** (у Google нет офиц. Node SDK): выбрана Python-эволюция, официальный SDK зрелее и уже интегрирован. [Certain]
 - **Авторизация:** OAuth2 refresh token + developer token + login_customer_id; per-account токены шифруются Fernet at-rest (`core/secrets.py`, `scripts/get_refresh_token.py`, `scripts/register_account.py`). [Certain]
-- **Готовый Google Ads MCP:** официальный `googleads/google-ads-mcp` — **READ-only** (`search` GAQL, `get_resource_metadata`, `list_accessible_customers`), Python, Apache-2.0. Мутаций нет. Ваш собственный READ-MCP (`mcp_server/`) уже реализует 24 READ-инструмента; для WRITE строим свои (нет зрелого готового write-MCP на актуальной версии). [Certain]
+- **Готовый Google Ads MCP:** официальный `googleads/google-ads-mcp` — **READ-only** (`search` GAQL, `get_resource_metadata`, `list_accessible_customers`), Python, Apache-2.0. Мутаций нет. Ваш собственный READ-MCP (`mcp_server/`) уже реализует 25 READ-инструментов; для WRITE строим свои (нет зрелого готового write-MCP на актуальной версии). [Certain]
   - https://github.com/googleads/google-ads-mcp · community с мутациями (незрелые/отстают по версии): `grantweston/google-ads-mcp-complete` (v21), `cohnen/mcp-google-ads`, `samihalawa/google-ads-mcp-server` (Node).
 - Доки: https://developers.google.com/google-ads/api/docs/release-notes · https://developers.google.com/google-ads/api/docs/query/overview
 

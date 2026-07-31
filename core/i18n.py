@@ -2721,6 +2721,12 @@ CATALOG: dict[str, dict[str, str]] = {
             "stage."
         ),
     },
+    "cc_images_notice": {
+        "ru": "⚠️ Image assets в Search показываются не на всех аккаунтах. "
+        "Если неприменимы — ассет будет пропущен при создании кампании.",
+        "en": "⚠️ Image assets in Search may not be available for this account. "
+        "If inapplicable, the asset will be skipped during campaign creation.",
+    },
     "cc_image_saved": {
         "ru": "🖼 Изображение добавлено к черновику ({n} шт.).",
         "en": "🖼 Image added to the draft ({n}).",

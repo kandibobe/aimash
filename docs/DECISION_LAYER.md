@@ -76,5 +76,12 @@ Slack/email/Teams требуют настроенных transport adapters и up
 identity намеренно не принимает сырой токен. Meta/Microsoft/TikTok требуют ingestion adapters и
 credentials; cross-channel рекомендации не исполняются.
 
+## Каналы-источники и рендеринг
+
+Monitoring, audit, waste mining и shadow evaluation создают тот же нормализованный объект, а не
+свои prose-alerts. Morning Standup группирует decision по аккаунту, Hourly Watchdog показывает
+только срочные, Weekly Janitor — waste-находки. В Telegram каждая карточка обязана показать:
+что случилось, severity, evidence/why, рекомендуемое и запрещённое действие, confidence.
+
 Приёмка ядра: `python -m pytest -q tests/test_operations_layer.py tests/test_notification_outbox.py`
 и полный `python -m pytest -q`.

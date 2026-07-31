@@ -17,7 +17,7 @@ Telegram-агент, который по свободному тексту уп�
 | Состояние | Что является ядром | Что доступно |
 |---|---|---|
 | **Целевое** | Hermes ведёт диалог и агентский цикл; Aimash MCP исполняет типизированные инструменты; scheduler работает отдельным процессом | свободный текст, READ/MEMORY/PLAN/WRITE, reply-confirm |
-| **Переходное сейчас** | Hermes уже выбран и подключён к MCP, но контейнер `aimash-bot` остаётся runtime-мостом | 24 READ на живой MCP-поверхности; PLAN/WRITE через Hermes закрыты |
+| **Переходное сейчас** | Hermes уже выбран и подключён к MCP, но контейнер `aimash-bot` остаётся runtime-мостом | 25 READ на живой MCP-поверхности; PLAN/WRITE через Hermes закрыты |
 | **Legacy aiogram** | `python -m bot.main` | кнопки, визарды и действующий путь мутаций; это источник переиспользуемой бизнес-логики, а не целевая архитектура |
 
 ⚠️ **Две независимые нумерации «волн», их легко перепутать** — это и есть источник расхождений в старых заметках:
@@ -35,7 +35,7 @@ Telegram-агент, который по свободному тексту уп�
 |---|---|
 | 1 · Hermes на VPS + bot-free bootstrap | ✅ пин v0.19.0, тулсет-поверхность заперта, `bot/`-зависимости срезаны, у планировщика свой процесс + advisory-lock. Gateway в Telegram ещё не поднят |
 | 2 · Гарды И1–И5 | ⛔ не сделано — в `tests/test_hermes_isolation.py` 8 `@pytest.mark.skip`; живьём покрыт только И3 (`tests/test_provenance_gate.py`) |
-| 3 · READ-инструменты | ✅ 24 READ-инструмента из 38 по реестру §6.1. Round-trip через Hermes доказан живьём на 15 из них; 8 добавленных 30.07 покрыты только офлайн-смоуком (`tests/test_mcp_read_smoke.py`, SDK подменён) |
+| 3 · READ-инструменты | ✅ 25 READ-инструментов. Round-trip через Hermes доказан живьём на 15; добавленные structural/shared-list ридеры покрыты офлайн-смоуком (`tests/test_mcp_read_smoke.py`, SDK подменён) |
 | 4 · Память | 🟡 `recall_client` есть; `remember_fact`/`agent_facts` — нет |
 | 5 · Мутации + реплай-гейт | 🟡 ready-dark: два `propose_*`, привязка карточки и CAS-подтверждение реплаем реализованы, но не зарегистрированы на живой MCP-поверхности и не получают доверенные Telegram-метаданные; мутации пока идут кнопочным путём |
 | 6–10 · скилы, самообучение, наблюдаемость | ⛔ не начаты |
@@ -153,7 +153,7 @@ clients/      §20: профиль (store), LLM-разбор, краулер с�
 scheduler/    плановые отчёты/аномалии/очистка черновиков (READ-ONLY, правило 3)            ← ядро
 db/           SQLAlchemy модели + Alembic (migrations/)                                     ← ядро
 app/          bootstrap — bot-free старт ads-глобалов                                       ← ядро
-mcp_server/   тул-слой Hermes: 24 READ live; 2 propose_* + reply/execute ready-dark; остальной PLAN/WRITE — Волна 1
+mcp_server/   тул-слой Hermes: 25 READ live; полный PLAN/WRITE-код ready-dark и не зарегистрирован до доверенного transport
 deploy/hermes/ конфиг Контура A, плагин-проб, конфиг-линт (К10), RUNBOOK хоста    ← пишется заново
 bot/          aiogram handlers, inline-кнопки, визарды, i18n, throttle    ← архивируется после гейтированного cutover
 agent/        свой цикл архивируется; router.py и tools/schemas.py переезжают в bot-free пакет

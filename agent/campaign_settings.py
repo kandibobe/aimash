@@ -46,6 +46,7 @@ class CampaignSettings(BaseModel):
     campaign_name: str | None = None
     product: str | None = None  # ЧТО рекламируется (товар/услуга): «поддержанные авто» — драйвер
     geo_locations: list[str] = Field(default_factory=list)  # ["Кения"] / ["Украина","Киев"]
+    geo_proximity: str | None = None  # §19.3: «Найроби, 20» = город + радиус км
     geo_country_code: str | None = None  # ISO alpha-2, если модель уверенно вывела
     languages: list[str] = Field(default_factory=list)  # ["English","Swahili"]
     budget_daily_units: float | None = None
@@ -89,6 +90,8 @@ _SYSTEM = (
     "'создай кампанию'/страны/бюджета (напр. 'поддержанные авто', 'доставка цветов'); "
     'null если неясно", '
     '"geo_locations": ["страна/город как в тексте"], '
+    '"geo_proximity": "город и радиус км ЧЕРЕЗ ЗАПЯТУЮ (напр. \'Найроби, 20\') если в тексте '
+    'указан гео-радиус, иначе null", '
     '"geo_country_code": "ISO alpha-2 страны таргетинга (Кения→KE, Украина→UA) или null", '
     '"languages": ["язык объявлений — ТОЛЬКО если пользователь ЯВНО назвал язык (напр. '
     "'на украинском', 'английские объявления'); иначе оставь ПУСТОЙ список [] — язык код подберёт "
@@ -522,6 +525,7 @@ def assemble_settings(
         "product": theme or None,
         "target_language": target_language,
         "geo_locations": list(extracted.geo_locations),
+        "geo_proximity": extracted.geo_proximity,
         "geo_country_code": extracted.geo_country_code or country_iso,
         # geo_locale — язык, на котором заданы НАЗВАНИЯ локаций (для их резолва в geoTargetConstant);
         # менеджер пишет «Кения»/«Найроби» на языке интерфейса, поэтому ui_language, а не target.
