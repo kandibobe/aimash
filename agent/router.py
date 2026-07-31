@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 from openai import AsyncOpenAI
 
+from core import llm_budget  # BZ-4: долларовый потолок дня — гейт в chat() ниже
 from core.config import _VALID_PROVIDER_SORTS, settings
 from core.breaker import CircuitOpenError  # цепь модели разомкнута → деградировать на резервную
 from core.resilience import (
@@ -205,6 +206,15 @@ async def chat(
     Возвращает message ответа (с .content и/или .tool_calls). Тул-исполнение — НЕ здесь:
     mutation-инструменты только предлагают proposal, выполняет код после «да».
     """
+    # BZ-4: дневной долларовый потолок ПЕРЕД любым обращением к OpenRouter — здесь, потому что
+    # chat() и есть единая точка всех наших LLM-вызовов (12 импортёров + fallback-ветка ниже);
+    # гейт в точках входа было бы можно забыть поставить в новой. Трата кэшируется в llm_budget
+    # (60 с) — это НЕ HTTP GET на каждый вызов. Интерактивный NL-вход отсекает раньше и отвечает
+    # человеку по-человечески (bot/main._llm_budget_or_reply); сюда долетают фоновые пути
+    # (advisor/дайджесты/keywords/досье) — их вызывающие переживают исключение как обычный сбой
+    # LLM. Стоит ДО try с fallback: отказ бюджета — не транзиентный сбой, резервной моделью
+    # не лечится.
+    await llm_budget.check_daily_cost_cap()
     chosen = model or effective_model(role)  # явный model > рантайм-override > дефолт роли
     kwargs: dict[str, Any] = {"messages": messages}  # model проставляется в _call (для fallback)
     if tools:

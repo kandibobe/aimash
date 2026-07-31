@@ -1,9 +1,13 @@
-"""FastMCP-реестр READ + WRITE инструментов + construction-time assert И4 + lifespan-bootstrap.
+"""Production FastMCP READ-реестр + construction-time assert И4 + lifespan-bootstrap.
 
 Импорт этого модуля РОНЯЕТ процесс, если в READ-слой просочилась мутация (assert И4) — это зерно
 инварианта изоляции, тот же паттерн, что защищает `ANALYSIS_TOOLS` в `agent/tools/schemas.py`.
 `agent.tools.schemas` bot-free (гард `tests/test_hermes_isolation.py` / `test_headless_bootstrap.py`),
 поэтому импорт `MUTATION_TOOLS` не нарушает развязку headless-контура.
+
+Полный набор `mcp_server.tools_write` существует ready-dark, но намеренно не импортируется и не
+регистрируется этим entrypoint: доверенный Telegram reply-transport ещё не принят. Скрыть WRITE
+через клиентский `tools.include` недостаточно — в read-фазе его не должно быть физически (И4).
 """
 
 from __future__ import annotations
@@ -13,7 +17,6 @@ from contextlib import asynccontextmanager
 from agent.tools.schemas import MUTATION_TOOLS
 from core.guards import require_no_mutations, require_registered_surface
 from mcp_server.tools_read import READ_MCP_TOOLS, READ_TOOL_FUNCS
-from mcp_server.tools_write import PROPOSE_MCP_TOOLS, PROPOSE_TOOL_FUNCS
 
 # ── И4 (зерно): READ-инструменты НЕ пересекаются с мутационными ──────────────────
 require_no_mutations(
@@ -42,7 +45,7 @@ def _registered_tool_names(mcp) -> frozenset[str]:
 
 
 def build_server():
-    """FastMCP с зарегистрированными READ + WRITE инструментами.
+    """FastMCP с зарегистрированным ровно READ-набором.
 
     §15.2: после регистрации сверяем ФАКТИЧЕСКУЮ поверхность с одобренным набором.
     Любой проскочивший инструмент мимо реестра → старт падает fail-fast."""
@@ -54,15 +57,10 @@ def build_server():
     for name, fn in READ_TOOL_FUNCS.items():
         mcp.tool(name=name, structured_output=False)(fn)
 
-    # WRITE-инструменты (propose_* + execute_confirmed)
-    for name, fn in PROPOSE_TOOL_FUNCS.items():
-        mcp.tool(name=name, structured_output=False)(fn)
-
-    # Проверка: вся живая поверхность внутри одобренного набора
-    approved = READ_MCP_TOOLS | PROPOSE_MCP_TOOLS
+    # Проверка на РАВЕНСТВО: живая поверхность — только production READ.
     require_registered_surface(
         _registered_tool_names(mcp),
-        approved,
+        READ_MCP_TOOLS,
         subject="mcp_server.server.build_server (живая MCP-поверхность)",
     )
     return mcp

@@ -912,18 +912,26 @@ async def execute_confirmed(
     cid = _ncid(str(account))
     store = ConfirmStore()
     try:
+        proposal = await store.get_confirmed(confirmation_id)
+        if proposal is None:
+            raise PermissionError("черновик не подтверждён или уже исполнен")
+        proposal_cid = _ncid(str(proposal.customer_id))
+        if proposal_cid != cid:
+            # `ads.service.execute_confirmed` правильно берёт account из proposal. Сверка здесь
+            # нужна, чтобы MCP-фасад не исполнил B, а отчитался как будто исполнил переданный A.
+            raise PermissionError("аккаунт вызова не совпадает с подтверждённым черновиком")
         result = await _execute(store, confirmation_id)
         return {
             "status": "executed",
             "operation": result.get("operation", ""),
             "summary": result.get("display", ""),
-            "customer_id": cid,
+            "customer_id": proposal_cid,
         }
     except ValueError as e:
         # Не найден / не в статусе confirmed
-        return {"status": "failed", "error": str(e), "error_code": "invalid_argument"}
+        return {"status": "failed", "error": redact_error(e), "error_code": "invalid_argument"}
     except PermissionError as e:
-        return {"status": "failed", "error": str(e), "error_code": "refused"}
+        return {"status": "failed", "error": redact_error(e), "error_code": "refused"}
     except Exception as e:  # noqa: BLE001
         log.warning("execute_confirmed failed: %s", type(e).__name__)
         return {"status": "failed", "error": redact_error(e), "error_code": classify_error(e)}

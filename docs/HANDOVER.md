@@ -35,6 +35,7 @@
 | `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | ID менеджерского (MCC) аккаунта | контекст авторизации |
 | `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS` | — | круг разрешённых аккаунтов (см. раздел 5) |
 | `SECRETS_ENCRYPTION_KEY` | `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` | Fernet-ключ; хранить в секрет-сторе |
+| `PSEUDONYMIZATION_HMAC_KEY` | `python -c "import secrets; print(secrets.token_urlsafe(32))"` | стабильный ключ CRM/SSO HMAC; отдельный бэкап, не ротировать вместе с Fernet |
 
 Передаём заказчику **инструкции** (этот файл + `DEPLOYMENT.md`), а не значения.
 

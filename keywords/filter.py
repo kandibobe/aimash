@@ -19,6 +19,7 @@ import logging
 
 from agent.router import chat, finish_reason
 from core.config import settings
+from core.llm_budget import LLMBudgetError
 
 log = logging.getLogger("aimash.keywords")
 
@@ -112,6 +113,11 @@ async def filter_relevance(
                 )
             else:
                 off_topic = parsed
+        except LLMBudgetError:
+            # BZ-4: бюджет-стоп — НЕ «сбой модели». Fail-open здесь означал бы «все ключи
+            # релевантны» на все часы до сброса потолка, то есть нерелевантные ключи уехали бы
+            # в кампанию с пометкой «проверено ИИ». Отказываем явно (вызыватель покажет причину).
+            raise
         except Exception as e:  # noqa: BLE001 — advisory; fail-open, но НЕ молча
             log.warning(
                 "релевантность: сбой модели (%s) — считаем все релевантными", type(e).__name__

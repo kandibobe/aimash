@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Any
 
@@ -20,6 +21,8 @@ from agent.tools.schemas import MUTATION_TOOLS, READ_TOOLS, SCHEMAS, TOOLS
 from core import i18n
 from confirm.gate import Proposal, build_summary
 from core.logging import redact_text
+
+log = logging.getLogger(__name__)
 
 SYSTEM = (
     "Ты — исполнитель команд для Google Ads (агент Aimash). По команде пользователя вызови "
@@ -669,10 +672,17 @@ async def _run_analysis_agent_impl(
         turn_tools = ANALYSIS_TOOLS if (has_tools and it < iters - 1) else None
         try:  # пер-итерация: дневной LLM-потолок (fail-closed → нарратив пропускаем, карточка остаётся)
             llm_budget.consume(chat_id)
-        except llm_budget.LLMBudgetExceededError:
+        except llm_budget.LLMBudgetError:
+            log.warning("analysis: бюджет LLM исчерпан — нарратив пропущен, карточка не страдает")
             return None
         try:
             msg = await chat(messages, role="analyst", tools=turn_tools)
+        except llm_budget.LLMBudgetError:
+            # Долларовый потолок BZ-4 прилетает ИЗ chat. Здесь глушим ОСОЗНАННО (в отличие от досье,
+            # где молчание портило бы сохранённые данные): карточка аудита детерминированна и уже
+            # собрана — теряется только текстовое пояснение. Но след в логе обязателен.
+            log.warning("analysis: бюджет LLM исчерпан на вызове — нарратив пропущен")
+            return None
         except Exception:  # noqa: BLE001 — сеть/таймаут OpenRouter → детерминированный fallback
             return None
         tcs = getattr(msg, "tool_calls", None) or []

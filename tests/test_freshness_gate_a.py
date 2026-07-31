@@ -213,6 +213,13 @@ def test_apply_functions_take_no_snapshot_argument():
     )
 
 
+# Проверка №0 (BZ-1) — ЕДИНСТВЕННОЕ, что вправе стоять до гейта свежести. Аварийный рубильник читает
+# env/файл-флаг и отказывает, НЕ тронув ни черновик, ни журнал, ни Google Ads, — его отказ безвреден и
+# обратим (сняли рубильник → то же «да» проходит заново). Любой другой шаг до свежести либо жжёт
+# одноразовое подтверждение, либо пишет в журнал за черновик, который свежесть всё равно отвергнет.
+_ALLOWED_BEFORE_FRESHNESS = ("ensure_mutations_enabled",)
+
+
 def test_freshness_runs_first_and_before_claim():
     """Порядок внутри `_require_confirmation` — не стилистика, а свойство: сначала свежесть, потом claim."""
     fn = next(
@@ -225,9 +232,21 @@ def test_freshness_runs_first_and_before_claim():
     ]
     src_of = [ast.dump(s) for s in body]
     fresh_idx = next(i for i, s in enumerate(src_of) if "_require_freshness" in s)
-    claim_idx = next(i for i, s in enumerate(src_of) if "'claim'" in s or '"claim"' in s)
-    assert fresh_idx == 0, "гейт свежести перестал быть первым в _require_confirmation"
-    assert fresh_idx < claim_idx, "claim столбит черновик раньше проверки свежести"
+    intruders = [
+        s for s in src_of[:fresh_idx] if not any(a in s for a in _ALLOWED_BEFORE_FRESHNESS)
+    ]
+    assert not intruders, (
+        "до гейта свежести в _require_confirmation появился посторонний шаг — свежесть обязана быть "
+        f"первой содержательной проверкой (разрешён только {_ALLOWED_BEFORE_FRESHNESS}): {intruders}"
+    )
+    # claim ищем по ВСЕМ вхождениям, а не по первому: сегодня он живёт во вложенном `_capped_steps`,
+    # и «первое вхождение» — это его ОПРЕДЕЛЕНИЕ. Требуем, чтобы ни одно вхождение не оказалось
+    # выше свежести, — иначе новый шаг с claim'ом мог бы въехать перед ней незамеченным.
+    claim_idxs = [i for i, s in enumerate(src_of) if "'claim'" in s or '"claim"' in s]
+    assert claim_idxs, (
+        "claim исчез из _require_confirmation — черновик больше не столбится атомарно"
+    )
+    assert min(claim_idxs) > fresh_idx, "claim столбит черновик раньше проверки свежести"
 
 
 def test_freshness_gate_has_exactly_one_call_site():

@@ -282,7 +282,7 @@
 
 ### 3.1 Чтение и аналитика
 
-**3.1.1 Интеграция** [Есть]. Официальный Google Ads API v24. OAuth 2.0 с refresh-токеном. Developer token: basic access получен; заявка на standard — подать немедленно (недели календаря, 0 ч разработки). Обработка rate limits и квот, пагинация, батчинг. Работа на уровне MCC с обходом иерархии.
+**3.1.1 Интеграция** [Есть]. Официальный Google Ads API v25 через Python SDK `google-ads` 31.2.x. OAuth 2.0 с refresh-токеном. Developer token: basic access получен; заявка на standard — подать немедленно (недели календаря, 0 ч разработки). Обработка rate limits и квот, пагинация, батчинг. Работа на уровне MCC с обходом иерархии.
 
 **3.1.2 Что читается** [Есть]. Кампании, группы, объявления, ключевые слова, минус-слова, бюджеты, ГЕО (страна/город/радиус по координатам), языки, аудитории, стратегии ставок, настройки кампании; статистика: impressions, clicks, CTR, CPC, conversions, cost, conversion value, CPA, ROAS.
 
@@ -441,7 +441,7 @@
 
 **3.5.8 Инвариант PAUSED** [Есть]. Кампания, группа, RSA и ключи создаются **приостановленными**, расход 0. Статусы зашиты **в коде, не в промпте**. Запуск — **отдельная прямая команда** со своим подтверждением. На сценарий приходится два подтверждения. Приёмка П25.
 
-**3.5.9 Карта «этап → сервис Google Ads API v24»** [Есть]. CustomerService (выбор аккаунта) → KeywordPlanIdeaService (ключи) → CampaignBudgetService + CampaignService (кампания) → CampaignCriterionService (гео, языки, сети) → AdGroupService + AdGroupCriterionService (группы, ключи) → AdGroupAdService (RSA) → AssetService + AssetSetService (ассеты) → GoogleAdsService (чтение и батч-мутации).
+**3.5.9 Карта «этап → сервис Google Ads API v25»** [Есть]. CustomerService (выбор аккаунта) → KeywordPlanIdeaService (ключи) → CampaignBudgetService + CampaignService (кампания) → CampaignCriterionService (гео, языки, сети) → AdGroupService + AdGroupCriterionService (группы, ключи) → AdGroupAdService (RSA) → AssetService + AssetSetService (ассеты) → GoogleAdsService (чтение и батч-мутации).
 
 ### 3.6 Медиа-кампании и ассеты
 
@@ -662,6 +662,76 @@
 
 **Поправка к Г4:** регрессионный набор должен ловить **false negatives** — хорошие скилы, зарезанные куратором, — а не только пропущенный мусор. Иначе библиотека тихо перестанет расти.
 
+### 3.11 Операционный control plane
+
+**3.11.1 Единая очередь решений** [Реализовано 30.07.2026]. Все новые детекторы пишут
+нормализованный `DecisionInput` в `operational_decisions`. Lifecycle:
+`new → acknowledged|approved|rejected|snoozed → applied|expired`. `active_fingerprint` под UNIQUE
+схлопывает даже конкурентные сигналы на уровне БД, evidence редактируется до БД. `approved` **не
+подтверждает Ads proposal**; `applied` ставится только correlated UPDATE при одновременно существующих
+matching proposal `status=applied` и audit-row `status=applied` того же customer/operation.
+
+**3.11.2 Incidents** [Реализовано]. События одного fingerprint складываются в `ops_incidents` с
+`occurrence_count`; оператор может ACK/snooze/resolve. Нерешённые critical/warning переходят в
+escalation по разным окнам, повторная доставка ограничена cooldown. Новый факт переоткрывает
+resolved incident. Каналы маршрутизации: Telegram/Slack/email/Teams/webhook через transport adapters;
+в БД хранится только uppercase config reference (`destination_ref`), не webhook/secret, а исходящий
+title/body обязательно проходит `redact_text`. Доставка — через `notification_outbox`: escalation
+cursor и route snapshot коммитятся вместе, воркер использует lease, bounded retry и dead-letter.
+Семантика at-least-once; тихая потеря запрещена, возможный crash-window дубль несёт `dedup_key`.
+
+**3.11.3 Budget pacing** [Реализовано ядро]. Версионный медиаплан импортируется из CSV или уже
+прочитанных Sheets rows; scope — account/campaign/portfolio. Код считает spend-to-date, ожидаемый
+расход, month-end projection, overspend/underspend и hard daily/monthly ceiling. Рекомендация нового
+daily budget — только decision. Создать `update_budget` proposal можно исключительно в новом прямом
+человеческом ходе: scheduler/план/decision провенанс денег не повышают.
+
+**3.11.4 Достоверность данных и change history** [Реализовано ядро]. Conversion integrity проверяет
+enabled primary goals, zero/drop anomaly, clicks↔sessions и Ads↔CRM. Недоступный источник (`None`)
+не превращается в «ноль». Timeline объединяет наш audit и Google `change_event`, ранжирует близкие
+изменения и всегда называет результат корреляцией, не доказанной причиной.
+
+**3.11.5 Health / search / creative / landing** [Реализовано]. Health 0–100 и версия модели описаны
+в `docs/ACCOUNT_HEALTH_SCORE.md`. Search mining: harvest, waste n-grams, brand split, exact/phrase/
+broad negative conflicts, cannibalization и MCC themes. Creative QA переиспользует кодовый RSA
+validator; LP probe идёт через SSRF-safe GET. Форма реального лида не отправляется: `form_ok` может
+принести только отдельный synthetic probe.
+
+**3.11.6 Experiments и bulk** [Реализовано ядро]. Эксперимент хранит hypothesis, control, treatment,
+end date, minimum sample, pre-registered KPI/success/rollback threshold и выдаёт
+`keep|rollback|inconclusive|continue`. Bulk planner требует полный before/after scope, target cap,
+dry-run digest и PolicyEngine verdict. Прямого execute в `operations/` нет; один bulk = максимум один
+proposal в человеческом ходе (И8).
+
+**3.11.7 Rule engine / playbooks** [Реализовано]. Версионный declarative rule читает закрытый набор
+метрик. Единственные action types — `decision` и `incident`; `operation/params/execute/mutation`
+запрещены валидатором. Playbook физически не может стать обходом confirm-гейта.
+
+**3.11.8 RBAC, four-eyes, identity** [Реализовано ядро, opt-in]. Viewer/Operator/Approver/Admin
+назначаются глобально или на customer. `FOUR_EYES_REQUIRED=true` добавляет к выбранным тирам
+(дефолт L3) независимый approve внутри **того же** атомарного `ConfirmStore.claim`: author reply,
+TTL, provenance, account lock, freshness, 2FA и audit не заменяются. Автор неизвестен/self-vote/
+отсутствующая роль/reject ⇒ отказ. Записанный reject не исчезает после отзыва роли; пустой/ошибочный
+список тиров при включённом four-eyes блокирует claim/fail-fast. SSO mapping принимает только claims, уже проверенные доверенным
+gateway; issuer/subject проходят keyed HMAC, токены не сохраняются.
+
+**3.11.9 Revenue, portfolio, cross-channel** [Реализовано ядро]. CRM id хранится только как keyed
+HMAC-SHA256 dedup digest с отдельным стабильным `PSEUDONYMIZATION_HMAC_KEY`; пустой ключ даёт
+fail-closed отказ. Агрегаты дают qualified rate/revenue по campaign. Provider-neutral snapshots держат
+Google/Meta/Microsoft/TikTok/other раздельно по валюте. Portfolio summary и reallocation — advisory;
+summary требует явный непустой customer scope, а reallocation не пересекает границу клиента. FX и
+cross-channel mutations отсутствуют намеренно.
+
+**3.11.10 Explainability и shadow eval** [Реализовано]. Стандарт ответа: what happened, evidence с
+источником, likely causes, next step, what not to do, confidence+basis, approval, execution status.
+`applied|failed|needs_review` без audit reference невалидны. Оценка последствий существующего
+rollback shadow-контура — `docs/SHADOW_MODE_EVAL.md`.
+
+**3.11.11 Граница live-готовности.** Миграция `0038` и сервисы не публикуют WRITE в Hermes: живой
+MCP остаётся READ-only до trusted reply transport/cutover §15.2. Slack/email/Teams, OIDC/SAML и
+Meta/Microsoft/TikTok требуют credentials и transport/ingestion adapters. Считать наличие схемы
+«включённой интеграцией» запрещено. Детальный контракт — `docs/DECISION_LAYER.md`.
+
 ---
 
 ## 4. Границы объёма и отклонения от исходных ТЗ
@@ -728,9 +798,12 @@ Telegram supergroup агентства
 
 **Переносится без изменений** (не переписывать): `ads/` (auth, client, read, mutations, resolve, keyword_plan, assets, service) · `confirm/` · `core/` (config, secrets, logging, access, limits, quota, twofa, usage) · `adcopy/` · `keywords/` · `clients/` · `reports/` · `advisor/` · `scheduler/` · `db/` + Alembic.
 
-**Архивируется:** кнопочный слой интерфейса — клавиатуры, inline-кнопки, FSM-визарды, обработчики callback-запросов; свой агентский цикл (`agent/loop.py`, `agent/router.py`, `agent/system_prompt.py`) — Hermes несёт своё.
+**Архивируется после гейтированного cutover:** кнопочный слой интерфейса — клавиатуры, inline-кнопки, FSM-визарды, обработчики callback-запросов; из `agent/` — только свой цикл (`loop.py`, `campaign_edit.py`, `campaign_settings.py`, `openrouter_account.py`), который заменяет Hermes. `agent/router.py` и `agent/tools/schemas.py` нужны сохраняемым пакетам и переезжают в bot-free пакет; `agent/system_prompt.py` не существует.
 
-**Пишется заново:** слой подключения инструментов к Hermes · инструменты памяти · распознавание реплай-подтверждения · роли поверх безролевого Hermes · стартовая библиотека скилов · гарды И1–И8 · артефактная память · гарды самообучения Г1–Г8.
+**Достраивается:** слой подключения инструментов к Hermes (25 READ live; полный PLAN/WRITE-код
+ready-dark и физически не зарегистрирован production entrypoint до доверенного reply-transport) ·
+доверенный транспорт реплай-подтверждения · инструменты памяти · роли поверх безролевого Hermes ·
+стартовая библиотека скилов · гарды И1–И8 · артефактная память · гарды самообучения Г1–Г8.
 
 ### 5.3 Что уносит с собой кнопочный слой — и что надо заменить
 
@@ -768,11 +841,11 @@ Telegram supergroup агентства
 
 > **Исправлено 2026-07-23 по фактическому состоянию сервера.** Прежняя редакция рекомендовала «плагин вместо MCP». Это противоречит развёрнутой реальности **и** самому §5.1. Ниже — как есть.
 
-**Реальность:** на сервере Hermes уже зовёт **наш MCP-сервер** `mcp_server/` (READ-инструменты `tools_read.py`), конфиг `deploy/hermes/config.yaml:68-75` (`docker exec -i aimash-bot python -m mcp_server`). Это развёрнуто и работает. **Оставляем.**
+**Реальность:** на сервере Hermes уже зовёт **наш MCP-сервер** `mcp_server/` (READ-инструменты `tools_read.py`), конфиг `deploy/hermes/config.yaml:213-220` (`docker exec -i aimash-bot python -m mcp_server`). Это развёрнуто и работает. **Оставляем.**
 
 **Два слоя — их нельзя путать:**
 
-- **Слой 1 — инструменты (транспорт до Google Ads): MCP-сервер.** Как Hermes дотягивается до `ads/`/`confirm/`. Сейчас READ; PLAN/WRITE дописываются (шаг 5).
+- **Слой 1 — инструменты (транспорт до Google Ads): MCP-сервер.** Как Hermes дотягивается до `ads/`/`confirm/`. Сейчас live-поверхность READ; два `propose_*` и reply/execute facade существуют ready-dark, остальной PLAN/WRITE дописывается (шаг 5).
 - **Слой 2 — автономный агентский цикл** (многошаговость, память, скилы, самообучение, проактив): Hermes-цикл + скилы/память + scheduler + гейт (Волны 1–3). **Не относится к выбору транспорта.** MCP-сервер этого не даёт и не должен.
 
 **Почему MCP, а не плагин — и это сильнее прежней рекомендации:**
@@ -851,10 +924,11 @@ Telegram supergroup агентства
 | `get_campaign_stats` · `get_adgroup_stats` | `ads/read.py` | ТЗ-1 §3 |
 | `get_keywords` · `get_search_terms` · `get_negatives` | `ads/read.py` | ТЗ-1 §3, §7 |
 | `get_ads` · `get_budgets` · `get_auction_insights` | `ads/read.py` | ТЗ-1 §3, §8 |
+| `list_campaigns` | [ads/read.py:220](ads/read.py#L220) | перечень кампаний аккаунта. Не дубль `get_campaign_stats`: тот сегментирует по `segments.date` и кампанию без показов не покажет вовсе — а правят как раз такие; он же даёт ИМЯ для `read_campaign_config` (контракт ридера — имя, не id) |
 | `read_campaign_targeting` | [ads/read.py:325](ads/read.py#L325) | ГЕО / радиус / negative locations / языки — «было» для 6+ гео-операций |
 | `list_audiences` · `list_attached_audiences` | [ads/read.py:171](ads/read.py#L171), [:193](ads/read.py#L193) | аудитории (ТЗ-1 §3) |
 | `read_campaign_config` | [ads/read.py:409](ads/read.py#L409) | настройки кампании + CPC групп |
-| `get_bidding_strategy` | [ads/resolve.py:212](ads/resolve.py#L212) | стратегия ставок, эффективный CPC ключа |
+| `get_bidding_strategy` | [reports/queries.py:591](reports/queries.py#L591) | стратегия ставок, эффективный CPC ключа. Ридер — `read_campaign_bidding`, а НЕ `ads/resolve.py:212` (`campaign_bidding_strategy`, указатель прошлой редакции): тот стоит за замком МУТАЦИЙ (`ensure_allowed`) и на аккаунте с одним лишь грантом чтения отказал бы — то есть ровно там, где чтение и разрешено (правило 9) |
 | `list_account_assets` | [ads/read.py:677](ads/read.py#L677) | переиспользование ассетов account/campaign/adgroup (ТЗ-2 §19.7) |
 | `search_campaign_medians` | [ads/read.py:581](ads/read.py#L581) | медианы «по аналогии» (§3.5.3) |
 | `mcc_summary` · `mcc_deep` | [reports/mcc.py:172](reports/mcc.py#L172), [:109](reports/mcc.py#L109) | сводка по дочерним + детализация (ТЗ-1 §8) |
@@ -866,7 +940,8 @@ Telegram supergroup агентства
 | `parse_keywords_input` · `read_keyword_sheet` | [keywords/ingest.py](keywords/ingest.py), [reports/sheets.py:657](reports/sheets.py#L657) | 4 способа ввода + round-trip (§3.3.6–3.3.7) |
 | `generate_rsa` · `validate_adcopy` · `build_display_path` | `adcopy/` | §3.4 — **сегодня генерации в реестре нет вовсе** |
 | `get_account_audit` | `advisor/` | скор + список проблем |
-| `get_change_history` | `db/history.py` | история изменений |
+| `get_change_history` | `db/history.py` | история изменений **наших** (что применил бот через гейт) |
+| `get_account_changes` | [reports/queries.py:2027](reports/queries.py#L2027) | журнал правок в САМОМ Google Ads: кто/когда/через какой канал/какой объект (`change_event`). Закрывает Р6 — Google о чужой правке не уведомляет, узнать можно только спросив. Окно ≤29 дней (ресурс живёт 30, сутки — запас на host-date фолбэк; глубже API истории не отдаёт), почты правивших маскированы |
 | `get_client_card` | `clients/store.py` | карточка **с PII** — отдельный код-путь (§3.8.10) |
 | `list_client_facts_structured` | `client_services` / `client_contacts` | услуги и цены **как структура**, из неё код строит price/snippets/call |
 | `list_site_pages` · `get_crawl_status` | `clients/` | карта страниц под sitelinks, статус краула |
@@ -912,7 +987,13 @@ Telegram supergroup агентства
 ### 6.4 Исполнение — единственная точка
 
 ```python
-execute_confirmed(proposal_id, confirmation_id, actor_chat_id, reply_to_message_id)
+confirm_and_execute_by_reply(
+    store,
+    confirmation_id=...,
+    actor_user_id=...,
+    actor_chat_id=...,
+    reply_to_message_id=...,
+)
 ```
 
 Девять проверок — §2.2. Инвариант транспорта — §2.3.
@@ -1079,7 +1160,7 @@ ads/mutations.py + audit-row                 ← существующий код
 | `account_health_snapshot`, `auction_insight_row`, `error_events` | тренды аудита, конкуренция, ошибки | §3.1.7 |
 | `whitelist`, `oauth_tokens` | доступ и токены | **активны**, не dead-schema |
 
-### 9.2 Новые таблицы
+### 9.2 Плановые таблицы Hermes-пивота
 
 ```
 agent_threads      id, chat_id, message_thread_id, client_id→client_profiles,
@@ -1122,6 +1203,22 @@ proposals          + tg_message_id      (к какому сообщению аг
 - `pending_expires_at` — прогон без ответа 24 ч протухает, иначе накопятся зомби.
 - **Факты не удаляются, а помечаются `superseded_by`** — иначе нельзя разобрать, почему агент когда-то принял решение.
 - **Процедура привязки топика к клиенту** (кто привязывает, когда, что если топика ещё нет) — [Дизайн открыт], сегодня описана только структура.
+
+### 9.2.1 Операционный слой — реализован миграцией `0038`
+
+```
+operational_decisions, ops_incidents
+budget_plans, pacing_snapshots
+managed_experiments
+role_assignments, approval_votes
+revenue_events, channel_metric_snapshots
+playbook_versions
+external_identities, notification_routes
+```
+
+Эти таблицы не подменяют плановые `agent_threads/facts/artifacts`: это отдельный слой исполнения
+§3.11. Полные поля и ретеншн — `docs/DATABASE.md`. Критический инвариант: ни наличие decision/vote,
+ни статус `approved` не разрешают Ads mutation. Только proposal + trusted reply + claim + audit.
 
 ### 9.3 Артефактная память
 

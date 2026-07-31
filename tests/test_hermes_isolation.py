@@ -73,10 +73,11 @@ def test_i4_seed_read_tools_disjoint_from_mutations():
         "И4: READ-инструменты MCP пересеклись с мутационными: "
         f"{sorted(READ_MCP_TOOLS & MUTATION_TOOLS)}"
     )
-    # 15 = 14 Google Ads READ (в т.ч. §8 MCC: get_mcc_summary/get_mcc_deep) + recall_client (память
-    # клиента §20). Точный счёт держит реестр от тихого разрастания: новая обёртка обязана осознанно
-    # бампнуть его вместе с config.yaml/_ACCOUNT_ARG.
-    assert len(READ_MCP_TOOLS) == 15, f"ожидалось 15 READ-инструментов, стало {len(READ_MCP_TOOLS)}"
+    # 25 = 24 Google Ads READ (в т.ч. shared negative sets, §8 MCC и служебный get_quota —
+    # счётчик наш, Ads не опрашивается) + recall_client (память клиента §20). Точный счёт держит
+    # реестр от тихого разрастания: новая обёртка обязана осознанно бампнуть его вместе с
+    # config.yaml/_ACCOUNT_ARG.
+    assert len(READ_MCP_TOOLS) == 25, f"ожидалось 25 READ-инструментов, стало {len(READ_MCP_TOOLS)}"
 
 
 def test_i4_seed_server_builds_and_registers_only_read():
@@ -111,13 +112,37 @@ _ACCOUNT_ARG: dict[str, str] = {
     "get_auction_insights": "account",
     "get_account_audit": "account",
     "get_change_history": "account",
+    "get_account_changes": "account",  # Р6: журнал правок Google (НЕ наш audit-trail)
     "keyword_ideas": "account",
+    "list_campaigns": "account",
+    "read_campaign_targeting": "account",
+    "read_campaign_config": "account",
+    "get_bidding_strategy": "account",
+    "get_report_breakdown": "account",
+    "list_audiences": "account",
+    "list_attached_audiences": "account",
+    "get_quota": "account",  # ридер НАШЕГО счётчика (core.quota) — замок только на границе
     "recall_client": "account",  # ридер НАШЕЙ БД (ClientProfileStore) — замок только на границе
     # §8 MCC: адресуют не лист, а УПРАВЛЯЮЩИЙ аккаунт — тот же чокпойнт, что у list_accounts
     # (ensure_manager_allowed). Дочерние аккаунты внутри обхода фильтрует сам `reports/mcc.py`
     # по read-allow-листу, поэтому граница проверяет ровно то, что адресовал вызывающий.
     "get_mcc_summary": "manager_id",
     "get_mcc_deep": "manager_id",
+    "list_negative_shared_sets": "account",
+}
+
+
+# Обязательные НЕ-аккаунтные аргументы обёрток. Без них вызов не собрался бы вовсе (TypeError), а
+# «вызов не собрался» неотличимо от «замок отказал» — инвариант проверял бы синтаксис, не замок.
+# Значения фиктивные и до ридера не доезжают ни в одной половине: в первой отказывает замок, во
+# второй взрывается стаб. Полноту словаря держит `test_required_args_are_declared_for_lock_invariant`.
+_EXTRA_ARGS: dict[str, dict[str, object]] = {
+    "read_campaign_targeting": {"campaign_id": "1"},
+    "read_campaign_config": {"campaign_name": "X"},
+    "list_attached_audiences": {"campaign_id": "1"},
+    # dimension валидируется ДО выхода наружу — фиктивное имя дало бы invalid_argument вместо
+    # internal, то есть обратная половина инварианта не доказала бы прохода замка. Нужно допустимое.
+    "get_report_breakdown": {"dimension": "device"},
 }
 
 
@@ -137,6 +162,7 @@ def _readers_explode():
         "gather_audit",
         "list_recent_applied_by_customer",
         "ClientProfileStore",  # recall_client: ридер НАШЕЙ БД — тоже за границу, тест офлайн
+        "quota_snapshot",  # get_quota: Ads не опрашивает, но за границу (наша БД) выходит
     )
     saved = {n: getattr(tr, n) for n in names}
 
@@ -161,13 +187,38 @@ def test_every_read_tool_declares_account_arg():
     )
 
 
+def test_required_args_are_declared_for_lock_invariant():
+    """Новая обёртка с обязательным аргументом не должна ронять инвариант замка `TypeError`'ом:
+    вызвать инструмент тест обязан ВАЛИДНО, иначе «замок отказал» неотличимо от «вызов не собрался».
+    Полнота `_EXTRA_ARGS` проверяется по сигнатуре, а не глазами."""
+    import inspect
+
+    from mcp_server import tools_read as tr
+
+    missing: dict[str, list[str]] = {}
+    for name, fn in tr.READ_TOOL_FUNCS.items():
+        required = {
+            p.name
+            for p in inspect.signature(fn).parameters.values()
+            if p.default is inspect.Parameter.empty
+        } - {_ACCOUNT_ARG[name]}
+        gap = sorted(required - set(_EXTRA_ARGS.get(name, {})))
+        if gap:
+            missing[name] = gap
+    assert not missing, f"обязательные аргументы не объявлены в _EXTRA_ARGS: {missing}"
+
+
+def _call_args(tool_name: str, account_id: str) -> dict[str, object]:
+    return {_ACCOUNT_ARG[tool_name]: account_id, **_EXTRA_ARGS.get(tool_name, {})}
+
+
 @pytest.mark.parametrize("tool_name", sorted(_ACCOUNT_ARG))
 def test_read_lock_denies_foreign_account_before_any_reader(tool_name):
     from mcp_server import tools_read as tr
 
     fn = tr.READ_TOOL_FUNCS[tool_name]
     with _allow_lists(mutate="", read="", manager=""), _readers_explode():
-        env = asyncio.run(fn(**{_ACCOUNT_ARG[tool_name]: _FOREIGN_ID}))
+        env = asyncio.run(fn(**_call_args(tool_name, _FOREIGN_ID)))
 
     assert env["error_code"] == "forbidden_account", (
         f"{tool_name}: отказ не классифицирован как замок (получено {env['error_code']!r}). "
@@ -190,7 +241,7 @@ def test_read_lock_admits_allowed_account_and_reaches_reader(tool_name):
         _allow_lists(mutate=DRAFT_ACCOUNT_ID, read="", manager=DRAFT_ACCOUNT_ID),
         _readers_explode(),
     ):
-        env = asyncio.run(fn(**{_ACCOUNT_ARG[tool_name]: DRAFT_ACCOUNT_ID}))
+        env = asyncio.run(fn(**_call_args(tool_name, DRAFT_ACCOUNT_ID)))
 
     assert env["error_code"] == "internal", (
         f"{tool_name}: разрешённый аккаунт не дошёл до ридера (код {env['error_code']!r}) — "

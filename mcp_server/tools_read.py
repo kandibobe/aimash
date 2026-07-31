@@ -1,9 +1,10 @@
-"""15 READ-обёрток MCP-слоя над существующими ридерами (Контур A, инкремент «MCP READ»).
+"""25 READ-обёрток MCP-слоя над существующими ридерами (Контур A, инкремент «MCP READ»).
 
 Каждая обёртка:
   1) проходит замок ЧТЕНИЯ на ГРАНИЦЕ слоя — `_guarded` требует `account=` и зовёт
      `ensure_read_allowed`/`ensure_manager_allowed` ДО тела инструмента (см. ниже);
-  2) строит клиент `build_client_async(account)` и период из `date_from/date_to|period_days`;
+  2) разбирает период из `date_from/date_to|period_days` — ДО клиента, потому что разбор аргументов
+     не имеет права зависеть от сети, — и только потом строит `build_client_async(account)`;
   3) зовёт ридер через `core.resilience.run_ads_read_call` (таймаут/ретрай/квота/to_thread) — как
      это уже делают `_do_read`/`gather_audit`;
   4) сериализует результат (`mcp_server.serialize`) в единый конверт (`mcp_server.envelope.ok`);
@@ -31,39 +32,66 @@ from typing import Any, Awaitable, Callable
 
 from ads.client import build_client_async, ensure_manager_allowed, ensure_read_allowed
 from ads.keyword_plan import generate_keyword_ideas
-from ads.read import account_timezone, list_audiences as _list_audiences, list_campaigns as _list_campaigns, list_child_accounts, list_negative_shared_sets as _list_shared_sets
+
+# Имена инструментов реестра §6.1 совпадают с именами ридеров (`list_campaigns`,
+# `read_campaign_targeting`, …). Ридеры импортируем под алиасами `_read_*`: имя инструмента —
+# контракт с агентом, и переименовывать его, чтобы разойтись с ридером, нельзя.
+from ads.read import (
+    account_timezone,
+    list_attached_audiences as _read_attached_audiences,
+    list_audiences as _read_audiences,
+    list_campaigns as _read_campaigns,
+    list_child_accounts,
+    list_negative_shared_sets as _read_shared_sets,
+    read_campaign_config as _read_config,
+    read_campaign_targeting as _read_targeting,
+)
 from audit.collect import gather_audit
 from clients.store import ClientProfileStore
 from core import observe  # Волна 3: вызов инструмента — прогон в журнале событий
 from core.logging import log
+from core.quota import snapshot as quota_snapshot
 from core.resilience import run_ads_read_call
 from db.history import list_recent_applied_by_customer
 from mcp_server.envelope import DEFAULT_LIMIT, client_context, err, ok
 from mcp_server.serialize import (
     audit_payload,
+    audience_dict,
+    bidding_dict,
     breakdown_extra,
     breakdown_rows,
     budget_dict,
+    campaign_config_payload,
+    campaign_dict,
+    change_event_dict,
     child_account_dict,
     impression_share_dict,
     keyword_idea_dict,
     mcc_deep_payload,
     mcc_summary_payload,
     negatives_payload,
+    quota_payload,
     recent_action_dict,
     search_term_dict,
+    targeting_payload,
 )
 from reports import period as pperiod
-from reports.tz import account_period, reanchor
+from reports.tz import account_period, account_today, reanchor
 from reports.queries import (
+    check_change_event_days,
     fetch_budgets,
+    fetch_change_events,
     fetch_by_ad,
     fetch_by_ad_group,
     fetch_by_campaign,
+    fetch_by_day,
+    fetch_by_device,
     fetch_by_keyword,
+    fetch_by_network,
     fetch_impression_share,
     fetch_negative_keywords,
     fetch_search_terms,
+    read_campaign_bidding,
 )
 
 
@@ -104,22 +132,46 @@ async def _guarded(
 
 
 def _period(date_from: str | None, date_to: str | None, period_days: int | None):
-    """ISO-даты `date_from`+`date_to` (обе) → custom-период; иначе — последние N дней (N=period_days).
-    Арифметику дат считает КОД (reports.period), не модель."""
+    """ISO-даты `date_from`+`date_to` (обе) → custom-период; ни одной → последние N дней (period_days).
+    Арифметику дат считает КОД (reports.period), не модель.
+
+    Одна дата без второй — ОТКАЗ, а не молчаливый откат на `last_n_days`. Прежнее поведение было
+    fail-open в цифрах: модель просила «с 1 июля», получала период «последние 30 дней» и цитировала
+    его как запрошенный — расхождение окна нигде не видно, потому что конверт отдаёт метрики без
+    жалоб. Про чужие деньги такая тишина дороже отказа: `invalid_argument` заставляет назвать окно
+    целиком (`envelope.classify_error`: ValueError → invalid_argument)."""
+    if bool(date_from) != bool(date_to):
+        raise ValueError(
+            "период задаётся ЛИБО обеими датами (date_from и date_to), ЛИБО ни одной "
+            "(тогда берётся period_days) — одна дата без второй трактовке не подлежит"
+        )
     if date_from and date_to:
         return pperiod.custom(date.fromisoformat(date_from), date.fromisoformat(date_to))
     return pperiod.last_n_days(max(1, int(period_days or 30)))
 
 
-async def _account_period(client, account: str, date_from, date_to, period_days):
+async def _account_period(client, account: str, window):
     """Окно, пере-якоренное на «сегодня» АККАУНТА (§8, `reports.tz.account_period`).
 
     Без этого относительное окно строилось от даты ХОСТА: для аккаунта в чужой TZ (UG при вечернем
     прогоне из Европы — `DEFAULT_GEO_COUNTRY_CODE=UG`) последний полный день выпадал из окна, и цифры
     MCP расходились и с интерфейсом Google Ads, и с bot-путём на тех же данных. custom-диапазон (обе
     ISO-даты названы менеджером явно) `account_period` НЕ трогает; относительный (last_n) — пере-
-    якоряет. Best-effort: TZ не прочитана → дата хоста (деградирует как раньше, отчёт не роняем)."""
-    return await account_period(client, str(account), _period(date_from, date_to, period_days))
+    якоряет. Best-effort: TZ не прочитана → дата хоста (деградирует как раньше, отчёт не роняем).
+
+    Готовое `window` аргументом, а НЕ сырые даты: разбор аргументов не имеет права зависеть от сети.
+    Пока `_period` вызывался отсюда, порядок в теле был «клиент → период», и на неполном периоде
+    наружу уезжал код от того, что сломалось РАНЬШЕ, — при недоступном OAuth `internal` вместо
+    `invalid_argument`. Модель по такому конверту чинит не свой вызов, а несуществующую аварию.
+    Порядок держит гард `tests/test_mcp_read_smoke.py::test_args_are_validated_before_the_network`."""
+    return await account_period(client, str(account), window)
+
+
+def _window_days(days: int) -> int:
+    """Разбор окна `days` (change_event) — ПРЯМЫМ вызовом в теле инструмента и ДО клиента, по той же
+    причине, что `_period`: иначе на бессмысленном окне наружу уедет код чужой аварии. Порядок
+    держит тот же гард `tests/test_mcp_read_smoke.py::test_args_are_validated_before_the_network`."""
+    return check_change_event_days(days)
 
 
 def _default_manager() -> str:
@@ -164,8 +216,9 @@ async def get_campaign_stats(
     считает КОД). campaign_id сужает до одной кампании. Замок: ensure_read_allowed."""
 
     async def _work() -> dict[str, Any]:
+        window = _period(date_from, date_to, period_days)
         client = await build_client_async(account)
-        period = await _account_period(client, account, date_from, date_to, period_days)
+        period = await _account_period(client, account, window)
         bd = await run_ads_read_call(
             fetch_by_campaign,
             client,
@@ -193,8 +246,9 @@ async def get_adgroup_stats(
     ensure_read_allowed."""
 
     async def _work() -> dict[str, Any]:
+        window = _period(date_from, date_to, period_days)
         client = await build_client_async(account)
-        period = await _account_period(client, account, date_from, date_to, period_days)
+        period = await _account_period(client, account, window)
         bd = await run_ads_read_call(
             fetch_by_ad_group,
             client,
@@ -222,8 +276,9 @@ async def get_keywords(
     Замок: ensure_read_allowed."""
 
     async def _work() -> dict[str, Any]:
+        window = _period(date_from, date_to, period_days)
         client = await build_client_async(account)
-        period = await _account_period(client, account, date_from, date_to, period_days)
+        period = await _account_period(client, account, window)
         bd = await run_ads_read_call(
             fetch_by_keyword,
             client,
@@ -251,8 +306,9 @@ async def get_ads(
     ensure_read_allowed."""
 
     async def _work() -> dict[str, Any]:
+        window = _period(date_from, date_to, period_days)
         client = await build_client_async(account)
-        period = await _account_period(client, account, date_from, date_to, period_days)
+        period = await _account_period(client, account, window)
         bd = await run_ads_read_call(
             fetch_by_ad,
             client,
@@ -281,8 +337,9 @@ async def get_search_terms(
     reader_limit — сколько строк тянуть из GAQL (топ по расходу). Замок: ensure_read_allowed."""
 
     async def _work() -> dict[str, Any]:
+        window = _period(date_from, date_to, period_days)
         client = await build_client_async(account)
-        period = await _account_period(client, account, date_from, date_to, period_days)
+        period = await _account_period(client, account, window)
         rows = await run_ads_read_call(
             fetch_search_terms,
             client,
@@ -368,8 +425,9 @@ async def get_auction_insights(
     ensure_read_allowed."""
 
     async def _work() -> dict[str, Any]:
+        window = _period(date_from, date_to, period_days)
         client = await build_client_async(account)
-        period = await _account_period(client, account, date_from, date_to, period_days)
+        period = await _account_period(client, account, window)
         rows = await run_ads_read_call(
             fetch_impression_share,
             client,
@@ -397,8 +455,9 @@ async def get_account_audit(
     сам асинхронен и внутри проходит замки ЧТЕНИЯ на под-фетчах. rows = находки, extra = сводка."""
 
     async def _work() -> dict[str, Any]:
+        window = _period(date_from, date_to, period_days)
         client = await build_client_async(account)
-        period = await _account_period(client, account, date_from, date_to, period_days)
+        period = await _account_period(client, account, window)
         result = await gather_audit(client, str(account), period, target_cpa=target_cpa)
         rows, extra = audit_payload(result)
         return ok(rows, offset=offset, limit=limit, extra=extra)
@@ -423,6 +482,50 @@ async def get_change_history(
         )
         return ok(
             [recent_action_dict(a) for a in actions],
+            offset=offset,
+            limit=limit,
+            reader_limit=int(reader_limit),
+        )
+
+    return await _guarded(_work, account=str(account))
+
+
+async def get_account_changes(
+    account: str,
+    days: int = 7,
+    reader_limit: int = 200,
+    offset: int = 0,
+    limit: int = DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Журнал изменений аккаунта в GOOGLE ADS: кто, когда, через какой канал и какой объект правил.
+
+    НЕ путать с `get_change_history` — тот отдаёт НАШ audit-trail (что применил бот через
+    confirm-гейт). Здесь — правки ЛЮБЫМ каналом: веб-интерфейс, Editor, другой API-клиент. Именно
+    так узнаётся, что бюджет подняли руками мимо нас: Google об этом не уведомляет, узнать можно
+    только спросив (`via_api=false` ⇒ правка сделана точно не через наш слой).
+
+    Окно `days` — 1..29 суток, считая сегодняшние (глубже история через API недоступна, в
+    веб-интерфейсе она за 2 года — это не одно и то же); якорится на «сегодня» аккаунта, иначе на
+    аккаунте в чужой TZ край окна уезжает на сутки. `changed_fields` — какие поля затронуты;
+    значений «было → стало» ресурс в нашем разборе не отдаёт, текущее читается обычным ридером.
+    Почты правивших маскированы. Замок: ensure_read_allowed."""
+
+    async def _work() -> dict[str, Any]:
+        window_days = _window_days(days)
+        client = await build_client_async(account)
+        today = await account_today(client, str(account))
+        rows = await run_ads_read_call(
+            fetch_change_events,
+            client,
+            str(account),
+            days=window_days,
+            today=today,
+            limit=int(reader_limit),
+            account=str(account),
+            label="mcp.get_account_changes",
+        )
+        return ok(
+            [change_event_dict(r) for r in rows],
             offset=offset,
             limit=limit,
             reader_limit=int(reader_limit),
@@ -477,6 +580,249 @@ async def keyword_ideas(
             limit=limit,
             reader_limit=int(reader_limit) if reader_limit else None,
         )
+
+    return await _guarded(_work, account=str(account))
+
+
+# ── §6.1: структура и настройки кампаний («было» для правок, не метрики) ───────────
+
+
+async def list_campaigns(
+    account: str,
+    channel_type: str | None = None,
+    offset: int = 0,
+    limit: int = DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Кампании аккаунта (id/имя/статус), активные первыми; REMOVED не показываются. `channel_type`
+    (напр. 'SEARCH') сужает до одного канала. Без периода и без метрик. Замок: ensure_read_allowed.
+
+    Зачем отдельно от `get_campaign_stats`: тот ходит с `segments.date` и возвращает ТОЛЬКО кампании,
+    у которых в окне были показы. Приостановленная, только что созданная или не тратившая кампания в
+    нём отсутствует — и модель читает это как «такой кампании нет». Здесь список полный. Он же даёт
+    ИМЯ для `read_campaign_config` (тот ищет по имени, а не по id)."""
+
+    async def _work() -> dict[str, Any]:
+        client = await build_client_async(account)
+        rows = await run_ads_read_call(
+            _read_campaigns,
+            client,
+            str(account),
+            account=str(account),
+            label="mcp.list_campaigns",
+            channel_type=channel_type or None,
+        )
+        return ok([campaign_dict(c) for c in rows], offset=offset, limit=limit)
+
+    return await _guarded(_work, account=str(account))
+
+
+async def read_campaign_targeting(
+    account: str,
+    campaign_id: str,
+    offset: int = 0,
+    limit: int = DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Текущее ГЕО (локации, исключения, радиусы) и языки кампании — «было» для гео-правок.
+    Строка = один критерий (`kind`: location | negative_location | proximity | language, + `value`
+    человекочитаемым именем). Замок: ensure_read_allowed.
+
+    Пустой список критериев НЕ значит «не прочитали»: у Google это «показ во всех регионах / на всех
+    языках». Разницу отдаёт КОД флагами `all_locations`/`all_languages` — читать её из пустоты rows
+    нельзя."""
+
+    async def _work() -> dict[str, Any]:
+        client = await build_client_async(account)
+        t = await run_ads_read_call(
+            _read_targeting,
+            client,
+            str(account),
+            str(campaign_id),
+            account=str(account),
+            label="mcp.read_campaign_targeting",
+        )
+        rows, extra = targeting_payload(t)
+        return ok(rows, offset=offset, limit=limit, extra=extra)
+
+    return await _guarded(_work, account=str(account))
+
+
+async def read_campaign_config(
+    account: str,
+    campaign_name: str,
+    offset: int = 0,
+    limit: int = DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Настройки кампании ПО ИМЕНИ + группы объявлений с их CPC, ключами и RSA-текстами. Строка =
+    группа объявлений; кампания/бюджет/канал — верхний уровень конверта. Замок: ensure_read_allowed.
+
+    Имя, а не id, — контракт ридера (`ads/read.py:409`); список имён даёт `list_campaigns`.
+    Кампания не найдена ⇒ `found=false` и пустые rows (это НЕ ошибка вызова). Что в ответ не входит,
+    перечислено в `not_included`: гео читает `read_campaign_targeting`, минус-слова `get_negatives`,
+    стратегию `get_bidding_strategy` — «нет в ответе» и «нет в кампании» это разные факты."""
+
+    async def _work() -> dict[str, Any]:
+        client = await build_client_async(account)
+        cfg = await run_ads_read_call(
+            _read_config,
+            client,
+            str(account),
+            str(campaign_name),
+            account=str(account),
+            label="mcp.read_campaign_config",
+        )
+        rows, extra = campaign_config_payload(cfg)
+        return ok(rows, offset=offset, limit=limit, extra=extra)
+
+    return await _guarded(_work, account=str(account))
+
+
+async def get_bidding_strategy(
+    account: str,
+    campaign_id: str | None = None,
+    offset: int = 0,
+    limit: int = DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Стратегия ставок и target CPA по кампаниям аккаунта. `manual_bidding` считает КОД: при
+    автостратегии Google отвергает мутацию ставки, и предлагать правку CPC там бессмысленно.
+    Замок: ensure_read_allowed.
+
+    `campaign_id` — отбор УЖЕ прочитанных строк, не фильтр в GAQL: ридер читает аккаунт целиком, и
+    цена вызова от этого параметра не меняется (он сужает ответ, а не запрос).
+
+    Ридер здесь — `reports.queries.read_campaign_bidding`, а НЕ `ads/resolve.py:212`
+    (`campaign_bidding_strategy`, на который указывает реестр §6.1): тот стоит за замком МУТАЦИЙ
+    (`ensure_allowed`), и READ-инструмент над ним отказывал бы на аккаунте с одним лишь грантом
+    чтения — то есть ровно там, где чтение и разрешено (правило 9: чтение и мутации — разные замки)."""
+
+    async def _work() -> dict[str, Any]:
+        client = await build_client_async(account)
+        rows = await run_ads_read_call(
+            read_campaign_bidding,
+            client,
+            str(account),
+            account=str(account),
+            label="mcp.get_bidding_strategy",
+        )
+        if campaign_id:
+            wanted = str(campaign_id)
+            rows = [r for r in rows if str(r.campaign_id) == wanted]
+        return ok([bidding_dict(b) for b in rows], offset=offset, limit=limit)
+
+    return await _guarded(_work, account=str(account))
+
+
+# Разбивки сегментами: имя измерения → ридер. Закрытый словарь, а не сборка имени функции из
+# аргумента: имя, пришедшее от модели, никогда не превращается в вызов (getattr по строке — это
+# та же дыра, что eval, только тише).
+_BREAKDOWN_READERS = {
+    "device": fetch_by_device,
+    "network": fetch_by_network,
+    "day": fetch_by_day,
+}
+
+
+async def get_report_breakdown(
+    account: str,
+    dimension: str,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    period_days: int = 30,
+    campaign_id: str | None = None,
+    offset: int = 0,
+    limit: int = DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Метрики за период в разрезе `dimension`: device (устройство) | network (сеть) | day (по дням).
+    campaign_id сужает до одной кампании. Замок: ensure_read_allowed.
+
+    Неизвестное `dimension` — отказ со списком допустимых (`invalid_argument`), а не молчаливый
+    дефолт: «спросил по устройствам, получил по дням» неотличимо от правильного ответа."""
+
+    async def _work() -> dict[str, Any]:
+        key = (dimension or "").strip().casefold()
+        reader = _BREAKDOWN_READERS.get(key)
+        if reader is None:
+            raise ValueError(
+                f"неизвестное измерение {dimension!r}; допустимы: "
+                f"{', '.join(sorted(_BREAKDOWN_READERS))}"
+            )
+        window = _period(date_from, date_to, period_days)
+        client = await build_client_async(account)
+        period = await _account_period(client, account, window)
+        bd = await run_ads_read_call(
+            reader,
+            client,
+            str(account),
+            period,
+            campaign_id,
+            account=str(account),
+            label=f"mcp.get_report_breakdown.{key}",
+        )
+        return ok(breakdown_rows(bd), offset=offset, limit=limit, extra=breakdown_extra(bd))
+
+    return await _guarded(_work, account=str(account))
+
+
+async def list_audiences(
+    account: str, offset: int = 0, limit: int = DEFAULT_LIMIT
+) -> dict[str, Any]:
+    """Аудитории аккаунта (user_list), открытые для членства, — что вообще можно прикрепить к
+    кампании. `size` = size_for_display (0 — размер не отдан). Замок: ensure_read_allowed."""
+
+    async def _work() -> dict[str, Any]:
+        client = await build_client_async(account)
+        rows = await run_ads_read_call(
+            _read_audiences,
+            client,
+            str(account),
+            account=str(account),
+            label="mcp.list_audiences",
+        )
+        return ok([audience_dict(a) for a in rows], offset=offset, limit=limit)
+
+    return await _guarded(_work, account=str(account))
+
+
+async def list_attached_audiences(
+    account: str,
+    campaign_id: str,
+    offset: int = 0,
+    limit: int = DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Аудитории, УЖЕ прикреплённые к кампании, — «было» для открепления/добавления. Список,
+    которого в `list_audiences` может не быть (закрытый список показывается как `user_list …id`).
+    Замок: ensure_read_allowed."""
+
+    async def _work() -> dict[str, Any]:
+        client = await build_client_async(account)
+        rows = await run_ads_read_call(
+            _read_attached_audiences,
+            client,
+            str(account),
+            str(campaign_id),
+            account=str(account),
+            label="mcp.list_attached_audiences",
+        )
+        return ok([audience_dict(a) for a in rows], offset=offset, limit=limit)
+
+    return await _guarded(_work, account=str(account))
+
+
+async def get_quota(account: str) -> dict[str, Any]:
+    """Остаток суточной квоты операций Google Ads: расход запрошенного аккаунта + общий лимит,
+    расход и остаток за 24-часовое окно. Google Ads НЕ опрашивается — счётчик наш (`core.quota`),
+    остаток считает КОД.
+
+    Замок: ensure_read_allowed на границе `_guarded` — у `core.quota` своего замка нет вовсе (как у
+    `db/history`, `clients/store`), и граница здесь единственная. Разрез по ЧУЖИМ аккаунтам наружу
+    не идёт (И6): служебная телеметрия — тоже канал утечки перечня клиентов."""
+
+    async def _work() -> dict[str, Any]:
+        # `quota_snapshot` импортирован НА УРОВНЕ МОДУЛЯ намеренно: инвариант замка
+        # (`tests/test_hermes_isolation.py::_readers_explode`) подменяет ВСЕ выходы `tools_read`
+        # наружу по имени в модуле — ленивый `from core.quota import snapshot` внутри функции такой
+        # подмене недоступен, и тест «замок пропустил и дошёл до ридера» проверял бы ничто.
+        rows, extra = quota_payload(await quota_snapshot(), account=str(account))
+        return ok(rows, extra=extra)
 
     return await _guarded(_work, account=str(account))
 
@@ -558,11 +904,11 @@ async def get_mcc_summary(
     async def _work() -> dict[str, Any]:
         from reports.mcc import build_mcc_summary_async
 
-        client = await build_client_async(mid)
         # Базовое окно — от даты хоста, БЕЗ `_account_period`: пере-якорять его на таймзону
         # менеджера незачем (у менеджера своих метрик нет), а каждый дочерний всё равно получает
         # своё окно через `period_for`. База работает фолбэком там, где TZ ребёнка не прочиталась.
         period = _period(date_from, date_to, period_days)
+        client = await build_client_async(mid)
         summary = await build_mcc_summary_async(
             client,
             mid,
@@ -597,8 +943,8 @@ async def get_mcc_deep(
     async def _work() -> dict[str, Any]:
         from reports.mcc import build_mcc_deep_async
 
-        client = await build_client_async(mid)
         period = _period(date_from, date_to, period_days)
+        client = await build_client_async(mid)
         # Общий таймаут, как на bot-пути (`_run_mcc_deep_export`): ~70 запросов под семафором
         # Google Ads легко переживают потолок одного вызова, а MCP-клиент ждёт ответа. Без него
         # зависший обход держит вызов бесконечно; с ним наружу уйдёт честный `timeout`-конверт.
@@ -618,51 +964,6 @@ async def get_mcc_deep(
     return await _guarded(_work, account=mid, manager=True)
 
 
-# ── Дополнительные READ-инструменты ──────────────────────────────────────────────
-
-
-async def list_campaigns(
-    account: str,
-    channel_type: str | None = None,
-    offset: int = 0,
-    limit: int = DEFAULT_LIMIT,
-) -> dict[str, Any]:
-    """Список кампаний аккаунта: id, имя, статус. channel_type сужает до SEARCH/DISPLAY и т.д.
-    Активные (ENABLED) — первыми, затем PAUSED, затем прочие. Без периода.
-
-    Замок: ensure_read_allowed."""
-    async def _work() -> dict[str, Any]:
-        client = await build_client_async(account)
-        campaigns = await run_ads_read_call(
-            _list_campaigns, client, str(account), account=str(account),
-            channel_type=channel_type,
-            label="mcp.list_campaigns",
-        )
-        return ok(campaigns, offset=offset, limit=limit)
-    return await _guarded(_work, account=str(account))
-
-
-async def list_audiences(
-    account: str,
-    offset: int = 0,
-    limit: int = DEFAULT_LIMIT,
-) -> dict[str, Any]:
-    """Доступные аудитории (user_list) аккаунта для прикрепления к кампании.
-    Каждая: resource_name, name, size (размер аудитории для показа).
-
-    Замок: ensure_read_allowed."""
-    async def _work() -> dict[str, Any]:
-        client = await build_client_async(account)
-        audiences = await run_ads_read_call(
-            _list_audiences, client, str(account), account=str(account),
-            label="mcp.list_audiences",
-        )
-        rows = [{"resource_name": a.resource_name, "name": a.name, "size": int(a.size or 0)}
-                for a in audiences]
-        return ok(rows, offset=offset, limit=limit)
-    return await _guarded(_work, account=str(account))
-
-
 async def list_negative_shared_sets(
     account: str,
     offset: int = 0,
@@ -673,13 +974,18 @@ async def list_negative_shared_sets(
     Нужен для propose_add_negatives_to_shared_set / propose_attach_shared_set.
 
     Замок: ensure_read_allowed."""
+
     async def _work() -> dict[str, Any]:
         client = await build_client_async(account)
         sets = await run_ads_read_call(
-            _list_shared_sets, client, str(account), account=str(account),
+            _read_shared_sets,
+            client,
+            str(account),
+            account=str(account),
             label="mcp.list_negative_shared_sets",
         )
         return ok(sets, offset=offset, limit=limit)
+
     return await _guarded(_work, account=str(account))
 
 
@@ -698,12 +1004,19 @@ READ_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "get_auction_insights": get_auction_insights,
     "get_account_audit": get_account_audit,
     "get_change_history": get_change_history,
+    "get_account_changes": get_account_changes,
     "keyword_ideas": keyword_ideas,
+    "list_campaigns": list_campaigns,
+    "read_campaign_targeting": read_campaign_targeting,
+    "read_campaign_config": read_campaign_config,
+    "get_bidding_strategy": get_bidding_strategy,
+    "get_report_breakdown": get_report_breakdown,
+    "list_audiences": list_audiences,
+    "list_attached_audiences": list_attached_audiences,
+    "get_quota": get_quota,
     "recall_client": recall_client,
     "get_mcc_summary": get_mcc_summary,
     "get_mcc_deep": get_mcc_deep,
-    "list_campaigns": list_campaigns,
-    "list_audiences": list_audiences,
     "list_negative_shared_sets": list_negative_shared_sets,
 }
 

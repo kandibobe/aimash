@@ -56,3 +56,21 @@
 - Таблицы ключей/отчёты Google Sheets создаются с доступом «всем по ссылке»
   (ключи — редактор, отчёты — читатель); если шаринг не удался, бот присылает пометку —
   тогда «Request access» в самой таблице.
+
+## 4. Операционные роли и four-eyes
+
+Роли `viewer|operator|approver|admin` не расширяют мутационный account allow-list. Выдать роль
+может только действующий env/runtime admin (или обладатель `manage_roles`):
+
+```bash
+python -m scripts.manage_roles assign --actor <admin_user_id> --user <user_id> \
+  --role approver --customer <customer_id>
+python -m scripts.manage_roles revoke --actor <admin_user_id> --user <user_id> \
+  --role approver --customer <customer_id>
+```
+
+Сначала выдать минимум двух разных identity и проверить `tests/test_operations_layer.py`, затем
+включить `FOUR_EYES_REQUIRED=true` и `FOUR_EYES_RISK_TIERS_CSV=L3`. Если роли/vote нет, автор
+неизвестен, approve поставил автор или существует reject, L3 остаётся `confirmed` и не claim-ится.
+Существующий Telegram UI ещё не публикует экран голосования; до trusted UI/cutover настройку на
+live включать нельзя. SQL-вставки вручную не являются штатной процедурой.

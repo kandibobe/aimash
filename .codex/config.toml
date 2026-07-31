@@ -1,0 +1,55 @@
+approval_policy = "on-request"
+approvals_reviewer = "auto_review"
+sandbox_mode = "workspace-write"
+allow_login_shell = false
+
+[sandbox_workspace_write]
+network_access = true
+
+[shell_environment_policy]
+inherit = "core"
+
+[shell_environment_policy.set]
+ENV = "dev"
+CLAUDE_CODE_AUTO_COMPACT_WINDOW = "200000"
+BASH_MAX_OUTPUT_LENGTH = "20000"
+MCP_GOOGLE_ADS_PYTHON = "C:/tools/mcp-google-ads/.venv/Scripts/python.exe"
+MCP_GOOGLE_ADS_PATH = "C:/tools/mcp-google-ads/google_ads_server.py"
+GOOGLE_ADS_OAUTH_JSON = "C:/tools/mcp-google-ads/google-ads-oauth.json"
+
+[mcp_servers.aimash]
+command = "python"
+args = [
+    "-m",
+    "mcp_server",
+]
+
+[mcp_servers.aimash.env]
+ENV = "dev"
+PYTHONIOENCODING = "utf-8"
+
+[mcp_servers.context7]
+command = "npx"
+args = [
+    "-y",
+    "@upstash/context7-mcp",
+]
+
+[mcp_servers.github]
+url = "https://api.githubcopilot.com/mcp"
+bearer_token_env_var = "GITHUB_PAT"
+
+[mcp_servers.hermes]
+command = "python"
+args = [
+    "-m",
+    "hermes_ops",
+]
+env_vars = [
+    "HERMES_DASHBOARD_URL",
+    "HERMES_DASHBOARD_USERNAME",
+    "HERMES_DASHBOARD_PASSWORD",
+]
+
+[mcp_servers.hermes.env]
+PYTHONIOENCODING = "utf-8"

@@ -118,6 +118,21 @@ def _err_hint(e: BaseException) -> str:
     return ""
 
 
+def llm_budget_text(e: BaseException) -> str:
+    """Бюджет-стоп LLM → человекочитаемый локализованный текст ('' для прочих исключений). Единая
+    точка: гейт `_llm_budget_or_reply` зовёт напрямую, а `err_text` — для путей, где отказ прилетел
+    из глубины (генерация/кластеризация/релевантность), чтобы пользователь видел «бюджет исчерпан»,
+    а не имя класса. Какой из двух потолков — видно по типу: у долларового spent/cap, у счётного
+    used/limit."""
+    from core.llm_budget import LLMBudgetError, LLMCostCapExceededError
+
+    if not isinstance(e, LLMBudgetError):
+        return ""
+    if isinstance(e, LLMCostCapExceededError):
+        return i18n.t("llm_cost_cap_exceeded", spent=f"{e.spent:.2f}", cap=f"{e.cap:.2f}")
+    return i18n.t("llm_budget_exceeded", used=e.used, limit=e.limit)
+
+
 def err_text(e: BaseException) -> str:
     """Безопасный текст исключения для показа пользователю (golden rule #5): редактирует
     секрето-подобные подстроки. str(e) от google-ads/google.auth/OpenAI может нести токен/креды,
@@ -129,6 +144,9 @@ def err_text(e: BaseException) -> str:
     одинаково понятно. Дакт-тайпинг (failure.errors) — без жёсткого импорта google.ads.
 
     Для частых временных ошибок (сеть/LLM) добавляем короткую подсказку к действию (_err_hint)."""
+    budget = llm_budget_text(e)
+    if budget:
+        return budget
     failure = getattr(e, "failure", None)
     if getattr(failure, "errors", None):
         from core.ads_errors import humanize_google_ads_error  # сам редактирует секреты

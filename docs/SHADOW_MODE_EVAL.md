@@ -1,32 +1,29 @@
-# Shadow Mode Evaluation Loop
+# Shadow Mode Evaluation
 
-## Purpose
+Текущий shadow-контур — `scheduler/rollback.py` + `rollback_watch`. Он наблюдает только за успешно
+применёнными и обратимыми `update_budget`, `update_bid`, `update_keyword_bid` с вычислимым
+`expected_ratio`.
 
-Turn Shadow Mode from a shadow recommendation generator into a measurable quality-control loop.
+В первые 3–6 часов честно измеримы расход и клики, но не CPA: конверсии продолжают досчитываться.
+Поэтому detector сравнивает `cost_micros`, а не заявляет «CPA ухудшился». База — медиана и MAD того
+же часа того же дня недели за четыре предыдущие недели, минимум три непустых samples. База
+масштабируется на ожидаемый эффект «было → станет», иначе detector ловил бы собственную причину.
 
-## Core metrics
+Вердикты: `ok`, `degraded`, `insufficient`. Недостаток данных никогда не повышается до degraded.
+В режиме `shadow` строка только получает verdict; уведомлений и мутаций нет. `alert` отправляет
+человеку диагноз, но обратный proposal рождается в новом человеческом ходе. `auto` сейчас
+намеренно деградирует в shadow и не является реализованным денежным путём.
 
-```yaml
-shadow_run_id: string
-date: YYYY-MM-DD
-recommendation_count: int
-useful_alert_count: int
-wasted_alert_count: int
-false_positive_rate: number|null
-false_negative_candidates: int
-actionability_score: 0-100
-```
+Перед любым auto-cutover нужна размеченная выборка shadow verdicts и минимум:
 
-## Evaluation questions
+- precision/false-positive rate отдельно по operation и account;
+- достаточное число окон с baseline и доля `insufficient`;
+- ручная проверка, что expected ratio корректен;
+- rollback proposal с полным обычным confirm/freshness/account/audit контуром;
+- staged rollout только на Draft/test, затем per-account opt-in и kill-switch.
 
-- Did the recommendation point to a real operator-relevant issue?
-- Would acting on it likely help?
-- Was it redundant/noisy?
-- Was there a missed issue that should have been surfaced?
+Еженедельная оценка дополнительно хранит число рекомендаций, useful/wasted alerts,
+false-positive rate, кандидаты в false-negative и actionability score. Эти метрики используются
+только для настройки порогов и снижения шума; они не разрешают auto-rollback.
 
-## Output use
-
-- weekly quality review
-- routing/prompt improvement
-- threshold tuning
-- wasted alert reduction
+Проверки: `tests/test_rollback.py` и `tests/test_rollback_watch.py`.

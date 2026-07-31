@@ -5,6 +5,9 @@
 > Часть рекомендаций «Node-стек» из первичного веб-ресёрча **отменена**: выбрана Python-эволюция +
 > фреймворк hermes-agent, поэтому актуальны Python-аналоги. Отклонённые альтернативы оставлены как
 > «что и почему не берём».
+>
+> Это обоснование выбора технологий, а не live-статус реализации. Текущее состояние перехода
+> (`Hermes` target / переходный runtime / legacy aiogram) фиксируется в корневом `README.md`.
 
 ---
 
@@ -35,10 +38,10 @@
 
 ## 2. Google Ads API
 
-- **Версия/SDK:** проект на официальном **Python SDK `google-ads` 31.x → API v24** (пин `>=31.1,<32`). Сохраняем. [Certain] Актуальная линия API — v23.x (2026), ежемесячные релизы, сансеты быстрее; SDK-версия ≠ API-версия. Бампить ~раз в месяц (скил `gads-version`, `docs/gads-api-refs.md`).
+- **Версия/SDK:** проект на официальном **Python SDK `google-ads` 31.2.x → API v25** (пин `>=31.2,<32`). Сохраняем. [Certain] SDK-версия ≠ API-версия; релизы и сансеты перепроверяются ежемесячно (скил `gads-version`, `docs/gads-api-refs.md`).
 - **Node/Opteo `google-ads-api` — НЕ берём** (у Google нет офиц. Node SDK): выбрана Python-эволюция, официальный SDK зрелее и уже интегрирован. [Certain]
 - **Авторизация:** OAuth2 refresh token + developer token + login_customer_id; per-account токены шифруются Fernet at-rest (`core/secrets.py`, `scripts/get_refresh_token.py`, `scripts/register_account.py`). [Certain]
-- **Готовый Google Ads MCP:** официальный `googleads/google-ads-mcp` — **READ-only** (`search` GAQL, `get_resource_metadata`, `list_accessible_customers`), Python, Apache-2.0. Мутаций нет. Ваш собственный READ-MCP (`mcp_server/`) уже реализует 15 READ-инструментов; для WRITE строим свои (нет зрелого готового write-MCP на актуальной версии). [Certain]
+- **Готовый Google Ads MCP:** официальный `googleads/google-ads-mcp` — **READ-only** (`search` GAQL, `get_resource_metadata`, `list_accessible_customers`), Python, Apache-2.0. Мутаций нет. Ваш собственный READ-MCP (`mcp_server/`) уже реализует 25 READ-инструментов; для WRITE строим свои (нет зрелого готового write-MCP на актуальной версии). [Certain]
   - https://github.com/googleads/google-ads-mcp · community с мутациями (незрелые/отстают по версии): `grantweston/google-ads-mcp-complete` (v21), `cohnen/mcp-google-ads`, `samihalawa/google-ads-mcp-server` (Node).
 - Доки: https://developers.google.com/google-ads/api/docs/release-notes · https://developers.google.com/google-ads/api/docs/query/overview
 
@@ -48,7 +51,7 @@
 
 - **Интерфейс — платформа фреймворка** `gateway.platforms.telegram` (webhook/поллинг у Hermes), НЕ отдельная библиотека. Три ортогональных гейта `allow_from`/`group_allow_from`/`group_allowed_chats` читаются с уровня блока (не из `extra`); `require_mention: true`, `guest_mode: false`. [Certain] (`deploy/hermes/config.yaml:238-268`, `lint_config.py`)
 - **aiogram 3.x** старого бота — архивируется вместе с `bot/` (кнопочные визарды). grammY/Node не берём (Python-эволюция + пивот на фреймворк). [Certain]
-- Подтверждение — reply-текстом; inline-кнопки визардов сняты по пивоту (Вопрос 2 «кнопки/слэш-команды» — открыт, нужна подпись; SPEC §2.6).
+- Целевое подтверждение — reply-текстом. Inline-кнопки визардов относятся к legacy aiogram и после гейтированного cutover архивируются; слэш-команды могут остаться как удобные shortcuts, но не как механизм безопасности (SPEC §2.2, §2.6).
 
 ---
 
@@ -108,7 +111,7 @@
 | Слой | Выбор | Уверенность |
 |---|---|---|
 | Агент-мозг | фреймворк hermes-agent v0.19.0 + модель `openai/gpt-5.6-terra` | [Certain] |
-| Google Ads | офиц. Python SDK `google-ads` v24; WRITE-MCP свой | [Certain] |
+| Google Ads | офиц. Python SDK `google-ads` 31.2.x → API v25; WRITE-MCP свой | [Certain] |
 | Telegram | платформа фреймворка (`gateway.platforms.telegram`) | [Certain] |
 | Vector store | pgvector 0.8.0 (`pgvector/pgvector:pg17`), SQLAlchemy `Vector` — если не покрыто фреймворком | [Likely] |
 | Эмбеддинги | `text-embedding-3-small` (1536) через OpenRouter | [Certain] |

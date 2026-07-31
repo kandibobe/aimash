@@ -1,17 +1,25 @@
 # Безопасность Aimash — проверенные гарантии
 
-Бот управляет **чужими деньгами** в Google Ads, поэтому safety-инварианты — не пожелания, а
-проверяемые свойства кода. Этот документ показывает, **где** в коде реализовано каждое из 10
+Система управляет **чужими деньгами** в Google Ads, поэтому safety-инварианты — не пожелания, а
+проверяемые свойства кода. Этот документ показывает, **где** в коде реализовано каждое из 15
 золотых правил ([CLAUDE.md](../CLAUDE.md#-золотые-правила)) и **чем** оно покрыто в тестах. Это
 одностраничное доказательство для заказчика/ревьюера: гарантии живут в коде и в CI, а не в промпте.
+
+> **Граница перехода.** Денежные инварианты ниже общие для legacy aiogram и целевого пути
+> `Hermes → MCP → ads/confirm`. Ссылки на кнопки доказывают безопасность действующего legacy-входа,
+> но не готовность Hermes WRITE. Для его включения отдельно обязательны И1–И8, доверенные
+> Telegram-метаданные и fail-closed reply-якорь; до этого WRITE-инструменты не регистрируются
+> на живой MCP-поверхности.
 
 > Имена функций/классов (а не номера строк) использованы для часто меняющихся модулей — чтобы
 > ссылки не «протухали». Точные строки даны только для стабильных файлов.
 
 ## Модель угроз (решение владельца 2026-07: мутации на всех видимых аккаунтах)
-**Draft-only доктрина снята.** В prod **МУТАЦИИ** по умолчанию разрешены на **всех** аккаунтах,
-ВИДИМЫХ боту под его MCC (`GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all`, прод-дефолт; эффективный потолок
-`allowed_ceiling()` = Draft ∪ read-list ∪ дочерние обхода). При разработке — **только TEST MCC**
+**Draft-only доктрина снята.** В prod **МУТАЦИИ** разрешаются на **всех** аккаунтах, ВИДИМЫХ боту
+под его MCC, — но только **явным** сентинелом `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all` (эффективный
+потолок `allowed_ceiling()` = Draft ∪ read-list ∪ дочерние обхода). **Пустой env = fail-closed в
+ЛЮБОМ окружении** — тихая коэрция «пусто в prod → all» снята 2026-07-30 (BZ-1): «очистить env»
+обязано ЗАКРЫВАТЬ мутации, а не открывать их. При разработке — **только TEST MCC**
 (в dev/test пустой список = fail-closed, мутаций нет). Радиус поражения расширился с одного Draft до
 всех дочерних (у клиента — 7 боевых аккаунтов), поэтому безопасность держится на **компенсирующих
 контролях**, каждый из которых сам по себе несменяем:
@@ -54,8 +62,8 @@
 | 6 | **Модель не трогает SDK напрямую** (Pydantic → валидация → diff → «да» → SDK) | `agent/tools/schemas.py` (типизированные схемы) → `ads/mutations.py` (валидация диапазонов) → confirm → SDK; capability-guard `ads/service.py` | `test_write_layer` (capability-guard), `test_bot_integration` |
 | 7 | **Только TEST MCC при разработке** | `ENV=dev` по умолчанию; замок аккаунта на `7753643025` (правило 9) | покрыто правилом 9 + `test_config_failfast` |
 | 8 | **Жёсткий allow-list операций** | `ads/service.py` исполняет только поддержанные операции (отклоняет неизвестную ДО кнопок и в `execute_confirmed`) | `test_write_layer` (отклонение неподдержанной операции) |
-| 9 | **Замок аккаунта** (мутации — все ВИДИМЫЕ, прод-дефолт `all`) + раздельное чтение (§8) | `ads/client.py::ensure_allowed` (мутации, набор = потолок при `all` / явный список), `ensure_read_allowed` (per-account чтение = мутационный ∪ read-env ∪ дочерние обхода), `ensure_manager_allowed` (обход MCC); потолок видимости `ALLOWED_CEILING`={Draft} зашит в коде | `test_safety_core` (сентинел/потолок/fail-closed/чужой), `test_mutations_all_accounts` (сквозной гейт на боевом), `test_mutation_lock_unchanged_by_read_allowlist`, `test_discovered_child_readable_but_not_mutable`, `test_ads_resolve`, `test_ads_read` |
-| 10 | **Fail-closed везде** (никогда fail-open) | `bot/main.py::WhitelistMiddleware` → `core.access.is_whitelisted` (источник = env `TELEGRAM_WHITELIST_CHAT_IDS` **∪ таблица `whitelist`**; блок при пустом объединении; сбой БД ⇒ пустой БД-набор, не fail-open); `core/config.py` prod fail-fast (нет ключа/пустой env-whitelist → `ValueError`); `user_initiated` дефолт `False`; пустой allow-list → отказ. **Единственное исключение — сбой стора размыкателя `core/breaker.py` (fail-OPEN), см. раздел ниже** | `test_whitelist`, `test_runtime_whitelist`, `test_config_failfast`, `test_safety_core`, `test_breaker_probe_lease` |
+| 9 | **Замок аккаунта** (мутации — набор из env: `all` — ЯВНЫЙ сентинел «все видимые», пусто = fail-closed в любом окружении) + раздельное чтение (§8) | `ads/client.py::ensure_allowed` (проверка №0 — рубильник `core/killswitch.py`, затем набор = потолок при `all` / явный список), `ensure_read_allowed` (per-account чтение = мутационный ∪ read-env ∪ дочерние обхода), `ensure_manager_allowed` (обход MCC); потолок видимости `ALLOWED_CEILING`={Draft} зашит в коде | `test_safety_core` (сентинел/потолок/fail-closed/чужой), `test_mutations_all_accounts` (сквозной гейт на боевом), `test_mutation_lock_unchanged_by_read_allowlist`, `test_discovered_child_readable_but_not_mutable`, `test_ads_resolve`, `test_ads_read`, `test_config_failfast` (пусто в prod = read-only, «all» — явное) |
+| 10 | **Fail-closed везде** (никогда fail-open) | `bot/main.py::WhitelistMiddleware` → `core.access.is_whitelisted` (источник = env `TELEGRAM_WHITELIST_CHAT_IDS` **∪ таблица `whitelist`**; блок при пустом объединении; сбой БД ⇒ пустой БД-набор, не fail-open); `core/config.py` prod fail-fast (нет ключа/пустой env-whitelist → `ValueError`); `user_initiated` дефолт `False`; пустой allow-list → отказ; рубильник `core/killswitch.py` (опечатка в значении = ВКЛЮЧЁН, OSError при чтении файл-флага = ВКЛЮЧЁН); кап бюджета B1-4 (стор недоступен/дельта несчитаема → отказ). **Единственное исключение — сбой стора размыкателя `core/breaker.py` (fail-OPEN), см. раздел ниже** | `test_whitelist`, `test_runtime_whitelist`, `test_config_failfast`, `test_safety_core`, `test_breaker_probe_lease`, `test_killswitch`, `test_budget_blast_radius` |
 
 ---
 
@@ -68,23 +76,109 @@ AND operation=...` с проверкой `rowcount==1` → одно подтве
 раз** (защита от replay) и **только** под ту операцию, для которой оно выдано. Нет валидного
 claim → `PermissionError`, SDK не вызывается.
 
+### Four-eyes — дополнительный конъюнкт claim, не второй confirm-путь
+
+При `FOUR_EYES_REQUIRED=true` proposal тиров из `FOUR_EYES_RISK_TIERS_CSV` (дефолт `L3`)
+требует независимый approve от активного `approver|admin` в scope customer или `*`. Проверка
+встроена в тот же `UPDATE ... WHERE` у `ConfirmStore.claim` через correlated EXISTS/NOT EXISTS:
+между чтением vote и переходом в `executing` нет TOCTOU-окна. Автор обязан быть известен и не
+совпадать с approver; любой независимый reject блокирует claim. Reply-якорь автора, TTL,
+provenance, account lock, freshness, 2FA и audit продолжают действовать. По умолчанию настройка
+выключена, поэтому существующий prod-flow не меняется до выдачи ролей. Покрытие —
+`tests/test_operations_layer.py` (нет vote, self-vote, approve, reject, replay). Записанный reject
+не теряет силу при отзыве роли: иначе revoke превращался бы в обход возражения. Неизвестный тир
+роняет конфигурацию, а пустой runtime-набор под включённым флагом даёт SQL `false` (fail-closed).
+
 ### Замок аккаунта МУТАЦИЙ — слои ([`ads/client.py`](../ads/client.py))
 1. **Код-минимум** `ALLOWED_CEILING = {7753643025}` — `.env` не может его **понизить** (Draft всегда в
    потолке; это МИНИМУМ, а не «только Draft»). **Эффективный** потолок `allowed_ceiling()` = этот
    минимум **∪ видимые боту аккаунты** (env `GOOGLE_ADS_READ_CUSTOMER_IDS` ∪ дочерние обхода MCC).
-2. **Мутационный набор** — сентинел `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all`/`*` (`allow_all_visible`,
-   **прод-дефолт**) ⇒ набор = ВЕСЬ `allowed_ceiling()`; явный список id ⇒ способ СУЗИТЬ; в dev/test
-   пусто ⇒ **fail-closed** (отказ, а не «разрешено всё»).
+2. **Мутационный набор** — сентинел `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all`/`*` (`allow_all_visible`)
+   задаётся ТОЛЬКО явно ⇒ набор = ВЕСЬ `allowed_ceiling()`; явный список id ⇒ способ СУЗИТЬ; пусто ⇒
+   **fail-closed в ЛЮБОМ окружении** (отказ, а не «разрешено всё»; prod поднимается read-only с
+   warning — тихая коэрция «пусто → all» снята 2026-07-30, BZ-1).
 3. **Потолок видимости** — набор ⊆ `allowed_ceiling()`: мутировать можно только **видимый** аккаунт,
    чужой боевой id вне видимости не пройдёт даже при `all` (защита от опечатки). Сбой discovery ⇒
    набор `all` схлопывается до `{Draft}` (безопасная деградация, не эскалация).
 
-`ensure_allowed` — точка проверки **всех мутаций**; per-account **ЧТЕНИЕ** идёт через отдельный,
-более широкий `ensure_read_allowed`; `ensure_manager_allowed` отдельно гейтит обход MCC. В prod по
-умолчанию мутируются **все видимые** аккаунты (решение владельца 2026-07); сузить — явным списком id
+`ensure_allowed` — точка проверки **всех мутаций** (первым шагом зовёт рубильник, см. раздел ниже);
+per-account **ЧТЕНИЕ** идёт через отдельный, более широкий `ensure_read_allowed`;
+`ensure_manager_allowed` отдельно гейтит обход MCC. Мутации на **всех видимых** аккаунтах — решение
+владельца 2026-07, включается явным `all`; сузить — явным списком id
 (см. [DEPLOYMENT.md §2.1](DEPLOYMENT.md)), понизить код-минимум можно лишь правкой `ads/client.py`.
 Каждая мутация всё равно проходит confirm-гейт + гард `user_initiated` — «all» расширяет НАБОР
 аккаунтов, но не отменяет подтверждение.
+
+### Аварийный рубильник (BZ-1, 2026-07-30) — стоп ВСЕХ мутаций без деплоя
+
+`core/killswitch.py::ensure_mutations_enabled` — **проверка №0** денежного пути, стоит раньше любых
+разрешений в ДВУХ чокпойнтах: `ads/client.py::ensure_allowed` (замок) и
+`ads/mutations.py::_require_confirmation` (шаг 0, до freshness/капа/claim — отказ рубильника **не
+сжигает** одноразовое подтверждение). Чтение не трогает вовсе.
+
+Два независимых канала, каждый работает без рестарта процесса:
+1. **env `DISABLE_ALL_MUTATIONS`** — читается ЖИВЬЁМ из `os.environ` на каждой проверке (мимо
+   settings-синглтона, который иначе требовал бы рестарта). Семантика fail-closed: рубильник ВЫКЛЮЧЕН
+   только значениями `""/0/false/no/off` — любая опечатка («flase», «disable», «стоп») = ВКЛЮЧЁН.
+2. **Файл-флаг** `KILL_SWITCH_FILE` (дефолт `KILL_SWITCH`, относительный к cwd процесса):
+   `docker exec aimash-bot touch /app/KILL_SWITCH` останавливает мутации немедленно, `rm` — включает
+   обратно. `OSError` при проверке ФС = ВКЛЮЧЁН (не смогли убедиться, что флага нет ⇒ стоим). Пустое
+   значение env отключает файловый канал осознанно. ⚠️ Контейнеры без volumes ⇒ пересоздание
+   контейнера файл снимает — для стойкого стопа канал env (в `.env` + `docker compose up -d`).
+
+**`GateRefusal(PermissionError)`** (там же, `core/killswitch.py`) — тип отказа политики ДО claim по
+ВНЕШНЕЙ временной причине (рубильник, кап B1-4, недоступная история капа): черновик остаётся
+валидным. Живой кнопочный путь (`bot/main.py::_do_confirm`) маршрутизирует его отдельно от прочих
+ошибок: CAS-возврат `confirmed → pending` (`ConfirmStore.reopen`, audit-строка `reopened`) +
+восстановление карточки с кнопками — после снятия причины ТО ЖЕ «да» проходит весь штатный
+CAS-путь заново (2FA, владелец, TTL, L3-свежесть). Обычный `PermissionError` (дефект черновика,
+замок) по-прежнему жжёт черновик в `failed`. В тексте отказа env-канала — только ИМЯ переменной,
+не значение (правило 5).
+
+Покрытие: `tests/test_killswitch.py` (off-значения, опечатки, toggle файлом без рестарта, порядок
+«рубильник раньше замка», тип `GateRefusal` + нетеча значения env, интеграция через настоящий
+`ConfirmStore` — отказ на юнит-пути оставляет черновик `confirmed`, после снятия рубильника тот же
+`confirmation_id` исполняется) и `tests/test_gate_refusal_reopen.py` (живой путь `_do_confirm`:
+reopen → pending → то же «да» применяется; граница «plain PermissionError всё ещё жжёт»;
+CAS-свойства `reopen`).
+
+### Суточный blast-radius кап бюджета (B1-4, 2026-07-30)
+
+Серия из N подтверждённых повышений бюджета за день раньше не ограничивалась ничем («смерть от тысячи
+подтверждённых порезов»). Теперь `ads/mutations.py::_require_budget_blast_radius` — шаг 1b
+`_require_confirmation` (ПОСЛЕ freshness, ДО claim — отказ не сжигает подтверждение), только для
+`update_budget` и только для ПОВЫШЕНИЙ (дельта ≤ 0 проходит всегда — понижение бюджета не блокируем):
+- **Счётный кап** `DAILY_BUDGET_INCREASE_MAX_OPS` — сколько повышений на аккаунт за 24 ч
+  (prod-автодефолт 10, в dev/test 0 = выкл);
+- **Кап суммы** `DAILY_BUDGET_INCREASE_CAP_UNITS` — суммарный прирост в единицах валюты за 24 ч
+  (дефолта нет — включается явно).
+
+История = строки proposals `status IN (executing, applied, needs_review)` за 24 ч по `decided_at`
+(`confirm/store.py::recent_money_params`; «могло примениться» = трата: `executing` — упавший между
+claim и finalize процесс, `needs_review` — зависшее/неподтверждённое исполнение — зачитываются
+консервативно). Дельта: предпочтительно `after_micros − before_micros` из аттестованного снимка
+(реальная валюта — то же число, что видел человек на карточке), fallback — пересчёт
+`compute_new_micros(before, mode, value)`. Fail-closed: стор без метода/с ошибкой — отказ;
+несчитаемая дельта ТЕКУЩЕГО черновика — отказ; несчитаемая строка ИСТОРИИ — консервативный зачёт
+в счётный кап.
+
+Отказы капа и недоступной истории — `GateRefusal` (см. выше): черновик возвращается в `pending`,
+не сжигается. Несчитаемая дельта текущего черновика — обычный `PermissionError` (дефект черновика,
+«создай заново» корректно).
+
+Конкурентные подтверждения: шаги 1b→3 для `BUDGET_INCREASE_OPS` сериализованы модульным
+`asyncio.Lock` (`_BUDGET_GATE_LOCK`) — конкурентные ✅ из aiogram-тасков одного event loop кап не
+обходят (второй видит claim первого). Межпроцессный остаток осознанно принят: сегодня второго
+пишущего процесса нет (scheduler отсечён правилом 3 — деньги только user_initiated, MCP-WRITE не
+подключён); появится второй процесс → лок переезжает в advisory-lock БД.
+
+Известные ограничения (задокументированы, не баги): `create_*`-операции (создание кампании с
+бюджетом) капом не покрыты — кап считает ПОВЫШЕНИЯ существующих бюджетов; `set_to` с
+`after ≤ before` по снимку проходит всегда — так строятся ВСЕ откаты (`confirm/reverse.py`), и путь
+«откатить» обязан оставаться открытым даже при выеденном капе. Остаток: `set_to` по устаревшей базе
+может оказаться фактическим повышением; ограничен L3-TTL согласия и `MONEY_MAX_UNITS`, человек
+видит целевое значение на карточке. Решение «зачитывать ли set_to-повышения в кап» — за владельцем.
+Покрытие: `tests/test_budget_blast_radius.py`.
 
 ### Редакция секретов — три рубежа
 1. **Логи**: `RedactionFilter` на каждой записи + повторная редакция в форматтере (`core/logging.py`).
@@ -98,7 +192,9 @@ claim → `PermissionError`, SDK не вызывается.
 приложение **не стартует** (`core/config.py`). env-whitelist — это **бутстрап первого админа**
 (обязателен в prod); дальше операторы добавляются в рантайме в таблицу `whitelist` (`/adduser`), но
 env всё равно должен быть непустым на старте. Пустое объединение (env ∪ БД) означало бы «отвечаю
-всем» — это запрещено (fail-closed).
+всем» — это запрещено (fail-closed). Пустой `GOOGLE_ADS_ALLOWED_CUSTOMER_IDS` в prod старт **не
+роняет** — бот поднимается read-only с warning (мутационный набор пуст, `ensure_allowed` отказывает):
+это законная конфигурация «только чтение/отчёты», а не ошибка.
 
 ### Единственное узаконенное исключение из fail-closed — размыкатель (Волна 2)
 

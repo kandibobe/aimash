@@ -58,6 +58,11 @@ os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_db.as_posix()}"
 # Ловит класс «зелёно локально, красно в CI» из-за зависимости теста от локального .env.
 os.environ["GOOGLE_ADS_ALLOWED_CUSTOMER_IDS"] = ""
 os.environ["GOOGLE_ADS_READ_CUSTOMER_IDS"] = ""
+# BZ-1: рубильник и файл-флаг НЕ должны течь из окружения машины в тесты (включённый на хосте
+# рубильник красил бы весь write-слой в непонятный PermissionError). Тесты рубильника задают
+# своё состояние явно (monkeypatch.setenv / settings.kill_switch_file).
+os.environ.pop("DISABLE_ALL_MUTATIONS", None)
+os.environ["KILL_SWITCH_FILE"] = ""
 # И login-MCC пустой (как CI без .env). Иначе ленивый само-обход дочерних
 # (ads.client.ensure_read_children_discovered, 2026-07: /accounts + пикеры → _read_account_rows)
 # дёргал бы РЕАЛЬНЫЙ Google Ads SDK на машине с живым .env: тест ~30 с (сетевой round-trip) и флак
@@ -99,6 +104,8 @@ class FakeProposal:
     # настоящего ConfirmStore проверяется в tests/test_provenance_gate.py.
     origin_human_turn: bool | None = None
     params: dict | None = None
+    # B1-4: blast-radius кап группирует историю ПО АККАУНТУ — зеркалим поле настоящего снимка.
+    customer_id: str = "7753643025"
 
     def __post_init__(self) -> None:
         if self.origin_human_turn is None:
@@ -126,6 +133,11 @@ class FakeConfirmStore:
             return None
         self._claimed = True
         return p
+
+    async def recent_money_params(self, customer_id, *, operations, window_hours=24):
+        # Зеркало ConfirmStore.recent_money_params (B1-4): у дублёра истории нет — пустое окно.
+        # Тесты капа с историей строят её на НАСТОЯЩЕМ сторе (tests/test_budget_blast_radius.py).
+        return []
 
     async def finalize(self, confirmation_id, *, result):
         self.finalized = True

@@ -187,7 +187,7 @@ mcp_servers:
     timeout: 120
     connect_timeout: 30
     tools:
-      include:
+      include:             # 25 READ (24 Google Ads + recall_client); PLAN/WRITE — только ready-dark
         - list_accounts
         - get_campaign_stats
         - get_adgroup_stats
@@ -199,7 +199,29 @@ mcp_servers:
         - get_auction_insights
         - get_account_audit
         - get_change_history
+        # Р6: журнал правок в САМОМ Google Ads (кто/когда/через какой канал) — не путать с
+        # get_change_history, тот про НАШ audit-trail. Google о чужих правках не уведомляет.
+        - get_account_changes
         - keyword_ideas
+        # Структура и настройки кампаний («было» для правок, не метрики): список кампаний, гео/языки,
+        # настройки по имени с группами и RSA, стратегия ставок, разбивки device/network/day,
+        # аудитории (доступные и прикреплённые) и остаток нашей суточной квоты операций.
+        - list_campaigns
+        - read_campaign_targeting
+        - read_campaign_config
+        - get_bidding_strategy
+        - get_report_breakdown
+        - list_audiences
+        - list_attached_audiences
+        - get_quota
+        - recall_client
+        # §8 MCC: сводка по всем дочерним + глубокий разбор. Список обязан совпадать с
+        # READ_TOOL_FUNCS РОВНО (require_registered_surface сверяет на равенство, не на вхождение):
+        # добавили инструмент в код и забыли здесь — Hermes его не увидит и работать будет «почти».
+        - get_mcc_summary
+        - get_mcc_deep
+        # Общие списки минус-слов нужны PLAN-обёрткам как READ-контекст; сам инструмент не мутирует.
+        - list_negative_shared_sets
   tavily:
     command: npx
     args:

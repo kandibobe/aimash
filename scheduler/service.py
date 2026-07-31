@@ -17,7 +17,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from core.config import settings
 from core.errors import capture_exception
 from core.logging import log
-from scheduler import jobs, rollback
+from scheduler import jobs, ops_delivery, rollback
 
 # Дефолт планового отчёта — fallback, если REPORT_SCHEDULE невалиден (см. report_trigger).
 _DEFAULT_REPORT_CRON = {"hour": 9, "minute": 0}  # ежедневно 09:00 (локальное время)
@@ -149,6 +149,17 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
         misfire_grace_time=1800,
     )
     sched.add_job(
+        ops_delivery.run_notification_delivery,
+        IntervalTrigger(seconds=settings.notification_outbox_interval_seconds),
+        args=[bot],
+        id="notification_outbox",
+        replace_existing=True,
+        misfire_grace_time=max(30, settings.notification_outbox_interval_seconds * 2),
+        coalesce=True,
+        max_instances=1,
+        next_run_time=datetime.now(timezone.utc),
+    )
+    sched.add_job(
         jobs.cleanup_stale_proposals,
         IntervalTrigger(minutes=settings.cleanup_interval_minutes),
         id="cleanup_stale",
@@ -251,6 +262,19 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
             id="error_alerts",
             replace_existing=True,
             misfire_grace_time=300,
+            next_run_time=datetime.now(timezone.utc),
+        )
+    # Р6: алерт о правках, сделанных в аккаунте МИМО бота (change_event). READ-ONLY, opt-in
+    # (EXTERNAL_CHANGES_INTERVAL_HOURS > 0) — как error_alerts. next_run_time=now: первый прогон
+    # ставит базлайн курсора по (чат, аккаунт), не рассылая недельную историю.
+    if settings.external_changes_interval_hours > 0:
+        sched.add_job(
+            jobs.run_external_change_alerts,
+            IntervalTrigger(hours=settings.external_changes_interval_hours),
+            args=[bot],
+            id="external_change_alerts",
+            replace_existing=True,
+            misfire_grace_time=3600,
             next_run_time=datetime.now(timezone.utc),
         )
     # §6/§15 (1.3): еженедельный дайджест админам (ошибки + баг-репорты + активность), текст + файл.

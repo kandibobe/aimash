@@ -1,0 +1,16 @@
+{
+  "name": "master-history",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/heads/master"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    { "type": "non_fast_forward" },
+    { "type": "deletion" }
+  ]
+}

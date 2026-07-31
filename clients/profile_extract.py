@@ -18,6 +18,7 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 from agent.router import chat
+from core.llm_budget import LLMBudgetError
 
 
 class ServiceItem(BaseModel):
@@ -162,7 +163,9 @@ def _coerce(data: dict) -> ClientProfileExtract:
 
 async def extract_profile(text: str, *, language: str = "ru") -> ClientProfileExtract:
     """Распарсить свободный текст менеджера в ClientProfileExtract (роль keywords). Пустой ввод →
-    пустой объект без вызова LLM. Fallback при сбое — пустой объект (менеджер увидит и дополнит)."""
+    пустой объект без вызова LLM. Fallback при сбое — пустой объект (менеджер увидит и дополнит).
+    Исключение: LLMBudgetError ПРОБРАСЫВАЕТСЯ — исчерпанный лимит/потолок это ответ пользователю,
+    а не «пустое извлечение» (вызыватели обязаны его показать)."""
     body = (text or "").strip()
     if not body:
         return ClientProfileExtract()
@@ -176,6 +179,8 @@ async def extract_profile(text: str, *, language: str = "ru") -> ClientProfileEx
             temperature=0.2,
         )
         data = _extract_json_object(getattr(msg, "content", "") or "")
+    except LLMBudgetError:
+        raise
     except Exception:  # noqa: BLE001 — разбор не критичен, есть fallback
         data = None
     return _coerce(data) if data is not None else ClientProfileExtract()

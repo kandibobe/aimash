@@ -4,24 +4,40 @@
 [`HERMES_SPEC.md`](../deploy/hermes/HERMES_SPEC.md) — архитектура ·
 [`AGENTIC_VS_TZ.md`](../deploy/hermes/AGENTIC_VS_TZ.md) — обоснование.
 [`ТЗ.md`](../ТЗ.md) — дословный текст трёх `.docx` заказчика («что было заказано»).
-Правила разработки и 15 золотых правил — [`CLAUDE.md`](../CLAUDE.md); обзор — корневой
+Правила разработки и 15 золотых правил — [`CLAUDE.md`](../CLAUDE.md) для Claude Code и
+[`AGENTS.md`](../AGENTS.md) для Codex; их общее ядро защищено тестом от дрейфа. Обзор — корневой
 [`README.md`](../README.md). Ниже — тематические гайды.
 
-**Точка входа в пивот** (не четвёртый источник истины, а вход; глубина — в трёх слоях выше) — три дока
-в этом каталоге: [`TZ-Aimash-Hermes-Agent.md`](TZ-Aimash-Hermes-Agent.md) (сводное ТЗ),
-[`AUDIT-open-source.md`](AUDIT-open-source.md) (аудит источников/библиотек/dev-MCP),
+**Точка входа в пивот** (не четвёртый источник истины, а навигация; глубина — в трёх слоях
+выше) — [`TZ-Aimash-Hermes-Agent.md`](TZ-Aimash-Hermes-Agent.md). Рядом:
+[`AUDIT-open-source.md`](AUDIT-open-source.md) (аудит источников/библиотек/dev-MCP) и
 [`REUSE-MAP.md`](REUSE-MAP.md) (фреймворк / переиспользуем / строим).
 
-> **Идёт пивот на ядро Hermes** (`SPEC.md` §5): свободный текст и подтверждение реплаем вместо
-> кнопок. Доки ниже помечены по `SPEC.md` §17: **[ядро]** — действует как есть; **[переписывается]**
-> — источник **функционального объёма**, механика переезжает в текстовую модель, документ не
-> выбрасывается; **[заменяется]** — уходит целиком.
+## Как читать документы во время перехода
+
+**Целевая архитектура уже выбрана: ядро агентского цикла — Hermes.** Свободный текст и
+подтверждение реплаем заменяют aiogram-кнопки, FSM-визарды и собственный `agent/loop.py`. Это не открытое
+архитектурное решение, а принятая цель (`SPEC.md` §5).
+
+Одновременно **переход ещё не завершён**: развёрнутый `aimash-bot` всё ещё запускает `bot.main`, Hermes получает
+Google Ads READ через MCP внутри этого контейнера, а PLAN/WRITE на живой поверхности нет. Поэтому в репозитории временно
+сосуществуют два слоя.
+
+| Метка | Что означает | Как использовать |
+|---|---|---|
+| **[целевая]** | Конечное устройство на Hermes | По ней принимаются новые архитектурные решения |
+| **[переход]** | То, что фактически развёрнуто сегодня | По ней деплоят, диагностируют и откатывают текущий прод |
+| **[legacy-референс]** | Детальное описание уже реализованной aiogram-механики | Из него переносят бизнес-правила и приёмку, **но не кнопочный UX** |
+| **[историческая]** | Замер, аудит или замороженный снимок | Не используется как текущая инструкция |
+
+Если вопрос звучит «как должно быть», читать `SPEC.md` + `HERMES_SPEC.md`. Если «что работает прямо сейчас» —
+корневой `README.md`, живые тесты и `git log`. Если «как была реализована функция» — legacy-референс нужного раздела.
 
 ## Для заказчика / менеджера
-- [USER_GUIDE.md](USER_GUIDE.md) — **руководство пользователя**: сценарии, команды, FAQ. **[заменяется]** на «что можно сказать агенту» (`SPEC.md` §2.6, приёмка П37).
-- [UAT_PLAN.md](UAT_PLAN.md) — план ручного приёмочного тестирования (7 сессий, чек-листы, скрины). **[переписывается]** — сценарии остаются, кнопочные шаги становятся репликами.
-- [ACCEPTANCE.md](ACCEPTANCE.md) — критерии приёмки §1–18 + §19/§20 с привязкой к коду/тестам. **[ядро]** — сверять статус по нему и по `git log`.
-- [HANDOVER.md](HANDOVER.md) — передача проекта заказчику: доступы, деплой, pre-delivery чек-лист. **[ядро]**
+- [USER_GUIDE.md](USER_GUIDE.md) — **[переход]**: сверху — целевые фразы для Hermes; ниже — пока что legacy-справка по развёрнутому кнопочному боту.
+- [UAT_PLAN.md](UAT_PLAN.md) — **[legacy-референс]**: сценарии и ожидаемые результаты сохраняются; кнопочные шаги не принимают Hermes-контур.
+- [ACCEPTANCE.md](ACCEPTANCE.md) — **[legacy-референс]** доказательств по старому aiogram-контуру. Целевая приёмка Hermes — `SPEC.md` §13 и `HERMES_SPEC.md` §12.
+- [HANDOVER.md](HANDOVER.md) — **[переход]**: передача доступов и текущего прода; целевые Hermes-операции живут в `deploy/hermes/`.
 
 ## Старт и эксплуатация
 - [OAUTH_SETUP.md](OAUTH_SETUP.md) — доступы Google Ads с нуля: test MCC, developer token, OAuth-клиент, refresh token.
@@ -35,17 +51,27 @@
 ## Безопасность
 - [SECURITY.md](SECURITY.md) — золотые правила → где реализовано → чем покрыто (артефакт для ревью). **[ядро]** — правил стало 15 (`CLAUDE.md`), карта покрытия здесь.
 
+## Операционный слой
+- [DECISION_LAYER.md](DECISION_LAYER.md) — decision queue, incidents, pacing, experiments, RBAC/four-eyes, CRM, portfolio, playbooks и граница live-cutover.
+- [ACCOUNT_HEALTH_SCORE.md](ACCOUNT_HEALTH_SCORE.md) — формула 0–100, семейные веса, grades и версия модели.
+- [SHADOW_MODE_EVAL.md](SHADOW_MODE_EVAL.md) — что реально измеряет rollback shadow, критерии до auto-cutover.
+- [DAILY_OPERATOR_BRIEF.md](DAILY_OPERATOR_BRIEF.md) — формат утреннего portfolio triage и приоритетов оператора.
+- [WASTE_MINING_LANE.md](WASTE_MINING_LANE.md) — отдельный контур поиска потерь и его граница с мутациями.
+
 ## Фичи — источники функционального объёма
-> Все шесть **[переписываются]**: функции остаются, кнопочная механика переезжает в текстовую модель (`SPEC.md` §3.3–§3.8). Не выбрасывать — это единственное подробное описание того, что именно должно работать.
+> Это **[legacy-референсы]**. Они фиксируют уже написанные бизнес-правила, форматы данных и тесты. В Hermes переносятся функция и
+> приёмка, но не кнопки, callback-имена, FSM-этапы и не старый агентский цикл (`SPEC.md` §3.3–§3.8).
 
 - [CAMPAIGN_WIZARD.md](CAMPAIGN_WIZARD.md) — §19 визард `/newcampaign`: 8 этапов, черновики, Sheets round-trip → диалог + состояние черновика (§3.5).
+- [section19-spec.md](section19-spec.md) — дополнение §19 по созданию Search-кампании через Telegram.
+- [gap-analysis-section19.md](gap-analysis-section19.md) — расхождения реализации с §19 и план закрытия.
 - [CLIENTS_KB.md](CLIENTS_KB.md) — §20 `/clients`: профиль клиента, LLM-разбор текста, краулер сайта → §3.8 (memory-инструменты, топик = клиент).
 - [REPORTS.md](REPORTS.md) — `/report` `/export` `/sheets` `/mcc`: периоды, метрики, разбивки, экспорт → §3.7.
 - [KEYWORD_RESEARCH.md](KEYWORD_RESEARCH.md) — `/keywords`: подбор идей, метрики, AI-кластеризация, `.xlsx` → §3.3.
 - [GDN_CAMPAIGNS.md](GDN_CAMPAIGNS.md) — кампания из фото/видео (§11): GDN/Video/Demand Gen, confirm-флоу → §3.6.
 - [OAUTH_SETUP.md](OAUTH_SETUP.md) — доступы (продублирован выше) — **[ядро]**, тул-слой ходит тем же OAuth.
-- [MUTATIONS.md](MUTATIONS.md) — карта изменяющих операций Google Ads и confirm-гейта. **[ядро]**
-- [SCHEDULER.md](SCHEDULER.md) — плановые отчёты/аномалии/очистка (read-only). **[ядро]** — но дом процесса переезжает (`SPEC.md` §5.3 C4).
+- [MUTATIONS.md](MUTATIONS.md) — **[переход]**: карта изменяющих операций и общего confirm-ядра; кнопочные точки входа — legacy, MCP WRITE — цель.
+- [SCHEDULER.md](SCHEDULER.md) — **[переход]**: плановые отчёты/аномалии/очистка; бизнес-логика остаётся, дом процесса уже вынесен в `python -m scheduler`.
 
 ## Технические референсы
 - [gads-api-refs.md](gads-api-refs.md) — версии Google Ads API/SDK, график сансета.
@@ -57,6 +83,8 @@
 - Эксплуатация ядра Hermes живёт рядом с самим ядром, в [`deploy/hermes/`](../deploy/hermes/):
   [`README.md`](../deploy/hermes/README.md) — установка (RB-0…RB-3) ·
   [`OPERATIONS.md`](../deploy/hermes/OPERATIONS.md) — день-2: редеплой↔MCP-reconnect, логи, откат, kill-switch, замеры §12 ·
+  [`SAFE_RESTART.md`](../deploy/hermes/SAFE_RESTART.md) — безопасный restart двух Telegram-контуров без второго poller ·
+  [`DRIFT_AUDIT.md`](../deploy/hermes/DRIFT_AUDIT.md) — сверка repo/runtime/cron drift перед эксплуатационными изменениями ·
   [`OPEN_DECISIONS.md`](../deploy/hermes/OPEN_DECISIONS.md) — решения заказчика D1–D7 (**настройка**, у каждого строгий дефолт) ·
   [`RISK_REGISTER.md`](../deploy/hermes/RISK_REGISTER.md) — риски Р1–Р9 (**подпись**, дефолта нет; приложение к договору) ·
   [`SOUL.md`](../deploy/hermes/SOUL.md) — **слот №1 системного промпта** (деплоится в `~/.hermes/SOUL.md`): идентичность агента, а НЕ граница безопасности — границы дают отсутствие WRITE-инструментов, confirm-гейт в коде и таинт через недоступность инструментов ·
@@ -66,5 +94,13 @@
 `docs/archive/` — вне зоны инвариантов ссылок (`tests/_docs_paths.py`), хранит документ таким, каким он был на момент заморозки.
 - [archive/main-transplant-2026-07-27.md](archive/main-transplant-2026-07-27.md) — разбор orphan-ветки `main` с VPS: что из неё взято, что отклонено и почему (`DRY_RUN` рапортует об успехе несостоявшейся мутации; `tools_writes.py` даёт исполняющий `execute_confirmed` на MCP-поверхности без И8).
 
-## Скилы разработчика (`.claude/skills/`)
-`new-mutation` · `confirm-gate-audit` · `gaql-query` · `check-rsa-copy` · `gads-version`.
+## Конфигурация ИИ-разработчиков
+
+- Claude Code: `.claude/skills/`, `.claude/commands/`, `.claude/hooks/`.
+- Codex: `.agents/skills/`, `.codex/agents/`, `.codex/hooks/`.
+- Общие скилы в `.claude/skills/` и `.agents/skills/` обязаны совпадать дословно; платформенные
+  обёртки могут отличаться. Дрейф ловит `tests/test_agent_config_sync.py`.
+- Локальные секреты Claude остаются в ignored `.claude/settings.local.json`; `.codex/config.toml`
+  содержит только имена env-переменных и проектные команды, а не значения токенов.
+
+Общие скилы: `new-mutation` · `confirm-gate-audit` · `gaql-query` · `check-rsa-copy` · `gads-version`.

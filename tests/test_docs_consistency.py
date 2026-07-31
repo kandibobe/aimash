@@ -36,6 +36,7 @@ _DATABASE_DOC = _ROOT / "docs" / "DATABASE.md"
 _READ_COUNT_DOCS = (
     "README.md",
     "CLAUDE.md",
+    "AGENTS.md",
     "CHANGELOG.md",
     "mcp_server/__init__.py",
     "deploy/hermes/README.md",

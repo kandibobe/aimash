@@ -448,3 +448,22 @@ def test_final_summary_zero_decimal_currency():
     out = fmt_cc_final_summary(state, lang="ru")
     assert "1 500 JPY" in out
     assert "1 500.00" not in out
+
+
+# ── BZ-4: бюджет-стоп LLM пробрасывается, а не даёт пустой CampaignSettings ──
+@pytest.mark.asyncio
+async def test_extract_reraises_budget_stop():
+    """Fallback на пустой объект здесь означал бы: описание пользователя молча потеряно, визард
+    подставил медианы/дефолты — и человек подтверждает кампанию, собранную НЕ по его словам.
+    Ловим по базовому LLMBudgetError (оба потолка), а обычный сбой модели fail-soft остаётся."""
+    from core.llm_budget import LLMBudgetError, LLMCostCapExceededError
+
+    async def _budget_stop(messages, **kwargs):
+        raise LLMCostCapExceededError(10.5, 10.0)
+
+    with patched(CS, "chat", _budget_stop):
+        with pytest.raises(LLMBudgetError):
+            await extract_campaign_settings("бюджет 40 долларов в день, Кения")
+
+    with patched(CS, "chat", _fake_chat(raises=True)):  # контроль: обычный сбой → пустой объект
+        assert await extract_campaign_settings("бюджет 40 долларов в день") == CampaignSettings()
