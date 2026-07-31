@@ -17,6 +17,7 @@ def test_deploy_reconnects_hermes_only_after_compose_health_gate():
     assert "EXPECTED_TOOLS=" in body
     assert 'grep -Fq "Tools discovered: $EXPECTED_TOOLS"' in body
     assert "settings.hermes_write_enabled == ('mcp_server.tools_write' in sys.modules)" in body
+    assert "from mcp_server.server import expected_tool_names; expected_tool_names();" in body
     assert "sync_aimash_surface.py" in body
 
 
