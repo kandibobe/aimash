@@ -333,6 +333,58 @@ def test_external_tool_and_write_are_mutually_exclusive_per_turn(monkeypatch):
     assert blocked_external["action"] == "block"
 
 
+def test_guarded_local_skill_reads_do_not_taint_ads_proposal(monkeypatch):
+    plugin = _load(monkeypatch, _env())
+    plugin._capture_gateway_event(event=_event())
+    for tool_name in ("skills_list", "skill_view", "clarify", "todo"):
+        assert (
+            plugin._pre_tool_call(
+                tool_name=tool_name,
+                args={},
+                session_id="s-safe-skill",
+                turn_id="t-safe-skill",
+            )
+            is None
+        )
+
+    args = {"account": "7753643025", "campaign": "Доставка цветов"}
+    assert (
+        plugin._pre_tool_call(
+            tool_name="mcp__aimash__propose_pause_campaign",
+            args=args,
+            session_id="s-safe-skill",
+            turn_id="t-safe-skill",
+        )
+        is None
+    )
+    verify_turn_token(
+        args["trusted_turn_token"],
+        expected_tool="propose_pause_campaign",
+        tool_args={"account": "7753643025", "campaign": "Доставка цветов"},
+    )
+
+
+def test_skill_write_still_taints_ads_proposal(monkeypatch):
+    plugin = _load(monkeypatch, _env())
+    plugin._capture_gateway_event(event=_event())
+    assert (
+        plugin._pre_tool_call(
+            tool_name="skill_manage",
+            args={"action": "create"},
+            session_id="s-skill-write",
+            turn_id="t-skill-write",
+        )
+        is None
+    )
+    blocked = plugin._pre_tool_call(
+        tool_name="mcp__aimash__propose_pause_campaign",
+        args={"account": "7753643025", "campaign": "X"},
+        session_id="s-skill-write",
+        turn_id="t-skill-write",
+    )
+    assert blocked["action"] == "block"
+
+
 def test_recall_client_is_tainted_external_content(monkeypatch):
     plugin = _load(monkeypatch, _env())
     plugin._capture_gateway_event(event=_event())

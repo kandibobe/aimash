@@ -47,7 +47,11 @@ _PLAN_STATE_TOOLS = frozenset(
 _TAINTED_AIMASH_TOOLS = frozenset({f"{_MCP_PREFIX}recall_client"})
 _CONFIRM_RE = re.compile(r"\bAIMASH_CONFIRM:([0-9a-fA-F]{32})\b")
 _CALLBACK_RE = re.compile(r"^am:(yes|edit|no):([0-9a-fA-F]{32})$")
-_SAFE_NATIVE_TOOLS = frozenset({"clarify"})
+# Local, read-only orchestration primitives do not import untrusted external content.  In
+# particular, Google Ads turns normally load the pinned/guarded safety skills before proposing a
+# change; treating skill_view as external made every such proposal fail И7.  skill_manage stays
+# tainted: changing the agent's own instructions and touching Ads must be separate human turns.
+_SAFE_NATIVE_TOOLS = frozenset({"clarify", "skills_list", "skill_view", "todo"})
 
 
 @dataclass(frozen=True, slots=True)
