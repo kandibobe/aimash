@@ -125,9 +125,18 @@ def _telegram_adapter_module():
 
     Hermes v0.19 loads bundled plugins under the synthetic ``hermes_plugins`` namespace. Importing
     the source path ``plugins.platforms...`` creates a second module/class object; monkey-patching it
-    succeeds but has no effect on the running gateway. Keep the source-path fallback for CLI/tests
-    and older Hermes builds.
+    succeeds but has no effect on the running gateway. Telegram itself is a deferred bundled plugin,
+    so resolve its registry entry before importing the synthetic namespace: user plugins are loaded
+    earlier during discovery, and otherwise the live adapter does not exist yet. Keep the source-path
+    fallback for CLI/tests and older Hermes builds.
     """
+    try:
+        from gateway.platform_registry import platform_registry
+
+        platform_registry.get("telegram")
+    except (ImportError, ModuleNotFoundError):
+        pass
+
     for module_name in (
         "hermes_plugins.telegram_platform.adapter",
         "plugins.platforms.telegram.adapter",

@@ -185,6 +185,61 @@ def test_plan_state_tools_receive_trusted_token(monkeypatch):
     assert (turn.actor_user_id, turn.actor_chat_id) == (101, -202)
 
 
+def test_register_resolves_deferred_telegram_plugin_before_patching(monkeypatch):
+    plugin = _load(monkeypatch, _env())
+    activated = []
+
+    class _Adapter:
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            return None
+
+        async def edit_message(
+            self, chat_id, message_id, content, *, finalize=False, metadata=None
+        ):
+            return None
+
+        async def _handle_callback_query(self, update, context):
+            return None
+
+    def resolve(name):
+        assert name == "telegram"
+        activated.append(name)
+        adapter_module = types.ModuleType("hermes_plugins.telegram_platform.adapter")
+        adapter_module.TelegramAdapter = _Adapter
+        adapter_module.normalize_telegram_chat_id = int
+        monkeypatch.setitem(sys.modules, "hermes_plugins", types.ModuleType("hermes_plugins"))
+        monkeypatch.setitem(
+            sys.modules,
+            "hermes_plugins.telegram_platform",
+            types.ModuleType("hermes_plugins.telegram_platform"),
+        )
+        monkeypatch.setitem(sys.modules, "hermes_plugins.telegram_platform.adapter", adapter_module)
+        return SimpleNamespace(name="telegram")
+
+    platform_registry = types.ModuleType("gateway.platform_registry")
+    platform_registry.platform_registry = SimpleNamespace(get=resolve)
+    monkeypatch.setitem(sys.modules, "gateway.platform_registry", platform_registry)
+    for name in (
+        "hermes_plugins",
+        "hermes_plugins.telegram_platform",
+        "hermes_plugins.telegram_platform.adapter",
+    ):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    hooks = []
+    plugin.register(SimpleNamespace(register_hook=lambda name, fn: hooks.append((name, fn))))
+
+    assert activated == ["telegram"]
+    assert _Adapter._aimash_button_bridge is True
+    assert plugin._button_bridge_ready is True
+    assert {name for name, _ in hooks} == {
+        "pre_gateway_dispatch",
+        "pre_tool_call",
+        "post_tool_call",
+        "transform_tool_result",
+    }
+
+
 async def test_confirmation_button_becomes_exact_trusted_reply(monkeypatch):
     env = _env()
     plugin = _load(monkeypatch, env)
