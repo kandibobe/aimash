@@ -16,7 +16,7 @@ def test_deploy_reconnects_hermes_only_after_compose_health_gate():
     assert health < restart < mcp_test
     assert "EXPECTED_TOOLS=" in body
     assert "END { print value }" in body
-    assert 'case "$EXPECTED_TOOLS" in' in body
+    assert "grep -Eq '^[0-9]+$'" in body
     assert "Could not derive numeric MCP tool count" in body
     assert 'grep -Fq "Tools discovered: $EXPECTED_TOOLS"' in body
     assert "settings.hermes_write_enabled == ('mcp_server.tools_write' in sys.modules)" in body

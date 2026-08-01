@@ -211,12 +211,10 @@ jobs:
             EXPECTED_TOOLS=$(docker compose --profile mcp run --rm --no-deps -T mcp python -c \
               "from mcp_server.server import expected_tool_names; print(len(expected_tool_names()))" \
               | awk '/^[0-9]+$/ { value=$0 } END { print value }')
-            case "$EXPECTED_TOOLS" in
-              ''|*[!0-9]*)
-                echo "::error::Could not derive numeric MCP tool count from compose service"
-                exit 1
-                ;;
-            esac
+            if ! echo "$EXPECTED_TOOLS" | grep -Eq '^[0-9]+$'; then
+              echo "::error::Could not derive numeric MCP tool count from compose service"
+              exit 1
+            fi
             echo "Expected MCP tools: $EXPECTED_TOOLS"
             docker compose --profile mcp run --rm --no-deps -T mcp python -c \
               "import sys; from core.config import settings; \
