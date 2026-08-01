@@ -57,7 +57,10 @@ async def test_threshold_tuning_enforced_skips_unauthorized_account(monkeypatch)
     import reports.queries as rq
     import scheduler.threshold_tuner as tuner
     from ads import read as ads_read
-    from bot.keyboards import thr_tune_kb
+
+    def thr_tune_kb(*_args, **_kwargs):
+        return object()
+
     from core.access import grant_account_access, revoke_account_access
     from core.config import settings as cfg
     from db.session import init_db

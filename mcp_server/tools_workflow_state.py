@@ -673,7 +673,7 @@ WORKFLOW_STATE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] =
     "search_wizard_update": search_wizard_update,
     "search_wizard_finalize": search_wizard_finalize,
     "ingest_media": ingest_media,
-    "propose_profile_change": propose_profile_change,
-    "propose_profile_clear": propose_profile_clear,
+    "profile_change": propose_profile_change,
+    "profile_clear": propose_profile_clear,
     "start_client_crawl": start_client_crawl,
 }

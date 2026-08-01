@@ -49,14 +49,3 @@ def test_blank_override_is_treated_as_none():
 def test_model_choices_nonempty_with_vendor_prefix():
     assert router.MODEL_CHOICES
     assert all("/" in m for m in router.MODEL_CHOICES)
-
-
-def test_valid_model_slug_accepts_and_rejects():
-    from bot.main import _valid_model_slug
-
-    assert _valid_model_slug("anthropic/claude-sonnet-4.6") == "anthropic/claude-sonnet-4.6"
-    assert _valid_model_slug("  openai/gpt-4o  ") == "openai/gpt-4o"
-    assert _valid_model_slug("noslash") is None
-    assert _valid_model_slug("has space/model") is None
-    assert _valid_model_slug("") is None
-    assert _valid_model_slug("x/" + "y" * 200) is None

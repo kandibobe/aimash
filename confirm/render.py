@@ -280,6 +280,42 @@ def _create_media_campaign_summary(operation: str, params: dict, lang: str) -> s
     return "\n".join(lines)
 
 
+def _create_app_campaign_summary(params: dict, lang: str) -> str:
+    en = lang == "en"
+    currency = str(params.get("_account_currency") or "").upper()
+    suffix = f" {currency}" if currency else ""
+    geo = ", ".join(str(item) for item in (params.get("geo_locations") or []))
+    geo = geo or ("all locations" if en else "все локации")
+    languages = ", ".join(str(item) for item in (params.get("languages") or []))
+    languages = languages or ("all languages" if en else "все языки")
+    store = {
+        "google_play": "Google Play",
+        "apple_app_store": "Apple App Store",
+    }.get(str(params.get("app_store") or ""), str(params.get("app_store") or "—"))
+    lines = [
+        (
+            f"Create an App campaign “{params.get('campaign_name') or '—'}” — paused."
+            if en
+            else f"Создать App/UAC-кампанию «{params.get('campaign_name') or '—'}» — на паузе."
+        ),
+        f"App: {params.get('app_id') or '—'} · {store}",
+        ("Goal" if en else "Цель") + ": installs (target CPA)",
+        ("Daily budget" if en else "Дневной бюджет")
+        + f": {_fmt_micros(params.get('budget_daily_micros'), currency)}{suffix}",
+        "Target CPA: " + f"{_fmt_micros(params.get('target_cpa_micros'), currency)}{suffix}",
+        ("Geo" if en else "ГЕО") + f": {geo}",
+        ("Languages" if en else "Языки") + f": {languages}",
+        ("Prepared images" if en else "Подготовленные изображения")
+        + f": {len(params.get('image_media_ids') or [])}",
+        "YouTube: " + (", ".join(params.get("youtube_video_ids") or []) or "—"),
+        "",
+        _text_block("Headlines" if en else "Заголовки", list(params.get("headlines") or [])),
+        "",
+        _text_block("Descriptions" if en else "Описания", list(params.get("descriptions") or [])),
+    ]
+    return "\n".join(lines)
+
+
 def _geo_type_human(value: str, lang: str) -> str:
     """G11: тип гео-таргетинга человеческим языком. Пустая строка (Google вернул UNSPECIFIED) —
     пустая и на выходе: «было» неизвестно, и выдумывать его нельзя."""
@@ -560,6 +596,8 @@ def fmt_mutation_summary(
         return _create_rsa_summary(params, lng)
     if operation == "create_search_campaign":
         return _create_search_summary(params, lng, attachment=attachment)
+    if operation == "create_app_campaign":
+        return _create_app_campaign_summary(params, lng)
     if operation in (
         "create_gdn_campaign",
         "create_demand_gen_campaign",
@@ -796,6 +834,8 @@ def _mutation_summary_en(operation: str, params: dict, c: str, *, attachment: bo
         return _create_rsa_summary(params, "en")
     if operation == "create_search_campaign":
         return _create_search_summary(params, "en", attachment=attachment)
+    if operation == "create_app_campaign":
+        return _create_app_campaign_summary(params, "en")
     if operation in (
         "create_gdn_campaign",
         "create_demand_gen_campaign",

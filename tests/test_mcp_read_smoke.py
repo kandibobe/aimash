@@ -114,6 +114,10 @@ def test_envelope_err_skeleton_and_redaction():
     assert env["rows"] == [] and env["total_rows"] == 0 and env["truncated"] is False
     assert env["code_numbers"] == []
     assert env["error"] and "SUPERSECRETVALUE123" not in env["error"]  # правило 5
+    assert env["ok"] is False
+    assert env["error_type"] == "INTERNAL_ERROR"
+    assert env["message"] == env["error"]
+    assert env["suggested_action"]
 
 
 # ── Сериализация: производные метрики считает КОД ───────────────────────────────────
@@ -857,7 +861,7 @@ def test_args_are_validated_before_the_network():
     # `days` разбирается своим парсером (`_window_days` → change_event 1..29) и попал сюда не сразу:
     # докстринг `_window_days` ссылался на этот гард, пока гард отбирал инструменты по `date_from` и
     # `get_account_changes` в набор не входил вовсе. Ложная ссылка на защиту хуже отсутствия защиты.
-    checks = (("date_from", "_period", 10), ("days", "_window_days", 1))
+    checks = (("date_from", "_period", 2), ("days", "_window_days", 1))
     src = Path(tr.__file__).read_text(encoding="utf-8")
     bad: dict[str, str] = {}
     for arg, parser, at_least in checks:
@@ -883,3 +887,84 @@ def test_args_are_validated_before_the_network():
         "аргумент разбирается не раньше сети — на бессмысленном окне наружу уедет код чужой аварии "
         f"вместо invalid_argument: {bad}"
     )
+
+
+def test_analyze_account_delegates_heavy_audit_and_returns_compact_digest(monkeypatch):
+    captured = {}
+
+    async def fake_client(account):  # noqa: ARG001
+        return object()
+
+    async def fake_account_period(client, account, window):  # noqa: ARG001
+        return window
+
+    async def fake_audit(client, account, period, target_cpa=None):  # noqa: ARG001
+        return object()
+
+    def fake_payload(result):  # noqa: ARG001
+        return (
+            [
+                {
+                    "check_id": "waste.search_terms",
+                    "severity": "high",
+                    "at_risk": 125.0,
+                    "target_campaign": "Brand",
+                    "suggested_operation": "add_negative_keywords",
+                },
+                {"check_id": "coverage", "severity": "medium", "at_risk": 20.0},
+            ],
+            {
+                "customer_id": DRAFT_ACCOUNT_ID,
+                "currency": "USD",
+                "score": 61,
+                "grade": "C",
+                "total_spend": 1000.0,
+                "at_risk": 145.0,
+                "optimization_score": 0.72,
+                "lost_opportunity": 30.0,
+            },
+        )
+
+    async def fake_agent(facts, **kwargs):
+        captured.update(facts=facts, kwargs=kwargs)
+        return "В аккаунте приоритетна очистка поисковых запросов Brand."
+
+    monkeypatch.setattr(tr, "build_client_async", fake_client)
+    monkeypatch.setattr(tr, "_account_period", fake_account_period)
+    monkeypatch.setattr(tr, "gather_audit", fake_audit)
+    monkeypatch.setattr(tr, "audit_payload", fake_payload)
+    monkeypatch.setattr("agent.loop.run_analysis_agent", fake_agent)
+
+    with _read_allowed():
+        env = asyncio.run(
+            tr.analyze_account(
+                account=DRAFT_ACCOUNT_ID,
+                objective="Найди главный источник потерь",
+                period_days=30,
+            )
+        )
+
+    assert env["ok"] is True and env["error"] is None
+    assert env["analysis_agent"] == "analyst"
+    assert env["metrics"]["score"] == 61
+    assert len(env["findings"]) == 2
+    assert "recommendations" not in env
+    assert "suggested_operation" not in env["findings"][0]
+    assert "one_tap" not in env["findings"][0]
+    assert captured["kwargs"]["question"] == "Найди главный источник потерь"
+    assert captured["facts"]["findings_count"] == 2
+    assert "suggested_operation" not in captured["facts"]["findings"][0]
+
+
+def test_analyze_account_returns_self_healing_json_for_bad_objective(monkeypatch):
+    async def network_must_not_run(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("network must not run")
+
+    monkeypatch.setattr(tr, "build_client_async", network_must_not_run)
+    with _read_allowed():
+        env = asyncio.run(tr.analyze_account(account=DRAFT_ACCOUNT_ID, objective="   "))
+
+    assert env["ok"] is False
+    assert env["error_type"] == "INVALID_ARGUMENT"
+    assert env["message"] == env["error"]
+    assert "аргумент" in env["suggested_action"].casefold()

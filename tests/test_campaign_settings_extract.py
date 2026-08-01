@@ -338,23 +338,6 @@ def test_assemble_nonpositive_max_cpc_ignored():
     assert out2["cpc_bid_micros"] == 500_000  # фолбэк-дефолт (валюта неизвестна)
 
 
-def test_patch_max_cpc_applies_and_clears_source_tags():
-    """«максимальная цена за клик 75» на Этапе 1 реально меняет черновик (раньше ветки не было)."""
-    import bot.main as bm
-
-    cur = {
-        "cpc_bid_micros": 500_000,
-        "by_analogy": [],
-        "by_default": ["cpc_bid_micros"],
-    }
-    merged = bm._cc_apply_settings_patch(cur, CampaignSettings(max_cpc_units=75))
-    assert merged["cpc_bid_micros"] == 75_000_000
-    assert "cpc_bid_micros" not in merged["by_default"]
-    # <=0 не зануляет бид
-    same = bm._cc_apply_settings_patch(dict(merged), CampaignSettings(max_cpc_units=0))
-    assert same["cpc_bid_micros"] == 75_000_000
-
-
 def test_cpc_phrases_are_settings_markers():
     """3B: «цена за клик»/«стоимость клика» — правка НАСТРОЕК, не literal-replace по тексту RSA."""
     from agent.campaign_edit import is_settings_edit

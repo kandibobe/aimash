@@ -41,7 +41,7 @@ class Tier(str, Enum):
     NO_DIFF = "no_diff"
 
 
-# ── Реестр: РОВНО 41 ключ = ads.service.SUPPORTED_OPERATIONS (инвариант в тестах) ─────
+# ── Реестр: ключи = ads.service.SUPPORTED_OPERATIONS (инвариант в тестах) ─────────────
 #
 # STRICT сейчас: четыре денежные и шесть pause/resume.
 #  · update_budget/update_bid/update_keyword_bid уже сверяются через `_assert_no_drift` — регрессии
@@ -94,6 +94,7 @@ FRESHNESS_TIERS: dict[str, Tier] = {
     "create_search_campaign": Tier.NO_DIFF,
     "create_demand_gen_campaign": Tier.NO_DIFF,
     "create_video_campaign": Tier.NO_DIFF,
+    "create_app_campaign": Tier.NO_DIFF,
     "add_sitelinks": Tier.NO_DIFF,
     "add_callouts": Tier.NO_DIFF,
     "add_structured_snippets": Tier.NO_DIFF,

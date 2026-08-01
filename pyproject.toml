@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aimash"
 version = "1.0.0"
-description = "AI-агент управления Google Ads через Telegram (исполнитель с подтверждением каждого изменения)"
+description = "Автономный Hermes-агент управления Google Ads через typed Function Calling"
 requires-python = ">=3.12"
 dependencies = [
     "aiogram>=3.13",

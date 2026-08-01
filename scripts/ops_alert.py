@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Host-level Aimash health watcher and Telegram operational notifier.
 
-Runs outside Docker so it can report a dead bot/scheduler.  No secret is printed: the bot token is
+Runs outside Docker so it can report a dead scheduler/database or Hermes gateway. No secret is printed: the bot token is
 read from the untracked env file and used only to construct the Telegram request in memory.
 """
 
@@ -32,7 +32,7 @@ ENV_FILES = (
     Path("/root/.hermes/.env"),
 )
 STATE_PATH = Path("/var/lib/aimash-ops-watch/state.json")
-CONTAINERS = ("aimash-bot", "aimash-scheduler", "aimash-pg", "aimash-backup")
+CONTAINERS = ("aimash-scheduler", "aimash-pg", "aimash-backup")
 _CHAT_ID_RE = re.compile(r"-?[1-9][0-9]{4,19}")
 _SEVERITY_RANK = {"info": 0, "success": 0, "warning": 1, "critical": 2}
 
@@ -152,7 +152,6 @@ def _systemctl_user_env() -> dict[str, str]:
 def _recent_conflict_marker(run: Callable[..., str] = _run) -> str:
     chunks: list[str] = []
     commands = (
-        ["docker", "logs", "--since", "90s", "aimash-bot"],
         [
             "journalctl",
             "--user",

@@ -38,7 +38,53 @@ _MAX_EVENTS = 2048
 _EVENT_TTL_S = 600
 _MCP_PREFIX = "mcp__aimash__"
 _EXECUTE_TOOL = f"{_MCP_PREFIX}execute_confirmed"
-_PROPOSE_PREFIX = f"{_MCP_PREFIX}propose_"
+_ACTION_TOOLS = frozenset(
+    f"{_MCP_PREFIX}{name}"
+    for name in (
+        "update_budget",
+        "update_bid",
+        "update_keyword_bid",
+        "set_bidding_strategy",
+        "add_keywords",
+        "remove_keywords",
+        "add_negative_keywords",
+        "remove_negative_keywords",
+        "add_negatives_to_shared_set",
+        "attach_shared_set",
+        "pause_campaign",
+        "resume_campaign",
+        "launch_campaign",
+        "update_campaign",
+        "remove_campaign",
+        "set_campaign_network",
+        "set_campaign_display_network",
+        "set_campaign_geo_target_type",
+        "pause_ad_group",
+        "resume_ad_group",
+        "remove_ad_group",
+        "pause_ad",
+        "resume_ad",
+        "remove_ad",
+        "set_geo_proximity",
+        "set_geo_location",
+        "attach_audience",
+        "detach_audience",
+        "create_rsa",
+        "create_search_campaign",
+        "create_gdn_campaign",
+        "create_demand_gen_campaign",
+        "create_video_campaign",
+        "create_app_campaign",
+        "add_sitelinks",
+        "add_callouts",
+        "add_structured_snippets",
+        "attach_image_asset",
+        "add_call_asset",
+        "add_promotion",
+        "add_price_asset",
+        "remove_asset_link",
+    )
+)
 _PLAN_STATE_TOOLS = frozenset(
     {
         f"{_MCP_PREFIX}list_pending_proposals",
@@ -59,6 +105,8 @@ _PLAN_STATE_TOOLS = frozenset(
         f"{_MCP_PREFIX}search_wizard_finalize",
         f"{_MCP_PREFIX}ingest_media",
         f"{_MCP_PREFIX}start_client_crawl",
+        f"{_MCP_PREFIX}profile_change",
+        f"{_MCP_PREFIX}profile_clear",
     }
 )
 _INGEST_MEDIA_TOOL = f"{_MCP_PREFIX}ingest_media"
@@ -340,7 +388,7 @@ def _verify_artifact_token(token: str, *, now: int | None = None) -> _Artifact:
     media_type = str(payload.get("media_type") or "")
     size = int(payload.get("size") or 0)
     digest = str(payload.get("sha256") or "")
-    if payload.get("container") != "aimash-bot" or not _ARTIFACT_PATH_RE.fullmatch(path):
+    if payload.get("container") != "aimash-mcp" or not _ARTIFACT_PATH_RE.fullmatch(path):
         raise ValueError("artifact source invalid")
     if not filename or filename != str(payload.get("filename") or "") or len(filename) > 120:
         raise ValueError("artifact filename invalid")
@@ -350,7 +398,7 @@ def _verify_artifact_token(token: str, *, now: int | None = None) -> _Artifact:
         raise ValueError("artifact digest invalid")
     return _Artifact(
         token=token,
-        container="aimash-bot",
+        container="aimash-mcp",
         path=path,
         filename=filename,
         media_type=media_type,
@@ -577,14 +625,14 @@ def _copy_trusted_inbound_media(inbound: _Inbound) -> list[dict]:
             if not _INBOUND_CONTAINER_RE.fullmatch(destination):
                 continue
             subprocess.run(
-                ["docker", "exec", "aimash-bot", "mkdir", "-p", "/tmp/aimash_inbound"],
+                ["docker", "exec", "aimash-mcp", "mkdir", "-p", "/tmp/aimash_inbound"],
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=10,
             )
             subprocess.run(
-                ["docker", "cp", str(resolved), f"aimash-bot:{destination}"],
+                ["docker", "cp", str(resolved), f"aimash-mcp:{destination}"],
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -639,9 +687,7 @@ def _signed_token(
 
 def _is_aimash_write(tool_name: str) -> bool:
     return (
-        tool_name == _EXECUTE_TOOL
-        or tool_name.startswith(_PROPOSE_PREFIX)
-        or tool_name in _PLAN_STATE_TOOLS
+        tool_name == _EXECUTE_TOOL or tool_name in _ACTION_TOOLS or tool_name in _PLAN_STATE_TOOLS
     )
 
 

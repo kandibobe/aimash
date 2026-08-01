@@ -86,7 +86,7 @@ MAX_IDEAS = 200  # сколько идей ВОЗВРАЩАЕМ (топ по о�
 # Жёсткий лимит Google (proto v24, KeywordSeed / KeywordAndUrlSeed): «Requires at least one keyword
 # and no more than 20 keywords». Больше 20 сидов ⇒ InvalidArgument на ВЕСЬ запрос (у менеджера это
 # выглядело как «подбор не работает»). Кап держим здесь, на границе SDK, — это последний рубеж;
-# честное сообщение об усечении даёт UI (bot.handlers.keywords_flow), схема тула — не выше лимита.
+# честное сообщение об усечении даёт Hermes/MCP transport, схема тула — не выше лимита.
 MAX_SEEDS = 20
 _FETCH_CEILING = 500  # сколько максимум тянем из API ДО сортировки (бюджет ~1 запроса)
 

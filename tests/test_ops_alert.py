@@ -22,15 +22,16 @@ def _load():
 ops = _load()
 
 
-def _snapshot(*, bot_health="healthy", bot_restarts=0, gateway_pid=10, gateway="active"):
+def _snapshot(
+    *, scheduler_health="healthy", scheduler_restarts=0, gateway_pid=10, gateway="active"
+):
     return {
         "containers": {
-            "aimash-bot": {
+            "aimash-scheduler": {
                 "status": "running",
-                "health": bot_health,
-                "restarts": bot_restarts,
+                "health": scheduler_health,
+                "restarts": scheduler_restarts,
             },
-            "aimash-scheduler": {"status": "running", "health": "healthy", "restarts": 0},
         },
         "gateway": {"state": gateway, "pid": gateway_pid},
         "backup_timer": "active",
@@ -41,15 +42,15 @@ def _snapshot(*, bot_health="healthy", bot_restarts=0, gateway_pid=10, gateway="
 
 def test_compare_reports_restart_failure_recovery_and_gateway_pid():
     old = _snapshot()
-    broken = _snapshot(bot_health="unhealthy", bot_restarts=1, gateway_pid=11)
+    broken = _snapshot(scheduler_health="unhealthy", scheduler_restarts=1, gateway_pid=11)
     text = "\n".join(event.text for event in ops.compare(old, broken))
-    assert "aimash-bot перезапустился" in text
-    assert "aimash-bot недоступен" in text
+    assert "aimash-scheduler перезапустился" in text
+    assert "aimash-scheduler недоступен" in text
     assert "Hermes gateway перезапущен" in text
 
-    recovered = _snapshot(bot_restarts=1, gateway_pid=11)
+    recovered = _snapshot(scheduler_restarts=1, gateway_pid=11)
     text = "\n".join(event.text for event in ops.compare(broken, recovered))
-    assert "aimash-bot восстановлен" in text
+    assert "aimash-scheduler восстановлен" in text
 
 
 def test_compare_reports_gateway_down_disk_backup_and_409():
@@ -136,7 +137,7 @@ def test_failed_delivery_does_not_advance_state(monkeypatch, tmp_path):
     path = tmp_path / "state.json"
     old = _snapshot()
     path.write_text(json.dumps(old), encoding="utf-8")
-    new = _snapshot(bot_restarts=1)
+    new = _snapshot(scheduler_restarts=1)
     monkeypatch.setattr(ops, "collect_snapshot", lambda: new)
     monkeypatch.setattr(ops, "send_telegram", lambda *_a, **_kw: False)
     assert ops.run_check(env={}, state_path=path) == 1
@@ -166,10 +167,10 @@ def test_container_snapshot_reads_top_level_restart_count():
         commands.append(command)
         return raw
 
-    got = ops._container_state("aimash-bot", run)
+    got = ops._container_state("aimash-scheduler", run)
     assert got == {"status": "running", "health": "healthy", "restarts": 4}
     assert commands == [
-        ["docker", "inspect", "-f", "{{json .State}}|{{.RestartCount}}", "aimash-bot"]
+        ["docker", "inspect", "-f", "{{json .State}}|{{.RestartCount}}", "aimash-scheduler"]
     ]
 
 

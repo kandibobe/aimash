@@ -1429,6 +1429,7 @@ _OP_HUMAN = {
     "create_rsa": "создать RSA",
     "create_gdn_campaign": "создать GDN-кампанию",
     "create_search_campaign": "создать Search-кампанию",
+    "create_app_campaign": "создать App/UAC-кампанию",
 }
 _AUDIT_STATUS_EN = {
     "applied": ("✅", "applied"),
@@ -1463,6 +1464,7 @@ _OP_HUMAN_EN = {
     "create_rsa": "create RSA",
     "create_gdn_campaign": "create GDN campaign",
     "create_search_campaign": "create Search campaign",
+    "create_app_campaign": "create App/UAC campaign",
 }
 
 
@@ -1516,6 +1518,7 @@ def fmt_mutation_result(operation: str, result: object, lang: str | None = None)
         "create_gdn_campaign",
         "create_demand_gen_campaign",
         "create_video_campaign",
+        "create_app_campaign",
     ):
         name = str(result.get("campaign_name") or "")
         head = (
@@ -2295,6 +2298,7 @@ def fmt_asset_spec_label(spec: dict, lang: str | None = None) -> str:
             "price": "Prices",
             "promotion": "Promotion",
             "lead_form": "Lead form",
+            "app": "App",
         }
         if en
         else {
@@ -2307,6 +2311,7 @@ def fmt_asset_spec_label(spec: dict, lang: str | None = None) -> str:
             "price": "Цены",
             "promotion": "Акция",
             "lead_form": "Лид-форма",
+            "app": "Приложение",
         }
     ).get(family, family)
     if family == "sitelinks":
@@ -2322,6 +2327,8 @@ def fmt_asset_spec_label(spec: dict, lang: str | None = None) -> str:
         return f"{fam_h}: {p.get('phone_number', '')}"
     if family == "lead_form":
         return f"{fam_h}: {p.get('headline', '')}"
+    if family == "app":
+        return f"{fam_h}: {p.get('link_text', '')} ({p.get('app_id', '')})"
     if family == "price":
         off = "offers" if en else "оф."
         return f"{fam_h}: {len(p.get('offerings') or [])} {off} ({p.get('currency', '')})"
@@ -2376,6 +2383,12 @@ def _asset_spec_lines(spec: dict, en: bool, esc) -> list[str]:
         lbl = "Phone" if en else "Телефон"
         cc = esc(str(p.get("country_code") or ""))
         return [f"  • {lbl}: {esc(str(p.get('phone_number') or ''))} ({cc})".replace(" ()", "")]
+    if family == "app":
+        lbl = "App" if en else "Приложение"
+        store = esc(str(p.get("app_store") or ""))
+        app_id = esc(str(p.get("app_id") or ""))
+        link_text = esc(str(p.get("link_text") or ""))
+        return [f"  • {lbl}: {link_text} · {store} · {app_id}"]
     return [f"  • {head}"]
 
 

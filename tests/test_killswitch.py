@@ -108,7 +108,7 @@ def test_compose_uses_one_persistent_read_only_safety_flag():
     compose = yaml.safe_load((root / "docker-compose.yml").read_text(encoding="utf-8"))
     expected_path = "/run/aimash-safety/KILL_SWITCH"
     expected_mount = "./runtime/safety:/run/aimash-safety:ro"
-    for service in ("bot", "scheduler", "mcp"):
+    for service in ("scheduler", "mcp"):
         cfg = compose["services"][service]
         assert cfg["environment"]["KILL_SWITCH_FILE"] == expected_path
         assert expected_mount in cfg["volumes"]

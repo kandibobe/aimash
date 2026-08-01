@@ -54,6 +54,57 @@ ERROR_CODES: frozenset[str] = frozenset(
 DEFAULT_LIMIT = 50
 
 
+_ERROR_TYPES: dict[str, str] = {
+    "forbidden_account": "ACCOUNT_NOT_AVAILABLE",
+    "quota_exhausted": "QUOTA_EXHAUSTED",
+    "timeout": "UPSTREAM_TIMEOUT",
+    "invalid_argument": "INVALID_ARGUMENT",
+    "upstream_denied": "UPSTREAM_ACCESS_DENIED",
+    "upstream_error": "UPSTREAM_ERROR",
+    "internal": "INTERNAL_ERROR",
+    "refused": "REQUEST_REFUSED",
+}
+
+_SUGGESTED_ACTIONS: dict[str, str] = {
+    "forbidden_account": "Вызови list_accounts, выбери доступный account и повтори запрос.",
+    "quota_exhausted": "Сократи объём чтения или повтори запрос после обновления квоты.",
+    "timeout": "Повтори тот же вызов один раз; затем сузь период или выборку.",
+    "invalid_argument": "Исправь аргументы по полю message и повтори вызов.",
+    "upstream_denied": "Проверь доступный account через list_accounts и повтори запрос.",
+    "upstream_error": "Повтори вызов один раз; при повторе используй более узкий READ-инструмент.",
+    "internal": "Повтори вызов один раз; при повторе выбери альтернативный инструмент.",
+    "refused": "Исправь запрос по полю message и сформируй действие заново.",
+}
+
+
+def self_healing_fields(
+    *,
+    success: bool,
+    error_code: str | None = None,
+    message: str | None = None,
+    suggested_action: str | None = None,
+) -> dict[str, Any]:
+    """Совместимое расширение MCP-конверта для автономного восстановления Hermes.
+
+    Старые ``error``/``error_code`` остаются стабильными. Новые поля дают модели один явный
+    следующий шаг без разбора локализованного текста ошибки.
+    """
+    if success:
+        return {
+            "ok": True,
+            "error_type": None,
+            "message": None,
+            "suggested_action": None,
+        }
+    code = error_code if error_code in ERROR_CODES else "internal"
+    return {
+        "ok": False,
+        "error_type": _ERROR_TYPES[code],
+        "message": message or "Инструмент не смог выполнить запрос.",
+        "suggested_action": suggested_action or _SUGGESTED_ACTIONS[code],
+    }
+
+
 def paginate(rows: list, *, offset: int = 0, limit: int = DEFAULT_LIMIT) -> tuple[list, int, bool]:
     """(страница, total, truncated). offset<0 → 0; limit<1 → 1. total — по ПОЛНОМУ списку до среза."""
     total = len(rows)
@@ -99,6 +150,7 @@ def ok(
         "code_numbers": sorted(collect_numbers(payload)),
         "error": None,
         "error_code": None,
+        **self_healing_fields(success=True),
     }
     if reader_capped:
         env["reader_limit"] = int(reader_limit)  # сколько строк тянул ридер — модель видит потолок
@@ -135,6 +187,7 @@ def client_context(text: str, *, customer_id: str) -> dict[str, Any]:
         "has_profile": bool(text),
         "error": None,
         "error_code": None,
+        **self_healing_fields(success=True),
     }
 
 
@@ -178,6 +231,8 @@ def err(exc: BaseException) -> dict[str, Any]:
     Форма совпадает с ok() по ключам-скелету, чтобы клиент не различал ветки структурно."""
     from mcp_server.redact import redact_error
 
+    message = redact_error(exc)
+    error_code = classify_error(exc)
     return {
         "rows": [],
         "total_rows": 0,
@@ -188,8 +243,9 @@ def err(exc: BaseException) -> dict[str, Any]:
         "next_offset": None,
         "reader_capped": False,
         "code_numbers": [],
-        "error": redact_error(exc),
-        "error_code": classify_error(exc),
+        "error": message,
+        "error_code": error_code,
+        **self_healing_fields(success=False, error_code=error_code, message=message),
     }
 
 
@@ -231,6 +287,7 @@ def proposed(
         "preview": anchored_preview,
         "error": None,
         "error_code": None,
+        **self_healing_fields(success=True),
     }
 
 
@@ -251,4 +308,5 @@ def refused(text: str, *, error_code: str = "refused") -> dict[str, Any]:
         "preview": None,
         "error": text,
         "error_code": error_code,
+        **self_healing_fields(success=False, error_code=error_code, message=text),
     }

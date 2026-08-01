@@ -69,7 +69,10 @@ async def test_tuner_job_offers_but_never_writes_thresholds(monkeypatch):
     from sqlalchemy import delete, select
 
     import core.access as acc
-    from bot.keyboards import thr_tune_kb
+
+    def thr_tune_kb(*_args, **_kwargs):
+        return object()
+
     from core.config import settings as cfg
     from db.models import UserSettings
     from db.session import Session, init_db
@@ -140,57 +143,3 @@ async def test_tuner_job_offers_but_never_writes_thresholds(monkeypatch):
 
 
 # ── /myschedule: персист + live; D9 — рантайм-whitelist в персональных расписаниях ────
-async def test_save_report_schedule_roundtrip_and_live_off(monkeypatch):
-    from sqlalchemy import select
-
-    import bot.main as bm
-    from db.models import UserSettings
-    from db.session import Session, init_db
-
-    await init_db()
-    chat = 6502
-    await bm._save_report_schedule(chat, "0 9 * * 1-5")
-    async with Session() as s:
-        cur = (
-            await s.execute(
-                select(UserSettings.report_schedule).where(UserSettings.chat_id == chat)
-            )
-        ).scalar_one_or_none()
-    assert cur == "0 9 * * 1-5"
-    await bm._save_report_schedule(chat, None)  # off → NULL (вернулись на глобальное)
-    async with Session() as s:
-        cur = (
-            await s.execute(
-                select(UserSettings.report_schedule).where(UserSettings.chat_id == chat)
-            )
-        ).scalar_one_or_none()
-    assert cur is None
-    # SCHED нет (тесты) → live-применение честно говорит «после рестарта»
-    assert await bm._apply_report_schedule_live(None, chat, "0 9 * * *") is False
-
-
-async def test_register_user_schedules_sees_runtime_whitelist(monkeypatch):
-    """D9: оператор из БД-whitelist (/adduser) с личным расписанием получает per-chat джобу."""
-    import core.access as ca
-    from db.session import init_db
-    from scheduler.service import register_user_report_schedules
-
-    await init_db()
-    chat = 6503
-    import bot.main as bm
-
-    await bm._save_report_schedule(chat, "0 8 * * *")
-
-    async def _wl():
-        return {chat}  # env пуст, оператор добавлен рантаймом
-
-    monkeypatch.setattr(ca, "whitelisted_ids", _wl)
-
-    added: list[str] = []
-
-    class FakeSched:
-        def add_job(self, fn, trig, **kw):
-            added.append(kw.get("id", ""))
-
-    n = await register_user_report_schedules(FakeSched(), bot=None)
-    assert n == 1 and added == [f"scheduled_report_{chat}"]

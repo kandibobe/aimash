@@ -70,14 +70,8 @@ os.environ["KILL_SWITCH_FILE"] = ""
 os.environ["GOOGLE_ADS_LOGIN_CUSTOMER_ID"] = ""
 os.environ["GOOGLE_ADS_LOGIN_CUSTOMER_IDS"] = ""
 
-# bot.main — ПЕРВЫМ (как в проде: `python -m bot.main` — точка входа), ПОСЛЕ форса env выше.
-# Гарантирует, что ни один хендлер-модуль не импортируется РАНЬШЕ bot.main. Иначе его
-# `import bot.main as bm` втягивает bot.main на середине себя: register_all регистрирует хендлеры
-# этого модуля уже ПОСЛЕ on_text (catch-all перестаёт быть последним) и теряет ре-экспорт имён —
-# сессионный флак «btn_report пропал»/«on_text не последний», зависящий от порядка тест-модулей.
-# Класс закрыт для всей сессии; страховка имён — module __getattr__ в bot/main.py, инвариант —
-# tests/test_handler_order.py.
-import bot.main  # noqa: E402,F401
+# v3: conftest остаётся bot-free. Legacy handler-тесты импортируют свой удаляемый контур явно;
+# MCP/core/scheduler тесты больше не платят import-time стоимость aiogram и bot.main.
 from ads.freshness import Snapshot, SnapshotKind, attach_freshness  # noqa: E402
 
 

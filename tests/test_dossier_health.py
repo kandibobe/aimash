@@ -19,8 +19,6 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-import pytest  # noqa: E402
-
 from audit.engine import build_audit  # noqa: E402
 from clients.dossier_render import (  # noqa: E402
     HEALTH_TOP,
@@ -127,95 +125,3 @@ def test_health_never_reaches_the_schema_the_store_or_the_prompt():
         assert "audit.collect" not in src and "gather_audit" not in src, (
             f"{py.name}: полный аудит (23 чтения) в слое клиентов — собирает bot-слой на тап человека"
         )
-
-
-async def test_dossier_trend_reads_the_baseline_but_never_writes_it(monkeypatch):
-    """record=False: тренд посчитан, снапшот НЕ записан. Гард на флаг двусторонний — с record=True
-    запись есть (иначе тест зелен на сломанном коде)."""
-    import audit.snapshot as snap
-    import bot.main as bm
-    import reports.tz as tz
-
-    written: list = []
-
-    async def _today(client, acct, **kw):
-        return date(2026, 6, 25)
-
-    async def _prev(acct, *, before_date, period_days):
-        return SimpleNamespace(
-            score=70, score_model_version="v1", snapshot_date="2026-06-18", period_days=period_days
-        )
-
-    async def _rec(result, *, snapshot_date, period_days):
-        written.append(snapshot_date)
-        return True
-
-    monkeypatch.setattr(tz, "account_today", _today)
-    monkeypatch.setattr(snap, "previous_snapshot", _prev)
-    monkeypatch.setattr(snap, "record_snapshot", _rec)
-    result = build_audit(_report())
-    result.score_model_version = "v1"
-
-    line = await bm._audit_trend_line(result, object(), "7753643025", 30, "ru", record=False)
-    assert "Тренд" in line and "70/100" in line  # прочитали и сравнили
-    assert written == [], "досье записало снапшот — baseline пишет только /audit"
-
-    await bm._audit_trend_line(result, object(), "7753643025", 30, "ru")
-    assert written == ["2026-06-25"], "флаг record не гейтит запись — гард бесполезен"
-
-
-async def test_cli_dossier_text_collects_full_audit_and_writes_nothing(monkeypatch):
-    """Тап по «📄 Досье» → полный gather_audit по аккаунту досье, за 30 дней, с target_cpa; в БД —
-    ни строчки (ни досье, ни снапшот)."""
-    import ads.client as ads_client
-    import audit.collect as collect
-    import bot.main as bm
-    import reports.tz as tz
-
-    calls: list = []
-
-    async def _client(cid):
-        return SimpleNamespace(cid=cid)
-
-    async def _period(client, cid, period, **kw):
-        return period
-
-    async def _gather(client, acct, period, **kw):
-        calls.append((acct, period.days, kw.get("target_cpa")))
-        return build_audit(_report())
-
-    async def _cpa(chat_id, cid):
-        return 12.0
-
-    async def _trend(result, client, acct, days, lang, *, record=True):
-        assert record is False, "досье не вправе писать baseline"
-        return ""
-
-    monkeypatch.setattr(ads_client, "build_client_async", _client)
-    monkeypatch.setattr(tz, "account_period", _period)
-    monkeypatch.setattr(collect, "gather_audit", _gather)
-    monkeypatch.setattr(bm, "_load_target_cpa", _cpa)
-    monkeypatch.setattr(bm, "_audit_trend_line", _trend)
-
-    base = render_markdown(_dossier())
-    out = await bm._cli_dossier_text(1, "7753643025", base)
-    assert calls == [("7753643025", 30, 12.0)]
-    assert "🩺 Здоровье аккаунта" in out
-    assert out.index("🩺 Здоровье аккаунта") < out.index("## Кратко")
-
-
-async def test_cli_dossier_text_survives_a_missing_read_grant(monkeypatch):
-    """Нет read-доступа к аккаунту (или упал сбор) → файл приходит БЕЗ секции. Кнопка не падает."""
-    import ads.client as ads_client
-    import bot.main as bm
-
-    async def _denied(cid):
-        raise PermissionError("read denied")
-
-    monkeypatch.setattr(ads_client, "build_client_async", _denied)
-    base = render_markdown(_dossier())
-    assert await bm._cli_dossier_text(1, "7753643025", base) == base
-
-
-if __name__ == "__main__":  # pragma: no cover
-    pytest.main([__file__, "-q"])

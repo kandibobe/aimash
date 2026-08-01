@@ -25,8 +25,6 @@ from types import SimpleNamespace
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import openpyxl  # noqa: E402
-import pytest  # noqa: E402
-
 from audit.engine import build_audit  # noqa: E402
 from reports.findings import (  # noqa: E402
     CLICKS_COL,
@@ -510,51 +508,3 @@ class _FakeMessage:
 
     async def answer(self, text, **kw):
         self.answers.append(text)
-
-
-async def test_audit_export_cold_cache_is_stale(monkeypatch):
-    """Холодный кэш (рестарт бота / старая клавиатура) → stale-алерт; выгрузка НЕ зовётся."""
-    import bot.main as bm
-
-    monkeypatch.setattr(bm, "_AUDIT_EXPORT_CACHE", {})
-    called: list = []
-
-    async def _no(*a, **kw):
-        called.append(a)
-
-    monkeypatch.setattr(bm, "_run_audit_sheets", _no)
-    monkeypatch.setattr(bm, "_run_audit_xlsx", _no)
-    m = _FakeMessage()
-    await bm._run_audit_export(m, "sheets", 4242)
-    assert called == []  # публикация не звана (аудит не пересобираем)
-    assert m.answers and "audit" in m.answers[0].lower() or "аудит" in m.answers[0].lower()
-
-
-async def test_audit_export_warm_cache_uses_cached_result(monkeypatch):
-    """Тёплый кэш → _run_audit_sheets получает ТОТ ЖЕ result из кэша (пере-сбор аудита не гоняем)."""
-    import bot.main as bm
-
-    r = _result()
-    monkeypatch.setattr(bm, "_AUDIT_EXPORT_CACHE", {4242: (r, "7753643025")})
-    seen: list = []
-
-    async def _sheets(m, result, acct):
-        seen.append((result, acct))
-
-    async def _xlsx(m, result, acct):
-        seen.append(("xlsx", result, acct))
-
-    monkeypatch.setattr(bm, "_run_audit_sheets", _sheets)
-    monkeypatch.setattr(bm, "_run_audit_xlsx", _xlsx)
-
-    await bm._run_audit_export(_FakeMessage(), "sheets", 4242)
-    assert seen == [(r, "7753643025")]  # тот же объект — без повторного gather
-    assert seen[0][0] is r
-
-    seen.clear()
-    await bm._run_audit_export(_FakeMessage(), "xlsx", 4242)
-    assert seen == [("xlsx", r, "7753643025")]
-
-
-if __name__ == "__main__":  # pragma: no cover
-    pytest.main([__file__, "-q"])

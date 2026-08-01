@@ -615,7 +615,9 @@ async def test_digest_action_button_and_proactive_antidup(monkeypatch):
     им карточки шлёт run_recommendations_digest). Персистнется ТОЛЬКО показанная рекомендация."""
     from sqlalchemy import delete
 
-    from bot.keyboards import advise_feedback_kb
+    def advise_feedback_kb(*_args, **_kwargs):
+        return object()
+
     from db.models import UserSettings
     from db.session import Session, init_db
     from scheduler import delivery, jobs

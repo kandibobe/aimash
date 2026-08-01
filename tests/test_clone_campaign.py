@@ -238,30 +238,6 @@ def _cfg_with_keywords(pairs: list[tuple[str, str]]):
         return read_campaign_config(_Client(ga), DRAFT_ACCOUNT_ID, "Источник")
 
 
-async def test_clone_params_keep_per_keyword_match_types():
-    """C4: типы соответствия источника переносятся 1:1. Раньше всем ключам клона ставился тип
-    ПЕРВОГО ключа — «настройки как в кампании X» молча врало на смешанном списке."""
-    import bot.main as bm
-
-    cfg = _cfg_with_keywords([("купить телефон", "EXACT"), ("смартфон", "BROAD")])
-    params, _bu, _dr, _rg = await bm._search_params_from_cfg(cfg, campaign_name="Клон")
-    assert params["keywords"] == ["купить телефон", "смартфон"]
-    assert params["keyword_match_types"] == ["exact", "broad"]
-
-
-async def test_clone_params_cap_is_schema_ceiling_not_50():
-    """C4: клон резал ключи [:50] при потолке схемы MAX_CAMPAIGN_KEYWORDS — молча (и усечение
-    персистилось в шаблон). Теперь режем по реальному потолку."""
-    import bot.main as bm
-
-    cfg = _cfg_with_keywords([(f"ключ {i}", "PHRASE") for i in range(120)])
-    params, _bu, _dr, _rg = await bm._search_params_from_cfg(cfg, campaign_name="Клон")
-    assert len(params["keywords"]) == 120  # раньше было бы 50
-    assert len(params["keyword_match_types"]) == 120
-    assert 120 <= bm.MAX_CAMPAIGN_KEYWORDS
-
-
-# ── сводка: честно про «не переносится» ──────────────────────────────────────────────
 def test_clone_summary_mentions_not_transferred():
     params = {
         "final_url": "https://shop.ua",

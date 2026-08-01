@@ -135,7 +135,7 @@ jobs:
             docker builder prune -f --max-used-space 4GB
             docker compose ps
             # B1: пост-деплой проверка здоровья. `compose up` возвращается сразу — деплой считался бы
-            # «зелёным», даже если бот крэш-лупит (битая миграция / плохой рантайм-конфиг / 409).
+            # «зелёным», даже если scheduler/DB крэш-лупит (битая миграция / плохой рантайм-конфиг).
             # Семплируем состояние контейнера 3× за ~35с: крэш-луп не удержит status=running на всех
             # проверках. Не running → script_stop=true валит job (красный деплой видно сразу).
             #
@@ -146,7 +146,7 @@ jobs:
             DEPLOY_STAGE="container healthcheck"
             echo "⏳ Пост-деплой проверка здоровья контейнеров..."
             sleep 20
-            for PAIR in aimash-bot:bot aimash-scheduler:scheduler; do
+            for PAIR in aimash-pg:postgres aimash-scheduler:scheduler aimash-backup:backup; do
               CNT=${PAIR%%:*}
               SVC=${PAIR##*:}
               PREV=""
@@ -174,8 +174,8 @@ jobs:
               echo "✅ $CNT running (деплой здоров)"
             done
 
-            # Контур A держит MCP как stdio-child `docker exec` внутри aimash-bot. Пересборка
-            # контейнера обрывает pipe, даже когда оба compose-сервиса healthy. SSH deploy user
+            # Hermes держит MCP как one-shot compose child. Surface sync поднимает свежий child из
+            # только что собранного aimash-core image. SSH deploy user
             # на production VPS измерен как root (31.07.2026), то есть он управляет тем же root
             # systemd --user gateway; если это когда-либо изменят, деплой обязан упасть, а не
             # оставить Hermes в тихо деградировавшем состоянии.
@@ -205,9 +205,9 @@ jobs:
             test -n "$HERMES_BACKUP"
             tar tzf "$HERMES_BACKUP" | grep -q '/state.db$'
             tar tzf "$HERMES_BACKUP" | grep -q '/\.env$'
-            EXPECTED_TOOLS=$(docker exec -i aimash-bot python -c \
+            EXPECTED_TOOLS=$(docker compose --profile mcp run --rm --no-deps -T mcp python -c \
               "from mcp_server.server import expected_tool_names; print(len(expected_tool_names()))")
-            docker exec -i aimash-bot python -c \
+            docker compose --profile mcp run --rm --no-deps -T mcp python -c \
               "import sys; from core.config import settings; \
               from mcp_server.server import expected_tool_names; expected_tool_names(); \
               assert settings.hermes_write_enabled == ('mcp_server.tools_write' in sys.modules)"
@@ -237,10 +237,6 @@ jobs:
             echo "$MCP_TEST"
             echo "$MCP_TEST" | grep -Fq "Tools discovered: $EXPECTED_TOOLS"
             sleep 5
-            if docker logs --since 2m aimash-bot 2>&1 | grep -Fq "409 Conflict"; then
-              echo "::error::legacy Telegram bot получил 409 Conflict после deploy"
-              exit 1
-            fi
             if journalctl --user -u hermes-gateway.service --since '-2 minutes' --no-pager 2>&1 \
               | grep -Fq "409 Conflict"; then
               echo "::error::Hermes Telegram gateway получил 409 Conflict после deploy"
@@ -252,5 +248,5 @@ jobs:
             python3 scripts/ops_alert.py send \
               --severity success \
               --title "Aimash deploy completed" \
-              --body "SHA $GIT_SHA; bot и scheduler healthy; Hermes gateway PID $GW_PID_AFTER; MCP tools: $EXPECTED_TOOLS."
+              --body "SHA $GIT_SHA; postgres/scheduler/backup healthy; Hermes gateway PID $GW_PID_AFTER; MCP tools: $EXPECTED_TOOLS."
             trap - EXIT

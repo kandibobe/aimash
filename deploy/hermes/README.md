@@ -1,18 +1,18 @@
 # Ранбук: поднять Hermes (Контур A) рядом с боевым ботом на VPS
 
 READ-пилот пивота Aimash → Hermes. Hermes-агент отвечает в Telegram и через
-MCP-сервер `aimash` (пакет `mcp_server/`) всегда отдаёт 38 READ-инструментов + 1 META. При явном
-`HERMES_WRITE_ENABLED=true` он добавляет 53 agent-first PLAN/state + 1 WRITE через HMAC trusted Telegram transport;
+MCP-сервер `aimash` (пакет `mcp_server/`) всегда отдаёт 24 READ-инструмента + 1 META. При явном
+`HERMES_WRITE_ENABLED=true` он добавляет 55 agent-first PLAN/state + 1 WRITE через HMAC trusted Telegram transport;
 при false модуль WRITE физически не импортируется.
 
 **Где что написано:** нормативный канон — три исходных DOCX заказчика; их текстовое зеркало — `ТЗ.md`,
 а производный implementation profile и границы автономии — [`/SPEC.md`](../../SPEC.md). Этот файл —
 только про установку.
 
-**Топология.** Текущий aiogram-бот (`aimash-bot` в Docker Compose) остаётся жив — он же окружение для
-MCP-сервера. Hermes ставится рядом отдельным systemd user-сервисом и зовёт MCP через `docker exec` в
-контейнер бота (паритет окружения: `DATABASE_URL=@postgres:5432`, `GOOGLE_ADS_*`,
-`SECRETS_ENCRYPTION_KEY`, OAuth-кэш — всё из контейнера, без host-venv).
+**Топология v3.** Telegram принимает Hermes gateway. Aimash предоставляет отдельные контейнеры
+`scheduler` и MCP; legacy aiogram poller отсутствует. Hermes запускает MCP через
+`docker compose --profile mcp run --rm --no-deps -T mcp`, используя то же окружение Google Ads/БД
+без зависимости от постоянно работающего bot-контейнера.
 
 **Артефакты рядом:** `config.yaml` (эталон `~/.hermes/config.yaml`), `SOUL.md` (идентичность агента —
 слот №1 системного промпта, эталон `~/.hermes/SOUL.md`), `hermes.env.example` (шаблон `~/.hermes/.env`),
@@ -198,7 +198,7 @@ hermes mcp test aimash             # 25 в READ-режиме, 65 при прин
 
 ## Что прогнано, что нет
 
-MCP READ-слой (`mcp_server/`) отдаёт чистые редактированные конверты на всех 38 READ-инструментах, но
+MCP READ-слой (`mcp_server/`) отдаёт чистые редактированные конверты на всех 24 READ-инструментах, но
 прогоны РАЗНОЙ силы, и разница существенна: 15 инструментов прогнаны **вживую** на Draft `7753643025`
 локально, 8 добавленных 30.07 (кампании · таргетинг · настройки · стратегия ставок · разбивки ·
 аудитории · квота) — **только офлайн** (`tests/test_mcp_read_smoke.py`, SDK подменён). Живой Draft-прогон

@@ -1,27 +1,14 @@
-"""Typed Google Ads action tools for the private Hermes operator profile.
+"""Typed Bias-for-Action tools for Hermes.
 
-Каждый вызов создаёт аттестованный DB-снимок ``было → станет`` и останавливается в статусе pending.
-Любая изменяющая операция требует ровно одну доверенную Telegram-кнопку/reply перед
-``execute_confirmed``. Исторические имена ``propose_*`` сохранены для совместимости MCP.
-
-Три вещи этот слой делает КОДОМ, не доверием к модели:
-  • **Провенанс (правило 3).** Денежный черновик (бюджет/ставка) создаётся только когда бит
-    `human_turn` поднят доверенным входом (`core.provenance`) — не из cron/anomaly/self-improve и не
-    по аргументу инструмента (агент его подделать не может). `user_initiated` черновика берётся из
-    того же провенанса, а не из параметра.
-  • **Одна confirm-card.** Не более ОДНОГО pending-черновика на человеческий ход; связанные
-    изменения собираются в один composite.
-  • **Валидация входа (правило 4).** Диапазоны/режимы/валюту проверяет Pydantic, кривой вход →
-    редактированный отказ, а не «доверие к модели».
-
-Границы слоя: здесь валидация входа, вызов существующих proposal/execution функций и сериализация.
-Политика подтверждения живёт в `confirm.policy`, CAS — в `confirm.store`, провенанс — в
-`core.provenance`, исполнение после подтверждения — в `ads.service`.
+Each call resolves live state, validates a minimal typed input and executes the operation in the
+current trusted human turn. A critical global budget change returns one ``APPROVAL_REQUIRED``
+response; every other typed action continues through CAS, audit and post-verify immediately.
 """
 
 from __future__ import annotations
 
 import uuid
+from functools import wraps
 from typing import Any, Awaitable, Callable
 
 from pydantic import BaseModel, ValidationError
@@ -38,10 +25,12 @@ from agent.tools.schemas import (
     AddPromotion,
     AddSitelinks,
     AddStructuredSnippets,
+    AttachImageAsset,
     AttachAudience,
     AttachSharedSet,
     CreateDemandGenCampaign,
     CreateGdnCampaign,
+    CreateAppCampaign,
     CreateRsa,
     CreateSearchCampaign,
     CreateVideoCampaign,
@@ -70,14 +59,13 @@ from agent.tools.schemas import (
     UpdateCampaign,
     UpdateKeywordBid,
 )
-from confirm.policy import CONFIRM_REQUIRED_ADS_OPS
+from confirm.policy import requires_confirmation
 from confirm.reverse import ROLLBACKABLE_OPS, reverse_spec
 from confirm.risk import TIERS, risk_tier
 from confirm.store import ConfirmStore
 from core import i18n
 from core.config import settings
 from core.context import get_context
-from core.guards import require_no_mutations
 from core.logging import log
 from core.provenance import get_provenance
 from mcp_server.envelope import classify_error, proposed, refused
@@ -89,7 +77,7 @@ from mcp_server.redact import redact_error
 # человеческого хода. Исполнитель повторяет эту проверку после confirm-claim;
 # здесь ранний отказ не даёт scheduler/self-improve создать заведомо неисполнимый
 # или опасный черновик.
-_HUMAN_ONLY_OPS = CONFIRM_REQUIRED_ADS_OPS
+_HUMAN_ONLY_OPS = MUTATION_TOOLS
 
 
 def _validation_text(exc: ValidationError) -> str:
@@ -102,6 +90,23 @@ def _validation_text(exc: ValidationError) -> str:
     return i18n.t("propose_bad_params", details="; ".join(parts))
 
 
+def _execution_failure(exc: BaseException, *, error_code: str) -> dict[str, Any]:
+    """Ошибка execution → единый Self-Healing JSON для Hermes."""
+    from ads.mutations import mutation_error_hint
+
+    message = redact_error(exc)
+    hint = mutation_error_hint(exc)
+    return {
+        "ok": False,
+        "status": "failed",
+        "error": message,  # legacy clients
+        "error_code": error_code,  # legacy clients
+        "error_type": hint["error_type"],
+        "message": message,
+        "suggested_action": hint["suggested_action"],
+    }
+
+
 async def _propose(
     operation: str,
     model_cls: type[BaseModel],
@@ -109,10 +114,11 @@ async def _propose(
     account: str,
     **fields: Any,
 ) -> dict[str, Any]:
-    """Собрать аттестованное действие и вернуть одну confirm-card.
+    """Собрать аттестованное действие и довести его до результата.
 
     ЛЮБОЙ отказ — редактированный `refused()`-конверт: сырой str(e) наружу не идёт. Успех —
-    `pending_confirmation` с неизменяемым preview.
+    Операционные изменения исполняются сразу из доверенного human-turn. Критический глобальный
+    бюджет возвращает один ``APPROVAL_REQUIRED`` с неизменяемым preview.
 
     Порядок гейтов fail-closed и значим:
       1) валидация входа моделью (диапазоны/режимы/валюта — КОД, не доверие);
@@ -120,7 +126,7 @@ async def _propose(
       3) контекст хода: черновику нужен чат доставки/подтверждения (fail-closed);
       4) не более одного pending-черновика на ход (счёт из хранилища по run-корреляции);
       5) сборка+сохранение черновика;
-      6) одна карточка подтверждения; execute возможен только после доверенного CAS.
+      6) policy-ветка: APPROVAL_REQUIRED либо атомарный CAS и execute с post-verify.
     """
     lang = i18n.current_lang()
     try:
@@ -142,8 +148,10 @@ async def _propose(
         from mcp_server.trusted_transport import TrustedTransportError, get_trusted_turn
 
         try:
-            trusted_user_text = get_trusted_turn().message_text or ""
+            trusted_turn = get_trusted_turn()
+            trusted_user_text = trusted_turn.message_text or ""
         except TrustedTransportError:
+            trusted_turn = None
             trusted_user_text = ""
 
         built = await build_proposal(
@@ -162,12 +170,66 @@ async def _propose(
     except Exception as e:  # noqa: BLE001
         log.warning("mcp propose tool failed: %s", type(e).__name__)
         return refused(redact_error(e), error_code=classify_error(e))
-    return proposed(
-        confirmation_id=built.cid,
-        operation=built.operation,
-        customer_id=built.customer_id,
-        preview=built.display,
-    )
+    if requires_confirmation(built.operation, built.params):
+        env = proposed(
+            confirmation_id=built.cid,
+            operation=built.operation,
+            customer_id=built.customer_id,
+            preview=built.display,
+        )
+        message = "Критическое изменение глобального бюджета ожидает одного подтверждения."
+        return {
+            **env,
+            "status": "approval_required",
+            "ok": False,
+            "error": message,
+            "error_code": "approval_required",
+            "error_type": "APPROVAL_REQUIRED",
+            "message": message,
+            "suggested_action": "Покажи пользователю preview и запроси одно подтверждение всего изменения.",
+        }
+
+    try:
+        actor_user_id = (
+            trusted_turn.actor_user_id if trusted_turn is not None else prov.actor_user_id
+        )
+        actor_username = trusted_turn.actor_username if trusted_turn is not None else None
+        confirmed = await store.confirm(
+            built.cid,
+            chat_id=chat_id,
+            actor_user_id=actor_user_id,
+            actor_username=actor_username,
+        )
+        if not confirmed:
+            raise PermissionError("direct execution CAS rejected the proposal")
+
+        from ads.service import execute_confirmed as apply_confirmed
+        from core.texts import fmt_mutation_result
+
+        result = await apply_confirmed(store, built.cid)
+        return {
+            "ok": True,
+            "status": "executed",
+            "operation": built.operation,
+            "customer_id": built.customer_id,
+            "confirmation_id": built.cid,
+            "preview": built.display,
+            "summary": fmt_mutation_result(built.operation, result, lang),
+            "result": result,
+            "error": None,
+            "error_code": None,
+            "error_type": None,
+            "message": None,
+            "suggested_action": None,
+        }
+    except Exception as e:  # noqa: BLE001
+        log.warning("direct mutation failed op=%s: %s", built.operation, type(e).__name__)
+        return {
+            **_execution_failure(e, error_code=classify_error(e)),
+            "operation": built.operation,
+            "customer_id": built.customer_id,
+            "confirmation_id": built.cid,
+        }
 
 
 # ── Бюджет и ставки ──
@@ -814,6 +876,39 @@ async def propose_create_video_campaign(
     )
 
 
+async def propose_create_app_campaign(
+    account: str,
+    campaign_name: str,
+    app_id: str,
+    app_store: str,
+    headlines: list[str],
+    descriptions: list[str],
+    budget_daily_micros: int,
+    target_cpa_micros: int,
+    image_media_ids: list[str] | None = None,
+    youtube_video_ids: list[str] | None = None,
+    geo_locations: list[str] | None = None,
+    languages: list[str] | None = None,
+) -> dict[str, Any]:
+    """Создать ЧЕРНОВИК App/UAC-кампании из trusted media и/или YouTube-видео."""
+    return await _propose(
+        "create_app_campaign",
+        CreateAppCampaign,
+        account=account,
+        campaign_name=campaign_name,
+        app_id=app_id,
+        app_store=app_store,
+        headlines=headlines,
+        descriptions=descriptions,
+        budget_daily_micros=budget_daily_micros,
+        target_cpa_micros=target_cpa_micros,
+        image_media_ids=image_media_ids or [],
+        youtube_video_ids=youtube_video_ids or [],
+        geo_locations=geo_locations or [],
+        languages=languages or [],
+    )
+
+
 # ── Расширения (ассеты) ──
 
 
@@ -855,6 +950,27 @@ async def propose_add_structured_snippets(
         campaign=campaign,
         header=header,
         values=values,
+    )
+
+
+async def propose_attach_image_asset(
+    account: str,
+    campaign: str,
+    media_id: str,
+    name: str,
+) -> dict[str, Any]:
+    """Создать ЧЕРНОВИК привязки подготовленного изображения к кампании.
+
+    media_id должен быть получен из trusted ``ingest_media``; бинарь не передаётся модели и
+    загружается только после единственного человеческого подтверждения.
+    """
+    return await _propose(
+        "attach_image_asset",
+        AttachImageAsset,
+        account=account,
+        campaign=campaign,
+        media_id=media_id,
+        name=name,
     )
 
 
@@ -1206,75 +1322,102 @@ async def execute_confirmed() -> dict[str, Any]:
         }
     except ValueError as e:
         # Не найден / не в статусе confirmed
-        return {"status": "failed", "error": redact_error(e), "error_code": "invalid_argument"}
+        return _execution_failure(e, error_code="invalid_argument")
     except PermissionError as e:
-        return {"status": "failed", "error": redact_error(e), "error_code": "refused"}
+        return _execution_failure(e, error_code="refused")
     except Exception as e:  # noqa: BLE001
         log.warning("execute_confirmed failed: %s", type(e).__name__)
-        return {"status": "failed", "error": redact_error(e), "error_code": classify_error(e)}
+        return _execution_failure(e, error_code=classify_error(e))
 
 
 # ── Реестр ──
 
 
-PROPOSE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
-    "propose_budget_change": propose_budget_change,
-    "propose_bid_change": propose_bid_change,
-    "propose_keyword_bid_change": propose_keyword_bid_change,
-    "propose_set_bidding_strategy": propose_set_bidding_strategy,
-    "propose_add_keywords": propose_add_keywords,
-    "propose_remove_keywords": propose_remove_keywords,
-    "propose_add_negative_keywords": propose_add_negative_keywords,
-    "propose_remove_negative_keywords": propose_remove_negative_keywords,
-    "propose_add_negatives_to_shared_set": propose_add_negatives_to_shared_set,
-    "propose_attach_shared_set": propose_attach_shared_set,
-    "propose_pause_campaign": propose_pause_campaign,
-    "propose_resume_campaign": propose_resume_campaign,
-    "propose_launch_campaign": propose_launch_campaign,
-    "propose_update_campaign": propose_update_campaign,
-    "propose_remove_campaign": propose_remove_campaign,
-    "propose_set_campaign_network": propose_set_campaign_network,
-    "propose_set_campaign_display_network": propose_set_campaign_display_network,
-    "propose_set_campaign_geo_target_type": propose_set_campaign_geo_target_type,
-    "propose_pause_ad_group": propose_pause_ad_group,
-    "propose_resume_ad_group": propose_resume_ad_group,
-    "propose_remove_ad_group": propose_remove_ad_group,
-    "propose_pause_ad": propose_pause_ad,
-    "propose_resume_ad": propose_resume_ad,
-    "propose_remove_ad": propose_remove_ad,
-    "propose_set_geo_proximity": propose_set_geo_proximity,
-    "propose_set_geo_location": propose_set_geo_location,
-    "propose_attach_audience": propose_attach_audience,
-    "propose_detach_audience": propose_detach_audience,
-    "propose_create_rsa": propose_create_rsa,
-    "propose_create_search_campaign": propose_create_search_campaign,
-    "propose_create_gdn_campaign": propose_create_gdn_campaign,
-    "propose_create_demand_gen_campaign": propose_create_demand_gen_campaign,
-    "propose_create_video_campaign": propose_create_video_campaign,
-    "propose_add_sitelinks": propose_add_sitelinks,
-    "propose_add_callouts": propose_add_callouts,
-    "propose_add_structured_snippets": propose_add_structured_snippets,
-    "propose_add_call_asset": propose_add_call_asset,
-    "propose_add_promotion": propose_add_promotion,
-    "propose_add_price_asset": propose_add_price_asset,
-    "propose_remove_asset_link": propose_remove_asset_link,
-    "propose_composite_change": propose_composite_change,
+def _action_tool(
+    fn: Callable[..., Awaitable[dict[str, Any]]], operation: str
+) -> Callable[..., Awaitable[dict[str, Any]]]:
+    """Expose the existing typed callable with a short action-oriented tool description."""
+
+    @wraps(fn)
+    async def action(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await fn(*args, **kwargs)
+
+    action.__doc__ = (
+        f"Выполнить Google Ads operation `{operation}` по текущему trusted запросу. "
+        "Инструмент сам читает недостающий live state и возвращает structured JSON result."
+    )
+    return action
+
+
+ACTION_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
+    "update_budget": _action_tool(propose_budget_change, "update_budget"),
+    "update_bid": _action_tool(propose_bid_change, "update_bid"),
+    "update_keyword_bid": _action_tool(propose_keyword_bid_change, "update_keyword_bid"),
+    "set_bidding_strategy": _action_tool(propose_set_bidding_strategy, "set_bidding_strategy"),
+    "add_keywords": _action_tool(propose_add_keywords, "add_keywords"),
+    "remove_keywords": _action_tool(propose_remove_keywords, "remove_keywords"),
+    "add_negative_keywords": _action_tool(propose_add_negative_keywords, "add_negative_keywords"),
+    "remove_negative_keywords": _action_tool(
+        propose_remove_negative_keywords, "remove_negative_keywords"
+    ),
+    "add_negatives_to_shared_set": _action_tool(
+        propose_add_negatives_to_shared_set, "add_negatives_to_shared_set"
+    ),
+    "attach_shared_set": _action_tool(propose_attach_shared_set, "attach_shared_set"),
+    "pause_campaign": _action_tool(propose_pause_campaign, "pause_campaign"),
+    "resume_campaign": _action_tool(propose_resume_campaign, "resume_campaign"),
+    "launch_campaign": _action_tool(propose_launch_campaign, "launch_campaign"),
+    "update_campaign": _action_tool(propose_update_campaign, "update_campaign"),
+    "remove_campaign": _action_tool(propose_remove_campaign, "remove_campaign"),
+    "set_campaign_network": _action_tool(propose_set_campaign_network, "set_campaign_network"),
+    "set_campaign_display_network": _action_tool(
+        propose_set_campaign_display_network, "set_campaign_display_network"
+    ),
+    "set_campaign_geo_target_type": _action_tool(
+        propose_set_campaign_geo_target_type, "set_campaign_geo_target_type"
+    ),
+    "pause_ad_group": _action_tool(propose_pause_ad_group, "pause_ad_group"),
+    "resume_ad_group": _action_tool(propose_resume_ad_group, "resume_ad_group"),
+    "remove_ad_group": _action_tool(propose_remove_ad_group, "remove_ad_group"),
+    "pause_ad": _action_tool(propose_pause_ad, "pause_ad"),
+    "resume_ad": _action_tool(propose_resume_ad, "resume_ad"),
+    "remove_ad": _action_tool(propose_remove_ad, "remove_ad"),
+    "set_geo_proximity": _action_tool(propose_set_geo_proximity, "set_geo_proximity"),
+    "set_geo_location": _action_tool(propose_set_geo_location, "set_geo_location"),
+    "attach_audience": _action_tool(propose_attach_audience, "attach_audience"),
+    "detach_audience": _action_tool(propose_detach_audience, "detach_audience"),
+    "create_rsa": _action_tool(propose_create_rsa, "create_rsa"),
+    "create_search_campaign": _action_tool(
+        propose_create_search_campaign, "create_search_campaign"
+    ),
+    "create_gdn_campaign": _action_tool(propose_create_gdn_campaign, "create_gdn_campaign"),
+    "create_demand_gen_campaign": _action_tool(
+        propose_create_demand_gen_campaign, "create_demand_gen_campaign"
+    ),
+    "create_video_campaign": _action_tool(propose_create_video_campaign, "create_video_campaign"),
+    "create_app_campaign": _action_tool(propose_create_app_campaign, "create_app_campaign"),
+    "add_sitelinks": _action_tool(propose_add_sitelinks, "add_sitelinks"),
+    "add_callouts": _action_tool(propose_add_callouts, "add_callouts"),
+    "add_structured_snippets": _action_tool(
+        propose_add_structured_snippets, "add_structured_snippets"
+    ),
+    "attach_image_asset": _action_tool(propose_attach_image_asset, "attach_image_asset"),
+    "add_call_asset": _action_tool(propose_add_call_asset, "add_call_asset"),
+    "add_promotion": _action_tool(propose_add_promotion, "add_promotion"),
+    "add_price_asset": _action_tool(propose_add_price_asset, "add_price_asset"),
+    "remove_asset_link": _action_tool(propose_remove_asset_link, "remove_asset_link"),
 }
+
+# Python compatibility alias for legacy imports; live MCP names come from ACTION_TOOL_FUNCS.
+PROPOSE_TOOL_FUNCS = ACTION_TOOL_FUNCS
 
 EXECUTE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "execute_confirmed": execute_confirmed,
 }
-PLAN_WRITE_TOOL_FUNCS = {**PROPOSE_TOOL_FUNCS, **EXECUTE_TOOL_FUNCS}
+PLAN_WRITE_TOOL_FUNCS = {**ACTION_TOOL_FUNCS, **EXECUTE_TOOL_FUNCS}
 
-# И4 / construction-time: имена propose-инструментов НЕ пересекаются с мутационными.
-require_no_mutations(
-    PROPOSE_TOOL_FUNCS,
-    MUTATION_TOOLS,
-    rule="И4",
-    subject="mcp_server.tools_write.PROPOSE_TOOL_FUNCS (propose-инструменты)",
-)
-
-PROPOSE_MCP_TOOLS: frozenset[str] = frozenset(PROPOSE_TOOL_FUNCS)
+ACTION_MCP_TOOLS: frozenset[str] = frozenset(ACTION_TOOL_FUNCS)
+PROPOSE_MCP_TOOLS = ACTION_MCP_TOOLS
 
 # PLAN-only server imports PROPOSE_TOOL_FUNCS. The trusted live server uses
 # PLAN_WRITE_TOOL_FUNCS and obtains actor/reply identity outside model arguments.

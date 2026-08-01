@@ -211,19 +211,6 @@ def test_addkeys_strips_markers():
     assert not any("[" in k.text or '"' in k.text for k in out)
 
 
-def test_addkeys_text_path_uses_ingest_parser():
-    """Гард: текстовый путь /addkeys обязан идти через parse_keywords_text (маркеры + валидация),
-    а не резать text.split(',') — иначе класс бага возвращается."""
-    src = (Path(__file__).resolve().parents[1] / "bot/handlers/keywords_flow.py").read_text(
-        encoding="utf-8"
-    )
-    body = src[src.index("async def kw_add_keywords") :]
-    body = body[: body.index("\n@bm.dp")]
-    assert "parse_keywords_text" in body
-    assert 'text.replace("\\n", ",").split(",")' not in body
-
-
-# ── 5. common_match_type: без REMOVED и без чужих каналов ─────────────────────────
 def test_common_match_type_query_excludes_removed_and_other_channels():
     """500 давно удалённых BROAD перевешивали 20 живых PHRASE → визард §19.3 предлагал «по
     аналогии» тип, которым аккаунт уже не пользуется."""
@@ -261,24 +248,12 @@ def test_single_flight_blocks_second_tap():
     ux.release_flight("cc_kw_gen", ("chat", "sess-2"))
 
 
-def test_kw_generate_handler_is_guarded():
-    """Гард класса: обработчик кнопки генерации ОБЯЗАН держать single-flight (иначе двойной тап
-    снова наплодит две Google-таблицы, и первая — уже выверенная — будет отвергнута как «чужая»)."""
-    src = (Path(__file__).resolve().parents[1] / "bot/handlers/campaign_wizard.py").read_text(
-        encoding="utf-8"
-    )
-    head = src[src.index('bm.F.action == "kw_generate"') :]
-    head = head[: head.index("async def cc_kw_generate_run")]
-    assert "acquire_flight" in head and "release_flight" in head
-
-
-# ── 7. Брендозащита минус-слов подключена во ВСЕХ call-site ───────────────────────
 def test_all_negative_keyword_callsites_pass_protected():
     """Докстринг suggest_negative_keywords обещал брендозащиту, но `protected=` передавал только
     /keywords: визард и /advise могли посоветовать заминусовать бренд самого клиента."""
     root = Path(__file__).resolve().parents[1]
     offenders = []
-    for rel in ("bot/main.py", "bot/handlers/campaign_wizard.py", "advisor/service.py"):
+    for rel in ("advisor/service.py",):
         src = (root / rel).read_text(encoding="utf-8")
         idx = 0
         while (idx := src.find("suggest_negative_keywords(", idx)) != -1:

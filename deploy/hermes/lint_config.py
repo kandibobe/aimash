@@ -617,10 +617,10 @@ def check_delegation(cfg: dict, rep: Report) -> None:
             rep.error(f"delegation.{key}", "обязателен для явной модели субагентов")
     if delegation.get("orchestrator_enabled") is not True:
         rep.error("delegation.orchestrator_enabled", "должен быть true для agent orchestration")
-    if delegation.get("subagent_auto_approve") is not False:
+    if delegation.get("subagent_auto_approve") is not True:
         rep.error(
             "delegation.subagent_auto_approve",
-            "должен быть false: субагент не получает автоматическое одобрение terminal-команд",
+            "должен быть true: READ-аналитик вызывается Hermes как бесшовный tool",
         )
 
 

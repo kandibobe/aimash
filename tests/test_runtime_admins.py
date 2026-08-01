@@ -183,30 +183,3 @@ def test_admins_migration_chain_is_linear():
     src = (ROOT / "migrations" / "versions" / "0021_admins_runtime.py").read_text(encoding="utf-8")
     assert re.search(r'revision: str = "0021_admins_runtime"', src)
     assert re.search(r'down_revision: str \| None = "0020_audit_chat_index"', src)
-
-
-async def test_removeuser_also_revokes_runtime_admin(monkeypatch):
-    """Ревью 2026-07-07: /removeuser снимает и рантайм-админку — иначе удалённый оператор
-    оставался в admins (рассылки) и повторный /adduser молча возвращал ему полную админку."""
-    from types import SimpleNamespace
-
-    import bot.main as bm
-    from core.access import add_whitelisted_user
-
-    with _env_admins("111"):
-        await add_whitelisted_user(NEW_ADMIN)
-        await add_admin(NEW_ADMIN)
-        assert await is_admin(NEW_ADMIN) is True
-
-        class _Msg:
-            def __init__(self):
-                self.chat = SimpleNamespace(id=111)  # вызывает env-админ
-                self.answers: list = []
-
-            async def answer(self, text="", **kw):
-                self.answers.append(text)
-                return self
-
-        await bm.removeuser_cmd(_Msg(), SimpleNamespace(args=str(NEW_ADMIN)))
-        _invalidate_admin_cache()
-        assert await is_admin(NEW_ADMIN) is False  # админка снята вместе с whitelist

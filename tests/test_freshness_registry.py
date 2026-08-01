@@ -2,7 +2,7 @@
 
 Реестр — это способ сделать «забыли про новую мутацию» ошибкой сборки, а не тихой дырой в проде.
 Поэтому проверяется не поведение отдельных операций, а СВОЙСТВА реестра целиком:
-полнота (41/41), храповик долга, deny-by-default и то, что денежная операция не может оказаться
+полнота реестра, храповик долга, deny-by-default и то, что денежная операция не может оказаться
 в мягком тире. Плюс семантика `compare` — она одна на все 41 операцию, значит её ошибка была бы
 ошибкой сразу везде.
 """
@@ -21,7 +21,7 @@ from ads.freshness import FRESHNESS_TIERS, Tier  # noqa: E402
 from ads.service import SUPPORTED_OPERATIONS  # noqa: E402
 from core.ads_errors import is_outcome_unknown_after_mutate  # noqa: E402
 
-# Восемь денежных операций — зеркало `_EXPECTED_MONEY_OPS` из tests/test_invariants_core.py
+# Денежные операции — зеркало `_EXPECTED_MONEY_OPS` из tests/test_invariants_core.py
 # (там же в именах `apply_*`). Дублируется осознанно: если списки разойдутся, разойдутся и падения,
 # и это будет видно — молчаливая рассинхронизация тут страшнее дубля.
 MONEY_OPERATIONS = frozenset(
@@ -34,6 +34,7 @@ MONEY_OPERATIONS = frozenset(
         "create_gdn_campaign",
         "create_demand_gen_campaign",
         "create_video_campaign",
+        "create_app_campaign",
     }
 )
 
@@ -69,7 +70,7 @@ def test_registry_covers_every_supported_operation() -> None:
     extra = set(FRESHNESS_TIERS) - set(SUPPORTED_OPERATIONS)
     assert not missing, f"операции без тира freshness: {sorted(missing)}"
     assert not extra, f"тир для несуществующей операции: {sorted(extra)}"
-    assert len(FRESHNESS_TIERS) == len(SUPPORTED_OPERATIONS) == 41
+    assert len(FRESHNESS_TIERS) == len(SUPPORTED_OPERATIONS) == 42
 
 
 def test_advisory_is_subset_of_frozen_debt() -> None:

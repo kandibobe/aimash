@@ -34,10 +34,10 @@ def test_deploy_proves_gateway_pid_changed_and_has_systemd_fallback():
     assert restart < fallback < mcp_test
 
 
-def test_deploy_checks_both_telegram_pollers_for_conflicts():
+def test_deploy_checks_the_single_hermes_poller_for_conflicts():
     body = WORKFLOW.read_text(encoding="utf-8")
     reconnect = body.split("hermes gateway restart", 1)[1]
 
-    assert "docker logs --since 2m aimash-bot" in reconnect
+    assert "docker logs --since 2m aimash-bot" not in reconnect
     assert "journalctl --user -u hermes-gateway.service" in reconnect
-    assert reconnect.count('grep -Fq "409 Conflict"') == 2
+    assert reconnect.count('grep -Fq "409 Conflict"') == 1

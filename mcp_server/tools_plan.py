@@ -9,7 +9,6 @@ from core.context import get_context
 from core.provenance import get_provenance
 from mcp_server.envelope import ok, refused
 from mcp_server.tools_ops import OPS_STATE_MCP_TOOLS, OPS_STATE_TOOL_FUNCS
-from mcp_server.tools_write import PROPOSE_TOOL_FUNCS
 from mcp_server.tools_workflow_state import WORKFLOW_STATE_TOOL_FUNCS
 
 
@@ -22,8 +21,8 @@ _AGENT_FIRST_WORKFLOW_NAMES = frozenset(
         "start_keyword_research",  # XLSX/Sheets export + ownership round-trip
         "read_keyword_sheet",
         "ingest_media",  # trusted Telegram attachment path
-        "propose_profile_change",
-        "propose_profile_clear",
+        "profile_change",
+        "profile_clear",
         "start_client_crawl",
     }
 )
@@ -113,7 +112,6 @@ if not OPS_STATE_MCP_TOOLS <= PLAN_STATE_MCP_TOOLS:
     raise RuntimeError("operational state tools must be part of the trusted PLAN surface")
 
 PLAN_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
-    **PROPOSE_TOOL_FUNCS,
     **PLAN_STATE_TOOL_FUNCS,
 }
 PLAN_MCP_TOOLS: frozenset[str] = frozenset(PLAN_TOOL_FUNCS)

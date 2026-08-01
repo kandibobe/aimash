@@ -44,7 +44,13 @@ MONEY_OPS: frozenset[str] = frozenset({"update_budget", "update_bid", "update_ke
 # Создание тратящей деньги сущности: обязательства есть, снимка «было» нет — сравнивать не с чем,
 # поэтому не L3 (двух актов за каждую новую кампанию никто не просил), но и не L1.
 _CREATE_OPS: frozenset[str] = frozenset(
-    {"create_search_campaign", "create_gdn_campaign", "create_video_campaign", "create_demandgen"}
+    {
+        "create_search_campaign",
+        "create_gdn_campaign",
+        "create_demand_gen_campaign",
+        "create_video_campaign",
+        "create_app_campaign",
+    }
 )
 
 # Пороги в ПРОЦЕНТАХ относительного сдвига. Абсолютного порога здесь нет намеренно: суммы приходят

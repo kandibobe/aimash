@@ -42,7 +42,7 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "⏳ Too frequent — wait a couple of seconds.",
     },
     "rejected": {"ru": "❌ Отменено", "en": "❌ Cancelled"},
-    # Кнопки/статусы выгрузки результата /audit (bot.keyboards.audit_export_kb)
+    # Подписи/статусы выгрузки результата /audit для transport renderer.
     "audit_export_btn_sheets": {"ru": "📄 В Google Sheets", "en": "📄 To Google Sheets"},
     "audit_export_btn_xlsx": {"ru": "📊 Скачать .xlsx", "en": "📊 Download .xlsx"},
     "audit_export_btn_docx": {"ru": "📝 Скачать .docx", "en": "📝 Download .docx"},
@@ -3009,22 +3009,26 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": (
             "📍 <b>Адрес (Location)</b> требует привязки <b>Google Business Profile</b> к аккаунту "
             "(адрес из текста нельзя превратить в объявление без верифицированной точки на картах). "
-            "Свяжите Business Profile в Google Ads и попробуйте снова."
+            "После настройки LOCATION_SYNC AssetSet кампании наследуют эти адреса на уровне аккаунта; "
+            "отдельный обычный campaign asset создавать не нужно."
         ),
         "en": (
             "📍 <b>Location</b> asset requires a linked <b>Google Business Profile</b> on the account "
             "(a text address can't become an ad without a verified Maps location). "
-            "Link the Business Profile in Google Ads and try again."
+            "Once the LOCATION_SYNC AssetSet is configured, campaigns inherit these locations at the "
+            "account level; no regular campaign asset needs to be created."
         ),
     },
     "cc_asset_needs_affiliate": {
         "ru": (
-            "🏬 <b>Адрес аффилиата</b> удалён из Google Ads API v24 (Google депрекировал этот тип "
-            "ассета) — создать его нельзя. Используйте адрес (Location) через Business Profile."
+            "🏬 <b>Адрес аффилиата</b> настраивается через account-level "
+            "<b>LOCATION_SYNC AssetSet</b> с ownership type AFFILIATE. Это требует выбранной сети "
+            "магазинов или внешнего источника локаций; из текста клиента такой источник создать нельзя."
         ),
         "en": (
-            "🏬 <b>Affiliate location</b> was removed from Google Ads API v24 (Google deprecated this "
-            "asset type) — it can't be created. Use a Location asset via Business Profile instead."
+            "🏬 <b>Affiliate location</b> uses an account-level <b>LOCATION_SYNC AssetSet</b> with "
+            "AFFILIATE ownership. It requires a selected retail chain or external location source; "
+            "that source cannot be generated from client text."
         ),
     },
     # §19.7.1: лид-форма РЕАЛИЗОВАНА — просим URL политики конфиденциальности (единственный внешний
@@ -3047,14 +3051,28 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "Нужна ссылка на политику конфиденциальности (http:// или https://). Пришлите URL.",
         "en": "A privacy policy link is required (http:// or https://). Please send the URL.",
     },
-    "cc_asset_app_out_of_scope": {
+    "cc_asset_app_prompt": {
         "ru": (
-            "📱 <b>Приложение (App)</b> — вне объёма проекта: App/UAC-кампании исключены (у клиента "
-            "нет приложения). Используйте другие типы ассетов."
+            "📱 <b>Приложение (App).</b> Пришлите одной строкой:\n"
+            "<code>google_play | com.example.app | Установить</code>\n"
+            "или <code>apple_app_store | 123456789 | Скачать</code>.\n"
+            "Текст ссылки — от 1 до 25 символов. App ID и магазин не генерируются: нужны реальные данные."
         ),
         "en": (
-            "📱 <b>App</b> asset is out of scope: App/UAC campaigns are excluded (the client has no "
-            "app). Use the other asset types."
+            "📱 <b>App.</b> Send one line:\n"
+            "<code>google_play | com.example.app | Install</code>\n"
+            "or <code>apple_app_store | 123456789 | Download</code>.\n"
+            "Link text must contain 1–25 characters. App ID and store must be real; they are not generated."
+        ),
+    },
+    "cc_asset_app_bad_format": {
+        "ru": (
+            "Формат: <code>google_play | app_id | текст</code> или "
+            "<code>apple_app_store | app_id | текст</code>; текст — 1–25 символов."
+        ),
+        "en": (
+            "Format: <code>google_play | app_id | text</code> or "
+            "<code>apple_app_store | app_id | text</code>; text must contain 1–25 characters."
         ),
     },
     "cc_asset_generating": {

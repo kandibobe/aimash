@@ -378,15 +378,17 @@ def test_four_eyes_config_rejects_unknown_or_empty_required_tiers():
         )
 
 
-async def _proposal(store: ConfirmStore, *, author: int, tier: str = "L3") -> str:
+async def _proposal(
+    store: ConfirmStore, *, author: int, tier: str = "L3", operation: str = "update_budget"
+) -> str:
     confirmation_id = uuid.uuid4().hex
     with human_turn(actor_user_id=author, run_id=uuid.uuid4().hex):
         await store.save_proposal(
             confirmation_id=confirmation_id,
-            operation="resume_campaign",
+            operation=operation,
             customer_id=DRAFT,
-            params={"campaign_id": "1"},
-            summary="paused → enabled",
+            params={"campaign": "Shared Budget", "_before": {"shared_campaigns": ["A", "B"]}},
+            summary="global budget change",
             chat_id=author,
             user_initiated=True,
             risk_tier=tier,
@@ -404,7 +406,7 @@ async def test_four_eyes_is_additive_atomic_and_independent(monkeypatch):
     confirmation_id = await _proposal(store, author=author)
 
     # The author's normal confirmation is still necessary but no longer sufficient for L3.
-    assert await store.claim(confirmation_id, operation="resume_campaign") is None
+    assert await store.claim(confirmation_id, operation="update_budget") is None
     with pytest.raises(PermissionError):
         await record_approval_vote(
             confirmation_id=confirmation_id,
@@ -430,9 +432,9 @@ async def test_four_eyes_is_additive_atomic_and_independent(monkeypatch):
         decision="approve",
         comment="scope and diff reviewed",
     )
-    claimed = await store.claim(confirmation_id, operation="resume_campaign")
+    claimed = await store.claim(confirmation_id, operation="update_budget")
     assert claimed is not None and claimed.status == "executing"
-    assert await store.claim(confirmation_id, operation="resume_campaign") is None
+    assert await store.claim(confirmation_id, operation="update_budget") is None
 
 
 async def test_four_eyes_empty_runtime_tier_set_fails_closed(monkeypatch):
@@ -441,7 +443,7 @@ async def test_four_eyes_empty_runtime_tier_set_fails_closed(monkeypatch):
     monkeypatch.setattr(settings, "four_eyes_risk_tiers_csv", "")
     store = ConfirmStore()
     confirmation_id = await _proposal(store, author=author)
-    assert await store.claim(confirmation_id, operation="resume_campaign") is None
+    assert await store.claim(confirmation_id, operation="update_budget") is None
 
 
 async def test_four_eyes_reject_blocks_claim(monkeypatch):
@@ -468,7 +470,7 @@ async def test_four_eyes_reject_blocks_claim(monkeypatch):
         decision="reject",
         comment="blast radius too high",
     )
-    assert await store.claim(confirmation_id, operation="resume_campaign") is None
+    assert await store.claim(confirmation_id, operation="update_budget") is None
     async with Session() as session:
         votes = list(
             (
@@ -532,7 +534,7 @@ async def test_four_eyes_reject_survives_role_revocation(monkeypatch):
         decision="approve",
         comment="independent approval after rejection",
     )
-    assert await store.claim(confirmation_id, operation="resume_campaign") is None
+    assert await store.claim(confirmation_id, operation="update_budget") is None
 
 
 async def test_decision_applied_requires_matching_live_audit_proof():
@@ -561,7 +563,7 @@ async def test_decision_applied_requires_matching_live_audit_proof():
     )
 
     store = ConfirmStore()
-    confirmation_id = await _proposal(store, author=101, tier="L1")
+    confirmation_id = await _proposal(store, author=101, tier="L1", operation="resume_campaign")
     assert await store.claim(confirmation_id, operation="resume_campaign") is not None
     await store.finalize(confirmation_id, result={"resource_name": "campaign/1"})
     assert await mark_decision_applied_from_audit(

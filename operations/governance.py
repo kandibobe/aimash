@@ -87,7 +87,13 @@ def four_eyes_claim_condition():
             independent,
         )
     )
-    gated_tier = Proposal.risk_tier.in_(settings.four_eyes_risk_tiers)
+    # v3: an independent approval is meaningful only on the same narrow branch that can stop the
+    # autonomous tool path — a critical global budget change. Other L3 labels are audit metadata,
+    # not a reason to turn routine operations back into a state machine.
+    gated_tier = and_(
+        Proposal.operation == "update_budget",
+        Proposal.risk_tier.in_(settings.four_eyes_risk_tiers),
+    )
     return or_(~gated_tier, and_(approved, ~rejected))
 
 

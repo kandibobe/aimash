@@ -496,19 +496,3 @@ def test_gdn_schema_accepts_geo_locations():
         geo_locations=["Кения", "Найроби"],
     )
     assert with_geo.geo_locations == ["Кения", "Найроби"]
-
-
-def test_parse_gdn_brief_optional_geo():
-    """§11: _parse_gdn_brief разбирает опц. 4-е поле «гео» (локации через запятую)."""
-    from bot.main import _parse_gdn_brief
-
-    # без гео (3 поля) — совместимость
-    r3 = _parse_gdn_brief("Весна | https://shop.example | 50")
-    assert r3 is not None and r3[3] == []
-    # с гео (4 поля)
-    r4 = _parse_gdn_brief("Кения авто | https://kasimotors.co.ke | 40 | Кения, Найроби")
-    assert r4 is not None
-    name, url, budget, geo = r4
-    assert budget == 40.0 and geo == ["Кения", "Найроби"]
-    # мусорный формат (2 поля) — None
-    assert _parse_gdn_brief("just text") is None

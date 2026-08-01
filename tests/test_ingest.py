@@ -182,9 +182,6 @@ async def test_handle_command_without_context_unchanged():
 
 
 # ── бот: приём файла → задача (с подписью и без) ──────────────────────────────────────
-from types import SimpleNamespace  # noqa: E402
-
-
 class _Msg:
     def __init__(self, chat_id=80_000, text="", caption="", document=None):
         self.chat = type("C", (), {"id": chat_id})()
@@ -224,54 +221,3 @@ class _State:
 
     async def get_state(self):
         return self._s
-
-
-async def test_on_document_with_caption_runs_task():
-    import bot.main as bm
-
-    captured = {}
-
-    async def fake_handle(instruction, *, chat_id=0, context_text=None, **kwargs):
-        captured.update(instruction=instruction, context_text=context_text)
-        return {"type": "text", "text": "ok"}
-
-    doc = SimpleNamespace(file_id="f", file_name="brief.txt", file_size=20)
-    msg = _Msg(chat_id=80_001, caption="сделай кампанию по брифу", document=doc)
-    with patched(bm, "handle_command", fake_handle):
-        await bm.on_document(msg, _State(), _Bot("Бриф: кроссовки, скидки".encode()))
-    assert captured["instruction"] == "сделай кампанию по брифу"
-    assert "кроссовки" in captured["context_text"]  # контент файла проброшен как контекст
-
-
-async def test_on_document_without_caption_asks_then_runs():
-    import bot.main as bm
-
-    captured = {}
-
-    async def fake_handle(instruction, *, chat_id=0, context_text=None, **kwargs):
-        captured.update(instruction=instruction, context_text=context_text)
-        return {"type": "text", "text": "ok"}
-
-    chat = 80_002
-    bm._PENDING_CONTEXT.pop(chat, None)
-    doc = SimpleNamespace(file_id="f", file_name="keys.csv", file_size=15)
-    state = _State()
-    # без подписи → запоминаем контент, спрашиваем задачу
-    await bm.on_document(_Msg(chat_id=chat, document=doc), state, _Bot(b"kw,vol\x0aboots,99"))
-    assert await state.get_state() == bm.IngestWizard.awaiting_task
-    assert bm._PENDING_CONTEXT.get(chat)
-    # задача пришла → агент с сохранённым контентом
-    with patched(bm, "handle_command", fake_handle):
-        await bm.ingest_task(_Msg(chat_id=chat, text="подбери похожие ключи"), state)
-    assert captured["instruction"] == "подбери похожие ключи"
-    assert "boots" in captured["context_text"]
-    assert bm._PENDING_CONTEXT.get(chat) is None  # контент израсходован
-
-
-async def test_on_document_too_big_rejected():
-    import bot.main as bm
-
-    doc = SimpleNamespace(file_id="f", file_name="big.txt", file_size=ingest.MAX_FILE_BYTES + 1)
-    msg = _Msg(chat_id=80_003, document=doc)
-    await bm.on_document(msg, _State(), _Bot(b"x"))
-    assert msg.answers and bm._PENDING_CONTEXT.get(80_003) is None  # отказ, контент не сохранён

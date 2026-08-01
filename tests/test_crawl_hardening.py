@@ -385,49 +385,6 @@ async def test_breaker_ignores_404_but_opens_on_5xx():
 
 
 # ── диагностика: пользователю фраза, а не «?» ─────────────────────────────────────
-def test_crawl_fail_reason_never_empty():
-    import httpx
-
-    import bot.main as bm
-
-    from core.ingest import SSRFBlocked
-
-    cases = [
-        TimeoutError(),  # str(e) == "" — ровно это давало пользователю «?»
-        httpx.ConnectTimeout(""),
-        httpx.ConnectError(""),
-        CircuitOpen(""),
-        httpx.TooManyRedirects(""),
-        ValueError("адрес заблокирован (внутренний/небезопасный): 127.0.0.1"),
-        SSRFBlocked(
-            "адрес заблокирован (внутренний/небезопасный): 169.254.169.254"
-        ),  # новый тип SSRF
-        RuntimeError(""),
-    ]
-    for e in cases:
-        reason = bm._crawl_fail_reason(e)
-        assert reason and reason.strip() not in ("?", "")
-        assert type(e).__name__ not in reason  # имя класса наружу не светим (решение P1-аудита)
-    # SSRF-блок распознан как «заблокирован», не свалился в generic
-    assert bm._crawl_fail_reason(
-        SSRFBlocked("адрес заблокирован: 10.0.0.5")
-    ) == bm._crawl_fail_reason(ValueError("адрес заблокирован: 10.0.0.5"))
-
-
-def test_crawl_fail_reason_http_codes():
-    import httpx
-
-    import bot.main as bm
-
-    req = httpx.Request("GET", "https://x.com/")
-
-    def _err(code):
-        return httpx.HTTPStatusError("e", request=req, response=httpx.Response(code, request=req))
-
-    assert bm._crawl_fail_reason(_err(403)) != bm._crawl_fail_reason(_err(404))
-    assert "500" in bm._crawl_fail_reason(_err(500))
-
-
 def test_fetch_stats_summary_counts_swallowed_failures():
     st = FetchStats(ok=36, by_status={404: 51}, by_error={"ReadTimeout": 2}, skipped_ctype=3)
     s = st.summary()

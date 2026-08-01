@@ -1,4 +1,4 @@
-"""Базовые READ-обёртки MCP-слоя над существующими ридерами (38 вместе с workflow readers).
+"""READ-слой MCP: универсальный GAQL, account-level анализ и bot-free workflows (24 tools).
 
 Каждая обёртка:
   1) проходит замок ЧТЕНИЯ на ГРАНИЦЕ слоя — `_guarded` требует `account=` и зовёт
@@ -28,7 +28,10 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime
+from collections.abc import Mapping
 from typing import Any, Awaitable, Callable, Literal
+
+from google.protobuf.json_format import MessageToDict
 
 from ads.client import build_client_async, ensure_manager_allowed, ensure_read_allowed
 from ads.keyword_plan import generate_keyword_ideas
@@ -53,7 +56,7 @@ from core.logging import log
 from core.quota import snapshot as quota_snapshot
 from core.resilience import run_ads_read_call
 from db.history import list_recent_applied_by_customer
-from mcp_server.envelope import DEFAULT_LIMIT, client_context, err, ok
+from mcp_server.envelope import DEFAULT_LIMIT, client_context, err, ok, self_healing_fields
 from mcp_server.serialize import (
     audit_payload,
     audience_dict,
@@ -266,6 +269,78 @@ async def list_accounts(
         return ok(payload, offset=offset, limit=limit, extra=extra)
 
     return await _guarded(_work, account=mid, manager=True)
+
+
+def _google_ads_row_dict(row: Any) -> dict[str, Any]:
+    """Serialize one Google Ads row without knowing its resource schema in advance."""
+    if isinstance(row, Mapping):
+        return dict(row)
+    message = getattr(row, "_pb", row)
+    if not hasattr(message, "DESCRIPTOR"):
+        raise TypeError("Google Ads row is not protobuf serializable")
+    return MessageToDict(
+        message,
+        preserving_proto_field_name=True,
+        use_integers_for_enums=False,
+    )
+
+
+def _execute_google_ads_query_sync(
+    client: Any,
+    account: str,
+    gaql_query: str,
+    row_limit: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    service = client.get_service("GoogleAdsService")
+    rows: list[dict[str, Any]] = []
+    for batch in service.search_stream(customer_id=str(account), query=gaql_query):
+        for row in batch.results:
+            if len(rows) >= row_limit:
+                return rows, True
+            rows.append(_google_ads_row_dict(row))
+    return rows, False
+
+
+async def execute_google_ads_query(
+    account: str,
+    gaql_query: str,
+    row_limit: int = 1000,
+) -> dict[str, Any]:
+    """Execute arbitrary read-only GAQL and return generic protobuf rows.
+
+    Google Ads validates GAQL syntax. This boundary only validates transport limits and account
+    access; it contains no marketing decisions or resource-specific query builder.
+    """
+
+    async def _work() -> dict[str, Any]:
+        if not isinstance(gaql_query, str) or not gaql_query.strip():
+            raise ValueError("gaql_query must be a non-empty string")
+        if len(gaql_query) > 20_000:
+            raise ValueError("gaql_query is too long")
+        if (
+            isinstance(row_limit, bool)
+            or not isinstance(row_limit, int)
+            or not 1 <= row_limit <= 10_000
+        ):
+            raise ValueError("row_limit must be an integer between 1 and 10000")
+
+        client = await build_client_async(account)
+        rows, capped = await run_ads_read_call(
+            _execute_google_ads_query_sync,
+            client,
+            str(account),
+            gaql_query,
+            row_limit,
+            account=str(account),
+            label="mcp.execute_google_ads_query",
+        )
+        response = ok(rows, limit=row_limit)
+        response["reader_capped"] = capped
+        if capped:
+            response["reader_limit"] = row_limit
+        return response
+
+    return await _guarded(_work, account=str(account))
 
 
 async def get_campaign_stats(
@@ -533,6 +608,96 @@ async def get_account_audit(
         result = await gather_audit(client, str(account), period, target_cpa=target_cpa)
         rows, extra = audit_payload(result)
         return ok(rows, offset=offset, limit=limit, extra=extra)
+
+    return await _guarded(_work, account=str(account))
+
+
+async def analyze_account(
+    account: str,
+    objective: str,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    period_days: int = 30,
+    period_preset: PeriodPreset | None = None,
+    target_cpa: float | None = None,
+    top_findings: int = 8,
+) -> dict[str, Any]:
+    """Делегировать тяжёлый аудит отдельному analysis-agent и вернуть Hermes короткий digest.
+
+    GAQL, полный ``AuditResult`` и промежуточный JSON остаются внутри инструмента. Оркестратор получает
+    только итоговый текст аналитика, основные метрики и ограниченный список приоритетных находок.
+    """
+
+    async def _work() -> dict[str, Any]:
+        task = str(objective or "").strip()
+        if not task:
+            raise ValueError("objective не может быть пустым")
+        if len(task) > 1_000:
+            raise ValueError("objective должен быть короче 1000 символов")
+        finding_limit = int(top_findings)
+        if not 1 <= finding_limit <= 20:
+            raise ValueError("top_findings должен быть между 1 и 20")
+
+        window = _period(date_from, date_to, period_days, period_preset)
+        client = await build_client_async(account)
+        period = await _account_period(client, account, window)
+        result = await gather_audit(client, str(account), period, target_cpa=target_cpa)
+        findings, audit = audit_payload(result)
+        selected = [
+            {
+                key: value
+                for key, value in finding.items()
+                if key not in {"suggested_operation", "one_tap"}
+            }
+            for finding in findings[:finding_limit]
+        ]
+        facts = {
+            **audit,
+            "period": {
+                "date_from": period.date_from.isoformat(),
+                "date_to": period.date_to.isoformat(),
+                "days": int(period.days),
+            },
+            "findings": selected,
+            "findings_count": len(findings),
+        }
+
+        from agent.loop import run_analysis_agent
+
+        summary = await run_analysis_agent(
+            facts,
+            chat_id=0,
+            lang="ru",
+            question=task,
+        )
+        if not summary:
+            raise RuntimeError("analysis sub-agent did not return a valid digest")
+
+        metrics = {
+            key: audit.get(key)
+            for key in (
+                "currency",
+                "score",
+                "grade",
+                "total_spend",
+                "at_risk",
+                "optimization_score",
+                "lost_opportunity",
+            )
+        }
+        return {
+            "summary": summary,
+            "objective": task,
+            "account": str(account),
+            "period": facts["period"],
+            "metrics": metrics,
+            "findings": selected,
+            "findings_count": len(findings),
+            "analysis_agent": "analyst",
+            "error": None,
+            "error_code": None,
+            **self_healing_fields(success=True),
+        }
 
     return await _guarded(_work, account=str(account))
 
@@ -1078,30 +1243,16 @@ async def list_negative_shared_sets(
 # мутационными (agent.tools.schemas.MUTATION_TOOLS).
 READ_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "list_accounts": list_accounts,
-    "get_campaign_stats": get_campaign_stats,
-    "get_adgroup_stats": get_adgroup_stats,
-    "get_keywords": get_keywords,
-    "get_ads": get_ads,
-    "get_search_terms": get_search_terms,
-    "get_negatives": get_negatives,
-    "get_budgets": get_budgets,
-    "get_auction_insights": get_auction_insights,
+    "execute_google_ads_query": execute_google_ads_query,
     "get_account_audit": get_account_audit,
+    "analyze_account": analyze_account,
     "get_change_history": get_change_history,
     "get_account_changes": get_account_changes,
     "keyword_ideas": keyword_ideas,
-    "list_campaigns": list_campaigns,
-    "read_campaign_targeting": read_campaign_targeting,
-    "read_campaign_config": read_campaign_config,
-    "get_bidding_strategy": get_bidding_strategy,
-    "get_report_breakdown": get_report_breakdown,
-    "list_audiences": list_audiences,
-    "list_attached_audiences": list_attached_audiences,
     "get_quota": get_quota,
     "recall_client": recall_client,
     "get_mcc_summary": get_mcc_summary,
     "get_mcc_deep": get_mcc_deep,
-    "list_negative_shared_sets": list_negative_shared_sets,
 }
 
 # Bot-free workflow readers. Imported only after this module has defined shared period helpers;

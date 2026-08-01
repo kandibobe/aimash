@@ -1,6 +1,6 @@
 """Signed, bounded file artifacts produced by the Aimash MCP process.
 
-The MCP server runs inside ``aimash-bot`` while Hermes runs on the host.  A tool may create a
+The MCP server runs inside the one-shot ``aimash-mcp`` container while Hermes runs on the host. A tool may create a
 report in the container, but it must never give the model a generic "send this path" primitive.
 This module returns a short-lived HMAC token bound to one file under a dedicated temp directory.
 The trusted Hermes plugin verifies the token, copies exactly that file and delivers it to the
@@ -81,7 +81,7 @@ def publish_artifact(path: str | Path, *, filename: str, media_type: str) -> dic
         "v": ARTIFACT_VERSION,
         "iat": int(time.time()),
         "exp": int(time.time()) + ARTIFACT_TTL_S,
-        "container": "aimash-bot",
+        "container": "aimash-mcp",
         "path": str(target),
         "filename": _safe_filename(filename),
         "media_type": media_type,

@@ -95,7 +95,7 @@ def _artifact_token(*, content: bytes = b"xlsx") -> str:
         "v": 1,
         "iat": now,
         "exp": now + 900,
-        "container": "aimash-bot",
+        "container": "aimash-mcp",
         "path": "/tmp/aimash_artifacts/" + "a" * 32 + ".xlsx",
         "filename": "report.xlsx",
         "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -118,7 +118,7 @@ def test_plugin_overwrites_model_token_with_verified_event(monkeypatch):
     args = {"account": "7753643025", "campaign": "X", "trusted_turn_token": "model-forgery"}
 
     result = plugin._pre_tool_call(
-        tool_name="mcp__aimash__propose_pause_campaign",
+        tool_name="mcp__aimash__pause_campaign",
         args=args,
         session_id="s1",
         turn_id="t1",
@@ -128,7 +128,7 @@ def test_plugin_overwrites_model_token_with_verified_event(monkeypatch):
     assert args["trusted_turn_token"] != "model-forgery"
     turn = verify_turn_token(
         args["trusted_turn_token"],
-        expected_tool="propose_pause_campaign",
+        expected_tool="pause_campaign",
         tool_args={"account": "7753643025", "campaign": "X"},
     )
     assert (turn.actor_user_id, turn.actor_chat_id, turn.message_id) == (101, -202, 303)
@@ -432,7 +432,7 @@ def test_external_tool_does_not_block_private_operator_write(monkeypatch):
     args_after_web = {"account": "7753643025", "campaign": "X"}
     assert (
         plugin._pre_tool_call(
-            tool_name="mcp__aimash__propose_pause_campaign",
+            tool_name="mcp__aimash__pause_campaign",
             args=args_after_web,
             session_id="s4",
             turn_id="t4",
@@ -441,14 +441,14 @@ def test_external_tool_does_not_block_private_operator_write(monkeypatch):
     )
     verify_turn_token(
         args_after_web["trusted_turn_token"],
-        expected_tool="propose_pause_campaign",
+        expected_tool="pause_campaign",
         tool_args={"account": "7753643025", "campaign": "X"},
     )
 
     args = {"account": "7753643025", "campaign": "Y"}
     assert (
         plugin._pre_tool_call(
-            tool_name="mcp__aimash__propose_pause_campaign",
+            tool_name="mcp__aimash__pause_campaign",
             args=args,
             session_id="s5",
             turn_id="t5",
@@ -478,7 +478,7 @@ def test_guarded_local_skill_reads_do_not_taint_ads_proposal(monkeypatch):
     args = {"account": "7753643025", "campaign": "Доставка цветов"}
     assert (
         plugin._pre_tool_call(
-            tool_name="mcp__aimash__propose_pause_campaign",
+            tool_name="mcp__aimash__pause_campaign",
             args=args,
             session_id="s-safe-skill",
             turn_id="t-safe-skill",
@@ -487,7 +487,7 @@ def test_guarded_local_skill_reads_do_not_taint_ads_proposal(monkeypatch):
     )
     verify_turn_token(
         args["trusted_turn_token"],
-        expected_tool="propose_pause_campaign",
+        expected_tool="pause_campaign",
         tool_args={"account": "7753643025", "campaign": "Доставка цветов"},
     )
 
@@ -507,7 +507,7 @@ def test_skill_write_does_not_phase_lock_private_operator_proposal(monkeypatch):
     args = {"account": "7753643025", "campaign": "X"}
     assert (
         plugin._pre_tool_call(
-            tool_name="mcp__aimash__propose_pause_campaign",
+            tool_name="mcp__aimash__pause_campaign",
             args=args,
             session_id="s-skill-write",
             turn_id="t-skill-write",
@@ -532,7 +532,7 @@ def test_recall_client_does_not_phase_lock_private_operator_proposal(monkeypatch
     args = {"account": "7753643025", "campaign": "X"}
     assert (
         plugin._pre_tool_call(
-            tool_name="mcp__aimash__propose_pause_campaign",
+            tool_name="mcp__aimash__pause_campaign",
             args=args,
             session_id="s6",
             turn_id="t6",
@@ -641,7 +641,7 @@ def test_missing_button_bridge_falls_back_to_semantic_reply(monkeypatch):
     plugin._capture_gateway_event(event=_event())
     proposal_args = {"account": "7753643025", "campaign": "X"}
     allowed = plugin._pre_tool_call(
-        tool_name="mcp__aimash__propose_pause_campaign",
+        tool_name="mcp__aimash__pause_campaign",
         args=proposal_args,
         session_id="s-no-buttons",
         turn_id="t-no-buttons",

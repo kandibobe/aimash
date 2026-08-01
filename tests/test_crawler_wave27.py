@@ -161,5 +161,3 @@ def test_store_merges_pages_only_when_flag_set():
     """Гард класса: full-краул заменяет карту, incremental — сливает (флаг site_pages_merge)."""
     src = (Path(__file__).resolve().parents[1] / "clients/store.py").read_text(encoding="utf-8")
     assert 'get("site_pages_merge")' in src
-    main = (Path(__file__).resolve().parents[1] / "bot/main.py").read_text(encoding="utf-8")
-    assert '"site_pages_merge": mode == "incremental"' in main

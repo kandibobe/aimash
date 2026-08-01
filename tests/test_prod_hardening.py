@@ -347,38 +347,6 @@ def test_llm_budget_none_chat_noop(monkeypatch):
 
 
 # ── A3: клавиатура /diag + форматтеры ──────────────────────────────────────────────
-def test_diag_kb_detail_only_for_admin():
-    from bot.keyboards import diag_kb
-
-    rows = [SimpleNamespace(request_id="abc123", where="w", exc_type="E", created_at=None)]
-    cbs_admin = [
-        b.callback_data
-        for r in diag_kb(rows, today=False, is_admin=True).inline_keyboard
-        for b in r
-    ]
-    assert any(c.startswith("diag:") for c in cbs_admin)
-    assert any("detail" in c for c in cbs_admin)  # detail-кнопка у админа есть
-    cbs_user = [
-        b.callback_data
-        for r in diag_kb(rows, today=False, is_admin=False).inline_keyboard
-        for b in r
-    ]
-    assert not any("detail" in c for c in cbs_user)  # у не-админа detail НЕТ
-
-
-def test_diag_kb_today_toggle():
-    from bot.keyboards import diag_kb
-
-    t_off = [
-        b.text.lower() for r in diag_kb([], today=False, is_admin=False).inline_keyboard for b in r
-    ]
-    assert any("сегодня" in t or "today" in t for t in t_off)
-    t_on = [
-        b.text.lower() for r in diag_kb([], today=True, is_admin=False).inline_keyboard for b in r
-    ]
-    assert any("все" in t or "all" in t for t in t_on)
-
-
 def test_fmt_error_alert_dedup_counts():
     from core import texts
 

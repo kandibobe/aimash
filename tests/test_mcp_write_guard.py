@@ -172,9 +172,22 @@ async def test_execute_facade_redacts_expected_errors(monkeypatch):
     assert result["status"] == "failed"
     assert result["error_code"] == "invalid_argument"
     assert secret not in result["error"]
+    assert result["ok"] is False
+    assert result["error_type"] == "INVALID_MUTATION_ARGUMENT"
+    assert result["message"] == result["error"]
+    assert result["suggested_action"]
 
 
-async def test_launch_campaign_is_proposal_only_agent_capability(monkeypatch):
+def test_mutation_error_hint_directs_ambiguous_campaign_to_read_tool():
+    from ads.mutations import mutation_error_hint
+
+    hint = mutation_error_hint(ValueError("Найдено несколько кампаний с таким названием"))
+
+    assert hint["error_type"] == "AMBIGUOUS_CAMPAIGN"
+    assert "list_campaigns" in hint["suggested_action"]
+
+
+async def test_launch_campaign_is_exposed_as_direct_action(monkeypatch):
     captured = {}
 
     async def _propose(operation, model_cls, **kwargs):
@@ -183,7 +196,7 @@ async def test_launch_campaign_is_proposal_only_agent_capability(monkeypatch):
 
     monkeypatch.setattr(tools_write, "_propose", _propose)
 
-    result = await tools_write.propose_launch_campaign("7753643025", "Draft Search")
+    result = await tools_write.ACTION_TOOL_FUNCS["launch_campaign"]("7753643025", "Draft Search")
 
     assert result == {"status": "pending", "operation": "launch_campaign"}
     assert captured == {
@@ -192,7 +205,4 @@ async def test_launch_campaign_is_proposal_only_agent_capability(monkeypatch):
         "kwargs": {"account": "7753643025", "campaign": "Draft Search"},
     }
     assert "launch_campaign" in MUTATION_TOOLS
-    assert (
-        tools_write.PROPOSE_TOOL_FUNCS["propose_launch_campaign"]
-        is tools_write.propose_launch_campaign
-    )
+    assert "launch_campaign" in tools_write.ACTION_TOOL_FUNCS

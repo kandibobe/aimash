@@ -1,9 +1,9 @@
 # Aimash — Hermes-агент для Google Ads
 
 Aimash — приватный Telegram-агент владельца и доверенных сотрудников агентства. Hermes понимает
-свободный запрос, выбирает инструменты, читает Google Ads, исследует, анализирует и готовит действия.
-Наш Python-код не заменяет агента: это узкий typed gateway к Google Ads, валидация денег/лимитов,
-одноразовое подтверждение каждой мутации, audit и повторная API-проверка.
+свободный запрос, выбирает инструменты, читает Google Ads, исследует, анализирует и выполняет действия.
+Python-код — узкий typed gateway к Google Ads со Structured JSON errors, Self-Healing,
+`validate_only`, лимитами и повторной API-проверкой.
 
 ## Источник истины
 
@@ -11,8 +11,8 @@ Aimash — приватный Telegram-агент владельца и дове
 [`Aimash_Technical_Specification.docx`](Aimash_Technical_Specification.docx),
 [`Aimash_Flow_Google_Search_4.docx`](Aimash_Flow_Google_Search_4.docx) и
 [`Информация о клиентах_1.docx`](Информация%20о%20клиентах_1.docx).
-[`ТЗ.md`](ТЗ.md) — их проверяемое текстовое зеркало; [`SPEC.md`](SPEC.md) и unified-артефакты — только
-производные implementation notes. При расхождении исправляется производный материал, а не исходный DOCX.
+[`ТЗ.md`](ТЗ.md) — их проверяемое текстовое зеркало. [`SPEC.md`](SPEC.md) фиксирует утверждённую
+архитектурную редакцию v3.0; исходные DOCX сохранены как исторический договорный baseline.
 
 ## Целевой UX
 
@@ -20,25 +20,24 @@ Aimash — приватный Telegram-агент владельца и дове
 - Hermes сам решает, что прочитать и в какой последовательности вызвать primitive tools.
 - Жёсткого восьмиэкранного wizard и обязательной покнопочной RSA-курации в целевом UX нет.
 - Чтение, аудит, отчёты, исследования, выбор tools и подготовка пакета выполняются автономно.
-- Для любой мутации показывается один общий diff и кнопки `✅ Да` / `❌ Нет`; reply на всю карточку
-  остаётся fallback.
-- Код исполняет typed mutation, пишет audit и перечитывает результат из Google Ads API.
+- Оперативные изменения по прямой команде выполняются сразу через typed Function Calling.
+- Критические глобальные бюджетные изменения backend переводит в отдельный подтверждаемый шаг.
+- Ошибка инструмента возвращает Hermes JSON с причиной и следующим действием для самостоятельного retry.
 
-`aimash_trusted_transport` — не второй агент и не бизнес-логика. Это узкий мост, который доказывает,
-что подтверждение действительно пришло от разрешённого Telegram user/chat/message, а не
-было придумано моделью или текстом сайта.
+`aimash_trusted_transport` — тонкий Telegram transport для actor/chat context, файлов и критических
+budget approvals; бизнес-логику и выбор следующего tool держит Hermes.
 
 ## Текущий production
 
 | Контур | Назначение |
 |---|---|
 | `@Google_Hermes_AI_Manager_bot` | Целевой agent-first интерфейс Hermes |
-| `@Aimash_Google_Ads_AI_Manager_bot` | Legacy aiogram fallback до завершения cutover |
-| `mcp_server/` | 38 READ-инструментов + 1 META + 53 agent-first PLAN/state + 1 WRITE |
+| `mcp_server/` | 24 READ-инструмента + 1 META + 55 agent-first PLAN/state + 1 WRITE |
 | `scheduler/` | Отчёты, алерты, delivery и фоновые задания |
 
-Hermes MCP всё ещё запускается внутри контейнера `aimash-bot`; поэтому `bot/` нельзя удалять до
-bot-free cutover. Точная эксплуатационная процедура — [`deploy/hermes/OPERATIONS.md`](deploy/hermes/OPERATIONS.md).
+Hermes MCP запускается отдельным ephemeral-контейнером `aimash-mcp`; scheduler и миграции также
+отделены от Telegram gateway. Точная эксплуатационная процедура —
+[`deploy/hermes/OPERATIONS.md`](deploy/hermes/OPERATIONS.md).
 
 ## Граница автономии
 
@@ -54,7 +53,7 @@ Hermes делает сам:
 
 - typed validation, деньги, проценты, billing units и RSA 30/90/15;
 - account ceiling, allowlist, provenance, freshness, kill-switch и quota;
-- подтверждение каждой мутации через Telegram anchor + CAS;
+- `validate_only`, лимиты и structured recovery hints на mutation boundary;
 - Google Ads SDK mutation, audit и post-verify;
 - доверенную доставку файлов и привязку входящих Telegram media.
 
@@ -69,18 +68,28 @@ python -m venv .venv
 pip install -e ".[dev]"
 Copy-Item .env.example .env
 python -m pytest -q
-python -m bot.main
+python -m mcp_server
 ```
 
 Hermes-конфиг, установка gateway, production env и OAuth-проверки описаны в
 [`deploy/hermes/README.md`](deploy/hermes/README.md) и
 [`deploy/hermes/OPERATIONS.md`](deploy/hermes/OPERATIONS.md). Шаблон переменных — [`.env.example`](.env.example).
 
-## Безопасность
+Живая проверка новой App mutation выполняется только явным запуском оператора на allowlisted Draft:
+
+```powershell
+python scripts/live_smoke_app.py --app-id com.example.real
+```
+
+Скрипт проходит production confirm/audit path, перечитывает `PAUSED` App campaign из API и не запускается
+автоматически тестами. Для Apple используйте `--store apple_app_store` и числовой App ID.
+
+## Runtime guarantees
 
 - Разработка и UAT мутаций — только Draft `7753643025`.
 - Пустой Telegram allowlist и пустой mutation allowlist блокируют доступ.
-- Бюджет/ставка/стратегия/launch требуют прямой команды человека и одного подтверждения.
+- Оперативные mutation-команды исполняются из текущего пользовательского запроса без legacy wizard.
+- Критический глобальный бюджетный diff исполняется после отдельного approval.
 - Секреты не попадают в prompt, Telegram, логи или git.
 - `skills.inline_shell: false` сохраняется.
 - «Выполнено» строится из audit-row и API-readback, а не из уверенного текста модели.
@@ -101,7 +110,6 @@ adcopy/          RSA generation + deterministic validation
 clients/         account-scoped profiles and crawl
 scheduler/       background jobs and delivery
 deploy/hermes/   gateway config, plugin, operations
-bot/             временный legacy runtime/fallback
 ```
 
 ## Живые документы Hermes

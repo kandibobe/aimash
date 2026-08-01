@@ -319,15 +319,14 @@ def test_keyword_bid_via_sdk_keys_by_ad_group_and_criterion_pair():
 
 
 def test_confirmation_policy_partitions_every_supported_operation():
-    """The executable policy, not a hand-maintained docs table, classifies every mutation exactly
-    once. This keeps newly added money operations from silently falling into an autonomous path."""
-    from ads.resolve import MONEY_OPS
+    """The typed registry stays total; only critical update_budget is conditionally approval-gated."""
     from ads.service import SUPPORTED_OPERATIONS
-    from confirm.policy import AUTONOMOUS_ADS_OPS, CONFIRM_REQUIRED_ADS_OPS
+    from confirm.policy import ALL_ADS_OPS, AUTONOMOUS_ADS_OPS, CONFIRM_REQUIRED_ADS_OPS
 
     assert not (AUTONOMOUS_ADS_OPS & CONFIRM_REQUIRED_ADS_OPS)
-    assert AUTONOMOUS_ADS_OPS | CONFIRM_REQUIRED_ADS_OPS == SUPPORTED_OPERATIONS
-    assert set(MONEY_OPS) <= CONFIRM_REQUIRED_ADS_OPS
+    assert ALL_ADS_OPS == SUPPORTED_OPERATIONS
+    assert AUTONOMOUS_ADS_OPS | CONFIRM_REQUIRED_ADS_OPS == ALL_ADS_OPS
+    assert CONFIRM_REQUIRED_ADS_OPS == {"update_budget"}
 
 
 async def test_apply_update_keyword_bid_validates_range_before_claim():
@@ -2911,6 +2910,18 @@ def _apply_case(op):
             "business_name": "Бренд",
             "final_url": "https://x.example/",
             "budget_daily_micros": 10_000_000,
+            **base,
+        }
+    if op == "create_app_campaign":
+        return mut.apply_create_app_campaign, {
+            "campaign_name": "Тест App",
+            "app_id": "com.example.app",
+            "app_store": "google_play",
+            "headlines": ["Установите приложение", "Попробуйте сегодня"],
+            "descriptions": ["Быстро и удобно.", "Все функции в приложении."],
+            "budget_daily_micros": 10_000_000,
+            "target_cpa_micros": 1_000_000,
+            "youtube_video_ids": ["dQw4w9WgXcQ"],
             **base,
         }
     raise AssertionError(op)

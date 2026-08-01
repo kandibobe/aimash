@@ -85,35 +85,6 @@ def test_keyword_plan_default_geo_and_language_are_neutral():
     assert kp.DEFAULT_LANGUAGE == ""  # не «ru»
 
 
-def test_default_kw_geo_from_settings():
-    """_default_kw_geo: пусто → () (глобально); env-страна → её geo id; неизвестная → ()."""
-    import bot.main as bm
-    from ads.geo import geo_id_for_country
-
-    with geo_env("", "ru"):
-        assert bm._default_kw_geo() == ()  # без биаса
-    with geo_env("UG", "en"):
-        assert bm._default_kw_geo() == (geo_id_for_country("UG"),)  # Уганда, не Украина
-    with geo_env("ZZ", "ru"):
-        assert bm._default_kw_geo() == ()  # неизвестная страна → глобально, не падаем
-
-
-def test_resolve_kw_geo_distinguishes_none_and_empty():
-    """Ключевой инвариант A1: geo_ids=() (явно «все страны») НЕ схлопывается в страну; None берёт
-    «домашний» дефолт из settings; непустой кортеж — как есть. Раньше falsy-() давало Украину."""
-    import bot.main as bm
-    from ads.geo import geo_id_for_country
-
-    with geo_env("UG", "en"):
-        ug = geo_id_for_country("UG")
-        assert bm._resolve_kw_geo(None) == (ug,)  # None → домашний дефолт (Уганда, не Украина)
-        assert bm._resolve_kw_geo(()) == ()  # явно «все страны» → глобально (НЕ схлоп в страну)
-        assert bm._resolve_kw_geo((1234,)) == (1234,)  # конкретное гео — как есть
-    with geo_env("", "ru"):
-        assert bm._resolve_kw_geo(None) == ()  # гео не задано, дефолта нет → глобально, без биаса
-        assert bm._resolve_kw_geo(()) == ()
-
-
 def test_call_and_price_asset_schemas_read_config():
     """D7: у CallAsset страна и у PriceAsset язык — из конфига, а не литералы «UA»/«uk». Литерал
     материализовался в model_dump() → env-фолбэк в ads/service.py становился мёртвым кодом, и

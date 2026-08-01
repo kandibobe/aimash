@@ -229,11 +229,3 @@ def test_card_mini_trend_needs_three_you_points():
 
     en = fmt_competitors(series3[-1], None, customer_id="123", lang="en", series=series3)
     assert "📈 Your impression share" in en
-
-
-def test_handler_module_registered_before_fallback():
-    """Документ ловится ПО СОСТОЯНИЮ раньше catch-all on_document — иначе CSV конкурентов уедет
-    в ИИ (ровно то, чего мы избегаем). Порядок = порядок HANDLER_MODULES."""
-    from bot.handlers import HANDLER_MODULES
-
-    assert HANDLER_MODULES.index("competitors") < HANDLER_MODULES.index("fallback")

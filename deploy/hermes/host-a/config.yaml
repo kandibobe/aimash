@@ -227,19 +227,12 @@ mcp_servers:
     connect_timeout: 30
     tools:
       include:
-        # РОВНО 11. `get_change_history` ИСКЛЮЧЁН осознанно: он читает НАШ audit-trail из таблицы
+        # РОВНО 4. `get_change_history` ИСКЛЮЧЁН осознанно: он читает НАШ audit-trail из таблицы
         # `proposals` (см. докстринг mcp_server/tools_read.py:377-379), а эта БД живёт на Хосте B и
         # с Хоста A недостижима по построению. Включённый, он давал бы пустой ответ, который агент
         # прочитает как «изменений не было» — худший вид ошибки: уверенный и неверный.
         - list_accounts
-        - get_campaign_stats
-        - get_adgroup_stats
-        - get_keywords
-        - get_ads
-        - get_search_terms
-        - get_negatives
-        - get_budgets
-        - get_auction_insights
+        - execute_google_ads_query
         - get_account_audit
         - keyword_ideas
 

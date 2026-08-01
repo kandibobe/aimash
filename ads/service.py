@@ -76,6 +76,7 @@ SUPPORTED_OPERATIONS: frozenset[str] = frozenset(
         "create_search_campaign",
         "create_demand_gen_campaign",
         "create_video_campaign",
+        "create_app_campaign",
         "add_sitelinks",
         "add_callouts",
         "add_structured_snippets",
@@ -1041,6 +1042,43 @@ async def _apply_confirmed(store, confirmation_id: str) -> dict:
             confirm_store=store,
             ads_client=client,
         )
+
+    if op == "create_app_campaign":
+        # UAC/App: proposal хранит только trusted media_id; бинарь читается здесь после ✅.
+        from ads.assets import clear_pending_media_ids, load_pending_media
+
+        media_ids = list(params.get("image_media_ids") or [])
+        image_assets: list[tuple[bytes, str]] = []
+        try:
+            for index, media_id in enumerate(media_ids, start=1):
+                landscape, square = await asyncio.to_thread(load_pending_media, media_id)
+                image_assets.extend(
+                    [
+                        (landscape, f"{params['campaign_name']}_app_landscape_{index}"),
+                        (square, f"{params['campaign_name']}_app_square_{index}"),
+                    ]
+                )
+            return await mutations.apply_create_app_campaign(
+                customer_id=customer_id,
+                campaign_name=params["campaign_name"],
+                app_id=params["app_id"],
+                app_store=params["app_store"],
+                headlines=params["headlines"],
+                descriptions=params["descriptions"],
+                budget_daily_micros=params["budget_daily_micros"],
+                target_cpa_micros=params["target_cpa_micros"],
+                image_assets=image_assets,
+                youtube_video_ids=params.get("youtube_video_ids") or [],
+                geo_locations=params.get("geo_locations") or [],
+                geo_country_code=params.get("geo_country_code") or settings.geo_default_country,
+                geo_locale=params.get("geo_locale") or settings.geo_default_locale,
+                languages=params.get("languages") or [],
+                confirmation_id=confirmation_id,
+                confirm_store=store,
+                ads_client=client,
+            )
+        finally:
+            await asyncio.to_thread(clear_pending_media_ids, media_ids)
 
     if op == "attach_audience":
         ref = await asyncio.to_thread(

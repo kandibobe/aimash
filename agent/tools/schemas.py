@@ -147,6 +147,8 @@ MUTATION_TOOLS = {
     "create_search_campaign",
     "create_demand_gen_campaign",
     "create_video_campaign",
+    "create_app_campaign",
+    "attach_image_asset",
     "add_sitelinks",
     "add_callouts",
     "add_structured_snippets",
@@ -878,6 +880,74 @@ class CreateVideoCampaign(_MediaVideoCampaignBase):
     сужает КОД (≤70, ads.mutations.VIDEO_DESCRIPTION_MAX)."""
 
 
+class CreateAppCampaign(BaseModel):
+    """§11: Universal App Campaign / App campaign из подготовленных изображений и YouTube-видео.
+
+    Бинарные изображения остаются во временном trusted-хранилище; в proposal лежат только media_id.
+    Кампания создаётся PAUSED и оптимизируется на установки с явным target CPA.
+    """
+
+    campaign_name: str = Field(min_length=1, max_length=120)
+    app_id: str = Field(min_length=1, max_length=255)
+    app_store: Literal["google_play", "apple_app_store"]
+    headlines: list[str] = Field(min_length=2, max_length=5)
+    descriptions: list[str] = Field(min_length=2, max_length=5)
+    budget_daily_micros: int = Field(gt=0, le=MONEY_MAX_MICROS)
+    target_cpa_micros: int = Field(gt=0, le=MONEY_MAX_MICROS)
+    image_media_ids: list[str] = Field(default_factory=list, max_length=10)
+    youtube_video_ids: list[str] = Field(default_factory=list, max_length=10)
+    geo_locations: list[str] = Field(default_factory=list, max_length=50)
+    geo_country_code: str = Field(default_factory=_default_geo_country)
+    geo_locale: str = Field(default_factory=_default_geo_locale)
+    languages: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("app_id")
+    @classmethod
+    def _app_id(cls, value: str) -> str:
+        out = str(value).strip()
+        if not out:
+            raise ValueError("app_id не может быть пустым")
+        return out
+
+    @field_validator("headlines")
+    @classmethod
+    def _headlines(cls, values: list[str]) -> list[str]:
+        for value in values:
+            _assert_rsa_len([value], "headline")
+        return values
+
+    @field_validator("descriptions")
+    @classmethod
+    def _descriptions(cls, values: list[str]) -> list[str]:
+        for value in values:
+            _assert_rsa_len([value], "description")
+        return values
+
+    @field_validator("image_media_ids")
+    @classmethod
+    def _image_ids(cls, values: list[str]) -> list[str]:
+        out = list(dict.fromkeys(str(value) for value in values))
+        if any(not value.isalnum() for value in out):
+            raise ValueError("image_media_ids должны быть буквенно-цифровыми")
+        return out
+
+    @field_validator("youtube_video_ids")
+    @classmethod
+    def _video_ids(cls, values: list[str]) -> list[str]:
+        from ads.assets import parse_youtube_video_id
+
+        out = list(dict.fromkeys(str(value) for value in values))
+        if any(not parse_youtube_video_id(value) for value in out):
+            raise ValueError("нужны ссылки на YouTube-видео или 11-символьные id")
+        return out
+
+    @model_validator(mode="after")
+    def _requires_media(self):
+        if not self.image_media_ids and not self.youtube_video_ids:
+            raise ValueError("для App campaign нужно минимум одно изображение или YouTube-видео")
+        return self
+
+
 class CreateSearchCampaign(BaseModel):
     """Финальные параметры поисковой (Search) кампании (§3). Минтуется ботом после визарда
     (/newsearch: генерация RSA), не из LLM напрямую. Длину/составы считает КОД — зеркалит
@@ -1099,7 +1169,8 @@ class AddStructuredSnippets(BaseModel):
 class AttachImageAsset(BaseModel):
     """Прикрепить изображение-ассет к кампании (§3-assets, семейство 2). Минтуется ботом после
     приёма фото (как GDN): бинарь НЕ здесь — media_id ссылается на временно сохранённое
-    подготовленное изображение. Не LLM-tool (нужно фото) — только bot-визард через SCHEMAS."""
+    подготовленное изображение. Hermes получает media_id только от trusted ingest_media и создаёт
+    тот же подтверждаемый черновик, что и bot-визард; бинарь в prompt/params не попадает."""
 
     campaign: str
     media_id: str = Field(min_length=1, max_length=64)
@@ -1296,6 +1367,7 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "create_search_campaign": CreateSearchCampaign,
     "create_demand_gen_campaign": CreateDemandGenCampaign,
     "create_video_campaign": CreateVideoCampaign,
+    "create_app_campaign": CreateAppCampaign,
     "get_stats": GetStats,
     "analyze_account": AnalyzeAccount,
     "generate_rsa": GenerateRsa,

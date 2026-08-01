@@ -22,7 +22,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ads import mutations as M  # noqa: E402
 from ads.read import ACCOUNT_LEVEL_FIELD_TYPES  # noqa: E402
 from core import texts  # noqa: E402
-from bot.keyboards import cc_assets_reuse_kb  # noqa: E402
 
 SPECS = [
     {
@@ -116,29 +115,6 @@ def test_confirm_card_includes_assets_plain_text():
         "C", "https://x.ua", 50.0, ["h"], ["d"], ["k"], "phrase", "ru", currency="USD"
     )
     assert "Ассеты" not in plain
-
-
-def test_wizard_confirm_card_passes_assets():
-    """Гард класса: хендлер «Создать черновик» обязан передавать ассеты в сводку карточки — иначе
-    §19.8 снова деградирует до счётчиков (баг не виден в тестах формата, только в call-site)."""
-    src = (Path(__file__).resolve().parents[1] / "bot/handlers/campaign_wizard.py").read_text(
-        encoding="utf-8"
-    )
-    call = src[src.index("summary = bm.texts.fmt_search_proposal_summary(") :]
-    call = call[: call.index("await cq.answer()")]
-    assert "asset_specs" in call and "existing_asset_links" in call and "image_media_ids" in call
-
-
-# ── §19.7: выбор подмножества ─────────────────────────────────────────────────────
-def test_reuse_keyboard_toggles_types():
-    kb = cc_assets_reuse_kb({"SITELINK": 4, "CALLOUT": 6}, {"SITELINK"}, "ru")
-    labels = [b.text for row in kb.inline_keyboard for b in row]
-    assert "⬜ SITELINK ×4" in labels  # выключен
-    assert "✅ CALLOUT ×6" in labels  # включён
-    assert any("Готово" in x for x in labels)
-    # по умолчанию (excluded пуст) — включено всё: «Готово» без правок = прежнее поведение
-    all_on = [b.text for row in cc_assets_reuse_kb({"SITELINK": 1}).inline_keyboard for b in row]
-    assert "✅ SITELINK ×1" in all_on
 
 
 def test_reuse_toggle_recomputes_links():

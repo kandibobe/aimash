@@ -51,6 +51,7 @@ _EXPECTED_MONEY_OPS = {
     "apply_create_gdn_campaign",
     "apply_create_demand_gen_campaign",  # §11: кампания из видео (Demand Gen) — задаёт бюджет
     "apply_create_video_campaign",  # §11: видеокампания — задаёт бюджет
+    "apply_create_app_campaign",  # §11: App/UAC — задаёт дневной бюджет и target CPA
     "apply_launch_campaign",  # включает ранее PAUSED-структуру и тем самым открывает расход
 }
 
@@ -163,50 +164,6 @@ def test_money_gate_requires_both_provenance_bits():
 
 
 # ── #5: глобальный @dp.errors() не утекает сырой текст исключения в Telegram ──────
-async def test_on_error_handler_does_not_leak_secret_to_telegram(monkeypatch):
-    """Необработанное исключение с секрето-подобным текстом → пользователю уходит НЕЙТРАЛЬНОЕ
-    сообщение с кодом инцидента, а не str(e). capture_exception (БД/Sentry) подменяем — тестируем
-    именно путь уведомления."""
-    import bot.main as bm
-
-    secret = "1//0SECRETrefreshTOKENvalue123"  # gitleaks:allow — форма refresh-токена
-    incident_code = "INC-TEST-42"
-
-    async def _fake_capture(exc, where="handler"):
-        return incident_code
-
-    monkeypatch.setattr(bm, "capture_exception", _fake_capture)
-
-    sent: dict[str, str] = {}
-
-    class _Msg:
-        async def answer(self, text, **kw):
-            sent["text"] = text
-
-    class _Update:
-        message = _Msg()
-        callback_query = None
-
-    class _Event:
-        exception = RuntimeError(f"google-ads auth failed refresh_token={secret} denied")
-        update = _Update()
-
-    handled = await bm.on_error(_Event())
-
-    assert handled is True  # aiogram: ошибка «обработана», не падает в stderr
-    text = sent.get("text", "")
-    assert text, "пользователю ничего не отправлено — уведомление о сбое пропало"
-    assert secret not in text, "СЕКРЕТ утёк в Telegram (golden rule #5)"
-    assert "refresh_token" not in text, "сырой текст исключения (str(e)) утёк в Telegram"
-    assert incident_code in text, "нет кода инцидента — пользователь не сможет сослаться на /diag"
-
-
-# ── Раскладка пакета `adcopy` — top-level, НЕ под ads/ (гард на IDE-дрейф) ─────────
-# Pylance периодически «услужливо» переносит adcopy/ внутрь ads/ (ads↔adcopy — общий
-# префикс) и переписывает импорты на `ads.adcopy.*`, что рушит рантайм (adcopy — плоский
-# top-level пакет, см. pyproject setuptools include). Раньше ловилось только глазами по
-# ModuleNotFoundError. Теперь — красный тест до отгрузки. Правится в одном месте при
-# осознанном переезде пакета.
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
@@ -367,9 +324,7 @@ async def test_google_ads_exception_with_token_redacted_in_chat_and_audit():
 # ∪ UI-only-операции (минтятся кнопками, агент их НЕ вызывает — защита от prompt-injection). Явный
 # allowlist UI-only: новая SUPPORTED-операция, забытая в MUTATION_TOOLS, провалит тест (агент не
 # сможет её вызвать по NL), ЕСЛИ она не внесена сюда осознанно как UI-only.
-_UI_ONLY_OPS = {
-    "attach_image_asset",  # §3-assets: изображение приходит как media_id из UI, не по NL агента
-}
+_UI_ONLY_OPS: set[str] = set()
 
 
 def test_supported_ops_are_agent_tools_or_ui_only():
@@ -395,39 +350,6 @@ def test_every_supported_op_has_a_schema():
 
 
 # ── #3 (UI-зеркало): _MONEY_OPS_UI в bot.main синхронен реестру денежных операций ──
-def test_money_ops_ui_mirror_matches_registry():
-    """bot.main._MONEY_OPS_UI (предупреждение о внешнем контенте) обязан зеркалить
-    _EXPECTED_MONEY_OPS (без префикса apply_) — дрейф реестров ловится здесь."""
-    import bot.main as bm
-
-    expected = {name.removeprefix("apply_") for name in _EXPECTED_MONEY_OPS}
-    assert set(bm._MONEY_OPS_UI) == expected, (
-        f"_MONEY_OPS_UI={sorted(bm._MONEY_OPS_UI)} разошёлся с реестром денежных операций "
-        f"{sorted(expected)} — обнови оба осознанно"
-    )
-
-
-# ── 1F7: офлайн-бэклог Telegram не переигрывается после рестарта ───────────────────
-def test_polling_drops_pending_updates():
-    """bot/main.py обязан вызывать delete_webhook(drop_pending_updates=True) ДО start_polling:
-    NL-команды многочасовой давности на денежном пути опасны. Слабая (текстовая), но
-    класс-фиксирующая проверка — снятие вызова ломает тест."""
-    src = (_REPO_ROOT / "bot" / "main.py").read_text(encoding="utf-8")
-    drop_pos = src.find("delete_webhook(drop_pending_updates=True)")
-    poll_pos = src.find("await dp.start_polling(bot)")
-    assert drop_pos != -1, "drop_pending_updates(True) пропал из bot/main.py (1F7)"
-    assert poll_pos != -1 and drop_pos < poll_pos, (
-        "drop_pending_updates должен идти ДО start_polling"
-    )
-
-
-# ── Construction-time гарды не должны быть `assert` (вырезается под -O) ────────────
-# Класс бага, а не два экземпляра: `assert` на уровне модуля читается как гард, но `python -O`
-# выбрасывает его из байткода целиком. И4 (MCP READ без мутаций) и S4 (аналитический цикл без
-# мутаций) стояли именно так. Ниже — два теста: механизм переживает -O, и в продовых пакетах
-# module-level `assert` больше нет ни одного. Подробности — `core/guards.py`.
-
-# Пакеты рантайма (tests/scripts/migrations сознательно вне: там assert — рабочий инструмент).
 _PROD_PACKAGES = (
     "adcopy",
     "ads",
@@ -446,7 +368,6 @@ _PROD_PACKAGES = (
 
 
 def _run_probe(code: str, *, optimized: bool) -> subprocess.CompletedProcess[str]:
-    """Прогнать код в чистом интерпретаторе; optimized=True → `-O` (assert'ы вырезаны)."""
     args = [sys.executable] + (["-O"] if optimized else []) + ["-c", code]
     return subprocess.run(
         args,
@@ -454,21 +375,20 @@ def _run_probe(code: str, *, optimized: bool) -> subprocess.CompletedProcess[str
         env={
             **os.environ,
             "PYTHONPATH": str(_REPO_ROOT),
-            "ENV": "dev",  # prod fail-fast на пустом whitelist уронил бы зонд не по делу
+            "ENV": "dev",
             "PYTHONIOENCODING": "utf-8",
         },
         capture_output=True,
         text=True,
-        encoding="utf-8",  # Windows: cp1251 ломает кириллицу в тексте ошибки
+        encoding="utf-8",
         timeout=180,
     )
 
 
 _I4_PROBE = """
 import mcp_server.tools_read as tr
-# Подсаживаем мутацию в read-реестр ДО импорта server.py: он читает атрибут модуля на импорте.
 tr.READ_MCP_TOOLS = frozenset(tr.READ_MCP_TOOLS) | {"update_budget"}
-import mcp_server.server  # обязан упасть RuntimeError'ом (И4), а не собраться
+import mcp_server.server
 print("ГАРД НЕ СРАБОТАЛ")
 """
 

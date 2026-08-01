@@ -72,11 +72,11 @@ def test_i4_seed_read_tools_disjoint_from_mutations():
         "И4: READ-инструменты MCP пересеклись с мутационными: "
         f"{sorted(READ_MCP_TOOLS & MUTATION_TOOLS)}"
     )
-    # 38 = прежние 25 Google Ads/profile READ + 13 bot-free workflow readers (report artifact,
+    # 24 = 11 generic/account/profile READ + 13 bot-free workflow readers (report artifact,
     # keyword/RSA primitives and structured client/crawl reads). Точный счёт держит
     # реестр от тихого разрастания: новая обёртка обязана осознанно бампнуть его вместе с
     # config.yaml/_ACCOUNT_ARG.
-    assert len(READ_MCP_TOOLS) == 38, f"ожидалось 38 READ-инструментов, стало {len(READ_MCP_TOOLS)}"
+    assert len(READ_MCP_TOOLS) == 24, f"ожидалось 24 READ-инструмента, стало {len(READ_MCP_TOOLS)}"
 
 
 def test_i4_seed_server_builds_and_registers_only_read():
@@ -103,25 +103,12 @@ def test_i4_seed_server_builds_and_registers_only_read():
 # аргументом он адресует аккаунт, нельзя.
 _ACCOUNT_ARG: dict[str, str] = {
     "list_accounts": "manager_id",  # другой чокпойнт — ensure_manager_allowed
-    "get_campaign_stats": "account",
-    "get_adgroup_stats": "account",
-    "get_keywords": "account",
-    "get_ads": "account",
-    "get_search_terms": "account",
-    "get_negatives": "account",
-    "get_budgets": "account",
-    "get_auction_insights": "account",
+    "execute_google_ads_query": "account",
     "get_account_audit": "account",
+    "analyze_account": "account",
     "get_change_history": "account",
     "get_account_changes": "account",  # Р6: журнал правок Google (НЕ наш audit-trail)
     "keyword_ideas": "account",
-    "list_campaigns": "account",
-    "read_campaign_targeting": "account",
-    "read_campaign_config": "account",
-    "get_bidding_strategy": "account",
-    "get_report_breakdown": "account",
-    "list_audiences": "account",
-    "list_attached_audiences": "account",
     "get_quota": "account",  # ридер НАШЕГО счётчика (core.quota) — замок только на границе
     "recall_client": "account",  # ридер НАШЕЙ БД (ClientProfileStore) — замок только на границе
     # §8 MCC: адресуют не лист, а УПРАВЛЯЮЩИЙ аккаунт — тот же чокпойнт, что у list_accounts
@@ -129,7 +116,6 @@ _ACCOUNT_ARG: dict[str, str] = {
     # по read-allow-листу, поэтому граница проверяет ровно то, что адресовал вызывающий.
     "get_mcc_summary": "manager_id",
     "get_mcc_deep": "manager_id",
-    "list_negative_shared_sets": "account",
     "build_report": "account",
     "seed_keywords": "account",
     "cluster_keywords": "account",
@@ -151,12 +137,8 @@ _ACCOUNT_ARG: dict[str, str] = {
 # Значения фиктивные и до ридера не доезжают ни в одной половине: в первой отказывает замок, во
 # второй взрывается стаб. Полноту словаря держит `test_required_args_are_declared_for_lock_invariant`.
 _EXTRA_ARGS: dict[str, dict[str, object]] = {
-    "read_campaign_targeting": {"campaign_id": "1"},
-    "read_campaign_config": {"campaign_name": "X"},
-    "list_attached_audiences": {"campaign_id": "1"},
-    # dimension валидируется ДО выхода наружу — фиктивное имя дало бы invalid_argument вместо
-    # internal, то есть обратная половина инварианта не доказала бы прохода замка. Нужно допустимое.
-    "get_report_breakdown": {"dimension": "device"},
+    "execute_google_ads_query": {"gaql_query": "SELECT customer.id FROM customer LIMIT 1"},
+    "analyze_account": {"objective": "Найди главный источник потерь"},
     "seed_keywords": {"topic": "X"},
     "cluster_keywords": {"keywords": ["X"]},
     "filter_keyword_relevance": {"topic": "X", "keywords": ["X"]},
@@ -460,8 +442,8 @@ async def test_i1_external_source_cannot_change_proposal_customer_id(monkeypatch
     monkeypatch.setattr(settings, "aimash_trust_hmac_key", SecretStr(KEY))
     monkeypatch.setattr("core.access.is_whitelisted", allowed)
     monkeypatch.setattr("core.access.ensure_account_allowed_for_user", account_allowed)
-    wrapped = trusted_tool("propose_test", propose)
-    token = _token("propose_test", {"account": DRAFT_ACCOUNT_ID}, now=1, expires=120)
+    wrapped = trusted_tool("action_test", propose)
+    token = _token("action_test", {"account": DRAFT_ACCOUNT_ID}, now=1, expires=120)
     # Freeze verifier time inside the signed lifetime without weakening production code.
     monkeypatch.setattr("mcp_server.trusted_transport.time.time", lambda: 60)
     result = await wrapped(account=_FOREIGN_ID, trusted_turn_token=token)
@@ -502,7 +484,7 @@ def test_i2_external_text_cannot_forge_financial_confirmation(monkeypatch):
     args = {"account": DRAFT_ACCOUNT_ID, "campaign": "X"}
     assert (
         plugin._pre_tool_call(
-            tool_name="mcp__aimash__propose_pause_campaign",
+            tool_name="mcp__aimash__pause_campaign",
             args=args,
             session_id="i2",
             turn_id="attack",
@@ -587,7 +569,7 @@ def test_private_profile_external_content_does_not_phase_lock_tools(monkeypatch)
     same_turn_args = {"account": DRAFT_ACCOUNT_ID, "campaign": "X"}
     assert (
         plugin._pre_tool_call(
-            tool_name="mcp__aimash__propose_pause_campaign",
+            tool_name="mcp__aimash__pause_campaign",
             args=same_turn_args,
             session_id="i7",
             turn_id="old",
@@ -598,7 +580,7 @@ def test_private_profile_external_content_does_not_phase_lock_tools(monkeypatch)
     fresh_args = {"account": DRAFT_ACCOUNT_ID, "campaign": "X"}
     assert (
         plugin._pre_tool_call(
-            tool_name="mcp__aimash__propose_pause_campaign",
+            tool_name="mcp__aimash__pause_campaign",
             args=fresh_args,
             session_id="i7",
             turn_id="new",
@@ -613,11 +595,11 @@ def test_i8_at_most_one_pending_proposal_per_turn():
     MCP-слое (на прогон/тред), не надежда на ограничения модели."""
     import inspect
 
-    from mcp_server.tools_write import PROPOSE_TOOL_FUNCS, _propose, propose_composite_change
+    from mcp_server.tools_write import ACTION_TOOL_FUNCS, _propose, propose_composite_change
 
     source = inspect.getsource(_propose)
     assert source.index("count_run_pending_proposals") < source.index("build_proposal")
-    ordinary = [fn for fn in PROPOSE_TOOL_FUNCS.values() if fn is not propose_composite_change]
+    ordinary = list(ACTION_TOOL_FUNCS.values())
     assert all("_propose(" in inspect.getsource(fn) for fn in ordinary)
     composite_source = inspect.getsource(propose_composite_change)
     assert composite_source.index("count_run_pending_proposals") < composite_source.index(

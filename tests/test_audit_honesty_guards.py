@@ -215,22 +215,24 @@ def test_every_signal_and_family_has_labels_in_both_languages():
                 )
 
 
-def test_quick_win_pool_matches_bot_slice():
-    """«В один тап» можно обещать ТОЛЬКО находке, которой бот нарисует кнопку. Кнопки получают
-    первые `_AUDIT_MAX_FINDINGS` находок — значит и пул быстрых побед ровно такой."""
-    import bot.main as bm
-
-    assert render.QUICK_WIN_POOL == bm._AUDIT_MAX_FINDINGS
-
-
 def _report(cost: float, conv: float = 0.0, campaign: str = "Поиск"):
-    m = Metrics(impressions=1000, clicks=100, cost_micros=int(cost * 1e6), conversions=conv)
+    metrics = Metrics(
+        impressions=1000,
+        clicks=100,
+        cost_micros=int(cost * 1e6),
+        conversions=conv,
+    )
     return SimpleNamespace(
         customer_id="123",
-        totals=m,
+        totals=metrics,
         currency="USD",
         breakdowns=[
-            Breakdown("campaign", "Кампании", ["Кампания", "Статус"], [((campaign, "ENABLED"), m)])
+            Breakdown(
+                "campaign",
+                "Кампании",
+                ["Кампания", "Статус"],
+                [((campaign, "ENABLED"), metrics)],
+            )
         ],
     )
 
@@ -240,7 +242,12 @@ def _st(term: str, cost: float, conv: float, campaign: str = "Поиск"):
         campaign=campaign,
         ad_group="Группа",
         search_term=term,
-        metrics=Metrics(impressions=100, clicks=20, cost_micros=int(cost * 1e6), conversions=conv),
+        metrics=Metrics(
+            impressions=100,
+            clicks=20,
+            cost_micros=int(cost * 1e6),
+            conversions=conv,
+        ),
     )
 
 
@@ -250,7 +257,12 @@ def _kw(text: str, campaign: str = "Поиск"):
         ad_group="Группа",
         keyword=text,
         match_type="PHRASE",
-        metrics=Metrics(impressions=10, clicks=1, cost_micros=1_000_000, conversions=0.0),
+        metrics=Metrics(
+            impressions=10,
+            clicks=1,
+            cost_micros=1_000_000,
+            conversions=0.0,
+        ),
     )
 
 

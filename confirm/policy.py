@@ -1,16 +1,16 @@
-"""Private-operator confirmation policy.
+"""Aimash v3 approval policy.
 
-Every user-facing mutation requires one trusted human confirmation. Hermes remains autonomous for
-reading, analysis, tool selection and proposal composition; execution never bypasses the card.
-Unknown operations fail closed into the confirmation-required branch.
+Operational Google Ads mutations execute from the current trusted human turn.  One approval is
+reserved for a critical global budget change: an ``update_budget`` classified as L3 from its live
+``before -> after`` snapshot.  Unknown operations still stop because they are outside the typed
+tool registry.
 """
 
 from __future__ import annotations
 
 
-# Complete Google Ads mutation surface. Every operation stops at the same one-tap trusted Telegram
-# confirmation flow, including renames and creation of PAUSED campaigns.
-CONFIRM_REQUIRED_ADS_OPS: frozenset[str] = frozenset(
+# Complete typed Google Ads mutation surface.
+ALL_ADS_OPS: frozenset[str] = frozenset(
     {
         "add_call_asset",
         "add_callouts",
@@ -53,23 +53,32 @@ CONFIRM_REQUIRED_ADS_OPS: frozenset[str] = frozenset(
         "create_search_campaign",
         "create_demand_gen_campaign",
         "create_video_campaign",
+        "create_app_campaign",
     }
 )
 
 
-# Compatibility exports make the policy partition explicit. They must stay empty: execution of any
-# mutation without a human decision would violate the product contract.
-AUTONOMOUS_ADS_OPS: frozenset[str] = frozenset()
+# Approval candidates are deliberately narrow. ``update_budget`` is conditional: L1/L2 execute
+# directly, while L3 returns APPROVAL_REQUIRED with the attested diff.
+CONFIRM_REQUIRED_ADS_OPS: frozenset[str] = frozenset({"update_budget"})
+AUTONOMOUS_ADS_OPS: frozenset[str] = ALL_ADS_OPS - CONFIRM_REQUIRED_ADS_OPS
 AUTONOMOUS_MEMORY_OPS: frozenset[str] = frozenset()
 
 
-def requires_confirmation(operation: str) -> bool:
-    """Every mutation, including an unknown future operation, requires confirmation."""
+def requires_confirmation(operation: str, params: dict | None = None) -> bool:
+    """Return whether this exact typed action needs the single approval step."""
 
-    return True
+    if operation not in ALL_ADS_OPS:
+        return True
+    if operation != "update_budget":
+        return False
+
+    from confirm.risk import TIER_L3, risk_tier
+
+    return risk_tier(operation, params) == TIER_L3
 
 
-def may_execute_autonomously(operation: str) -> bool:
-    """No mutation may execute autonomously."""
+def may_execute_autonomously(operation: str, params: dict | None = None) -> bool:
+    """Return whether the trusted Hermes turn may continue straight to execution."""
 
-    return False
+    return operation in ALL_ADS_OPS and not requires_confirmation(operation, params)

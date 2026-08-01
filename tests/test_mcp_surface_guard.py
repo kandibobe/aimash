@@ -53,10 +53,10 @@ def test_surface_guard_rejects_confirm_execute_leak() -> None:
         require_registered_surface(leaked, READ_MCP_TOOLS, subject="тест")
 
 
-def test_surface_guard_rejects_propose_leak() -> None:
-    """§15.2 буквально: propose-инструмент на живой поверхности запрещён так же, как execute."""
-    leaked = set(READ_MCP_TOOLS) | {"propose_budget_change"}
-    with pytest.raises(RuntimeError, match="propose_budget_change"):
+def test_surface_guard_rejects_action_leak() -> None:
+    """§15.2: direct action на READ-only поверхности запрещён так же, как execute."""
+    leaked = set(READ_MCP_TOOLS) | {"update_budget"}
+    with pytest.raises(RuntimeError, match="update_budget"):
         require_registered_surface(leaked, READ_MCP_TOOLS, subject="тест")
 
 

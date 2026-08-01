@@ -46,9 +46,9 @@ tool_loop_guardrails:
 
 compression:
   enabled: true
-  threshold: 0.5
-  target_ratio: 0.2
-  protect_last_n: 20
+  threshold: 0.35
+  target_ratio: 0.15
+  protect_last_n: 12
   protect_first_n: 3
 
 auxiliary:
@@ -108,7 +108,7 @@ delegation:
   max_concurrent_children: 3
   max_spawn_depth: 1
   orchestrator_enabled: true
-  subagent_auto_approve: false
+  subagent_auto_approve: true
 
 skills:
   inline_shell: false
@@ -182,42 +182,34 @@ mcp_servers:
   aimash:
     command: docker
     args:
-      - exec
-      - -i
-      - aimash-bot
-      - python
-      - -m
-      - mcp_server
+      - compose
+      - --project-directory
+      - /opt/aimash
+      - --profile
+      - mcp
+      - run
+      - --rm
+      - --no-deps
+      - -T
+      - --name
+      - aimash-mcp
+      - mcp
     timeout: 120
     connect_timeout: 30
     tools:
       include:             # exact registry; guarded by tests/test_hermes_isolation.py
         - get_bridge_capabilities
         - list_accounts
-        - get_campaign_stats
-        - get_adgroup_stats
-        - get_keywords
-        - get_ads
-        - get_search_terms
-        - get_negatives
-        - get_budgets
-        - get_auction_insights
+        # Универсальный READ: Hermes сам пишет GAQL; Google Ads валидирует его синтаксис.
+        - execute_google_ads_query
         - get_account_audit
+        - analyze_account
         - get_change_history
         # Р6: журнал правок в САМОМ Google Ads (кто/когда/через какой канал) — не путать с
         # get_change_history, тот про НАШ audit-trail. Google о чужих правках не уведомляет.
         - get_account_changes
         - keyword_ideas
-        # Структура и настройки кампаний («было» для правок, не метрики): список кампаний, гео/языки,
-        # настройки по имени с группами и RSA, стратегия ставок, разбивки device/network/day,
-        # аудитории (доступные и прикреплённые) и остаток нашей суточной квоты операций.
-        - list_campaigns
-        - read_campaign_targeting
-        - read_campaign_config
-        - get_bidding_strategy
-        - get_report_breakdown
-        - list_audiences
-        - list_attached_audiences
+        # Технические/локальные reads, которые нельзя выразить одним GAQL.
         - get_quota
         - recall_client
         # §8 MCC: сводка по всем дочерним + глубокий разбор. Список обязан совпадать с
@@ -225,8 +217,6 @@ mcp_servers:
         # добавили инструмент в код и забыли здесь — Hermes его не увидит и работать будет «почти».
         - get_mcc_summary
         - get_mcc_deep
-        # Общие списки минус-слов нужны PLAN-обёрткам как READ-контекст; сам инструмент не мутирует.
-        - list_negative_shared_sets
         # Bot-free professional workflows: artifact report delivery, keyword/RSA primitives and
         # structured client-profile/crawl reads. Every function keeps the same read-account lock.
         - build_report
@@ -242,51 +232,52 @@ mcp_servers:
         - list_client_facts_structured
         - list_site_pages
         - get_crawl_status
-        # PLAN создаёт только pending proposal. Каждый вызов проходит HMAC trusted-turn wrapper;
-        # execute не принимает identity/id от модели и требует реальный Telegram reply-якорь.
-        - propose_budget_change
-        - propose_bid_change
-        - propose_keyword_bid_change
-        - propose_set_bidding_strategy
-        - propose_add_keywords
-        - propose_remove_keywords
-        - propose_add_negative_keywords
-        - propose_remove_negative_keywords
-        - propose_add_negatives_to_shared_set
-        - propose_attach_shared_set
-        - propose_pause_campaign
-        - propose_resume_campaign
-        - propose_launch_campaign
-        - propose_update_campaign
-        - propose_remove_campaign
-        - propose_set_campaign_network
-        - propose_set_campaign_display_network
-        - propose_set_campaign_geo_target_type
-        - propose_pause_ad_group
-        - propose_resume_ad_group
-        - propose_remove_ad_group
-        - propose_pause_ad
-        - propose_resume_ad
-        - propose_remove_ad
-        - propose_set_geo_proximity
-        - propose_set_geo_location
-        - propose_attach_audience
-        - propose_detach_audience
-        - propose_create_rsa
-        - propose_create_search_campaign
-        - propose_create_gdn_campaign
-        - propose_create_demand_gen_campaign
-        - propose_create_video_campaign
-        - propose_add_sitelinks
-        - propose_add_callouts
-        - propose_add_structured_snippets
-        - propose_add_call_asset
-        - propose_add_promotion
-        - propose_add_price_asset
-        - propose_remove_asset_link
-        - propose_composite_change
-        - propose_profile_change
-        - propose_profile_clear
+        # Bias-for-Action: typed actions execute in the current trusted turn. Only a critical
+        # global update_budget returns APPROVAL_REQUIRED and continues through execute_confirmed.
+        - update_budget
+        - update_bid
+        - update_keyword_bid
+        - set_bidding_strategy
+        - add_keywords
+        - remove_keywords
+        - add_negative_keywords
+        - remove_negative_keywords
+        - add_negatives_to_shared_set
+        - attach_shared_set
+        - pause_campaign
+        - resume_campaign
+        - launch_campaign
+        - update_campaign
+        - remove_campaign
+        - set_campaign_network
+        - set_campaign_display_network
+        - set_campaign_geo_target_type
+        - pause_ad_group
+        - resume_ad_group
+        - remove_ad_group
+        - pause_ad
+        - resume_ad
+        - remove_ad
+        - set_geo_proximity
+        - set_geo_location
+        - attach_audience
+        - detach_audience
+        - create_rsa
+        - create_search_campaign
+        - create_gdn_campaign
+        - create_demand_gen_campaign
+        - create_video_campaign
+        - create_app_campaign
+        - add_sitelinks
+        - add_callouts
+        - add_structured_snippets
+        - attach_image_asset
+        - add_call_asset
+        - add_promotion
+        - add_price_asset
+        - remove_asset_link
+        - profile_change
+        - profile_clear
         - list_pending_proposals
         - cancel_proposal
         # Private control plane: trusted HMAC turn + account scope + atomic transition; no RBAC blocker.

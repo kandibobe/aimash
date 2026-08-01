@@ -20,8 +20,6 @@ from types import SimpleNamespace
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import openpyxl  # noqa: E402
-import pytest  # noqa: E402
-
 from audit.engine import build_audit  # noqa: E402
 from reports.findings import FINDINGS_FORMATS, FINDINGS_TITLE, MONEY_COL, findings_rows  # noqa: E402
 from reports.period import last_n_days  # noqa: E402
@@ -189,47 +187,3 @@ def test_mcc_deep_survives_a_broken_report():
     from reports.findings import account_health_cells
 
     assert account_health_cells(SimpleNamespace()) == ["", "", ""]
-
-
-async def test_export_audit_full_only_on_explicit_account_export(monkeypatch):
-    """Полный сбор — только когда человек сам попросил экспорт ПО АККАУНТУ. Покампанийный экспорт,
-    kill-switch и сбой сбора дают None (лист не строится), а не 23 чтения и не исключение."""
-    import audit.collect as collect
-    import bot.main as bm
-    from core.config import settings
-
-    calls: list = []
-
-    async def _fake_gather(client, acct, period, **kw):
-        calls.append((acct, period, kw.get("target_cpa")))
-        return "RESULT"
-
-    async def _fake_cpa(chat_id, cid):
-        return 12.0
-
-    monkeypatch.setattr(collect, "gather_audit", _fake_gather)
-    monkeypatch.setattr(bm, "_load_target_cpa", _fake_cpa)
-    report = _report()
-
-    got = await bm._export_audit(object(), report, "7753643025", None, 1)
-    assert got == "RESULT"
-    # период — из ОТЧЁТА (окно пере-якорено в TZ аккаунта), иначе лист покрыл бы другие дни
-    assert calls == [("7753643025", report.period, 12.0)]
-
-    calls.clear()
-    assert await bm._export_audit(object(), report, "7753643025", "123", 1) is None  # кампания
-    monkeypatch.setattr(settings, "export_findings", False)
-    assert await bm._export_audit(object(), report, "7753643025", None, 1) is None  # kill-switch
-    assert calls == []
-
-    monkeypatch.setattr(settings, "export_findings", True)
-
-    async def _boom(*a, **kw):
-        raise RuntimeError("SDK down")
-
-    monkeypatch.setattr(collect, "gather_audit", _boom)
-    assert await bm._export_audit(object(), report, "7753643025", None, 1) is None  # best-effort
-
-
-if __name__ == "__main__":  # pragma: no cover
-    pytest.main([__file__, "-q"])

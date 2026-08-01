@@ -54,11 +54,17 @@ def _params(mode: str = "increase_by_percent", value: float = 20.0, before: int 
     )
 
 
-async def _mk(store: ConfirmStore, cust: str, *, params: dict | None = None) -> str:
+async def _mk(
+    store: ConfirmStore,
+    cust: str,
+    *,
+    params: dict | None = None,
+    operation: str = OP,
+) -> str:
     cid = uuid.uuid4().hex
     await store.save_proposal(
         confirmation_id=cid,
-        operation=OP,
+        operation=operation,
         customer_id=cust,
         params=params if params is not None else _params(),
         summary="s",
@@ -68,11 +74,17 @@ async def _mk(store: ConfirmStore, cust: str, *, params: dict | None = None) -> 
     return cid
 
 
-async def _spend(store: ConfirmStore, cust: str, *, params: dict | None = None) -> str:
+async def _spend(
+    store: ConfirmStore,
+    cust: str,
+    *,
+    params: dict | None = None,
+    operation: str = OP,
+) -> str:
     """Исполненная трата капа: pending → confirmed → claim (executing, decided_at=now())."""
-    cid = await _mk(store, cust, params=params)
+    cid = await _mk(store, cust, params=params, operation=operation)
     assert await store.confirm(cid, chat_id=OWNER) is True
-    assert await store.claim(cid, operation=OP) is not None
+    assert await store.claim(cid, operation=operation) is not None
     return cid
 
 
@@ -99,6 +111,10 @@ def test_delta_from_attested_snapshot():
     # Нет mode/value ⇒ None; нет аттестации ⇒ None (снимок из «сырых» params не принимается).
     assert _budget_delta_micros(attested({"campaign": "X"}, {"kind": "budget"})) is None
     assert _budget_delta_micros({"campaign": "X", "mode": "set_to", "value": 5.0}) is None
+
+
+def test_new_campaign_budget_is_full_positive_delta():
+    assert _budget_delta_micros({"budget_daily_micros": 7_500_000}) == 7_500_000
 
 
 def test_delta_prefers_snapshot_after_micros():
@@ -134,6 +150,23 @@ async def test_count_cap_blocks_next_increase_and_keeps_confirmation(monkeypatch
         await _require_confirmation(store, cid, OP)
     snap = await store.get_confirmed(cid)
     assert snap is not None and snap.status == "confirmed"
+
+
+async def test_new_campaign_budget_consumes_same_daily_count_cap(monkeypatch):
+    await init_db()
+    monkeypatch.setattr(settings, "daily_budget_increase_max_ops", 1)
+    store, cust = ConfirmStore(), _cust()
+    await _spend(
+        store,
+        cust,
+        operation="create_search_campaign",
+        params={"budget_daily_micros": 8_000_000},
+    )
+
+    cid = await _mk(store, cust)
+    assert await store.confirm(cid, chat_id=OWNER) is True
+    with pytest.raises(GateRefusal, match="кап"):
+        await _require_confirmation(store, cid, OP)
 
 
 async def test_decrease_never_blocked_even_when_cap_exhausted(monkeypatch):

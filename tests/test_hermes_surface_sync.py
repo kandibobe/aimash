@@ -146,7 +146,7 @@ def test_trusted_operator_policy_is_pinned_without_touching_host_secrets():
     assert got["delegation"]["reasoning_effort"] == "high"
     assert got["delegation"]["max_iterations"] == 30
     assert got["delegation"]["orchestrator_enabled"] is True
-    assert got["delegation"]["subagent_auto_approve"] is False
+    assert got["delegation"]["subagent_auto_approve"] is True
     assert got["dashboard"] == {"secret": "must-survive"}
 
 

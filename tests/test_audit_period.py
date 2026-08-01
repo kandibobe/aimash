@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import sys
-from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -34,33 +33,6 @@ def _result(**kw) -> AuditResult:
 
 
 # ── Парсер аргумента /audit → Period (kind решает судьбу снапшота) ─────────────────────
-def test_audit_period_from_arg_rolling_vs_custom():
-    import bot.main as bm
-
-    # пусто → последние 30 дн (rolling)
-    p = bm._audit_period_from_arg(None)
-    assert p.kind == "last_n" and p.days == 30
-    # голое число → последние N дн (rolling), кламп 1..365
-    assert bm._audit_period_from_arg("7").kind == "last_n"
-    assert bm._audit_period_from_arg("7").days == 7
-    assert bm._audit_period_from_arg("9999").days == 365  # кламп
-    # ISO-диапазон → custom с точными датами
-    iso = bm._audit_period_from_arg("2025-06-01 2025-06-30")
-    assert iso.kind == "custom"
-    assert iso.date_from == date(2025, 6, 1) and iso.date_to == date(2025, 6, 30)
-    # месяц с явным годом → custom, весь месяц
-    jun = bm._audit_period_from_arg("июнь 2025")
-    assert jun.kind == "custom"
-    assert jun.date_from == date(2025, 6, 1) and jun.date_to == date(2025, 6, 30)
-    # свободные фразы → распознаны (не падают). 3.1: «прошлый месяц» — last_month (относительное
-    # окно: TZ аккаунта пере-якорит), для снапшота/тренда исторический — как custom.
-    assert bm._audit_period_from_arg("прошлый месяц").kind == "last_month"
-    assert bm._audit_period_from_arg("MTD").kind == "mtd"
-    # мусор → безопасный дефолт 30 дн (никогда не бросает)
-    assert bm._audit_period_from_arg("абырвалг xyz").days == 30
-
-
-# ── Карточка: метка периода в заголовке + баннер моментальных сигналов для custom ──────
 def test_render_period_label_and_momentary_banner():
     res = _result()
     # обычный rolling-аудит: без баннера моментальных сигналов

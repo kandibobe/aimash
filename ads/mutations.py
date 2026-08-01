@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from typing import Protocol
+from typing import Any, Protocol
 
 from google.ads.googleads.errors import GoogleAdsException
 from google.api_core import protobuf_helpers
@@ -77,6 +77,67 @@ from core.resilience import (  # таймаут+ретрай на самом SDK
 # Длину/форму ключевых слов считает КОД (golden rule #4) — единый источник в ads.validation.
 # Алиас сохранён для обратной совместимости (тесты/вызовы mutations._assert_keyword_ok).
 _assert_keyword_ok = assert_keyword_ok
+
+
+def mutation_error_hint(exc: BaseException) -> dict[str, Any]:
+    """Структурированная подсказка для Self-Healing на внешней tool-границе.
+
+    ``apply_*`` продолжают бросать исключения, чтобы execution/audit слой корректно завершал
+    неуспешную попытку. MCP-адаптер использует этот переводчик и возвращает Hermes стабильные
+    ``error_type``/``suggested_action`` без разбора сырого исключения.
+    """
+    message = str(exc).casefold()
+    if "несколько" in message and "кампан" in message:
+        return {
+            "error_type": "AMBIGUOUS_CAMPAIGN",
+            "suggested_action": "Вызови list_campaigns, выбери одну кампанию и повтори запрос с её точным именем.",
+        }
+    if "кампан" in message and ("не найден" in message or "не найдена" in message):
+        return {
+            "error_type": "CAMPAIGN_NOT_FOUND",
+            "suggested_action": "Вызови list_campaigns, найди актуальное имя кампании и сформируй действие заново.",
+        }
+    if isinstance(exc, FreshnessMissing):
+        return {
+            "error_type": "ACCOUNT_STATE_CHANGED",
+            "suggested_action": "Повтори READ текущего состояния и сформируй действие заново.",
+        }
+    if isinstance(exc, TimeoutError):
+        return {
+            "error_type": "MUTATION_TIMEOUT",
+            "suggested_action": "Вызови READ состояния объекта; если изменение отсутствует, сформируй действие заново.",
+        }
+
+    codes = error_code_names(exc)
+    if any("BUDGET" in code for code in codes):
+        return {
+            "error_type": "BUDGET_REJECTED",
+            "suggested_action": "Вызови get_budgets, возьми живое значение и сформируй бюджетное действие заново.",
+        }
+    if any("BID" in code or "BIDDING" in code for code in codes):
+        return {
+            "error_type": "BIDDING_REJECTED",
+            "suggested_action": "Вызови get_bidding_strategy, уточни текущую стратегию и сформируй действие заново.",
+        }
+    if codes:
+        return {
+            "error_type": "GOOGLE_ADS_REJECTED",
+            "suggested_action": "Исправь действие по полю message и повтори его с тем же объектом.",
+        }
+    if isinstance(exc, ValueError | TypeError | KeyError):
+        return {
+            "error_type": "INVALID_MUTATION_ARGUMENT",
+            "suggested_action": "Исправь аргументы по полю message и сформируй действие заново.",
+        }
+    if isinstance(exc, PermissionError):
+        return {
+            "error_type": "MUTATION_REFUSED",
+            "suggested_action": "Сформируй новое действие из текущего пользовательского запроса.",
+        }
+    return {
+        "error_type": "MUTATION_FAILED",
+        "suggested_action": "Перечитай состояние объекта и выбери следующий инструмент по актуальным данным.",
+    }
 
 
 def _find_dupes(items: list[str]) -> list[str]:
@@ -211,11 +272,17 @@ async def _require_freshness(
     log.info("freshness(A): снимка нет op=%s tier=advisory cause=%s", operation, why)
 
 
-# B1-4: операции, меняющие СУЩЕСТВУЮЩИЙ бюджет, — только их считает суточный blast-radius кап.
+# B1-4: операции, создающие или меняющие бюджет, — только их считает суточный blast-radius кап.
 # Ставки (update_bid/update_keyword_bid/set_bidding_strategy) — вне скоупа: другой рычаг с другой
-# экономикой (кап на них — отдельное решение, не молчаливое расширение этого). Бюджет НОВОЙ
-# кампании (create_campaign*) капом не считается — признанный gap, см. docs/SECURITY.md.
-BUDGET_INCREASE_OPS = ("update_budget",)
+# экономикой (кап на них — отдельное решение, не молчаливое расширение этого).
+BUDGET_INCREASE_OPS = (
+    "update_budget",
+    "create_search_campaign",
+    "create_gdn_campaign",
+    "create_demand_gen_campaign",
+    "create_video_campaign",
+    "create_app_campaign",
+)
 
 # B1-4: сериализация окна «проверка капа → claim» ВНУТРИ процесса. Конкурентные ✅ — это
 # aiogram-таски ОДНОГО event loop: без лока каждая читала бы историю ДО чужого claim, и кап
@@ -238,6 +305,11 @@ def _budget_delta_micros(params: dict) -> int | None:
     на карточке. Fallback (старые строки без after_micros) — пересчёт `compute_new_micros` с
     currency=None: округление дефолтной биллинг-единицей — допустимая черновая оценка для дельты
     капа (авторитетное округление всё равно делает граница SDK), а лишний GAQL в гейте не оправдан."""
+    # Создание новой кампании не имеет «было»: весь новый дневной бюджет считается приростом.
+    # Эта ветка безопасна только потому, что вызывающий фильтрует строки по BUDGET_INCREASE_OPS.
+    created_budget = (params or {}).get("budget_daily_micros")
+    if isinstance(created_budget, int) and created_budget > 0:
+        return created_budget
     snap = attested_snapshot(params or {})
     if not snap:
         return None
@@ -732,7 +804,7 @@ async def apply_remove_ad(
 
 # ── Удаление кампании / группы (необратимо, status→REMOVED) ───────────────────────
 # НЕ денежная операция (user_initiated не требуется, как pause/resume), НО необратимая — в UI
-# закрыта ДВОЙНЫМ подтверждением (bot.keyboards.confirm_destructive_kb). Оба гейта обязательны:
+# проходит единый confirm-policy в доверенном transport-слое. Оба backend-гейта обязательны:
 # ensure_allowed (замок аккаунта) + _require_confirmation (atomic claim, one-shot, replay-защита).
 async def apply_remove_campaign(
     *,
@@ -4116,6 +4188,321 @@ def _create_demand_gen_campaign_via_sdk(
         "status": "PAUSED",
         "applied": True,
     }
+
+
+def _validate_app_campaign_inputs(
+    *,
+    app_id: str,
+    app_store: str,
+    headlines: list[str],
+    descriptions: list[str],
+    budget_daily_micros: int,
+    target_cpa_micros: int,
+    image_assets: list[tuple[bytes, str]],
+    youtube_video_ids: list[str],
+) -> None:
+    """Defense-in-depth для App/UAC до одноразового claim."""
+    from ads.assets import parse_youtube_video_id
+
+    if not str(app_id).strip():
+        raise ValueError("app_id не может быть пустым")
+    if app_store not in {"google_play", "apple_app_store"}:
+        raise ValueError("app_store должен быть google_play или apple_app_store")
+    if not 2 <= len(headlines) <= MEDIA_MAX_HEADLINES:
+        raise ValueError(f"нужно 2–{MEDIA_MAX_HEADLINES} заголовков")
+    if not 2 <= len(descriptions) <= MEDIA_MAX_DESCRIPTIONS:
+        raise ValueError(f"нужно 2–{MEDIA_MAX_DESCRIPTIONS} описаний")
+    for headline in headlines:
+        ok, n = _rsa_validate(headline, "headline")
+        if not ok:
+            raise ValueError(f"заголовок превышает лимит ({n}/30): «{headline}»")
+    for description in descriptions:
+        ok, n = _rsa_validate(description, "description")
+        if not ok:
+            raise ValueError(f"описание превышает лимит ({n}/90): «{description}»")
+    if not 0 < int(budget_daily_micros) <= MAX_AMOUNT_MICROS:
+        raise ValueError("дневной бюджет должен быть > 0 и не превышать защитный потолок")
+    if not 0 < int(target_cpa_micros) <= MAX_AMOUNT_MICROS:
+        raise ValueError("target CPA должен быть > 0 и не превышать защитный потолок")
+    if not image_assets and not youtube_video_ids:
+        raise ValueError("для App campaign нужно минимум одно изображение или YouTube-видео")
+    if len(image_assets) > 20:
+        raise ValueError("App campaign поддерживает не более 20 image assets")
+    if len(youtube_video_ids) > 10:
+        raise ValueError("передано слишком много YouTube-видео (максимум 10)")
+    if any(not payload or not str(name).strip() for payload, name in image_assets):
+        raise ValueError("пустое изображение или имя image asset")
+    if any(not parse_youtube_video_id(value) for value in youtube_video_ids):
+        raise ValueError("не распознан YouTube video id")
+
+
+async def apply_create_app_campaign(
+    *,
+    customer_id: str,
+    campaign_name: str,
+    app_id: str,
+    app_store: str,
+    headlines: list[str],
+    descriptions: list[str],
+    budget_daily_micros: int,
+    target_cpa_micros: int,
+    image_assets: list[tuple[bytes, str]] | None = None,
+    youtube_video_ids: list[str] | None = None,
+    geo_locations: list[str] | None = None,
+    geo_country_code: str = "",
+    geo_locale: str = "ru",
+    languages: list[str] | None = None,
+    confirmation_id: str,
+    confirm_store: ConfirmStore,
+    ads_client: object,
+) -> dict:
+    """Создать PAUSED App/UAC-кампанию из trusted images/YouTube assets за общими money-гейтами."""
+    ensure_allowed(customer_id)
+    images = list(image_assets or [])
+    videos = list(youtube_video_ids or [])
+    _validate_app_campaign_inputs(
+        app_id=app_id,
+        app_store=app_store,
+        headlines=headlines,
+        descriptions=descriptions,
+        budget_daily_micros=budget_daily_micros,
+        target_cpa_micros=target_cpa_micros,
+        image_assets=images,
+        youtube_video_ids=videos,
+    )
+    proposal = await _require_confirmation(confirm_store, confirmation_id, "create_app_campaign")
+    _require_user_command(proposal, "создание App campaign")
+    result = await run_ads_create_call(
+        _create_app_campaign_via_sdk,
+        ads_client,
+        customer_id,
+        label="create_app_campaign",
+        account=customer_id,
+        op_count=4 + len(images) + len(videos) + len(geo_locations or []) + len(languages or []),
+        campaign_name=campaign_name,
+        app_id=app_id,
+        app_store=app_store,
+        headlines=list(headlines),
+        descriptions=list(descriptions),
+        budget_micros=int(budget_daily_micros),
+        target_cpa_micros=int(target_cpa_micros),
+        image_assets=images,
+        youtube_video_ids=videos,
+        geo_locations=list(geo_locations or []),
+        geo_country_code=geo_country_code,
+        geo_locale=geo_locale,
+        languages=list(languages or []),
+    )
+    await confirm_store.finalize(confirmation_id, result=result)
+    return result
+
+
+def _create_app_campaign_via_sdk(
+    client,
+    customer_id: str,
+    *,
+    campaign_name: str,
+    app_id: str,
+    app_store: str,
+    headlines: list[str],
+    descriptions: list[str],
+    budget_micros: int,
+    target_cpa_micros: int,
+    image_assets: list[tuple[bytes, str]],
+    youtube_video_ids: list[str],
+    geo_locations: list[str] | None = None,
+    geo_country_code: str = "",
+    geo_locale: str = "ru",
+    languages: list[str] | None = None,
+) -> dict:
+    """v25 App campaign: non-shared budget → MULTI_CHANNEL campaign → group → AppAdInfo."""
+    from ads.assets import parse_youtube_video_id, upload_image_asset, upload_youtube_video_asset
+
+    cid = str(customer_id)
+    stamp = str(int(time.time()))
+    budget_svc = client.get_service("CampaignBudgetService")
+    bop = client.get_type("CampaignBudgetOperation")
+    bop.create.name = f"{campaign_name}_budget_{stamp}"
+    bop.create.amount_micros = int(budget_micros)
+    bop.create.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
+    bop.create.explicitly_shared = False
+    budget_rn = (
+        budget_svc.mutate_campaign_budgets(customer_id=cid, operations=[bop])
+        .results[0]
+        .resource_name
+    )
+
+    campaign_rn = ""
+    ad_group_rn = ""
+
+    def _rollback() -> None:
+        for service_name, operation_name, resource_name, method in (
+            ("AdGroupService", "AdGroupOperation", ad_group_rn, "mutate_ad_groups"),
+            ("CampaignService", "CampaignOperation", campaign_rn, "mutate_campaigns"),
+            (
+                "CampaignBudgetService",
+                "CampaignBudgetOperation",
+                budget_rn,
+                "mutate_campaign_budgets",
+            ),
+        ):
+            if not resource_name:
+                continue
+            try:
+                operation = client.get_type(operation_name)
+                operation.remove = resource_name
+                getattr(client.get_service(service_name), method)(
+                    customer_id=cid, operations=[operation]
+                )
+            except Exception:  # noqa: BLE001 — best-effort cleanup; all created entities are PAUSED
+                pass
+
+    try:
+        campaign_svc = client.get_service("CampaignService")
+        cop = client.get_type("CampaignOperation")
+        campaign = cop.create
+        campaign.name = campaign_name
+        campaign.campaign_budget = budget_rn
+        campaign.status = client.enums.CampaignStatusEnum.PAUSED
+        campaign.advertising_channel_type = client.enums.AdvertisingChannelTypeEnum.MULTI_CHANNEL
+        campaign.advertising_channel_sub_type = (
+            client.enums.AdvertisingChannelSubTypeEnum.APP_CAMPAIGN
+        )
+        campaign.target_cpa.target_cpa_micros = int(target_cpa_micros)
+        campaign.app_campaign_setting.app_id = str(app_id).strip()
+        campaign.app_campaign_setting.app_store = (
+            client.enums.AppCampaignAppStoreEnum.GOOGLE_APP_STORE
+            if app_store == "google_play"
+            else client.enums.AppCampaignAppStoreEnum.APPLE_APP_STORE
+        )
+        campaign.app_campaign_setting.bidding_strategy_goal_type = client.enums.AppCampaignBiddingStrategyGoalTypeEnum.OPTIMIZE_INSTALLS_TARGET_INSTALL_COST
+        campaign.contains_eu_political_advertising = (
+            client.enums.EuPoliticalAdvertisingStatusEnum.DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
+        )
+        campaign_rn = (
+            campaign_svc.mutate_campaigns(customer_id=cid, operations=[cop])
+            .results[0]
+            .resource_name
+        )
+
+        geo_count = 0
+        if geo_locations:
+            try:
+                geo_count = int(
+                    _set_geo_location_via_sdk(
+                        client,
+                        cid,
+                        campaign_rn.split("/")[-1],
+                        list(geo_locations),
+                        geo_country_code,
+                        geo_locale,
+                    ).get("count", 0)
+                )
+            except Exception:  # noqa: BLE001 — PAUSED; partial result reported below
+                geo_count = 0
+
+        language_ids, language_unresolved = _split_language_ids(languages)
+        language_count = 0
+        if language_ids:
+            try:
+                criterion_svc = client.get_service("CampaignCriterionService")
+                operations = []
+                for language_id in language_ids:
+                    operation = client.get_type("CampaignCriterionOperation")
+                    operation.create.campaign = campaign_rn
+                    operation.create.language.language_constant = f"languageConstants/{language_id}"
+                    operations.append(operation)
+                language_count = len(
+                    criterion_svc.mutate_campaign_criteria(
+                        customer_id=cid, operations=operations
+                    ).results
+                )
+            except Exception:  # noqa: BLE001 — PAUSED; partial result reported below
+                language_count = 0
+
+        ad_group_svc = client.get_service("AdGroupService")
+        agop = client.get_type("AdGroupOperation")
+        agop.create.name = f"{campaign_name}_ag_{stamp}"
+        agop.create.campaign = campaign_rn
+        agop.create.status = client.enums.AdGroupStatusEnum.PAUSED
+        ad_group_rn = (
+            ad_group_svc.mutate_ad_groups(customer_id=cid, operations=[agop])
+            .results[0]
+            .resource_name
+        )
+
+        image_resource_names = [
+            upload_image_asset(client, cid, payload, name) for payload, name in image_assets
+        ]
+        video_resource_names = [
+            upload_youtube_video_asset(
+                client,
+                cid,
+                parse_youtube_video_id(video_id) or "",
+                f"{campaign_name}_video_{index}_{stamp}",
+            )
+            for index, video_id in enumerate(youtube_video_ids, start=1)
+        ]
+
+        ad_svc = client.get_service("AdGroupAdService")
+        adop = client.get_type("AdGroupAdOperation")
+        ad_group_ad = adop.create
+        ad_group_ad.ad_group = ad_group_rn
+        ad_group_ad.status = client.enums.AdGroupAdStatusEnum.PAUSED
+        app_ad = ad_group_ad.ad.app_ad
+        for text in headlines:
+            asset = client.get_type("AdTextAsset")
+            asset.text = text
+            app_ad.headlines.append(asset)
+        for text in descriptions:
+            asset = client.get_type("AdTextAsset")
+            asset.text = text
+            app_ad.descriptions.append(asset)
+        for resource_name in image_resource_names:
+            asset = client.get_type("AdImageAsset")
+            asset.asset = resource_name
+            app_ad.images.append(asset)
+        for resource_name in video_resource_names:
+            asset = client.get_type("AdVideoAsset")
+            asset.asset = resource_name
+            app_ad.youtube_videos.append(asset)
+        ad_rn = (
+            ad_svc.mutate_ad_group_ads(customer_id=cid, operations=[adop]).results[0].resource_name
+        )
+    except Exception:
+        _rollback()
+        raise
+
+    result = {
+        "customer_id": cid,
+        "campaign_name": campaign_name,
+        "campaign": campaign_rn,
+        "budget": budget_rn,
+        "ad_group": ad_group_rn,
+        "ad": ad_rn,
+        "app_id": app_id,
+        "app_store": app_store,
+        "headlines": len(headlines),
+        "descriptions": len(descriptions),
+        "images": len(image_resource_names),
+        "videos": len(video_resource_names),
+        "geo": geo_count,
+        "languages": language_count,
+        "status": "PAUSED",
+        "applied": True,
+    }
+    warnings: list[dict] = []
+    if geo_locations and geo_count < len(geo_locations):
+        warnings.append({"part": "geo", "requested": len(geo_locations), "applied": geo_count})
+    requested_languages = len(language_ids) + len(language_unresolved)
+    if requested_languages and language_count < requested_languages:
+        warnings.append(
+            {"part": "languages", "requested": requested_languages, "applied": language_count}
+        )
+    if warnings:
+        result["warnings"] = warnings
+        result["partial"] = True
+    return result
 
 
 async def apply_create_video_campaign(

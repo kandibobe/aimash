@@ -1,5 +1,5 @@
-# Многостадийная сборка: компактный образ, non-root, БЕЗ секретов внутри (секреты — только
-# в рантайме через env/секрет-менеджер). Бот — long-poll (HTTP-порта нет).
+# Многостадийная сборка Aimash Core: MCP + scheduler, non-root, без секретов внутри.
+# Telegram long-poll принадлежит Hermes gateway.
 FROM python:3.12-slim AS builder
 WORKDIR /app
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -30,7 +30,7 @@ RUN chmod +x /app/docker-entrypoint.sh
 ARG GIT_SHA=unknown
 ENV AIMASH_GIT_SHA=${GIT_SHA}
 LABEL org.opencontainers.image.revision="${GIT_SHA}" \
-      org.opencontainers.image.title="aimash-bot" \
+      org.opencontainers.image.title="aimash-core" \
       org.opencontainers.image.source="https://github.com/kandibobe/aimash"
 USER aimash
 # B9: healthcheck по СВЕЖЕСТИ heartbeat (живость event-loop бота), а не только импорт модулей —
@@ -39,4 +39,4 @@ USER aimash
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD ["python", "scripts/healthcheck.py"]
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
-CMD ["python", "-m", "bot.main"]
+CMD ["python", "-m", "mcp_server"]

@@ -72,10 +72,10 @@ def _key(monkeypatch):
 
 
 def test_token_is_bound_to_exact_tool_and_arguments():
-    token = _token("propose_budget_change", {"account": "7753643025", "value": 20})
+    token = _token("update_budget", {"account": "7753643025", "value": 20})
     turn = verify_turn_token(
         token,
-        expected_tool="propose_budget_change",
+        expected_tool="update_budget",
         tool_args={"account": "7753643025", "value": 20},
         now=1_050,
     )
@@ -84,7 +84,7 @@ def test_token_is_bound_to_exact_tool_and_arguments():
     with pytest.raises(TrustedTransportError):
         verify_turn_token(
             token,
-            expected_tool="propose_budget_change",
+            expected_tool="update_budget",
             tool_args={"account": "7753643025", "value": 21},
             now=1_050,
         )
@@ -94,19 +94,19 @@ def test_token_is_bound_to_exact_tool_and_arguments():
 
 def test_digest_accepts_fastmcp_integer_to_float_coercion_but_not_value_change():
     token = _token(
-        "propose_budget_change",
+        "update_budget",
         {"account": "7753643025", "value": 20, "nested": [1, {"ratio": 2}]},
     )
     verify_turn_token(
         token,
-        expected_tool="propose_budget_change",
+        expected_tool="update_budget",
         tool_args={"account": "7753643025", "value": 20.0, "nested": [1.0, {"ratio": 2.0}]},
         now=1_050,
     )
     with pytest.raises(TrustedTransportError):
         verify_turn_token(
             token,
-            expected_tool="propose_budget_change",
+            expected_tool="update_budget",
             tool_args={"account": "7753643025", "value": 20.01, "nested": [1, {"ratio": 2}]},
             now=1_050,
         )
@@ -154,7 +154,7 @@ async def test_wrapper_requires_token_and_opens_human_context(monkeypatch):
 
     monkeypatch.setattr("core.access.is_whitelisted", allowed)
     monkeypatch.setattr("core.access.ensure_account_allowed_for_user", account_allowed)
-    wrapped = trusted_tool("propose_test", fn)
+    wrapped = trusted_tool("action_test", fn)
     assert TOKEN_PARAM in inspect.signature(wrapped).parameters
 
     refused = await wrapped(account="7753643025")
@@ -162,7 +162,7 @@ async def test_wrapper_requires_token_and_opens_human_context(monkeypatch):
     assert called is False
 
     now = int(time.time())
-    token = _token("propose_test", {"account": "7753643025"}, now=now, expires=now + 120)
+    token = _token("action_test", {"account": "7753643025"}, now=now, expires=now + 120)
     # FastMCP supplies omitted schema defaults to the wrapper.  They are safe only while equal to
     # the function's declared defaults and must not invalidate the hook's exact argument binding.
     result = await wrapped(account="7753643025", currency=None, trusted_turn_token=token)
@@ -183,20 +183,20 @@ async def test_wrapper_requires_token_and_opens_human_context(monkeypatch):
 
 def test_legacy_token_keeps_exact_argument_binding():
     token = _token(
-        "propose_test",
+        "action_test",
         {"account": "7753643025"},
         include_arg_keys=False,
     )
     verify_turn_token(
         token,
-        expected_tool="propose_test",
+        expected_tool="action_test",
         tool_args={"account": "7753643025"},
         now=1_050,
     )
     with pytest.raises(TrustedTransportError):
         verify_turn_token(
             token,
-            expected_tool="propose_test",
+            expected_tool="action_test",
             tool_args={"account": "7753643025", "currency": None},
             default_args={"currency": None},
             now=1_050,

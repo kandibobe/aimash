@@ -174,45 +174,6 @@ def test_industry_facts_from_blog_never_reach_ad_copy():
 
 
 # ── правило 8: краулёный текст не командует ───────────────────────────────────────
-def test_crawl_text_cannot_wipe_services():
-    """Prompt-injection: страница уговорила модель вернуть replace_services=true — до store флаг не
-    доедет ни по одному из двух путей (досье / фолбэк structure_crawl)."""
-    import bot.main as bm
-    from clients.dossier import dossier_patch
-
-    class _Injected:  # то, что вернула бы модель, начитавшись «ignore previous instructions»
-        def to_patch(self) -> dict:
-            return {
-                "brand": "Evil",
-                "replace_services": True,
-                "replace_contacts": True,
-                "services": [],
-            }
-
-    class _Result:
-        phones: list[str] = []
-        emails: list[str] = []
-        socials: dict[str, str] = {}
-
-    patch = bm._crawl_patch_from_result(_Injected(), _Result())
-    assert "replace_services" not in patch
-    assert "replace_contacts" not in patch
-
-    # второй путь: патч из досье. В самой схеме досье этих флагов нет — проверяем, что и не появятся.
-    d = merge_extracts(
-        [DossierExtract(company=Company(legal_name="Evil"))],
-        domain="e.com",
-        website=None,
-        contacts=[],
-        socials={},
-        pages_count=1,
-        map_calls=1,
-    )
-    assert "replace_services" not in dossier_patch(d)
-    assert "replace_services" not in bm._crawl_patch_from_dossier(d, _Result())
-
-
-# ── деньги: потолок вызовов и дневной лимит ───────────────────────────────────────
 def test_hard_cap_cannot_be_raised_by_env(monkeypatch):
     """`.env` с опечаткой (`DOSSIER_MAX_MAP_CALLS=1000`) не превращается в счёт от OpenRouter:
     литерал в коде — верхняя граница, настройка может только опустить её."""

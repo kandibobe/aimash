@@ -108,40 +108,6 @@ def test_list_attached_audiences_maps_names_and_falls_back_to_id():
     assert "999" in res[1].name  # закрытый/неизвестный список — честный фолбэк на id
 
 
-async def test_detach_button_mints_pending_proposal_only(monkeypatch):
-    """C7: 🗑 у прикреплённой аудитории минтит ТОЛЬКО pending-черновик detach_audience
-    (исполнение — после ✅ через confirm-гейт; ничего не выполняется на клик)."""
-    import bot.main as bm
-    from bot.handlers.campaigns_menu import on_audience_detach
-
-    chat_id = 909
-    bm._CAMP_CACHE[chat_id] = [{"name": "Кампания X", "id": "42", "status": "ENABLED"}]
-    bm._AUD_DET_CACHE[chat_id] = [SimpleNamespace(resource_name=_UL, name="Покупатели")]
-    presented: dict = {}
-
-    async def fake_present(msg, **kw):
-        presented.update(kw)
-
-    monkeypatch.setattr(bm, "_present_proposal", fake_present)
-
-    class _Msg:
-        chat = SimpleNamespace(id=chat_id)
-
-    class _Cq:
-        message = _Msg()
-        from_user = SimpleNamespace(id=chat_id)
-
-        async def answer(self, *a, **kw):
-            pass
-
-    cb = SimpleNamespace(action="det", camp_idx=0, idx=0)
-    await on_audience_detach(_Cq(), cb)
-    assert presented.get("operation") == "detach_audience"
-    assert presented["params"]["audience_resource_names"] == [_UL]
-    assert presented["params"]["_audience_names"] == ["Покупатели"]
-
-
-# ── apply_attach_audience: оба гейта (не деньги → без user_initiated) ─────────────
 async def test_apply_attach_audience_happy_path():
     called = {}
 

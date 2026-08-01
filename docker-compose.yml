@@ -8,8 +8,8 @@
 # ⚠️ На уже проинициализированном томе смена пароля требует ручного `ALTER ROLE aimash WITH
 #    PASSWORD '…';` — иначе бот не подключится (docs/DEPLOYMENT.md).
 
-# Сборка образа `aimash-bot` описана ОДИН раз и переиспользуется тремя сервисами (bot, scheduler,
-# mcp). Раньше блок был скопирован трижды: три определения сборки под ОДНИМ тегом образа — стоит
+# Сборка образа `aimash-core` описана ОДИН раз и переиспользуется scheduler/mcp/migrate.
+# Telegram принимает Hermes gateway; legacy aiogram poller в topology v3 отсутствует.
 # аргументам разъехаться, и какой из них выиграл в `aimash-bot`, зависит от порядка сборки.
 # GIT_SHA — маркер версии внутри образа. `.dockerignore` исключает `.git`, поэтому
 # `docker exec … git rev-parse` не работает в принципе: без этого аргумента вопрос «какой коммит
@@ -53,80 +53,38 @@ services:
           memory: 512M
           cpus: "0.5"
 
-  # Бот (Telegram long-poll + планировщик). Запуск всего: `docker compose up --build`.
-  # Секреты — из .env (env_file), в образ НЕ запекаются. Миграции применяются АВТОМАТИЧЕСКИ
-  # при старте (docker-entrypoint.sh → alembic upgrade head, fail-fast если миграция падает).
-  # Прогнать вручную при необходимости: docker compose run --rm bot alembic upgrade head
-  bot:
+  # Одноразовая миграция схемы перед scheduler. MCP стартует по запросу Hermes поверх уже
+  # подготовленной БД. Отдельный сервис заменяет скрытый side-effect запуска legacy bot.main.
+  migrate:
     build: *aimash-build
-    # Стабильный тег образа: его переиспользует сервис `mcp` (profiles: [mcp]), чтобы не пересобирать
-    # второй раз. Health-check смотрит на container_name, не на имя образа, — поведение не меняется.
-    image: aimash-bot
-    container_name: aimash-bot
+    image: aimash-core
+    container_name: aimash-migrate
     depends_on:
       postgres:
         condition: service_healthy
-    # Порядок важен: .env.defaults (tracked, несекретные операционные дефолты) — базой;
-    # .env (untracked, секреты + оверрайды) — ПОСЛЕДНИМ, поэтому переопределяет дефолты.
     env_file:
       - .env.defaults
       - .env
     environment:
-      # ВНУТРИ сети compose — имя сервиса + порт 5432 (НЕ хостовый 5433!).
-      # ⚠️ `environment:` БЬЁТ `env_file:` — DATABASE_URL из .env тут не действует, поэтому пароль
-      # подставляем той же переменной, что и сам postgres (иначе бот молча уходил бы со старым).
       DATABASE_URL: postgresql+asyncpg://aimash:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD обязателен — задай в .env}@postgres:5432/aimash
-      # Фиксируем UTC: APScheduler берёт локальную TZ контейнера, а код трактует naive datetime как
-      # UTC. Явный TZ=UTC делает cron детерминированным независимо от хоста: REPORT_SCHEDULE
-      # '0 1 * * *' = 01:00 UTC = 10:00 JST (10 утра по Японии).
       TZ: UTC
-      # C4: джобы переехали в сервис `scheduler` (отдельный процесс, топология «три процесса»).
-      # Флаг выражает НАМЕРЕНИЕ; энфорсмент — advisory-lock роли `scheduler` в БД, поэтому забытый
-      # флаг не даст двойных дайджестов/двойного reconcile, а даст громкий отказ у проигравшего.
-      # Дефолт в коде — `true` (историческое поведение), здесь снимаем осознанно.
-      SCHEDULER_IN_BOT: "false"
-      KILL_SWITCH_FILE: /run/aimash-safety/KILL_SWITCH
-    volumes:
-      - ./runtime/safety:/run/aimash-safety:ro
-    restart: unless-stopped
-    # Потолок ресурсов одного инстанса (long-poll бот лёгкий; лимит ловит утечку/раздувание).
-    # docker compose v2 (не-swarm) применяет deploy.resources.limits для memory/cpus.
-    # 1200M (было 768M): пиковый путь — deep-MCC xlsx (`/export` → «Все аккаунты»), он держит в RAM
-    # ReportData ВСЕХ дочерних сразу (reports/mcc.py) и строит полный объектный граф openpyxl.
-    # Хост тянет: 1.2G (бот) + 512M (pg) + ~700M системы ≈ 2.4G из 3.8G, плюс 2G swap.
-    deploy:
-      resources:
-        limits:
-          memory: 1200M
-          cpus: "1.0"
-    # Ротация логов: без неё json-file растёт безгранично и забивает диск VPS.
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
 
-  # C4 (§5.3): ДОМ ПРОЦЕССА ПЛАНИРОВЩИКА. Раньше APScheduler крутился внутри aiogram-петли бота —
-  # значит архивация кнопочного слоя унесла бы с собой все 15 джоб, включая `reconcile_stale_executing`
-  # (зависшие мутации → needs_review). Это денежный путь, а не дайджесты. Топология «три процесса»
-  # даёт джобам собственный контейнер: «БД + тонкий Bot-клиент для отправки».
+  # Фоновый scheduler живёт отдельно от Telegram/Hermes gateway.
   # Владение — advisory-lock роли `scheduler`: занято ⇒ этот процесс выходит ненулевым кодом
   # (restart подхватит, когда бот отпустит), а НЕ уходит в тихий standby.
   # ⚠️ Кнопочного слоя здесь нет по построению: порт `scheduler/delivery.py` не заполняется ⇒
   #    дайджесты уходят текстом, а thr-tune молчит (его сообщение целиком — предложение под тап).
   scheduler:
-    image: aimash-bot            # тот же образ, что собрал сервис bot (как у `mcp`) — без второй сборки
+    image: aimash-core
     build: *aimash-build
     container_name: aimash-scheduler
     depends_on:
       postgres:
         condition: service_healthy
-      # Промежуточный ответ на C6: `docker-entrypoint.sh` гоняет `alembic upgrade head` только для
-      # команды `python -m bot.main`, поэтому одновременного апгрейда двумя сервисами не возникает
-      # по построению — планировщик стартует уже после того, как бот довёл схему до head. Свою
-      # проверку он всё равно делает сам (`assert_schema_at_head` в `bootstrap_ads_layer`).
-      bot:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     # Тот же порядок и файлы, что у бота: .env.defaults базой, .env (untracked) последним.
     env_file:
       - .env.defaults
@@ -135,9 +93,6 @@ services:
       DATABASE_URL: postgresql+asyncpg://aimash:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD обязателен — задай в .env}@postgres:5432/aimash
       # Как у бота: APScheduler берёт локальную TZ контейнера, код трактует naive datetime как UTC.
       TZ: UTC
-      # Здесь джобы и живут — флаг относится к боту, но пишем явно, чтобы `env_file` не переключил
-      # роли молча: этот процесс владеет джобами независимо от значения (энфорсмент — lock).
-      SCHEDULER_IN_BOT: "true"
       PYTHONIOENCODING: utf-8
       KILL_SWITCH_FILE: /run/aimash-safety/KILL_SWITCH
     volumes:
@@ -160,16 +115,14 @@ services:
         max-size: "10m"
         max-file: "5"
 
-  # Контур A (Hermes): READ-only MCP-сервер по stdio. НЕ поднимается штатным `up` (profiles) — только
+  # Hermes MCP-сервер по stdio. НЕ поднимается штатным `up` (profiles) — только
   # по требованию Hermes: `docker compose --profile mcp run --rm --no-deps -T mcp`. Тот же образ и env,
   # что у бота (OAuth-кэш в БД, DATABASE_URL, GOOGLE_ADS_*, SECRETS_ENCRYPTION_KEY) — паритет окружения
   # без host-venv. docker-entrypoint.sh для не-`bot.main` команды миграции НЕ гоняет (exec "$@").
-  # Дефолтный путь MCP — `docker exec` в aimash-bot (см. deploy/hermes/README.md); этот сервис —
-  # durable-вариант с изоляцией OAuth-процесса от Telegram-поллера (§20), включается сменой args в
-  # ~/.hermes/config.yaml на `docker compose … run … mcp`.
+  # Hermes запускает этот сервис напрямую; legacy контейнер aimash-bot не требуется.
   mcp:
     profiles: ["mcp"]
-    image: aimash-bot            # переиспользовать образ, что уже собрал сервис bot (без второй сборки)
+    image: aimash-core
     build: *aimash-build
     depends_on:
       postgres:

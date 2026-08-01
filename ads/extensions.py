@@ -379,17 +379,82 @@ def _add_lead_form_via_sdk(
     }
 
 
-# Семейства, требующие внешней конфигурации аккаунта / отсутствующие в API v24 — НЕ создаём из
+def _add_mobile_app_asset_via_sdk(
+    client,
+    customer_id,
+    campaign_id,
+    *,
+    app_id: str,
+    app_store: str,
+    link_text: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict:
+    """MobileAppAsset → CampaignAsset(MOBILE_APP), с fail-before-mutate validation."""
+    from datetime import date
+
+    app_id = str(app_id or "").strip()
+    link_text = str(link_text or "").strip()
+    store = str(app_store or "").strip().upper()
+    if not app_id or len(app_id) > 255:
+        raise ValueError("app_id обязателен и не должен превышать 255 символов")
+    if not 1 <= len(link_text) <= 25:
+        raise ValueError("link_text должен содержать 1–25 символов")
+    if store not in {"GOOGLE_APP_STORE", "APPLE_APP_STORE"}:
+        raise ValueError("app_store должен быть GOOGLE_APP_STORE или APPLE_APP_STORE")
+    for value in (start_date, end_date):
+        if value:
+            date.fromisoformat(str(value))
+    if start_date and end_date and str(start_date) > str(end_date):
+        raise ValueError("start_date не может быть позже end_date")
+
+    cid = str(customer_id)
+    op = client.get_type("AssetOperation")
+    app = op.create.mobile_app_asset
+    app.app_id = app_id
+    app.app_store = getattr(client.enums.MobileAppVendorEnum, store)
+    app.link_text = link_text
+    if start_date:
+        app.start_date = str(start_date)
+    if end_date:
+        app.end_date = str(end_date)
+    asset_rn = (
+        client.get_service("AssetService")
+        .mutate_assets(customer_id=cid, operations=[op])
+        .results[0]
+        .resource_name
+    )
+    links = _link_campaign_assets(
+        client,
+        cid,
+        _campaign_rn(client, cid, campaign_id),
+        [asset_rn],
+        client.enums.AssetFieldTypeEnum.MOBILE_APP,
+    )
+    return {
+        "customer_id": cid,
+        "campaign_id": str(campaign_id),
+        "kind": "app",
+        "app_id": app_id,
+        "app_store": store,
+        "assets": [asset_rn],
+        "links": links,
+        "count": len(links),
+        "applied": True,
+    }
+
+
+# Семейства, требующие внешней конфигурации аккаунта — НЕ создаём из
 # профиля/текста (нет данных для валидной сборки). Чтобы не уронить composite-создание, дисп. бросает
 # NotImplementedError, а вызывающий ловит и пропускает такой ассет с пометкой (assets_skipped). Точный
-# статус в v24 (сверено интроспекцией установленного google-ads):
-#   • location — AssetFieldType.LOCATION в v24 НЕТ: location-ассеты идут через AssetSet + place_id/
+# статус в текущем API:
+#   • location — location-ассеты идут через AssetSet + place_id/
 #     привязанный Google Business Profile (иной механизм, аккаунт-зависимо) — вне авто-генерации;
-#   • affiliate_location — AffiliateLocationAsset в v24 ОТСУТСТВУЕТ (Google депрекировал) — недоступно.
-# lead_form РЕАЛИЗОВАН выше (стандартная пара asset→link), из _CONFIG_GATED убран.
+#   • affiliate_location — также настраивается через LOCATION_SYNC AssetSet с ownership_type=AFFILIATE.
+# lead_form и app реализованы выше (стандартная пара asset→link).
 _CONFIG_GATED = {
-    "location": "Location в v24 — через AssetSet + place_id/Google Business Profile (аккаунт-зависимо)",
-    "affiliate_location": "Affiliate location удалён из Google Ads API v24 (депрекирован)",
+    "location": "Location требует AssetSet + place_id/Google Business Profile (аккаунт-зависимо)",
+    "affiliate_location": "Affiliate location требует LOCATION_SYNC AssetSet уровня аккаунта",
 }
 
 
@@ -410,6 +475,8 @@ def apply_asset_spec_via_sdk(client, customer_id, campaign_id, spec: dict) -> di
         )
     if family == "lead_form":
         return _add_lead_form_via_sdk(client, customer_id, campaign_id, **p)
+    if family == "app":
+        return _add_mobile_app_asset_via_sdk(client, customer_id, campaign_id, **p)
     if family == "call":
         return _add_call_asset_via_sdk(
             client, customer_id, campaign_id, p["phone_number"], p["country_code"]

@@ -12,6 +12,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from google.ads.googleads.client import GoogleAdsClient
+from google.auth.credentials import AnonymousCredentials
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -219,13 +221,93 @@ def test_asset_dispatch_and_gated():
             object(), "1", "2", {"family": "callouts", "params": {"callouts": ["Гарантия"]}}
         )
     assert calls["callouts"] == ["Гарантия"]
-    # location/affiliate_location — недоступны в v24 (config-gated → NotImplementedError). lead_form
-    # РЕАЛИЗОВАН (см. test_lead_form_asset_*), в этот набор больше не входит.
+    # location/affiliate_location требуют account-level AssetSet-конфигурации.
     for gated in ("location", "affiliate_location"):
         with pytest.raises(NotImplementedError):
             ext.apply_asset_spec_via_sdk(object(), "1", "2", {"family": gated, "params": {}})
     with pytest.raises(ValueError):
         ext.apply_asset_spec_via_sdk(object(), "1", "2", {"family": "unknown", "params": {}})
+
+
+class _MobileAppAssetService:
+    def __init__(self):
+        self.operations = []
+
+    def mutate_assets(self, *, customer_id, operations):
+        self.operations.extend(operations)
+        return SimpleNamespace(results=[SimpleNamespace(resource_name="customers/1/assets/7")])
+
+
+class _MobileAppCampaignAssetService:
+    def __init__(self):
+        self.operations = []
+
+    def mutate_campaign_assets(self, *, customer_id, operations):
+        self.operations.extend(operations)
+        return SimpleNamespace(
+            results=[SimpleNamespace(resource_name="customers/1/campaignAssets/2~7~MOBILE_APP")]
+        )
+
+
+class _MobileAppCampaignService:
+    @staticmethod
+    def campaign_path(customer_id, campaign_id):
+        return f"customers/{customer_id}/campaigns/{campaign_id}"
+
+
+class _MobileAppV25Client:
+    def __init__(self):
+        self.real = GoogleAdsClient(
+            AnonymousCredentials(), "test", version="v25", use_proto_plus=True
+        )
+        self.enums = self.real.enums
+        self.asset_service = _MobileAppAssetService()
+        self.campaign_asset_service = _MobileAppCampaignAssetService()
+
+    def get_type(self, name):
+        return self.real.get_type(name)
+
+    def get_service(self, name):
+        return {
+            "AssetService": self.asset_service,
+            "CampaignAssetService": self.campaign_asset_service,
+            "CampaignService": _MobileAppCampaignService(),
+        }[name]
+
+
+def test_mobile_app_asset_builds_official_v25_shape_and_campaign_link():
+    client = _MobileAppV25Client()
+    result = ext._add_mobile_app_asset_via_sdk(
+        client,
+        "1",
+        "2",
+        app_id="com.example.real",
+        app_store="GOOGLE_APP_STORE",
+        link_text="Install",
+    )
+    app = client.asset_service.operations[0].create.mobile_app_asset
+    assert app.app_id == "com.example.real"
+    assert app.link_text == "Install"
+    assert app.app_store == client.enums.MobileAppVendorEnum.GOOGLE_APP_STORE
+    link = client.campaign_asset_service.operations[0].create
+    assert link.campaign == "customers/1/campaigns/2"
+    assert link.asset == "customers/1/assets/7"
+    assert link.field_type == client.enums.AssetFieldTypeEnum.MOBILE_APP
+    assert result["kind"] == "app" and result["applied"] is True
+
+
+def test_mobile_app_asset_validation_happens_before_mutate():
+    client = _MobileAppV25Client()
+    with pytest.raises(ValueError, match="1–25"):
+        ext._add_mobile_app_asset_via_sdk(
+            client,
+            "1",
+            "2",
+            app_id="com.example.real",
+            app_store="GOOGLE_APP_STORE",
+            link_text="x" * 26,
+        )
+    assert not client.asset_service.operations
 
 
 # ── _attach_asset_specs_via_sdk: добавленные vs пропущенные (config-gated/сбой) ────

@@ -1,7 +1,7 @@
 """Гард развязки фоновых контуров от `bot/` — разбором ИСХОДНИКА, а не sys.modules.
 
 Почему отдельный тест, а не строка в `tests/test_headless_bootstrap.py`: тот зонд импортирует модуль
-в чистом процессе и смотрит `sys.modules`. Функция-локальный `from bot.keyboards import ...` туда
+в чистом процессе и смотрит `sys.modules`. Функция-локальный transport-импорт туда
 ничего не кладёт до первого ВЫЗОВА, поэтому import-зонд молчит на связности, которая живёт внутри
 джобы (проверено отрицательным контролем 23.07.2026: `scheduler.jobs` в списке зонда → всё равно
 "clean", при шести живых импортах `bot` в теле функций). Ровно такой ленивой связностью
@@ -11,8 +11,8 @@
 AST видит импорт независимо от того, где он написан, и не путает код со строками/комментариями
 (`grep` спотыкался бы о каждое упоминание `bot.main` в докстрингах — их тут десятки).
 
-Что стережём: перечисленные пакеты обязаны подниматься процессом БЕЗ Telegram-слоя. Планировщик —
-отдельный контейнер (топология: три процесса), `mcp_server/` — тул-слой Hermes, остальное — ядро,
+Что стережём: перечисленные пакеты обязаны подниматься процессом БЕЗ legacy Telegram-слоя.
+Планировщик — отдельный контейнер, `mcp_server/` — тул-слой Hermes, остальное — ядро,
 которое переезжает без изменений. Одна строка `from bot import ux` в любом из них возвращает
 зависимость от архивируемого пакета, и заметить это без гарда нельзя: в bot-процессе всё работает.
 """
@@ -105,82 +105,23 @@ def test_aiogram_allowlist_is_not_stale() -> None:
         )
 
 
-def test_bot_process_fills_the_delivery_port() -> None:
-    """Обратная сторона развязки: порт кто-то обязан ЗАПОЛНИТЬ, иначе карточки планировщика молча
-    уедут без кнопок, а thr-tune перестанет слаться вовсе. Проводка живёт в `bot/main.py` (старт
-    процесса) — проверяем её по AST, а не запуском main(): она внутри polling-энтрипоинта."""
-    from scheduler import delivery
+def test_compose_v3_has_no_legacy_bot_service() -> None:
+    import yaml
 
-    src = (REPO_ROOT / "bot" / "main.py").read_text(encoding="utf-8")
-    registered: set[str] = set()
-    for node in ast.walk(ast.parse(src, filename="bot/main.py")):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if not (isinstance(func, ast.Attribute) and func.attr == "register"):
-            continue
-        if not (isinstance(func.value, ast.Name) and func.value.id.endswith("delivery")):
-            continue
-        if node.args and isinstance(node.args[0], ast.Attribute):
-            registered.add(node.args[0].attr)
-
-    expected = {"ADVISE_FEEDBACK", "THRESHOLD_TUNE"}
-    assert registered == expected, (
-        f"bot/main.py заполняет порт доставки не полностью: {sorted(registered)} вместо "
-        f"{sorted(expected)} — карточки уйдут без кнопок, и никто не заметит"
+    compose = yaml.safe_load((REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    services = compose["services"]
+    assert "bot" not in services
+    assert {"postgres", "migrate", "scheduler", "mcp", "backup"} <= set(services)
+    assert services["scheduler"]["depends_on"]["migrate"]["condition"] == (
+        "service_completed_successfully"
     )
-    # Имена констант — не выдумка теста: они обязаны существовать в самом порту.
-    assert {getattr(delivery, name) for name in expected} == set(delivery.KNOWN)
+    assert services["mcp"]["command"] == ["python", "-m", "mcp_server"]
 
 
-def test_bot_registers_jobs_only_when_it_owns_the_lock() -> None:
-    """Владение джобами — не env-флаг, а advisory-lock. `SCHEDULER_IN_BOT` выражает НАМЕРЕНИЕ и
-    живёт в `.env`, где его легко забыть снять; забыли — и при поднятом контейнере планировщика
-    каждая джоба идёт дважды (два дайджеста, два алерта, два reconcile ОДНОГО денежного черновика).
-    Поэтому `setup_scheduler(...)` обязан стоять под захватом lock, а не под одним лишь флагом.
-    Проверяем по AST: запустить `bot.main.main()` в тесте нельзя — это polling-энтрипоинт."""
-    src = (REPO_ROOT / "bot" / "main.py").read_text(encoding="utf-8")
-    tree = ast.parse(src, filename="bot/main.py")
-
-    parents: dict[ast.AST, ast.AST] = {}
-    for node in ast.walk(tree):
-        for child in ast.iter_child_nodes(node):
-            parents[child] = node
-
-    calls = [
-        n
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Call)
-        and isinstance(n.func, ast.Name)
-        and n.func.id == "setup_scheduler"
-    ]
-    assert len(calls) == 1, f"ожидался ровно один старт планировщика в боте, найдено {len(calls)}"
-
-    guards: list[str] = []
-    node: ast.AST | None = calls[0]
-    while node is not None:
-        if isinstance(node, ast.If):
-            guards.append(ast.unparse(node.test))
-        node = parents.get(node)
-    assert any("_own_sched" in g for g in guards), (
-        "setup_scheduler() в bot/main.py не под флагом владения джобами: "
-        f"объемлющие условия — {guards}. Без него флаг `SCHEDULER_IN_BOT` остаётся единственным "
-        "разделителем, а он в env — забыли снять ⇒ каждая джоба дважды."
-    )
-
-    lock_roles = {
-        n.args[0].value
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Call)
-        and isinstance(n.func, ast.Name)
-        and n.func.id == "acquire_single_instance_lock"
-        and n.args
-        and isinstance(n.args[0], ast.Constant)
-    }
-    assert "scheduler" in lock_roles, (
-        "bot/main.py не берёт advisory-lock роли `scheduler` — значит standalone-планировщик "
-        "и бот могут планировать одновременно, и никто этого не заметит"
-    )
+def test_runtime_image_defaults_to_mcp() -> None:
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert 'CMD ["python", "-m", "mcp_server"]' in dockerfile
+    assert 'CMD ["python", "-m", "bot.main"]' not in dockerfile
 
 
 def test_standalone_scheduler_writes_heartbeat() -> None:

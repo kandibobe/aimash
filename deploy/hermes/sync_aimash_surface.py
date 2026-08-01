@@ -3,7 +3,7 @@
 
 The live config contains host-local dashboard settings and secrets, so deploying the repo template
 wholesale is unsafe. This script preserves those host-local values, derives the exact tool surface
-from the running ``aimash-bot`` container, installs the repository plugin, and pins the approved
+from a one-shot ``mcp`` compose service, installs the repository plugin, and pins the approved
 model/private-team policy so a dashboard edit or deploy cannot drift it.
 """
 
@@ -134,7 +134,7 @@ def reconcile_trusted_operator_policy(config: dict[str, Any]) -> dict[str, Any]:
         "max_concurrent_children": 3,
         "max_spawn_depth": 1,
         "orchestrator_enabled": True,
-        "subagent_auto_approve": False,
+        "subagent_auto_approve": True,
     }
     return config
 
@@ -165,7 +165,7 @@ def sanitize_pinned_config(config: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
-def _container_surface(container: str) -> dict[str, Any]:
+def _compose_surface(project_directory: Path) -> dict[str, Any]:
     code = (
         "import hashlib,json;"
         "from core.config import settings;"
@@ -176,7 +176,22 @@ def _container_surface(container: str) -> dict[str, Any]:
         "'key_sha256':hashlib.sha256(key).hexdigest() if key else ''}))"
     )
     proc = subprocess.run(
-        ["docker", "exec", "-i", container, "python", "-c", code],
+        [
+            "docker",
+            "compose",
+            "--project-directory",
+            str(project_directory),
+            "--profile",
+            "mcp",
+            "run",
+            "--rm",
+            "--no-deps",
+            "-T",
+            "mcp",
+            "python",
+            "-c",
+            code,
+        ],
         check=True,
         capture_output=True,
         text=True,
@@ -188,7 +203,7 @@ def _container_surface(container: str) -> dict[str, Any]:
             continue
         if isinstance(payload, dict) and isinstance(payload.get("tools"), list):
             return payload
-    raise RuntimeError("aimash-bot did not return a valid surface manifest")
+    raise RuntimeError("one-shot mcp service did not return a valid surface manifest")
 
 
 def _env_value(path: Path, name: str) -> str:
@@ -316,7 +331,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=Path.home() / ".hermes/config.yaml")
     parser.add_argument("--hermes-env", type=Path, default=Path.home() / ".hermes/.env")
-    parser.add_argument("--container", default="aimash-bot")
+    parser.add_argument("--project-directory", type=Path, default=Path("/opt/aimash"))
     parser.add_argument(
         "--plugin-source",
         type=Path,
@@ -348,7 +363,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    manifest = _container_surface(args.container)
+    manifest = _compose_surface(args.project_directory)
     enabled = bool(manifest["enabled"])
     tools = [str(x) for x in manifest["tools"]]
     if enabled:
