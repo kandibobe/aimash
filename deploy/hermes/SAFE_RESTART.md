@@ -15,7 +15,9 @@ This is acceptable for dead sessions, but risky during active work because the m
 
 ## Scope
 
-This document defines an operational protocol first. It does **not** claim that Hermes currently implements native drain mode.
+Hermes v0.19 implements native restart drain through `agent.restart_drain_timeout`. Aimash pins it to
+`180` seconds in the deployed config; the operator preflight below remains mandatory because a drain
+window limits interruption risk but cannot preserve an unbounded turn forever.
 
 ## Safety levels
 
@@ -33,9 +35,9 @@ Preferred default:
 4. restart only after window expires or sessions finish
 
 ### Level 2 — native drain mode
-Future desired behavior:
+Current production behavior with `agent.restart_drain_timeout: 180`:
 - gateway stops accepting new heavy turns
-- existing turns are allowed to finish up to timeout N
+- existing turns are allowed to finish for up to 180 seconds
 - restart reason is logged explicitly
 - post-restart health check runs automatically
 
@@ -94,7 +96,7 @@ hermes mcp test aimash
 hermes cron list
 ```
 
-## Detection sources to implement next
+## Detection sources for the preflight wrapper
 
 The wrapper/script should eventually check one or more of:
 - Hermes `state.db` running sessions
@@ -126,4 +128,5 @@ This protocol does not yet:
 
 ## Immediate next engineering step
 
-Implement `scripts/safe_gateway_restart.py` in wrapper mode first, then decide whether native drain support belongs upstream in Hermes.
+Implement `scripts/safe_gateway_restart.py` as a preflight wrapper around the native drain and make
+deploy reject `restart_drain_timeout <= 0` before sending the restart signal.

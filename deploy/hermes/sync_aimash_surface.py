@@ -26,6 +26,7 @@ PRIMARY_PROVIDER = "openai-codex"
 PRIMARY_MODEL = "gpt-5.6-terra"
 PRIMARY_REASONING_EFFORT = "high"
 PRIMARY_MAX_TURNS = 90
+RESTART_DRAIN_TIMEOUT = 180
 DELEGATION_MAX_ITERATIONS = 60
 CANONICAL_SKILLS = ("google-ads-worker",)
 RETIRED_SKILLS = (
@@ -53,6 +54,7 @@ def reconcile_trusted_operator_policy(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(agent, dict):
         raise RuntimeError("live Hermes config: agent must be a mapping")
     agent["max_turns"] = PRIMARY_MAX_TURNS
+    agent["restart_drain_timeout"] = RESTART_DRAIN_TIMEOUT
     agent["reasoning_effort"] = PRIMARY_REASONING_EFFORT
     agent["disabled_toolsets"] = list(TRUSTED_OPERATOR_DISABLED_TOOLSETS)
 

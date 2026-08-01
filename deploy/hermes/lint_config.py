@@ -101,6 +101,9 @@ _ATTESTED: dict[str, Attested] = {
         '  tool_use_enforcement: "auto"   # "auto" | true | false | ["model-substring", ...]',
     ),
     "agent.max_turns": Attested("cli-config.yaml.example:700", "  max_turns: 60"),
+    "agent.restart_drain_timeout": Attested(
+        "hermes_cli/config.py:1020-1033", '"restart_drain_timeout": 0'
+    ),
     "agent.reasoning_effort": Attested(
         "cli-config.yaml.example:758", '  reasoning_effort: "medium"'
     ),

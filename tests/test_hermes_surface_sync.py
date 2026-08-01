@@ -40,6 +40,7 @@ def test_surface_sync_model_policy_matches_repository_config():
         "default": SYNC.PRIMARY_MODEL,
     }
     assert config["agent"]["max_turns"] == SYNC.PRIMARY_MAX_TURNS
+    assert config["agent"]["restart_drain_timeout"] == SYNC.RESTART_DRAIN_TIMEOUT
     assert config["agent"]["reasoning_effort"] == SYNC.PRIMARY_REASONING_EFFORT
     assert config["delegation"]["max_iterations"] == SYNC.DELEGATION_MAX_ITERATIONS
 
@@ -116,6 +117,7 @@ def test_trusted_operator_policy_is_pinned_without_touching_host_secrets():
 
     assert got["model"] == {"provider": "openai-codex", "default": "gpt-5.6-terra"}
     assert got["agent"]["max_turns"] == 90
+    assert got["agent"]["restart_drain_timeout"] == 180
     assert got["agent"]["reasoning_effort"] == "high"
     assert got["agent"]["disabled_toolsets"] == list(SYNC.TRUSTED_OPERATOR_DISABLED_TOOLSETS)
     assert got["memory"] == {"memory_enabled": True, "user_profile_enabled": True}

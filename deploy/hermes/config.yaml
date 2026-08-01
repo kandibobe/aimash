@@ -19,6 +19,7 @@ fallback_providers:
 
 agent:
   max_turns: 90
+  restart_drain_timeout: 180
   tool_use_enforcement: auto
   disabled_toolsets:
     - homeassistant
