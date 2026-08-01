@@ -79,7 +79,7 @@ jobs:
 
   # ── Авто-деплой на VPS (Hetzner) ────────────────────────────────────────────────
   # Только push в master И только ПОСЛЕ зелёных lint-test + secret-scan (не катим сломанное).
-  # На сервере: git reset --hard origin/master → docker compose up -d --build. Миграции
+  # На сервере: git reset --hard ${{ github.sha }} → docker compose up -d --build. Миграции
   # применяются АВТОМАТИЧЕСКИ при старте контейнера (docker-entrypoint.sh → alembic upgrade head,
   # fail-fast). .env на сервере — untracked (секреты не в гите), reset --hard его не трогает.
   # Нужны секреты репозитория (Settings → Secrets and variables → Actions):
@@ -120,7 +120,13 @@ jobs:
             }
             trap notify_deploy_exit EXIT
             git fetch --prune origin master
-            git reset --hard origin/master
+            # Deploy exactly the revision that passed THIS workflow. A later master push may run
+            # its tests in parallel; following moving origin/master here would deploy it before
+            # its own checks have passed.
+            DEPLOY_SHA="${{ github.sha }}"
+            git cat-file -e "$DEPLOY_SHA^{commit}"
+            git reset --hard "$DEPLOY_SHA"
+            test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
             # Маркер версии внутрь образа: `.dockerignore` исключает `.git`, поэтому иначе коммит
             # в контейнере узнать нечем. Берём ПОСЛЕ reset — то есть ровно то, что задеплоено.
             export GIT_SHA="$(git rev-parse --short HEAD)"
