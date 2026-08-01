@@ -136,17 +136,13 @@ class FakeState:
 
 
 def test_guard_registered_before_state_handlers():
-    """Инвариант порядка: btn_guard_menu — раньше state-хендлеров визардов (иначе кнопку съест
-    ввод), on_text — последний (существующий инвариант не сломан)."""
+    """Legacy menu guard импортируется для отката, но к Dispatcher больше не привязан."""
+    from bot.handlers import UNBOUND_HANDLER_MODULES
+
     names = [h.callback.__name__ for h in bm.dp.message.handlers]
-    assert "btn_guard_menu" in names
-    gpos = names.index("btn_guard_menu")
-    for state_handler in ("cc_settings_desc", "cli_accumulate_text", "gdn_brief"):
-        if state_handler in names:
-            assert gpos < names.index(state_handler), (
-                f"btn_guard_menu должен стоять РАНЬШЕ {state_handler}"
-            )
-    assert names[-1] == "on_text"
+    assert "menu_guard" in UNBOUND_HANDLER_MODULES
+    assert "btn_guard_menu" not in names
+    assert names[:2] == ["newcampaign_react", "on_text"]
 
 
 async def test_button_interrupts_cc_wizard_preserves_draft(monkeypatch):

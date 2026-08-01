@@ -299,24 +299,45 @@ async def test_agentloop_mutation_refused_on_read_only_active_account():
     assert msg.answers and "только" in msg.answers[-1][0].lower()  # сообщение «только для чтения»
 
 
-async def test_on_text_with_active_wizard_state_does_not_reach_agent():
-    """N5: если активен визард-state без своего текст-хендлера (напр. RSA-пикер), on_text НЕ уводит
-    текст/URL в агента (раньше URL давал «Прочитал… контекст»), а подсказывает завершить шаг."""
+async def test_on_text_with_active_wizard_state_reaches_agent_and_clears_fsm():
+    """Любой legacy FSM state сбрасывается, а свободный текст доходит до ReAct entrypoint."""
     await init_db()
     called = {"n": 0}
 
     async def _spy(text, chat_id, **kwargs):
         called["n"] += 1
-        return {"type": "text", "text": "не должно вызваться"}
+        return {"type": "text", "text": "принято агентом"}
 
     state = FakeFSM()
     await state.set_state("RsaWizard:picking")  # активный пикер-экран
     msg = FakeMessage("https://example.com/foo", chat_id=888, bot=FakeBot())
     with patched(bm, "handle_command", _spy):
         await bm.on_text(msg, state)
-    assert called["n"] == 0  # агент НЕ вызван (URL не утёк в ingest/агента)
-    assert msg.answers  # показана подсказка «заверши шаг»
+    assert called["n"] == 1
+    assert await state.get_state() is None
+    assert msg.answers and "принято агентом" in msg.answers[-1][0]
     assert bm._LAST_PENDING.get(888) is None
+
+
+async def test_newcampaign_command_starts_agent_dialog_without_fsm():
+    captured = {}
+
+    async def _spy(text, chat_id, **kwargs):
+        captured.update(text=text, chat_id=chat_id)
+        return {"type": "text", "text": "Какая цель кампании?"}
+
+    state = FakeFSM()
+    await state.set_state("CreateCampaignWizard:settings_desc")
+    msg = FakeMessage("/newcampaign", chat_id=889, bot=FakeBot())
+    with patched(bm, "handle_command", _spy):
+        await bm.newcampaign_react(msg, state)
+
+    assert await state.get_state() is None
+    assert captured == {
+        "text": "Создай новую кампанию Google Ads. Собери недостающие параметры в диалоге.",
+        "chat_id": 889,
+    }
+    assert msg.answers and "Какая цель" in msg.answers[-1][0]
 
 
 # ── ошибка исполнения: failed + audit failed ─────────────────────────────────────

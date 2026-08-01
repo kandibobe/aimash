@@ -6,8 +6,9 @@
 1. Без алиаса sys.modules Python не находит 'bot.main' и ИСПОЛНЯЕТ файл повторно вторым
    модулем → ДВА разных Dispatcher, main() поллит пустой → все апдейты «не обработаны»,
    бот молчит.
-2. Тот же циклический ре-импорт ЛОМАЕТ порядок регистрации: fallback/on_text (catch-all
-   `@dp.message(F.text)`) встаёт ПЕРЕД командами → /start, /help и др. проглатывает LLM-фолбэк.
+2. Тот же циклический ре-импорт может создать неверный порядок регистрации. В agent-first схеме
+   первыми обязаны стоять `/newcampaign`-alias и non-command `on_text`; slash-команды исключены
+   фильтром самого `on_text`.
 
 Фикс — алиас `sys.modules.setdefault("bot.main", sys.modules["__main__"])` в bot/main.py (до
 импорта хендлеров). Обычные тесты этого не ловят: они `import bot.main` (как bot.main, не
@@ -34,11 +35,9 @@ runpy.run_module("bot.main", run_name="__main__", alter_sys=True)
 import bot.main as bm  # с фиксом это ТОТ ЖЕ модуль (__main__), что поллит main()
 names = [h.callback.__name__ for h in bm.dp.message.handlers]
 assert names, "dp.message пуст — double-import создал второй пустой Dispatcher"
-assert names[-1] == "on_text", (
-    "on_text не последний message-хендлер (idx=%s из %d, last=%s) — скрамбл порядка от "
-    "double-import: команды проглотит LLM-фолбэк"
-    % (names.index("on_text") if "on_text" in names else None, len(names), names[-1])
-)
+assert names[:2] == ["newcampaign_react", "on_text"], names[:5]
+react = next(h for h in bm.dp.message.handlers if h.callback.__name__ == "on_text")
+assert react.filters[0].callback(type("M", (), {"text": "/start"})()) is False
 print("ENTRYPOINT_OK handlers=%d" % len(names))
 """
 

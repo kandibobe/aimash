@@ -911,7 +911,13 @@ async def on_more(cq: bm.CallbackQuery, callback_data: bm.MoreCB, state: bm.FSMC
     action = callback_data.action
     # ── хаб «➕ Создать» (create_menu_kb) ──
     if action == "newcampaign":
-        await bm._cc_entry(msg, state)  # §19: guided-визард создания кампании
+        from bot.handlers.react_gateway import forward_to_react
+
+        await forward_to_react(
+            msg,
+            state,
+            text="Создай новую кампанию Google Ads. Собери недостающие параметры в диалоге.",
+        )
     elif action == "rsa":
         await bm.rsa_cmd(msg, state)  # ✍️ генерация текстов RSA
     elif action == "keywords":

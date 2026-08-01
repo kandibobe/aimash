@@ -1,63 +1,73 @@
-"""Инвариант порядка регистрации хендлеров (критично при разбиении bot/main.py на модули).
+"""Agent-first инварианты регистрации aiogram handlers.
 
-aiogram диспатчит по принципу «первый совпавший в порядке регистрации». Catch-all `on_text`
-(@dp.message(F.text)) обязан быть ПОСЛЕДНИМ message-хендлером: любой хендлер, зарегистрированный
-после него, никогда не получит текст (state-визарды §19/§20, /команды с текстом и т.д.).
-Офлайн-тесты зовут хендлеры напрямую и НЕ видят регрессий порядка — этот тест закрывает дыру.
+Свободный non-command текст обязан встретить ReAct catch-all раньше любого legacy FSM handler.
+Slash-команды не входят в фильтр catch-all и продолжают жить в command handlers.
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bot.main as bm  # noqa: E402
+from aiogram.fsm.state import State  # noqa: E402
 
 
 def _message_handler_names() -> list[str]:
     return [h.callback.__name__ for h in bm.dp.message.handlers]
 
 
-def test_on_text_catchall_is_last_message_handler():
+def test_react_catchall_precedes_legacy_text_handlers():
     names = _message_handler_names()
     assert names, "нет message-хендлеров — сломана регистрация dp?"
-    assert names[-1] == "on_text", (
-        f"catch-all on_text должен быть ПОСЛЕДНИМ message-хендлером, а он на позиции "
-        f"{names.index('on_text') if 'on_text' in names else 'ОТСУТСТВУЕТ'} из {len(names)}; "
-        f"последний: {names[-1]}. Хендлеры после on_text никогда не получат текст."
-    )
-
-
-def test_state_and_command_handlers_precede_catchall():
-    """Выборочные критичные хендлеры (визард §19, клиенты §20, команды) — ДО on_text."""
-    names = _message_handler_names()
+    assert names[:2] == ["newcampaign_react", "on_text"]
     idx_text = names.index("on_text")
-    for critical in (
-        "cc_settings_desc",  # §19 Этап 1 (state-текст)
-        "cc_account_search",  # §19 Этап 0 (поиск аккаунта)
-        "cc_kw_verify",  # §19 Этап 2 (ссылка на таблицу)
-        "cli_accumulate_text",  # §20 приём текста профиля
-        "crawl_cmd",  # §20.4 /crawl [url] (команда с текстом — до catch-all)
-        "rsa_list_edited",  # §10 list-UX paste-back
-        "report_",  # /report
-        "on_document",  # файлы (ключи XLSX/CSV)
-    ):
-        assert critical in names, f"хендлер {critical} не зарегистрирован"
-        assert names.index(critical) < idx_text, (
-            f"{critical} зарегистрирован ПОСЛЕ catch-all on_text — текст до него не дойдёт"
-        )
+    for legacy in ("kw_seeds", "gdn_brief", "cli_accumulate_text", "rsa_list_edited"):
+        if legacy in names:
+            assert idx_text < names.index(legacy)
+
+
+def test_system_commands_remain_registered_behind_non_command_filter():
+    names = _message_handler_names()
+    for command in ("start", "help_", "cancel_cmd", "on_unknown_command"):
+        assert command in names
+
+
+def test_react_filter_accepts_free_text_and_excludes_slash_commands():
+    handler = next(h for h in bm.dp.message.handlers if h.callback.__name__ == "on_text")
+    match = handler.filters[0].callback
+    assert match(SimpleNamespace(text="создай кампанию")) is True
+    assert match(SimpleNamespace(text="/start")) is False
 
 
 # ── 4A: HANDLER_MODULES — единственный источник порядка (star-импорты выпилены) ──────
 def test_handler_modules_registry_invariants():
-    """menu_guard — первым (3A), fallback — последним; без дублей."""
-    from bot.handlers import HANDLER_MODULES
+    """ReAct gateway — первым; campaign FSM/menu guard сняты; fallback — последним."""
+    from bot.handlers import HANDLER_MODULES, UNBOUND_HANDLER_MODULES
 
-    assert HANDLER_MODULES[0] == "menu_guard", "3A: гард кнопок меню обязан идти первым"
-    assert HANDLER_MODULES[-1] == "fallback", "catch-all on_text обязан регистрироваться последним"
+    assert HANDLER_MODULES[0] == "react_gateway"
+    assert HANDLER_MODULES[-1] == "fallback"
+    assert "campaign_wizard" in HANDLER_MODULES
+    assert "campaign_wizard" in UNBOUND_HANDLER_MODULES
+    assert "menu_guard" in HANDLER_MODULES
+    assert "menu_guard" in UNBOUND_HANDLER_MODULES
     assert len(set(HANDLER_MODULES)) == len(HANDLER_MODULES), "дубль модуля в HANDLER_MODULES"
+
+
+def test_create_campaign_wizard_has_no_registered_handlers():
+    handlers = [*bm.dp.message.handlers, *bm.dp.callback_query.handlers]
+    assert all(h.callback.__module__ != "bot.handlers.campaign_wizard" for h in handlers)
+
+
+def test_no_fsm_state_message_handlers_are_registered():
+    assert not [
+        handler.callback.__name__
+        for handler in bm.dp.message.handlers
+        if any(isinstance(item.callback, State) for item in handler.filters)
+    ]
 
 
 def test_no_star_imports_in_main():
@@ -72,20 +82,9 @@ def test_no_star_imports_in_main():
     )
 
 
-def test_menu_guard_precedes_state_handlers():
-    """3A: гард кнопок меню — раньше текстовых state-хендлеров визардов (иначе кнопку съест ввод)."""
-    names = _message_handler_names()
-    gpos = names.index("btn_guard_menu")
-    for state_handler in ("cc_settings_desc", "cli_accumulate_text", "gdn_brief", "kw_seeds"):
-        if state_handler in names:
-            assert gpos < names.index(state_handler), (
-                f"btn_guard_menu должен стоять РАНЬШЕ {state_handler}"
-            )
-
-
 def test_reexported_handler_names_present():
     """Ре-экспорт (4A): тесты/скрипты зовут хендлеры как bot.main.<handler> — выборочная проверка."""
-    for name in ("on_text", "account_cmd", "btn_report", "cc_final_edit", "grant_cmd"):
+    for name in ("on_text", "forward_to_react", "account_cmd", "btn_report", "grant_cmd"):
         assert hasattr(bm, name), f"bot.main.{name} пропал после рефактора ре-экспорта"
 
 

@@ -1,4 +1,4 @@
-"""Хвост диспатча: документы, ingest-задача, гард визарда и CATCH-ALL on_text (строго последним)
+"""Хвост диспатча: документы, legacy ingest, неизвестные команды и error boundary.
 
 Хендлеры вынесены из bot/main.py (декомпозиция god-module, предсдаточный аудит 2026-07).
 ВСЕ имена из bot.main берутся через `bm.<name>` (ПОЗДНЕЕ связывание): monkeypatch тестов на
@@ -116,23 +116,6 @@ async def ingest_task(m: bm.Message, state: bm.FSMContext) -> None:
     )
 
 
-@bm.dp.message(
-    bm.StateFilter(
-        bm.CreateCampaignWizard.account_select,
-        bm.CreateCampaignWizard.images,
-        bm.CreateCampaignWizard.assets,
-        bm.CreateCampaignWizard.asset_logo,
-    ),
-    bm.F.text,
-)
-async def cc_stage_expects_button(m: bm.Message) -> None:
-    """B8: callback/фото-этапы визарда (выбор аккаунта, изображения, ассеты, логотип) текст не ждут.
-    Раньше он проваливался в общий on_text → LLM-агент минтил ПОСТОРОННИЙ proposal (напр. update_budget
-    на живую кампанию). Подсказываем нажать кнопку шага; фото на images/asset_logo — отдельные хендлеры,
-    сюда не попадают (F.text). Зарегистрирован ДО on_text, поэтому перехватывает раньше catch-all."""
-    await m.answer(bm.i18n.t("cc_stage_expects_button"))
-
-
 @bm.dp.errors()
 async def on_error(event: bm.ErrorEvent) -> bool:
     """Глобальная сеть безопасности (§15): необработанное исключение в любом хендлере ловится,
@@ -156,61 +139,11 @@ async def on_error(event: bm.ErrorEvent) -> bool:
 
 # D9: нераспознанная слэш-команда → понятная подсказка, НЕ отправка в LLM. Известные команды
 # перехватывают свои Command-хендлеры ВЫШЕ (порядок HANDLER_MODULES: commands/reports/… раньше
-# fallback) — сюда доходит только неизвестное «/…». Зарегистрирован строго ПЕРЕД on_text (иначе
-# catch-all проглотил бы «/фыва» и агент трактовал бы его как задачу, мог нафантазировать мутацию).
+# fallback) — сюда доходит только неизвестное «/…». Agent-first on_text зарегистрирован раньше,
+# но его фильтр явно исключает строки, начинающиеся с `/`.
 @bm.dp.message(bm.F.text.startswith("/"))
 async def on_unknown_command(m: bm.Message) -> None:
     cmd = (m.text or "").split(maxsplit=1)[0][:32]
     await m.answer(
         bm.i18n.t("unknown_command", cmd=bm.texts.esc(cmd)), parse_mode=bm.ParseMode.HTML
     )
-
-
-# ВАЖНО: catch-all свободного текста регистрируется ПОСЛЕДНИМ message-хендлером (aiogram —
-# «первый совпавший в порядке регистрации»): всё, что окажется ниже, никогда не получит текст.
-# Регрессия этого инварианта уже случалась (/diag и rsa_list_edited были зарегистрированы после
-# catch-all → мертвы в диспатче) — теперь порядок закреплён tests/test_handler_order.py.
-@bm.dp.message(bm.F.text)
-async def on_text(m: bm.Message, state: bm.FSMContext) -> None:
-    text = m.text or ""
-    # N5 (гард класса): если активен FSM-state визарда, но у его экрана нет своего текст-хендлера
-    # (пикеры выбора кампании/группы, экран параметров без обработчика) — текст сюда доходить НЕ
-    # должен уводиться в ingest/агента (раньше URL на таком экране давал «Прочитал… контекст» и
-    # посторонний ответ). Подсказываем завершить шаг на экране. /команды сюда не доходят (их снимает
-    # SlashCommandExitsWizardMiddleware), кнопки меню — menu_guard.
-    if await state.get_state() is not None:
-        await m.answer(bm.i18n.t("wizard_use_screen"))
-        return
-    # P1-8: «экспорт статистики всех аккаунтов [за N дней]» → сводный MCC-экспорт (xlsx по всем
-    # дочерним) детерминированно, минуя одно-аккаунтный get_stats (раньше отдавал только один).
-    is_all, period_arg = bm.is_export_all_accounts(text)
-    if is_all:
-        bm._chat_ctx_note(m.chat.id, user_text=text)
-        await bm._send_mcc(m, period_arg)
-        return
-    # ingest: если в сообщении есть ссылка — прочитаем её и передадим агенту как СПРАВОЧНЫЙ КОНТЕНТ
-    # (best-effort: сбой чтения не ломает обычную команду). Текст на callback/фото-этапах визарда сюда
-    # НЕ доходит — его раньше перехватывает cc_stage_expects_button (B8); прочие визарды — свой стейт.
-    urls = bm.ingest.extract_urls(text)
-    if urls:
-        try:
-            async with bm.ux.typing_action(m):
-                content = await bm.ingest.fetch_url_text(urls[0])
-        except bm.ingest.IngestError as e:
-            await m.answer(
-                bm.i18n.t("ingest_link_failed", err=bm.texts.esc(str(e))),
-                parse_mode=bm.ParseMode.HTML,
-            )
-            content = ""
-        if content:
-            await bm._run_task_with_context(
-                m, instruction=text, context_text=content, source=urls[0], state=state
-            )
-            return
-    if await bm._llm_budget_or_reply(m):  # C3: пер-юзер дневной потолок LLM (fail-closed)
-        return
-    ctx = bm._build_agent_context(m.chat.id)  # C1/C3: контекст диалога (последняя кампания/история)
-    async with bm.ux.typing_action(m):  # «печатает…» пока модель парсит команду
-        res = await bm.handle_command(text, chat_id=m.chat.id, context=ctx)
-    bm._chat_ctx_note(m.chat.id, user_text=text)  # текущая реплика → история для след. хода
-    await bm._dispatch_command_result(m, res, state)

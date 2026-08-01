@@ -1,8 +1,8 @@
 """D9 (удобство 2026-07): нераспознанная слэш-команда → подсказка, НЕ отправка в LLM.
 
 Агент трактовал бы «/фыва» как задачу и мог свободно нафантазировать (в т.ч. посторонний proposal).
-Известные команды перехватывают свои Command-хендлеры ВЫШЕ; on_unknown_command стоит строго перед
-catch-all on_text и ловит только неизвестное «/…».
+Agent-first on_text зарегистрирован первым, но фильтром исключает slash-команды. Поэтому известные
+команды доходят до своих handlers, а неизвестные — до on_unknown_command.
 """
 
 from __future__ import annotations
@@ -30,10 +30,11 @@ def _handler_names() -> list[str]:
     return [h.callback.__name__ for h in bm.dp.message.handlers]
 
 
-def test_registered_right_before_catchall():
+def test_react_catchall_does_not_capture_slash_commands():
     names = _handler_names()
-    assert names[-1] == "on_text"  # catch-all по-прежнему последний
-    assert names[-2] == "on_unknown_command"  # неизвестные «/…» ловим прямо перед ним
+    assert names.index("on_text") < names.index("on_unknown_command")
+    react = next(h for h in bm.dp.message.handlers if h.callback.__name__ == "on_text")
+    assert react.filters[0].callback(SimpleNamespace(text="/unknown")) is False
 
 
 async def test_unknown_command_shows_hint():
