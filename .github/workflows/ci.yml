@@ -205,8 +205,19 @@ jobs:
             test -n "$HERMES_BACKUP"
             tar tzf "$HERMES_BACKUP" | grep -q '/state.db$'
             tar tzf "$HERMES_BACKUP" | grep -q '/\.env$'
+            # `docker compose run` may print container lifecycle messages to stdout. Keep only the
+            # numeric line emitted by Python; otherwise the exact Hermes count comparison below
+            # receives a multi-line value and fails even when both surfaces expose the same tools.
             EXPECTED_TOOLS=$(docker compose --profile mcp run --rm --no-deps -T mcp python -c \
-              "from mcp_server.server import expected_tool_names; print(len(expected_tool_names()))")
+              "from mcp_server.server import expected_tool_names; print(len(expected_tool_names()))" \
+              | awk '/^[0-9]+$/ { value=$0 } END { print value }')
+            case "$EXPECTED_TOOLS" in
+              ''|*[!0-9]*)
+                echo "::error::Could not derive numeric MCP tool count from compose service"
+                exit 1
+                ;;
+            esac
+            echo "Expected MCP tools: $EXPECTED_TOOLS"
             docker compose --profile mcp run --rm --no-deps -T mcp python -c \
               "import sys; from core.config import settings; \
               from mcp_server.server import expected_tool_names; expected_tool_names(); \
