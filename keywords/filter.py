@@ -64,7 +64,12 @@ def _parse_offtopic(content: str, valid: list[str]) -> set[str] | None:
 
 
 async def filter_relevance(
-    *, texts: list[str], topic: str, profile: str = "", language: str = "ru"
+    *,
+    texts: list[str],
+    topic: str,
+    profile: str = "",
+    language: str = "ru",
+    target_geo: str = "",
 ) -> dict[str, bool]:
     """Вернуть {текст: релевантно?} по списку идей. Fail-open: отсутствующие/сбой → True (advisory).
     Дедупит вход по casefold, сохраняет исходное написание ключа."""
@@ -76,6 +81,11 @@ async def filter_relevance(
         batch = uniq[i : i + _BATCH]
         ctx = (
             f"Язык: {language}.\nТема кампании: {topic}.\n"
+            + (
+                f"Целевое гео: {target_geo}. Ключи про другие страны нерелевантны.\n"
+                if target_geo
+                else ""
+            )
             + (
                 f"О клиенте:\n{profile[: settings.profile_ctx_chars]}\n"
                 if (profile or "").strip()

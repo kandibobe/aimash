@@ -797,8 +797,7 @@ def _install_telegram_button_bridge() -> bool:
             await _attach_confirmation_keyboard(
                 adapter, chat_id, getattr(result, "message_id", None), content
             )
-            if (metadata or {}).get("notify"):
-                await _deliver_pending_artifacts(adapter, chat_id, metadata)
+            await _deliver_pending_artifacts(adapter, chat_id, metadata)
         return result
 
     @functools.wraps(original_edit)
@@ -814,11 +813,11 @@ def _install_telegram_button_bridge() -> bool:
         if finalize and getattr(result, "success", False):
             effective_message_id = getattr(result, "message_id", None) or message_id
             await _attach_confirmation_keyboard(adapter, chat_id, effective_message_id, content)
-            if (metadata or {}).get("notify"):
-                # Final answers are commonly completed through edit_message rather than send().
-                # Without this symmetric hook signed XLSX/media stayed queued forever while the
-                # model incorrectly reported that Telegram delivery had happened.
-                await _deliver_pending_artifacts(adapter, chat_id, metadata)
+            # Final answers are commonly completed through edit_message rather than send().
+            # Without this symmetric hook signed XLSX/media stayed queued forever while the
+            # model incorrectly reported that Telegram delivery had happened. Queue pop makes
+            # this safe even when Hermes omits the optional ``notify`` metadata flag.
+            await _deliver_pending_artifacts(adapter, chat_id, metadata)
         return result
 
     @functools.wraps(original_callback)

@@ -147,6 +147,21 @@ def test_unknown_nested_leaf_does_not_hide_behind_a_known_section():
     assert any(f.path == "agent.max_turnz" for f in rep.warnings), [str(f) for f in rep.findings]
 
 
+def test_platform_disabled_accepts_dynamic_platform_but_not_a_typo():
+    """Pinned Hermes supports per-platform skill disables; only the platform name is dynamic."""
+    rep = _LINT.Report()
+    _LINT.check_unknown_keys(
+        {"skills": {"platform_disabled": {"telegram": ["aimash-development"]}}}, rep
+    )
+    assert not rep.findings
+
+    typo = _LINT.Report()
+    _LINT.check_unknown_keys(
+        {"skills": {"platform_disable": {"telegram": ["aimash-development"]}}}, typo
+    )
+    assert any(f.path == "skills.platform_disable.telegram" for f in typo.warnings)
+
+
 def test_runtime_registry_matches_deploy_model_and_fallbacks():
     """Два источника модели не могут снова тихо объявить разные canonical runtime."""
     registry = _load_cfg(HERMES_DIR / "runtime_registry.yaml")

@@ -342,15 +342,23 @@ async def test_confirmation_button_becomes_exact_trusted_reply(monkeypatch):
         delivered.append((adapter_arg, chat_id, metadata))
 
     monkeypatch.setattr(plugin, "_deliver_pending_artifacts", _deliver)
+    await adapter.send(
+        "-202",
+        "обычный итог без notify",
+        metadata={"thread_id": "7"},
+    )
     await adapter.edit_message(
         "-202",
         "303",
         card,
         finalize=True,
-        metadata={"notify": True, "thread_id": "7"},
+        metadata={"thread_id": "7"},
     )
     assert attached[1]["message_id"] == 404
-    assert delivered == [(adapter, "-202", {"notify": True, "thread_id": "7"})]
+    assert delivered == [
+        (adapter, "-202", {"thread_id": "7"}),
+        (adapter, "-202", {"thread_id": "7"}),
+    ]
 
     answers = []
 

@@ -18,6 +18,7 @@ from adcopy.session import CurationSession, SessionStore
 from adcopy.validate import validate
 from agent.tools.schemas import CreateSearchCampaign
 from ads.client import build_client_async, ensure_read_allowed
+from ads.geo import country_name_for_geo_id
 from ads.keyword_plan import generate_keyword_ideas
 from ads.read import account_currency
 from clients.crawl_service import prepare_profile_crawl
@@ -77,6 +78,10 @@ async def start_keyword_research(
     if not 1 <= int(max_ideas) <= 500:
         raise ValueError("max_ideas must be between 1 and 500")
     ensure_read_allowed(str(account))
+    normalized_geo_ids = tuple(int(item) for item in (geo_ids or []))
+    target_geo = ", ".join(
+        name for name in (country_name_for_geo_id(item) for item in normalized_geo_ids) if name
+    )
     turn = get_trusted_turn()
     store = ClientProfileStore()
     profile = await store.profile_context_text(str(account))
@@ -98,14 +103,20 @@ async def start_keyword_research(
         seeds=seeds,
         url=url,
         language=language,
-        geo_ids=tuple(int(item) for item in (geo_ids or [])),
+        geo_ids=normalized_geo_ids,
         limit=int(max_ideas),
         account=str(account),
         label="mcp.start_keyword_research",
     )
     texts = [item.text for item in ideas]
     relevance, clusters, negatives = await asyncio.gather(
-        filter_relevance(texts=texts, topic=topic, profile=profile, language=language),
+        filter_relevance(
+            texts=texts,
+            topic=topic,
+            profile=profile,
+            language=language,
+            target_geo=target_geo,
+        ),
         cluster_keywords(texts, language),
         suggest_negative_keywords(
             topic,
@@ -137,6 +148,7 @@ async def start_keyword_research(
         "clusters": len(clusters),
         "negative_suggestions": negatives,
         "currency": currency or "",
+        "target_geo": target_geo,
     }
     if output in {"xlsx", "both"}:
         path = artifact_path(".xlsx")

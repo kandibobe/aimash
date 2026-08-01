@@ -7,7 +7,7 @@
 
 model:
   provider: openai-codex
-  default: gpt-5.6-terra
+  default: gpt-5.6-sol
 
 # Резервная цепочка Hermes v0.19.0 уходит с Codex OAuth на отдельный OpenRouter-ключ:
 # переживает отказ Codex или конкретной fallback-модели, но требует рабочие credentials обоих providers.
@@ -18,7 +18,7 @@ fallback_providers:
     model: google/gemini-3.1-flash-lite
 
 agent:
-  max_turns: 90
+  max_turns: 40
   restart_drain_timeout: 180
   tool_use_enforcement: auto
   disabled_toolsets:
@@ -100,10 +100,10 @@ memory:
   user_profile_enabled: true
 
 delegation:
-  model: gpt-5.6-terra
+  model: gpt-5.6-sol
   provider: openai-codex
   inherit_mcp_toolsets: true
-  max_iterations: 60
+  max_iterations: 30
   reasoning_effort: high
   max_concurrent_children: 3
   max_spawn_depth: 1
@@ -114,6 +114,16 @@ skills:
   inline_shell: false
   guard_agent_created: true
   write_approval: true
+  platform_disabled:
+    telegram:
+      - ad-master-context
+      - ad-master-cron-ops
+      - ad-master-routing
+      - ad-master-self-learning
+      - admaster-operations
+      - aimash-architecture
+      - aimash-development
+      - quant
 
 plugins:
   enabled:
@@ -320,6 +330,17 @@ platform_toolsets:
     - video
     - web
     - yuanbao
+  # Typed MCP servers remain available by default. Host/code mutation tools are deliberately CLI-only.
+  telegram:
+    - clarify
+    - cronjob
+    - delegation
+    - memory
+    - session_search
+    - skills
+    - todo
+    - vision
+    - web
 
 known_plugin_toolsets:
   cli:

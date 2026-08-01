@@ -23,12 +23,12 @@ import yaml
 
 PLUGIN_NAME = "aimash_trusted_transport"
 PRIMARY_PROVIDER = "openai-codex"
-PRIMARY_MODEL = "gpt-5.6-terra"
+PRIMARY_MODEL = "gpt-5.6-sol"
 PRIMARY_REASONING_EFFORT = "high"
-PRIMARY_MAX_TURNS = 90
+PRIMARY_MAX_TURNS = 40
 RESTART_DRAIN_TIMEOUT = 180
-DELEGATION_MAX_ITERATIONS = 60
-CANONICAL_SKILLS = ("google-ads-worker",)
+DELEGATION_MAX_ITERATIONS = 30
+CANONICAL_SKILLS = ("ad-master-agent", "google-ads-worker")
 RETIRED_SKILLS = (
     "ad-master-tools",
     "admaster-confirm-model",
@@ -42,6 +42,36 @@ TRUSTED_OPERATOR_DISABLED_TOOLSETS = (
     "yuanbao",
     "tts",
 )
+TELEGRAM_TOOLSETS = (
+    "clarify",
+    "cronjob",
+    "delegation",
+    "memory",
+    "session_search",
+    "skills",
+    "todo",
+    "vision",
+    "web",
+)
+TELEGRAM_DISABLED_SKILLS = (
+    "ad-master-context",
+    "ad-master-cron-ops",
+    "ad-master-routing",
+    "ad-master-self-learning",
+    "admaster-operations",
+    "aimash-architecture",
+    "aimash-development",
+    "quant",
+)
+TOOL_LOOP_GUARDRAILS = {
+    "warnings_enabled": True,
+    "hard_stop_enabled": True,
+    "hard_stop_after": {
+        "exact_failure": 3,
+        "same_tool_failure": 4,
+        "idempotent_no_progress": 3,
+    },
+}
 
 
 def reconcile_trusted_operator_policy(config: dict[str, Any]) -> dict[str, Any]:
@@ -74,6 +104,26 @@ def reconcile_trusted_operator_policy(config: dict[str, Any]) -> dict[str, Any]:
             "write_approval": True,
         }
     )
+    platform_disabled = skills.setdefault("platform_disabled", {})
+    if not isinstance(platform_disabled, dict):
+        raise RuntimeError("live Hermes config: skills.platform_disabled must be a mapping")
+    platform_disabled["telegram"] = list(TELEGRAM_DISABLED_SKILLS)
+
+    approvals = config.setdefault("approvals", {})
+    if not isinstance(approvals, dict):
+        raise RuntimeError("live Hermes config: approvals must be a mapping")
+    approvals["mode"] = "manual"
+    approvals["cron_mode"] = "deny"
+
+    config["tool_loop_guardrails"] = {
+        "warnings_enabled": TOOL_LOOP_GUARDRAILS["warnings_enabled"],
+        "hard_stop_enabled": TOOL_LOOP_GUARDRAILS["hard_stop_enabled"],
+        "hard_stop_after": dict(TOOL_LOOP_GUARDRAILS["hard_stop_after"]),
+    }
+    platform_toolsets = config.setdefault("platform_toolsets", {})
+    if not isinstance(platform_toolsets, dict):
+        raise RuntimeError("live Hermes config: platform_toolsets must be a mapping")
+    platform_toolsets["telegram"] = list(TELEGRAM_TOOLSETS)
 
     config["delegation"] = {
         "model": PRIMARY_MODEL,

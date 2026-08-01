@@ -43,6 +43,9 @@ def test_surface_sync_model_policy_matches_repository_config():
     assert config["agent"]["restart_drain_timeout"] == SYNC.RESTART_DRAIN_TIMEOUT
     assert config["agent"]["reasoning_effort"] == SYNC.PRIMARY_REASONING_EFFORT
     assert config["delegation"]["max_iterations"] == SYNC.DELEGATION_MAX_ITERATIONS
+    assert config["platform_toolsets"]["telegram"] == list(SYNC.TELEGRAM_TOOLSETS)
+    assert config["skills"]["platform_disabled"]["telegram"] == list(SYNC.TELEGRAM_DISABLED_SKILLS)
+    assert config["tool_loop_guardrails"] == SYNC.TOOL_LOOP_GUARDRAILS
 
 
 def test_enable_changes_only_plugin_and_aimash_include():
@@ -115,8 +118,8 @@ def test_trusted_operator_policy_is_pinned_without_touching_host_secrets():
 
     got = SYNC.reconcile_trusted_operator_policy(cfg)
 
-    assert got["model"] == {"provider": "openai-codex", "default": "gpt-5.6-terra"}
-    assert got["agent"]["max_turns"] == 90
+    assert got["model"] == {"provider": "openai-codex", "default": "gpt-5.6-sol"}
+    assert got["agent"]["max_turns"] == 40
     assert got["agent"]["restart_drain_timeout"] == 180
     assert got["agent"]["reasoning_effort"] == "high"
     assert got["agent"]["disabled_toolsets"] == list(SYNC.TRUSTED_OPERATOR_DISABLED_TOOLSETS)
@@ -126,11 +129,22 @@ def test_trusted_operator_policy_is_pinned_without_touching_host_secrets():
         "guard_agent_created": True,
         "write_approval": True,
         "custom": "survives",
+        "platform_disabled": {"telegram": list(SYNC.TELEGRAM_DISABLED_SKILLS)},
     }
+    assert got["approvals"] == {"mode": "manual", "cron_mode": "deny"}
+    assert got["tool_loop_guardrails"] == SYNC.TOOL_LOOP_GUARDRAILS
+    assert got["platform_toolsets"]["telegram"] == list(SYNC.TELEGRAM_TOOLSETS)
+    assert not {
+        "browser",
+        "code_execution",
+        "computer_use",
+        "file",
+        "terminal",
+    }.intersection(got["platform_toolsets"]["telegram"])
     assert got["delegation"]["provider"] == "openai-codex"
-    assert got["delegation"]["model"] == "gpt-5.6-terra"
+    assert got["delegation"]["model"] == "gpt-5.6-sol"
     assert got["delegation"]["reasoning_effort"] == "high"
-    assert got["delegation"]["max_iterations"] == 60
+    assert got["delegation"]["max_iterations"] == 30
     assert got["delegation"]["orchestrator_enabled"] is True
     assert got["delegation"]["subagent_auto_approve"] is False
     assert got["dashboard"] == {"secret": "must-survive"}
@@ -160,13 +174,13 @@ def test_skill_sync_replaces_topic_skill_and_retires_conflicting_duplicates(tmp_
     source = tmp_path / "source"
     target = tmp_path / "skills" / "ad-master"
     retired = tmp_path / "retired"
-    canonical = source / "google-ads-worker"
-    canonical.mkdir(parents=True)
-    canonical.joinpath("SKILL.md").write_text("unified contract\n", encoding="utf-8")
-
-    old_worker = target / "google-ads-worker"
-    old_worker.mkdir(parents=True)
-    old_worker.joinpath("SKILL.md").write_text("stale worker\n", encoding="utf-8")
+    for name in SYNC.CANONICAL_SKILLS:
+        canonical = source / name
+        canonical.mkdir(parents=True)
+        canonical.joinpath("SKILL.md").write_text(f"unified {name}\n", encoding="utf-8")
+        old_worker = target / name
+        old_worker.mkdir(parents=True)
+        old_worker.joinpath("SKILL.md").write_text(f"stale {name}\n", encoding="utf-8")
     for name in SYNC.RETIRED_SKILLS:
         folder = target / name
         folder.mkdir(parents=True)
@@ -177,10 +191,12 @@ def test_skill_sync_replaces_topic_skill_and_retires_conflicting_duplicates(tmp_
 
     SYNC._sync_skills(source, target, retired)
 
-    assert old_worker.joinpath("SKILL.md").read_text(encoding="utf-8") == "unified contract\n"
-    assert old_worker.joinpath("SKILL.md.aimash-prev").read_text(encoding="utf-8") == (
-        "stale worker\n"
-    )
+    for name in SYNC.CANONICAL_SKILLS:
+        installed = target / name
+        assert installed.joinpath("SKILL.md").read_text(encoding="utf-8") == (f"unified {name}\n")
+        assert installed.joinpath("SKILL.md.aimash-prev").read_text(encoding="utf-8") == (
+            f"stale {name}\n"
+        )
     assert unrelated.joinpath("SKILL.md").read_text(encoding="utf-8") == "keep me\n"
     for name in SYNC.RETIRED_SKILLS:
         assert not (target / name).exists()

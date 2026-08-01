@@ -69,13 +69,13 @@ hermes config env-path             # путь ~/.hermes/.env
 
 # 3. Первичная авторизация Codex — через интерактивный мастер (он же запускается при первом старте):
 hermes model
-#   Select provider/model — `gpt-5.6-terra` via `openai-codex`; следующий surface sync закрепит
+#   Select provider/model — `gpt-5.6-sol` via `openai-codex`; следующий surface sync закрепит
 #   это значение из `/opt/aimash/deploy/hermes/runtime_registry.yaml`.
 #   Select terminal backend → Keep current (local).
 #   Select platforms        → только Telegram (SPACE, ENTER).
-#   Tools for CLI (тулсеты) → не снимать рабочие native tools. Surface sync отключает только
-#     homeassistant/spotify/video_gen/x_search/yuanbao/tts. Terminal/Code/File/Browser остаются
-#     доступны через `approvals: manual`; Google Ads вызывается только через typed Aimash MCP.
+#   Tools for CLI (тулсеты) → не снимать рабочие native tools. Terminal/Code/File/Browser остаются
+#     доступны в CLI через `approvals: manual`. Surface sync задаёт отдельный узкий Telegram surface:
+#     без host/code mutation tools, но с живыми typed Aimash MCP tools, web и делегированием.
 
 # 4. Долить host-local настройки, которых нет в репозитории (dashboard/secrets); не заменять live YAML
 #    шаблоном целиком. Model/delegation/tool policy, mcp_servers.aimash, plugin, SOUL и topic skill

@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import keywords.filter as KF  # noqa: E402
 import keywords.seeds as KS  # noqa: E402
+from ads.geo import country_name_for_geo_id  # noqa: E402
 from keywords.ingest import (  # noqa: E402
     DEFAULT_MATCH_TYPE,
     parse_keywords_text,
@@ -64,6 +65,22 @@ async def test_generate_seeds_empty_input():
     assert seeds == []
 
 
+@pytest.mark.asyncio
+async def test_generate_seeds_does_not_invent_business_for_broad_topic():
+    captured = []
+
+    async def _capture(messages, **_kw):
+        captured.extend(messages)
+        return SimpleNamespace(content='["рыбалка"]')
+
+    with patched(KS, "chat", _capture):
+        await KS.generate_seed_keywords(topic="рыбалка", language="ru")
+
+    system = captured[0]["content"]
+    assert "Не выдумывай неуказанный бизнес" in system
+    assert "не сужай широкую тему" in system
+
+
 # ── relevance filter (контракт ИНВЕРТИРОВАН 2026-07: модель шлёт только НЕРЕЛЕВАНТНЫЕ) ──
 @pytest.mark.asyncio
 async def test_filter_relevance_marks_and_failopen():
@@ -75,6 +92,31 @@ async def test_filter_relevance_marks_and_failopen():
     assert verdicts["used cars nairobi"] is True
     assert verdicts["free car games"] is False
     assert verdicts["car rental"] is True  # отсутствует в ответе → fail-open (релевантно)
+
+
+@pytest.mark.asyncio
+async def test_filter_relevance_includes_readable_target_geo():
+    captured = []
+
+    async def _capture(messages, **_kw):
+        captured.extend(messages)
+        return SimpleNamespace(content="[]")
+
+    with patched(KF, "chat", _capture):
+        await KF.filter_relevance(
+            texts=["рыбалка на камчатке"],
+            topic="рыбалка",
+            language="ru",
+            target_geo="Украина",
+        )
+
+    assert "Целевое гео: Украина" in captured[1]["content"]
+    assert "другие страны нерелевантны" in captured[1]["content"]
+
+
+def test_country_name_for_geo_id_resolves_country_target():
+    assert country_name_for_geo_id(2804) == "Украина"
+    assert country_name_for_geo_id("not-an-id") is None
 
 
 # ── ingest ──────────────────────────────────────────────────────────────────────────

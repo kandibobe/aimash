@@ -5,7 +5,7 @@ purpose: Canonical runtime registry for AdMaster/Hermes. This file is the single
 
 primary_runtime:
   provider: openai-codex
-  model: gpt-5.6-terra
+  model: gpt-5.6-sol
   status: canonical_current
   applies_to:
     - interactive_chat
@@ -13,7 +13,7 @@ primary_runtime:
   notes:
     - Repository truth is deploy/hermes/config.yaml; live truth still requires `hermes model` after deploy.
     - Automatic semantic model_routing is not supported by the pinned Hermes runtime.
-    - Live VPS was measured before apply on 2026-08-01 as openai-codex/gpt-5.4; changing this registry alone does not restart or mutate the gateway.
+    - Live VPS was measured before this apply on 2026-08-01 as openai-codex/gpt-5.6-terra; changing this registry alone does not restart or mutate the gateway.
 
 pinned_exceptions:
   - scope: cron_legacy_jobs
@@ -27,7 +27,7 @@ pinned_exceptions:
 routing_lanes:
   dialogue_and_analysis:
     provider: openai-codex
-    model: gpt-5.6-terra
+    model: gpt-5.6-sol
     status: canonical_current
   primary_fallback:
     provider: openrouter
@@ -39,11 +39,11 @@ routing_lanes:
     status: configured_fallback_and_auxiliary
   delegated_subagents:
     provider: openai-codex
-    model: gpt-5.6-terra
+    model: gpt-5.6-sol
     status: canonical_current
   deep_audit_strategy:
     provider: openai-codex
-    model: gpt-5.6-terra
+    model: gpt-5.6-sol
     status: explicit_workflow_only
   external_coding_executor:
     provider: external
@@ -57,14 +57,14 @@ policy_rules:
 
 known_conflicts:
   - file: /root/.hermes/config.yaml
-    lines: model, agent, delegation
-    issue: Live gateway still used gpt-5.4 with medium reasoning and Gemini delegation at the 2026-08-01 pre-apply measurement.
+    lines: model, agent, delegation, platform_toolsets.telegram
+    issue: Live gateway used Terra with oversized turn limits and exposed host/code toolsets to Telegram at the 2026-08-01 pre-apply measurement.
   - file: /root/.hermes/cron/jobs.json
     lines: '11-12, 60-61, 102-103, 142-143, 190-191'
     issue: Live cron jobs still pinned to gpt-5.4.
   - file: /root/.hermes/skills/ad-master/ad-master-agent/SKILL.md
     lines: '11-12'
-    issue: Skill states gpt-5.4 in present tense.
+    issue: Live stale skill states gpt-5.4 in present tense; surface sync will replace it with the repository skill.
   - file: /root/.hermes/skills/ad-master/aimash-development/SKILL.md
     lines: '149-157'
     issue: Skill cron matrix still states gpt-5.4 as current.

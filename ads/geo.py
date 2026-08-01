@@ -743,6 +743,21 @@ def country_name(iso: str | None) -> str | None:
     return nm.title() if nm else None
 
 
+def country_name_for_geo_id(geo_id: int | str | None) -> str | None:
+    """Country geoTargetConstant id -> readable country name for LLM relevance context."""
+    try:
+        value = int(geo_id) if geo_id is not None else 0
+    except (TypeError, ValueError):
+        return None
+    for iso, known_id in _ISO_TO_GEO_ID.items():
+        if known_id == value:
+            return country_name(iso)
+    for iso, numeric in _ISO_ALPHA2_TO_NUMERIC.items():
+        if 2000 + numeric == value:
+            return country_name(iso)
+    return None
+
+
 def language_name(iso: str | None) -> str | None:
     """ISO языка → имя для критерия языка кампании (ads.mutations). Только языки, которые Google
     РЕАЛЬНО умеет таргетить (keyword_plan.LANGUAGE_IDS): авто-дефолт не должен обещать на карточке

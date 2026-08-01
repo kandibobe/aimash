@@ -153,6 +153,10 @@ _ATTESTED: dict[str, Attested] = {
     "skills.inline_shell": Attested(
         "user-guide/features/creating-skills.md:314", "  inline_shell: true"
     ),
+    "skills.platform_disabled": Attested(
+        "hermes_cli/skills_config.py:10,58-61",
+        "platform_disabled:                    # per-platform overrides",
+    ),
     "security.redact_secrets": Attested(
         "user-guide/configuration.md:1914",
         "  redact_secrets: true           # Redact API key patterns in tool output and logs "
@@ -224,6 +228,7 @@ _ATTESTED_SUBTREES = frozenset(
         "display.platforms",
         "platform_toolsets",
         "known_plugin_toolsets",
+        "skills.platform_disabled",
         "agent.reasoning_overrides",
         "display.runtime_footer",
         "dashboard.basic_auth",
