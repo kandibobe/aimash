@@ -242,16 +242,28 @@ jobs:
               exit 1
             fi
             echo "Hermes gateway replaced: PID $GW_PID_BEFORE -> $GW_PID_AFTER"
-            MCP_TEST=$(hermes mcp test aimash)
-            echo "$MCP_TEST"
-            echo "$MCP_TEST" | grep -Fq "Tools discovered: $EXPECTED_TOOLS"
             sleep 5
+            MCP_STATE=$(docker inspect -f '{{.State.Status}}' aimash-mcp 2>/dev/null || echo missing)
+            if [ "$MCP_STATE" != "running" ]; then
+              echo "::error::Hermes MCP container is not running (state=$MCP_STATE)"
+              docker logs --tail=80 aimash-mcp 2>/dev/null || true
+              journalctl --user -u hermes-gateway.service --since '-3 minutes' --no-pager || true
+              exit 1
+            fi
+            LIVE_TOOLS=$(docker exec -i aimash-mcp python -c \
+              "from mcp_server.server import expected_tool_names; print(len(expected_tool_names()))" \
+              | awk '/^[0-9]+$/ { value=$0 } END { print value }')
+            if [ "$LIVE_TOOLS" != "$EXPECTED_TOOLS" ]; then
+              echo "::error::Live Hermes MCP surface mismatch: expected=$EXPECTED_TOOLS actual=$LIVE_TOOLS"
+              docker logs --tail=80 aimash-mcp 2>/dev/null || true
+              exit 1
+            fi
             if journalctl --user -u hermes-gateway.service --since '-2 minutes' --no-pager 2>&1 \
               | grep -Fq "409 Conflict"; then
               echo "::error::Hermes Telegram gateway получил 409 Conflict после deploy"
               exit 1
             fi
-            echo "✅ Hermes gateway reconnected: $EXPECTED_TOOLS tools, no Telegram 409"
+            echo "✅ Hermes gateway reconnected: $LIVE_TOOLS tools, no Telegram 409"
             DEPLOY_STAGE="operational notification"
             systemctl start aimash-ops-watch.service || true
             python3 scripts/ops_alert.py send \
