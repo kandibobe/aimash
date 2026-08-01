@@ -624,7 +624,7 @@ async def start_client_crawl(
     account: str,
     mode: Literal["full", "incremental"] = "full",
 ) -> dict[str, Any]:
-    """Crawl the stored profile URL and autonomously save the account-scoped profile update."""
+    """Crawl the stored profile URL and propose one account-scoped profile/memory update."""
     ensure_read_allowed(str(account))
     turn = get_trusted_turn()
     result = await prepare_profile_crawl(
@@ -640,15 +640,18 @@ async def start_client_crawl(
     operation: Literal["profile_save", "profile_update"] = (
         "profile_update" if before is not None else "profile_save"
     )
+    params = {
+        "customer_id": str(account),
+        "patch": patch,
+        "source": "crawl",
+        "crawl_extra": result["crawl_extra"],
+    }
+    if result.get("dossier_id") is not None:
+        params["dossier_id"] = result["dossier_id"]
     proposal = await _profile_proposal(
         account=str(account),
         operation=operation,
-        params={
-            "customer_id": str(account),
-            "patch": patch,
-            "source": "crawl",
-            "crawl_extra": result["crawl_extra"],
-        },
+        params=params,
         before=before,
         after=preview_merge(before, patch),
     )
@@ -657,6 +660,9 @@ async def start_client_crawl(
         "pages": result["pages"],
         "domain": result["domain"],
         "partial": result.get("partial", False),
+        "dossier_built": result.get("dossier_id") is not None,
+        "dossier_counts": result.get("dossier_counts"),
+        "memory_status": result.get("memory_status", "pending_confirmation"),
     }
     return proposal
 

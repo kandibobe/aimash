@@ -7,13 +7,16 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 from clients import crawl_jobs, crawler
+from clients.dossier import build_dossier, dossier_patch
+from clients.dossier_render import render_llm_context, render_markdown
+from clients.dossier_store import ClientDossierStore
 from clients.profile_extract import structure_crawl
 from clients.store import ClientProfileStore
 from core.config import settings
 
 
 def _profile_patch(extract: Any, result: Any) -> dict[str, Any]:
-    patch = extract.to_patch() if extract is not None else {}
+    patch = dict(extract) if isinstance(extract, dict) else extract.to_patch() if extract else {}
     # External content may enrich but can never wipe manager-owned categories.
     patch.pop("replace_services", None)
     patch.pop("replace_contacts", None)
@@ -88,16 +91,42 @@ async def prepare_profile_crawl(
                     "unchanged": True,
                     "pages": result.pages_count,
                     "domain": domain,
+                    "memory_status": "unchanged",
                 }
-        extract = await structure_crawl(
-            pages_text=result.combined_text(
-                max_chars=settings.crawl_llm_text_chars,
-                per_page_chars=settings.crawl_llm_per_page_chars,
-            ),
+
+        # Build the durable, structured client memory from the complete page map. The compact
+        # profile extractor remains a fallback for tiny sites or an empty dossier extraction.
+        crawl_facts = _profile_patch(None, result)
+        dossier = await build_dossier(
+            pages=pages,
+            domain=domain,
             website=url,
+            contacts=list(crawl_facts.get("contacts") or []),
+            socials=dict(crawl_facts.get("socials") or {}),
+            chat_id=chat_id,
             language=language,
         )
-        patch = _profile_patch(extract, result)
+        dossier_id: int | None = None
+        dossier_counts: dict[str, int] | None = None
+        if dossier is not None:
+            patch = _profile_patch(dossier_patch(dossier), result)
+            dossier_id = await ClientDossierStore().save_draft(
+                customer_id,
+                markdown=render_markdown(dossier),
+                llm_context=render_llm_context(dossier),
+                data=dossier.model_dump(mode="json"),
+            )
+            dossier_counts = dossier.counts()
+        else:
+            extract = await structure_crawl(
+                pages_text=result.combined_text(
+                    max_chars=settings.crawl_llm_text_chars,
+                    per_page_chars=settings.crawl_llm_per_page_chars,
+                ),
+                website=url,
+                language=language,
+            )
+            patch = _profile_patch(extract, result)
         await crawl_jobs.mark_done(job_id, pages_crawled=result.pages_count)
         return {
             "job_id": job_id,
@@ -107,6 +136,9 @@ async def prepare_profile_crawl(
             "partial": bool(result.partial),
             "before": before,
             "patch": patch,
+            "dossier_id": dossier_id,
+            "dossier_counts": dossier_counts,
+            "memory_status": "pending_confirmation",
             "crawl_extra": {
                 "website": url,
                 "last_crawled_at_now": True,
