@@ -28,10 +28,19 @@ KEY = "p" * 32
 def _load(monkeypatch, env: dict[str, str]):
     gateway = types.ModuleType("gateway")
     session_context = types.ModuleType("gateway.session_context")
+    telegram = types.ModuleType("telegram")
+
+    class _InputFile:
+        def __init__(self, stream, *, filename: str):
+            self.stream = stream
+            self.filename = filename
+
+    telegram.InputFile = _InputFile
     session_context.get_session_env = lambda name, default="": env.get(name, default)
     gateway.session_context = session_context
     monkeypatch.setitem(sys.modules, "gateway", gateway)
     monkeypatch.setitem(sys.modules, "gateway.session_context", session_context)
+    monkeypatch.setitem(sys.modules, "telegram", telegram)
     monkeypatch.setenv("AIMASH_TRUST_HMAC_KEY", KEY)
     monkeypatch.setattr(settings, "aimash_trust_hmac_key", SecretStr(KEY))
     spec = importlib.util.spec_from_file_location(f"aimash_transport_{uuid.uuid4().hex}", PLUGIN)
