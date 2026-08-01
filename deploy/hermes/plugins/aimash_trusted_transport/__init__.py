@@ -849,11 +849,6 @@ def _pre_tool_call(*args, **kwargs):
     turn_id = str(kwargs.get("turn_id") or "")
 
     if _is_aimash_write(tool_name):
-        if _button_bridge_ready is False:
-            return {
-                "action": "block",
-                "message": "Aimash WRITE: Telegram confirmation buttons are unavailable",
-            }
         if not session_id or not turn_id:
             return {"action": "block", "message": "Aimash WRITE: нет доверенной корреляции хода"}
         inbound = _current_inbound()
@@ -893,7 +888,9 @@ def register(ctx):  # noqa: ANN001 - runtime-owned plugin API
     ctx.register_hook("transform_tool_result", _transform_tool_result)
     _button_bridge_ready = _install_telegram_button_bridge()
     if not _button_bridge_ready:
-        log.error("aimash_trusted_transport loaded without Telegram button bridge; WRITE blocked")
+        log.warning(
+            "Telegram button bridge unavailable; WRITE confirmations use trusted semantic replies"
+        )
     if len(os.environ.get("AIMASH_TRUST_HMAC_KEY", "").encode("utf-8")) < 32:
         log.warning("aimash_trusted_transport loaded without a valid signing key; WRITE will block")
     else:

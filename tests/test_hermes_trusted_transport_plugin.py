@@ -629,22 +629,49 @@ async def test_artifact_background_retry_recovers_without_new_message(monkeypatc
     assert plugin._pending_artifacts.get((-202, "7")) in (None, [])
 
 
-def test_missing_button_bridge_blocks_write_tools(monkeypatch):
+def test_missing_button_bridge_falls_back_to_semantic_reply(monkeypatch):
     plugin = _load(monkeypatch, _env())
     monkeypatch.setattr(plugin, "_install_telegram_button_bridge", lambda: False)
     hooks = {}
     ctx = SimpleNamespace(register_hook=lambda name, fn: hooks.__setitem__(name, fn))
 
     plugin.register(ctx)
-    blocked = plugin._pre_tool_call(
+    assert plugin._button_bridge_ready is False
+
+    plugin._capture_gateway_event(event=_event())
+    proposal_args = {"account": "7753643025", "campaign": "X"}
+    allowed = plugin._pre_tool_call(
         tool_name="mcp__aimash__propose_pause_campaign",
-        args={"account": "7753643025", "campaign": "X"},
+        args=proposal_args,
         session_id="s-no-buttons",
         turn_id="t-no-buttons",
     )
+    assert allowed is None
+    assert "trusted_turn_token" in proposal_args
 
+    execute_args = {}
+    blocked = plugin._pre_tool_call(
+        tool_name="mcp__aimash__execute_confirmed",
+        args=execute_args,
+        session_id="s-no-buttons",
+        turn_id="t-no-buttons",
+    )
     assert blocked["action"] == "block"
-    assert "buttons" in blocked["message"]
+    assert "trusted_turn_token" not in execute_args
+
+    marker = "a" * 32
+    plugin._capture_gateway_event(event=_event(own_reply=True, marker=marker))
+    allowed = plugin._pre_tool_call(
+        tool_name="mcp__aimash__execute_confirmed",
+        args=execute_args,
+        session_id="s-no-buttons",
+        turn_id="t-semantic-reply",
+    )
+    assert allowed is None
+    turn = verify_turn_token(
+        execute_args["trusted_turn_token"], expected_tool="execute_confirmed", tool_args={}
+    )
+    assert turn.reply_confirmation_id == marker
 
 
 def test_forged_artifact_is_not_queued(monkeypatch):
