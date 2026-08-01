@@ -59,7 +59,7 @@ systemctl --user list-units 'hermes-gateway-*'
 |---|---|
 | `model.context_length`, `compression.*` | **Hot-reload** — со следующего сообщения, без рестарта [Certain] |
 | Смена `model.provider`/`model.default` | Новые сессии подхватят; живым — `hermes gateway restart` (issue #13146) [Certain] |
-| `mcp_servers.*` / `plugins.enabled` (наш `aimash`) | `deploy/hermes/sync_aimash_surface.py` + `hermes gateway restart` [Certain] |
+| Model/delegation/tool policy, `mcp_servers.*`, plugin/SOUL/topic skill | `deploy/hermes/sync_aimash_surface.py` + `hermes gateway restart` [Certain] |
 | `gateway.platforms.telegram.*` (auth, топики, mention) | `hermes gateway restart`; **добавление** нового топика подхватывается на след. cache-miss, **изменение/удаление** привязки — только рестарт [Likely] |
 | `.env` (ротация ключей) | `/reload` (сессионный, только CLI) или `hermes gateway restart` для gateway-wide [Certain] |
 | `agent.disabled_toolsets`, `approvals.*` | `hermes gateway restart` [Likely] |
@@ -172,11 +172,12 @@ account/args обязаны отказать. После успеха свери
 
 ## 5. Редеплой боевого бота ⟷ Hermes (важнейшее сопряжение)
 
-Авто-деплой (`docs/DEPLOYMENT.md`): push master → CI → SSH → `git reset --hard origin/master` →
+Авто-деплой: push master → CI → SSH → `git reset --hard origin/master` →
 `docker compose up -d --build`.
 
-**Что редеплой НЕ трогает:** `~/.hermes/**` вне `/opt/aimash` → конфиг Hermes, `.env`, модель, `OPENROUTER_API_KEY`
-переживают редеплой; сам gateway и его cron-тикер продолжают работать [Certain].
+**Что редеплой сохраняет:** host-local `.env`, dashboard settings, state и cron jobs в `~/.hermes/**`.
+Surface sync выборочно обновляет model/delegation/tool policy, plugin, SOUL, topic skill и Aimash MCP config;
+сырой live YAML эталонным шаблоном целиком не заменяется [Certain].
 
 **Что редеплой ЛОМАЕТ:** `docker compose up -d --build` **пересоздаёт** контейнер `aimash-bot`. MCP-сервер Hermes —
 это stdio-ребёнок `docker exec -i aimash-bot python -m mcp_server`, привязанный к прежнему экземпляру контейнера.
@@ -1088,7 +1089,7 @@ Hetzner: линейки меняются]. 8 GiB (`CPX31`/`CX32`) — миним
 | # | Группа | Где | В git? | Как переносится |
 |---|---|---|---|---|
 | 1 | Код | `/opt/aimash` | ✅ | `git clone` + `git reset --hard origin/master` |
-| 2 | Секреты приложения | `/opt/aimash/.env` | ❌ | архив экспорта. **`SECRETS_ENCRYPTION_KEY` — без него `oauth_tokens` из дампа мертвы** (docs/BACKUP.md) |
+| 2 | Секреты приложения | `/opt/aimash/.env` | ❌ | архив экспорта. **`SECRETS_ENCRYPTION_KEY` — без него `oauth_tokens` из дампа мертвы** |
 | 3 | Данные Postgres | docker volume `aimash_pgdata` | ❌ | B: сам; C: `pg_dump -Fc` → `pg_restore` |
 | 4 | Состояние агента | `/root/.hermes` | ❌ | `state.db` (история топиков = история решений, в Postgres её НЕТ), `.env`, `config.yaml`, `skills/`, `cron/jobs.json` |
 | 5 | Обвязка пульта | `/etc/systemd/system/hermes-*`, `/etc/systemd/system.control/hermes-*.d` (MemoryMax!), `/etc/caddy/Caddyfile`, `tailscale serve`, `linger` | ❌ | архив экспорта; tailnet-узел — только вручную |

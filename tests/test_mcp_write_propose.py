@@ -1,10 +1,10 @@
 """Офлайн-smoke PROPOSE-слоя MCP (`mcp_server.tools_write`): черновик создаётся, Google Ads НЕ трогается,
-три гейта, которые слой держит КОДОМ, а не доверием к модели, — провенанс (правило 3), И8 (правило 13),
-валидация входа (правило 4).
+три гейта, которые слой держит КОДОМ, а не доверием к модели, — провенанс (правило 3), одна pending
+confirm-card на команду и валидация входа (правило 4).
 
 Работаем на НАСТОЯЩЕМ `ConfirmStore` (temp SQLite из conftest), а не на фейке: смысл propose именно в
-том, что строка черновика реально ложится в нашу БД со штампом провенанса из контекста хода, а счёт И8
-берётся из ХРАНИЛИЩА (`count_run_proposals`), а не из памяти процесса. SDK-путь внутри `build_proposal`
+том, что строка черновика реально ложится в нашу БД со штампом провенанса из контекста хода, а счёт
+pending берётся из ХРАНИЛИЩА (`count_run_pending_proposals`), а не из памяти процесса. SDK-путь внутри `build_proposal`
 (снимок «было» через `read_state`, валюта аккаунта) подменён — как `read_state`/`build_client_async` в
 соседних офлайн-смоуках; Google Ads в этом тесте не дёргается ни разу (что и есть свойство propose-only:
 `ads.mutations.apply_*` отсюда физически недостижим — гард `require_no_mutations` в самом модуле).
@@ -72,6 +72,11 @@ class _ReadStateSpy:
             return Snapshot(
                 SnapshotKind.OK,
                 {"kind": "status", "before_status": "ENABLED"},
+            )
+        if operation == "update_campaign":
+            return Snapshot(
+                SnapshotKind.OK,
+                {"kind": "name", "before_name": str(params.get("campaign") or "")},
             )
         return Snapshot(
             SnapshotKind.OK,
@@ -144,6 +149,12 @@ async def _count(run_id: str) -> int:
     return await ConfirmStore().count_run_proposals(run_id)
 
 
+async def _count_pending(run_id: str) -> int:
+    from confirm.store import ConfirmStore
+
+    return await ConfirmStore().count_run_pending_proposals(run_id)
+
+
 # ── Happy-path: черновик создан, Google Ads не тронут, провенанс проштампован из контекста ──────────
 async def test_propose_budget_creates_pending_draft_without_touching_ads(propose_env):
     """Прямая команда человека в этом ходе → черновик `update_budget` на Draft. Конверт `pending` +
@@ -201,33 +212,20 @@ async def test_propose_launch_creates_pending_draft_from_human_turn(propose_env)
     assert row.user_initiated is True and row.origin_human_turn is True
 
 
-async def test_non_spend_update_executes_autonomously_and_reports_from_audit(
-    propose_env, monkeypatch
-):
-    import ads.service
-
-    async def execute_from_confirmed_store(store, confirmation_id):
-        assert await store.claim(confirmation_id, operation="update_campaign") is not None
-        await store.finalize(
-            confirmation_id,
-            result={"campaign": "Old", "new_name": "New", "status": "updated"},
-        )
-        return {"status": "updated"}
-
-    monkeypatch.setattr(ads.service, "execute_confirmed", execute_from_confirmed_store)
-    with _human_turn(run_id="wp_autonomous_rename", chat_id=OWNER):
+async def test_non_spend_update_creates_pending_confirmation(propose_env):
+    """Every mutation, including a rename, stops at one trusted confirmation card."""
+    with _human_turn(run_id="wp_confirm_rename", chat_id=OWNER):
         env = await tw.propose_update_campaign(
             account=DRAFT_ACCOUNT_ID,
             campaign="Old",
             new_name="New",
         )
 
-    assert env["status"] == "executed"
+    assert env["status"] == "pending"
     assert env["operation"] == "update_campaign"
-    assert env["preview"] is None
-    assert env["summary"]
+    assert env["preview"]
     row = await _row(env["confirmation_id"])
-    assert row.status == "applied"
+    assert row.status == "pending"
 
 
 async def test_machine_turn_launch_propose_refused_before_ads(propose_env):
@@ -245,11 +243,11 @@ async def test_machine_turn_launch_propose_refused_before_ads(propose_env):
     assert propose_env.calls == 0
 
 
-# ── И8 (правило 13): не более одного черновика на ассистентский ход ─────────────────────────────────
-async def test_i8_second_draft_in_same_run_is_refused(propose_env):
+# ── Не более одной pending confirm-card на человеческую команду ─────────────────────────────────────
+async def test_second_pending_draft_in_same_run_is_refused(propose_env):
     """Второй propose в ТОМ ЖЕ run → отказ по счёту из хранилища, ДО сборки/сохранения (read_state
     больше не вызывается). В БД остаётся ровно один черновик этого run — счётчик не в памяти процесса."""
-    with _human_turn(run_id="wp_i8", chat_id=OWNER):
+    with _human_turn(run_id="wp_pending_limit", chat_id=OWNER):
         first = await tw.propose_budget_change(
             account=DRAFT_ACCOUNT_ID, campaign="Camp A", mode="increase_by_percent", value=10
         )
@@ -266,7 +264,8 @@ async def test_i8_second_draft_in_same_run_is_refused(propose_env):
     assert (
         propose_env.calls == calls_after_first
     )  # второй отказан ДО read_state (build не достигнут)
-    assert await _count("wp_i8") == 1  # ровно один черновик в этом ходе — лимит держит хранилище
+    assert await _count("wp_pending_limit") == 1
+    assert await _count_pending("wp_pending_limit") == 1
 
 
 async def test_i8_new_run_allows_a_fresh_draft(propose_env):
@@ -360,6 +359,35 @@ async def test_composite_creates_one_parent_for_two_reversible_changes(propose_e
         "pause_campaign",
     ]
     assert all("_freshness" in item["params"] for item in row.params["operations"])
+
+
+async def test_composite_resolves_post_rename_campaign_alias_before_snapshots(propose_env):
+    """Regression 2026-08-01: Hermes may naturally address the budget child by the requested new
+    name. Both snapshots are pre-execution, so the bridge must resolve that alias to the current name."""
+    with _human_turn(run_id="wp_composite_rename_budget", chat_id=OWNER):
+        env = await tw.propose_composite_change(
+            DRAFT_ACCOUNT_ID,
+            [
+                {
+                    "operation": "update_campaign",
+                    "params": {"campaign": "Before", "new_name": "After"},
+                },
+                {
+                    "operation": "update_budget",
+                    "params": {
+                        "campaign": "After",
+                        "mode": "set_to",
+                        "value": 1.1,
+                        "currency": "AUD",
+                    },
+                },
+            ],
+        )
+
+    assert env["status"] == "pending"
+    row = await _row(env["confirmation_id"])
+    assert row.params["operations"][0]["params"]["campaign"] == "Before"
+    assert row.params["operations"][1]["params"]["campaign"] == "Before"
 
 
 async def test_composite_rejects_nonrollbackable_operation_before_read(propose_env):

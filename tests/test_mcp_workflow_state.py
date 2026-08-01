@@ -231,5 +231,34 @@ async def test_ingest_video_is_received_but_requires_youtube_id(monkeypatch, tmp
     assert not path.exists()
 
 
+@pytest.mark.asyncio
+async def test_profile_save_stops_at_pending_confirmation(monkeypatch):
+    saved = {}
+
+    class _Store:
+        async def count_run_pending_proposals(self, run_id):
+            return 0
+
+        async def save_proposal(self, **kwargs):
+            saved.update(kwargs)
+
+    monkeypatch.setattr(ws, "ConfirmStore", _Store)
+    monkeypatch.setattr(ws, "get_provenance", lambda: SimpleNamespace(run_id="profile-turn"))
+
+    with trusted_turn_scope(_turn()):
+        result = await ws._profile_proposal(
+            account=DRAFT_ACCOUNT_ID,
+            operation="profile_save",
+            params={"customer_id": DRAFT_ACCOUNT_ID, "patch": {"brand": "Aimash"}},
+            before=None,
+            after={"brand": "Aimash"},
+        )
+
+    assert result["status"] == "pending"
+    assert result["operation"] == "profile_save"
+    assert result["preview"]
+    assert saved["operation"] == "profile_save"
+
+
 async def _async_value(value):
     return value

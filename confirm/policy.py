@@ -1,15 +1,15 @@
 """Private-operator confirmation policy.
 
-Hermes may execute only operations explicitly listed in ``AUTONOMOUS_ADS_OPS`` without a human
-confirmation card. Unknown operations fail closed into the confirmation-required branch.
+Every user-facing mutation requires one trusted human confirmation. Hermes remains autonomous for
+reading, analysis, tool selection and proposal composition; execution never bypasses the card.
+Unknown operations fail closed into the confirmation-required branch.
 """
 
 from __future__ import annotations
 
 
-# Direct money controls, delivery state, traffic expansion, creative/targeting changes on possibly
-# active entities and destructive removals. These keep the one-tap trusted Telegram confirmation
-# flow until code can prove from a fresh snapshot that the target is non-serving.
+# Complete Google Ads mutation surface. Every operation stops at the same one-tap trusted Telegram
+# confirmation flow, including renames and creation of PAUSED campaigns.
 CONFIRM_REQUIRED_ADS_OPS: frozenset[str] = frozenset(
     {
         "add_call_asset",
@@ -48,15 +48,6 @@ CONFIRM_REQUIRED_ADS_OPS: frozenset[str] = frozenset(
         "remove_keywords",
         "remove_negative_keywords",
         "remove_asset_link",
-    }
-)
-
-
-# Proven non-spend actions. Campaign creation is safe here because every creator persists the
-# campaign, ad groups and ads as PAUSED in deterministic SDK code; enabling them is the separate
-# ``launch_campaign`` operation above. A rename changes identity only, not delivery.
-AUTONOMOUS_ADS_OPS: frozenset[str] = frozenset(
-    {
         "update_campaign",
         "create_gdn_campaign",
         "create_search_campaign",
@@ -65,16 +56,20 @@ AUTONOMOUS_ADS_OPS: frozenset[str] = frozenset(
     }
 )
 
-# Account-scoped local memory is not a Google Ads spend control. Save/update is reversible and may
-# run immediately for a trusted private operator; destructive clear retains one explicit confirm.
-AUTONOMOUS_MEMORY_OPS: frozenset[str] = frozenset({"profile_save", "profile_update"})
+
+# Compatibility exports make the policy partition explicit. They must stay empty: execution of any
+# mutation without a human decision would violate the product contract.
+AUTONOMOUS_ADS_OPS: frozenset[str] = frozenset()
+AUTONOMOUS_MEMORY_OPS: frozenset[str] = frozenset()
 
 
 def requires_confirmation(operation: str) -> bool:
-    """Unknown operations require confirmation; only the explicit autonomous set bypasses it."""
+    """Every mutation, including an unknown future operation, requires confirmation."""
 
-    return operation not in AUTONOMOUS_ADS_OPS | AUTONOMOUS_MEMORY_OPS
+    return True
 
 
 def may_execute_autonomously(operation: str) -> bool:
-    return operation in AUTONOMOUS_ADS_OPS | AUTONOMOUS_MEMORY_OPS
+    """No mutation may execute autonomously."""
+
+    return False

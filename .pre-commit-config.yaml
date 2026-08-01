@@ -47,7 +47,7 @@ repos:
         entry: python scripts/check_admaster_drift.py --static
         language: system
         pass_filenames: false
-        files: ^(scripts/check_admaster_drift\.py|deploy/hermes/(runtime_registry|cron_registry|config)\.yaml|README\.md|docs/TZ-Aimash-Hermes-Agent\.md|deploy/hermes/(README|OPERATIONS)\.md)$
+        files: ^(scripts/check_admaster_drift\.py|deploy/hermes/(runtime_registry|cron_registry|config)\.yaml|README\.md|ТЗ\.md|deploy/hermes/(README|OPERATIONS)\.md)$
 
       # Типы — manual-стадия (не блокирует обычный коммит из-за долга типов в bot/main.py).
       # Запуск: `pre-commit run --hook-stage manual mypy` или `make typecheck`.

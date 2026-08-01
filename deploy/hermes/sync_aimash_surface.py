@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Atomically reconcile the Aimash surface and pinned trusted-operator policy on a live host.
 
-The live config contains host-local provider/dashboard settings and secrets, so deploying the repo
-template wholesale is unsafe. This script preserves provider/dashboard/secrets, derives the exact
-tool surface from the running ``aimash-bot`` container, installs the repository plugin, and pins
-the explicitly approved private-team permissions so a dashboard edit or deploy cannot drift them.
+The live config contains host-local dashboard settings and secrets, so deploying the repo template
+wholesale is unsafe. This script preserves those host-local values, derives the exact tool surface
+from the running ``aimash-bot`` container, installs the repository plugin, and pins the approved
+model/private-team policy so a dashboard edit or deploy cannot drift it.
 """
 
 from __future__ import annotations
@@ -22,6 +22,17 @@ from typing import Any
 import yaml
 
 PLUGIN_NAME = "aimash_trusted_transport"
+PRIMARY_PROVIDER = "openai-codex"
+PRIMARY_MODEL = "gpt-5.6-terra"
+PRIMARY_REASONING_EFFORT = "high"
+PRIMARY_MAX_TURNS = 90
+DELEGATION_MAX_ITERATIONS = 60
+CANONICAL_SKILLS = ("google-ads-worker",)
+RETIRED_SKILLS = (
+    "ad-master-tools",
+    "admaster-confirm-model",
+    "google-ads-safety",
+)
 TRUSTED_OPERATOR_DISABLED_TOOLSETS = (
     "homeassistant",
     "spotify",
@@ -34,9 +45,15 @@ TRUSTED_OPERATOR_DISABLED_TOOLSETS = (
 
 def reconcile_trusted_operator_policy(config: dict[str, Any]) -> dict[str, Any]:
     """Pin the owner-approved private-team tool, memory, delegation and skill policy."""
+    config["model"] = {
+        "provider": PRIMARY_PROVIDER,
+        "default": PRIMARY_MODEL,
+    }
     agent = config.setdefault("agent", {})
     if not isinstance(agent, dict):
         raise RuntimeError("live Hermes config: agent must be a mapping")
+    agent["max_turns"] = PRIMARY_MAX_TURNS
+    agent["reasoning_effort"] = PRIMARY_REASONING_EFFORT
     agent["disabled_toolsets"] = list(TRUSTED_OPERATOR_DISABLED_TOOLSETS)
 
     memory = config.setdefault("memory", {})
@@ -57,11 +74,11 @@ def reconcile_trusted_operator_policy(config: dict[str, Any]) -> dict[str, Any]:
     )
 
     config["delegation"] = {
-        "model": "google/gemini-3.1-flash-lite",
-        "provider": "openrouter",
+        "model": PRIMARY_MODEL,
+        "provider": PRIMARY_PROVIDER,
         "inherit_mcp_toolsets": True,
-        "max_iterations": 30,
-        "reasoning_effort": "none",
+        "max_iterations": DELEGATION_MAX_ITERATIONS,
+        "reasoning_effort": PRIMARY_REASONING_EFFORT,
         "max_concurrent_children": 3,
         "max_spawn_depth": 1,
         "orchestrator_enabled": True,
@@ -167,9 +184,40 @@ def reconcile_config(config: dict[str, Any], *, enabled: bool, tools: list[str])
 def _install_plugin(source: Path, target: Path) -> None:
     if not (source / "plugin.yaml").is_file() or not (source / "__init__.py").is_file():
         raise RuntimeError(f"trusted plugin source is incomplete: {source}")
-    target.mkdir(parents=True, exist_ok=True)
     for name in ("plugin.yaml", "__init__.py"):
-        shutil.copy2(source / name, target / name)
+        _atomic_copy(source / name, target / name)
+
+
+def _sync_skills(source_root: Path, target_root: Path, retired_root: Path) -> None:
+    """Install the SPEC-aligned topic skill and move proven-conflicting duplicates out of discovery.
+
+    Retiring is recoverable: old folders move outside ``~/.hermes/skills`` and remain in the normal
+    Hermes backup. We do not touch unrelated skills because topic/cron references are host state.
+    """
+    canonical_sources = [source_root / name / "SKILL.md" for name in CANONICAL_SKILLS]
+    for source in canonical_sources:
+        if not source.is_file():
+            raise RuntimeError(f"canonical Hermes skill is absent: {source}")
+    for name in RETIRED_SKILLS:
+        source = target_root / name
+        if source.exists() and not (source / "SKILL.md").is_file():
+            raise RuntimeError(f"retired Hermes skill is malformed: {source}")
+
+    for name, source in zip(CANONICAL_SKILLS, canonical_sources, strict=True):
+        _atomic_copy(source, target_root / name / "SKILL.md")
+
+    retired_root.mkdir(parents=True, exist_ok=True)
+    for name in RETIRED_SKILLS:
+        source = target_root / name
+        if not source.exists():
+            continue
+        digest = hashlib.sha256((source / "SKILL.md").read_bytes()).hexdigest()[:12]
+        destination = retired_root / f"{name}-{digest}"
+        suffix = 2
+        while destination.exists():
+            destination = retired_root / f"{name}-{digest}-{suffix}"
+            suffix += 1
+        shutil.move(str(source), str(destination))
 
 
 def _atomic_copy(source: Path, target: Path) -> None:
@@ -231,6 +279,21 @@ def main() -> int:
         "--soul-source", type=Path, default=Path(__file__).resolve().parent / "SOUL.md"
     )
     parser.add_argument("--soul-target", type=Path, default=Path.home() / ".hermes/SOUL.md")
+    parser.add_argument(
+        "--skills-source",
+        type=Path,
+        default=Path(__file__).resolve().parent / "skills" / "ad-master",
+    )
+    parser.add_argument(
+        "--skills-target",
+        type=Path,
+        default=Path.home() / ".hermes/skills/ad-master",
+    )
+    parser.add_argument(
+        "--retired-skills-target",
+        type=Path,
+        default=Path.home() / ".hermes/retired-skills/ad-master",
+    )
     args = parser.parse_args()
 
     manifest = _container_surface(args.container)
@@ -246,10 +309,19 @@ def main() -> int:
     config = yaml.safe_load(args.config.read_text(encoding="utf-8"))
     if not isinstance(config, dict):
         raise RuntimeError("live Hermes config must be a mapping")
+    # Validate and compose the complete live config before touching any installed surface file.
+    config = reconcile_trusted_operator_policy(sanitize_pinned_config(config))
+    config = reconcile_config(config, enabled=enabled, tools=tools)
+    if not args.soul_source.is_file():
+        raise RuntimeError(f"deployment source is absent: {args.soul_source}")
+    for name in CANONICAL_SKILLS:
+        source = args.skills_source / name / "SKILL.md"
+        if not source.is_file():
+            raise RuntimeError(f"canonical Hermes skill is absent: {source}")
     _install_plugin(args.plugin_source, args.plugin_target)
     _atomic_copy(args.soul_source, args.soul_target)
-    config = reconcile_trusted_operator_policy(sanitize_pinned_config(config))
-    _atomic_yaml(args.config, reconcile_config(config, enabled=enabled, tools=tools))
+    _sync_skills(args.skills_source, args.skills_target, args.retired_skills_target)
+    _atomic_yaml(args.config, config)
     print(
         f"Aimash Hermes surface reconciled: mode={'WRITE' if enabled else 'READ'}, tools={len(tools)}"
     )

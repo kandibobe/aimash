@@ -1,11 +1,11 @@
 version: 2
-last_verified_at: '2026-07-31T00:00:00Z'
+last_verified_at: '2026-08-01T00:00:00Z'
 owner: kandibobe
 purpose: Canonical runtime registry for AdMaster/Hermes. This file is the single source of truth for present-tense runtime/model/provider policy. Any conflicting docs/skills must either reference this file or explicitly mark themselves as historical or pinned exceptions.
 
 primary_runtime:
-  provider: openrouter
-  model: deepseek/deepseek-v4-pro
+  provider: openai-codex
+  model: gpt-5.6-terra
   status: canonical_current
   applies_to:
     - interactive_chat
@@ -13,6 +13,7 @@ primary_runtime:
   notes:
     - Repository truth is deploy/hermes/config.yaml; live truth still requires `hermes model` after deploy.
     - Automatic semantic model_routing is not supported by the pinned Hermes runtime.
+    - Live VPS was measured before apply on 2026-08-01 as openai-codex/gpt-5.4; changing this registry alone does not restart or mutate the gateway.
 
 pinned_exceptions:
   - scope: cron_legacy_jobs
@@ -25,8 +26,8 @@ pinned_exceptions:
       - This is an operational exception, not the canonical present-tense runtime for chat.
 routing_lanes:
   dialogue_and_analysis:
-    provider: openrouter
-    model: deepseek/deepseek-v4-pro
+    provider: openai-codex
+    model: gpt-5.6-terra
     status: canonical_current
   primary_fallback:
     provider: openrouter
@@ -37,12 +38,12 @@ routing_lanes:
     model: google/gemini-3.1-flash-lite
     status: configured_fallback_and_auxiliary
   delegated_subagents:
-    provider: openrouter
-    model: google/gemini-3.1-flash-lite
-    status: configured_read_profile
+    provider: openai-codex
+    model: gpt-5.6-terra
+    status: canonical_current
   deep_audit_strategy:
-    provider: openrouter
-    model: deepseek/deepseek-v4-pro
+    provider: openai-codex
+    model: gpt-5.6-terra
     status: explicit_workflow_only
   external_coding_executor:
     provider: external
@@ -55,6 +56,9 @@ policy_rules:
   - Memory should store only high-level routing facts, not full policy prose.
 
 known_conflicts:
+  - file: /root/.hermes/config.yaml
+    lines: model, agent, delegation
+    issue: Live gateway still used gpt-5.4 with medium reasoning and Gemini delegation at the 2026-08-01 pre-apply measurement.
   - file: /root/.hermes/cron/jobs.json
     lines: '11-12, 60-61, 102-103, 142-143, 190-191'
     issue: Live cron jobs still pinned to gpt-5.4.

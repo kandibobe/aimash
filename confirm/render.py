@@ -107,6 +107,179 @@ def _before(params: dict) -> dict | None:
     return b if isinstance(b, dict) else None
 
 
+def _plain_value(value: object) -> str:
+    """Compact deterministic rendering for nested optional campaign settings."""
+
+    if isinstance(value, dict):
+        return ", ".join(f"{key}={_plain_value(item)}" for key, item in value.items()) or "—"
+    if isinstance(value, list):
+        return ", ".join(_plain_value(item) for item in value) or "—"
+    if value is None or value == "":
+        return "—"
+    return str(value)
+
+
+def _text_block(label: str, values: list[object]) -> str:
+    return f"{label} ({len(values)}):\n" + "\n".join(f"  • {value}" for value in values)
+
+
+def _create_rsa_summary(params: dict, lang: str) -> str:
+    en = lang == "en"
+    campaign = str(params.get("campaign") or "—")
+    group = str(params.get("ad_group_id") or "—")
+    url = str(params.get("final_url") or "—")
+    path = "/".join(str(params.get(key) or "").strip("/") for key in ("path1", "path2"))
+    path = path.strip("/")
+    headlines = list(params.get("headlines") or [])
+    descriptions = list(params.get("descriptions") or [])
+    if en:
+        lines = [
+            f"Create an RSA in campaign “{campaign}”, ad group {group} — paused.",
+            f"Final URL: {url}" + (f" · path: {path}" if path else ""),
+            "",
+            _text_block("Headlines", headlines),
+            "",
+            _text_block("Descriptions", descriptions),
+        ]
+    else:
+        lines = [
+            f"Создать RSA в кампании «{campaign}», группа {group} — на паузе.",
+            f"Final URL: {url}" + (f" · path: {path}" if path else ""),
+            "",
+            _text_block("Заголовки", headlines),
+            "",
+            _text_block("Описания", descriptions),
+        ]
+    return "\n".join(lines)
+
+
+def _create_search_summary(params: dict, lang: str, *, attachment: bool) -> str:
+    en = lang == "en"
+    name = str(params.get("campaign_name") or "—")
+    url = str(params.get("final_url") or "—")
+    currency = str(params.get("_account_currency") or "").upper()
+    cur = f" {currency}" if currency else ""
+    budget = _fmt_micros(params.get("budget_daily_micros"), currency)
+    cpc_raw = params.get("cpc_bid_micros")
+    cpc = _fmt_micros(cpc_raw, currency) + cur if cpc_raw is not None else "default by account"
+    if not en and cpc_raw is None:
+        cpc = "по умолчанию для аккаунта"
+    geo = ", ".join(str(item) for item in (params.get("geo_locations") or []))
+    geo = geo or ("all locations" if en else "все локации")
+    languages = ", ".join(str(item) for item in (params.get("languages") or [])) or "—"
+    networks = str(params.get("networks") or "search")
+    schedule = _plain_value(params.get("ad_schedule_blocks") or [])
+    dates = f"{params.get('start_date') or ('today' if en else 'сегодня')} — {params.get('end_date') or ('no end date' if en else 'без даты конца')}"
+    headlines = list(params.get("headlines") or [])
+    descriptions = list(params.get("descriptions") or [])
+    keywords = list(params.get("keywords") or [])
+    keyword_types = list(params.get("keyword_match_types") or [])
+    default_mt = str(params.get("match_type") or "phrase")
+    shown_keywords = []
+    for index, keyword in enumerate(keywords[:KW_INLINE_MAX]):
+        mt = keyword_types[index] if index < len(keyword_types) else default_mt
+        shown_keywords.append(f"[{match_type_human(str(mt), lang)}] {keyword}")
+    kw_block = _text_block("Keywords" if en else "Ключевые слова", shown_keywords)
+    kw_block += _kw_tail(keywords, lang, promised=attachment)
+    path = "/".join(str(params.get(key) or "").strip("/") for key in ("path1", "path2"))
+    path = path.strip("/") or "—"
+    assets = list(params.get("asset_specs") or [])
+    reuse = list(params.get("existing_asset_links") or [])
+    images = list(params.get("image_media_ids") or [])
+    if en:
+        lines = [
+            f"Create a search campaign “{name}” — paused.",
+            f"Final URL: {url} · path: {path}",
+            f"Daily budget: {budget}{cur} · Max CPC: {cpc}",
+            f"Geo: {geo} · Languages: {languages}",
+            f"Networks: {networks} · Schedule: {schedule} · Dates: {dates}",
+            f"Bidding: {_plain_value(params.get('bidding'))}",
+            f"URL options: {_plain_value(params.get('url_options'))}",
+            "",
+            _text_block("Headlines", headlines),
+            "",
+            _text_block("Descriptions", descriptions),
+            "",
+            kw_block,
+            "",
+            f"New assets ({len(assets)}): {_plain_value(assets)}",
+            f"Reused assets ({len(reuse)}): {_plain_value(reuse)}",
+            f"Images: {len(images)}",
+        ]
+    else:
+        lines = [
+            f"Создать поисковую кампанию «{name}» — на паузе.",
+            f"Final URL: {url} · path: {path}",
+            f"Дневной бюджет: {budget}{cur} · Max CPC: {cpc}",
+            f"ГЕО: {geo} · Языки: {languages}",
+            f"Сети: {networks} · Расписание: {schedule} · Даты: {dates}",
+            f"Стратегия: {_plain_value(params.get('bidding'))}",
+            f"URL-опции: {_plain_value(params.get('url_options'))}",
+            "",
+            _text_block("Заголовки", headlines),
+            "",
+            _text_block("Описания", descriptions),
+            "",
+            kw_block,
+            "",
+            f"Новые ассеты ({len(assets)}): {_plain_value(assets)}",
+            f"Переиспользуемые ассеты ({len(reuse)}): {_plain_value(reuse)}",
+            f"Изображения: {len(images)}",
+        ]
+    return "\n".join(lines)
+
+
+def _create_media_campaign_summary(operation: str, params: dict, lang: str) -> str:
+    en = lang == "en"
+    kind = {
+        "create_gdn_campaign": "display campaign (GDN)" if en else "медийную кампанию (GDN)",
+        "create_demand_gen_campaign": "Demand Gen campaign" if en else "Demand Gen кампанию",
+        "create_video_campaign": "video campaign" if en else "видеокампанию",
+    }[operation]
+    currency = str(params.get("_account_currency") or "").upper()
+    cur = f" {currency}" if currency else ""
+    budget = _fmt_micros(params.get("budget_daily_micros"), currency)
+    geo = ", ".join(str(item) for item in (params.get("geo_locations") or []))
+    geo = geo or ("all locations" if en else "все локации")
+    headlines = list(params.get("headlines") or [])
+    long_headline = str(params.get("long_headline") or "—")
+    descriptions = list(params.get("descriptions") or [])
+    lines = [
+        (
+            f"Create a {kind} “{params.get('campaign_name') or '—'}” — paused."
+            if en
+            else f"Создать {kind} «{params.get('campaign_name') or '—'}» — на паузе."
+        ),
+        ("Business" if en else "Бизнес") + f": {params.get('business_name') or '—'}",
+        f"Final URL: {params.get('final_url') or '—'}",
+    ]
+    if operation != "create_gdn_campaign":
+        lines.append(f"YouTube: {params.get('youtube_video_id') or '—'}")
+    lines.extend(
+        [
+            ("Daily budget" if en else "Дневной бюджет") + f": {budget}{cur}",
+            ("Geo" if en else "ГЕО") + f": {geo}",
+        ]
+    )
+    if operation == "create_gdn_campaign":
+        lines.append("Image: 1" if en else "Изображение: 1")
+    if operation == "create_demand_gen_campaign":
+        lines.append(("Goal" if en else "Цель") + f": {params.get('goal') or 'clicks'}")
+        has_logo = bool(params.get("logo_media_id"))
+        logo_value = "yes" if has_logo and en else "есть" if has_logo else "no" if en else "нет"
+        lines.append(("Logo" if en else "Логотип") + f": {logo_value}")
+    lines.extend(
+        [
+            "",
+            _text_block("Headlines" if en else "Заголовки", headlines),
+            ("Long headline" if en else "Длинный заголовок") + f": {long_headline}",
+            "",
+            _text_block("Descriptions" if en else "Описания", descriptions),
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _geo_type_human(value: str, lang: str) -> str:
     """G11: тип гео-таргетинга человеческим языком. Пустая строка (Google вернул UNSPECIFIED) —
     пустая и на выходе: «было» неизвестно, и выдумывать его нельзя."""
@@ -363,9 +536,8 @@ def fmt_mutation_summary(
 ) -> str:
     """Человекочитаемая сводка черновика «было → станет»/действия (plain text; esc — при показе).
 
-    Для ключей — тип соответствия словами + список (усечён до KW_INLINE_MAX).
-    Возвращает '' для операций со своим богатым форматтером (create_rsa/create_gdn_campaign) — тогда
-    вызывающий оставляет собственный summary (create_rsa/GDN рисуют карточку сами).
+    Для ключей — тип соответствия словами + список (усечён до KW_INLINE_MAX). Все поддержанные
+    mutations, включая создание кампаний/RSA, имеют здесь детерминированную полную карточку.
 
     `attachment` — есть ли КАНАЛ доставки .xlsx у вызывающего (решение принимает
     `confirm.attachment.plan_attachment`, а не этот форматтер). Только при `True` в хвосте
@@ -384,6 +556,16 @@ def fmt_mutation_summary(
         return _bid_summary(params, lng)
     if operation == "update_keyword_bid":
         return _keyword_bid_summary(params, lng)
+    if operation == "create_rsa":
+        return _create_rsa_summary(params, lng)
+    if operation == "create_search_campaign":
+        return _create_search_summary(params, lng, attachment=attachment)
+    if operation in (
+        "create_gdn_campaign",
+        "create_demand_gen_campaign",
+        "create_video_campaign",
+    ):
+        return _create_media_campaign_summary(operation, params, lng)
     if operation in ("pause_campaign", "resume_campaign"):
         # §5: показываем текущий статус → новый, если снимок прочитан.
         b = _before(params)
@@ -598,7 +780,7 @@ def fmt_mutation_summary(
     if operation == "remove_asset_link":
         n = len(params.get("link_resource_names") or [])
         return f"Открепить расширения от кампании: {n} шт. (ассеты не удаляются)."
-    return ""  # create_rsa / create_gdn_campaign / неизвестное — оставить summary вызывающего
+    return ""
 
 
 def _mutation_summary_en(operation: str, params: dict, c: str, *, attachment: bool = False) -> str:
@@ -610,6 +792,16 @@ def _mutation_summary_en(operation: str, params: dict, c: str, *, attachment: bo
         return _bid_summary(params, "en")
     if operation == "update_keyword_bid":
         return _keyword_bid_summary(params, "en")
+    if operation == "create_rsa":
+        return _create_rsa_summary(params, "en")
+    if operation == "create_search_campaign":
+        return _create_search_summary(params, "en", attachment=attachment)
+    if operation in (
+        "create_gdn_campaign",
+        "create_demand_gen_campaign",
+        "create_video_campaign",
+    ):
+        return _create_media_campaign_summary(operation, params, "en")
     if operation in ("pause_campaign", "resume_campaign"):
         b = _before(params)
         new = "paused ⏸" if operation == "pause_campaign" else "enabled ▶️"
@@ -805,4 +997,4 @@ def _mutation_summary_en(operation: str, params: dict, c: str, *, attachment: bo
     if operation == "remove_asset_link":
         n = len(params.get("link_resource_names") or [])
         return f"Detach {n} extension(s) from the campaign (assets are not deleted)."
-    return ""  # create_rsa / create_gdn_campaign / unknown — keep caller's summary
+    return ""

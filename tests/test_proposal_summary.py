@@ -82,9 +82,29 @@ def test_fmt_pause_resume_geo():
 
 
 def test_fmt_returns_empty_for_rich_ops():
-    # create_rsa/create_gdn имеют свой богатый форматтер → caller оставляет собственный summary
-    assert texts.fmt_mutation_summary("create_rsa", {"campaign": "X"}) == ""
-    assert texts.fmt_mutation_summary("create_gdn_campaign", {"campaign": "X"}) == ""
+    # Shared headless renderer owns rich create cards too; MCP callers cannot confirm an empty diff.
+    assert "RSA" in texts.fmt_mutation_summary(
+        "create_rsa",
+        {
+            "campaign": "X",
+            "ad_group_id": "42",
+            "final_url": "https://example.com",
+            "headlines": ["A", "B", "C"],
+            "descriptions": ["D", "E"],
+        },
+    )
+    assert "GDN" in texts.fmt_mutation_summary(
+        "create_gdn_campaign",
+        {
+            "campaign_name": "X",
+            "final_url": "https://example.com",
+            "budget_daily_micros": 1_000_000,
+            "headlines": ["A"],
+            "long_headline": "Long",
+            "descriptions": ["D"],
+            "business_name": "Brand",
+        },
+    )
 
 
 # ── §10: редакторские замечания видны на карточке ДО «да» (bot-free дом эвристики) ──

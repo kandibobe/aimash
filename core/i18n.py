@@ -617,11 +617,10 @@ CATALOG: dict[str, dict[str, str]] = {
         "unknown). No draft was created (fail-closed).",
     },
     "propose_draft_limit": {
-        "ru": "🚫 В этом ходе черновик уже создан — второй за тот же ход не создаю (И8). Дождись "
-        "решения человека по текущему черновику, затем предлагай следующий.",
-        "en": "🚫 A draft was already created in this turn — I won't create a second one in the same "
-        "turn (one draft per turn, invariant I8). Wait for the human's decision on the current draft, "
-        "then propose the next.",
+        "ru": "🚫 В этом ходе уже есть pending-черновик. Не создаю вторую карточку подтверждения: "
+        "связанные изменения нужно собрать в один composite/batch.",
+        "en": "🚫 This turn already has a pending draft. I won't create a second confirmation card; "
+        "combine related changes into one composite/batch.",
     },
     "propose_bad_params": {
         # {details} — компактный (loc: msg) из Pydantic; сами msg-валидаторов пока RU (agent.tools.
@@ -2167,7 +2166,7 @@ CATALOG: dict[str, dict[str, str]] = {
     "err_sheets": {
         "ru": (
             "⚠️ Не удалось выгрузить в Google Sheets: {err}\n"
-            "Проверь настройку (docs/DEPLOYMENT.md → Google Sheets):\n"
+            "Проверь настройку Google Sheets по .env.example:\n"
             "1) включён ли Google Sheets API в Google Cloud — ссылка для включения обычно есть в "
             "тексте ошибки выше (после включения подожди 1–2 мин);\n"
             "2) есть ли у токена доступ drive.file (+ spreadsheets.readonly для чтения чужих таблиц): "
@@ -2177,7 +2176,7 @@ CATALOG: dict[str, dict[str, str]] = {
         ),
         "en": (
             "⚠️ Couldn't export to Google Sheets: {err}\n"
-            "Check the setup (docs/DEPLOYMENT.md → Google Sheets):\n"
+            "Check the Google Sheets setup in .env.example:\n"
             "1) is the Google Sheets API enabled in Google Cloud — the enable link is usually in "
             "the error text above (after enabling, wait 1–2 min);\n"
             "2) does the token have drive.file (+ spreadsheets.readonly to read others' sheets) access: "

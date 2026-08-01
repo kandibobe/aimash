@@ -1,26 +1,22 @@
 """Typed Google Ads action tools for the private Hermes operator profile.
 
-Каждый вызов сначала создаёт аттестованный DB-снимок ``было → станет``. Операции из
-``confirm.policy.AUTONOMOUS_ADS_OPS`` затем атомарно авторизуются, исполняются и возвращают результат
-из audit-row без пользовательской карточки. Spend-affecting и неизвестные операции остаются pending
-и требуют ровно одну доверенную Telegram-кнопку/reply перед ``execute_confirmed``. Исторические имена
-``propose_*`` сохранены для совместимости MCP; истина — поле ответа ``status``: ``executed`` либо
-``pending_confirmation``.
+Каждый вызов создаёт аттестованный DB-снимок ``было → станет`` и останавливается в статусе pending.
+Любая изменяющая операция требует ровно одну доверенную Telegram-кнопку/reply перед
+``execute_confirmed``. Исторические имена ``propose_*`` сохранены для совместимости MCP.
 
 Три вещи этот слой делает КОДОМ, не доверием к модели:
   • **Провенанс (правило 3).** Денежный черновик (бюджет/ставка) создаётся только когда бит
     `human_turn` поднят доверенным входом (`core.provenance`) — не из cron/anomaly/self-improve и не
     по аргументу инструмента (агент его подделать не может). `user_initiated` черновика берётся из
     того же провенанса, а не из параметра.
-  • **И8 (правило 13).** Не более ОДНОГО черновика на ассистентский ход. Счёт — свойство ХРАНИЛИЩА
-    (`ConfirmStore.count_run_proposals` по run-корреляции), а не in-memory-счётчик: агентский цикл
-    делает много последовательных итераций, и счётчик в процессе пережил бы не каждую.
+  • **Одна confirm-card.** Не более ОДНОГО pending-черновика на человеческий ход; связанные
+    изменения собираются в один composite.
   • **Валидация входа (правило 4).** Диапазоны/режимы/валюту проверяет Pydantic, кривой вход →
     редактированный отказ, а не «доверие к модели».
 
 Границы слоя: здесь валидация входа, вызов существующих proposal/execution функций и сериализация.
-Классификация автономии живёт в `confirm.policy`, CAS — в `confirm.store`, провенанс — в
-`core.provenance`, исполнение — в `ads.service`.
+Политика подтверждения живёт в `confirm.policy`, CAS — в `confirm.store`, провенанс — в
+`core.provenance`, исполнение после подтверждения — в `ads.service`.
 """
 
 from __future__ import annotations
@@ -74,8 +70,7 @@ from agent.tools.schemas import (
     UpdateCampaign,
     UpdateKeywordBid,
 )
-from ads.resolve import MONEY_OPS
-from confirm.policy import AUTONOMOUS_ADS_OPS as _AUTONOMOUS_ADS_OPS
+from confirm.policy import CONFIRM_REQUIRED_ADS_OPS
 from confirm.reverse import ROLLBACKABLE_OPS, reverse_spec
 from confirm.risk import TIERS, risk_tier
 from confirm.store import ConfirmStore
@@ -85,7 +80,7 @@ from core.context import get_context
 from core.guards import require_no_mutations
 from core.logging import log
 from core.provenance import get_provenance
-from mcp_server.envelope import autonomously_applied, classify_error, proposed, refused
+from mcp_server.envelope import classify_error, proposed, refused
 from mcp_server.propose import ProposalRefused, build_proposal
 from mcp_server.redact import redact_error
 
@@ -94,13 +89,7 @@ from mcp_server.redact import redact_error
 # человеческого хода. Исполнитель повторяет эту проверку после confirm-claim;
 # здесь ранний отказ не даёт scheduler/self-improve создать заведомо неисполнимый
 # или опасный черновик.
-_HUMAN_ONLY_OPS = frozenset(MONEY_OPS) | {
-    "launch_campaign",
-    "create_search_campaign",
-    "create_gdn_campaign",
-    "create_demand_gen_campaign",
-    "create_video_campaign",
-}
+_HUMAN_ONLY_OPS = CONFIRM_REQUIRED_ADS_OPS
 
 
 def _validation_text(exc: ValidationError) -> str:
@@ -120,18 +109,18 @@ async def _propose(
     account: str,
     **fields: Any,
 ) -> dict[str, Any]:
-    """Собрать аттестованное действие и автономно исполнить либо вернуть одну confirm-card.
+    """Собрать аттестованное действие и вернуть одну confirm-card.
 
     ЛЮБОЙ отказ — редактированный `refused()`-конверт: сырой str(e) наружу не идёт. Успех —
-    `executed` с audit-backed summary для allow-list либо `pending_confirmation` с preview.
+    `pending_confirmation` с неизменяемым preview.
 
     Порядок гейтов fail-closed и значим:
       1) валидация входа моделью (диапазоны/режимы/валюта — КОД, не доверие);
       2) провенанс: денежный черновик только человеческим ходом (правило 3);
       3) контекст хода: черновику нужен чат доставки/подтверждения (fail-closed);
-      4) И8: не более одного черновика на ход (счёт из хранилища по run-корреляции);
+      4) не более одного pending-черновика на ход (счёт из хранилища по run-корреляции);
       5) сборка+сохранение черновика;
-      6) autonomous allow-list: CAS → execute → audit/readback; иначе одна карточка подтверждения.
+      6) одна карточка подтверждения; execute возможен только после доверенного CAS.
     """
     lang = i18n.current_lang()
     try:
@@ -146,7 +135,7 @@ async def _propose(
     if chat_id is None:
         return refused(i18n.t("propose_no_turn_context", lang), error_code="refused")
     store = ConfirmStore()
-    if await store.count_run_proposals(prov.run_id) >= 1:
+    if await store.count_run_pending_proposals(prov.run_id) >= 1:
         return refused(i18n.t("propose_draft_limit", lang), error_code="refused")
     cid = uuid.uuid4().hex
     try:
@@ -173,32 +162,6 @@ async def _propose(
     except Exception as e:  # noqa: BLE001
         log.warning("mcp propose tool failed: %s", type(e).__name__)
         return refused(redact_error(e), error_code=classify_error(e))
-    from confirm.policy import may_execute_autonomously
-
-    if may_execute_autonomously(operation):
-        try:
-            if not await store.authorize_autonomous(cid, operation=operation):
-                raise PermissionError("autonomous authorization rejected")
-            from ads.service import execute_confirmed as _execute_autonomous
-            from core.texts import fmt_mutation_result
-
-            await _execute_autonomous(store, cid)
-            applied = await store.get_applied_audit_result(cid)
-            if applied is None:
-                raise RuntimeError("applied audit row is unavailable")
-            summary = fmt_mutation_result(applied.operation, applied.result, lang=lang)
-            if not summary.strip():
-                raise RuntimeError("applied audit result is not renderable")
-            return autonomously_applied(
-                confirmation_id=cid,
-                operation=applied.operation,
-                customer_id=applied.customer_id,
-                summary=summary,
-            )
-        except Exception as e:  # noqa: BLE001 - MCP boundary; never leak raw exception text
-            log.warning("mcp autonomous mutation failed: %s", type(e).__name__)
-            return refused(redact_error(e), error_code=classify_error(e))
-
     return proposed(
         confirmation_id=built.cid,
         operation=built.operation,
@@ -985,6 +948,8 @@ async def propose_composite_change(
 
     Каждый элемент: ``{"operation": "pause_campaign", "params": {...}}``. В пакет допускаются
     только операции с детерминированной компенсацией; создание и удаление сущностей отклоняются.
+    Если пакет одновременно переименовывает кампанию, остальные children могут адресовать её как
+    текущим, так и запрошенным новым именем — bridge нормализует ссылку к текущему снимку.
     """
     from ads.composite import CaptureStore
     from mcp_server.trusted_transport import TrustedTransportError, get_trusted_turn
@@ -1014,6 +979,50 @@ async def propose_composite_change(
     except (KeyError, TypeError, ValueError) as e:
         return refused(redact_error(e), error_code="invalid_argument")
 
+    # Hermes естественно связывает следующий child с результатом предыдущего: rename A→B, затем
+    # budget(campaign=B). Но все proposal-снимки снимаются ДО выполнения batch, когда существует A.
+    # Нормализуем post-rename alias кодом, чтобы корректность composite не зависела от того, какое из
+    # двух понятных человеку имён выбрала модель. Цепочки/циклы rename здесь намеренно отклоняем:
+    # они требуют отдельной семантики порядка, а не угадывания.
+    rename_aliases: dict[str, str] = {}
+    rename_sources: set[str] = set()
+    try:
+        for operation, model in normalized:
+            if operation != "update_campaign":
+                continue
+            params = model.model_dump(exclude_none=True)
+            current_name = str(params.get("campaign") or "")
+            new_name = str(params.get("new_name") or "")
+            if new_name in rename_aliases or current_name in rename_aliases:
+                raise ValueError(
+                    "chained or duplicate campaign renames are not supported in one batch"
+                )
+            rename_aliases[new_name] = current_name
+            rename_sources.add(current_name)
+        if rename_sources & rename_aliases.keys():
+            raise ValueError("chained campaign renames are not supported in one batch")
+
+        normalized = [
+            (
+                operation,
+                type(model)(
+                    **{
+                        **model.model_dump(exclude_none=True),
+                        "campaign": rename_aliases.get(
+                            str(model.model_dump(exclude_none=True).get("campaign") or ""),
+                            model.model_dump(exclude_none=True).get("campaign"),
+                        ),
+                    }
+                ),
+            )
+            if operation != "update_campaign"
+            and model.model_dump(exclude_none=True).get("campaign") in rename_aliases
+            else (operation, model)
+            for operation, model in normalized
+        ]
+    except (TypeError, ValueError, ValidationError) as e:
+        return refused(redact_error(e), error_code="invalid_argument")
+
     prov = get_provenance()
     if any(operation in _HUMAN_ONLY_OPS for operation, _ in normalized) and not prov.human_turn:
         return refused(i18n.t("propose_requires_human", lang), error_code="refused")
@@ -1021,7 +1030,7 @@ async def propose_composite_change(
     if chat_id is None:
         return refused(i18n.t("propose_no_turn_context", lang), error_code="refused")
     store = ConfirmStore()
-    if await store.count_run_proposals(prov.run_id) >= 1:
+    if await store.count_run_pending_proposals(prov.run_id) >= 1:
         return refused(i18n.t("propose_draft_limit", lang), error_code="refused")
 
     try:
@@ -1251,26 +1260,6 @@ PROPOSE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "propose_remove_asset_link": propose_remove_asset_link,
     "propose_composite_change": propose_composite_change,
 }
-
-# Public MCP names are retained for rolling compatibility, but their old ``propose_*`` prefix must
-# not make Hermes invent an extra approval step. Keep this presentation map in lockstep with the
-# code policy and prepend an explicit execution contract to the schema description FastMCP exposes.
-_AUTONOMOUS_TOOL_OPERATIONS: dict[str, str] = {
-    "propose_update_campaign": "update_campaign",
-    "propose_create_search_campaign": "create_search_campaign",
-    "propose_create_gdn_campaign": "create_gdn_campaign",
-    "propose_create_demand_gen_campaign": "create_demand_gen_campaign",
-    "propose_create_video_campaign": "create_video_campaign",
-}
-
-if frozenset(_AUTONOMOUS_TOOL_OPERATIONS.values()) != _AUTONOMOUS_ADS_OPS:
-    raise RuntimeError("MCP autonomous tool descriptions diverged from confirm.policy")
-for _tool_name in _AUTONOMOUS_TOOL_OPERATIONS:
-    _fn = PROPOSE_TOOL_FUNCS[_tool_name]
-    _fn.__doc__ = (
-        "АВТОНОМНОЕ ДЕЙСТВИЕ: в приватном контуре выполняется сразу, без карточки подтверждения, "
-        "и возвращает status=executed с результатом из audit/readback.\n\n" + (_fn.__doc__ or "")
-    )
 
 EXECUTE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "execute_confirmed": execute_confirmed,

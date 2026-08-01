@@ -44,7 +44,7 @@ ERROR_CODES: frozenset[str] = frozenset(
         "upstream_denied",  # Google отказал в доступе к аккаунту (нет линковки/токен без прав)
         "upstream_error",  # прочая ошибка Google Ads API
         "internal",  # всё остальное, включая сбой самой классификации
-        "refused",  # propose-гейт отказал ДО создания черновика (И8-лимит/замок/валюта/снижение) —
+        "refused",  # propose-гейт отказал ДО создания черновика (pending-лимит/замок/валюта/снижение) —
         # это НЕ сбой, а штатный отказ: причина в `error` (текст сформирован КОДОМ). Google Ads не тронут.
     }
 )
@@ -235,7 +235,7 @@ def proposed(
 
 
 def refused(text: str, *, error_code: str = "refused") -> dict[str, Any]:
-    """Отказ propose-гейта ДО создания черновика: И8-лимит, замок аккаунта, валютный mismatch,
+    """Отказ propose-гейта ДО создания черновика: pending-лимит, замок аккаунта, валютный mismatch,
     невыполнимое снижение, кривой вход. Черновика НЕТ (confirmation_id=None), Google Ads не тронут.
 
     `text` — ГОТОВОЕ сообщение человеку. Для `ProposalRefused` его сформировал КОД (редактировать
@@ -251,21 +251,4 @@ def refused(text: str, *, error_code: str = "refused") -> dict[str, Any]:
         "preview": None,
         "error": text,
         "error_code": error_code,
-    }
-
-
-def autonomously_applied(
-    *, confirmation_id: str, operation: str, customer_id: str, summary: str
-) -> dict[str, Any]:
-    """Successful audited non-spend mutation; no confirmation card is rendered."""
-
-    return {
-        "confirmation_id": confirmation_id,
-        "operation": operation,
-        "customer_id": str(customer_id),
-        "status": "executed",
-        "summary": summary,
-        "preview": None,
-        "error": None,
-        "error_code": None,
     }

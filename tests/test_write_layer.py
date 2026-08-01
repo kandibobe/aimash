@@ -318,27 +318,16 @@ def test_keyword_bid_via_sdk_keys_by_ad_group_and_criterion_pair():
     ]
 
 
-def test_docs_mutations_table_matches_supported_operations():
-    """`docs/MUTATIONS.md` — карта того, что код умеет менять в чужом аккаунте; отставший док опаснее
-    отсутствующего (в нём было 29 операций из 39, и среди пропавших — ДЕНЕЖНАЯ update_keyword_bid).
-    Таблица обязана перечислять ровно `SUPPORTED_OPERATIONS`, а денежные — быть помечены деньгами."""
-    import pathlib
-    import re
-
+def test_confirmation_policy_partitions_every_supported_operation():
+    """The executable policy, not a hand-maintained docs table, classifies every mutation exactly
+    once. This keeps newly added money operations from silently falling into an autonomous path."""
     from ads.resolve import MONEY_OPS
     from ads.service import SUPPORTED_OPERATIONS
+    from confirm.policy import AUTONOMOUS_ADS_OPS, CONFIRM_REQUIRED_ADS_OPS
 
-    doc = (pathlib.Path(__file__).resolve().parents[1] / "docs" / "MUTATIONS.md").read_text(
-        encoding="utf-8"
-    )
-    rows = dict(re.findall(r"^\| `([a-z_]+)` \|[^|]*\|[^|]*\|([^|]*)\|", doc, re.M))
-    assert set(rows) == set(SUPPORTED_OPERATIONS), (
-        f"док разошёлся с кодом: нет строк для {sorted(set(SUPPORTED_OPERATIONS) - set(rows))}, "
-        f"лишние строки {sorted(set(rows) - set(SUPPORTED_OPERATIONS))}"
-    )
-    # Денежные операции (гейт user_initiated) не должны числиться в доке безобидными.
-    for op in MONEY_OPS:
-        assert "Да" in rows[op], f"{op} — деньги, а в доке помечена как «{rows[op].strip()}»"
+    assert not (AUTONOMOUS_ADS_OPS & CONFIRM_REQUIRED_ADS_OPS)
+    assert AUTONOMOUS_ADS_OPS | CONFIRM_REQUIRED_ADS_OPS == SUPPORTED_OPERATIONS
+    assert set(MONEY_OPS) <= CONFIRM_REQUIRED_ADS_OPS
 
 
 async def test_apply_update_keyword_bid_validates_range_before_claim():

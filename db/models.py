@@ -131,6 +131,13 @@ class Proposal(Base):
     __table_args__ = (
         Index("ix_proposals_status_created_at", "status", "created_at"),
         Index("ix_proposals_chat_status", "chat_id", "status"),
+        Index(
+            "ux_proposals_pending_run_id",
+            "run_id",
+            unique=True,
+            sqlite_where=text("status = 'pending' AND run_id IS NOT NULL AND run_id <> '-'"),
+            postgresql_where=text("status = 'pending' AND run_id IS NOT NULL AND run_id <> '-'"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

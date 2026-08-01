@@ -39,7 +39,7 @@ recommended_fix: string
    - `/root/.hermes/skills/ad-master/ad-master-cron-ops/SKILL.md`
 5. runtime statements in docs:
    - `README.md`
-   - `docs/TZ-Aimash-Hermes-Agent.md`
+   - `ТЗ.md`
    - `deploy/hermes/README.md`
    - `deploy/hermes/OPERATIONS.md`
 

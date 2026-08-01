@@ -6,6 +6,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import yaml
+
 from tests._docs_paths import ROOT
 
 PATH = ROOT / "deploy/hermes/sync_aimash_surface.py"
@@ -28,6 +30,18 @@ def _config():
             }
         },
     }
+
+
+def test_surface_sync_model_policy_matches_repository_config():
+    config = yaml.safe_load((ROOT / "deploy/hermes/config.yaml").read_text(encoding="utf-8"))
+
+    assert config["model"] == {
+        "provider": SYNC.PRIMARY_PROVIDER,
+        "default": SYNC.PRIMARY_MODEL,
+    }
+    assert config["agent"]["max_turns"] == SYNC.PRIMARY_MAX_TURNS
+    assert config["agent"]["reasoning_effort"] == SYNC.PRIMARY_REASONING_EFFORT
+    assert config["delegation"]["max_iterations"] == SYNC.DELEGATION_MAX_ITERATIONS
 
 
 def test_enable_changes_only_plugin_and_aimash_include():
@@ -100,6 +114,9 @@ def test_trusted_operator_policy_is_pinned_without_touching_host_secrets():
 
     got = SYNC.reconcile_trusted_operator_policy(cfg)
 
+    assert got["model"] == {"provider": "openai-codex", "default": "gpt-5.6-terra"}
+    assert got["agent"]["max_turns"] == 90
+    assert got["agent"]["reasoning_effort"] == "high"
     assert got["agent"]["disabled_toolsets"] == list(SYNC.TRUSTED_OPERATOR_DISABLED_TOOLSETS)
     assert got["memory"] == {"memory_enabled": True, "user_profile_enabled": True}
     assert got["skills"] == {
@@ -108,9 +125,12 @@ def test_trusted_operator_policy_is_pinned_without_touching_host_secrets():
         "write_approval": True,
         "custom": "survives",
     }
+    assert got["delegation"]["provider"] == "openai-codex"
+    assert got["delegation"]["model"] == "gpt-5.6-terra"
+    assert got["delegation"]["reasoning_effort"] == "high"
+    assert got["delegation"]["max_iterations"] == 60
     assert got["delegation"]["orchestrator_enabled"] is True
     assert got["delegation"]["subagent_auto_approve"] is False
-    assert got["model"] == {"provider": "host-local", "default": "host-model"}
     assert got["dashboard"] == {"secret": "must-survive"}
 
 
@@ -132,3 +152,34 @@ def test_atomic_copy_preserves_previous_live_soul(tmp_path: Path):
     assert target.with_suffix(".md.aimash-prev").read_text(encoding="utf-8") == (
         "live operator rules\n"
     )
+
+
+def test_skill_sync_replaces_topic_skill_and_retires_conflicting_duplicates(tmp_path: Path):
+    source = tmp_path / "source"
+    target = tmp_path / "skills" / "ad-master"
+    retired = tmp_path / "retired"
+    canonical = source / "google-ads-worker"
+    canonical.mkdir(parents=True)
+    canonical.joinpath("SKILL.md").write_text("unified contract\n", encoding="utf-8")
+
+    old_worker = target / "google-ads-worker"
+    old_worker.mkdir(parents=True)
+    old_worker.joinpath("SKILL.md").write_text("stale worker\n", encoding="utf-8")
+    for name in SYNC.RETIRED_SKILLS:
+        folder = target / name
+        folder.mkdir(parents=True)
+        folder.joinpath("SKILL.md").write_text(f"stale {name}\n", encoding="utf-8")
+    unrelated = target / "copywriter"
+    unrelated.mkdir(parents=True)
+    unrelated.joinpath("SKILL.md").write_text("keep me\n", encoding="utf-8")
+
+    SYNC._sync_skills(source, target, retired)
+
+    assert old_worker.joinpath("SKILL.md").read_text(encoding="utf-8") == "unified contract\n"
+    assert old_worker.joinpath("SKILL.md.aimash-prev").read_text(encoding="utf-8") == (
+        "stale worker\n"
+    )
+    assert unrelated.joinpath("SKILL.md").read_text(encoding="utf-8") == "keep me\n"
+    for name in SYNC.RETIRED_SKILLS:
+        assert not (target / name).exists()
+        assert len(list(retired.glob(f"{name}-*"))) == 1

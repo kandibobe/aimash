@@ -86,5 +86,6 @@ logs/
 *.tmp
 
 # client documents — keep local only, never commit
+artifacts/
 *.docx
 ТЗ.md

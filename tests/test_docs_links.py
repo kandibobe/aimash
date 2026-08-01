@@ -74,7 +74,7 @@ def test_markdown_links_resolve(doc):
 
 
 def test_docs_index_covers_every_doc():
-    """Каждый документ `docs/` и `deploy/hermes/` достижим ССЫЛКОЙ из индекса `docs/README.md`.
+    """Каждый живой документ `docs/` и `deploy/hermes/` достижим ссылкой из текущего индекса.
 
     Обратное включение к `test_markdown_links_resolve`: тот ловит ссылку в пустоту, этот — пустоту
     вместо ссылки. Второе тише: битых ссылок нет ровно потому, что документ никто не упомянул.
@@ -84,7 +84,8 @@ def test_docs_index_covers_every_doc():
 
     Вне требования: сам индекс и `docs/archive/**` (архив вне зоны инвариантов, `_SKIP_DIRS`).
     """
-    index = ROOT / "docs" / "README.md"
+    docs_index = ROOT / "docs" / "README.md"
+    index = docs_index if docs_index.exists() else ROOT / "README.md"
     linked = set()
     for target in _internal_targets(index.read_text(encoding="utf-8")):
         for base in (index.parent, ROOT):
@@ -109,7 +110,7 @@ def test_docs_index_covers_every_doc():
         and p.resolve() not in linked
     )
     assert not missing, (
-        "не сослан из индекса docs/README.md: "
+        f"не сослан из индекса {index.relative_to(ROOT).as_posix()}: "
         + ", ".join(missing)
         + ". Дока, которой нет в индексе, не существует для читающего — добавь строку "
         "«- [имя](путь) — о чём» в подходящий раздел. Если документ намеренно не для индекса, "

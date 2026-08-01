@@ -27,15 +27,7 @@ from confirm import render  # noqa: E402
 from confirm.gate import build_summary  # noqa: E402
 
 _ROOT = Path(__file__).resolve().parents[1]
-# Операции со СВОЕЙ богатой карточкой (тексты RSA поэлементно, превью GDN/Video): рендер для них
-# честно отдаёт '', а вызывающий оставляет собственный summary.
-_OWN_CARD = {
-    "create_rsa",
-    "create_search_campaign",
-    "create_gdn_campaign",
-    "create_video_campaign",
-    "create_demand_gen_campaign",
-}
+_OWN_CARD: set[str] = set()
 
 
 def test_render_is_headless():
@@ -117,9 +109,84 @@ def test_build_summary_shows_human_text_not_raw_dict():
     )
 
 
-def test_build_summary_falls_back_for_own_card_operations():
-    """У create_rsa своя карточка — рендер отдаёт '', и запасной сырой формат обязан остаться,
-    иначе подтверждение уехало бы с ПУСТОЙ сводкой (хуже сырого dict)."""
-    s = build_summary("create_rsa", before="—", after={"headlines": ["a"]})
-    assert s.startswith("create_rsa: ")
+def test_create_rsa_has_human_summary_in_shared_renderer():
+    s = build_summary(
+        "create_rsa",
+        before="—",
+        after={
+            "campaign": "Search",
+            "ad_group_id": "42",
+            "final_url": "https://example.com",
+            "headlines": ["Headline one", "Headline two", "Headline three"],
+            "descriptions": ["Description one", "Description two"],
+        },
+    )
+    assert "RSA" in s and "Search" in s and "https://example.com" in s
+    assert "create_rsa" not in s and "{" not in s
+
+
+@pytest.mark.parametrize(
+    ("operation", "params", "needle"),
+    [
+        (
+            "create_search_campaign",
+            {
+                "campaign_name": "Search Draft",
+                "final_url": "https://example.com",
+                "budget_daily_micros": 1_100_000,
+                "_account_currency": "AUD",
+                "headlines": ["A", "B", "C"],
+                "descriptions": ["D", "E"],
+                "keywords": ["buy flowers"],
+            },
+            "1.10 AUD",
+        ),
+        (
+            "create_gdn_campaign",
+            {
+                "campaign_name": "Display Draft",
+                "final_url": "https://example.com",
+                "budget_daily_micros": 2_000_000,
+                "headlines": ["A"],
+                "long_headline": "Long headline",
+                "descriptions": ["D"],
+                "business_name": "Brand",
+            },
+            "Long headline",
+        ),
+        (
+            "create_demand_gen_campaign",
+            {
+                "campaign_name": "Demand Draft",
+                "youtube_video_id": "abcdefghijk",
+                "final_url": "https://example.com",
+                "budget_daily_micros": 3_000_000,
+                "headlines": ["A"],
+                "long_headline": "Long headline",
+                "descriptions": ["D"],
+                "business_name": "Brand",
+                "goal": "conversions",
+            },
+            "conversions",
+        ),
+        (
+            "create_video_campaign",
+            {
+                "campaign_name": "Video Draft",
+                "youtube_video_id": "abcdefghijk",
+                "final_url": "https://example.com",
+                "budget_daily_micros": 4_000_000,
+                "headlines": ["A"],
+                "long_headline": "Long headline",
+                "descriptions": ["D"],
+                "business_name": "Brand",
+            },
+            "abcdefghijk",
+        ),
+    ],
+)
+def test_campaign_create_cards_show_material_fields(operation, params, needle):
+    summary = render.fmt_mutation_summary(operation, params, "ru")
+    assert summary.strip()
+    assert needle in summary
     assert build_summary("pause_campaign", before="—", after=None) == "pause_campaign: — → None"

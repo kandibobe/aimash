@@ -14,7 +14,7 @@ from docx.shared import Cm, Pt, RGBColor
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "SPEC.md"
-OUTPUT = ROOT / "artifacts" / "Aimash_Unified_Technical_Specification_ACCEPTED.docx"
+OUTPUT = ROOT / "artifacts" / "Aimash_Unified_Technical_Specification_DRAFT.docx"
 
 NAVY = "12233F"
 BLUE = "1E5AA8"
@@ -220,7 +220,7 @@ def add_cover(document: Document) -> None:
     r.font.size = Pt(16)
     r.font.color.rgb = RGBColor.from_string(BLUE)
 
-    document.add_paragraph("Версия для согласования · 31 июля 2026", style="Subtitle")
+    document.add_paragraph("Производный документ для сверки · 31 июля 2026", style="Subtitle")
 
     table = document.add_table(rows=1, cols=1)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -231,7 +231,7 @@ def add_cover(document: Document) -> None:
     r = p.add_run("СТАТУС: ЧЕРНОВИК")
     r.bold = True
     r.font.color.rgb = RGBColor.from_string(GREEN)
-    p.add_run("\nНе является нормативным источником до явной приёмки заказчиком.")
+    p.add_run("\nНе является нормативным источником; при расхождении действуют три исходных DOCX.")
 
     p = document.add_paragraph()
     p.paragraph_format.space_before = Pt(32)
@@ -326,7 +326,7 @@ def build() -> Path:
 
     for section in document.sections:
         header = section.header.paragraphs[0]
-        header.text = "AIMASH  /  ЕДИНОЕ ТЕХНИЧЕСКОЕ ЗАДАНИЕ  /  ACCEPTED 31.07.2026"
+        header.text = "AIMASH  /  ПРОИЗВОДНЫЙ IMPLEMENTATION PROFILE  /  DRAFT 31.07.2026"
         header.alignment = WD_ALIGN_PARAGRAPH.RIGHT
         for run in header.runs:
             run.font.name = "Aptos"
@@ -338,7 +338,7 @@ def build() -> Path:
     core.title = "Aimash — единое техническое задание"
     core.subject = "AI-агент управления Google Ads через Telegram"
     core.author = "Aimash"
-    core.comments = "Черновик для согласования. Нормативным становится только после явной приёмки."
+    core.comments = "Производный черновик. Нормативны три исходных DOCX заказчика."
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     document.save(OUTPUT)

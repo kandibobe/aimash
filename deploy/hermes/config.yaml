@@ -6,11 +6,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 model:
-  provider: openrouter
-  default: deepseek/deepseek-v4-pro
+  provider: openai-codex
+  default: gpt-5.6-terra
 
-# Официальная цепочка Hermes v0.19.0. Это смена модели внутри того же OpenRouter-ключа:
-# переживает отказ конкретной модели/эндпоинта, но не падение самого OpenRouter.
+# Резервная цепочка Hermes v0.19.0 уходит с Codex OAuth на отдельный OpenRouter-ключ:
+# переживает отказ Codex или конкретной fallback-модели, но требует рабочие credentials обоих providers.
 fallback_providers:
   - provider: openrouter
     model: deepseek/deepseek-v4-flash
@@ -18,7 +18,7 @@ fallback_providers:
     model: google/gemini-3.1-flash-lite
 
 agent:
-  max_turns: 20
+  max_turns: 90
   tool_use_enforcement: auto
   disabled_toolsets:
     - homeassistant
@@ -30,7 +30,6 @@ agent:
   reasoning_overrides:
     google/gemini-3.1-flash-lite: none
     deepseek/deepseek-v4-flash: ''
-    deepseek/deepseek-v4-pro: high
   reasoning_effort: high
 
 browser:
@@ -100,11 +99,11 @@ memory:
   user_profile_enabled: true
 
 delegation:
-  model: google/gemini-3.1-flash-lite
-  provider: openrouter
+  model: gpt-5.6-terra
+  provider: openai-codex
   inherit_mcp_toolsets: true
-  max_iterations: 30
-  reasoning_effort: none
+  max_iterations: 60
+  reasoning_effort: high
   max_concurrent_children: 3
   max_spawn_depth: 1
   orchestrator_enabled: true

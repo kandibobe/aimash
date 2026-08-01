@@ -248,16 +248,16 @@ async def test_confirmation_button_becomes_exact_trusted_reply(monkeypatch):
         async def handle_message(self, event):
             sent_events.append(event)
 
-    adapter_module = types.ModuleType("plugins.platforms.telegram.adapter")
+    # Pinned Hermes loads its bundled Telegram plugin under this synthetic namespace. Regressing to
+    # ``plugins.platforms...`` patches a duplicate class and leaves the live gateway untouched.
+    adapter_module = types.ModuleType("hermes_plugins.telegram_platform.adapter")
     adapter_module.TelegramAdapter = _Adapter
     adapter_module.normalize_telegram_chat_id = int
-    plugins = types.ModuleType("plugins")
-    plugin_platforms = types.ModuleType("plugins.platforms")
-    plugin_telegram = types.ModuleType("plugins.platforms.telegram")
-    monkeypatch.setitem(sys.modules, "plugins", plugins)
-    monkeypatch.setitem(sys.modules, "plugins.platforms", plugin_platforms)
-    monkeypatch.setitem(sys.modules, "plugins.platforms.telegram", plugin_telegram)
-    monkeypatch.setitem(sys.modules, "plugins.platforms.telegram.adapter", adapter_module)
+    hermes_plugins = types.ModuleType("hermes_plugins")
+    telegram_platform = types.ModuleType("hermes_plugins.telegram_platform")
+    monkeypatch.setitem(sys.modules, "hermes_plugins", hermes_plugins)
+    monkeypatch.setitem(sys.modules, "hermes_plugins.telegram_platform", telegram_platform)
+    monkeypatch.setitem(sys.modules, "hermes_plugins.telegram_platform.adapter", adapter_module)
 
     assert plugin._install_telegram_button_bridge() is True
     adapter = _Adapter()
@@ -492,6 +492,87 @@ def test_signed_artifact_is_queued_for_exact_topic_and_hidden_from_model(monkeyp
     assert plugin._pending_artifacts[(-202, "7")] == [token]
     assert token not in transformed
     assert "report.xlsx" in transformed
+
+
+async def test_verified_artifact_is_requeued_after_transient_delivery_failure(monkeypatch):
+    plugin = _load(monkeypatch, _env())
+    token = _artifact_token()
+    plugin._pending_artifacts[(-202, "7")] = [token]
+
+    def fail_copy(artifact, target):
+        raise RuntimeError("temporary docker copy failure")
+
+    monkeypatch.setattr(plugin, "_copy_artifact", fail_copy)
+    scheduled = []
+    monkeypatch.setattr(
+        plugin,
+        "_schedule_artifact_retry",
+        lambda adapter, chat_id, metadata, key: scheduled.append(key),
+    )
+    adapter = SimpleNamespace(_bot=SimpleNamespace())
+
+    await plugin._deliver_pending_artifacts(
+        adapter,
+        "-202",
+        {"notify": True, "thread_id": "7"},
+    )
+
+    assert plugin._pending_artifacts[(-202, "7")] == [token]
+    assert scheduled == [(-202, "7")]
+
+
+async def test_artifact_background_retry_recovers_without_new_message(monkeypatch):
+    plugin = _load(monkeypatch, _env())
+    token = _artifact_token()
+    plugin._pending_artifacts[(-202, "7")] = [token]
+    attempts = 0
+    sent = []
+
+    def flaky_copy(artifact, target):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("transient")
+        target.write_bytes(b"xlsx")
+
+    class _Bot:
+        async def send_document(self, **kwargs):
+            sent.append(kwargs)
+
+    monkeypatch.setattr(plugin, "_copy_artifact", flaky_copy)
+    monkeypatch.setattr(plugin, "_remove_container_artifact", lambda artifact: None)
+    monkeypatch.setattr(plugin, "_ARTIFACT_RETRY_DELAYS_S", (0,))
+    adapter = SimpleNamespace(_bot=_Bot())
+
+    await plugin._deliver_pending_artifacts(
+        adapter,
+        "-202",
+        {"notify": True, "thread_id": "7"},
+    )
+    retry_task = plugin._artifact_retry_tasks[(-202, "7")]
+    await retry_task
+
+    assert attempts == 2
+    assert len(sent) == 1
+    assert plugin._pending_artifacts.get((-202, "7")) in (None, [])
+
+
+def test_missing_button_bridge_blocks_write_tools(monkeypatch):
+    plugin = _load(monkeypatch, _env())
+    monkeypatch.setattr(plugin, "_install_telegram_button_bridge", lambda: False)
+    hooks = {}
+    ctx = SimpleNamespace(register_hook=lambda name, fn: hooks.__setitem__(name, fn))
+
+    plugin.register(ctx)
+    blocked = plugin._pre_tool_call(
+        tool_name="mcp__aimash__propose_pause_campaign",
+        args={"account": "7753643025", "campaign": "X"},
+        session_id="s-no-buttons",
+        turn_id="t-no-buttons",
+    )
+
+    assert blocked["action"] == "block"
+    assert "buttons" in blocked["message"]
 
 
 def test_forged_artifact_is_not_queued(monkeypatch):

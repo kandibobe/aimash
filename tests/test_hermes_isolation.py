@@ -616,10 +616,10 @@ def test_i8_at_most_one_pending_proposal_per_turn():
     from mcp_server.tools_write import PROPOSE_TOOL_FUNCS, _propose, propose_composite_change
 
     source = inspect.getsource(_propose)
-    assert source.index("count_run_proposals") < source.index("build_proposal")
+    assert source.index("count_run_pending_proposals") < source.index("build_proposal")
     ordinary = [fn for fn in PROPOSE_TOOL_FUNCS.values() if fn is not propose_composite_change]
     assert all("_propose(" in inspect.getsource(fn) for fn in ordinary)
     composite_source = inspect.getsource(propose_composite_change)
-    assert composite_source.index("count_run_proposals") < composite_source.index(
+    assert composite_source.index("count_run_pending_proposals") < composite_source.index(
         "store.save_proposal"
     )

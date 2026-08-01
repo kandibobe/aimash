@@ -3,27 +3,29 @@
 Aimash — приватный Telegram-агент владельца и доверенных сотрудников агентства. Hermes понимает
 свободный запрос, выбирает инструменты, читает Google Ads, исследует, анализирует и готовит действия.
 Наш Python-код не заменяет агента: это узкий typed gateway к Google Ads, валидация денег/лимитов,
-одноразовое подтверждение финансового риска, audit и повторная API-проверка.
+одноразовое подтверждение каждой мутации, audit и повторная API-проверка.
 
-## Один источник истины
+## Источник истины
 
-Единственный нормативный продуктовый документ — [`SPEC.md`](SPEC.md). Оригинальные `.docx` и
-[`ТЗ.md`](ТЗ.md) сохранены как contract evidence. Старые продуктовые спеки лежат в
-[`docs/archive/pre-single-spec-2026-07/`](docs/archive/pre-single-spec-2026-07/) и не задают текущее
-поведение. Runbooks и security/API references подчинены `SPEC.md`.
+Договорный продуктовый канон — три оригинальных документа заказчика:
+[`Aimash_Technical_Specification.docx`](Aimash_Technical_Specification.docx),
+[`Aimash_Flow_Google_Search_4.docx`](Aimash_Flow_Google_Search_4.docx) и
+[`Информация о клиентах_1.docx`](Информация%20о%20клиентах_1.docx).
+[`ТЗ.md`](ТЗ.md) — их проверяемое текстовое зеркало; [`SPEC.md`](SPEC.md) и unified-артефакты — только
+производные implementation notes. При расхождении исправляется производный материал, а не исходный DOCX.
 
 ## Целевой UX
 
 - Менеджер пишет обычным русским или английским текстом.
 - Hermes сам решает, что прочитать и в какой последовательности вызвать primitive tools.
 - Жёсткого восьмиэкранного wizard и обязательной покнопочной RSA-курации в целевом UX нет.
-- Чтение, аудит, отчёты, исследования и явно разрешённые неденежные операции выполняются автономно.
-- Для spend-affecting операции показывается один diff и кнопки `✅ Да` / `❌ Нет`; reply на всю
-  карточку остаётся fallback.
+- Чтение, аудит, отчёты, исследования, выбор tools и подготовка пакета выполняются автономно.
+- Для любой мутации показывается один общий diff и кнопки `✅ Да` / `❌ Нет`; reply на всю карточку
+  остаётся fallback.
 - Код исполняет typed mutation, пишет audit и перечитывает результат из Google Ads API.
 
 `aimash_trusted_transport` — не второй агент и не бизнес-логика. Это узкий мост, который доказывает,
-что финансовое подтверждение действительно пришло от разрешённого Telegram user/chat/message, а не
+что подтверждение действительно пришло от разрешённого Telegram user/chat/message, а не
 было придумано моделью или текстом сайта.
 
 ## Текущий production
@@ -52,7 +54,7 @@ Hermes делает сам:
 
 - typed validation, деньги, проценты, billing units и RSA 30/90/15;
 - account ceiling, allowlist, provenance, freshness, kill-switch и quota;
-- подтверждение финансового риска через Telegram anchor + CAS;
+- подтверждение каждой мутации через Telegram anchor + CAS;
 - Google Ads SDK mutation, audit и post-verify;
 - доверенную доставку файлов и привязку входящих Telegram media.
 
@@ -70,9 +72,9 @@ python -m pytest -q
 python -m bot.main
 ```
 
-Hermes-конфиг и установка gateway: [`deploy/hermes/README.md`](deploy/hermes/README.md). Переменные
-production: [`docs/RUNBOOK_ENV.md`](docs/RUNBOOK_ENV.md). OAuth Google Ads:
-[`docs/OAUTH_SETUP.md`](docs/OAUTH_SETUP.md).
+Hermes-конфиг, установка gateway, production env и OAuth-проверки описаны в
+[`deploy/hermes/README.md`](deploy/hermes/README.md) и
+[`deploy/hermes/OPERATIONS.md`](deploy/hermes/OPERATIONS.md). Шаблон переменных — [`.env.example`](.env.example).
 
 ## Безопасность
 
@@ -83,8 +85,9 @@ production: [`docs/RUNBOOK_ENV.md`](docs/RUNBOOK_ENV.md). OAuth Google Ads:
 - `skills.inline_shell: false` сохраняется.
 - «Выполнено» строится из audit-row и API-readback, а не из уверенного текста модели.
 
-Подробности: [`docs/SECURITY.md`](docs/SECURITY.md), [`docs/BACKUP.md`](docs/BACKUP.md),
-[`docs/HERMES_PRODUCTION_GAP.md`](docs/HERMES_PRODUCTION_GAP.md).
+Подробности: [`deploy/hermes/RISK_REGISTER.md`](deploy/hermes/RISK_REGISTER.md),
+[`deploy/hermes/OPERATIONS.md`](deploy/hermes/OPERATIONS.md) и разделы 15–17 текстового зеркала
+[`SPEC.md`](SPEC.md).
 
 ## Структура
 
@@ -101,4 +104,14 @@ deploy/hermes/   gateway config, plugin, operations
 bot/             временный legacy runtime/fallback
 ```
 
-Документационный индекс — [`docs/README.md`](docs/README.md).
+## Живые документы Hermes
+
+- [`deploy/hermes/README.md`](deploy/hermes/README.md) — установка и топология.
+- [`deploy/hermes/OPERATIONS.md`](deploy/hermes/OPERATIONS.md) — эксплуатация, deploy и verification.
+- [`deploy/hermes/SAFE_RESTART.md`](deploy/hermes/SAFE_RESTART.md) — безопасный restart.
+- [`deploy/hermes/host-a/RUNBOOK.md`](deploy/hermes/host-a/RUNBOOK.md) — runbook текущего host.
+- [`deploy/hermes/SOUL.md`](deploy/hermes/SOUL.md) — системные инструкции агента.
+- [`deploy/hermes/DRIFT_AUDIT.md`](deploy/hermes/DRIFT_AUDIT.md) — контроль дрейфа поверхности.
+- [`deploy/hermes/RISK_REGISTER.md`](deploy/hermes/RISK_REGISTER.md) — открытые риски.
+- [`deploy/hermes/OPEN_DECISIONS.md`](deploy/hermes/OPEN_DECISIONS.md) — операционные решения.
+- [`deploy/hermes/skills/ad-master/google-ads-worker/SKILL.md`](deploy/hermes/skills/ad-master/google-ads-worker/SKILL.md) — канонический Google Ads skill.

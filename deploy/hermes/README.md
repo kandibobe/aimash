@@ -5,8 +5,9 @@ MCP-сервер `aimash` (пакет `mcp_server/`) всегда отдаёт 3
 `HERMES_WRITE_ENABLED=true` он добавляет 53 agent-first PLAN/state + 1 WRITE через HMAC trusted Telegram transport;
 при false модуль WRITE физически не импортируется.
 
-**Где что написано:** единое ТЗ и границы автономии — [`/SPEC.md`](../../SPEC.md). Этот файл — только
-про установку; исторические архитектурные документы перенесены в `docs/archive/pre-single-spec-2026-07/`.
+**Где что написано:** нормативный канон — три исходных DOCX заказчика; их текстовое зеркало — `ТЗ.md`,
+а производный implementation profile и границы автономии — [`/SPEC.md`](../../SPEC.md). Этот файл —
+только про установку.
 
 **Топология.** Текущий aiogram-бот (`aimash-bot` в Docker Compose) остаётся жив — он же окружение для
 MCP-сервера. Hermes ставится рядом отдельным systemd user-сервисом и зовёт MCP через `docker exec` в
@@ -28,7 +29,7 @@ restart, редеплой↔MCP-reconnect, логи, обновление/отк
 ## RB-0. Зайти на VPS
 
 ```bash
-# host — из docs/DEPLOYMENT.md (167.233.48.243, секрет CI VPS_SSH_HOST); user = VPS_SSH_USER
+# host — из CI-секрета VPS_SSH_HOST (текущее значение сверять перед подключением); user = VPS_SSH_USER
 # (root или deploy); если задан VPS_SSH_PORT — добавьте -p <порт>.
 ssh root@167.233.48.243
 cd /opt/aimash
@@ -66,25 +67,19 @@ hermes config env-path             # путь ~/.hermes/.env
 #   ⚠️ Тулсет `web` без ключа поискового провайдера (EXA/TAVILY/BRAVE/FIRECRAWL/SEARXNG) мёртв —
 #      либо ключ, либо `web` в disabled_toolsets, иначе агент дёргает нерабочий инструмент.
 
-# 3. Провайдер модели — через интерактивный мастер (он же запускается при первом старте):
+# 3. Первичная авторизация Codex — через интерактивный мастер (он же запускается при первом старте):
 hermes model
-#   Select provider/model — сверять с `/opt/aimash/deploy/hermes/runtime_registry.yaml`.
-#   На 2026-07-30 canonical current runtime для чата: `gpt-5.6-terra` via `openai-codex`.
-#   Если выбираешь иной runtime для конкретной джобы/исключения — зафиксируй это как pinned exception,
-#   а не как новую безымянную правду.
-#   Select terminal backend → Keep current (local): терминал у Контура A и так гасится (см. тулсеты).
+#   Select provider/model — `gpt-5.6-terra` via `openai-codex`; следующий surface sync закрепит
+#   это значение из `/opt/aimash/deploy/hermes/runtime_registry.yaml`.
+#   Select terminal backend → Keep current (local).
 #   Select platforms        → только Telegram (SPACE, ENTER).
-#   Tools for CLI (тулсеты) → эталон = минимум (skills/todo/clarify + наш MCP). `session_search`
-#     в эталоне ПОГАШЕН (К9/И6): он ищет по всей ~/.hermes/state.db, то есть по всем топикам, а
-#     топик у нас = клиент — кросс-клиентное чтение переписки в обход нашего замка.
-#     Снять ОБЯЗАТЕЛЬНО: Computer Use (контроль рабочего стола VPS) и Cron Jobs (автономный запуск,
-#     против золотого правила №3). Terminal/Code/File/Browser держать под approvals: manual и
-#     вычитывать каждую команду; обкатка — только на Draft 7753643025.
+#   Tools for CLI (тулсеты) → не снимать рабочие native tools. Surface sync отключает только
+#     homeassistant/spotify/video_gen/x_search/yuanbao/tts. Terminal/Code/File/Browser остаются
+#     доступны через `approvals: manual`; Google Ads вызывается только через typed Aimash MCP.
 
-# 4. Долить НЕ-модельные блоки из эталона репо (мастер их не трогает):
-#    mcp_servers.aimash (без него нет доступа к Google Ads), gateway…group_topics (топик→скил),
-#    approvals: manual. Эталон: /opt/aimash/deploy/hermes/config.yaml — справочный: live model/dashboard
-#    настройки не заменять целиком.
+# 4. Долить host-local настройки, которых нет в репозитории (dashboard/secrets); не заменять live YAML
+#    шаблоном целиком. Model/delegation/tool policy, mcp_servers.aimash, plugin, SOUL и topic skill
+#    выборочно и атомарно закрепляет sync_aimash_surface.py.
 hermes config edit
 #   Aimash surface/plugin/SOUL синхронизируются выборочно:
 /usr/local/lib/hermes-agent/venv/bin/python /opt/aimash/deploy/hermes/sync_aimash_surface.py

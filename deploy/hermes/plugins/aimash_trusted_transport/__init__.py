@@ -15,6 +15,7 @@ import asyncio
 import functools
 import hashlib
 import hmac
+import importlib
 import json
 import logging
 import math
@@ -114,6 +115,36 @@ class _Artifact:
 _lock = threading.RLock()
 _events: dict[tuple[str, int, int], _Inbound] = {}
 _pending_artifacts: dict[tuple[int, str | None], list[str]] = {}
+_artifact_retry_tasks: dict[tuple[int, str | None], asyncio.Task] = {}
+_ARTIFACT_RETRY_DELAYS_S = (1, 3, 10, 30, 60)
+_button_bridge_ready: bool | None = None
+
+
+def _telegram_adapter_module():
+    """Return the module that owns the *live* TelegramAdapter class.
+
+    Hermes v0.19 loads bundled plugins under the synthetic ``hermes_plugins`` namespace. Importing
+    the source path ``plugins.platforms...`` creates a second module/class object; monkey-patching it
+    succeeds but has no effect on the running gateway. Keep the source-path fallback for CLI/tests
+    and older Hermes builds.
+    """
+    for module_name in (
+        "hermes_plugins.telegram_platform.adapter",
+        "plugins.platforms.telegram.adapter",
+    ):
+        try:
+            module = importlib.import_module(module_name)
+        except (ImportError, ModuleNotFoundError):
+            continue
+        if getattr(module, "TelegramAdapter", None) is not None:
+            return module
+    return None
+
+
+def _normalize_telegram_chat_id(chat_id):
+    module = _telegram_adapter_module()
+    normalize = getattr(module, "normalize_telegram_chat_id", None) if module else None
+    return normalize(chat_id) if callable(normalize) else chat_id
 
 
 def _as_int(value, *, positive: bool = False):
@@ -264,7 +295,12 @@ def _b64url(value: bytes) -> str:
 
 
 def _b64url_decode(value: str) -> bytes:
-    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    if not value or re.fullmatch(r"[A-Za-z0-9_-]+", value) is None:
+        raise ValueError("invalid base64url")
+    decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    if not hmac.compare_digest(_b64url(decoded), value):
+        raise ValueError("non-canonical base64url")
+    return decoded
 
 
 def _verify_artifact_token(token: str, *, now: int | None = None) -> _Artifact:
@@ -414,7 +450,41 @@ def _remove_container_artifact(artifact: _Artifact) -> None:
     )
 
 
-async def _deliver_pending_artifacts(adapter, chat_id, metadata=None) -> None:
+async def _artifact_retry_worker(adapter, chat_id, metadata, key) -> None:
+    """Retry transient Telegram/docker failures without waiting for another user message."""
+
+    try:
+        for delay in _ARTIFACT_RETRY_DELAYS_S:
+            await asyncio.sleep(delay)
+            await _deliver_pending_artifacts(
+                adapter,
+                chat_id,
+                metadata,
+                schedule_retry=False,
+            )
+            with _lock:
+                if not _pending_artifacts.get(key):
+                    return
+        log.error("Aimash artifact delivery exhausted bounded retries")
+    finally:
+        with _lock:
+            _artifact_retry_tasks.pop(key, None)
+
+
+def _schedule_artifact_retry(adapter, chat_id, metadata, key) -> None:
+    with _lock:
+        task = _artifact_retry_tasks.get(key)
+        if task is not None and not task.done():
+            return
+        _artifact_retry_tasks[key] = asyncio.create_task(
+            _artifact_retry_worker(adapter, chat_id, dict(metadata or {}), key),
+            name=f"aimash-artifact-retry-{key[0]}-{key[1] or 'root'}",
+        )
+
+
+async def _deliver_pending_artifacts(
+    adapter, chat_id, metadata=None, *, schedule_retry: bool = True
+) -> None:
     parsed_chat = _as_int(chat_id)
     if parsed_chat is None or getattr(adapter, "_bot", None) is None:
         return
@@ -429,17 +499,18 @@ async def _deliver_pending_artifacts(adapter, chat_id, metadata=None) -> None:
                 thread_id = matches[0][1]
     if not tokens:
         return
-    from plugins.platforms.telegram.adapter import normalize_telegram_chat_id
     from telegram import InputFile
 
+    retry_tokens: list[str] = []
     for token in tokens:
+        artifact = None
         try:
             artifact = _verify_artifact_token(token)
             with tempfile.TemporaryDirectory(prefix="aimash_artifact_") as tmp:
                 target = Path(tmp) / artifact.filename
                 await asyncio.to_thread(_copy_artifact, artifact, target)
                 kwargs = {
-                    "chat_id": normalize_telegram_chat_id(chat_id),
+                    "chat_id": _normalize_telegram_chat_id(chat_id),
                     "caption": f"📎 {artifact.filename}",
                 }
                 if thread_id is not None:
@@ -455,6 +526,20 @@ async def _deliver_pending_artifacts(adapter, chat_id, metadata=None) -> None:
             await asyncio.to_thread(_remove_container_artifact, artifact)
         except Exception as exc:  # noqa: BLE001 - text response survives failed attachment
             log.warning("Aimash artifact delivery failed: %s", type(exc).__name__)
+            # A verified artifact remains in the container until Telegram accepts it. Preserve its
+            # signed token so a later final response in the same topic can retry transient copy/API
+            # failures instead of turning "queued" into a silent permanent loss.
+            if artifact is not None:
+                retry_tokens.append(token)
+    if retry_tokens:
+        retry_key = (parsed_chat, thread_id)
+        with _lock:
+            queued = _pending_artifacts.setdefault(retry_key, [])
+            _pending_artifacts[retry_key] = retry_tokens + [
+                token for token in queued if token not in retry_tokens
+            ]
+        if schedule_retry:
+            _schedule_artifact_retry(adapter, chat_id, metadata, retry_key)
 
 
 _INBOUND_MEDIA_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov"})
@@ -558,7 +643,6 @@ async def _attach_confirmation_keyboard(adapter, chat_id, message_id, content: s
         return
     try:
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        from plugins.platforms.telegram.adapter import normalize_telegram_chat_id
 
         confirmation_id = match.group(1).lower()
         keyboard = InlineKeyboardMarkup(
@@ -570,7 +654,7 @@ async def _attach_confirmation_keyboard(adapter, chat_id, message_id, content: s
             ]
         )
         await adapter._bot.edit_message_reply_markup(
-            chat_id=normalize_telegram_chat_id(chat_id),
+            chat_id=_normalize_telegram_chat_id(chat_id),
             message_id=int(message_id),
             reply_markup=keyboard,
         )
@@ -671,11 +755,11 @@ async def _dispatch_confirmation_callback(adapter, update, query, choice: str) -
 
 def _install_telegram_button_bridge() -> bool:
     """Patch the pinned Telegram adapter without adding Ads credentials to Hermes."""
-    try:
-        from plugins.platforms.telegram.adapter import TelegramAdapter
-    except Exception as exc:  # noqa: BLE001 - secure reply flow remains the fallback
-        log.warning("Aimash Telegram button bridge unavailable: %s", type(exc).__name__)
+    adapter_module = _telegram_adapter_module()
+    if adapter_module is None:
+        log.warning("Aimash Telegram button bridge unavailable: TelegramAdapter not found")
         return False
+    TelegramAdapter = adapter_module.TelegramAdapter
     if getattr(TelegramAdapter, "_aimash_button_bridge", False):
         return True
 
@@ -757,6 +841,11 @@ def _pre_tool_call(*args, **kwargs):
     turn_id = str(kwargs.get("turn_id") or "")
 
     if _is_aimash_write(tool_name):
+        if _button_bridge_ready is False:
+            return {
+                "action": "block",
+                "message": "Aimash WRITE: Telegram confirmation buttons are unavailable",
+            }
         if not session_id or not turn_id:
             return {"action": "block", "message": "Aimash WRITE: нет доверенной корреляции хода"}
         inbound = _current_inbound()
@@ -783,16 +872,20 @@ def _pre_tool_call(*args, **kwargs):
 
     # Private trusted-operator profile: READ, audit, web, memory, skills and native tools never
     # phase-lock one another. External content remains marked as data in MCP envelopes, while
-    # financial execution is protected by the independent trusted Telegram confirmation path.
+    # mutation execution is protected by the independent trusted Telegram confirmation path.
     return None
 
 
 def register(ctx):  # noqa: ANN001 - runtime-owned plugin API
-    _install_telegram_button_bridge()
+    global _button_bridge_ready
+
     ctx.register_hook("pre_gateway_dispatch", _capture_gateway_event)
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     ctx.register_hook("post_tool_call", _post_tool_call)
     ctx.register_hook("transform_tool_result", _transform_tool_result)
+    _button_bridge_ready = _install_telegram_button_bridge()
+    if not _button_bridge_ready:
+        log.error("aimash_trusted_transport loaded without Telegram button bridge; WRITE blocked")
     if len(os.environ.get("AIMASH_TRUST_HMAC_KEY", "").encode("utf-8")) < 32:
         log.warning("aimash_trusted_transport loaded without a valid signing key; WRITE will block")
     else:

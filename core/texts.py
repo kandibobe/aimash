@@ -1208,7 +1208,7 @@ def fmt_mutready(r: dict, lang: str | None = None) -> str:
         else:
             lines.append(
                 "⏭ final step (OWNER, by hand): set GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (all "
-                "visible; prod default) or an explicit id list (docs/DEPLOYMENT.md §2.1). "
+                "visible; prod default) or an explicit id list (see .env.example). "
                 "The bot never changes this config itself."
             )
         return "\n".join(lines)
@@ -1236,7 +1236,7 @@ def fmt_mutready(r: dict, lang: str | None = None) -> str:
     else:
         lines.append(
             "⏭ финальный шаг (ВЛАДЕЛЕЦ, руками): GOOGLE_ADS_ALLOWED_CUSTOMER_IDS=all (все видимые) "
-            "или явный список id (docs/DEPLOYMENT.md §2.1). Пусто = мутации выключены (fail-closed). "
+            "или явный список id (см. .env.example). Пусто = мутации выключены (fail-closed). "
             "Бот этот конфиг сам НЕ меняет."
         )
     return "\n".join(lines)

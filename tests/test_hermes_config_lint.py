@@ -361,6 +361,19 @@ def test_lint_accepts_live_slugs_everywhere():
     )
 
 
+def test_lint_accepts_pinned_codex_slug_and_rejects_unknown_one():
+    """Codex OAuth has its own pinned catalog; it must not be treated as unchecked OpenRouter."""
+    good = {"model": {"provider": "openai-codex", "default": "gpt-5.6-terra"}}
+    good_rep = _LINT.Report()
+    _LINT.check_model_slugs(good, good_rep)
+    assert not good_rep.findings
+
+    bad = {"model": {"provider": "openai-codex", "default": "gpt-5.6-terra-typo"}}
+    bad_rep = _LINT.Report()
+    _LINT.check_model_slugs(bad, bad_rep)
+    assert any(f.path == "model" for f in bad_rep.errors)
+
+
 def test_lint_warns_but_does_not_redden_without_network(monkeypatch):
     """Каталог не достался ⇒ WARN, не ERROR: линт зовут из pre-commit и из CI без гарантии сети.
 

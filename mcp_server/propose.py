@@ -43,7 +43,7 @@ from confirm import render
 from confirm.attachment import plan_attachment, plan_budget_chart
 from confirm.consequences import consequences
 from confirm.risk import TIER_L3, risk_tier
-from confirm.store import ConfirmStore
+from confirm.store import ConfirmStore, PendingProposalExists
 from core.config import normalize_customer_id
 from core.resilience import run_ads_read_call
 
@@ -162,6 +162,7 @@ async def build_proposal(
     # P0 (golden rule #4): денежная команда в валюте ≠ валюте аккаунта → отказ с уточнением ДО
     # показа кнопок (FX не делаем; иначе «было→станет» соврал бы про сумму). Валюта — best-effort:
     # неизвестна (нет клиента/сбой read) ⇒ не блокируем (и чужую валюту на показе не печатаем).
+    acct_cur = ""
     if operation in MONEY_OPS:
         # P0-1: голая цифра без валютного слова. Модель порой всё равно ставит currency (обычно
         # 'USD') — детерминированно снимаем её, если пользователь валюту НЕ писал, чтобы сумма
@@ -171,7 +172,6 @@ async def build_proposal(
         claimed_cur = params.get("currency")
         if claimed_cur and claimed_cur != "percent" and not detect_currency_token(user_text):
             params = {**params, "currency": None}
-        acct_cur = ""
         try:
             from ads.client import build_client_async
 
@@ -186,11 +186,14 @@ async def build_proposal(
         mismatch = currency_mismatch(operation, params, acct_cur)
         if mismatch:
             raise ProposalRefused("⚠️ " + mismatch)
+    if acct_cur:
+        params = {**params, "_account_currency": acct_cur}
     # Снимок + аттестация свежести в одном месте: `_before` как раньше (только при успехе),
     # `_freshness` — всегда. Без маркера черновик считается непрочитанным (fail-closed).
     params = attach_freshness(params, snap)
     # Человекочитаемая сводка по operation+params (деньги — реальное «40.00 → 48.00 (+20%)»).
-    # Для create_rsa/create_gdn у вызывающего свой богатый summary → рендер вернёт "".
+    # Все поддержанные mutations имеют общий детерминированный renderer. `summary` оставлен только
+    # для rolling compatibility старых внутренних callers.
     # Волна 1b: обещание вложения и обязательство его доставить рождаются ИЗ ОДНОГО решения. `spec`
     # решает оба: он же включает фразу «полный список во вложении» в тексте, он же ставит
     # attachment_state='pending' в той же вставке ниже. Разъехаться им негде — раньше первое жило в
@@ -200,6 +203,13 @@ async def build_proposal(
     display = (
         render.fmt_mutation_summary(operation, params, lang, attachment=spec is not None) or summary
     )
+    if not display.strip():
+        text = (
+            "Could not safely render the complete change summary. Nothing was changed."
+            if lang == "en"
+            else "Не удалось безопасно показать полную сводку изменения. Ничего не изменено."
+        )
+        raise ProposalRefused(text)
     # Волна 5: тир риска — ЧТО показать, а не нужен ли человек (`confirm/risk.py`). Считается из тех
     # же (operation, params), из которых курьер вложений пересчитает его через минуту, — второго
     # места, где решение принимается, нет. На L3 карточка несёт блок «последствия», а числа в нём
@@ -224,17 +234,20 @@ async def build_proposal(
     if external_context and operation in MONEY_OPS_UI:
         # Денежное предложение при внешнем контенте — усиленное предупреждение В СВОДКЕ (и в audit).
         display = i18n.t("external_context_money_warn", lang) + "\n\n" + display
-    await store.save_proposal(
-        confirmation_id=cid,
-        operation=operation,
-        customer_id=customer_id,  # штамп аккаунта мутации (authoritative для execute_confirmed)
-        params=params,
-        summary=display,
-        chat_id=chat_id,
-        user_initiated=user_initiated,
-        attachment_state="pending" if (spec is not None or chart is not None) else None,
-        risk_tier=tier,
-    )
+    try:
+        await store.save_proposal(
+            confirmation_id=cid,
+            operation=operation,
+            customer_id=customer_id,  # штамп аккаунта мутации (authoritative для execute_confirmed)
+            params=params,
+            summary=display,
+            chat_id=chat_id,
+            user_initiated=user_initiated,
+            attachment_state="pending" if (spec is not None or chart is not None) else None,
+            risk_tier=tier,
+        )
+    except PendingProposalExists:
+        raise ProposalRefused(i18n.t("propose_draft_limit", lang)) from None
     return BuiltProposal(
         cid=cid,
         operation=operation,

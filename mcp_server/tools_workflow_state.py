@@ -35,7 +35,7 @@ from keywords.export import write_keywords_xlsx
 from keywords.filter import filter_relevance
 from keywords.seeds import generate_seed_keywords
 from mcp_server.artifacts import artifact_path, publish_artifact, remove_artifact
-from mcp_server.envelope import autonomously_applied, ok, proposed, refused
+from mcp_server.envelope import ok, proposed, refused
 from mcp_server.trusted_transport import get_trusted_turn
 from reports.sheets import (
     parse_spreadsheet_id,
@@ -544,7 +544,7 @@ async def _profile_proposal(
     turn = get_trusted_turn()
     provenance = get_provenance()
     store = ConfirmStore()
-    if await store.count_run_proposals(provenance.run_id) >= 1:
+    if await store.count_run_pending_proposals(provenance.run_id) >= 1:
         return refused(i18n.t("propose_draft_limit"), error_code="refused")
     confirmation_id = uuid.uuid4().hex
     summary = texts.fmt_client_diff(
@@ -563,28 +563,6 @@ async def _profile_proposal(
         chat_id=turn.actor_chat_id,
         user_initiated=True,
     )
-    from confirm.policy import may_execute_autonomously
-
-    if may_execute_autonomously(operation):
-        if not await store.authorize_autonomous(confirmation_id, operation=operation):
-            raise PermissionError("autonomous profile authorization rejected")
-        from clients.execute import execute_confirmed_memory
-
-        await execute_confirmed_memory(store, confirmation_id)
-        applied = await store.get_applied_audit_result(confirmation_id)
-        if applied is None:
-            raise RuntimeError("applied profile audit row is unavailable")
-        summary = texts.fmt_mutation_result(
-            applied.operation, applied.result, lang=turn.language_code
-        )
-        if not summary.strip():
-            raise RuntimeError("applied profile audit result is not renderable")
-        return autonomously_applied(
-            confirmation_id=confirmation_id,
-            operation=applied.operation,
-            customer_id=applied.customer_id,
-            summary=summary,
-        )
     return proposed(
         confirmation_id=confirmation_id,
         operation=operation,
@@ -595,7 +573,7 @@ async def _profile_proposal(
 
 
 async def propose_profile_change(account: str, text: str) -> dict[str, Any]:
-    """Extract free-form client data and autonomously save/update the account-scoped profile."""
+    """Extract free-form client data and propose a confirm-gated account profile change."""
     ensure_read_allowed(str(account))
     extracted = await extract_profile(text, language=i18n.current_lang())
     if extracted.is_empty():

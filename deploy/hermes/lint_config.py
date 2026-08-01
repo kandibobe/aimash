@@ -53,6 +53,25 @@ _OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 _ENDPOINTS_URL_TMPL = "https://openrouter.ai/api/v1/models/{slug}/endpoints"
 _CATALOG_TIMEOUT = 6.0
 
+# OAuth-backed Codex provider does not use OpenRouter's catalog. These are the pinned Hermes
+# v0.19.0 curated fallbacks from hermes_cli/codex_models.py at ref v2026.7.20. Keep the list tied
+# to PIN.json: a Hermes upgrade must re-attest it instead of silently accepting a guessed slug.
+_OPENAI_CODEX_MODELS = frozenset(
+    {
+        "gpt-5.6-sol",
+        "gpt-5.6-sol-pro",
+        "gpt-5.6-terra",
+        "gpt-5.6-terra-pro",
+        "gpt-5.6-luna",
+        "gpt-5.6-luna-pro",
+        "gpt-5.5",
+        "gpt-5.4-mini",
+        "gpt-5.4",
+        "gpt-5.3-codex",
+        "gpt-5.3-codex-spark",
+    }
+)
+
 # ── Аттестации ────────────────────────────────────────────────────────────────
 # Дословная цитата + откуда взята. Таблица НЕ читает эталонные конфиги этого репозитория:
 # оракул, сверяющий файл сам с собой, доказывает только собственную непротиворечивость.
@@ -760,7 +779,16 @@ def check_model_slugs(cfg: dict, rep: Report) -> None:
         if not model:
             rep.error(path, "модель не задана — Hermes молча уедет на свой дефолт")
             continue
-        if provider.lower() != "openrouter":
+        normalized_provider = provider.lower()
+        if normalized_provider == "openai-codex":
+            if model not in _OPENAI_CODEX_MODELS:
+                rep.error(
+                    path,
+                    f"{model!r} нет в curated catalog openai-codex пинового Hermes; "
+                    "сверить hermes_cli/codex_models.py и обновить PIN/аттестацию",
+                )
+            continue
+        if normalized_provider != "openrouter":
             rep.warn(
                 path,
                 f"провайдер {provider!r}: по топологии (CLAUDE.md) gateway знает ровно один ключ, "

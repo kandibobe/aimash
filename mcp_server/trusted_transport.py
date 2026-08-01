@@ -68,7 +68,7 @@ class TrustedTurn:
 
     @property
     def run_id(self) -> str:
-        """Stable per-human-message key for И8 (one proposal per assistant turn)."""
+        """Stable per-human-message key for one pending confirmation card per command."""
         raw = f"telegram:{self.actor_chat_id}:{self.thread_id or '-'}:{self.message_id}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
