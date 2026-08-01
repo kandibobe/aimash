@@ -120,6 +120,31 @@ def test_envelope_err_skeleton_and_redaction():
     assert env["suggested_action"]
 
 
+def test_envelope_err_queues_sanitized_structured_incident(monkeypatch):
+    incidents = []
+    monkeypatch.setattr(envelope, "log_tool_failure", lambda **fields: incidents.append(fields))
+
+    env = envelope.err(
+        RuntimeError("boom: token=SUPERSECRETVALUE123"),
+        tool_name="execute_google_ads_query",
+        account="1234567890",
+    )
+
+    assert env["ok"] is False
+    assert incidents == [
+        {
+            "tool": "execute_google_ads_query",
+            "account": "1234567890",
+            "error_code": "internal",
+            "error_type": "INTERNAL_ERROR",
+            "exception_type": "RuntimeError",
+            "message": env["message"],
+            "suggested_action": env["suggested_action"],
+        }
+    ]
+    assert "SUPERSECRETVALUE123" not in str(incidents)
+
+
 # ── Сериализация: производные метрики считает КОД ───────────────────────────────────
 def test_metrics_dict_computed_by_code():
     m = Metrics(100, 10, 5_000_000, 2.0, 20.0)
@@ -169,19 +194,31 @@ def test_get_campaign_stats_envelope_offline(monkeypatch):
 
 
 def test_wrapper_catches_reader_failure_into_envelope(monkeypatch):
+    incident_context = {}
+    original_err = tr.err
+
     async def fake_client(customer_id=None):
         return object()
 
     async def boom(*args, **kwargs):
         raise RuntimeError("upstream failed: api_key=SECRET_TOKEN_ABC")
 
+    def capture_err(exc, **context):
+        incident_context.update(context)
+        return original_err(exc, **context)
+
     monkeypatch.setattr(tr, "build_client_async", fake_client)
     monkeypatch.setattr(tr, "run_ads_read_call", boom)
+    monkeypatch.setattr(tr, "err", capture_err)
 
     with _read_allowed():
         env = asyncio.run(tr.get_campaign_stats(account=DRAFT_ACCOUNT_ID))
     assert env["rows"] == [] and env["error"]  # fail-closed: сбой → error-конверт, не исключение
     assert "SECRET_TOKEN_ABC" not in env["error"]  # правило 5
+    assert incident_context == {
+        "tool_name": "get_campaign_stats",
+        "account": DRAFT_ACCOUNT_ID,
+    }
     # Код доказывает, что поймали сбой РИДЕРА, а не отказ замка — иначе тест зелёный по другой причине.
     assert env["error_code"] == "internal"
 

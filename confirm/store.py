@@ -839,21 +839,31 @@ class ConfirmStore:
         log.warning и НЕ кладём спурьёзную applied-строку в журнал (раньше audit писался всегда,
         даже при статусе ≠ executing — асимметрия с record_failure)."""
         async with Session() as s:
-            p = (
-                await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
-            ).scalar_one_or_none()
-            if p is None:
-                return
-            if p.status != "executing":
+            res = await s.execute(
+                update(Proposal)
+                .where(
+                    Proposal.confirmation_id == confirmation_id,
+                    Proposal.status == "executing",
+                )
+                .values(status="applied", decided_at=func.now())
+            )
+            if cast(CursorResult, res).rowcount != 1:
+                status = (
+                    await s.execute(
+                        select(Proposal.status).where(Proposal.confirmation_id == confirmation_id)
+                    )
+                ).scalar_one_or_none()
+                await s.rollback()
                 log.warning(
                     "finalize() на черновике %s в статусе %s (ожидался executing) — "
                     "пропускаю запись applied в журнал",
                     confirmation_id,
-                    p.status,
+                    status or "missing",
                 )
                 return
-            p.status = "applied"
-            p.decided_at = func.now()
+            p = (
+                await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
+            ).scalar_one()
             s.add(_audit(p, p.chat_id, "applied", result=result))
             await s.commit()
 
@@ -1034,18 +1044,25 @@ class ConfirmStore:
         (нельзя «понизить» успешно применённую операцию). SDK при ошибке до claim не вызывался —
         повтор = новая команда (тех же кнопок у старого черновика уже нет)."""
         async with Session() as s:
+            res = await s.execute(
+                update(Proposal)
+                .where(
+                    Proposal.confirmation_id == confirmation_id,
+                    Proposal.status.in_(("confirmed", "executing")),
+                )
+                .values(status="failed", decided_at=func.now())
+            )
+            if cast(CursorResult, res).rowcount != 1:
+                await s.rollback()
+                return
             p = (
                 await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
-            ).scalar_one_or_none()
-            if p is not None:
-                if p.status in ("confirmed", "executing"):
-                    p.status = "failed"
-                    p.decided_at = func.now()
-                # Авторитетная редакция на границе БД (golden rule #5): str(e) от SDK/google.auth
-                # может нести креды; редактируем здесь, чтобы НИ один вызывающий (бот, dev-скрипты,
-                # будущий код) не записал секрет в audit_log. redact_text идемпотентен.
-                s.add(_audit(p, p.chat_id, "failed", result={"error": redact_text(str(error))}))
-                await s.commit()
+            ).scalar_one()
+            # Авторитетная редакция на границе БД (golden rule #5): str(e) от SDK/google.auth
+            # может нести креды; редактируем здесь, чтобы НИ один вызывающий (бот, dev-скрипты,
+            # будущий код) не записал секрет в audit_log. redact_text идемпотентен.
+            s.add(_audit(p, p.chat_id, "failed", result={"error": redact_text(str(error))}))
+            await s.commit()
 
 
 def _audit(

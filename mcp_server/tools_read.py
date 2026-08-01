@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import date, datetime
 from collections.abc import Mapping
 from typing import Any, Awaitable, Callable, Literal
@@ -52,7 +53,6 @@ from ads.read import (
 from audit.collect import gather_audit
 from clients.store import ClientProfileStore
 from core import observe  # Волна 3: вызов инструмента — прогон в журнале событий
-from core.logging import log
 from core.quota import snapshot as quota_snapshot
 from core.resilience import run_ads_read_call
 from db.history import list_recent_applied_by_customer
@@ -132,8 +132,8 @@ async def _guarded(
         async with observe.run_scope("mcp_read"):
             return await work()
     except Exception as e:  # noqa: BLE001 — граница слоя: наружу только редактированное
-        log.warning("mcp read tool failed: %s", type(e).__name__)
-        return err(e)
+        tool_name = work.__qualname__.split(".<locals>", 1)[0].rsplit(".", 1)[-1]
+        return err(e, tool_name=tool_name, account=str(account))
 
 
 def _period(
@@ -285,20 +285,32 @@ def _google_ads_row_dict(row: Any) -> dict[str, Any]:
     )
 
 
+GOOGLE_ADS_QUERY_PAYLOAD_LIMIT_BYTES = 512_000
+
+
 def _execute_google_ads_query_sync(
     client: Any,
     account: str,
     gaql_query: str,
     row_limit: int,
-) -> tuple[list[dict[str, Any]], bool]:
+) -> tuple[list[dict[str, Any]], bool, bool]:
     service = client.get_service("GoogleAdsService")
     rows: list[dict[str, Any]] = []
+    payload_bytes = 2  # JSON brackets around the rows array
     for batch in service.search_stream(customer_id=str(account), query=gaql_query):
         for row in batch.results:
             if len(rows) >= row_limit:
-                return rows, True
-            rows.append(_google_ads_row_dict(row))
-    return rows, False
+                return rows, True, False
+            item = _google_ads_row_dict(row)
+            item_bytes = len(
+                json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            )
+            separator_bytes = 1 if rows else 0
+            if payload_bytes + separator_bytes + item_bytes > GOOGLE_ADS_QUERY_PAYLOAD_LIMIT_BYTES:
+                return rows, False, True
+            rows.append(item)
+            payload_bytes += separator_bytes + item_bytes
+    return rows, False, False
 
 
 async def execute_google_ads_query(
@@ -325,7 +337,7 @@ async def execute_google_ads_query(
             raise ValueError("row_limit must be an integer between 1 and 10000")
 
         client = await build_client_async(account)
-        rows, capped = await run_ads_read_call(
+        rows, row_capped, payload_capped = await run_ads_read_call(
             _execute_google_ads_query_sync,
             client,
             str(account),
@@ -335,9 +347,15 @@ async def execute_google_ads_query(
             label="mcp.execute_google_ads_query",
         )
         response = ok(rows, limit=row_limit)
-        response["reader_capped"] = capped
-        if capped:
+        response["reader_capped"] = row_capped
+        if row_capped:
             response["reader_limit"] = row_limit
+        response["payload_capped"] = payload_capped
+        if payload_capped:
+            response["payload_limit_bytes"] = GOOGLE_ADS_QUERY_PAYLOAD_LIMIT_BYTES
+            response["payload_hint"] = (
+                "Сузь SELECT/период или добавь LIMIT: ответ достиг лимита размера контекста."
+            )
         return response
 
     return await _guarded(_work, account=str(account))

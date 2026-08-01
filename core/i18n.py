@@ -1388,6 +1388,18 @@ CATALOG: dict[str, dict[str, str]] = {
         "ru": "⚠️ Расход {now}{cur} при нуле конверсий (было {prev_conv}).",
         "en": "⚠️ Spend {now}{cur} with zero conversions (was {prev_conv}).",
     },
+    "anomaly_delivery_stopped": {
+        "ru": "🛑 Показы остановились: 0 при {prev} в предыдущем периоде.",
+        "en": "🛑 Delivery stopped: 0 impressions versus {prev} in the previous period.",
+    },
+    "anomaly_impressions_drop": {
+        "ru": "📉 Показы упали на {pct}% ({prev} → {now}).",
+        "en": "📉 Impressions down {pct}% ({prev} → {now}).",
+    },
+    "anomaly_ctr_drop": {
+        "ru": "📉 CTR упал на {pct}% ({prev}% → {now}%).",
+        "en": "📉 CTR down {pct}% ({prev}% → {now}%).",
+    },
     "camp_network_title": {
         "ru": (
             "🌐 Сети кампании «{camp}»\n\n"

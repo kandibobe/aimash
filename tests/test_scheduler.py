@@ -20,6 +20,15 @@ def _m(cost: float, conv: float):
     return SimpleNamespace(cost=cost, conversions=conv)
 
 
+def _traffic(cost: float, conv: float, *, impressions: int, clicks: int):
+    return SimpleNamespace(
+        cost=cost,
+        conversions=conv,
+        impressions=impressions,
+        clicks=clicks,
+    )
+
+
 async def _fake_client_async(*a, **k):
     # scheduler зовёт await build_client_async(acct) (холодная сборка вне loop) — фейк-заглушка.
     return None
@@ -112,6 +121,54 @@ def test_anomaly_spend_no_conv():
 def test_anomaly_custom_thresholds():
     # порог 200% — рост на 100% НЕ должен триггерить
     assert detect_anomalies(_m(200, 5), _m(100, 5), {"spend_spike_pct": 200.0}) == []
+
+
+def test_anomaly_detects_stopped_delivery():
+    alerts = detect_anomalies(
+        _traffic(0, 0, impressions=0, clicks=0),
+        _traffic(0, 2, impressions=1000, clicks=100),
+    )
+    assert "delivery_stopped" in {a.kind for a in alerts}
+
+
+def test_anomaly_detects_impressions_and_ctr_drop():
+    alerts = detect_anomalies(
+        _traffic(20, 2, impressions=200, clicks=4),
+        _traffic(20, 2, impressions=1000, clicks=100),
+    )
+    kinds = {a.kind for a in alerts}
+    assert {"impressions_drop", "ctr_drop"} <= kinds
+
+
+def test_anomaly_ignores_delivery_noise_below_previous_impressions_floor():
+    alerts = detect_anomalies(
+        _traffic(0, 0, impressions=0, clicks=0),
+        _traffic(0, 0, impressions=10, clicks=1),
+    )
+    assert not {"delivery_stopped", "impressions_drop", "ctr_drop"} & {a.kind for a in alerts}
+
+
+def test_scheduler_account_health_includes_status_heartbeats(monkeypatch):
+    from audit import engine
+    from scheduler import jobs
+
+    captured = {}
+
+    def fake_build(report, **kwargs):
+        captured["report"] = report
+        captured.update(kwargs)
+        return "health"
+
+    monkeypatch.setattr(engine, "build_audit", fake_build)
+    report = object()
+    policy = [SimpleNamespace(approval_status="DISAPPROVED")]
+
+    assert jobs._account_health(report, ad_policy=policy, account_status="SUSPENDED") == "health"
+    assert captured == {
+        "report": report,
+        "ad_policy": policy,
+        "account_status": "SUSPENDED",
+    }
 
 
 # ── Очистка просроченных черновиков (reject + audit), на временном SQLite ─────────
@@ -398,6 +455,11 @@ def _wire_sched(monkeypatch, jobs, reports: dict, recipients: set[int]):
     monkeypatch.setattr(jobs, "summary_text", lambda r, lang=None: f"R:{r.customer_id}")
     monkeypatch.setattr(jobs, "_recipients", _arecipients(recipients))
 
+    async def no_status_heartbeats(_client, _acct):
+        return None, None
+
+    monkeypatch.setattr(jobs, "_account_status_heartbeats", no_status_heartbeats)
+
 
 def test_digest_delta_line_unit():
     """3.3: дельту CPA/ROAS считает КОД (golden rule #4); нет сравнения/конверсий → '' (не мусор),
@@ -475,7 +537,9 @@ async def test_digest_quiet_accounts_collapse(monkeypatch):
     A, B = "8881112220", "8882223330"
     reports = {A: _rep(A, _mm(100, 1)), B: _rep(B, _mm(0, 0, clicks=0))}
     _wire_sched(monkeypatch, jobs, reports, {91004})
-    monkeypatch.setattr(jobs, "_account_health", lambda r: None)  # детерминизм: аудит молчит
+    monkeypatch.setattr(
+        jobs, "_account_health", lambda r, **_kwargs: None
+    )  # детерминизм: аудит молчит
 
     async def _no_applied(_days):
         return {}
@@ -499,7 +563,7 @@ async def test_digest_applied_line_unquiets_and_counts_only_visible(monkeypatch)
     A, B = "8881112220", "8882223330"
     reports = {A: _rep(A, _mm(100, 1)), B: _rep(B, _mm(0, 0, clicks=0))}
     _wire_sched(monkeypatch, jobs, reports, {91005})
-    monkeypatch.setattr(jobs, "_account_health", lambda r: None)
+    monkeypatch.setattr(jobs, "_account_health", lambda r, **_kwargs: None)
 
     async def _applied(_days):
         return {B: 2, "9998887776": 100}  # 100 — аккаунт вне дайджеста, утечь не должен
@@ -525,7 +589,7 @@ async def test_digest_auction_stale_nudge(monkeypatch):
     A, B = "5551112223", "5552223334"
     reports = {A: _rep(A, _mm(100, 1)), B: _rep(B, _mm(0, 0, clicks=0))}
     _wire_sched(monkeypatch, jobs, reports, {91011})
-    monkeypatch.setattr(jobs, "_account_health", lambda r: None)
+    monkeypatch.setattr(jobs, "_account_health", lambda r, **_kwargs: None)
 
     async def _no_applied(_days):
         return {}
@@ -571,7 +635,7 @@ async def test_digest_all_quiet_single_short_message(monkeypatch):
     B = "8882223330"
     reports = {B: _rep(B, _mm(0, 0, clicks=0))}
     _wire_sched(monkeypatch, jobs, reports, {91006})
-    monkeypatch.setattr(jobs, "_account_health", lambda r: None)
+    monkeypatch.setattr(jobs, "_account_health", lambda r, **_kwargs: None)
 
     async def _no_applied(_days):
         return {}
@@ -595,7 +659,7 @@ async def test_digest_blocks_sorted_by_at_risk(monkeypatch):
     reports = {A: _rep(A, _mm(1000, 5)), B: _rep(B, _mm(200, 0))}
     _wire_sched(monkeypatch, jobs, reports, {91007})
 
-    def fake_health(report):
+    def fake_health(report, **_kwargs):
         return SimpleNamespace(
             at_risk=200.0 if report.customer_id == B else 0.0, findings=[], currency="USD"
         )

@@ -34,6 +34,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from mcp_server.tool_failures import log_tool_failure
+
 # Стабильный контракт кодов. Расширять можно, ПЕРЕИМЕНОВЫВАТЬ — нет: на них ассертят инварианты.
 ERROR_CODES: frozenset[str] = frozenset(
     {
@@ -226,13 +228,28 @@ def classify_error(exc: BaseException) -> str:
     return "internal"
 
 
-def err(exc: BaseException) -> dict[str, Any]:
+def err(
+    exc: BaseException,
+    *,
+    tool_name: str | None = None,
+    account: str | None = None,
+) -> dict[str, Any]:
     """Ошибочный конверт: пустые rows + редактированный текст (правило 5) + машиночитаемый код.
     Форма совпадает с ok() по ключам-скелету, чтобы клиент не различал ветки структурно."""
     from mcp_server.redact import redact_error
 
     message = redact_error(exc)
     error_code = classify_error(exc)
+    healing = self_healing_fields(success=False, error_code=error_code, message=message)
+    log_tool_failure(
+        tool=tool_name or "unknown",
+        account=str(account) if account is not None else None,
+        error_code=error_code,
+        error_type=healing["error_type"],
+        exception_type=type(exc).__name__,
+        message=message,
+        suggested_action=healing["suggested_action"],
+    )
     return {
         "rows": [],
         "total_rows": 0,
@@ -245,7 +262,7 @@ def err(exc: BaseException) -> dict[str, Any]:
         "code_numbers": [],
         "error": message,
         "error_code": error_code,
-        **self_healing_fields(success=False, error_code=error_code, message=message),
+        **healing,
     }
 
 

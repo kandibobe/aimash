@@ -19,7 +19,6 @@ from ads.read import account_currency
 from clients import crawl_jobs
 from clients.store import ClientProfileStore
 from core import observe
-from core.logging import log
 from core.resilience import run_ads_read_call
 from keywords.cluster import cluster_keywords as _cluster_keywords
 from keywords.cluster import suggest_negative_keywords
@@ -39,8 +38,8 @@ async def _guarded(
         async with observe.run_scope("mcp_read"):
             return await work()
     except Exception as exc:  # noqa: BLE001 - MCP boundary, never leak raw exception text
-        log.warning("mcp workflow read failed: %s", type(exc).__name__)
-        return err(exc)
+        tool_name = work.__qualname__.split(".<locals>", 1)[0].rsplit(".", 1)[-1]
+        return err(exc, tool_name=tool_name, account=str(account))
 
 
 async def build_report(

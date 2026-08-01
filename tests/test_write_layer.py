@@ -2345,8 +2345,11 @@ async def test_real_store_apply_is_single_use_replay_blocked():
 
 # ── record_failure: статус и audit согласованы; терминальный applied не понижается ─
 async def test_record_failure_terminalizes_confirmed_but_not_applied():
+    from sqlalchemy import select
+
     from confirm.store import ConfirmStore
-    from db.session import init_db
+    from db.models import AuditLog
+    from db.session import Session, init_db
 
     await init_db()
     store = ConfirmStore()
@@ -2383,6 +2386,35 @@ async def test_record_failure_terminalizes_confirmed_but_not_applied():
     assert (await store.get_confirmed(cid2)).status == "applied"
     await store.record_failure(cid2, error="late error")
     assert (await store.get_confirmed(cid2)).status == "applied"  # терминальный не понижен
+    async with Session() as session:
+        terminal = (
+            (
+                await session.execute(
+                    select(AuditLog.status).where(
+                        AuditLog.confirmation_id == cid2,
+                        AuditLog.status.in_(("applied", "failed")),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert terminal == ["applied"]  # поздняя ошибка не создаёт ложную failed audit-row
+
+
+def test_terminal_audit_transitions_are_compare_and_set():
+    import inspect
+
+    from confirm.store import ConfirmStore
+
+    finalize_src = inspect.getsource(ConfirmStore.finalize)
+    failure_src = inspect.getsource(ConfirmStore.record_failure)
+    assert "update(Proposal)" in finalize_src
+    assert 'Proposal.status == "executing"' in finalize_src
+    assert "rowcount != 1" in finalize_src
+    assert "update(Proposal)" in failure_src
+    assert 'Proposal.status.in_(("confirmed", "executing"))' in failure_src
+    assert "rowcount != 1" in failure_src
 
 
 async def test_record_failure_redacts_secret_in_audit():

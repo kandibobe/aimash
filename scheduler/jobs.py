@@ -100,7 +100,7 @@ async def _account_period(client, acct: str, n_days: int):
     return await account_period(client, acct, last_n_days(n_days), label=f"sched_tz_{acct}")
 
 
-def _account_health(report):
+def _account_health(report, *, ad_policy=None, account_status=None):
     """Аудит по УЖЕ собранному отчёту — engine-only: НИ ОДНОГО доп. чтения Google Ads. Планировщик
     ходит веером по всем аккаунтам, и полный gather_audit (23 чтения × N аккаунтов × каждый прогон)
     съел бы квоту — поэтому здесь только чеки, которым хватает отчёта (остальные молчат честно, а не
@@ -114,9 +114,26 @@ def _account_health(report):
     try:
         from audit.engine import build_audit
 
-        return build_audit(report)
+        return build_audit(report, ad_policy=ad_policy, account_status=account_status)
     except Exception:  # noqa: BLE001 — здоровье необязательно, отчёт важнее
         return None
+
+
+async def _account_status_heartbeats(client, acct: str):
+    """Прочитать status customer и policy health активных объявлений без отказа всего отчёта."""
+    from reports.queries import fetch_account_status, fetch_ad_policy_health
+
+    async def _read(fn, label: str):
+        try:
+            return await run_ads_read_call(fn, client, acct, label=label)
+        except Exception as e:  # noqa: BLE001 — основной отчёт важнее heartbeat-довеска
+            await capture_exception(e, where=f"scheduler:{label}:{acct}")
+            return None
+
+    return await asyncio.gather(
+        _read(fetch_ad_policy_health, "audit_ad_policy"),
+        _read(fetch_account_status, "audit_account_status"),
+    )
 
 
 def _health_line(result, lang: str) -> str:
@@ -350,9 +367,18 @@ async def run_scheduled_report(bot, only_chat: int | None = None) -> None:
                 except Exception:  # noqa: BLE001
                     currency = ""
                 report = await build_account_report_async(client, acct, period, currency=currency)
+                # Два дешёвых heartbeat-READ дополняют engine-only аудит статусами, которых нет в
+                # метриках отчёта: состояние customer и impaired approval у активных объявлений.
+                # Сбой одного heartbeat не скрывает основной отчёт и не превращается в «в норме»:
+                # build_audit получает None и честно не делает вывод по отсутствующим данным.
+                ad_policy, account_status = await _account_status_heartbeats(client, acct)
                 # Здоровье считаем ОДИН раз на аккаунт (движок — чистая функция, ctx не зависит от
                 # языка), рендерим per-lang. Как в /report: сначала «что горит», потом цифры.
-                health = _account_health(report)
+                health = _account_health(
+                    report,
+                    ad_policy=ad_policy,
+                    account_status=account_status,
+                )
                 cost = clicks = None
                 t = getattr(report, "totals", None)
                 if t is not None:

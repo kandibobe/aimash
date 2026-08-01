@@ -13,6 +13,9 @@ from dataclasses import dataclass
 DEFAULT_THRESHOLDS: dict[str, float] = {
     "spend_spike_pct": 50.0,  # расход вырос на >= X% к пред. периоду → алерт
     "conv_drop_pct": 50.0,  # конверсии упали на >= X% → алерт
+    "impressions_drop_pct": 70.0,  # показы упали на >= X% → алерт
+    "ctr_drop_pct": 50.0,  # CTR упал на >= X% → алерт
+    "min_previous_impressions": 100.0,  # не считать остановкой исчезновение малого шума
     "min_spend": 1.0,  # игнорировать шум при копеечном расходе (в валюте аккаунта)
 }
 
@@ -23,7 +26,7 @@ class Alert:
     рендерится в точке доставки на языке получателя (core/i18n, ключ anomaly_<kind>,
     scheduler.jobs._alert_line). Раньше message был RU-литералом и утекал EN-операторам."""
 
-    kind: str  # "spend_spike" | "conv_drop" | "spend_no_conv" — суффикс i18n-ключа
+    kind: str  # суффикс i18n-ключа `anomaly_<kind>`
     severity: str  # "warning" | "info"
     params: dict  # значения для подстановки в i18n-шаблон (числа форматирует КОД, без секретов)
 
@@ -47,9 +50,17 @@ def detect_anomalies(
     alerts: list[Alert] = []
     cost_now, cost_prev = float(current.cost), float(previous.cost)
     conv_now, conv_prev = float(current.conversions), float(previous.conversions)
+    impressions_now = float(getattr(current, "impressions", 0.0) or 0.0)
+    impressions_prev = float(getattr(previous, "impressions", 0.0) or 0.0)
+    clicks_now = float(getattr(current, "clicks", 0.0) or 0.0)
+    clicks_prev = float(getattr(previous, "clicks", 0.0) or 0.0)
 
     # Не шумим на околонулевом расходе в обоих периодах.
-    if cost_now < t["min_spend"] and cost_prev < t["min_spend"]:
+    if (
+        cost_now < t["min_spend"]
+        and cost_prev < t["min_spend"]
+        and impressions_prev < t["min_previous_impressions"]
+    ):
         return alerts
 
     ch = _pct_change(cost_now, cost_prev)
@@ -86,5 +97,46 @@ def detect_anomalies(
                 {"now": f"{cost_now:.2f}", "cur": cur, "prev_conv": f"{conv_prev:.1f}"},
             )
         )
+
+    # Delivery heartbeat. Низкую базу отсекаем отдельно от денежных порогов: у бесплатного/brand
+    # трафика показы могут быть критичны и при почти нулевом расходе.
+    if impressions_prev >= t["min_previous_impressions"]:
+        impressions_change = _pct_change(impressions_now, impressions_prev)
+        if impressions_now == 0:
+            alerts.append(
+                Alert(
+                    "delivery_stopped",
+                    "warning",
+                    {"prev": f"{impressions_prev:.0f}"},
+                )
+            )
+        elif impressions_change is not None and impressions_change <= -t["impressions_drop_pct"]:
+            alerts.append(
+                Alert(
+                    "impressions_drop",
+                    "warning",
+                    {
+                        "pct": f"{impressions_change:+.0f}",
+                        "prev": f"{impressions_prev:.0f}",
+                        "now": f"{impressions_now:.0f}",
+                    },
+                )
+            )
+
+        ctr_now = clicks_now / impressions_now if impressions_now > 0 else 0.0
+        ctr_prev = clicks_prev / impressions_prev
+        ctr_change = _pct_change(ctr_now, ctr_prev)
+        if impressions_now > 0 and ctr_change is not None and ctr_change <= -t["ctr_drop_pct"]:
+            alerts.append(
+                Alert(
+                    "ctr_drop",
+                    "warning",
+                    {
+                        "pct": f"{ctr_change:+.0f}",
+                        "prev": f"{ctr_prev * 100:.2f}",
+                        "now": f"{ctr_now * 100:.2f}",
+                    },
+                )
+            )
 
     return alerts
