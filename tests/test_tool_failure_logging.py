@@ -18,8 +18,12 @@ def test_tool_failure_transport_uses_non_blocking_queue(monkeypatch):
         message="bad field",
     )
     logger = logging.getLogger("aimash.tool_failures")
-    assert len(logger.handlers) == 1
-    assert isinstance(logger.handlers[0], logging.handlers.QueueHandler)
+    # Full-suite pytest may attach its own LogCaptureHandler instances directly to this logger.
+    # Assert our transport invariant without coupling the test to the runner's capture plumbing.
+    queue_handlers = [
+        handler for handler in logger.handlers if isinstance(handler, logging.handlers.QueueHandler)
+    ]
+    assert len(queue_handlers) == 1
     assert logger.propagate is False
 
 
