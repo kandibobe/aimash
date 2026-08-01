@@ -125,7 +125,7 @@ jobs:
             # в контейнере узнать нечем. Берём ПОСЛЕ reset — то есть ровно то, что задеплоено.
             export GIT_SHA="$(git rev-parse --short HEAD)"
             DEPLOY_STAGE="docker build/start"
-            docker compose up -d --build
+            docker compose up -d --build --remove-orphans
             docker image prune -f
             # `image prune` НЕ трогает кэш сборок BuildKit — а он растёт ~600 МБ за КАЖДЫЙ деплой
             # (к 2026-07-14 накопил 26.5 ГБ = 81% диска; байты лежат в /var/lib/containerd, поэтому

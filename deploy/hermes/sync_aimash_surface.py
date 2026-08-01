@@ -72,6 +72,21 @@ TOOL_LOOP_GUARDRAILS = {
         "idempotent_no_progress": 3,
     },
 }
+AIMASH_MCP_COMMAND = "docker"
+AIMASH_MCP_ARGS = (
+    "compose",
+    "--project-directory",
+    "/opt/aimash",
+    "--profile",
+    "mcp",
+    "run",
+    "--rm",
+    "--no-deps",
+    "-T",
+    "--name",
+    "aimash-mcp",
+    "mcp",
+)
 
 
 def reconcile_trusted_operator_policy(config: dict[str, Any]) -> dict[str, Any]:
@@ -225,7 +240,7 @@ def _env_value(path: Path, name: str) -> str:
 
 
 def reconcile_config(config: dict[str, Any], *, enabled: bool, tools: list[str]) -> dict[str, Any]:
-    """Mutate only the plugin activation and Aimash include-list."""
+    """Pin the current Aimash transport plus its plugin activation and include-list."""
     plugins = config.setdefault("plugins", {})
     if not isinstance(plugins, dict):
         raise RuntimeError("live Hermes config: plugins must be a mapping")
@@ -241,7 +256,10 @@ def reconcile_config(config: dict[str, Any], *, enabled: bool, tools: list[str])
     servers = config.get("mcp_servers")
     if not isinstance(servers, dict) or not isinstance(servers.get("aimash"), dict):
         raise RuntimeError("live Hermes config has no mcp_servers.aimash mapping")
-    tool_cfg = servers["aimash"].setdefault("tools", {})
+    aimash = servers["aimash"]
+    aimash["command"] = AIMASH_MCP_COMMAND
+    aimash["args"] = list(AIMASH_MCP_ARGS)
+    tool_cfg = aimash.setdefault("tools", {})
     if not isinstance(tool_cfg, dict):
         raise RuntimeError("live Hermes config: mcp_servers.aimash.tools must be a mapping")
     tool_cfg["include"] = list(tools)

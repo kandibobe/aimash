@@ -14,6 +14,7 @@ def test_deploy_reconnects_hermes_only_after_compose_health_gate():
     mcp_test = body.index("hermes mcp test aimash")
 
     assert health < restart < mcp_test
+    assert "docker compose up -d --build --remove-orphans" in body
     assert "EXPECTED_TOOLS=" in body
     assert "END { print value }" in body
     assert "grep -Eq '^[0-9]+$'" in body

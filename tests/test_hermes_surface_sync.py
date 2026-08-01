@@ -48,7 +48,7 @@ def test_surface_sync_model_policy_matches_repository_config():
     assert config["tool_loop_guardrails"] == SYNC.TOOL_LOOP_GUARDRAILS
 
 
-def test_enable_changes_only_plugin_and_aimash_include():
+def test_enable_pins_current_transport_plugin_and_aimash_include():
     cfg = SYNC.reconcile_config(_config(), enabled=True, tools=["read", "execute_confirmed"])
     assert cfg["model"] == {"provider": "host-local", "default": "host-model"}
     assert cfg["dashboard"]["secret"] == "must-survive"
@@ -56,6 +56,8 @@ def test_enable_changes_only_plugin_and_aimash_include():
         "enabled": ["other", "aimash_trusted_transport"],
         "disabled": [],
     }
+    assert cfg["mcp_servers"]["aimash"]["command"] == SYNC.AIMASH_MCP_COMMAND
+    assert cfg["mcp_servers"]["aimash"]["args"] == list(SYNC.AIMASH_MCP_ARGS)
     assert cfg["mcp_servers"]["aimash"]["tools"] == {
         "include": ["read", "execute_confirmed"],
         "exclude": ["never-touch"],
