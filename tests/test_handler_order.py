@@ -30,6 +30,10 @@ def test_react_catchall_precedes_legacy_text_handlers():
             assert idx_text < names.index(legacy)
 
 
+def test_startup_dispatcher_guard_accepts_react_first_order():
+    bm._assert_dispatcher_ready()
+
+
 def test_system_commands_remain_registered_behind_non_command_filter():
     names = _message_handler_names()
     for command in ("start", "help_", "cancel_cmd", "on_unknown_command"):

@@ -7318,6 +7318,24 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+def _assert_dispatcher_ready() -> None:
+    """Fail fast when the production dispatcher is empty or misordered."""
+    message_handlers = [handler.callback.__name__ for handler in dp.message.handlers]
+    if not message_handlers:
+        raise RuntimeError(
+            "dp.message без хендлеров — сломана регистрация (вероятно double-import при "
+            "`python -m bot.main`: второй модуль с пустым dp). См. алиас sys.modules у dp."
+        )
+
+    expected_prefix = ["newcampaign_react", "on_text"]
+    if message_handlers[:2] != expected_prefix:
+        raise RuntimeError(
+            "ReAct gateway должен открывать message-router как "
+            f"{expected_prefix}, получено {message_handlers[:2]}. "
+            "Slash-команды остаются доступны, потому что on_text исключает текст с префиксом '/'."
+        )
+
+
 async def main() -> None:
     setup_logging()
     init_observability()  # Sentry — no-op без SENTRY_DSN (core.observability)
@@ -7443,23 +7461,10 @@ async def main() -> None:
                 log.warning("per-user report schedules не зарегистрированы: %s", type(e).__name__)
     except Exception as e:  # планировщик опционален — бот работает и без него
         log.warning("scheduler не запущен: %s: %s", type(e).__name__, e)
-    # Fail-fast против double-import gotcha (см. алиас sys.modules у dp и блок __main__): поллить
-    # dp без хендлеров = молча глотать ВСЕ апдейты; неверный порядок = catch-all on_text проглотит
-    # команды/визарды. Лучше ГРОМКО упасть на старте, чем «работать» неправильно (prod-инцидент
-    # 2026-07-03). Инвариант зеркалит tests/test_handler_order.py + tests/test_entrypoint_dp.py.
-    _msg_handlers = [h.callback.__name__ for h in dp.message.handlers]
-    if not _msg_handlers:
-        raise RuntimeError(
-            "dp.message без хендлеров — сломана регистрация (вероятно double-import при "
-            "`python -m bot.main`: второй модуль с пустым dp). См. алиас sys.modules у dp."
-        )
-    if _msg_handlers[-1] != "on_text":
-        _pos = _msg_handlers.index("on_text") if "on_text" in _msg_handlers else "ОТСУТСТВУЕТ"
-        raise RuntimeError(
-            f"catch-all on_text НЕ последний message-хендлер (позиция {_pos} из {len(_msg_handlers)}): "
-            "команды/визарды будут проглочены LLM-фолбэком. Обычно это скрамбл порядка от "
-            "циклического double-import при `python -m bot.main`. См. алиас sys.modules у dp."
-        )
+    # Fail-fast против double-import gotcha (см. алиас sys.modules у dp и блок __main__). После
+    # agent-first cutover ReAct catch-all намеренно стоит первым и пропускает slash-команды своим
+    # фильтром. Инвариант зеркалит tests/test_handler_order.py + tests/test_entrypoint_dp.py.
+    _assert_dispatcher_ready()
     log.info("Aimash bot запущен (polling).")
     await _notify_admins_started(bot)  # B1: readiness-пинг админам (живой сигнал успешного деплоя)
     # B9: heartbeat живости event-loop для честного Docker HEALTHCHECK — на ТОМ ЖЕ loop, что polling;
