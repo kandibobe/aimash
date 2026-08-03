@@ -21,6 +21,12 @@ x-aimash-build: &aimash-build
   args:
     GIT_SHA: ${GIT_SHA:-unknown}
 
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
     image: postgres:16
@@ -43,15 +49,14 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+      start_period: 10s
     # B3: как и у бота — БД должна сама подниматься после падения/перезагрузки VPS. Без этого
     # упавший postgres остаётся мёртвым, а бот (depends_on healthy) уходит в бесконечный крэш-луп.
     restart: unless-stopped
     # Потолок ресурсов БД (co-located с ботом на 2 vCPU / 4 ГБ — БД не должна задушить бота).
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "0.5"
+    mem_limit: 512m
+    cpus: 0.5
+    logging: *default-logging
 
   # Одноразовая миграция схемы перед scheduler. MCP стартует по запросу Hermes поверх уже
   # подготовленной БД. Отдельный сервис заменяет скрытый side-effect запуска legacy bot.main.
@@ -70,6 +75,9 @@ services:
       TZ: UTC
     command: ["alembic", "upgrade", "head"]
     restart: "no"
+    mem_limit: 512m
+    cpus: 0.5
+    logging: *default-logging
 
   # Фоновый scheduler живёт отдельно от Telegram/Hermes gateway.
   # Владение — advisory-lock роли `scheduler`: занято ⇒ этот процесс выходит ненулевым кодом
@@ -104,16 +112,9 @@ services:
     # temp КОНТЕЙНЕРА (HEARTBEAT_FILE не задан), у бота свой: файловые системы разные.
     # Пик памяти — плановый xlsx-отчёт (openpyxl держит объектный граф); интерактивный deep-MCC
     # `/export` остаётся у бота, поэтому потолок ниже ботовского.
-    deploy:
-      resources:
-        limits:
-          memory: 900M
-          cpus: "0.5"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
+    mem_limit: 900m
+    cpus: 0.5
+    logging: *default-logging
 
   # Hermes MCP-сервер по stdio. НЕ поднимается штатным `up` (profiles) — только
   # по требованию Hermes: `docker compose --profile mcp run --rm --no-deps -T mcp`. Тот же образ и env,
@@ -127,6 +128,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     # Тот же порядок и файлы, что у бота: .env.defaults базой, серверный .env (untracked) последним.
     env_file:
       - .env.defaults
@@ -141,6 +144,17 @@ services:
       - ./runtime/safety:/run/aimash-safety:ro
     command: ["python", "-m", "mcp_server"]
     restart: "no"               # запускается через `run --rm` на сессию Hermes, не long-running
+    mem_limit: 1200m
+    cpus: 1.0
+    logging: *default-logging
+    # Hermes gateway живёт в systemd на хосте; здесь проверяется его живой stdio MCP-процесс.
+    # Проверка импортирует фактический registry с теми же env/settings, что использует PID 1.
+    healthcheck:
+      test: ["CMD", "python", "-c", "from mcp_server.server import expected_tool_names; assert expected_tool_names()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # C1: АВТОБЭКАП БД. Раньше scripts/backup_db.sh надо было ставить в host-cron ВРУЧНУЮ — по факту он
   # часто НЕ был запущен, а в БД oauth_tokens (шифр. refresh-токены) + audit_log (денежный реестр).
@@ -162,6 +176,8 @@ services:
     volumes:
       - ./backups:/backups
     restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.25
     # Дамп сразу на старте, затем sleep 24ч. Сбой pg_dump не роняет цикл (|| echo). $$ = литеральный
     # $ для shell (compose съедает одиночный $). Ротация: оставить последние BACKUP_RETAIN дампов.
     entrypoint: ["/bin/sh", "-c"]
@@ -179,11 +195,7 @@ services:
           ls -1t /backups/aimash-*.dump 2>/dev/null | tail -n +$$(( $${BACKUP_RETAIN:-14} + 1 )) | xargs -r rm -f;
           sleep 86400;
         done
-    logging:
-      driver: json-file
-      options:
-        max-size: "5m"
-        max-file: "3"
+    logging: *default-logging
 
 volumes:
   aimash_pgdata:

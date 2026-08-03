@@ -22,7 +22,7 @@ from db.models import Base, event_immutability_ddl
 # NullPool закрывает соединение сразу после использования → процесс выходит чисто.
 # Для asyncpg (prod) оставляем дефолтный пул (переиспользование соединений).
 _db_url = settings.database_url.get_secret_value()  # SecretStr → реальный DSN в точке использования
-_engine_kwargs: dict = {"future": True}
+_engine_kwargs: dict = {}
 if _db_url.startswith("sqlite"):
     _engine_kwargs["poolclass"] = NullPool
 else:
