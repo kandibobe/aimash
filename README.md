@@ -32,7 +32,7 @@ budget approvals; бизнес-логику и выбор следующего t
 | Контур | Назначение |
 |---|---|
 | `@Google_Hermes_AI_Manager_bot` | Целевой agent-first интерфейс Hermes |
-| `mcp_server/` | 24 READ-инструмента + 1 META + 55 agent-first PLAN/state + 1 WRITE |
+| `mcp_server/` | 25 READ-инструментов + 1 META + 57 agent-first PLAN/state + 1 WRITE |
 | `scheduler/` | Отчёты, алерты, delivery и фоновые задания |
 
 Hermes MCP запускается отдельным ephemeral-контейнером `aimash-mcp`; scheduler и миграции также
