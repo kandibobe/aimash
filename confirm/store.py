@@ -1260,18 +1260,25 @@ class ConfirmStore:
         (нельзя «понизить» успешно применённую операцию). SDK при ошибке до claim не вызывался —
         повтор = новая команда (тех же кнопок у старого черновика уже нет)."""
         async with Session() as s:
+            res = await s.execute(
+                update(Proposal)
+                .where(
+                    Proposal.confirmation_id == confirmation_id,
+                    Proposal.status.in_(("confirmed", "executing")),
+                )
+                .values(status="failed", decided_at=func.now())
+            )
+            if cast(CursorResult, res).rowcount != 1:
+                await s.rollback()
+                return
             p = (
                 await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
-            ).scalar_one_or_none()
-            if p is not None:
-                if p.status in ("confirmed", "executing"):
-                    p.status = "failed"
-                    p.decided_at = func.now()
-                # Авторитетная редакция на границе БД (golden rule #5): str(e) от SDK/google.auth
-                # может нести креды; редактируем здесь, чтобы НИ один вызывающий (бот, dev-скрипты,
-                # будущий код) не записал секрет в audit_log. redact_text идемпотентен.
-                s.add(_audit(p, p.chat_id, "failed", result={"error": redact_text(str(error))}))
-                await s.commit()
+            ).scalar_one()
+            # Авторитетная редакция на границе БД (golden rule #5): str(e) от SDK/google.auth
+            # может нести креды; редактируем здесь, чтобы НИ один вызывающий (бот, dev-скрипты,
+            # будущий код) не записал секрет в audit_log. redact_text идемпотентен.
+            s.add(_audit(p, p.chat_id, "failed", result={"error": redact_text(str(error))}))
+            await s.commit()
 
 
 def _audit(
