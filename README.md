@@ -184,6 +184,7 @@ implementation notes и при расхождении исправляются �
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — Trusted Transport, proposal CAS и Outcome Checker.
 - [`docs/MCP_TOOLS.md`](docs/MCP_TOOLS.md) — проверяемый registry 84 FastMCP tools.
 - [`docs/MEMORY_AND_SOUL.md`](docs/MEMORY_AND_SOUL.md) — Aimash Memory, crawler и правила SOUL.
+- [`docs/research_archive.md`](docs/research_archive.md) — feature-gated архив публичных научных источников и его откат.
 - [`docs/CLIENT_HANDOFF_RUNBOOK.md`](docs/CLIENT_HANDOFF_RUNBOOK.md) — передача VPS, secrets и production readiness.
 - [`deploy/hermes/README.md`](deploy/hermes/README.md) — установка и топология.
 - [`deploy/hermes/OPERATIONS.md`](deploy/hermes/OPERATIONS.md) — deploy и runtime verification.

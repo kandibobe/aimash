@@ -850,6 +850,33 @@ class AgentRunEvent(Base):
     payload_digest: Mapped[str | None] = mapped_column(String(64))
 
 
+class ResearchSource(Base):
+    """Versioned public research metadata, isolated from client memory and Ads state."""
+
+    __tablename__ = "research_sources"
+    __table_args__ = (
+        Index("ix_research_sources_published", "published_at"),
+        Index("ix_research_sources_type_external", "source_type", "external_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    version: Mapped[str] = mapped_column(String(16), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    abstract: Mapped[str] = mapped_column(Text, nullable=False)
+    authors: Mapped[list] = mapped_column(JSON, nullable=False)
+    categories: Mapped[list] = mapped_column(JSON, nullable=False)
+    canonical_url: Mapped[str] = mapped_column(Text, nullable=False)
+    pdf_url: Mapped[str | None] = mapped_column(Text)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    content_digest: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    retrieved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 def event_immutability_ddl(dialect: str) -> list[str]:
     """DDL неизменяемости `agent_run_events` для диалекта: список идемпотентных операторов.
 

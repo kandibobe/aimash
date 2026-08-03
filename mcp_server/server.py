@@ -20,10 +20,18 @@ from core.config import settings
 from core.guards import require_no_mutations, require_registered_surface
 from mcp_server.tools_read import READ_MCP_TOOLS, READ_TOOL_FUNCS
 from mcp_server.tools_meta import META_MCP_TOOLS, META_TOOL_FUNCS
+from mcp_server.tools_research import RESEARCH_MCP_TOOLS, RESEARCH_TOOL_FUNCS
 
 # ── И4 (зерно): READ-инструменты НЕ пересекаются с мутационными ──────────────────
 require_no_mutations(
     READ_MCP_TOOLS, MUTATION_TOOLS, rule="И4", subject="READ-инструменты MCP (READ_MCP_TOOLS)"
+)
+
+require_no_mutations(
+    RESEARCH_MCP_TOOLS,
+    MUTATION_TOOLS,
+    rule="И4",
+    subject="research MCP tools (RESEARCH_MCP_TOOLS)",
 )
 
 
@@ -49,12 +57,13 @@ def _registered_tool_names(mcp) -> frozenset[str]:
 
 def expected_tool_names() -> frozenset[str]:
     """Authoritative live surface for the configured server mode."""
+    research = RESEARCH_MCP_TOOLS if settings.research_archive_enabled else frozenset()
     if not settings.hermes_write_enabled:
-        return READ_MCP_TOOLS | META_MCP_TOOLS
+        return READ_MCP_TOOLS | META_MCP_TOOLS | research
     from mcp_server.tools_write import PLAN_WRITE_MCP_TOOLS
     from mcp_server.tools_plan import PLAN_STATE_MCP_TOOLS
 
-    return READ_MCP_TOOLS | META_MCP_TOOLS | PLAN_WRITE_MCP_TOOLS | PLAN_STATE_MCP_TOOLS
+    return READ_MCP_TOOLS | META_MCP_TOOLS | research | PLAN_WRITE_MCP_TOOLS | PLAN_STATE_MCP_TOOLS
 
 
 def build_server():
@@ -71,6 +80,9 @@ def build_server():
         mcp.tool(name=name, structured_output=False)(fn)
     for name, fn in META_TOOL_FUNCS.items():
         mcp.tool(name=name, structured_output=False)(fn)
+    if settings.research_archive_enabled:
+        for name, fn in RESEARCH_TOOL_FUNCS.items():
+            mcp.tool(name=name, structured_output=False)(fn)
 
     if settings.hermes_write_enabled:
         from mcp_server.tools_plan import PLAN_STATE_TOOL_FUNCS

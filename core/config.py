@@ -224,6 +224,9 @@ class Settings(BaseSettings):
     # Hermes PLAN/WRITE stays physically absent unless this flag is explicit. The HMAC key is
     # shared only with the trusted gateway plugin; Hermes still has no Google OAuth credentials.
     hermes_write_enabled: bool = False
+    # Agency research cache. When disabled its tools are absent from the MCP surface.
+    # It stores public source metadata only, never model weights or client memory.
+    research_archive_enabled: bool = False
     aimash_trust_hmac_key: SecretStr = SecretStr("")
     # SecretStr: DSN несёт пароль БД — маскируем в repr/логах/трейсбеках (golden rule #5).
     # Реальное значение — только через .get_secret_value() (db.session, migrations.env).

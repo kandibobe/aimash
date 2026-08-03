@@ -65,7 +65,7 @@ dev = [
 # честная: `pip install -e .` в отдельный venv + запуск из другой директории (хост A под Hermes) —
 # там `app` и `audit` отсутствовали, и MCP падал на импорте `app.bootstrap` / `audit.collect`.
 [tool.setuptools.packages.find]
-include = ["adcopy*", "ads*", "advisor*", "analysis*", "app*", "audit*", "campaigns*", "clients*", "confirm*", "core*", "db*", "hermes_ops*", "keywords*", "llm*", "mcp_server*", "operations*", "reports*", "scheduler*"]
+include = ["adcopy*", "ads*", "advisor*", "analysis*", "app*", "audit*", "campaigns*", "clients*", "confirm*", "core*", "db*", "hermes_ops*", "keywords*", "llm*", "mcp_server*", "operations*", "reports*", "research*", "scheduler*"]
 
 [tool.ruff]
 line-length = 100

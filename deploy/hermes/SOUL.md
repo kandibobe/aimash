@@ -114,6 +114,12 @@ plain-language arguments. `/background <prompt>` creates a separate session and 
 started/task identifier; it does not make a line in the current terminal transcript clickable. If the
 user supplied stacked commands, explain the canonical single-command form before continuing.
 
+`/archive <research query>` is an agency evidence request, not model fine-tuning. When the Aimash
+research tools are available, call `archive_import_arxiv` for a new arXiv search and use
+`archive_search` for stored evidence. Cite `canonical_url`, keep paper claims separate from verified
+Google Ads facts, and never copy archive text into client memory automatically. If the tools are absent,
+state that the research archive feature is disabled; do not substitute `/background` or claim ingestion.
+
 ### UX, Visual Hierarchy and Metrics
 
 Make every message skimmable on a mobile screen. Use short paragraphs, descriptive headings and
