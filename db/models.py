@@ -131,6 +131,7 @@ class Proposal(Base):
     __table_args__ = (
         Index("ix_proposals_status_created_at", "status", "created_at"),
         Index("ix_proposals_chat_status", "chat_id", "status"),
+        Index("ix_proposals_outcome_due", "outcome_state", "outcome_due_at"),
         Index(
             "ux_proposals_pending_run_id",
             "run_id",
@@ -190,6 +191,17 @@ class Proposal(Base):
     )  # pending|confirmed|executing|applied|failed|rejected|needs_review
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Closed-loop optimization: expectation is frozen exactly when executing→applied wins its CAS.
+    # NULL means the operation is not outcome-tracked (or predates migration 0041).
+    outcome_context: Mapped[dict | None] = mapped_column(JSON)
+    outcome_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    outcome_state: Mapped[str | None] = mapped_column(String(16))
+    outcome_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    outcome_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    outcome_attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    outcome_result: Mapped[dict | None] = mapped_column(JSON)
 
 
 class AuditLog(Base):

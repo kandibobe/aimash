@@ -10,12 +10,14 @@ execute_confirmed / apply_* — планировщик не меняет акк�
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
 from ads.client import DRAFT_ACCOUNT_ID, build_client_async
-from confirm.store import ConfirmStore
+from confirm.store import ConfirmStore, DueOutcome
 from core.ads_errors import is_account_access_error
 from core.config import settings
 from core.context import request_scope, reset_context, set_context
@@ -24,8 +26,8 @@ from core.logging import log
 from core.resilience import run_ads_read_call
 from db.models import CampaignDraft, CrawlJob, Proposal, UserSettings
 from db.session import Session
-from reports.period import last_n_days
-from reports.queries import fetch_totals
+from reports.period import custom, last_n_days
+from reports.queries import Metrics, fetch_totals
 from reports.service import build_account_report_async, summary_text
 from scheduler import transport
 from scheduler.anomaly import detect_anomalies
@@ -1684,6 +1686,319 @@ async def run_threshold_tuning(bot) -> None:
                     )
                 except Exception as e:  # один недоступный чат не роняет рассылку
                     log.warning("thr-tune не доставлен в %s: %s", chat_id, type(e).__name__)
+
+
+def _outcome_metric_values(metrics: Metrics) -> dict[str, int | float | None]:
+    """Small JSON-safe metric set; never pass raw Google Ads rows to the LLM or Telegram."""
+    return {
+        "impressions": int(metrics.impressions),
+        "clicks": int(metrics.clicks),
+        "cost": round(float(metrics.cost), 2),
+        "conversions": round(float(metrics.conversions), 2),
+        "cpa": round(float(metrics.cpa), 2) if metrics.conversions else None,
+        "roas": round(float(metrics.roas), 2) if metrics.cost else None,
+    }
+
+
+def _outcome_delta(after: float, before: float) -> float | None:
+    if before == 0:
+        return None
+    return round((after - before) / abs(before) * 100, 1)
+
+
+def _outcome_verdict(
+    operation: str, context: dict, before: Metrics, after: Metrics
+) -> tuple[str, str]:
+    """Code, not the model, assigns a cautious observational verdict."""
+    conv_delta = _outcome_delta(float(after.conversions), float(before.conversions))
+    cost_delta = _outcome_delta(float(after.cost), float(before.cost))
+    cpa_delta = (
+        _outcome_delta(float(after.cpa), float(before.cpa))
+        if before.conversions and after.conversions
+        else None
+    )
+
+    if operation == "update_budget" and context.get("direction") == "decrease":
+        improved = cost_delta is not None and cost_delta <= -5 and (
+            conv_delta is None or conv_delta >= -10
+        )
+        worse = (conv_delta is not None and conv_delta < -20) or (
+            cost_delta is not None and cost_delta >= 0
+        )
+    else:
+        gained_first_conversions = before.conversions == 0 and after.conversions > 0
+        improved = gained_first_conversions or (
+            conv_delta is not None
+            and conv_delta >= 10
+            and (cpa_delta is None or cpa_delta <= 20)
+        )
+        worse = (conv_delta is not None and conv_delta < -10) or (
+            cpa_delta is not None and cpa_delta > 25
+        )
+
+    if improved and not worse:
+        return "improved", "Положительный сигнал"
+    if worse:
+        return "worse", "Негативный сигнал"
+    return "inconclusive", "Недостаточно данных для уверенного вывода"
+
+
+async def _outcome_calendar_dates(
+    client: object, item: DueOutcome, now: datetime
+) -> tuple[date, date]:
+    """Applied date and today in the Google Ads account timezone, with UTC fallback."""
+    from zoneinfo import ZoneInfo
+
+    applied = item.applied_at
+    if applied.tzinfo is None:
+        applied = applied.replace(tzinfo=timezone.utc)
+    try:
+        from ads.read import account_timezone
+
+        zone_name = await run_ads_read_call(
+            account_timezone,
+            client,
+            item.customer_id,
+            label=f"outcome_tz_{item.customer_id}",
+            account=item.customer_id,
+        )
+        zone = ZoneInfo(zone_name) if zone_name else timezone.utc
+    except Exception:  # noqa: BLE001 — timezone is best-effort; UTC keeps equal windows
+        zone = timezone.utc
+    aware_now = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    return applied.astimezone(zone).date(), aware_now.astimezone(zone).date()
+
+
+def _outcome_periods(applied_on: date, today: date, days: int):
+    """Equal windows; the application day is included and the incomplete current day is excluded."""
+    after_to = applied_on + timedelta(days=days - 1)
+    if today - timedelta(days=1) < after_to:
+        raise RuntimeError("outcome window is not complete yet")
+    after = custom(applied_on, after_to)
+    before_to = applied_on - timedelta(days=1)
+    before = custom(before_to - timedelta(days=days - 1), before_to)
+    return before, after
+
+
+async def _outcome_campaign_id(client: object, item: DueOutcome) -> tuple[str, str]:
+    context = item.context
+    campaign_name = str(context.get("campaign") or item.params.get("campaign") or "").strip()
+    campaign_id = str(context.get("campaign_id") or "").strip()
+    if campaign_id:
+        return campaign_id, campaign_name or campaign_id
+    if not campaign_name:
+        raise ValueError("outcome campaign is missing")
+    from ads.read import list_campaigns
+
+    rows = await run_ads_read_call(
+        list_campaigns,
+        client,
+        item.customer_id,
+        label=f"outcome_campaign_{item.customer_id}",
+        account=item.customer_id,
+    )
+    matches = [row for row in rows if str(row.get("name") or "") == campaign_name]
+    if len(matches) != 1:
+        raise LookupError("outcome campaign was not found")
+    return str(matches[0]["id"]), campaign_name
+
+
+async def _measure_outcome(item: DueOutcome, client: object, now: datetime) -> dict:
+    days = max(1, min(int(item.context.get("window_days") or 7), 30))
+    applied_on, today = await _outcome_calendar_dates(client, item, now)
+    before_period, after_period = _outcome_periods(applied_on, today, days)
+    campaign_id, campaign_name = await _outcome_campaign_id(client, item)
+    before = await run_ads_read_call(
+        fetch_totals,
+        client,
+        item.customer_id,
+        before_period,
+        campaign_id,
+        label=f"outcome_before_{item.customer_id}",
+        account=item.customer_id,
+    )
+    after = await run_ads_read_call(
+        fetch_totals,
+        client,
+        item.customer_id,
+        after_period,
+        campaign_id,
+        label=f"outcome_after_{item.customer_id}",
+        account=item.customer_id,
+    )
+    currency = ""
+    try:
+        from ads.read import account_currency
+
+        currency = await run_ads_read_call(
+            account_currency,
+            client,
+            item.customer_id,
+            label=f"outcome_currency_{item.customer_id}",
+            account=item.customer_id,
+        )
+    except Exception:  # noqa: BLE001 — unit is helpful but must not erase a valid measurement
+        pass
+    verdict, verdict_text = _outcome_verdict(item.operation, item.context, before, after)
+    before_values = _outcome_metric_values(before)
+    after_values = _outcome_metric_values(after)
+    return {
+        "version": 1,
+        "confirmation_id": item.confirmation_id,
+        "operation": item.operation,
+        "campaign": campaign_name,
+        "campaign_id": campaign_id,
+        "currency": currency,
+        "applied_on": applied_on.isoformat(),
+        "goal": str(item.context.get("goal") or ""),
+        "before_period": [before_period.date_from.isoformat(), before_period.date_to.isoformat()],
+        "after_period": [after_period.date_from.isoformat(), after_period.date_to.isoformat()],
+        "before": before_values,
+        "after": after_values,
+        "delta_pct": {
+            key: _outcome_delta(float(after_values[key]), float(before_values[key]))
+            if before_values[key] is not None and after_values[key] is not None
+            else None
+            for key in ("impressions", "clicks", "cost", "conversions", "cpa", "roas")
+        },
+        "verdict": verdict,
+        "verdict_text": verdict_text,
+    }
+
+
+def _outcome_prompt(item: DueOutcome, result: dict) -> str:
+    """Compact event for the analyst model: aggregates only, never raw Google Ads JSON."""
+    event = {
+        "optimization": item.summary[:1000],
+        "expectation": item.context,
+        "measurement": result,
+    }
+    return (
+        f"7 дней назад была выполнена оптимизация [{item.summary[:500]}]. "
+        "Сравни метрики до и после и сделай вывод об успешности. "
+        "Опирайся только на агрегаты события ниже; это наблюдение, а не доказательство причинности. "
+        "Вердикт уже определён кодом — не меняй его, не добавляй чисел и не предлагай WRITE. "
+        "Верни одну короткую фразу без markdown.\n"
+        + json.dumps(event, ensure_ascii=False, separators=(",", ":"), default=str)
+    )
+
+
+async def _outcome_agent_note(item: DueOutcome, result: dict) -> str:
+    """Optional phrasing only; deterministic report remains complete when the LLM is unavailable."""
+    try:
+        from agent.router import chat
+
+        message = await chat(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты аналитик Google Ads. Сформулируй только качественную интерпретацию "
+                        "готового кодового вердикта. Не добавляй числа, факты, советы или действия."
+                    ),
+                },
+                {"role": "user", "content": _outcome_prompt(item, result)},
+            ],
+            role="analyst",
+            temperature=0.1,
+            max_tokens=120,
+        )
+        note = str(getattr(message, "content", "") or "").strip()
+        if not note or len(note) > 600 or re.search(r"\d", note):
+            return ""
+        return note
+    except Exception as e:  # noqa: BLE001 — optional prose, deterministic fallback is authoritative
+        log.info("outcome checker: LLM phrasing unavailable (%s)", type(e).__name__)
+        return ""
+
+
+def _outcome_message(item: DueOutcome, result: dict, note: str = "") -> str:
+    before = result["before"]
+    after = result["after"]
+    delta = result["delta_pct"]
+
+    def metric(name: str, label: str, unit: str = "") -> str:
+        change = delta.get(name)
+        suffix = "" if change is None else f" ({change:+.1f}%)"
+        unit_suffix = f" {unit}" if unit else ""
+        before_text = "—" if before[name] is None else str(before[name])
+        after_text = "—" if after[name] is None else str(after[name])
+        return f"{label}: {before_text} → {after_text}{unit_suffix}{suffix}"
+
+    lines = [
+        "📊 Проверка результата оптимизации",
+        f"7 дней назад: {item.summary[:700]}",
+        f"Кампания: {result['campaign']}",
+        f"Цель: {result['goal']}",
+        (
+            f"До: {result['before_period'][0]} — {result['before_period'][1]} | "
+            f"После: {result['after_period'][0]} — {result['after_period'][1]}"
+        ),
+        metric("impressions", "Показы"),
+        metric("clicks", "Клики"),
+        metric("cost", "Расход", result.get("currency") or ""),
+        metric("conversions", "Конверсии"),
+        metric("cpa", "CPA", result.get("currency") or ""),
+        f"Вывод: {result['verdict_text']}.",
+    ]
+    if note:
+        lines.append(note)
+    lines.append(
+        "Важно: это сравнение соседних периодов. На результат могли повлиять сезонность, спрос "
+        "и другие изменения; день применения включён в окно «после»."
+    )
+    return "\n".join(lines)
+
+
+async def run_outcome_checker(bot=None, *, now: datetime | None = None) -> dict[str, int]:
+    """Daily, read-only seven-day follow-up for applied budget and keyword mutations."""
+    counts = {"claimed": 0, "delivered": 0, "retrying": 0, "failed": 0}
+    if bot is None:
+        log.warning("outcome checker: Telegram transport is absent — no rows claimed")
+        return counts
+    run_now = now or datetime.now(timezone.utc)
+    with request_scope("scheduler:outcome-checker"):
+        store = ConfirmStore()
+        due = await store.claim_due_outcomes(now=run_now)
+        counts["claimed"] = len(due)
+        for item in due:
+            tok = set_context(customer_id=item.customer_id)
+            try:
+                from core.access import ensure_account_allowed_for_user, is_whitelisted
+
+                if not await is_whitelisted(item.chat_id):
+                    raise PermissionError("outcome recipient is no longer whitelisted")
+                await ensure_account_allowed_for_user(item.chat_id, item.customer_id)
+                client = await build_client_async(item.customer_id)
+                result = await _measure_outcome(item, client, run_now)
+                note = await _outcome_agent_note(item, result)
+                await transport.send_bot_message(
+                    bot, item.chat_id, _outcome_message(item, result, note)
+                )
+                if not await store.complete_outcome(
+                    item.confirmation_id, result={**result, "agent_note": note}, now=run_now
+                ):
+                    raise RuntimeError("outcome completion CAS was lost after delivery")
+                counts["delivered"] += 1
+            except Exception as e:  # one account/recipient must not stop the daily batch
+                terminal = item.attempts >= max(1, int(settings.outcome_check_max_attempts))
+                await store.retry_outcome(item.confirmation_id, error=type(e).__name__, now=run_now)
+                counts["failed" if terminal else "retrying"] += 1
+                if is_account_access_error(e) or isinstance(e, PermissionError):
+                    log.info(
+                        "outcome checker: proposal %s unavailable (%s)",
+                        item.confirmation_id,
+                        type(e).__name__,
+                    )
+                else:
+                    await capture_exception(
+                        e, where=f"scheduler:outcome-checker:{item.customer_id}"
+                    )
+            finally:
+                reset_context(tok)
+        if due:
+            log.info("scheduler outcome checker: %s", counts)
+        return counts
 
 
 async def _notify_outcome(bot, outcome, verdict: str) -> None:

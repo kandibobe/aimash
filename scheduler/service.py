@@ -21,6 +21,7 @@ from scheduler import jobs, ops_delivery, rollback
 
 # Дефолт планового отчёта — fallback, если REPORT_SCHEDULE невалиден (см. report_trigger).
 _DEFAULT_REPORT_CRON = {"hour": 9, "minute": 0}  # ежедневно 09:00 (локальное время)
+_DEFAULT_OUTCOME_CRON = {"hour": 10, "minute": 0}  # ежедневно 10:00 (локальное время)
 
 
 def report_trigger() -> CronTrigger:
@@ -37,6 +38,20 @@ def report_trigger() -> CronTrigger:
             type(e).__name__,
         )
         return CronTrigger(**_DEFAULT_REPORT_CRON)
+
+
+def outcome_check_trigger() -> CronTrigger:
+    """Daily outcome cadence; invalid config falls back without preventing scheduler startup."""
+    raw = (settings.outcome_check_schedule or "").strip()
+    try:
+        return CronTrigger.from_crontab(raw)
+    except (ValueError, TypeError) as e:
+        log.warning(
+            "OUTCOME_CHECK_SCHEDULE=%r невалиден (%s) — откат на ежедневно 10:00",
+            raw,
+            type(e).__name__,
+        )
+        return CronTrigger(**_DEFAULT_OUTCOME_CRON)
 
 
 _DEFAULT_WEEKLY_DIGEST_CRON = {"day_of_week": "mon", "hour": 9, "minute": 0}  # пн 09:00 (fallback)
@@ -228,6 +243,17 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
         id="advise_followups",
         replace_existing=True,
         misfire_grace_time=3600,
+    )
+    # Closed-loop optimization: только READ Google Ads + Telegram; ни одного mutation tool.
+    sched.add_job(
+        jobs.run_outcome_checker,
+        outcome_check_trigger(),
+        args=[bot],
+        id="outcome_checker",
+        replace_existing=True,
+        misfire_grace_time=3600,
+        coalesce=True,
+        max_instances=1,
     )
     # §advisor: проактивные рекомендации операторам с opt-in (ui_prefs.advise_proactive). READ-ONLY,
     # не создаёт proposal. Ежедневно; по умолчанию НИКОМУ (fail-closed к анти-спаму).

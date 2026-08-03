@@ -48,6 +48,7 @@ from operations.governance import four_eyes_claim_condition
 # усечение error_events.traceback (core.errors._TB_MAX). Усекаем длинные списки/строки, не теряя
 # структуру (count/applied остаются).
 _RESULT_MAX = 4000
+_OUTCOME_OPERATIONS = frozenset({"update_budget", "add_keywords"})
 
 
 class PendingProposalExists(RuntimeError):
@@ -77,6 +78,64 @@ def _cap_result(result: object) -> object:
         capped["_truncated"] = True
         return capped
     return {"_truncated": True, "preview": s[:_RESULT_MAX]}
+
+
+def _outcome_context(p: Proposal, result: object = None) -> dict | None:
+    """Compact, immutable expectation for operations with a meaningful seven-day outcome.
+
+    The model does not choose metrics here: code maps the operation to a stable measurement contract.
+    Full keyword lists remain in ``proposals.params``; the outcome context stores only count/scope.
+    """
+    if p.operation not in _OUTCOME_OPERATIONS:
+        return None
+    params = p.params if isinstance(p.params, dict) else {}
+    applied = result if isinstance(result, dict) else {}
+    days = max(1, min(int(settings.outcome_check_days), 30))
+    base = {
+        "version": 1,
+        "operation": p.operation,
+        "campaign": str(params.get("campaign") or ""),
+        "campaign_id": str(applied.get("campaign_id") or ""),
+        "summary": str(p.summary or "")[:1000],
+        "window_days": days,
+    }
+    if p.operation == "add_keywords":
+        keywords = params.get("keywords") if isinstance(params.get("keywords"), list) else []
+        return {
+            **base,
+            "ad_group": str(params.get("ad_group") or ""),
+            "keyword_count": len(keywords),
+            "goal": "Получить дополнительный релевантный трафик и конверсии без неприемлемого роста CPA.",
+            "metrics": ["impressions", "clicks", "conversions", "cost", "cpa"],
+        }
+
+    before = params.get("_before") if isinstance(params.get("_before"), dict) else {}
+    before_micros = before.get("before_micros")
+    after_micros = before.get("after_micros")
+    direction = "unknown"
+    if isinstance(before_micros, int | float) and isinstance(after_micros, int | float):
+        direction = "increase" if after_micros > before_micros else "decrease"
+        if after_micros == before_micros:
+            direction = "flat"
+    elif str(params.get("mode") or "").startswith("increase"):
+        direction = "increase"
+    elif str(params.get("mode") or "").startswith("decrease"):
+        direction = "decrease"
+    goal = (
+        "Увеличить объём трафика и конверсий, удержав CPA/ROAS в приемлемом диапазоне."
+        if direction == "increase"
+        else "Снизить расход без непропорциональной потери конверсий."
+        if direction == "decrease"
+        else "Проверить влияние нового бюджета на объём и эффективность кампании."
+    )
+    return {
+        **base,
+        "direction": direction,
+        "before_micros": before_micros if isinstance(before_micros, int | float) else None,
+        "after_micros": after_micros if isinstance(after_micros, int | float) else None,
+        "goal": goal,
+        "metrics": ["impressions", "clicks", "cost", "conversions", "cpa", "roas"],
+    }
 
 
 def _ttl_boundary() -> datetime:
@@ -181,6 +240,21 @@ class AppliedAuditResult:
     operation: str
     customer_id: str
     result: dict
+
+
+@dataclass(frozen=True, slots=True)
+class DueOutcome:
+    """One CAS-claimed applied mutation ready for the read-only outcome checker."""
+
+    confirmation_id: str
+    operation: str
+    customer_id: str
+    params: dict
+    summary: str
+    chat_id: int
+    applied_at: datetime
+    context: dict
+    attempts: int
 
 
 class ConfirmStore:
@@ -839,13 +913,29 @@ class ConfirmStore:
         log.warning и НЕ кладём спурьёзную applied-строку в журнал (раньше audit писался всегда,
         даже при статусе ≠ executing — асимметрия с record_failure)."""
         async with Session() as s:
+            candidate = (
+                await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
+            ).scalar_one_or_none()
+            context = _outcome_context(candidate, result) if candidate is not None else None
+            now = datetime.now(timezone.utc)
+            values: dict = {"status": "applied", "decided_at": db_dt(now)}
+            if context is not None:
+                values.update(
+                    outcome_context=context,
+                    outcome_due_at=db_dt(now + timedelta(days=int(context["window_days"]))),
+                    outcome_state="pending",
+                    outcome_claimed_at=None,
+                    outcome_checked_at=None,
+                    outcome_attempts=0,
+                    outcome_result=None,
+                )
             res = await s.execute(
                 update(Proposal)
                 .where(
                     Proposal.confirmation_id == confirmation_id,
                     Proposal.status == "executing",
                 )
-                .values(status="applied", decided_at=func.now())
+                .values(**values)
             )
             if cast(CursorResult, res).rowcount != 1:
                 status = (
@@ -866,6 +956,132 @@ class ConfirmStore:
             ).scalar_one()
             s.add(_audit(p, p.chat_id, "applied", result=result))
             await s.commit()
+
+    async def claim_due_outcomes(
+        self, *, now: datetime | None = None, limit: int = 50
+    ) -> list[DueOutcome]:
+        """CAS-claim due outcomes; stale one-hour claims are safely made eligible again."""
+        now = now or datetime.now(timezone.utc)
+        safe_limit = max(1, min(int(limit), 200))
+        stale_before = now - timedelta(hours=1)
+        claimed: list[DueOutcome] = []
+        async with Session() as s:
+            await s.execute(
+                update(Proposal)
+                .where(
+                    Proposal.status == "applied",
+                    Proposal.outcome_state == "checking",
+                    Proposal.outcome_claimed_at < db_dt(stale_before),
+                )
+                .values(outcome_state="pending", outcome_claimed_at=None)
+            )
+            candidates = list(
+                (
+                    await s.execute(
+                        select(Proposal)
+                        .where(
+                            Proposal.status == "applied",
+                            Proposal.outcome_state == "pending",
+                            Proposal.outcome_due_at <= db_dt(now),
+                        )
+                        .order_by(Proposal.outcome_due_at, Proposal.id)
+                        .limit(safe_limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for p in candidates:
+                attempts = int(p.outcome_attempts or 0) + 1
+                res = await s.execute(
+                    update(Proposal)
+                    .where(
+                        Proposal.id == p.id,
+                        Proposal.status == "applied",
+                        Proposal.outcome_state == "pending",
+                    )
+                    .values(
+                        outcome_state="checking",
+                        outcome_claimed_at=db_dt(now),
+                        outcome_attempts=attempts,
+                    )
+                )
+                if cast(CursorResult, res).rowcount != 1:
+                    continue
+                applied_at = p.decided_at or p.created_at
+                claimed.append(
+                    DueOutcome(
+                        confirmation_id=p.confirmation_id,
+                        operation=p.operation,
+                        customer_id=p.customer_id,
+                        params=dict(p.params or {}),
+                        summary=p.summary,
+                        chat_id=int(p.chat_id),
+                        applied_at=applied_at,
+                        context=dict(p.outcome_context or {}),
+                        attempts=attempts,
+                    )
+                )
+            await s.commit()
+        return claimed
+
+    async def complete_outcome(
+        self, confirmation_id: str, *, result: dict, now: datetime | None = None
+    ) -> bool:
+        """Terminal CAS after the outcome message has been delivered."""
+        now = now or datetime.now(timezone.utc)
+        async with Session() as s:
+            res = await s.execute(
+                update(Proposal)
+                .where(
+                    Proposal.confirmation_id == confirmation_id,
+                    Proposal.status == "applied",
+                    Proposal.outcome_state == "checking",
+                )
+                .values(
+                    outcome_state="delivered",
+                    outcome_checked_at=db_dt(now),
+                    outcome_claimed_at=None,
+                    outcome_result=_cap_result(result),
+                )
+            )
+            if cast(CursorResult, res).rowcount != 1:
+                await s.rollback()
+                return False
+            await s.commit()
+            return True
+
+    async def retry_outcome(
+        self, confirmation_id: str, *, error: object, now: datetime | None = None
+    ) -> bool:
+        """Release a failed claim for next-day retry, terminal after configured max attempts."""
+        now = now or datetime.now(timezone.utc)
+        async with Session() as s:
+            p = (
+                await s.execute(
+                    select(Proposal).where(
+                        Proposal.confirmation_id == confirmation_id,
+                        Proposal.status == "applied",
+                        Proposal.outcome_state == "checking",
+                    )
+                )
+            ).scalar_one_or_none()
+            if p is None:
+                return False
+            terminal = int(p.outcome_attempts or 0) >= max(
+                1, int(settings.outcome_check_max_attempts)
+            )
+            p.outcome_state = "failed" if terminal else "pending"
+            p.outcome_due_at = db_dt(now if terminal else now + timedelta(days=1))
+            p.outcome_claimed_at = None
+            p.outcome_checked_at = db_dt(now) if terminal else None
+            p.outcome_result = {
+                "error": redact_text(str(error))[:500],
+                "attempts": int(p.outcome_attempts or 0),
+                "terminal": terminal,
+            }
+            await s.commit()
+            return True
 
     async def get_applied_audit_result(self, confirmation_id: str) -> AppliedAuditResult | None:
         """Вернуть итог только когда proposal всё ещё applied и точный applied audit-row существует.
@@ -1044,25 +1260,18 @@ class ConfirmStore:
         (нельзя «понизить» успешно применённую операцию). SDK при ошибке до claim не вызывался —
         повтор = новая команда (тех же кнопок у старого черновика уже нет)."""
         async with Session() as s:
-            res = await s.execute(
-                update(Proposal)
-                .where(
-                    Proposal.confirmation_id == confirmation_id,
-                    Proposal.status.in_(("confirmed", "executing")),
-                )
-                .values(status="failed", decided_at=func.now())
-            )
-            if cast(CursorResult, res).rowcount != 1:
-                await s.rollback()
-                return
             p = (
                 await s.execute(select(Proposal).where(Proposal.confirmation_id == confirmation_id))
-            ).scalar_one()
-            # Авторитетная редакция на границе БД (golden rule #5): str(e) от SDK/google.auth
-            # может нести креды; редактируем здесь, чтобы НИ один вызывающий (бот, dev-скрипты,
-            # будущий код) не записал секрет в audit_log. redact_text идемпотентен.
-            s.add(_audit(p, p.chat_id, "failed", result={"error": redact_text(str(error))}))
-            await s.commit()
+            ).scalar_one_or_none()
+            if p is not None:
+                if p.status in ("confirmed", "executing"):
+                    p.status = "failed"
+                    p.decided_at = func.now()
+                # Авторитетная редакция на границе БД (golden rule #5): str(e) от SDK/google.auth
+                # может нести креды; редактируем здесь, чтобы НИ один вызывающий (бот, dev-скрипты,
+                # будущий код) не записал секрет в audit_log. redact_text идемпотентен.
+                s.add(_audit(p, p.chat_id, "failed", result={"error": redact_text(str(error))}))
+                await s.commit()
 
 
 def _audit(

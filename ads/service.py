@@ -786,6 +786,7 @@ async def _apply_confirmed(store, confirmation_id: str) -> dict:
                 )
         return await mutations.apply_add_keywords(
             customer_id=customer_id,
+            campaign_id=ad_groups[0].campaign_id,
             ad_group_ids=[ag.id for ag in ad_groups],
             keywords=params["keywords"],
             match_type=params["match_type"],

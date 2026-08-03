@@ -973,6 +973,7 @@ def _apply_keyword_bid_via_sdk(client, customer_id: str, campaign_id: str, bids:
 async def apply_add_keywords(
     *,
     customer_id: str,
+    campaign_id: str | None = None,
     ad_group_ids: list[str],
     keywords: list[str],
     match_type: str,
@@ -995,6 +996,9 @@ async def apply_add_keywords(
         match_type,
         op_count=len(ad_group_ids) * len(clean),  # квота §3: каждая mutate-операция батча
     )
+    if campaign_id:
+        # Stable scope for the seven-day outcome logger; campaign names may later be renamed/duplicated.
+        result["campaign_id"] = str(campaign_id)
     await confirm_store.finalize(confirmation_id, result=result)
     return result
 

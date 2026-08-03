@@ -290,6 +290,11 @@ class Settings(BaseSettings):
     # 2.6: окна планового отчёта/сравнения аномалий (дни) — раньше зашиты в scheduler/jobs.
     report_window_days: int = 7
     anomaly_window_days: int = 7
+    # Closed-loop optimization: important applied mutations are measured after an equal before/after
+    # window and reported once to the originating Telegram chat. The scheduler stays read-only.
+    outcome_check_days: int = 7
+    outcome_check_schedule: str = "0 10 * * *"
+    outcome_check_max_attempts: int = 3
     # Р6: алерт о правках, сделанных в аккаунте МИМО бота (change_event). Opt-in: 0 = выкл, потому
     # что на чужом аккаунте с активным агентством это шумный поток, а не сигнал. Окно шире интервала
     # НАМЕРЕННО (после простоя событие не должно выпасть из выборки) — дубли отсекает per-chat
