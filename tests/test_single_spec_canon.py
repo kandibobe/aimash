@@ -13,10 +13,13 @@ ORIGINALS = (
 
 
 def test_tz_mirror_identifies_only_the_three_original_docx_as_canon():
-    tz = (ROOT / "ТЗ.md").read_text(encoding="utf-8")
-    assert all(name in tz for name in ORIGINALS)
-    assert "ТЕКСТОВОЕ ЗЕРКАЛО ДОГОВОРНОГО КАНОНА" in tz
-    assert "Aimash_Unified_Technical_Specification_ACCEPTED.docx" not in tz
+    # Customer DOCX files and their generated ТЗ.md mirror are intentionally local-only
+    # (.gitignore); CI can still enforce the tracked generator contract. Actual source hashes and
+    # rendered mirror are checked by test_tz_sync.py whenever those private files are present.
+    generator = (ROOT / "scripts" / "docx_to_tz.py").read_text(encoding="utf-8")
+    assert all(name in generator for name in ORIGINALS)
+    assert "ТЕКСТОВОЕ ЗЕРКАЛО ДОГОВОРНОГО КАНОНА" in generator
+    assert "Aimash_Unified_Technical_Specification_ACCEPTED.docx" not in generator
 
 
 def test_developer_entrypoints_reference_the_original_contract_set():
