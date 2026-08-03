@@ -204,6 +204,19 @@ _ATTESTED: dict[str, Attested] = {
     "compression.target_ratio": Attested("hermes_cli/config.py", '"target_ratio"'),
     "compression.protect_last_n": Attested("hermes_cli/config.py", '"protect_last_n"'),
     "compression.protect_first_n": Attested("hermes_cli/config.py", '"protect_first_n"'),
+    "session_reset.mode": Attested(
+        "gateway/config.py:456-473", 'mode: str = "none"  # "daily", "idle", "both", or "none"'
+    ),
+    "session_reset.idle_minutes": Attested("gateway/config.py:456-473", "idle_minutes: int = 1440"),
+    "session_reset.notify": Attested("gateway/config.py:456-474", "notify: bool = True"),
+    "sessions.auto_prune": Attested("hermes_cli/config.py:3174-3188", '"auto_prune": False'),
+    "sessions.retention_days": Attested("hermes_cli/config.py:3174-3188", '"retention_days": 90'),
+    "sessions.vacuum_after_prune": Attested(
+        "hermes_cli/config.py:3189-3195", '"vacuum_after_prune": True'
+    ),
+    "sessions.min_interval_hours": Attested(
+        "hermes_cli/config.py:3196-3199", '"min_interval_hours": 24'
+    ),
     "display.show_cost": Attested("hermes_cli/config.py", '"show_cost": False'),
     "display.runtime_footer": Attested("hermes_cli/config.py", '"runtime_footer": {'),
     "auxiliary.transient_retries": Attested("hermes_cli/config.py", '"transient_retries"'),
@@ -589,12 +602,24 @@ def check_vps_trusted_operator_policy(cfg: dict, rep: Report) -> None:
     expected = {
         "memory.memory_enabled": True,
         "memory.user_profile_enabled": True,
+        "compression.enabled": True,
+        "compression.threshold": 0.15,
+        "compression.target_ratio": 0.10,
+        "compression.protect_last_n": 12,
+        "compression.protect_first_n": 0,
+        "session_reset.mode": "idle",
+        "session_reset.idle_minutes": 1440,
+        "session_reset.notify": True,
+        "sessions.auto_prune": True,
+        "sessions.retention_days": 30,
+        "sessions.vacuum_after_prune": True,
+        "sessions.min_interval_hours": 24,
     }
     for path, want in expected.items():
         value = _get(cfg, path)
         if value is _MISSING:
             rep.error(path, f"не задан явно; private trusted-operator profile требует {want!r}")
-        elif value is not want:
+        elif type(value) is not type(want) or value != want:
             rep.error(path, f"{value!r}, ожидалось {want!r} для private trusted-operator profile")
 
 

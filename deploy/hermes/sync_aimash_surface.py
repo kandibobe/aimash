@@ -4,7 +4,7 @@
 The live config contains host-local dashboard settings and secrets, so deploying the repo template
 wholesale is unsafe. This script preserves those host-local values, derives the exact tool surface
 from a one-shot ``mcp`` compose service, installs the repository plugin, and pins the approved
-model/private-team policy so a dashboard edit or deploy cannot drift it.
+model/private-team/context policy so a dashboard edit or deploy cannot drift it.
 """
 
 from __future__ import annotations
@@ -28,6 +28,20 @@ PRIMARY_REASONING_EFFORT = "high"
 PRIMARY_MAX_TURNS = 40
 RESTART_DRAIN_TIMEOUT = 180
 DELEGATION_MAX_ITERATIONS = 30
+COMPRESSION_POLICY = {
+    "enabled": True,
+    "threshold": 0.15,
+    "target_ratio": 0.10,
+    "protect_last_n": 12,
+    "protect_first_n": 0,
+}
+SESSION_RESET_POLICY = {"mode": "idle", "idle_minutes": 1440, "notify": True}
+SESSIONS_POLICY = {
+    "auto_prune": True,
+    "retention_days": 30,
+    "vacuum_after_prune": True,
+    "min_interval_hours": 24,
+}
 CANONICAL_SKILLS = ("ad-master-agent", "google-ads-worker")
 RETIRED_SKILLS = (
     "ad-master-tools",
@@ -47,7 +61,6 @@ TELEGRAM_TOOLSETS = (
     "cronjob",
     "delegation",
     "memory",
-    "session_search",
     "skills",
     "todo",
     "vision",
@@ -108,6 +121,10 @@ def reconcile_trusted_operator_policy(config: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("live Hermes config: memory must be a mapping")
     memory["memory_enabled"] = True
     memory["user_profile_enabled"] = True
+
+    config["compression"] = dict(COMPRESSION_POLICY)
+    config["session_reset"] = dict(SESSION_RESET_POLICY)
+    config["sessions"] = dict(SESSIONS_POLICY)
 
     skills = config.setdefault("skills", {})
     if not isinstance(skills, dict):

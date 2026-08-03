@@ -285,7 +285,7 @@ def _google_ads_row_dict(row: Any) -> dict[str, Any]:
     )
 
 
-GOOGLE_ADS_QUERY_PAYLOAD_LIMIT_BYTES = 512_000
+GOOGLE_ADS_QUERY_PAYLOAD_LIMIT_BYTES = 128 * 1024
 
 
 def _execute_google_ads_query_sync(
@@ -316,7 +316,7 @@ def _execute_google_ads_query_sync(
 async def execute_google_ads_query(
     account: str,
     gaql_query: str,
-    row_limit: int = 1000,
+    row_limit: int = 200,
 ) -> dict[str, Any]:
     """Execute arbitrary read-only GAQL and return generic protobuf rows.
 

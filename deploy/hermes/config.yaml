@@ -46,10 +46,23 @@ tool_loop_guardrails:
 
 compression:
   enabled: true
-  threshold: 0.35
-  target_ratio: 0.15
+  threshold: 0.15
+  target_ratio: 0.10
   protect_last_n: 12
-  protect_first_n: 3
+  protect_first_n: 0
+
+# Short-term dialogue is a working set, not the client knowledge base. A day of inactivity starts a
+# fresh session; ended transcripts stay searchable from CLI for 30 days, then are removed from state.db.
+session_reset:
+  mode: idle
+  idle_minutes: 1440
+  notify: true
+
+sessions:
+  auto_prune: true
+  retention_days: 30
+  vacuum_after_prune: true
+  min_interval_hours: 24
 
 auxiliary:
   transient_retries: 2
@@ -327,7 +340,6 @@ platform_toolsets:
     - cronjob
     - delegation
     - memory
-    - session_search
     - skills
     - todo
     - vision

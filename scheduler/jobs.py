@@ -1719,8 +1719,10 @@ def _outcome_verdict(
     )
 
     if operation == "update_budget" and context.get("direction") == "decrease":
-        improved = cost_delta is not None and cost_delta <= -5 and (
-            conv_delta is None or conv_delta >= -10
+        improved = (
+            cost_delta is not None
+            and cost_delta <= -5
+            and (conv_delta is None or conv_delta >= -10)
         )
         worse = (conv_delta is not None and conv_delta < -20) or (
             cost_delta is not None and cost_delta >= 0
@@ -1728,9 +1730,7 @@ def _outcome_verdict(
     else:
         gained_first_conversions = before.conversions == 0 and after.conversions > 0
         improved = gained_first_conversions or (
-            conv_delta is not None
-            and conv_delta >= 10
-            and (cpa_delta is None or cpa_delta <= 20)
+            conv_delta is not None and conv_delta >= 10 and (cpa_delta is None or cpa_delta <= 20)
         )
         worse = (conv_delta is not None and conv_delta < -10) or (
             cpa_delta is not None and cpa_delta > 25

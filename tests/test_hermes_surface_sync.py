@@ -126,6 +126,9 @@ def test_trusted_operator_policy_is_pinned_without_touching_host_secrets():
     assert got["agent"]["reasoning_effort"] == "high"
     assert got["agent"]["disabled_toolsets"] == list(SYNC.TRUSTED_OPERATOR_DISABLED_TOOLSETS)
     assert got["memory"] == {"memory_enabled": True, "user_profile_enabled": True}
+    assert got["compression"] == SYNC.COMPRESSION_POLICY
+    assert got["session_reset"] == SYNC.SESSION_RESET_POLICY
+    assert got["sessions"] == SYNC.SESSIONS_POLICY
     assert got["skills"] == {
         "inline_shell": False,
         "guard_agent_created": True,
@@ -136,6 +139,7 @@ def test_trusted_operator_policy_is_pinned_without_touching_host_secrets():
     assert got["approvals"] == {"mode": "manual", "cron_mode": "deny"}
     assert got["tool_loop_guardrails"] == SYNC.TOOL_LOOP_GUARDRAILS
     assert got["platform_toolsets"]["telegram"] == list(SYNC.TELEGRAM_TOOLSETS)
+    assert "session_search" not in got["platform_toolsets"]["telegram"]
     assert not {
         "browser",
         "code_execution",

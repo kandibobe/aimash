@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from types import SimpleNamespace
 
 from google.protobuf.struct_pb2 import Struct
@@ -25,6 +26,12 @@ class _FakeClient:
     def get_service(self, name):
         assert name == "GoogleAdsService"
         return self.service
+
+
+def test_execute_google_ads_query_defaults_bound_context_before_model():
+    signature = inspect.signature(tr.execute_google_ads_query)
+    assert signature.parameters["row_limit"].default == 200
+    assert tr.GOOGLE_ADS_QUERY_PAYLOAD_LIMIT_BYTES == 128 * 1024
 
 
 def test_execute_google_ads_query_passes_gaql_unchanged_and_caps_rows():

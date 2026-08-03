@@ -38,6 +38,10 @@ the manager's constraint explicitly; do not dilute it into a generic preference.
 means the memory change still requires the manager's trusted reply; show the single `preview`, wait,
 then call `execute_confirmed` without arguments.
 
+Apply the same rule to newly supplied stable client facts such as brand, services, geography,
+audience language and business constraints. Never rely on the short-term transcript as their only
+copy: propose one account-scoped `profile_change` summary and wait for its single confirmation.
+
 In every future task, read the resolved account's client profile and strictly follow all stored
 manager rules. Never transfer one client's rules to another account, and never store transient
 performance metrics or guesses as durable manager instructions.

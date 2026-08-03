@@ -237,6 +237,28 @@ def test_lint_reddens_when_a_hardening_key_disappears(dotted, why):
     )
 
 
+@pytest.mark.parametrize(
+    ("section", "key", "bad_value"),
+    [
+        ("compression", "threshold", 0.35),
+        ("compression", "target_ratio", 0.15),
+        ("compression", "protect_first_n", 3),
+        ("session_reset", "mode", "none"),
+        ("sessions", "auto_prune", False),
+        ("sessions", "retention_days", 90),
+    ],
+)
+def test_vps_lint_rejects_context_cost_policy_drift(section, key, bad_value):
+    path, profile = _REFERENCE_CONFIGS[0]
+    cfg = copy.deepcopy(_load_cfg(path))
+    cfg[section][key] = bad_value
+
+    rep = _LINT.lint(cfg, profile=profile)
+
+    dotted = f"{section}.{key}"
+    assert any(f.path == dotted for f in rep.errors), [str(f) for f in rep.errors]
+
+
 def test_lint_reddens_when_a_must_disable_toolset_is_enabled():
     """Включение любого тулсета из `_MUST_DISABLE` обязано давать ERROR по каждому.
 

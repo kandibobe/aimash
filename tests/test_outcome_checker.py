@@ -104,12 +104,8 @@ async def test_due_claim_is_single_use_and_completion_is_terminal():
     row = next(item for item in first if item.confirmation_id == confirmation_id)
     assert row.attempts == 1
     assert all(item.confirmation_id != confirmation_id for item in second)
-    assert await store.complete_outcome(
-        confirmation_id, result={"verdict": "improved"}, now=now
-    )
-    assert not await store.complete_outcome(
-        confirmation_id, result={"verdict": "worse"}, now=now
-    )
+    assert await store.complete_outcome(confirmation_id, result={"verdict": "improved"}, now=now)
+    assert not await store.complete_outcome(confirmation_id, result={"verdict": "worse"}, now=now)
     async with Session() as session:
         proposal = (
             await session.execute(
@@ -231,6 +227,4 @@ def test_outcome_prompt_is_compact_and_schedule_is_daily(monkeypatch):
     monkeypatch.setattr(settings, "outcome_check_schedule", "0 10 * * *")
     assert str(outcome_check_trigger()) == str(CronTrigger.from_crontab("0 10 * * *"))
     monkeypatch.setattr(settings, "outcome_check_schedule", "invalid")
-    assert str(outcome_check_trigger()) == str(
-        CronTrigger(**_DEFAULT_OUTCOME_CRON)
-    )
+    assert str(outcome_check_trigger()) == str(CronTrigger(**_DEFAULT_OUTCOME_CRON))
