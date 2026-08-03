@@ -190,7 +190,52 @@ def test_deploy_installs_watcher_and_notifies_both_outcomes():
         "systemctl enable --now aimash-ops-watch.timer",
         "trap notify_deploy_exit EXIT",
         '--title "Deploy Aimash failed"',
-        '--title "Aimash deploy completed"',
+        '--title "Aimash обновлён"',
+        "PREVIOUS_DEPLOY_SHA=$(git rev-parse HEAD",
+        "scripts/ops_alert.py deploy-summary",
+        "DEPLOY_BODY=$(printf",
         "systemctl start aimash-ops-watch.service",
     ):
         assert required in workflow
+
+
+def test_deploy_summary_labels_and_bounds_commit_subjects():
+    commands = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        return "\n".join(
+            (
+                "feat: add keyword export",
+                "fix(telegram): deliver report rows",
+                "refactor: isolate report builder",
+                "docs: explain export",
+            )
+        )
+
+    summary = ops.deploy_summary("a" * 40, "b" * 40, limit=3, run=run)
+
+    assert summary.splitlines() == [
+        "• Добавлено — add keyword export",
+        "• Исправлено — deliver report rows",
+        "• Изменено — isolate report builder",
+        "• Ещё изменений: 1",
+    ]
+    assert commands == [["git", "log", "--reverse", "--format=%s", f"{'a' * 40}..{'b' * 40}"]]
+
+
+def test_deploy_summary_rejects_non_sha_arguments():
+    with pytest.raises(ValueError, match="invalid from_sha"):
+        ops.deploy_summary("HEAD; curl attacker", "b" * 40)
+
+
+def test_deploy_summary_same_sha_reads_only_one_commit():
+    commands = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        return "chore: redeploy"
+
+    sha = "c" * 40
+    assert ops.deploy_summary(sha, sha, run=run) == "• Изменено — redeploy"
+    assert commands == [["git", "log", "-1", "--format=%s", sha]]

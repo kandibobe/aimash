@@ -127,6 +127,59 @@ def _run(command: list[str], *, env: dict[str, str] | None = None) -> str:
     return "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
 
 
+_GIT_SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}")
+_DEPLOY_CHANGE_LABELS = {
+    "feat": "Добавлено",
+    "fix": "Исправлено",
+    "perf": "Ускорено",
+    "docs": "Документация",
+}
+
+
+def _deploy_change_line(subject: str) -> str:
+    """Turn one conventional commit subject into a short Russian deploy bullet."""
+    clean = " ".join(str(subject).split())[:180]
+    match = re.match(r"^(?P<kind>[a-z]+)(?:\([^)]{1,40}\))?!?:\s*(?P<body>.+)$", clean)
+    if match:
+        label = _DEPLOY_CHANGE_LABELS.get(match.group("kind"), "Изменено")
+        clean = match.group("body").strip()
+    else:
+        label = "Изменено"
+    return f"• {label} — {clean}" if clean else ""
+
+
+def deploy_summary(
+    from_sha: str,
+    to_sha: str,
+    *,
+    limit: int = 5,
+    run: Callable[..., str] = _run,
+) -> str:
+    """Describe commits included since the previously deployed revision."""
+    start = str(from_sha).strip()
+    end = str(to_sha).strip()
+    if _GIT_SHA_RE.fullmatch(end) is None:
+        raise ValueError("invalid to_sha")
+    if start and _GIT_SHA_RE.fullmatch(start) is None:
+        raise ValueError("invalid from_sha")
+    if start and start != end:
+        command = ["git", "log", "--reverse", "--format=%s", f"{start}..{end}"]
+    else:
+        # First install or an explicit redeploy of the same SHA: showing the whole
+        # repository history would be noisy and misleading, so name only this revision.
+        command = ["git", "log", "-1", "--format=%s", end]
+    output = run(command)
+    subjects = [line for line in output.splitlines() if line.strip()]
+    if not subjects:
+        return "• Изменено — служебное обновление"
+    bounded = max(1, int(limit))
+    lines = [line for item in subjects[:bounded] if (line := _deploy_change_line(item))]
+    remaining = len(subjects) - len(lines)
+    if remaining > 0:
+        lines.append(f"• Ещё изменений: {remaining}")
+    return "\n".join(lines)
+
+
 def _container_state(name: str, run: Callable[..., str] = _run) -> dict[str, Any]:
     try:
         raw = run(["docker", "inspect", "-f", "{{json .State}}|{{.RestartCount}}", name])
@@ -341,12 +394,19 @@ def main(argv: list[str] | None = None) -> int:
     send.add_argument("--severity", choices=tuple(_SEVERITY_RANK), default="info")
     send.add_argument("--title", required=True)
     send.add_argument("--body", required=True)
+    summary = sub.add_parser("deploy-summary")
+    summary.add_argument("--from-sha", default="")
+    summary.add_argument("--to-sha", required=True)
+    summary.add_argument("--limit", type=int, default=5)
     args = parser.parse_args(argv)
     paths = tuple(Path(path) for path in args.env_file) or ENV_FILES
     env = _read_env(paths)
     if args.command == "check":
         state_path = Path(env.get("OPS_ALERT_STATE_PATH", str(STATE_PATH)))
         return run_check(env=env, state_path=state_path)
+    if args.command == "deploy-summary":
+        print(deploy_summary(args.from_sha, args.to_sha, limit=args.limit))
+        return 0
     return 0 if send_telegram(args.title, args.body, args.severity, env=env) else 1
 
 

@@ -104,6 +104,7 @@ jobs:
           script: |
             set -e
             cd /opt/aimash
+            PREVIOUS_DEPLOY_SHA=$(git rev-parse HEAD 2>/dev/null || true)
             DEPLOY_STAGE="git fetch"
             notify_deploy_exit() {
               CODE=$?
@@ -278,8 +279,14 @@ jobs:
             echo "✅ Hermes gateway reconnected: $LIVE_TOOLS tools, no Telegram 409"
             DEPLOY_STAGE="operational notification"
             systemctl start aimash-ops-watch.service || true
+            DEPLOY_CHANGES=$(python3 scripts/ops_alert.py deploy-summary \
+              --from-sha "$PREVIOUS_DEPLOY_SHA" \
+              --to-sha "$DEPLOY_SHA" \
+              --limit 5)
+            DEPLOY_BODY=$(printf 'SHA %s · сервисы healthy · MCP tools: %s\n%s' \
+              "$GIT_SHA" "$EXPECTED_TOOLS" "$DEPLOY_CHANGES")
             python3 scripts/ops_alert.py send \
               --severity success \
-              --title "Aimash deploy completed" \
-              --body "SHA $GIT_SHA; postgres/scheduler/backup healthy; Hermes gateway PID $GW_PID_AFTER; MCP tools: $EXPECTED_TOOLS."
+              --title "Aimash обновлён" \
+              --body "$DEPLOY_BODY"
             trap - EXIT
