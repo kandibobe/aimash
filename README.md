@@ -191,6 +191,7 @@ implementation notes и при расхождении исправляются �
 - [`deploy/hermes/SAFE_RESTART.md`](deploy/hermes/SAFE_RESTART.md) — безопасный restart.
 - [`deploy/hermes/host-a/RUNBOOK.md`](deploy/hermes/host-a/RUNBOOK.md) — host runbook.
 - [`deploy/hermes/SOUL.md`](deploy/hermes/SOUL.md) — системные инструкции и Bias for Action.
+- [`deploy/hermes/skills/ad-master/creative-director/SKILL.md`](deploy/hermes/skills/ad-master/creative-director/SKILL.md) — creative-director workflow Hermes.
 - [`deploy/hermes/DRIFT_AUDIT.md`](deploy/hermes/DRIFT_AUDIT.md) — контроль дрейфа tool surface.
 - [`deploy/hermes/RISK_REGISTER.md`](deploy/hermes/RISK_REGISTER.md) — открытые риски.
 - [`deploy/hermes/OPEN_DECISIONS.md`](deploy/hermes/OPEN_DECISIONS.md) — операционные решения.
