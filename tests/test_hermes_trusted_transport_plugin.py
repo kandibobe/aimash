@@ -422,6 +422,114 @@ async def test_confirmation_button_becomes_exact_trusted_reply(monkeypatch):
     assert turn.reply_confirmation_id == marker
 
 
+async def test_text_button_marker_is_cleaned_and_attached_as_keyboard(monkeypatch):
+    plugin = _load(monkeypatch, _env())
+
+    class _Button:
+        def __init__(self, text, callback_data):
+            self.text = text
+            self.callback_data = callback_data
+
+    class _Markup:
+        def __init__(self, rows):
+            self.inline_keyboard = rows
+
+    telegram = types.ModuleType("telegram")
+    telegram.InlineKeyboardButton = _Button
+    telegram.InlineKeyboardMarkup = _Markup
+    monkeypatch.setitem(sys.modules, "telegram", telegram)
+    sent = []
+    attached = []
+    events = []
+
+    class _MessageEvent(SimpleNamespace):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+
+    base = types.ModuleType("gateway.platforms.base")
+    base.MessageEvent = _MessageEvent
+    base.MessageType = SimpleNamespace(TEXT="text")
+    monkeypatch.setitem(sys.modules, "gateway.platforms", types.ModuleType("gateway.platforms"))
+    monkeypatch.setitem(sys.modules, "gateway.platforms.base", base)
+
+    class _Bot:
+        async def edit_message_reply_markup(self, **kwargs):
+            attached.append(kwargs)
+
+    class _Result:
+        success = True
+        message_id = "404"
+
+    class _Adapter:
+        _aimash_button_bridge = False
+
+        def __init__(self):
+            self._bot = _Bot()
+
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            sent.append(content)
+            return _Result()
+
+        async def edit_message(self, chat_id, message_id, content, *, finalize=False, metadata=None):
+            return _Result()
+
+        async def _handle_callback_query(self, update, context):
+            return None
+
+        def _is_callback_user_authorized(self, *args, **kwargs):
+            return True
+
+        def build_source(self, **kwargs):
+            return SimpleNamespace(platform="telegram", **kwargs)
+
+        async def handle_message(self, event):
+            events.append(event)
+
+    adapter_module = types.ModuleType("hermes_plugins.telegram_platform.adapter")
+    adapter_module.TelegramAdapter = _Adapter
+    adapter_module.normalize_telegram_chat_id = int
+    monkeypatch.setitem(sys.modules, "hermes_plugins", types.ModuleType("hermes_plugins"))
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_plugins.telegram_platform",
+        types.ModuleType("hermes_plugins.telegram_platform"),
+    )
+    monkeypatch.setitem(sys.modules, "hermes_plugins.telegram_platform.adapter", adapter_module)
+
+    assert plugin._install_telegram_button_bridge() is True
+    adapter = _Adapter()
+    await adapter.send("-202", "Выберите действие:\n[Кнопка: Найти неэффективные ключи]")
+
+    assert sent == ["Выберите действие:"]
+    keyboard = attached[0]["reply_markup"].inline_keyboard
+    assert [[button.text for button in row] for row in keyboard] == [
+        ["Найти неэффективные ключи"]
+    ]
+    query = SimpleNamespace(
+        data="ab:0",
+        from_user=SimpleNamespace(id=101, first_name="Operator", full_name="Operator"),
+        message=SimpleNamespace(
+            message_id=404,
+            chat_id=-202,
+            chat=SimpleNamespace(type="private", full_name="Operator", title=None),
+            message_thread_id=None,
+            text="Выберите действие:",
+            from_user=SimpleNamespace(id=9001, full_name="Aimash"),
+            date=None,
+        ),
+        answer=lambda **kwargs: None,
+        edit_message_reply_markup=lambda **kwargs: None,
+    )
+
+    async def _noop(**kwargs):
+        return None
+
+    query.answer = _noop
+    query.edit_message_reply_markup = _noop
+    await adapter._handle_callback_query(SimpleNamespace(update_id=505, callback_query=query), None)
+    assert events[0].text == "Найти неэффективные ключи"
+
+
 def test_external_tool_does_not_block_private_operator_write(monkeypatch):
     plugin = _load(monkeypatch, _env())
     plugin._capture_gateway_event(event=_event())

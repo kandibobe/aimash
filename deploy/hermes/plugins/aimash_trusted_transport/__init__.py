@@ -111,6 +111,9 @@ _PLAN_STATE_TOOLS = frozenset(
 )
 _INGEST_MEDIA_TOOL = f"{_MCP_PREFIX}ingest_media"
 _CONFIRM_RE = re.compile(r"\bAIMASH_CONFIRM:([0-9a-fA-F]{32})\b")
+_TEXT_BUTTON_RE = re.compile(r"\[Кнопка:\s*(.*?)\]", re.IGNORECASE)
+_TEXT_BUTTON_LINE_RE = re.compile(r"\[Кнопка:.*?\]\n?", re.IGNORECASE)
+_TEXT_BUTTON_CALLBACK_RE = re.compile(r"ab:(\d+)")
 _CALLBACK_RE = re.compile(r"^am:(yes|edit|no):([0-9a-fA-F]{32})$")
 _ARTIFACT_MARKER = "AIMASH_ARTIFACT:"
 _ARTIFACT_VERSION = 1
@@ -717,6 +720,39 @@ async def _attach_confirmation_keyboard(adapter, chat_id, message_id, content: s
         log.warning("Aimash confirmation keyboard was not attached: %s", type(exc).__name__)
 
 
+def _extract_text_buttons(content: str) -> tuple[str, list[str]]:
+    """Remove Hermes' textual button markers and return their labels."""
+    text = str(content or "")
+    buttons = [button.strip() for button in _TEXT_BUTTON_RE.findall(text) if button.strip()]
+    if not buttons:
+        return text, []
+    return _TEXT_BUTTON_LINE_RE.sub("", text).strip(), buttons
+
+
+async def _attach_text_button_keyboard(adapter, chat_id, message_id, buttons: list[str]) -> None:
+    """Attach inline buttons and retain their exact text for the callback bridge."""
+    if not buttons or not message_id or getattr(adapter, "_bot", None) is None:
+        return
+    try:
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton(button, callback_data=f"ab:{index}")] for index, button in enumerate(buttons)]
+        )
+        normalized_chat_id = _normalize_telegram_chat_id(chat_id)
+        numeric_message_id = int(message_id)
+        if not hasattr(adapter, "_aimash_text_buttons"):
+            adapter._aimash_text_buttons = {}
+        adapter._aimash_text_buttons[(normalized_chat_id, numeric_message_id)] = tuple(buttons)
+        await adapter._bot.edit_message_reply_markup(
+            chat_id=normalized_chat_id,
+            message_id=numeric_message_id,
+            reply_markup=keyboard,
+        )
+    except Exception as exc:  # noqa: BLE001 - plain text remains usable
+        log.warning("Aimash text button keyboard was not attached: %s", type(exc).__name__)
+
+
 def _telegram_chat_type(chat) -> str:
     value = str(getattr(chat, "type", "")).split(".")[-1].lower()
     if value in {"group", "supergroup"}:
@@ -808,6 +844,67 @@ async def _dispatch_confirmation_callback(adapter, update, query, choice: str) -
     return True
 
 
+async def _dispatch_text_button_callback(adapter, update, query, index: int) -> bool:
+    """Return a generated button label to Hermes as a trusted Telegram reply."""
+    message = getattr(query, "message", None)
+    user = getattr(query, "from_user", None)
+    chat = getattr(message, "chat", None)
+    update_id = _as_int(getattr(update, "update_id", None), positive=True)
+    message_id = _as_int(getattr(message, "message_id", None), positive=True)
+    chat_id = _as_int(getattr(message, "chat_id", None))
+    user_id = _as_int(getattr(user, "id", None), positive=True)
+    buttons = getattr(adapter, "_aimash_text_buttons", {}).get((chat_id, message_id), ())
+    if None in (update_id, message_id, chat_id, user_id) or not 0 <= index < len(buttons):
+        await query.answer(text="⚠️ Кнопка устарела — отправьте нужный вариант текстом.")
+        return True
+    if not adapter._is_callback_user_authorized(
+        str(user_id),
+        chat_id=chat_id,
+        chat_type=str(getattr(chat, "type", None)),
+        thread_id=str(getattr(message, "message_thread_id", None))
+        if getattr(message, "message_thread_id", None) is not None
+        else None,
+        user_name=getattr(user, "first_name", None),
+    ):
+        await query.answer(text="⛔ У вас нет права нажимать эту кнопку.")
+        return True
+
+    from gateway.platforms.base import MessageEvent, MessageType
+
+    thread_id = getattr(message, "message_thread_id", None)
+    source = adapter.build_source(
+        chat_id=str(chat_id),
+        chat_name=getattr(chat, "title", None) or getattr(chat, "full_name", None),
+        chat_type=_telegram_chat_type(chat),
+        user_id=str(user_id),
+        user_name=getattr(user, "full_name", None) or getattr(user, "first_name", None),
+        thread_id=str(thread_id) if thread_id is not None else None,
+        message_id=str(update_id),
+        is_bot=False,
+    )
+    button_text = buttons[index]
+    event = MessageEvent(
+        text=button_text,
+        message_type=MessageType.TEXT,
+        source=source,
+        raw_message=query,
+        message_id=str(update_id),
+        platform_update_id=update_id,
+        reply_to_message_id=str(message_id),
+        reply_to_text=str(getattr(message, "text", None) or ""),
+        reply_to_author_id=str(getattr(getattr(message, "from_user", None), "id", "") or ""),
+        reply_to_author_name=getattr(getattr(message, "from_user", None), "full_name", None),
+        reply_to_is_own_message=True,
+        metadata={"aimash_text_button": True},
+        timestamp=getattr(message, "date", None),
+    )
+    await query.answer()
+    await query.edit_message_reply_markup(reply_markup=None)
+    getattr(adapter, "_aimash_text_buttons", {}).pop((chat_id, message_id), None)
+    await adapter.handle_message(event)
+    return True
+
+
 def _install_telegram_button_bridge() -> bool:
     """Patch the pinned Telegram adapter without adding Ads credentials to Hermes."""
     adapter_module = _telegram_adapter_module()
@@ -830,35 +927,41 @@ def _install_telegram_button_bridge() -> bool:
             # Confirmation cards need an inline keyboard.  Keep this one small message on the
             # ordinary sendMessage path: Telegram's new rich/streaming path can finalize through
             # a different message id, which made the post-send keyboard edit target stale output.
-            if _CONFIRM_RE.search(str(content or "")):
+            if _CONFIRM_RE.search(str(content or "")) or _TEXT_BUTTON_RE.search(str(content or "")):
                 return False
             return original_should_attempt_rich(adapter, content, metadata=metadata)
 
     @functools.wraps(original_send)
     async def send(adapter, chat_id, content, reply_to=None, metadata=None):
+        clean_content, buttons = _extract_text_buttons(content)
         result = await original_send(
-            adapter, chat_id, content, reply_to=reply_to, metadata=metadata
+            adapter, chat_id, clean_content, reply_to=reply_to, metadata=metadata
         )
         if getattr(result, "success", False):
             await _attach_confirmation_keyboard(
-                adapter, chat_id, getattr(result, "message_id", None), content
+                adapter, chat_id, getattr(result, "message_id", None), clean_content
+            )
+            await _attach_text_button_keyboard(
+                adapter, chat_id, getattr(result, "message_id", None), buttons
             )
             await _deliver_pending_artifacts(adapter, chat_id, metadata)
         return result
 
     @functools.wraps(original_edit)
     async def edit_message(adapter, chat_id, message_id, content, *, finalize=False, metadata=None):
+        clean_content, buttons = _extract_text_buttons(content)
         result = await original_edit(
             adapter,
             chat_id,
             message_id,
-            content,
+            clean_content,
             finalize=finalize,
             metadata=metadata,
         )
         if finalize and getattr(result, "success", False):
             effective_message_id = getattr(result, "message_id", None) or message_id
-            await _attach_confirmation_keyboard(adapter, chat_id, effective_message_id, content)
+            await _attach_confirmation_keyboard(adapter, chat_id, effective_message_id, clean_content)
+            await _attach_text_button_keyboard(adapter, chat_id, effective_message_id, buttons)
             # Final answers are commonly completed through edit_message rather than send().
             # Without this symmetric hook signed XLSX/media stayed queued forever while the
             # model incorrectly reported that Telegram delivery had happened. Queue pop makes
@@ -869,7 +972,12 @@ def _install_telegram_button_bridge() -> bool:
     @functools.wraps(original_callback)
     async def handle_callback(adapter, update, context):
         query = getattr(update, "callback_query", None)
-        match = _CALLBACK_RE.fullmatch(str(getattr(query, "data", "") or ""))
+        callback_data = str(getattr(query, "data", "") or "")
+        text_button_match = _TEXT_BUTTON_CALLBACK_RE.fullmatch(callback_data)
+        if text_button_match is not None:
+            await _dispatch_text_button_callback(adapter, update, query, int(text_button_match.group(1)))
+            return
+        match = _CALLBACK_RE.fullmatch(callback_data)
         if match is not None:
             await _dispatch_confirmation_callback(adapter, update, query, match.group(1))
             return
