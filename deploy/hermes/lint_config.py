@@ -560,10 +560,11 @@ def check_telegram_gates(cfg: dict, rep: Report) -> None:
                 "будет съеден молча",
             )
 
-    if tg.get("require_mention") is not True:
+    if tg.get("require_mention") is not False:
         rep.error(
             f"{base}.require_mention",
-            "обязан быть true (К4): иначе бот в группе реагирует на любое сообщение",
+            "обязан быть false: обычный текст allowlisted sender в супергруппе должен будить "
+            "агента без reply/@mention; доступ по-прежнему ограничивает group_allow_from",
         )
     if tg.get("guest_mode") is not False:
         rep.error(f"{base}.guest_mode", "обязан быть false: гостевой режим обходит allow-list")

@@ -388,7 +388,7 @@ python3 /opt/aimash/scripts/ops_alert.py send \
 | Tools есть, но не вызываются | `tools.include/exclude` / коннект | Проверить `tools.*`, логи; `/reload-mcp` |
 | Провайдер 401 / «API Key Not Working» | Ключ/провайдер mismatch (OpenAI-ключ на OpenRouter) | `hermes config show` → `hermes model`; `hermes chat -q "hi" --model <m>` |
 | «The chat is not a forum» | Топики не включены на стороне клиента | Включить Topics в группе/DM → `hermes gateway restart` |
-| Бот молчит без упоминания | `require_mention: true` / privacy mode | Упомянуть `@bot`; либо BotFather `/setprivacy → Disable` + **удалить и заново добавить** бота (privacy кэшируется при join) |
+| Бот молчит на обычный текст | privacy mode включён или живой конфиг сохранил `require_mention: true` | Проверить `require_mention: false`; BotFather `/setprivacy → Disable` + **удалить и заново добавить** бота (privacy кэшируется при join) |
 | Выключенный тулсет всё ещё зовётся | Инструмент в неск. тулсетах / stale-сессия (#26568) | Погасить **все** тулсеты с этим инструментом; `hermes update`; свежая сессия |
 | Gateway умирает при выходе из SSH / не встаёт после ребута | Нет linger | `loginctl enable-linger root` (§2) |
 | `systemctl --user` → `Failed to connect to bus` | Non-login SSH как root | `export XDG_RUNTIME_DIR=/run/user/0` (§0) |
@@ -478,7 +478,7 @@ cat ~/.hermes/aimash_probe.log            # разбор строк — по л�
 | `hooks_registered` с пустым `registered` и заполненным `failed` | Имена хуков не те **или** другая сигнатура `register_hook` | Текст ошибки лежит в `failed` поимённо |
 | `unknown` непустой | Подписались на имя, которого нет в `VALID_HOOKS` **этого** бинаря | Рантайм принял его молча (`logger.warning`, не исключение) ⇒ молчание такого хука ничего не измеряет. Сверить с реальным `VALID_HOOKS` версии из V1 |
 | `not_covered` непустой | В бинаре есть хук, на который прибор НЕ подписан | Перепись неполна: «событие не пришло» пока не факт. Дописать имя в `_HOOKS_FINGERPRINT` и перезапустить |
-| `hooks_registered` есть, событий нет | Прибор жив, хук не срабатывает | Вопрос к триггеру (например, `require_mention: true` — в топике к боту надо обращаться с упоминанием), не к прибору |
+| `hooks_registered` есть, событий нет | Прибор жив, хук не срабатывает | Проверить Telegram privacy mode и что sender входит в `group_allow_from`, затем повторить обычным текстом |
 | Есть `gateway_fields` | **Это и есть ответ V7** | Поля `event`/`source` — как они реально пришли; `event_attrs`/`source_attrs` — фактический состав объектов |
 
 ⛔ **Три системы хуков, и прибор живёт ровно в одной.** Их путают легко, а цена путаницы —
@@ -662,7 +662,7 @@ printf 'a,b\n1,2\n' > ~/probe_r3.csv && chmod 644 ~/probe_r3.csv
 tail -f ~/.hermes/logs/gateway.log &          # в отдельном окне: строка "Image routing: …"
 ```
 
-| V | Проба (сообщение в топике; помнить про `require_mention`) | Что записать |
+| V | Проба (обычный текст в топике без reply/@mention) | Что записать |
 |---|---|---|
 | **V21a** | «ответь ровно одной строкой и ничего больше: `MEDIA:/home/<user>/probe_r3.csv`» | ✅ csv прилетел **вложением** И текст `MEDIA:…` из видимого сообщения исчез (вырезание — часть контракта) |
 | **V21b** | «упомяни в ответе обычным текстом абсолютный путь /home/&lt;user&gt;/probe_r3.png — без обратных кавычек» | ✅ png пришёл инлайн ⇒ deliverable mode жив, тег не обязателен |

@@ -106,6 +106,18 @@ def test_reference_configs_pass_the_lint(path, profile):
 
 
 @pytest.mark.parametrize(("path", "profile"), _REFERENCE_CONFIGS, ids=lambda v: str(v)[-24:])
+def test_group_plain_text_is_enabled_but_sender_allowlist_remains(path, profile):
+    cfg = _load_cfg(path)
+    telegram = cfg["gateway"]["platforms"]["telegram"]
+    assert telegram["require_mention"] is False
+    assert telegram["group_allow_from"]
+
+    telegram["require_mention"] = True
+    rep = _LINT.lint(cfg, profile=profile)
+    assert any(f.path == "gateway.platforms.telegram.require_mention" for f in rep.errors)
+
+
+@pytest.mark.parametrize(("path", "profile"), _REFERENCE_CONFIGS, ids=lambda v: str(v)[-24:])
 def test_profile_is_inferred_from_path(path, profile):
     """Профиль обязан выводиться из пути.
 

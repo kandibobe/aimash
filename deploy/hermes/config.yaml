@@ -158,7 +158,7 @@ gateway:
       group_allow_from:
         - '787132457'
         - '1674890775'
-      require_mention: true
+      require_mention: false
       guest_mode: false
       extra:
         group_topics: '[{"chat_id": "-1004443550627", "topics": [{"name": "general",

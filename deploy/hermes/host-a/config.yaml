@@ -279,7 +279,9 @@ gateway:
       #    (без user_id) отсекаются (:377-378). Это и есть fail-closed по правилу 10.
       #    Включать его = принять Р2 технически, а не на словах. Тогда — осознанно и письменно.
       # group_allowed_chats: ["REPLACE_SUPERGROUP_ID"]
-      require_mention: true
+      # Обычный текст от allowlisted sender в супергруппе считается обращением к агенту.
+      # Privacy mode Telegram должен быть выключен, иначе gateway такой текст не получит.
+      require_mention: false
       guest_mode: false
       extra:
         # `group_topics` — наоборот, ТОЛЬКО в `extra`: единственный потребитель читает
