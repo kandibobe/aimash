@@ -53,6 +53,18 @@ def test_surface_sync_model_policy_matches_repository_config():
     )
 
 
+def test_soul_scopes_dynamic_buttons_to_the_supported_transport():
+    soul = (ROOT / "deploy/hermes/SOUL.md").read_text(encoding="utf-8")
+
+    assert "On Telegram" in soul
+    assert "[Кнопка: Action text]" in soul
+    assert "In dashboard, CLI and TUI sessions" in soul
+    assert "never tell the user to click" in soul
+    assert "Введите номер или текст варианта:" in soul
+    assert "Hermes dispatches only the first slash command" in soul
+    assert "`/arxiv /background ...`" in soul
+
+
 def test_enable_pins_current_transport_plugin_and_aimash_include():
     cfg = SYNC.reconcile_config(_config(), enabled=True, tools=["read", "execute_confirmed"])
     assert cfg["model"] == {"provider": "host-local", "default": "host-model"}
