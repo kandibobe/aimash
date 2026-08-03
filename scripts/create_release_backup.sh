@@ -31,6 +31,12 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
+docker_bin="${DOCKER_BIN:-docker}"
+
+docker_cli() {
+  "${docker_bin}" "$@"
+}
+
 cleanup() {
   if [[ -n "${STAGE_DIR}" && -d "${STAGE_DIR}" ]]; then
     case "${STAGE_DIR}" in
@@ -46,10 +52,13 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-require_command docker
 require_command git
 require_command tar
 require_command grep
+
+if ! command -v "${docker_bin}" >/dev/null 2>&1; then
+  die "required Docker CLI not found: ${docker_bin}"
+fi
 
 git -C "${PROJECT_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
   || die "project root is not a Git worktree: ${PROJECT_ROOT}"
@@ -61,34 +70,42 @@ if [[ -n "$(git -C "${PROJECT_ROOT}" status --porcelain --untracked-files=normal
   log "WARNING: creating an emergency snapshot from a dirty worktree (ALLOW_DIRTY=1)"
 fi
 
-docker info >/dev/null 2>&1 || die "Docker daemon is unavailable"
+if ! docker_cli info >/dev/null 2>&1; then
+  # WSL may resolve /usr/bin/docker while Docker Desktop exposes only docker.exe through /mnt/c.
+  # Prefer the native Linux CLI in production; use the Windows CLI only when it is actually ready.
+  windows_docker="/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe"
+  if [[ -z "${DOCKER_BIN:-}" && -x "${windows_docker}" ]]; then
+    docker_bin="${windows_docker}"
+  fi
+fi
+docker_cli info >/dev/null 2>&1 || die "Docker daemon is unavailable"
 
 postgres_container="${POSTGRES_CONTAINER:-}"
-if [[ -z "${postgres_container}" ]] && docker compose version >/dev/null 2>&1; then
+if [[ -z "${postgres_container}" ]] && docker_cli compose version >/dev/null 2>&1; then
   postgres_container="$(
     cd -- "${PROJECT_ROOT}"
-    docker compose ps -q postgres 2>/dev/null || true
+    docker_cli compose ps -q postgres 2>/dev/null | tr -d '\r' || true
   )"
 fi
 if [[ -z "${postgres_container}" ]]; then
   postgres_container="aimash-pg"
 fi
 
-docker inspect "${postgres_container}" >/dev/null 2>&1 \
+docker_cli inspect "${postgres_container}" >/dev/null 2>&1 \
   || die "PostgreSQL container not found. Start the Compose service 'postgres' or set POSTGRES_CONTAINER."
 
-[[ "$(docker inspect --format '{{.State.Running}}' "${postgres_container}")" == "true" ]] \
+[[ "$(docker_cli inspect --format '{{.State.Running}}' "${postgres_container}" | tr -d '\r')" == "true" ]] \
   || die "PostgreSQL container is not running: ${postgres_container}"
 
 postgres_health="$(
-  docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
-    "${postgres_container}"
+  docker_cli inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+    "${postgres_container}" | tr -d '\r'
 )"
 if [[ "${postgres_health}" != "healthy" && "${postgres_health}" != "none" ]]; then
   die "PostgreSQL container health is '${postgres_health}', expected 'healthy'"
 fi
 
-docker exec "${postgres_container}" sh -ec \
+docker_cli exec "${postgres_container}" sh -ec \
   'command -v pg_dump >/dev/null; command -v pg_restore >/dev/null; test -n "${POSTGRES_USER:-}"; test -n "${POSTGRES_DB:-}"' \
   || die "pg_dump/pg_restore or POSTGRES_USER/POSTGRES_DB is unavailable in the PostgreSQL container"
 
@@ -107,12 +124,12 @@ mkdir -p -- "${STAGE_DIR}/release-assets/postgres"
 readonly DUMP_PATH="${STAGE_DIR}/release-assets/postgres/aimash.dump"
 
 log "creating PostgreSQL schema+data dump from Compose service 'postgres'"
-docker exec "${postgres_container}" sh -ec \
+docker_cli exec "${postgres_container}" sh -ec \
   'exec pg_dump --format=custom --no-owner --no-privileges --username="$POSTGRES_USER" --dbname="$POSTGRES_DB"' \
   > "${DUMP_PATH}"
 
 [[ -s "${DUMP_PATH}" ]] || die "pg_dump produced an empty file"
-docker exec -i "${postgres_container}" pg_restore --list < "${DUMP_PATH}" >/dev/null \
+docker_cli exec -i "${postgres_container}" pg_restore --list < "${DUMP_PATH}" >/dev/null \
   || die "pg_restore could not read the generated dump"
 
 git_commit="$(git -C "${PROJECT_ROOT}" rev-parse HEAD)"
