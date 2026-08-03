@@ -26,7 +26,9 @@ from keywords.filter import filter_relevance
 from keywords.ingest import parse_keywords_text
 from keywords.seeds import generate_seed_keywords
 from mcp_server.envelope import err, ok
+from reports.keyword_export import fetch_keyword_performance_rows, write_keyword_performance_xlsx
 from reports.service import build_account_report_async
+from reports.tz import account_period
 from reports.xlsx import write_report_xlsx
 
 
@@ -91,6 +93,78 @@ async def build_report(
                 "period": {
                     "date_from": report.period.date_from.isoformat(),
                     "date_to": report.period.date_to.isoformat(),
+                },
+                "currency": currency or "",
+            },
+        )
+
+    return await _guarded(_work, account=str(account))
+
+
+async def export_keyword_report(
+    account: str,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    period_days: int | None = 30,
+    period_preset: Literal["7", "14", "30", "90", "MTD", "LM"] | None = None,
+    language: Literal["ru", "en"] = "ru",
+) -> dict[str, Any]:
+    """Export every Search-campaign keyword as a row-level .xlsx report.
+
+    Use for "выгрузи слова", "все ключи", semantic exports and "export
+    keywords". ``build_report`` is an account overview and is not the complete
+    keyword-list export.
+    """
+    from mcp_server.artifacts import artifact_path, publish_artifact, remove_artifact
+    from mcp_server.tools_read import _period
+
+    async def _work() -> dict[str, Any]:
+        window = _period(date_from, date_to, period_days, period_preset)
+        client = await build_client_async(account)
+        window = await account_period(
+            client, str(account), window, label="mcp.export_keyword_report.period"
+        )
+        rows = await run_ads_read_call(
+            fetch_keyword_performance_rows,
+            client,
+            str(account),
+            window,
+            account=str(account),
+            label="mcp.export_keyword_report.rows",
+        )
+        currency = await run_ads_read_call(
+            account_currency,
+            client,
+            str(account),
+            account=str(account),
+            label="mcp.export_keyword_report.currency",
+        )
+        path = artifact_path(".xlsx")
+        try:
+            await asyncio.to_thread(
+                write_keyword_performance_xlsx,
+                rows,
+                str(path),
+                currency=currency or "",
+                language=language,
+            )
+            artifact = publish_artifact(
+                path,
+                filename=f"aimash_keywords_{account}.xlsx",
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        except Exception:
+            remove_artifact(path)
+            raise
+        return ok(
+            [],
+            extra={
+                "artifact": artifact,
+                "account": str(account),
+                "row_count": len(rows),
+                "period": {
+                    "date_from": window.date_from.isoformat(),
+                    "date_to": window.date_to.isoformat(),
                 },
                 "currency": currency or "",
             },
@@ -389,6 +463,7 @@ async def get_crawl_status(account: str, job_id: str) -> dict[str, Any]:
 
 WORKFLOW_READ_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "build_report": build_report,
+    "export_keyword_report": export_keyword_report,
     "seed_keywords": seed_keywords,
     "cluster_keywords": cluster_keywords,
     "filter_keyword_relevance": filter_keyword_relevance,

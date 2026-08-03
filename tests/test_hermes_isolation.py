@@ -72,11 +72,11 @@ def test_i4_seed_read_tools_disjoint_from_mutations():
         "И4: READ-инструменты MCP пересеклись с мутационными: "
         f"{sorted(READ_MCP_TOOLS & MUTATION_TOOLS)}"
     )
-    # 24 = 11 generic/account/profile READ + 13 bot-free workflow readers (report artifact,
+    # 25 = 11 generic/account/profile READ + 14 bot-free workflow readers (report artifacts,
     # keyword/RSA primitives and structured client/crawl reads). Точный счёт держит
     # реестр от тихого разрастания: новая обёртка обязана осознанно бампнуть его вместе с
     # config.yaml/_ACCOUNT_ARG.
-    assert len(READ_MCP_TOOLS) == 24, f"ожидалось 24 READ-инструмента, стало {len(READ_MCP_TOOLS)}"
+    assert len(READ_MCP_TOOLS) == 25, f"ожидалось 25 READ-инструментов, стало {len(READ_MCP_TOOLS)}"
 
 
 def test_i4_seed_server_builds_and_registers_only_read():
@@ -117,6 +117,7 @@ _ACCOUNT_ARG: dict[str, str] = {
     "get_mcc_summary": "manager_id",
     "get_mcc_deep": "manager_id",
     "build_report": "account",
+    "export_keyword_report": "account",
     "seed_keywords": "account",
     "cluster_keywords": "account",
     "filter_keyword_relevance": "account",

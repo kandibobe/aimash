@@ -21,5 +21,8 @@ description: Автономно читать и изменять Google Ads че
 6. При `ok=false` выполни `suggested_action`, уточни параметры через READ и повтори action.
 
 Для связанных изменений вызывай typed actions последовательно в рамках одной цели и после каждого
-проверяй фактический status. Для отчёта используй `build_report`; artifact bridge доставит файл в
-исходный Telegram topic. Числа, валюты, сущности и итог применения бери из structured tool results.
+проверяй фактический status. Для общего отчёта по аккаунту используй `build_report`. Если пользователь
+просит выгрузить слова, ключи, семантику или полный список keywords, используй
+`export_keyword_report`: он формирует построчный `.xlsx` без top-N ограничения. Artifact bridge
+доставит файл в исходный Telegram topic. Числа, валюты, сущности и итог применения бери из structured
+tool results.
