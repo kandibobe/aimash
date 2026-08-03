@@ -73,12 +73,24 @@ def fetch_keyword_performance_rows(
 
 _HEADERS = {
     "ru": [
-        "Кампания", "Группа объявлений", "Ключевое слово", "Тип соответствия",
-        "Показы", "Клики", "Расход", "Конверсии",
+        "Кампания",
+        "Группа объявлений",
+        "Ключевое слово",
+        "Тип соответствия",
+        "Показы",
+        "Клики",
+        "Расход",
+        "Конверсии",
     ],
     "en": [
-        "Campaign", "Ad group", "Keyword", "Match type",
-        "Impressions", "Clicks", "Cost", "Conversions",
+        "Campaign",
+        "Ad group",
+        "Keyword",
+        "Match type",
+        "Impressions",
+        "Clicks",
+        "Cost",
+        "Conversions",
     ],
 }
 
@@ -100,8 +112,14 @@ def build_keyword_performance_workbook(
         ws.append(
             safe_row(
                 [
-                    item.campaign_name, item.ad_group_name, item.keyword_text, item.match_type,
-                    item.impressions, item.clicks, item.cost, item.conversions,
+                    item.campaign_name,
+                    item.ad_group_name,
+                    item.keyword_text,
+                    item.match_type,
+                    item.impressions,
+                    item.clicks,
+                    item.cost,
+                    item.conversions,
                 ]
             )
         )

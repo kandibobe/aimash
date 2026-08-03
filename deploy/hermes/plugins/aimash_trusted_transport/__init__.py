@@ -737,7 +737,10 @@ async def _attach_text_button_keyboard(adapter, chat_id, message_id, buttons: li
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
         keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton(button, callback_data=f"ab:{index}")] for index, button in enumerate(buttons)]
+            [
+                [InlineKeyboardButton(button, callback_data=f"ab:{index}")]
+                for index, button in enumerate(buttons)
+            ]
         )
         normalized_chat_id = _normalize_telegram_chat_id(chat_id)
         numeric_message_id = int(message_id)
@@ -960,7 +963,9 @@ def _install_telegram_button_bridge() -> bool:
         )
         if finalize and getattr(result, "success", False):
             effective_message_id = getattr(result, "message_id", None) or message_id
-            await _attach_confirmation_keyboard(adapter, chat_id, effective_message_id, clean_content)
+            await _attach_confirmation_keyboard(
+                adapter, chat_id, effective_message_id, clean_content
+            )
             await _attach_text_button_keyboard(adapter, chat_id, effective_message_id, buttons)
             # Final answers are commonly completed through edit_message rather than send().
             # Without this symmetric hook signed XLSX/media stayed queued forever while the
@@ -975,7 +980,9 @@ def _install_telegram_button_bridge() -> bool:
         callback_data = str(getattr(query, "data", "") or "")
         text_button_match = _TEXT_BUTTON_CALLBACK_RE.fullmatch(callback_data)
         if text_button_match is not None:
-            await _dispatch_text_button_callback(adapter, update, query, int(text_button_match.group(1)))
+            await _dispatch_text_button_callback(
+                adapter, update, query, int(text_button_match.group(1))
+            )
             return
         match = _CALLBACK_RE.fullmatch(callback_data)
         if match is not None:

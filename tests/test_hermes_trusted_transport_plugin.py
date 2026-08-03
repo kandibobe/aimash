@@ -470,7 +470,9 @@ async def test_text_button_marker_is_cleaned_and_attached_as_keyboard(monkeypatc
             sent.append(content)
             return _Result()
 
-        async def edit_message(self, chat_id, message_id, content, *, finalize=False, metadata=None):
+        async def edit_message(
+            self, chat_id, message_id, content, *, finalize=False, metadata=None
+        ):
             return _Result()
 
         async def _handle_callback_query(self, update, context):
@@ -502,9 +504,7 @@ async def test_text_button_marker_is_cleaned_and_attached_as_keyboard(monkeypatc
 
     assert sent == ["Выберите действие:"]
     keyboard = attached[0]["reply_markup"].inline_keyboard
-    assert [[button.text for button in row] for row in keyboard] == [
-        ["Найти неэффективные ключи"]
-    ]
+    assert [[button.text for button in row] for row in keyboard] == [["Найти неэффективные ключи"]]
     query = SimpleNamespace(
         data="ab:0",
         from_user=SimpleNamespace(id=101, first_name="Operator", full_name="Operator"),

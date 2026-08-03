@@ -118,9 +118,7 @@ def test_export_keyword_tool_builds_dedicated_row_artifact(monkeypatch, tmp_path
     )
 
     result = asyncio.run(
-        tw.export_keyword_report(
-            DRAFT_ACCOUNT_ID, date_from="2025-01-01", date_to="2025-12-31"
-        )
+        tw.export_keyword_report(DRAFT_ACCOUNT_ID, date_from="2025-01-01", date_to="2025-12-31")
     )
 
     assert result["ok"] is True
