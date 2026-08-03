@@ -15,6 +15,10 @@ FROM python:3.12-slim AS runtime
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
+# DejaVu is the deterministic Cyrillic font used by monthly PDF reports.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
 # Непривилегированный пользователь (никаких root-процессов в контейнере).
 RUN useradd --create-home --uid 10001 aimash
 WORKDIR /app

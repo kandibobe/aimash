@@ -1,9 +1,14 @@
-version: 2
+version: 3
 last_verified_at: '2026-08-03T10:00:00Z'
 owner: kandibobe
 purpose: Canonical registry of AdMaster cron jobs with criticality, expected state, and alert semantics.
 
 default_rules:
+  execution_policy: read_only_notify_then_wait
+  mutations_from_cron: forbidden
+  proposals_from_cron: forbidden
+  memory_writes_from_cron: forbidden
+  artifacts_from_cron: human_command_required
   paused_P0: immediate_alert
   failed_P0: immediate_alert
   paused_P1: daily_digest
@@ -50,6 +55,11 @@ jobs:
     actual_state: scheduled
     schedule: '30 18 * * *'
     prompt_file: cron_prompts/shadow_daily.txt
+    depends_on:
+      - '6e96062d99ad'
+      - '5db43f3b3d5d'
+      - 'b44861829e51'
+      - 'a0cff93f3a2b'
     enabled_expected: true
     silent_on_normal: false
 
@@ -63,6 +73,9 @@ jobs:
     actual_state: scheduled
     schedule: '10 18 * * *'
     prompt_file: cron_prompts/context_summary.txt
+    depends_on:
+      - '5db43f3b3d5d'
+      - 'b44861829e51'
     enabled_expected: true
     silent_on_normal: false
 
@@ -80,7 +93,7 @@ jobs:
   - job_id: 'e4f1b2ae179d'
     name: '🧹 Weekly Account Review (Friday 10:00 UTC)'
     criticality: P1
-    purpose: Weekly search term cleanup / waste detection lane.
+    purpose: Full weekly WoW account audit and prioritized advisory review.
     provider: openai-codex
     model: gpt-5.4
     expected_state: scheduled
@@ -93,7 +106,7 @@ jobs:
   - job_id: '2a402a32e5ec'
     name: '📝 Monthly Strategic Audit (day 1, 11:00 UTC)'
     criticality: P2
-    purpose: Monthly creative/RSA audit.
+    purpose: Full monthly strategic account audit and client-report review.
     provider: openai-codex
     model: gpt-5.4
     expected_state: scheduled

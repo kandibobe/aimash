@@ -303,6 +303,7 @@ mcp_servers:
         - read_keyword_sheet
         - create_search_term_review
         - read_search_term_review
+        - build_monthly_pdf
         - ingest_media
         - start_client_crawl
         - execute_confirmed

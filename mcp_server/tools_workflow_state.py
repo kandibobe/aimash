@@ -1,4 +1,4 @@
-"""Trusted local workflow state for keyword review and RSA curation.
+"""Trusted local workflow state and artifacts for operator-initiated workflows.
 
 These tools do not mutate Google Ads.  They are nevertheless registered on the trusted PLAN
 surface because their durable state is scoped to the real Telegram actor/chat and later feeds a
@@ -416,6 +416,121 @@ async def read_search_term_review(account: str, spreadsheet: str) -> dict[str, A
         rows,
         limit=200,
         extra={"spreadsheet_id": sheet_id, "verified": True, "advisory_only": True},
+    )
+
+
+async def build_monthly_pdf(
+    account: str,
+    executive_summary: str,
+    work_completed: list[str] | None = None,
+    measured_results: list[str] | None = None,
+    risks: list[str] | None = None,
+    next_month_plan: list[str] | None = None,
+    language: Literal["ru", "en"] = "ru",
+    period_preset: Literal["30", "LM"] = "LM",
+) -> dict[str, Any]:
+    """Create a monthly PDF only from a trusted human turn; never mutate Ads or client memory."""
+    from audit.factguard import collect_numbers, narrative_facts_preserved
+    from mcp_server.tools_read import _period
+    from reports.pdf import write_monthly_report_pdf
+    from reports.service import build_account_report_async
+
+    ensure_read_allowed(str(account))
+    turn = get_trusted_turn()  # cron/model-only turns cannot mint or deliver an artifact
+    if language not in {"ru", "en"}:
+        raise ValueError("language must be ru or en")
+    narrative_parts = [
+        executive_summary,
+        *(work_completed or []),
+        *(measured_results or []),
+        *(risks or []),
+        *(next_month_plan or []),
+    ]
+    if sum(len(str(item)) for item in narrative_parts) > 50_000:
+        raise ValueError("monthly PDF narrative exceeds 50000 characters")
+
+    client = await build_client_async(account)
+    currency = await run_ads_read_call(
+        account_currency,
+        client,
+        str(account),
+        account=str(account),
+        label="mcp.monthly_pdf.currency",
+    )
+    report = await build_account_report_async(
+        client,
+        str(account),
+        _period(None, None, None, period_preset),
+        currency=currency or "",
+    )
+
+    t = report.totals
+    p = report.prev_totals
+
+    def _change_pct(current: float, previous: float) -> float | None:
+        if previous == 0:
+            return None
+        return round((current - previous) / previous * 100.0, 1)
+
+    facts: dict[str, Any] = {
+        "account": report.customer_id,
+        "period": [report.period.date_from.isoformat(), report.period.date_to.isoformat()],
+        "period_days": (report.period.date_to - report.period.date_from).days + 1,
+        "current": t.as_row(),
+        "previous": p.as_row() if p else [],
+        "changes_pct": (
+            {
+                "cost": _change_pct(t.cost, p.cost),
+                "clicks": _change_pct(t.clicks, p.clicks),
+                "conversions": _change_pct(t.conversions, p.conversions),
+                "cpa": _change_pct(t.cpa, p.cpa),
+                "roas": _change_pct(t.roas, p.roas),
+            }
+            if p
+            else {}
+        ),
+        "campaigns": [
+            [*dimensions, *metrics.as_row()]
+            for breakdown in report.breakdowns
+            if breakdown.key == "campaign"
+            for dimensions, metrics in breakdown.rows[:15]
+        ],
+    }
+    narrative = "\n".join(str(item) for item in narrative_parts if str(item).strip())
+    if not narrative_facts_preserved(narrative, collect_numbers(facts)):
+        raise ValueError("monthly PDF narrative contains numbers absent from verified report data")
+
+    path = artifact_path(".pdf")
+    try:
+        await asyncio.to_thread(
+            write_monthly_report_pdf,
+            report,
+            path,
+            language=language,
+            executive_summary=executive_summary,
+            work_completed=work_completed,
+            measured_results=measured_results,
+            risks=risks,
+            next_month_plan=next_month_plan,
+        )
+        artifact = publish_artifact(
+            path,
+            filename=f"aimash_monthly_report_{account}.pdf",
+            media_type="application/pdf",
+        )
+    except Exception:
+        remove_artifact(path)
+        raise
+    return ok(
+        [],
+        extra={
+            "artifact": artifact,
+            "account": str(account),
+            "period": facts["period"],
+            "currency": currency or "",
+            "advisory_only": True,
+            "human_command_message_id": turn.message_id,
+        },
     )
 
 
@@ -855,6 +970,7 @@ WORKFLOW_STATE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] =
     "read_keyword_sheet": read_keyword_sheet,
     "create_search_term_review": create_search_term_review,
     "read_search_term_review": read_search_term_review,
+    "build_monthly_pdf": build_monthly_pdf,
     "curation_start": curation_start,
     "curation_state": curation_state,
     "curation_apply": curation_apply,

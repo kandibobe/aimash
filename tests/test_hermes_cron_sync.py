@@ -26,13 +26,74 @@ def test_managed_cron_prompts_exist_and_schedules_do_not_collide():
                 or "никаких автоматических изменений" in prompt.casefold()
                 or "не записывай автоматически" in prompt.casefold()
             )
-            if job["job_id"] != "a0cff93f3a2b":
-                assert "[Кнопка:" in prompt
+            assert "[Кнопка:" in prompt
     by_schedule: dict[str, list[str]] = {}
     for job in managed:
         by_schedule.setdefault(job["schedule"], []).append(job["job_id"])
     assert all(len(ids) == 1 for ids in by_schedule.values())
     assert next(j for j in managed if j["job_id"] == "031080f7bfac")["schedule"] == "30 18 * * *"
+
+
+def test_cron_policy_is_advisory_only_and_evening_jobs_are_ordered():
+    registry = yaml.safe_load(_registry().read_text(encoding="utf-8"))
+    rules = registry["default_rules"]
+    assert rules["execution_policy"] == "read_only_notify_then_wait"
+    assert rules["mutations_from_cron"] == "forbidden"
+    assert rules["proposals_from_cron"] == "forbidden"
+    assert rules["memory_writes_from_cron"] == "forbidden"
+    assert rules["artifacts_from_cron"] == "human_command_required"
+
+    jobs = {job["job_id"]: job for job in registry["jobs"]}
+    assert jobs["5db43f3b3d5d"]["schedule"] == "30 17 * * *"
+    assert jobs["b44861829e51"]["schedule"] == "50 17 * * *"
+    assert jobs["a0cff93f3a2b"]["schedule"] == "10 18 * * *"
+    assert jobs["a0cff93f3a2b"]["depends_on"] == ["5db43f3b3d5d", "b44861829e51"]
+    assert jobs["031080f7bfac"]["schedule"] == "30 18 * * *"
+    assert "a0cff93f3a2b" in jobs["031080f7bfac"]["depends_on"]
+
+
+def test_cron_prompts_cover_requested_review_cycles_without_automatic_actions():
+    prompt_dir = _registry().parent / "cron_prompts"
+    prompts = {
+        name: (prompt_dir / f"{name}.txt").read_text(encoding="utf-8").casefold()
+        for name in (
+            "hourly_watchdog",
+            "daily_health",
+            "daily_budget",
+            "drift_detection",
+            "context_summary",
+            "shadow_daily",
+            "weekly_review",
+            "monthly_review",
+        )
+    }
+
+    for prompt in prompts.values():
+        assert "[кнопка:" in prompt
+    assert all(
+        marker in prompts["hourly_watchdog"]
+        for marker in ("cpc", "конверс", "нулевых кликах", "disapproved", "рекомендации google")
+    )
+    assert all(
+        marker in prompts["daily_health"]
+        for marker in ("search terms", "сформировать sheets", "create_search_term_review")
+    )
+    assert all(
+        marker in prompts["weekly_review"]
+        for marker in ("предыдущих 7 дней", "quality", "auction insights", "wow sheets")
+    )
+    assert all(
+        marker in prompts["monthly_review"]
+        for marker in (
+            "pinning",
+            "landing page",
+            "attribution",
+            "сформировать pdf",
+            "build_monthly_pdf",
+        )
+    )
+    assert "ничего не записывай и не удаляй" in prompts["context_summary"]
+    assert "не создавай proposal" in prompts["shadow_daily"]
 
 
 def test_cron_sync_is_scoped_and_detects_schedule_prompt_and_resume(tmp_path):

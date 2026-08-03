@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from datetime import date
 
 import pytest
 
@@ -8,6 +9,9 @@ from ads.client import DRAFT_ACCOUNT_ID
 from ads.keyword_plan import KeywordIdea
 from mcp_server import tools_workflow_state as ws
 from mcp_server.trusted_transport import TrustedMedia, TrustedTurn, trusted_turn_scope
+from reports.period import Period
+from reports.queries import Breakdown, Metrics
+from reports.service import ReportData
 
 
 def _turn(chat_id: int = 100) -> TrustedTurn:
@@ -228,6 +232,82 @@ async def test_search_term_review_rejects_foreign_sheet(monkeypatch):
     with trusted_turn_scope(_turn()):
         with pytest.raises(PermissionError):
             await ws.read_search_term_review(DRAFT_ACCOUNT_ID, "sheet-id")
+
+
+@pytest.mark.asyncio
+async def test_monthly_pdf_requires_trusted_human_turn_before_reads(monkeypatch):
+    monkeypatch.setattr(ws, "ensure_read_allowed", lambda account: None)
+
+    async def must_not_read(account):
+        raise AssertionError("cron/model-only turn reached Google Ads reader")
+
+    monkeypatch.setattr(ws, "build_client_async", must_not_read)
+    with pytest.raises(PermissionError):
+        await ws.build_monthly_pdf(DRAFT_ACCOUNT_ID, "Краткая сводка без чисел")
+
+
+@pytest.mark.asyncio
+async def test_monthly_pdf_is_advisory_artifact_after_human_command(monkeypatch, tmp_path):
+    report = ReportData(
+        customer_id=DRAFT_ACCOUNT_ID,
+        period=Period(date(2026, 7, 1), date(2026, 7, 31), "июль"),
+        totals=Metrics(
+            impressions=10_000,
+            clicks=500,
+            cost_micros=1_000_000_000,
+            conversions=50,
+            conv_value=4_000,
+        ),
+        prev_totals=Metrics(
+            impressions=9_000,
+            clicks=450,
+            cost_micros=900_000_000,
+            conversions=45,
+            conv_value=3_600,
+        ),
+        breakdowns=[
+            Breakdown(
+                key="campaign",
+                title="Кампании",
+                dim_headers=["Кампания", "Статус"],
+                rows=[(("Brand", "ENABLED"), Metrics(cost_micros=600_000_000, conversions=40))],
+            )
+        ],
+        currency="EUR",
+    )
+    monkeypatch.setattr(ws, "ensure_read_allowed", lambda account: None)
+    monkeypatch.setattr(ws, "build_client_async", lambda account: _async_value(object()))
+    monkeypatch.setattr(ws, "run_ads_read_call", lambda *args, **kwargs: _async_value("EUR"))
+    monkeypatch.setattr(
+        "reports.service.build_account_report_async",
+        lambda *args, **kwargs: _async_value(report),
+    )
+    output = tmp_path / "monthly.pdf"
+    monkeypatch.setattr(ws, "artifact_path", lambda suffix: output)
+    monkeypatch.setattr(
+        ws,
+        "publish_artifact",
+        lambda path, **kwargs: {"filename": kwargs["filename"], "media_type": kwargs["media_type"]},
+    )
+    captured = {}
+
+    def fake_write(report_arg, path, **kwargs):
+        captured.update(kwargs)
+        path.write_bytes(b"%PDF-1.7\nfixture")
+
+    monkeypatch.setattr("reports.pdf.write_monthly_report_pdf", fake_write)
+    with trusted_turn_scope(_turn()):
+        result = await ws.build_monthly_pdf(
+            DRAFT_ACCOUNT_ID,
+            "Расход вырос на 11.1%; причинность не установлена.",
+            risks=["Нужна ручная проверка tracking."],
+            next_month_plan=["Проверить приоритеты до изменения аккаунта."],
+        )
+
+    assert result["error"] is None and result["advisory_only"] is True
+    assert result["artifact"]["media_type"] == "application/pdf"
+    assert result["human_command_message_id"] == _turn().message_id
+    assert captured["executive_summary"].startswith("Расход")
 
 
 @pytest.mark.asyncio
