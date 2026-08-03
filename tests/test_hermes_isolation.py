@@ -76,7 +76,7 @@ def test_i4_seed_read_tools_disjoint_from_mutations():
     # keyword/RSA primitives and structured client/crawl reads). Точный счёт держит
     # реестр от тихого разрастания: новая обёртка обязана осознанно бампнуть его вместе с
     # config.yaml/_ACCOUNT_ARG.
-    assert len(READ_MCP_TOOLS) == 25, f"ожидалось 25 READ-инструментов, стало {len(READ_MCP_TOOLS)}"
+    assert len(READ_MCP_TOOLS) == 26, f"ожидалось 26 READ-инструментов, стало {len(READ_MCP_TOOLS)}"
 
 
 def test_i4_seed_server_builds_and_registers_only_read():
@@ -117,6 +117,7 @@ _ACCOUNT_ARG: dict[str, str] = {
     "get_mcc_summary": "manager_id",
     "get_mcc_deep": "manager_id",
     "build_report": "account",
+    "build_mcc_report": "manager_id",
     "export_keyword_report": "account",
     "seed_keywords": "account",
     "cluster_keywords": "account",

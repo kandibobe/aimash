@@ -1,9 +1,8 @@
-"""Aimash v3 approval policy.
+"""Fail-closed approval policy for every Google Ads and client-memory mutation.
 
-Operational Google Ads mutations execute from the current trusted human turn.  One approval is
-reserved for a critical global budget change: an ``update_budget`` classified as L3 from its live
-``before -> after`` snapshot.  Unknown operations still stop because they are outside the typed
-tool registry.
+The trusted human turn may prepare one exact proposal, but it is never the approval itself.  The
+mutation executes only after a separate trusted reply/button claims that proposal through CAS.
+Risk tiers enrich the preview and hard caps; they never waive confirmation.
 """
 
 from __future__ import annotations
@@ -58,27 +57,21 @@ ALL_ADS_OPS: frozenset[str] = frozenset(
 )
 
 
-# Approval candidates are deliberately narrow. ``update_budget`` is conditional: L1/L2 execute
-# directly, while L3 returns APPROVAL_REQUIRED with the attested diff.
-CONFIRM_REQUIRED_ADS_OPS: frozenset[str] = frozenset({"update_budget"})
-AUTONOMOUS_ADS_OPS: frozenset[str] = ALL_ADS_OPS - CONFIRM_REQUIRED_ADS_OPS
+# Every Ads mutation changes delivery, account state or spend.  Keep the sets explicit so a newly
+# registered operation cannot silently become autonomous.
+CONFIRM_REQUIRED_ADS_OPS: frozenset[str] = ALL_ADS_OPS
+AUTONOMOUS_ADS_OPS: frozenset[str] = frozenset()
 AUTONOMOUS_MEMORY_OPS: frozenset[str] = frozenset()
 
 
 def requires_confirmation(operation: str, params: dict | None = None) -> bool:
     """Return whether this exact typed action needs the single approval step."""
-
-    if operation not in ALL_ADS_OPS:
-        return True
-    if operation != "update_budget":
-        return False
-
-    from confirm.risk import TIER_L3, risk_tier
-
-    return risk_tier(operation, params) == TIER_L3
+    del params
+    return True
 
 
 def may_execute_autonomously(operation: str, params: dict | None = None) -> bool:
     """Return whether the trusted Hermes turn may continue straight to execution."""
 
-    return operation in ALL_ADS_OPS and not requires_confirmation(operation, params)
+    del operation, params
+    return False

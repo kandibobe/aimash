@@ -177,7 +177,7 @@ async def _propose(
             customer_id=built.customer_id,
             preview=built.display,
         )
-        message = "Критическое изменение глобального бюджета ожидает одного подтверждения."
+        message = "Изменение ожидает одного подтверждения всей карточки."
         return {
             **env,
             "status": "approval_required",

@@ -76,7 +76,7 @@ async def _run(
     return result, store
 
 
-async def test_operational_mutation_executes_in_current_human_turn(monkeypatch):
+async def test_operational_mutation_requires_separate_approval(monkeypatch):
     result, store = await _run(
         monkeypatch,
         operation="pause_campaign",
@@ -85,13 +85,13 @@ async def test_operational_mutation_executes_in_current_human_turn(monkeypatch):
         fields={"campaign": "Search"},
     )
 
-    assert result["ok"] is True
-    assert result["status"] == "executed"
+    assert result["ok"] is False
+    assert result["status"] == "approval_required"
     assert result["operation"] == "pause_campaign"
-    assert store.confirmed == [(result["confirmation_id"], 9001, 42)]
+    assert store.confirmed == []
 
 
-async def test_direct_action_uses_real_store_cas_and_audit_state(monkeypatch):
+async def test_proposal_is_persisted_without_claiming_or_applying(monkeypatch):
     async def _build(**kwargs):
         params = {"campaign": "Search"}
         await kwargs["store"].save_proposal(
@@ -112,12 +112,8 @@ async def test_direct_action_uses_real_store_cas_and_audit_state(monkeypatch):
             display="ENABLED → PAUSED",
         )
 
-    async def _execute(store, confirmation_id):
-        claimed = await store.claim(confirmation_id, operation="pause_campaign")
-        assert claimed is not None and claimed.status == "executing"
-        result = {"campaign": "Search", "status": "PAUSED"}
-        await store.finalize(confirmation_id, result=result)
-        return result
+    async def _execute(_store, _confirmation_id):
+        raise AssertionError("proposal must not execute before a separate approval")
 
     monkeypatch.setattr(tools_write, "build_proposal", _build)
     monkeypatch.setattr(ads.service, "execute_confirmed", _execute)
@@ -129,12 +125,14 @@ async def test_direct_action_uses_real_store_cas_and_audit_state(monkeypatch):
             campaign="Search",
         )
 
-    assert result["status"] == "executed"
-    row = await ConfirmStore().get_confirmed(result["confirmation_id"])
-    assert row is not None and row.status == "applied"
+    assert result["status"] == "approval_required"
+    row = (await ConfirmStore().load_proposals([result["confirmation_id"]]))[
+        result["confirmation_id"]
+    ]
+    assert row is not None and row.status == "pending"
 
 
-async def test_small_budget_change_executes_without_approval(monkeypatch):
+async def test_small_budget_change_requires_separate_approval(monkeypatch):
     result, store = await _run(
         monkeypatch,
         operation="update_budget",
@@ -148,8 +146,9 @@ async def test_small_budget_change_executes_without_approval(monkeypatch):
         fields={"campaign": "Search", "mode": "increase_by_percent", "value": 20},
     )
 
-    assert result["status"] == "executed"
-    assert len(store.confirmed) == 1
+    assert result["status"] == "approval_required"
+    assert result["error_type"] == "APPROVAL_REQUIRED"
+    assert store.confirmed == []
 
 
 async def test_critical_global_budget_returns_structured_approval(monkeypatch):

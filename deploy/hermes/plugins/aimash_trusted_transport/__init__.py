@@ -95,6 +95,9 @@ _PLAN_STATE_TOOLS = frozenset(
         f"{_MCP_PREFIX}update_incident",
         f"{_MCP_PREFIX}start_keyword_research",
         f"{_MCP_PREFIX}read_keyword_sheet",
+        f"{_MCP_PREFIX}create_search_term_review",
+        f"{_MCP_PREFIX}read_search_term_review",
+        f"{_MCP_PREFIX}build_monthly_pdf",
         f"{_MCP_PREFIX}curation_start",
         f"{_MCP_PREFIX}curation_state",
         f"{_MCP_PREFIX}curation_apply",
@@ -165,8 +168,8 @@ class _Artifact:
 
 _lock = threading.RLock()
 _events: dict[tuple[str, int, int], _Inbound] = {}
-_pending_artifacts: dict[tuple[int, str | None], list[str]] = {}
-_artifact_retry_tasks: dict[tuple[int, str | None], asyncio.Task] = {}
+_pending_artifacts: dict[tuple[int, str | None, int], list[str]] = {}
+_artifact_retry_tasks: dict[tuple[int, str | None, int], asyncio.Task] = {}
 _ARTIFACT_RETRY_DELAYS_S = (1, 3, 10, 30, 60)
 _button_bridge_ready: bool | None = None
 
@@ -451,7 +454,10 @@ def _post_tool_call(*args, **kwargs) -> None:
     inbound = _current_inbound()
     if not tokens or inbound is None:
         return
-    key = (inbound.actor_chat_id, inbound.thread_id)
+    # Bind the artifact to the initiating Telegram message, not merely to its topic. Concurrent
+    # /background sessions share one topic; topic-only queues let whichever response finished first
+    # drain files created by another task.
+    key = (inbound.actor_chat_id, inbound.thread_id, inbound.message_id)
     with _lock:
         queued = _pending_artifacts.setdefault(key, [])
         for token in tokens:
@@ -538,7 +544,7 @@ def _schedule_artifact_retry(adapter, chat_id, metadata, key) -> None:
             return
         _artifact_retry_tasks[key] = asyncio.create_task(
             _artifact_retry_worker(adapter, chat_id, dict(metadata or {}), key),
-            name=f"aimash-artifact-retry-{key[0]}-{key[1] or 'root'}",
+            name=f"aimash-artifact-retry-{key[0]}-{key[1] or 'root'}-{key[2]}",
         )
 
 
@@ -549,14 +555,21 @@ async def _deliver_pending_artifacts(
     if parsed_chat is None or getattr(adapter, "_bot", None) is None:
         return
     thread_id = _optional_text((metadata or {}).get("thread_id"))
-    exact = (parsed_chat, thread_id)
+    reply_to_message_id = _as_int((metadata or {}).get("reply_to_message_id"), positive=True)
+    route_message_id = reply_to_message_id or 0
+    exact = (parsed_chat, thread_id, reply_to_message_id or 0)
     with _lock:
-        tokens = _pending_artifacts.pop(exact, [])
-        if not tokens:
-            matches = [key for key in _pending_artifacts if key[0] == parsed_chat]
+        tokens = _pending_artifacts.pop(exact, []) if reply_to_message_id is not None else []
+        # Older/non-streaming adapters may omit reply metadata. A fallback is safe only when one
+        # initiating message owns artifacts in this exact topic; concurrent tasks must wait.
+        if not tokens and reply_to_message_id is None:
+            matches = [
+                key for key in _pending_artifacts if key[0] == parsed_chat and key[1] == thread_id
+            ]
             if len(matches) == 1:
                 tokens = _pending_artifacts.pop(matches[0], [])
                 thread_id = matches[0][1]
+                route_message_id = matches[0][2]
     if not tokens:
         return
     from telegram import InputFile
@@ -592,7 +605,7 @@ async def _deliver_pending_artifacts(
             if artifact is not None:
                 retry_tokens.append(token)
     if retry_tokens:
-        retry_key = (parsed_chat, thread_id)
+        retry_key = (parsed_chat, thread_id, route_message_id)
         with _lock:
             queued = _pending_artifacts.setdefault(retry_key, [])
             _pending_artifacts[retry_key] = retry_tokens + [

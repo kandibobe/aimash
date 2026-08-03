@@ -669,7 +669,7 @@ def test_signed_artifact_is_queued_for_exact_topic_and_hidden_from_model(monkeyp
         tool_name="mcp__aimash__build_report", result=result
     )
 
-    assert plugin._pending_artifacts[(-202, "7")] == [token]
+    assert plugin._pending_artifacts[(-202, "7", 303)] == [token]
     assert token not in transformed
     assert "report.xlsx" in transformed
 
@@ -677,7 +677,7 @@ def test_signed_artifact_is_queued_for_exact_topic_and_hidden_from_model(monkeyp
 async def test_verified_artifact_is_requeued_after_transient_delivery_failure(monkeypatch):
     plugin = _load(monkeypatch, _env())
     token = _artifact_token()
-    plugin._pending_artifacts[(-202, "7")] = [token]
+    plugin._pending_artifacts[(-202, "7", 303)] = [token]
 
     def fail_copy(artifact, target):
         raise RuntimeError("temporary docker copy failure")
@@ -694,17 +694,17 @@ async def test_verified_artifact_is_requeued_after_transient_delivery_failure(mo
     await plugin._deliver_pending_artifacts(
         adapter,
         "-202",
-        {"notify": True, "thread_id": "7"},
+        {"notify": True, "thread_id": "7", "reply_to_message_id": "303"},
     )
 
-    assert plugin._pending_artifacts[(-202, "7")] == [token]
-    assert scheduled == [(-202, "7")]
+    assert plugin._pending_artifacts[(-202, "7", 303)] == [token]
+    assert scheduled == [(-202, "7", 303)]
 
 
 async def test_artifact_background_retry_recovers_without_new_message(monkeypatch):
     plugin = _load(monkeypatch, _env())
     token = _artifact_token()
-    plugin._pending_artifacts[(-202, "7")] = [token]
+    plugin._pending_artifacts[(-202, "7", 303)] = [token]
     attempts = 0
     sent = []
 
@@ -727,14 +727,44 @@ async def test_artifact_background_retry_recovers_without_new_message(monkeypatc
     await plugin._deliver_pending_artifacts(
         adapter,
         "-202",
-        {"notify": True, "thread_id": "7"},
+        {"notify": True, "thread_id": "7", "reply_to_message_id": "303"},
     )
-    retry_task = plugin._artifact_retry_tasks[(-202, "7")]
+    retry_task = plugin._artifact_retry_tasks[(-202, "7", 303)]
     await retry_task
 
     assert attempts == 2
     assert len(sent) == 1
-    assert plugin._pending_artifacts.get((-202, "7")) in (None, [])
+    assert plugin._pending_artifacts.get((-202, "7", 303)) in (None, [])
+
+
+async def test_concurrent_background_response_delivers_only_its_own_artifact(monkeypatch):
+    plugin = _load(monkeypatch, _env())
+    first = _artifact_token(content=b"first")
+    second = _artifact_token(content=b"second")
+    plugin._pending_artifacts[(-202, "7", 303)] = [first]
+    plugin._pending_artifacts[(-202, "7", 909)] = [second]
+    sent = []
+
+    def copy(artifact, target):
+        target.write_bytes(b"first" if artifact.token == first else b"second")
+
+    class _Bot:
+        async def send_document(self, **kwargs):
+            sent.append(kwargs["document"].filename)
+
+    monkeypatch.setattr(plugin, "_copy_artifact", copy)
+    monkeypatch.setattr(plugin, "_remove_container_artifact", lambda artifact: None)
+    adapter = SimpleNamespace(_bot=_Bot())
+
+    await plugin._deliver_pending_artifacts(
+        adapter,
+        "-202",
+        {"thread_id": "7", "reply_to_message_id": "909"},
+    )
+
+    assert sent == ["report.xlsx"]
+    assert plugin._pending_artifacts[(-202, "7", 303)] == [first]
+    assert (-202, "7", 909) not in plugin._pending_artifacts
 
 
 def test_missing_button_bridge_falls_back_to_semantic_reply(monkeypatch):

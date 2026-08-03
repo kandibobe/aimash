@@ -226,6 +226,7 @@ mcp_servers:
         # Bot-free professional workflows: artifact report delivery, keyword/RSA primitives and
         # structured client-profile/crawl reads. Every function keeps the same read-account lock.
         - build_report
+        - build_mcc_report
         - export_keyword_report
         - seed_keywords
         - cluster_keywords

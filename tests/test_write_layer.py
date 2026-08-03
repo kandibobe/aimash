@@ -318,14 +318,14 @@ def test_keyword_bid_via_sdk_keys_by_ad_group_and_criterion_pair():
 
 
 def test_confirmation_policy_partitions_every_supported_operation():
-    """The typed registry stays total; only critical update_budget is conditionally approval-gated."""
+    """The typed registry stays total and every Google Ads mutation is approval-gated."""
     from ads.service import SUPPORTED_OPERATIONS
     from confirm.policy import ALL_ADS_OPS, AUTONOMOUS_ADS_OPS, CONFIRM_REQUIRED_ADS_OPS
 
     assert not (AUTONOMOUS_ADS_OPS & CONFIRM_REQUIRED_ADS_OPS)
     assert ALL_ADS_OPS == SUPPORTED_OPERATIONS
     assert AUTONOMOUS_ADS_OPS | CONFIRM_REQUIRED_ADS_OPS == ALL_ADS_OPS
-    assert CONFIRM_REQUIRED_ADS_OPS == {"update_budget"}
+    assert CONFIRM_REQUIRED_ADS_OPS == ALL_ADS_OPS
 
 
 async def test_apply_update_keyword_bid_validates_range_before_claim():

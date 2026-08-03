@@ -79,7 +79,7 @@ async def build_report(
             await asyncio.to_thread(write_report_xlsx, report, str(path), language)
             artifact = publish_artifact(
                 path,
-                filename=f"aimash_report_{account}.xlsx",
+                filename=f"aimash_report_{account}_{path.stem[:8]}.xlsx",
                 media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         except Exception:
@@ -99,6 +99,86 @@ async def build_report(
         )
 
     return await _guarded(_work, account=str(account))
+
+
+async def build_mcc_report(
+    manager_id: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    period_days: int | None = 30,
+    period_preset: Literal["7", "14", "30", "90", "MTD", "LM"] | None = None,
+    language: Literal["ru", "en"] = "ru",
+) -> dict[str, Any]:
+    """Build one verified MCC summary workbook and deliver it to the current Telegram task."""
+    from ads.client import ensure_manager_allowed
+    from ads.read import account_timezone
+    from core.config import settings
+    from mcp_server.artifacts import artifact_path, publish_artifact, remove_artifact
+    from mcp_server.tools_read import _child_period_factory, _period
+    from reports.mcc import build_mcc_summary_async
+    from reports.xlsx import write_mcc_xlsx
+
+    mid = str(manager_id or settings.google_ads_login_customer_id or "")
+
+    async def _work() -> dict[str, Any]:
+        ensure_manager_allowed(mid)
+        window = _period(date_from, date_to, period_days, period_preset)
+        client = await build_client_async(mid)
+        summary = await build_mcc_summary_async(
+            client,
+            mid,
+            window,
+            tz_of=account_timezone,
+            period_for=_child_period_factory(window),
+        )
+        if not summary.children:
+            return ok(
+                [],
+                extra={
+                    "manager_id": mid,
+                    "artifact_status": "not_published",
+                    "data_gap": "no_readable_child_accounts",
+                    "skipped": summary.skipped,
+                    "inactive": summary.inactive,
+                    "errors": summary.errors,
+                },
+            )
+        path = artifact_path(".xlsx")
+        try:
+            await asyncio.to_thread(write_mcc_xlsx, summary, str(path), language)
+            artifact = publish_artifact(
+                path,
+                filename=(
+                    f"aimash_mcc_{mid}_{window.date_from}_{window.date_to}_{path.stem[:8]}.xlsx"
+                ),
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        except Exception:
+            remove_artifact(path)
+            raise
+        return ok(
+            [],
+            extra={
+                "manager_id": mid,
+                "period": {
+                    "date_from": window.date_from.isoformat(),
+                    "date_to": window.date_to.isoformat(),
+                },
+                "account_count": len(summary.children),
+                "currencies": sorted({item.account.currency for item in summary.children}),
+                "artifact_status": "published",
+                "artifact": artifact,
+                "skipped": summary.skipped,
+                "inactive": summary.inactive,
+                "errors": summary.errors,
+            },
+        )
+
+    try:
+        async with observe.run_scope("mcp_read"):
+            return await _work()
+    except Exception as exc:  # noqa: BLE001 - MCP boundary, never leak raw exception text
+        return err(exc, tool_name="build_mcc_report", account=mid)
 
 
 async def export_keyword_report(
@@ -150,7 +230,7 @@ async def export_keyword_report(
             )
             artifact = publish_artifact(
                 path,
-                filename=f"aimash_keywords_{account}.xlsx",
+                filename=f"aimash_keywords_{account}_{path.stem[:8]}.xlsx",
                 media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         except Exception:
@@ -189,7 +269,7 @@ async def seed_keywords(
         rows = await generate_seed_keywords(
             topic=topic,
             url=url,
-            profile=profile,
+            profile="" if str(topic).strip() else profile,
             language=language,
             n=int(count),
         )
@@ -463,6 +543,7 @@ async def get_crawl_status(account: str, job_id: str) -> dict[str, Any]:
 
 WORKFLOW_READ_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "build_report": build_report,
+    "build_mcc_report": build_mcc_report,
     "export_keyword_report": export_keyword_report,
     "seed_keywords": seed_keywords,
     "cluster_keywords": cluster_keywords,

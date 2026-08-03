@@ -88,10 +88,14 @@ async def start_keyword_research(
     store = ClientProfileStore()
     profile = await store.profile_context_text(str(account))
     protected = await store.protected_negative_terms(str(account))
+    # The user's explicit research topic is authoritative. A stored profile may describe another
+    # project living in the same Draft account; feeding it into seed generation contaminated
+    # "рыбалка" research with restaurant keywords. Profile data remains useful below for relevance
+    # and protected negatives, but it cannot redefine the requested market.
     seeds = await generate_seed_keywords(
         topic=topic,
         url=url,
-        profile=profile,
+        profile="",
         language=language,
         n=15,
     )
@@ -111,6 +115,14 @@ async def start_keyword_research(
         label="mcp.start_keyword_research",
     )
     texts = [item.text for item in ideas]
+    metric_rows = sum(
+        1
+        for item in ideas
+        if int(item.avg_monthly_searches or 0) > 0
+        or str(item.competition or "").upper() not in {"", "UNSPECIFIED"}
+        or int(item.competition_index or 0) > 0
+        or bool(item.monthly)
+    )
     relevance, clusters, negatives = await asyncio.gather(
         filter_relevance(
             texts=texts,
@@ -151,7 +163,24 @@ async def start_keyword_research(
         "negative_suggestions": negatives,
         "currency": currency or "",
         "target_geo": target_geo,
+        "metric_rows": metric_rows,
+        "metric_coverage": round(metric_rows / len(ideas), 3) if ideas else 0.0,
     }
+    if not ideas or metric_rows == 0:
+        # A syntactically valid workbook full of zero/UNSPECIFIED cells is not a completed Planner
+        # report. Return the data gap without minting an artifact, so Telegram cannot deliver an
+        # almost-empty XLSX and call it ready.
+        extra.update(
+            {
+                "artifact_status": "not_published",
+                "data_gap": "planner_metrics_unavailable",
+            }
+        )
+        return ok(
+            [{"keyword": item.text, "metrics_available": False} for item in ideas[:20]],
+            limit=20,
+            extra=extra,
+        )
     if output in {"xlsx", "both"}:
         path = artifact_path(".xlsx")
         try:
@@ -169,7 +198,7 @@ async def start_keyword_research(
             )
             extra["artifact"] = publish_artifact(
                 path,
-                filename=f"aimash_keywords_{account}.xlsx",
+                filename=f"aimash_keywords_{account}_{turn.run_id}.xlsx",
                 media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         except Exception:

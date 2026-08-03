@@ -1,6 +1,6 @@
 # HERMES 3.0 MCP Tool Registry
 
-FastMCP server публикует строго проверяемую поверхность из **84 инструментов**. Источник истины —
+FastMCP server публикует строго проверяемую поверхность из **85 инструментов**. Источник истины —
 Python registries в [`mcp_server/`](../mcp_server/), а не ручной список: при старте
 `require_registered_surface()` сравнивает фактически зарегистрированные имена с ожидаемым набором и
 останавливает процесс при drift.
@@ -16,7 +16,7 @@ Python registries в [`mcp_server/`](../mcp_server/), а не ручной сп�
 | Approval execution | `EXECUTE_TOOL_FUNCS` | 1 |
 | **Total** | exact union | **84** |
 
-В составе поверхности — **25 READ-инструментов**, 1 META, 15 PLAN & STATE, 42 ACTION и один
+В составе поверхности — **26 READ-инструментов**, 1 META, 15 PLAN & STATE, 42 ACTION и один
 `execute_confirmed`.
 
 ```python
@@ -27,7 +27,7 @@ expected = (
     | ACTION_MCP_TOOLS
     | EXECUTE_MCP_TOOLS
 )
-assert len(expected) == 84
+assert len(expected) == 85
 ```
 
 ## READ — статистика, аудит и подготовка
@@ -37,7 +37,7 @@ proposal и не вызывают Google Ads mutate methods.
 
 | Группа | Tools | Назначение |
 |---|---|---|
-| Accounts & MCC | `list_accounts`, `get_mcc_summary`, `get_mcc_deep`, `get_quota` | Discovery, агрегаты MCC, quota |
+| Accounts & MCC | `list_accounts`, `get_mcc_summary`, `get_mcc_deep`, `build_mcc_report`, `get_quota` | Discovery, агрегаты MCC, единый XLSX, quota |
 | GAQL & changes | `execute_google_ads_query`, `get_account_changes`, `get_change_history` | Typed GAQL и история изменений |
 | Audit & analysis | `get_account_audit`, `analyze_account` | Детерминированные проверки и аналитический пакет |
 | Aimash Memory reads | `recall_client`, `get_client_card`, `list_client_facts_structured`, `get_crawl_status`, `list_site_pages` | Account-scoped профиль, досье, crawl state |

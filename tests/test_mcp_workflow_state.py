@@ -147,6 +147,69 @@ async def test_keyword_research_builds_signed_delivery_artifact(monkeypatch, tmp
     assert result["ideas"] == 2
     assert result["relevant"] == 1
     assert result["negative_suggestions"] == ["бесплатно"]
+    assert result["metric_rows"] == 2
+    assert result["artifact"]["filename"].startswith(f"aimash_keywords_{DRAFT_ACCOUNT_ID}_")
+
+
+@pytest.mark.asyncio
+async def test_keyword_research_does_not_publish_zero_metric_workbook(monkeypatch):
+    ideas = [KeywordIdea("fisch restaurant essen", 0), KeywordIdea("restaurant essen", 0)]
+    seen: dict[str, object] = {}
+
+    monkeypatch.setattr(ws, "ensure_read_allowed", lambda account: None)
+    monkeypatch.setattr(ws, "build_client_async", lambda account: _async_value(object()))
+    monkeypatch.setattr(
+        ws.ClientProfileStore,
+        "profile_context_text",
+        lambda self, account: _async_value("Restaurant profile from another task"),
+    )
+    monkeypatch.setattr(
+        ws.ClientProfileStore,
+        "protected_negative_terms",
+        lambda self, account: _async_value(set()),
+    )
+
+    async def fake_seeds(**kwargs):
+        seen.update(kwargs)
+        return ["angeln deutschland"]
+
+    monkeypatch.setattr(ws, "generate_seed_keywords", fake_seeds)
+
+    async def fake_read(fn, *args, **kwargs):
+        return "AUD" if fn is ws.account_currency else ideas
+
+    monkeypatch.setattr(ws, "run_ads_read_call", fake_read)
+    monkeypatch.setattr(
+        ws, "filter_relevance", lambda **kwargs: _async_value({item.text: True for item in ideas})
+    )
+    monkeypatch.setattr(ws, "cluster_keywords", lambda *args, **kwargs: _async_value([]))
+    monkeypatch.setattr(ws, "suggest_negative_keywords", lambda *args, **kwargs: _async_value([]))
+    monkeypatch.setattr(ws, "rank_clusters", lambda clusters, *args: clusters)
+    monkeypatch.setattr(
+        ws,
+        "write_keywords_xlsx",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("zero-metric workbook must not be written")
+        ),
+    )
+    monkeypatch.setattr(
+        ws,
+        "publish_artifact",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("zero-metric workbook must not be published")
+        ),
+    )
+
+    with trusted_turn_scope(_turn()):
+        result = await ws.start_keyword_research(
+            DRAFT_ACCOUNT_ID, "angeln deutschland", output="xlsx"
+        )
+
+    assert seen["profile"] == ""
+    assert result["artifact_status"] == "not_published"
+    assert result["data_gap"] == "planner_metrics_unavailable"
+    assert result["metric_rows"] == 0
+    assert "artifact" not in result
 
 
 @pytest.mark.asyncio

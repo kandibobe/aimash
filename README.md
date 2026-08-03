@@ -80,7 +80,7 @@ flowchart LR
 
 ### MCP surface
 
-Текущий проверяемый registry содержит **84 инструмента**:
+Текущий проверяемый registry содержит **85 инструментов**:
 
 | Surface | Count | Responsibility |
 |---|---:|---|
@@ -90,7 +90,7 @@ flowchart LR
 | Actions | 42 | Прямые agent-first action names; mutation либо исполняется по policy, либо готовит proposal |
 | Approval execute | 1 | `execute_confirmed` — единственная точка исполнения подтверждённого proposal |
 
-Итого: **25 READ-инструментов + 1 META + 57 agent-first PLAN/action/state + 1 approval execute**.
+Итого: **26 READ-инструментов + 1 META + 57 agent-first PLAN/action/state + 1 approval execute**.
 Фактический FastMCP registry сверяется на точное равенство при старте.
 
 ## Safety Model
