@@ -42,6 +42,20 @@ SESSIONS_POLICY = {
     "vacuum_after_prune": True,
     "min_interval_hours": 24,
 }
+AUXILIARY_POLICY = {
+    "transient_retries": 2,
+    "vision": {"provider": "openai-codex", "model": "gpt-5.4"},
+    "web_extract": {"provider": "openai-codex", "model": "gpt-5.4"},
+    "compression": {"provider": "openai-codex", "model": "gpt-5.6-sol"},
+    "approval": {"provider": "openai-codex", "model": "gpt-5.6-sol"},
+    "title_generation": {
+        "enabled": True,
+        "provider": "openai-codex",
+        "model": "gpt-5.4",
+    },
+    "memory_query_rewrite": {"provider": "openai-codex", "model": "gpt-5.4"},
+    "curator": {"provider": "openai-codex", "model": "gpt-5.6-sol"},
+}
 CANONICAL_SKILLS = ("ad-master-agent", "google-ads-worker", "creative-director")
 RETIRED_SKILLS = (
     "ad-master-tools",
@@ -123,6 +137,13 @@ def reconcile_trusted_operator_policy(config: dict[str, Any]) -> dict[str, Any]:
     memory["user_profile_enabled"] = True
 
     config["compression"] = dict(COMPRESSION_POLICY)
+    config["auxiliary"] = {
+        key: dict(value) if isinstance(value, dict) else value
+        for key, value in AUXILIARY_POLICY.items()
+    }
+    # Do not silently send client/Ads context to a third-party provider when Codex is unavailable.
+    # An unavailable Codex runtime must fail visibly; the owner can decide whether to retry later.
+    config["fallback_providers"] = []
     config["session_reset"] = dict(SESSION_RESET_POLICY)
     config["sessions"] = dict(SESSIONS_POLICY)
 

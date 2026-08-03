@@ -30,13 +30,13 @@ routing_lanes:
     model: gpt-5.6-sol
     status: canonical_current
   primary_fallback:
-    provider: openrouter
-    model: deepseek/deepseek-v4-flash
-    status: configured_fallback
+    status: disabled_by_policy
+    notes:
+      - Do not send Google Ads or client context to an external fallback provider.
   lightweight_background:
-    provider: openrouter
-    model: google/gemini-3.1-flash-lite
-    status: configured_fallback_and_auxiliary
+    provider: openai-codex
+    model: gpt-5.4
+    status: canonical_auxiliary
   delegated_subagents:
     provider: openai-codex
     model: gpt-5.6-sol
@@ -53,6 +53,7 @@ routing_lanes:
 policy_rules:
   - Docs and skills must not state a present-tense runtime different from primary_runtime unless labelled as pinned_exception or historical_context.
   - Cron jobs may pin older models temporarily, but must be listed under pinned_exceptions or cron_registry.yaml.
+  - "Dashboard model selections are not a policy source: sync_aimash_surface.py pins main, delegation, auxiliary and fallback settings on deploy."
   - Memory should store only high-level routing facts, not full policy prose.
 
 known_conflicts:

@@ -9,13 +9,9 @@ model:
   provider: openai-codex
   default: gpt-5.6-sol
 
-# Резервная цепочка Hermes v0.19.0 уходит с Codex OAuth на отдельный OpenRouter-ключ:
-# переживает отказ Codex или конкретной fallback-модели, но требует рабочие credentials обоих providers.
-fallback_providers:
-  - provider: openrouter
-    model: deepseek/deepseek-v4-flash
-  - provider: openrouter
-    model: google/gemini-3.1-flash-lite
+# Не передавать клиентский/Google Ads контекст внешнему провайдеру при отказе Codex.
+# Сбой основного runtime должен быть явным и безопасным, а не молча уходить в OpenRouter.
+fallback_providers: []
 
 agent:
   max_turns: 40
@@ -67,27 +63,27 @@ sessions:
 auxiliary:
   transient_retries: 2
   vision:
-    provider: openrouter
-    model: google/gemini-3.1-flash-lite
+    provider: openai-codex
+    model: gpt-5.4
   web_extract:
-    provider: openrouter
-    model: google/gemini-3.1-flash-lite
+    provider: openai-codex
+    model: gpt-5.4
   compression:
-    provider: openrouter
-    model: google/gemini-3.1-flash-lite
+    provider: openai-codex
+    model: gpt-5.6-sol
   approval:
-    provider: openrouter
-    model: google/gemini-3.1-flash-lite
+    provider: openai-codex
+    model: gpt-5.6-sol
   title_generation:
     enabled: true
-    provider: openrouter
-    model: google/gemini-3.1-flash-lite
+    provider: openai-codex
+    model: gpt-5.4
   memory_query_rewrite:
-    provider: openrouter
-    model: google/gemini-3.1-flash-lite
+    provider: openai-codex
+    model: gpt-5.4
   curator:
-    provider: openrouter
-    model: google/gemini-3.1-flash-lite
+    provider: openai-codex
+    model: gpt-5.6-sol
 
 display:
   show_cost: true

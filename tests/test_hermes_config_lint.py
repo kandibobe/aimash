@@ -182,12 +182,15 @@ def test_runtime_registry_matches_deploy_model_and_fallbacks():
         registry["primary_runtime"]["provider"],
         registry["primary_runtime"]["model"],
     ) == (deploy["model"]["provider"], deploy["model"]["default"])
-    configured = [(item["provider"], item["model"]) for item in deploy["fallback_providers"]]
-    registered = [
-        (registry["routing_lanes"][name]["provider"], registry["routing_lanes"][name]["model"])
-        for name in ("primary_fallback", "lightweight_background")
-    ]
-    assert registered == configured
+    assert deploy["fallback_providers"] == []
+    assert registry["routing_lanes"]["primary_fallback"]["status"] == "disabled_by_policy"
+    assert (
+        registry["routing_lanes"]["lightweight_background"]["provider"],
+        registry["routing_lanes"]["lightweight_background"]["model"],
+    ) == (
+        deploy["auxiliary"]["vision"]["provider"],
+        deploy["auxiliary"]["vision"]["model"],
+    )
 
 
 def test_lint_reports_display_tool_progress_typo():
