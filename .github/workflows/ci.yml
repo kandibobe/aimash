@@ -267,10 +267,33 @@ jobs:
               "from mcp_server.server import expected_tool_names; print(len(expected_tool_names()))" \
               | awk '/^[0-9]+$/ { value=$0 } END { print value }')
             if [ "$LIVE_TOOLS" != "$EXPECTED_TOOLS" ]; then
-              echo "::error::Live Hermes MCP surface mismatch: expected=$EXPECTED_TOOLS actual=$LIVE_TOOLS"
+              # A graceful gateway restart can leave its already-running MCP child attached.
+              # Only after the drain/restart has completed, recycle that one stale, ephemeral
+              # child and start the gateway again. PostgreSQL and the scheduler stay untouched.
+              echo "::warning::Live Hermes MCP surface is stale: expected=$EXPECTED_TOOLS actual=$LIVE_TOOLS; recycling aimash-mcp"
+              DEPLOY_STAGE="stale Hermes MCP recycle"
+              hermes gateway stop
+              docker rm -f aimash-mcp >/dev/null 2>&1 || true
+              hermes gateway start
+              sleep 5
+              GW_STATE=$(systemctl --user is-active hermes-gateway.service || true)
+              MCP_STATE=$(docker inspect -f '{{.State.Status}}' aimash-mcp 2>/dev/null || echo missing)
+              LIVE_TOOLS=$(docker exec -i aimash-mcp python -c \
+                "from mcp_server.server import expected_tool_names; print(len(expected_tool_names()))" \
+                2>/dev/null | awk '/^[0-9]+$/ { value=$0 } END { print value }' || true)
+              echo "Hermes MCP surface after recycle: state=$MCP_STATE tools=$LIVE_TOOLS"
+            fi
+            if [ "$GW_STATE" != "active" ] || [ "$MCP_STATE" != "running" ] \
+              || [ "$LIVE_TOOLS" != "$EXPECTED_TOOLS" ]; then
+              echo "::error::Live Hermes MCP surface mismatch after recovery: expected=$EXPECTED_TOOLS actual=$LIVE_TOOLS gateway=$GW_STATE mcp=$MCP_STATE"
               docker logs --tail=80 aimash-mcp 2>/dev/null || true
+              journalctl --user -u hermes-gateway.service --since '-3 minutes' --no-pager || true
               exit 1
             fi
+            docker exec -i aimash-mcp python -c \
+              "from core.config import settings; from mcp_server.server import expected_tool_names; \
+              names=expected_tool_names(); required={'archive_search','archive_import_arxiv'}; \
+              assert not settings.research_archive_enabled or required <= names"
             if journalctl --user -u hermes-gateway.service --since '-2 minutes' --no-pager 2>&1 \
               | grep -Fq "409 Conflict"; then
               echo "::error::Hermes Telegram gateway получил 409 Conflict после deploy"

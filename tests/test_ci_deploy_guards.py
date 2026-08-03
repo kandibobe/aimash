@@ -46,3 +46,18 @@ def test_deploy_checks_the_single_hermes_poller_for_conflicts():
     assert "docker logs --since 2m aimash-bot" not in reconnect
     assert "journalctl --user -u hermes-gateway.service" in reconnect
     assert reconnect.count('grep -Fq "409 Conflict"') == 1
+
+
+def test_deploy_recycles_only_a_stale_mcp_child_after_graceful_restart():
+    body = WORKFLOW.read_text(encoding="utf-8")
+    restart = body.index("hermes gateway restart")
+    stale = body.index("Live Hermes MCP surface is stale", restart)
+    stop = body.index("hermes gateway stop", stale)
+    remove = body.index("docker rm -f aimash-mcp", stop)
+    start = body.index("hermes gateway start", remove)
+    recovered = body.index("Live Hermes MCP surface mismatch after recovery", start)
+
+    assert restart < stale < stop < remove < start < recovered
+    assert "docker compose down" not in body[stale:recovered]
+    assert "archive_search" in body[recovered:]
+    assert "archive_import_arxiv" in body[recovered:]
