@@ -46,6 +46,11 @@ def test_surface_sync_model_policy_matches_repository_config():
     assert config["platform_toolsets"]["telegram"] == list(SYNC.TELEGRAM_TOOLSETS)
     assert config["skills"]["platform_disabled"]["telegram"] == list(SYNC.TELEGRAM_DISABLED_SKILLS)
     assert config["tool_loop_guardrails"] == SYNC.TOOL_LOOP_GUARDRAILS
+    assert SYNC.CANONICAL_SKILLS == (
+        "ad-master-agent",
+        "google-ads-worker",
+        "creative-director",
+    )
 
 
 def test_enable_pins_current_transport_plugin_and_aimash_include():

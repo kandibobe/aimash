@@ -29,6 +29,14 @@ profile: show its `preview` and wait for the manager's trusted reply. After that
 `execute_confirmed` without arguments. Do not call `profile_change` after the crawl—the pending crawl
 proposal already contains the profile and dossier update, and `execute_confirmed` applies it.
 
+## Ad Copy
+
+For requests to create or improve RSA headlines, descriptions or ad copy, use the
+`creative-director` skill. Read the account profile and live campaign/ad-group state before drafting;
+generate and validate text with the typed RSA tools, then use the normal one-proposal/one-confirmation
+flow. Frameworks are drafting aids only: never invent a discount, price, guarantee, availability or
+measured outcome.
+
 ## Continuous Learning
 
 When a manager corrects you, gives a durable strategic instruction—such as a KPI, negative-keyword

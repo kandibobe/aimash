@@ -76,11 +76,23 @@ def test_cron_prompts_cover_requested_review_cycles_without_automatic_actions():
     )
     assert all(
         marker in prompts["daily_health"]
-        for marker in ("search terms", "сформировать sheets", "create_search_term_review")
+        for marker in (
+            "search terms",
+            "явный мусор",
+            "сформировать sheets",
+            "create_search_term_review",
+        )
     )
     assert all(
         marker in prompts["weekly_review"]
-        for marker in ("предыдущих 7 дней", "quality", "auction insights", "wow sheets")
+        for marker in (
+            "предыдущих 7 дней",
+            "quality",
+            "auction insights",
+            "competitor intelligence",
+            "tavily",
+            "wow sheets",
+        )
     )
     assert all(
         marker in prompts["monthly_review"]
@@ -94,6 +106,10 @@ def test_cron_prompts_cover_requested_review_cycles_without_automatic_actions():
     )
     assert "ничего не записывай и не удаляй" in prompts["context_summary"]
     assert "не создавай proposal" in prompts["shadow_daily"]
+    assert all(
+        marker in prompts["daily_budget"]
+        for marker in ("месячный медиаплан", "расход mtd", "месячный план не задан")
+    )
 
 
 def test_cron_sync_is_scoped_and_detects_schedule_prompt_and_resume(tmp_path):

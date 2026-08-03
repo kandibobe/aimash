@@ -42,7 +42,7 @@ SESSIONS_POLICY = {
     "vacuum_after_prune": True,
     "min_interval_hours": 24,
 }
-CANONICAL_SKILLS = ("ad-master-agent", "google-ads-worker")
+CANONICAL_SKILLS = ("ad-master-agent", "google-ads-worker", "creative-director")
 RETIRED_SKILLS = (
     "ad-master-tools",
     "admaster-confirm-model",
