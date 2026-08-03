@@ -544,6 +544,124 @@ def publish_audit_to_sheets(
     )
 
 
+# ── Search-term review: editable, advisory-only, with week-over-week evidence ───────────────
+_SEARCH_TERM_HEADERS = [
+    "Решение",
+    "Поисковый запрос",
+    "Кампания",
+    "Группа",
+    "Триггер-ключ",
+    "Тип соответствия",
+    "Причина кандидата",
+    "Расход текущая неделя",
+    "Расход прошлая неделя",
+    "WoW расход, %",
+    "Конверсии текущая неделя",
+    "Конверсии прошлая неделя",
+    "WoW конверсии, %",
+    "Клики текущая неделя",
+    "Показы текущая неделя",
+    "CTR текущая неделя, %",
+]
+
+
+def build_search_term_review_rows(
+    items: list[dict[str, Any]], currency: str = ""
+) -> list[list[Any]]:
+    """Build an editable review sheet from compact, already-aggregated evidence.
+
+    ``Решение`` is deliberately blank: the model may nominate candidates, but only the manager marks
+    ``ДОБАВИТЬ``.  This sheet is not an execution surface; applying reviewed negatives remains a
+    separate typed proposal and confirmation.
+    """
+    headers = list(_SEARCH_TERM_HEADERS)
+    if currency:
+        headers[7] += f", {currency}"
+        headers[8] += f", {currency}"
+    rows: list[list[Any]] = [headers]
+    for item in items:
+        rows.append(
+            [
+                "",
+                item.get("search_term", ""),
+                item.get("campaign", ""),
+                item.get("ad_group", ""),
+                item.get("keyword", ""),
+                item.get("match_type", ""),
+                item.get("reason", ""),
+                item.get("cost", 0.0),
+                item.get("previous_cost", 0.0),
+                item.get("cost_wow_pct", "—"),
+                item.get("conversions", 0.0),
+                item.get("previous_conversions", 0.0),
+                item.get("conversions_wow_pct", "—"),
+                item.get("clicks", 0),
+                item.get("impressions", 0),
+                item.get("ctr_pct", 0.0),
+            ]
+        )
+    return rows
+
+
+def publish_search_term_review_to_sheets(
+    items: list[dict[str, Any]],
+    *,
+    title: str,
+    currency: str = "",
+    service: Any = None,
+    drive_service: Any = None,
+) -> tuple[str, str, str]:
+    """Create an editable search-term review sheet and return ``(url, id, share)``."""
+    tabs = [
+        SheetTab(
+            title="Search terms review",
+            rows=build_search_term_review_rows(items, currency),
+            formats=[(7, "#,##0.00"), (8, "#,##0.00"), (9, "0.0"), (15, "0.00")],
+        )
+    ]
+    url, share = _publish_tabs(
+        tabs,
+        title,
+        role="writer",
+        service=service,
+        drive_service=drive_service,
+        log_label="sheets-search-terms",
+    )
+    sheet_id = parse_spreadsheet_id(url)
+    if not sheet_id:
+        raise RuntimeError("Sheets API returned an invalid spreadsheet URL")
+    return url, sheet_id, share
+
+
+def read_search_term_review(spreadsheet_id: str, *, service: Any = None) -> list[dict[str, str]]:
+    """Read only rows explicitly marked ``ДОБАВИТЬ`` from a bot-owned review sheet."""
+    svc = service or _build_service(own_file=True)
+    values = (
+        svc.spreadsheets()
+        .values()
+        .get(spreadsheetId=spreadsheet_id, range="'Search terms review'!A:P")
+        .execute()
+        .get("values", [])
+    )
+    accepted = {"добавить", "add", "✅", "yes", "да"}
+    out: list[dict[str, str]] = []
+    for row in values[1:]:
+        padded = list(row) + [""] * (16 - len(row))
+        if str(padded[0]).strip().casefold() not in accepted:
+            continue
+        term = str(padded[1]).strip()
+        if term:
+            out.append(
+                {
+                    "search_term": term,
+                    "campaign": str(padded[2]).strip(),
+                    "ad_group": str(padded[3]).strip(),
+                    "reason": str(padded[6]).strip(),
+                }
+            )
+    return out
+
+
 # ── §19.4.2: выгрузка ключей с пометкой релевантности + чтение верифицированного списка ─────
 _KW_HEADERS = ["Keyword", "Avg. searches", "Competition", "Top-of-page bid", "Релевантность"]
 _RELEVANT_MARK = "✅ Релевантно"

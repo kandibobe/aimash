@@ -1,5 +1,5 @@
-version: 1
-last_verified_at: '2026-07-30T14:41:00Z'
+version: 2
+last_verified_at: '2026-08-03T10:00:00Z'
 owner: kandibobe
 purpose: Canonical registry of AdMaster cron jobs with criticality, expected state, and alert semantics.
 
@@ -12,48 +12,57 @@ default_rules:
 
 jobs:
   - job_id: '478eac21bfe6'
-    name: '🚨 Hourly Watchdog — Fire Detector'
+    name: '🚨 Hourly Watchdog — Health Alerts (UTC)'
     criticality: P0
     purpose: Detect spend/conversion/account anomalies during operator hours.
     provider: openai-codex
     model: gpt-5.4
     expected_state: scheduled
-    actual_state: paused
+    actual_state: scheduled
+    schedule: '0 9-17 * * *'
+    prompt_file: cron_prompts/hourly_watchdog.txt
+    auto_resume: true
     enabled_expected: true
     alert_if_paused: true
     silent_on_normal: false
-    note: Highest-priority monitoring lane. Current paused state is a live operational risk.
+    note: Read-only alerting lane; never applies recommendations or creates proposals autonomously.
 
   - job_id: '6e96062d99ad'
-    name: '☀️ Morning Standup (09:00 JST) — Trigger Style'
+    name: '☀️ Daily Account Health (09:00 UTC)'
     criticality: P1
     purpose: Daily multi-account operator digest.
     provider: openai-codex
     model: gpt-5.4
     expected_state: scheduled
     actual_state: scheduled
+    schedule: '0 9 * * *'
+    prompt_file: cron_prompts/daily_health.txt
     enabled_expected: true
     silent_on_normal: false
 
   - job_id: '031080f7bfac'
-    name: 'Shadow Mode Daily (09:00 JST)'
+    name: '📊 Shadow Mode Daily (18:30 UTC)'
     criticality: P1
     purpose: Evaluate recommendation quality in dry-run/shadow mode.
     provider: openai-codex
     model: gpt-5.4
     expected_state: scheduled
     actual_state: scheduled
+    schedule: '30 18 * * *'
+    prompt_file: cron_prompts/shadow_daily.txt
     enabled_expected: true
     silent_on_normal: false
 
   - job_id: 'a0cff93f3a2b'
-    name: '🧠 Context Summarization (ежедневно, 18:00 JST)'
+    name: '🧠 Context Summarization (18:10 UTC)'
     criticality: P2
     purpose: Context compression / memory fallback maintenance.
     provider: openai-codex
     model: gpt-5.4
     expected_state: scheduled
     actual_state: scheduled
+    schedule: '10 18 * * *'
+    prompt_file: cron_prompts/context_summary.txt
     enabled_expected: true
     silent_on_normal: false
 
@@ -69,46 +78,54 @@ jobs:
     silent_on_normal: true
 
   - job_id: 'e4f1b2ae179d'
-    name: '🧹 Weekly Janitor — Search Term Cleanup'
+    name: '🧹 Weekly Account Review (Friday 10:00 UTC)'
     criticality: P1
     purpose: Weekly search term cleanup / waste detection lane.
     provider: openai-codex
     model: gpt-5.4
     expected_state: scheduled
     actual_state: scheduled
+    schedule: '0 10 * * 5'
+    prompt_file: cron_prompts/weekly_review.txt
     enabled_expected: true
     silent_on_normal: false
 
   - job_id: '2a402a32e5ec'
-    name: '📝 Monthly Copywriter — RSA Audit'
+    name: '📝 Monthly Strategic Audit (day 1, 11:00 UTC)'
     criticality: P2
     purpose: Monthly creative/RSA audit.
     provider: openai-codex
     model: gpt-5.4
     expected_state: scheduled
     actual_state: scheduled
+    schedule: '0 11 1 * *'
+    prompt_file: cron_prompts/monthly_review.txt
     enabled_expected: true
     silent_on_normal: false
 
   - job_id: 'b44861829e51'
-    name: '🌙 Drift Detection — State Reconciliation'
+    name: '🌙 Drift Detection (17:50 UTC)'
     criticality: P1
     purpose: Detect operational/config/account drift.
     provider: openai-codex
     model: gpt-5.4
     expected_state: scheduled
     actual_state: scheduled
+    schedule: '50 17 * * *'
+    prompt_file: cron_prompts/drift_detection.txt
     enabled_expected: true
     silent_on_normal: false
 
   - job_id: '5db43f3b3d5d'
-    name: '💰 Daily Budget Cap Check (18:00 JST)'
+    name: '💰 Daily Budget Check (17:30 UTC)'
     criticality: P0
     purpose: Detect end-of-day budget cap violations / spend safety issues.
     provider: openai-codex
     model: gpt-5.4
     expected_state: scheduled
     actual_state: scheduled
+    schedule: '30 17 * * *'
+    prompt_file: cron_prompts/daily_budget.txt
     enabled_expected: true
     alert_if_paused: true
     silent_on_normal: false

@@ -1,0 +1,12 @@
+Проведи read-only месячный стратегический аудит: RSA assets/performance/pinning, структура и дубли,
+устаревшие кампании/группы, landing page versus offer, conversion actions/primary goals/attribution,
+факт против KPI/ROAS target и план на следующий месяц. Отделяй проверенные API-факты от внешнего
+web evidence и пробелов данных.
+
+Никаких автоматических изменений, proposal или memory writes. Сначала отправь executive summary и:
+[Кнопка: Сформировать PDF]
+[Кнопка: Разобрать план]
+[Кнопка: Отложить]
+PDF создавай только по человеческой команде, с executive summary, сделанным, измеренным эффектом,
+рисками и планом; не утверждай причинность без evidence. Любые Ads/memory изменения проходят обычный
+typed preview и одно подтверждение.

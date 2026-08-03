@@ -194,6 +194,12 @@ jobs:
             DEPLOY_STAGE="Hermes surface sync"
             /usr/local/lib/hermes-agent/venv/bin/python \
               deploy/hermes/sync_aimash_surface.py
+            # Cron state is host-owned and survives Git deploys. Reconcile only explicitly managed
+            # jobs; the script backs up jobs.json before its first edit and leaves unrelated jobs
+            # untouched. This also resumes the read-only P0 watchdog when policy requires it.
+            DEPLOY_STAGE="Hermes cron sync"
+            /usr/local/lib/hermes-agent/venv/bin/python \
+              scripts/sync_hermes_cron.py --hermes-home /root/.hermes --apply
             # Hermes state/config/.env live outside Compose and outside the PostgreSQL backup.
             # Install the versioned timer on every deploy so a rebuilt VPS cannot silently lose it.
             install -m 0644 deploy/hermes/hermes-backup.service /etc/systemd/system/hermes-backup.service

@@ -41,7 +41,9 @@ from mcp_server.trusted_transport import get_trusted_turn
 from reports.sheets import (
     parse_spreadsheet_id,
     publish_keywords_to_sheets,
+    publish_search_term_review_to_sheets,
     read_keyword_column,
+    read_search_term_review as read_search_term_review_rows,
 )
 
 
@@ -233,6 +235,187 @@ async def read_keyword_sheet(
         [{"keyword": keyword, "match_type": default_match_type} for keyword in keywords],
         limit=1000,
         extra={"spreadsheet_id": sheet_id, "verified": True},
+    )
+
+
+def _wow_pct(current: float, previous: float) -> float | str:
+    if previous == 0:
+        return "—"
+    return round((current - previous) / previous * 100.0, 1)
+
+
+async def create_search_term_review(
+    account: str,
+    candidates: list[dict[str, str]],
+    period_days: int = 7,
+    reader_limit: int = 500,
+) -> dict[str, Any]:
+    """Create an editable Google Sheet for human review of nominated search-term negatives.
+
+    The caller supplies semantic nominations after reading the client profile and live search terms.
+    Every nomination is re-anchored to a real API row; invented terms are rejected.  Current and
+    previous equal periods are read independently so the sheet contains genuine week-over-week data.
+    No Google Ads mutation or proposal is created here.
+    """
+    if not 1 <= int(period_days) <= 30:
+        raise ValueError("period_days must be between 1 and 30")
+    if not 1 <= int(reader_limit) <= 1000:
+        raise ValueError("reader_limit must be between 1 and 1000")
+    if not candidates or len(candidates) > 200:
+        raise ValueError("candidates must contain between 1 and 200 rows")
+    ensure_read_allowed(str(account))
+    turn = get_trusted_turn()
+
+    from reports.period import last_n_days
+    from reports.queries import fetch_search_terms
+    from reports.tz import account_period
+
+    client = await build_client_async(account)
+    current_period = await account_period(
+        client, str(account), last_n_days(int(period_days)), label="search_review_tz"
+    )
+    previous_period = current_period.previous()
+
+    async def _fetch(period, label: str):
+        return await run_ads_read_call(
+            fetch_search_terms,
+            client,
+            str(account),
+            period,
+            None,
+            int(reader_limit),
+            account=str(account),
+            label=label,
+        )
+
+    current, previous, currency = await asyncio.gather(
+        _fetch(current_period, "mcp.search_review.current"),
+        _fetch(previous_period, "mcp.search_review.previous"),
+        run_ads_read_call(
+            account_currency,
+            client,
+            str(account),
+            account=str(account),
+            label="mcp.search_review.currency",
+        ),
+    )
+
+    nominations: dict[tuple[str, str], str] = {}
+    for item in candidates:
+        term = str(item.get("search_term", "")).strip()
+        campaign = str(item.get("campaign", "")).strip()
+        reason = str(item.get("reason", "")).strip()[:500]
+        if not term:
+            raise ValueError("every candidate requires search_term")
+        nominations[(term.casefold(), campaign.casefold())] = reason
+
+    def _key(row) -> tuple[str, str, str]:
+        return (row.search_term.casefold(), row.campaign.casefold(), row.ad_group.casefold())
+
+    previous_by_key = {_key(row): row for row in previous}
+    review: list[dict[str, Any]] = []
+    matched: set[tuple[str, str]] = set()
+    for row in current:
+        exact = (row.search_term.casefold(), row.campaign.casefold())
+        any_campaign = (row.search_term.casefold(), "")
+        nomination = exact if exact in nominations else any_campaign
+        if nomination not in nominations:
+            continue
+        matched.add(nomination)
+        old = previous_by_key.get(_key(row))
+        metrics = row.metrics
+        old_metrics = old.metrics if old is not None else None
+        cost = float(metrics.cost_micros or 0) / 1_000_000
+        old_cost = float(getattr(old_metrics, "cost_micros", 0) or 0) / 1_000_000
+        conv = float(metrics.conversions or 0)
+        old_conv = float(getattr(old_metrics, "conversions", 0) or 0)
+        impressions = int(metrics.impressions or 0)
+        clicks = int(metrics.clicks or 0)
+        review.append(
+            {
+                "search_term": row.search_term,
+                "campaign": row.campaign,
+                "ad_group": row.ad_group,
+                "keyword": row.keyword,
+                "match_type": row.match_type,
+                "reason": nominations[nomination],
+                "cost": round(cost, 2),
+                "previous_cost": round(old_cost, 2),
+                "cost_wow_pct": _wow_pct(cost, old_cost),
+                "conversions": round(conv, 2),
+                "previous_conversions": round(old_conv, 2),
+                "conversions_wow_pct": _wow_pct(conv, old_conv),
+                "clicks": clicks,
+                "impressions": impressions,
+                "ctr_pct": round(clicks / impressions * 100.0, 2) if impressions else 0.0,
+            }
+        )
+    missing = [term for term, campaign in nominations if (term, campaign) not in matched]
+    if missing:
+        raise ValueError(
+            "candidate terms are absent from the current API window: " + ", ".join(missing[:10])
+        )
+    review.sort(key=lambda item: (-float(item["cost"]), item["search_term"].casefold()))
+
+    title = (
+        f"Aimash search terms · {account} · "
+        f"{current_period.date_from.isoformat()}—{current_period.date_to.isoformat()}"
+    )
+    sheet_url, sheet_id, share = await asyncio.to_thread(
+        publish_search_term_review_to_sheets,
+        review,
+        title=title,
+        currency=currency or "",
+    )
+    await sheets_registry.record(
+        chat_id=turn.actor_chat_id,
+        customer_id=str(account),
+        kind="search_terms",
+        spreadsheet_id=sheet_id,
+        url=sheet_url,
+        title=title,
+        share=share,
+    )
+    return ok(
+        review,
+        limit=20,
+        extra={
+            "sheet": {"url": sheet_url, "spreadsheet_id": sheet_id, "share": share},
+            "period": [current_period.date_from.isoformat(), current_period.date_to.isoformat()],
+            "previous_period": [
+                previous_period.date_from.isoformat(),
+                previous_period.date_to.isoformat(),
+            ],
+            "candidates": len(review),
+            "source_reader_capped": len(current) >= int(reader_limit)
+            or len(previous) >= int(reader_limit),
+            "advisory_only": True,
+        },
+    )
+
+
+async def read_search_term_review(account: str, spreadsheet: str) -> dict[str, Any]:
+    """Read manager-approved rows from a bot-owned sheet; still does not create a proposal."""
+    ensure_read_allowed(str(account))
+    turn = get_trusted_turn()
+    sheet_id = parse_spreadsheet_id(spreadsheet)
+    if not sheet_id:
+        raise ValueError("не удалось распознать spreadsheet_id")
+    if not await sheets_registry.is_owned_sheet(
+        chat_id=turn.actor_chat_id,
+        customer_id=str(account),
+        kind="search_terms",
+        spreadsheet_id=sheet_id,
+        max_age_days=14,
+    ):
+        raise PermissionError(
+            "таблица не принадлежит этому чату/аккаунту либо срок review истёк; создайте новую"
+        )
+    rows = await asyncio.to_thread(read_search_term_review_rows, sheet_id)
+    return ok(
+        rows,
+        limit=200,
+        extra={"spreadsheet_id": sheet_id, "verified": True, "advisory_only": True},
     )
 
 
@@ -670,6 +853,8 @@ async def start_client_crawl(
 WORKFLOW_STATE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "start_keyword_research": start_keyword_research,
     "read_keyword_sheet": read_keyword_sheet,
+    "create_search_term_review": create_search_term_review,
+    "read_search_term_review": read_search_term_review,
     "curation_start": curation_start,
     "curation_state": curation_state,
     "curation_apply": curation_apply,

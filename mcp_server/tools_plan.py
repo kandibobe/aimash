@@ -20,6 +20,8 @@ _AGENT_FIRST_WORKFLOW_NAMES = frozenset(
     {
         "start_keyword_research",  # XLSX/Sheets export + ownership round-trip
         "read_keyword_sheet",
+        "create_search_term_review",  # WoW evidence + editable human-review sheet
+        "read_search_term_review",  # verified approved rows; still no proposal/mutation
         "ingest_media",  # trusted Telegram attachment path
         "profile_change",
         "profile_clear",

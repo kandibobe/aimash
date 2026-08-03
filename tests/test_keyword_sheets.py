@@ -17,9 +17,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import reports.sheets as sheets_mod  # noqa: E402
 from reports.sheets import (  # noqa: E402
     build_keyword_sheet_rows,
+    build_search_term_review_rows,
     parse_spreadsheet_id,
     publish_keywords_to_sheets,
     read_keyword_column,
+    read_search_term_review,
 )
 
 
@@ -59,6 +61,60 @@ def test_build_rows_shows_dash_for_missing_metrics():
     ideas = [_idea("no metrics kw", avg_monthly_searches=0, competition="UNSPECIFIED")]
     rows = build_keyword_sheet_rows(ideas, {"no metrics kw": True})
     assert rows[1] == ["no metrics kw", "—", "—", "—", "✅ Релевантно"]
+
+
+def test_search_term_review_rows_include_wow_and_blank_human_decision():
+    rows = build_search_term_review_rows(
+        [
+            {
+                "search_term": "бесплатные игры",
+                "campaign": "Premium",
+                "ad_group": "Sales",
+                "keyword": "купить продукт",
+                "match_type": "BROAD",
+                "reason": "бесплатный интент не соответствует офферу",
+                "cost": 25.5,
+                "previous_cost": 10.0,
+                "cost_wow_pct": 155.0,
+                "conversions": 0.0,
+                "previous_conversions": 0.0,
+                "conversions_wow_pct": "—",
+                "clicks": 15,
+                "impressions": 1000,
+                "ctr_pct": 1.5,
+            }
+        ],
+        "EUR",
+    )
+    assert rows[0][7].endswith(", EUR") and rows[0][9] == "WoW расход, %"
+    assert rows[1][0] == ""  # только менеджер выставляет ДОБАВИТЬ
+    assert rows[1][1] == "бесплатные игры" and rows[1][9] == 155.0
+
+
+def test_search_term_review_reads_only_explicitly_approved_rows():
+    service = _FakeSheetsService()
+    service.execute = lambda: {
+        "values": [
+            ["Решение", "Поисковый запрос", "Кампания", "Группа"],
+            ["ДОБАВИТЬ", "free games", "Premium", "Sales", "", "", "off-topic"],
+            ["ОСТАВИТЬ", "buy product", "Premium", "Sales"],
+            ["✅", "cheap product", "Premium", "Sales", "", "", "price mismatch"],
+        ]
+    }
+    assert read_search_term_review("SID", service=service) == [
+        {
+            "search_term": "free games",
+            "campaign": "Premium",
+            "ad_group": "Sales",
+            "reason": "off-topic",
+        },
+        {
+            "search_term": "cheap product",
+            "campaign": "Premium",
+            "ad_group": "Sales",
+            "reason": "price mismatch",
+        },
+    ]
 
 
 def test_sheets_consent_asks_only_non_sensitive_scope():

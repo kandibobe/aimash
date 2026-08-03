@@ -301,6 +301,8 @@ mcp_servers:
         # Only durable/transport state that Hermes cannot keep in its own dialogue context.
         - start_keyword_research
         - read_keyword_sheet
+        - create_search_term_review
+        - read_search_term_review
         - ingest_media
         - start_client_crawl
         - execute_confirmed

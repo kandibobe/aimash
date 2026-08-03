@@ -160,6 +160,77 @@ async def test_keyword_sheet_rejects_substitution(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_search_term_review_has_real_wow_evidence_and_no_mutation(monkeypatch):
+    from reports.queries import Metrics, SearchTermRow
+
+    monkeypatch.setattr(ws, "ensure_read_allowed", lambda account: None)
+    monkeypatch.setattr(ws, "build_client_async", lambda account: _async_value(object()))
+    current = SearchTermRow(
+        "free games",
+        "Premium",
+        "Sales",
+        "buy product",
+        "BROAD",
+        Metrics(impressions=1000, clicks=10, cost_micros=25_000_000, conversions=0),
+    )
+    previous = SearchTermRow(
+        "free games",
+        "Premium",
+        "Sales",
+        "buy product",
+        "BROAD",
+        Metrics(impressions=500, clicks=5, cost_micros=10_000_000, conversions=0),
+    )
+    calls = 0
+
+    async def fake_read(fn, *args, **kwargs):
+        nonlocal calls
+        if fn is ws.account_currency:
+            return "EUR"
+        calls += 1
+        return current and ([current] if calls == 1 else [previous])
+
+    monkeypatch.setattr(ws, "run_ads_read_call", fake_read)
+    monkeypatch.setattr(
+        ws,
+        "publish_search_term_review_to_sheets",
+        lambda items, **kwargs: (
+            "https://docs.google.com/spreadsheets/d/SHEET1234567890123456",
+            "SHEET1234567890123456",
+            "writer",
+        ),
+    )
+
+    async def fake_record(**kwargs):
+        assert kwargs["kind"] == "search_terms"
+
+    monkeypatch.setattr(ws.sheets_registry, "record", fake_record)
+    with trusted_turn_scope(_turn()):
+        result = await ws.create_search_term_review(
+            DRAFT_ACCOUNT_ID,
+            [{"search_term": "free games", "campaign": "Premium", "reason": "off-topic"}],
+        )
+
+    assert result["error"] is None and result["advisory_only"] is True
+    assert result["rows"][0]["cost_wow_pct"] == 150.0
+    assert result["sheet"]["share"] == "writer"
+
+
+@pytest.mark.asyncio
+async def test_search_term_review_rejects_foreign_sheet(monkeypatch):
+    monkeypatch.setattr(ws, "ensure_read_allowed", lambda account: None)
+    monkeypatch.setattr(ws, "parse_spreadsheet_id", lambda value: "sheet-id")
+    monkeypatch.setattr(
+        ws.sheets_registry,
+        "is_owned_sheet",
+        lambda **kwargs: _async_value(False),
+    )
+    with trusted_turn_scope(_turn()):
+        with pytest.raises(PermissionError):
+            await ws.read_search_term_review(DRAFT_ACCOUNT_ID, "sheet-id")
+
+
+@pytest.mark.asyncio
 async def test_ingest_image_uses_only_trusted_media_and_deletes_copy(monkeypatch, tmp_path):
     import hashlib
 

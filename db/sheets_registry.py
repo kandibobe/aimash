@@ -113,3 +113,31 @@ async def is_owned_keyword_sheet(
         return False
     stamp = row if row.tzinfo is not None else row.replace(tzinfo=timezone.utc)
     return stamp >= datetime.now(timezone.utc) - timedelta(days=max(1, int(max_age_days)))
+
+
+async def is_owned_sheet(
+    *,
+    chat_id: int,
+    customer_id: str,
+    kind: str,
+    spreadsheet_id: str,
+    max_age_days: int = 14,
+) -> bool:
+    """Generic anti-substitution check for a bot-created account-scoped sheet."""
+    async with Session() as s:
+        row = (
+            await s.execute(
+                select(SheetExport.created_at)
+                .where(
+                    SheetExport.chat_id == int(chat_id),
+                    SheetExport.customer_id == str(customer_id),
+                    SheetExport.kind == str(kind),
+                    SheetExport.spreadsheet_id == str(spreadsheet_id),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    if row is None:
+        return False
+    stamp = row if row.tzinfo is not None else row.replace(tzinfo=timezone.utc)
+    return stamp >= datetime.now(timezone.utc) - timedelta(days=max(1, int(max_age_days)))
