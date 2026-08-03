@@ -5,7 +5,7 @@ purpose: Canonical runtime registry for AdMaster/Hermes. This file is the single
 
 primary_runtime:
   provider: openai-codex
-  model: gpt-5.6-sol
+  model: gpt-5.6-terra
   status: canonical_current
   applies_to:
     - interactive_chat
@@ -27,7 +27,7 @@ pinned_exceptions:
 routing_lanes:
   dialogue_and_analysis:
     provider: openai-codex
-    model: gpt-5.6-sol
+    model: gpt-5.6-terra
     status: canonical_current
   primary_fallback:
     status: disabled_by_policy

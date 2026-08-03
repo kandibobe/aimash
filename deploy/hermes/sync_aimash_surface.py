@@ -23,9 +23,11 @@ import yaml
 
 PLUGIN_NAME = "aimash_trusted_transport"
 PRIMARY_PROVIDER = "openai-codex"
-PRIMARY_MODEL = "gpt-5.6-sol"
-PRIMARY_REASONING_EFFORT = "high"
-PRIMARY_MAX_TURNS = 40
+PRIMARY_MODEL = "gpt-5.6-terra"
+PRIMARY_REASONING_EFFORT = "medium"
+PRIMARY_MAX_TURNS = 20
+DELEGATION_MODEL = "gpt-5.6-sol"
+DELEGATION_REASONING_EFFORT = "high"
 RESTART_DRAIN_TIMEOUT = 180
 DELEGATION_MAX_ITERATIONS = 30
 COMPRESSION_POLICY = {
@@ -128,6 +130,8 @@ def reconcile_trusted_operator_policy(config: dict[str, Any]) -> dict[str, Any]:
     agent["max_turns"] = PRIMARY_MAX_TURNS
     agent["restart_drain_timeout"] = RESTART_DRAIN_TIMEOUT
     agent["reasoning_effort"] = PRIMARY_REASONING_EFFORT
+    # Model-specific overrides from an older OpenRouter setup must not survive the Codex-only policy.
+    agent.pop("reasoning_overrides", None)
     agent["disabled_toolsets"] = list(TRUSTED_OPERATOR_DISABLED_TOOLSETS)
 
     memory = config.setdefault("memory", {})
@@ -179,11 +183,11 @@ def reconcile_trusted_operator_policy(config: dict[str, Any]) -> dict[str, Any]:
     platform_toolsets["telegram"] = list(TELEGRAM_TOOLSETS)
 
     config["delegation"] = {
-        "model": PRIMARY_MODEL,
+        "model": DELEGATION_MODEL,
         "provider": PRIMARY_PROVIDER,
         "inherit_mcp_toolsets": True,
         "max_iterations": DELEGATION_MAX_ITERATIONS,
-        "reasoning_effort": PRIMARY_REASONING_EFFORT,
+        "reasoning_effort": DELEGATION_REASONING_EFFORT,
         "max_concurrent_children": 3,
         "max_spawn_depth": 1,
         "orchestrator_enabled": True,

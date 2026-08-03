@@ -185,6 +185,17 @@ def test_runtime_registry_matches_deploy_model_and_fallbacks():
     assert deploy["fallback_providers"] == []
     assert registry["routing_lanes"]["primary_fallback"]["status"] == "disabled_by_policy"
     assert (
+        registry["routing_lanes"]["delegated_subagents"]["provider"],
+        registry["routing_lanes"]["delegated_subagents"]["model"],
+    ) == (deploy["delegation"]["provider"], deploy["delegation"]["model"])
+    providers = {deploy["model"]["provider"], deploy["delegation"]["provider"]}
+    providers.update(
+        value["provider"]
+        for value in deploy["auxiliary"].values()
+        if isinstance(value, dict) and "provider" in value
+    )
+    assert providers == {"openai-codex"}
+    assert (
         registry["routing_lanes"]["lightweight_background"]["provider"],
         registry["routing_lanes"]["lightweight_background"]["model"],
     ) == (

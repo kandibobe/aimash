@@ -69,7 +69,7 @@ hermes config env-path             # путь ~/.hermes/.env
 
 # 3. Первичная авторизация Codex — через интерактивный мастер (он же запускается при первом старте):
 hermes model
-#   Select provider/model — `gpt-5.6-sol` via `openai-codex`; следующий surface sync закрепит
+#   Select provider/model — `gpt-5.6-terra` via `openai-codex`; следующий surface sync закрепит
 #   это значение из `/opt/aimash/deploy/hermes/runtime_registry.yaml`.
 #   Select terminal backend → Keep current (local).
 #   Select platforms        → только Telegram (SPACE, ENTER).

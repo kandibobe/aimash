@@ -43,6 +43,9 @@ def test_surface_sync_model_policy_matches_repository_config():
     assert config["agent"]["restart_drain_timeout"] == SYNC.RESTART_DRAIN_TIMEOUT
     assert config["agent"]["reasoning_effort"] == SYNC.PRIMARY_REASONING_EFFORT
     assert config["delegation"]["max_iterations"] == SYNC.DELEGATION_MAX_ITERATIONS
+    assert config["delegation"]["provider"] == SYNC.PRIMARY_PROVIDER
+    assert config["delegation"]["model"] == SYNC.DELEGATION_MODEL
+    assert config["delegation"]["reasoning_effort"] == SYNC.DELEGATION_REASONING_EFFORT
     assert config["platform_toolsets"]["telegram"] == list(SYNC.TELEGRAM_TOOLSETS)
     assert config["skills"]["platform_disabled"]["telegram"] == list(SYNC.TELEGRAM_DISABLED_SKILLS)
     assert config["tool_loop_guardrails"] == SYNC.TOOL_LOOP_GUARDRAILS
@@ -51,6 +54,16 @@ def test_surface_sync_model_policy_matches_repository_config():
         "google-ads-worker",
         "creative-director",
     )
+
+
+def test_soul_routes_bounded_reads_directly_and_heavy_analysis_to_delegation():
+    soul = (ROOT / "deploy/hermes/SOUL.md").read_text(encoding="utf-8")
+
+    assert "one bounded READ call" in soul
+    assert "Do not delegate greetings" in soul
+    assert "multi-period or multi-account" in soul
+    assert "keyword research" in soul
+    assert "Model selection is internal" in soul
 
 
 def test_soul_scopes_dynamic_buttons_to_the_supported_transport():
@@ -129,7 +142,10 @@ def test_trusted_operator_policy_is_pinned_without_touching_host_secrets():
     cfg = _config()
     cfg.update(
         {
-            "agent": {"disabled_toolsets": ["terminal"]},
+            "agent": {
+                "disabled_toolsets": ["terminal"],
+                "reasoning_overrides": {"external/model": "none"},
+            },
             "memory": {"memory_enabled": False, "user_profile_enabled": False},
             "skills": {"inline_shell": True, "custom": "survives"},
         }
@@ -137,10 +153,11 @@ def test_trusted_operator_policy_is_pinned_without_touching_host_secrets():
 
     got = SYNC.reconcile_trusted_operator_policy(cfg)
 
-    assert got["model"] == {"provider": "openai-codex", "default": "gpt-5.6-sol"}
-    assert got["agent"]["max_turns"] == 40
+    assert got["model"] == {"provider": "openai-codex", "default": "gpt-5.6-terra"}
+    assert got["agent"]["max_turns"] == 20
     assert got["agent"]["restart_drain_timeout"] == 180
-    assert got["agent"]["reasoning_effort"] == "high"
+    assert got["agent"]["reasoning_effort"] == "medium"
+    assert "reasoning_overrides" not in got["agent"]
     assert got["agent"]["disabled_toolsets"] == list(SYNC.TRUSTED_OPERATOR_DISABLED_TOOLSETS)
     assert got["memory"] == {"memory_enabled": True, "user_profile_enabled": True}
     assert got["compression"] == SYNC.COMPRESSION_POLICY
@@ -165,8 +182,8 @@ def test_trusted_operator_policy_is_pinned_without_touching_host_secrets():
         "terminal",
     }.intersection(got["platform_toolsets"]["telegram"])
     assert got["delegation"]["provider"] == "openai-codex"
-    assert got["delegation"]["model"] == "gpt-5.6-sol"
-    assert got["delegation"]["reasoning_effort"] == "high"
+    assert got["delegation"]["model"] == SYNC.DELEGATION_MODEL
+    assert got["delegation"]["reasoning_effort"] == SYNC.DELEGATION_REASONING_EFFORT
     assert got["delegation"]["max_iterations"] == 30
     assert got["delegation"]["orchestrator_enabled"] is True
     assert got["delegation"]["subagent_auto_approve"] is True

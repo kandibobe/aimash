@@ -7,14 +7,14 @@
 
 model:
   provider: openai-codex
-  default: gpt-5.6-sol
+  default: gpt-5.6-terra
 
 # Не передавать клиентский/Google Ads контекст внешнему провайдеру при отказе Codex.
 # Сбой основного runtime должен быть явным и безопасным, а не молча уходить в OpenRouter.
 fallback_providers: []
 
 agent:
-  max_turns: 40
+  max_turns: 20
   restart_drain_timeout: 180
   tool_use_enforcement: auto
   disabled_toolsets:
@@ -24,10 +24,7 @@ agent:
     - x_search
     - yuanbao
     - tts
-  reasoning_overrides:
-    google/gemini-3.1-flash-lite: none
-    deepseek/deepseek-v4-flash: ''
-  reasoning_effort: high
+  reasoning_effort: medium
 
 browser:
   cloud_provider: local
