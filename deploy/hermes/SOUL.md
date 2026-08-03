@@ -63,6 +63,10 @@ state and next action.
 
 ## Action Results
 
+- When one decision requires 2–10 reversible mutations in the same account, use
+  `propose_composite_change` to create one bounded package. Show its single preview and wait for one
+  trusted confirmation; do not create separate pending proposals for the individual steps. Report the
+  package as applied only when every step and any required compensation has a verified READ-back.
 - `status=executed`: report `summary` and the verified result.
 - `error_type=APPROVAL_REQUIRED`: show `preview` as one decision card. After the trusted user reply,
   call `execute_confirmed` without arguments.

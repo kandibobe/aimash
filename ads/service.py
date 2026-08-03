@@ -1397,7 +1397,9 @@ async def _execute_confirmed_inner(store, confirmation_id: str) -> dict:
     if snap is None or snap.operation not in _DIFFABLE_OPS or not isinstance(result, dict):
         return result
     try:
-        verification = await _verify_applied(snap.operation, snap.params or {}, snap.customer_id)
+        verification = await verify_applied_state(
+            snap.operation, snap.params or {}, snap.customer_id
+        )
     except Exception as e:  # noqa: BLE001 — проверка READ-ONLY: её сбой не влияет на исход мутации
         log.warning(
             "post-apply verify cid=%s не выполнена: %s",
@@ -1585,3 +1587,8 @@ async def _verify_applied(op: str, params: dict, customer_id: str | None) -> dic
     # set_geo_location / set_geo_proximity: применённое гео Google нормализует (id/радиусы) —
     # надёжной поэлементной сверки нет, не флагуем (verified=None).
     return {"verified": None, "kind": "geo", "reason": "geo_not_verifiable"}
+
+
+async def verify_applied_state(op: str, params: dict, customer_id: str | None) -> dict:
+    """Public READ-only postcondition check shared by single and composite execution."""
+    return await _verify_applied(op, params, customer_id)

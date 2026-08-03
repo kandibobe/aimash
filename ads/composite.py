@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import Any
 
 from ads.freshness import attach_freshness
-from ads.service import execute_confirmed_step, read_state
+from ads.service import execute_confirmed_step, read_state, verify_applied_state
 from confirm.reverse import reverse_spec
 from confirm.store import ConfirmedProposal
 from core.logging import redact_text
@@ -20,6 +20,10 @@ class CaptureStore:
 
     async def save_proposal(self, **kwargs: Any) -> None:
         self.saved = dict(kwargs)
+
+
+class CompositeVerificationError(RuntimeError):
+    """A step mutated successfully but its postcondition was not proven by READ-back."""
 
 
 class _StepStore:
@@ -95,9 +99,23 @@ async def execute_confirmed_composite(store, confirmation_id: str) -> dict[str, 
             params = dict(item["params"])
             step_store = _StepStore(claimed, operation, params)
             result = await execute_confirmed_step(step_store, confirmation_id)
-            completed.append(
-                {"index": index, "operation": operation, "params": params, "result": result}
-            )
+            completed_item = {
+                "index": index,
+                "operation": operation,
+                "params": params,
+                "result": result,
+                "verification": {"verified": None, "reason": "readback_not_completed"},
+            }
+            # Append before READ-back: if the verifier itself fails, the mutation may already have
+            # applied and therefore must participate in compensation.
+            completed.append(completed_item)
+            verification = await verify_applied_state(operation, params, claimed.customer_id)
+            completed_item["verification"] = verification
+            if verification.get("verified") is not True:
+                raise CompositeVerificationError(
+                    f"post-verify failed for composite step {index}: "
+                    f"{verification.get('reason') or verification.get('kind') or 'unknown'}"
+                )
     except Exception as exc:
         rollbacks: list[dict[str, Any]] = []
         rollback_ok = True
@@ -111,8 +129,27 @@ async def execute_confirmed_composite(store, confirmation_id: str) -> dict[str, 
                 reverse_operation, reverse_params = rebuilt
                 reverse_store = _StepStore(claimed, reverse_operation, reverse_params)
                 result = await execute_confirmed_step(reverse_store, confirmation_id)
+                verification = await verify_applied_state(
+                    reverse_operation, reverse_params, claimed.customer_id
+                )
+                if verification.get("verified") is not True:
+                    rollback_ok = False
+                    rollbacks.append(
+                        {
+                            "operation": reverse_operation,
+                            "status": "unverified",
+                            "result": result,
+                            "verification": verification,
+                        }
+                    )
+                    continue
                 rollbacks.append(
-                    {"operation": reverse_operation, "status": "applied", "result": result}
+                    {
+                        "operation": reverse_operation,
+                        "status": "verified",
+                        "result": result,
+                        "verification": verification,
+                    }
                 )
             except Exception as rollback_exc:  # noqa: BLE001 - terminal audit decides recovery
                 rollback_ok = False
@@ -140,7 +177,12 @@ async def execute_confirmed_composite(store, confirmation_id: str) -> dict[str, 
         "applied": True,
         "operation_count": len(completed),
         "operations": [
-            {"index": item["index"], "operation": item["operation"], "result": item["result"]}
+            {
+                "index": item["index"],
+                "operation": item["operation"],
+                "result": item["result"],
+                "verification": item["verification"],
+            }
             for item in completed
         ],
     }

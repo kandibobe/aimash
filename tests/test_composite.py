@@ -7,6 +7,14 @@ from confirm.store import ConfirmedProposal
 from conftest import FakeConfirmStore
 
 
+@pytest.fixture(autouse=True)
+def _verified_readback(monkeypatch):
+    async def verify(operation, params, customer_id):  # noqa: ARG001
+        return {"verified": True, "kind": operation, "expected": "after", "actual": "after"}
+
+    monkeypatch.setattr(composite, "verify_applied_state", verify)
+
+
 def _parent() -> ConfirmedProposal:
     return ConfirmedProposal(
         operation="composite",
@@ -57,6 +65,7 @@ async def test_composite_executes_in_order_and_finalizes_parent(monkeypatch):
 
     assert calls == ["A", "B"]
     assert result["operation_count"] == 2
+    assert all(item["verification"]["verified"] is True for item in result["operations"])
     assert store.finalized == result
 
 
@@ -121,6 +130,106 @@ async def test_composite_compensates_completed_steps_on_failure(monkeypatch):
     ]
     assert store.failure and "rolled back" in store.failure
     assert store.needs_review is None
+
+
+@pytest.mark.asyncio
+async def test_composite_post_verify_mismatch_compensates_and_does_not_finalize(monkeypatch):
+    calls = []
+
+    async def apply(step_store, confirmation_id):  # noqa: ARG001
+        calls.append((step_store._pending.operation, step_store._pending.params["campaign"]))
+        return {"applied": True}
+
+    async def verify(operation, params, customer_id):  # noqa: ARG001
+        if operation == "pause_campaign" and params["campaign"] == "A":
+            return {
+                "verified": False,
+                "kind": "status",
+                "expected": "PAUSED",
+                "actual": "ENABLED",
+            }
+        return {"verified": True, "kind": "status", "expected": "ENABLED", "actual": "ENABLED"}
+
+    async def reverse(parent, operation, params):  # noqa: ARG001
+        return "resume_campaign", {
+            "campaign": params["campaign"],
+            "_before": {"kind": "status"},
+        }
+
+    monkeypatch.setattr(composite, "execute_confirmed_step", apply)
+    monkeypatch.setattr(composite, "verify_applied_state", verify)
+    monkeypatch.setattr(composite, "_rebuilt_reverse", reverse)
+    store = _ParentStore()
+
+    with pytest.raises(composite.CompositeVerificationError, match="post-verify failed"):
+        await composite.execute_confirmed_composite(store, "c" * 32)
+
+    assert calls == [("pause_campaign", "A"), ("resume_campaign", "A")]
+    assert store.finalized is None
+    assert store.failure and "rolled back" in store.failure
+    assert store.needs_review is None
+
+
+@pytest.mark.asyncio
+async def test_composite_verifier_exception_still_compensates_applied_step(monkeypatch):
+    calls = []
+
+    async def apply(step_store, confirmation_id):  # noqa: ARG001
+        calls.append((step_store._pending.operation, step_store._pending.params["campaign"]))
+        return {"applied": True}
+
+    async def verify(operation, params, customer_id):  # noqa: ARG001
+        if operation == "pause_campaign":
+            raise ConnectionError("readback failed")
+        return {"verified": True, "kind": "status", "expected": "ENABLED", "actual": "ENABLED"}
+
+    async def reverse(parent, operation, params):  # noqa: ARG001
+        return "resume_campaign", {
+            "campaign": params["campaign"],
+            "_before": {"kind": "status"},
+        }
+
+    monkeypatch.setattr(composite, "execute_confirmed_step", apply)
+    monkeypatch.setattr(composite, "verify_applied_state", verify)
+    monkeypatch.setattr(composite, "_rebuilt_reverse", reverse)
+    store = _ParentStore()
+
+    with pytest.raises(ConnectionError, match="readback failed"):
+        await composite.execute_confirmed_composite(store, "c" * 32)
+
+    assert calls == [("pause_campaign", "A"), ("resume_campaign", "A")]
+    assert store.finalized is None
+    assert store.failure and "rolled back" in store.failure
+
+
+@pytest.mark.asyncio
+async def test_composite_unverified_compensation_requires_operator_review(monkeypatch):
+    async def apply(step_store, confirmation_id):  # noqa: ARG001
+        if step_store._pending.params["campaign"] == "B":
+            raise RuntimeError("second step failed")
+        return {"applied": True}
+
+    async def verify(operation, params, customer_id):  # noqa: ARG001
+        if operation == "resume_campaign":
+            return {"verified": None, "reason": "readback_unavailable"}
+        return {"verified": True, "kind": "status", "expected": "PAUSED", "actual": "PAUSED"}
+
+    async def reverse(parent, operation, params):  # noqa: ARG001
+        return "resume_campaign", {
+            "campaign": params["campaign"],
+            "_before": {"kind": "status"},
+        }
+
+    monkeypatch.setattr(composite, "execute_confirmed_step", apply)
+    monkeypatch.setattr(composite, "verify_applied_state", verify)
+    monkeypatch.setattr(composite, "_rebuilt_reverse", reverse)
+    store = _ParentStore()
+
+    with pytest.raises(RuntimeError, match="second step failed"):
+        await composite.execute_confirmed_composite(store, "c" * 32)
+
+    assert store.failure is None
+    assert store.needs_review and "rollback was incomplete" in store.needs_review
 
 
 @pytest.mark.asyncio
