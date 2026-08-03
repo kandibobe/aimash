@@ -13,20 +13,14 @@ from __future__ import annotations
 
 import ast
 import pathlib
-from types import SimpleNamespace
 
 import pytest
-from aiogram.exceptions import TelegramRetryAfter
 
 from scheduler import transport
 
 
-def _retry_after(seconds: float) -> TelegramRetryAfter:
-    return TelegramRetryAfter(
-        method=SimpleNamespace(),
-        message=f"Flood control: retry after {seconds}",
-        retry_after=seconds,
-    )
+def _retry_after(seconds: float) -> transport.TelegramRetryAfter:
+    return transport.TelegramRetryAfter(seconds)
 
 
 class _FloodBot:
@@ -51,7 +45,7 @@ class _FloodBot:
         if self.fail_n > 0:
             self.fail_n -= 1
             raise _retry_after(0.01)
-        self.documents.append((chat_id, getattr(document, "filename", "")))
+        self.documents.append((chat_id, kw.get("filename", "")))
 
 
 async def test_send_message_survives_two_floods():
@@ -66,7 +60,7 @@ async def test_send_message_gives_up_after_max_attempts():
     """Флуд не кончается → после 3 попыток исключение отдаётся вызывающему (per-recipient
     решение — его: чек-поинт алертов не двигается, батч повторится)."""
     bot = _FloodBot(fail_n=99)
-    with pytest.raises(TelegramRetryAfter):
+    with pytest.raises(transport.TelegramRetryAfter):
         await transport.send_bot_message(bot, 7, "hi")
     assert bot.calls == 3
     assert bot.sent == []

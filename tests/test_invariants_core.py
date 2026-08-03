@@ -251,14 +251,13 @@ def test_direct_write_scripts_call_require_dev_env():
     )
 
 
-# ── #5 (регресс-инвариант): GoogleAdsException с токеном → REDACTED и в чат, и в audit ──
+# ── #5 (регресс-инвариант): GoogleAdsException с токеном → REDACTED в transport и audit ──
 async def test_google_ads_exception_with_token_redacted_in_chat_and_audit():
     """Сырой GoogleAdsException может нести креды в message. Инвариант: на ОБЕИХ границах
     (текст пользователю и audit_log) секрет заменён на REDACTED, request_id сохранён (не секрет —
     нужен саппорту). Ловит будущий рефактор, случайно открывший утечку."""
     import uuid
 
-    from bot import ux
     from confirm.store import ConfirmStore
     from core.ads_errors import humanize_google_ads_error
     from db.session import init_db
@@ -281,11 +280,11 @@ async def test_google_ads_exception_with_token_redacted_in_chat_and_audit():
 
     exc = _FakeAdsExc("raw")
 
-    # Граница 1: текст пользователю (humanize + err_text)
-    for text in (humanize_google_ads_error(exc), ux.err_text(exc)):
-        assert secret not in text, "секрет утёк в текст пользователю (golden rule #5)"
-        assert "REDACTED" in text
-        assert "AbCd123" in text or "request_id" not in text  # request_id сохранён, если печатается
+    # Граница 1: санитизированный текст для transport/gateway.
+    text = humanize_google_ads_error(exc)
+    assert secret not in text, "секрет утёк в текст пользователю (golden rule #5)"
+    assert "REDACTED" in text
+    assert "AbCd123" in text or "request_id" not in text
 
     # Граница 2: audit_log (record_failure редактирует на записи в БД)
     await init_db()
@@ -329,7 +328,7 @@ _UI_ONLY_OPS: set[str] = set()
 
 def test_supported_ops_are_agent_tools_or_ui_only():
     from ads.service import SUPPORTED_OPERATIONS
-    from agent.tools.schemas import MUTATION_TOOLS
+    from llm.schemas import MUTATION_TOOLS
 
     ui_only = set(SUPPORTED_OPERATIONS) - set(MUTATION_TOOLS)
     assert ui_only == _UI_ONLY_OPS, (
@@ -343,7 +342,7 @@ def test_every_supported_op_has_a_schema():
     """Каждая исполнимая операция имеет Pydantic-схему (SCHEMAS) — _build_proposal (UI-кнопки) и
     валидация агента опираются на неё; op без схемы упал бы KeyError при попытке минтить черновик."""
     from ads.service import SUPPORTED_OPERATIONS
-    from agent.tools.schemas import SCHEMAS
+    from llm.schemas import SCHEMAS
 
     missing = sorted(op for op in SUPPORTED_OPERATIONS if op not in SCHEMAS)
     assert not missing, f"SUPPORTED_OPERATIONS без Pydantic-схемы (SCHEMAS): {missing}"

@@ -21,7 +21,7 @@ import core.resilience as R  # noqa: E402
 
 # ── Единый источник порогов: схема (единицы) и мутации (micros) выводятся из core.limits ──────
 def test_money_cap_single_source_no_drift():
-    from agent.tools import schemas
+    from llm import schemas
     from ads import mutations as mut
 
     # обе границы — из одного значения; micros = единицы * 1e6 (без повтора литерала)
@@ -32,7 +32,7 @@ def test_money_cap_single_source_no_drift():
 
 
 def test_radius_cap_single_source():
-    from agent.tools.schemas import SetGeoProximity
+    from llm.schemas import SetGeoProximity
     from ads import mutations as mut
 
     assert mut.MAX_RADIUS_KM == L.MAX_RADIUS_KM

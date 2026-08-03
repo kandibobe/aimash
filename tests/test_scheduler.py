@@ -851,7 +851,7 @@ class _DigestBot:
         self.messages.append((chat_id, text))
 
     async def send_document(self, chat_id, document, **kw):
-        self.documents.append((chat_id, getattr(document, "filename", "")))
+        self.documents.append((chat_id, kw.get("filename", "")))
 
 
 async def _seed_digest_rows():

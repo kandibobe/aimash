@@ -432,7 +432,7 @@ def test_pending_media_rejects_traversal_id():
 
 # ── Схема CreateGdnCampaign ──────────────────────────────────────────────────────
 def test_gdn_schema_validates_and_rejects():
-    from agent.tools.schemas import CreateGdnCampaign
+    from llm.schemas import CreateGdnCampaign
 
     ok = CreateGdnCampaign(
         campaign_name="Весна",
@@ -471,7 +471,7 @@ def test_gdn_schema_validates_and_rejects():
 
 def test_gdn_schema_accepts_geo_locations():
     """§11: схема принимает опц. geo_locations (пусто по умолчанию)."""
-    from agent.tools.schemas import CreateGdnCampaign
+    from llm.schemas import CreateGdnCampaign
 
     default = CreateGdnCampaign(
         campaign_name="X",

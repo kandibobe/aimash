@@ -208,21 +208,3 @@ async def test_langmiddleware_contextvar_isolation():
     await asyncio.gather(worker("en"), worker("ru"), worker("en"))
     assert seen["en"] == ("en", "Done")
     assert seen["ru"] == ("ru", "Готово")
-
-
-def test_fmt_rsa_diagnostics_follows_contextvar():
-    """ux.fmt_rsa_diagnostics без явного lang берёт язык запроса (contextvar), как форматтеры texts.*."""
-    from bot import ux
-
-    class _Draft:
-        headlines = [1] * 12
-        descriptions = [1] * 4
-        dropped_headlines = 0
-        dropped_descriptions = 0
-
-    tok = i18n.set_current_lang("en")
-    try:
-        assert ux.fmt_rsa_diagnostics(_Draft(), 15, 4).startswith("✅ Generated")
-    finally:
-        i18n.reset_current_lang(tok)
-    assert ux.fmt_rsa_diagnostics(_Draft(), 15, 4).startswith("✅ Сгенерировано")

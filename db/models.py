@@ -772,7 +772,7 @@ class AgentRun(Base):
     Сшивка по run_id с core.provenance/core.context (одна корреляция на ход, не вторая нумерация —
     provenance.run_id == context.request_id).
 
-    Заполняется НАШИМ путём (agent.loop.run_analysis_agent, NL-команды); траты Hermes-прогонов идут
+    Заполняется НАШИМ путём (analysis.agent.run_analysis_agent, NL-команды); траты Hermes-прогонов идут
     мимо нашего процесса (config.yaml:70-71) — их подшивает ридер OpenRouter Activity API строкой с
     origin='hermes'. Deliverable шага 10 «сколько стоит один прогон / одна группа в месяц» считается
     отсюда: SUM(cost_usd) GROUP BY customer_id за окно по started_at.

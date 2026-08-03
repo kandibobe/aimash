@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import re
 
-from agent.router import chat
+from llm.router import chat
 from clients.dossier_schema import Company, Dossier, DossierExtract, FaqItem, Fact, Person, Service
 from core.config import settings
 from core.llm_budget import LLMBudgetError, consume

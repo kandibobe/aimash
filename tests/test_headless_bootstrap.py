@@ -28,7 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Модули, которые обязаны подниматься БЕЗ Telegram-слоя. Порядок = порядок импорта в зонде;
 # виновника называем поимённо, поэтому импортируем ПО ОДНОМУ, а не одной строкой.
 #
-# `mcp_server.*` и `agent.tools.schemas` докстринг `mcp_server/server.py` объявляет
+# `mcp_server.*` и `llm.schemas` докстринг `mcp_server/server.py` объявляет
 # «приколоченными гардами» — до 23.07.2026 это было неправдой: в списке их не было, и цепочка
 # оставалась чистой по случайности (`agent/__init__.py` пуст). Одна строка `from bot import ux`
 # в `mcp_server/tools_read.py` — самое естественное место, там тексты ошибок — протащила бы
@@ -55,7 +55,7 @@ _HEADLESS_MODULES = (
     "core.texts",
     "advisor.service",
     "reports.service",
-    "agent.tools.schemas",
+    "llm.schemas",
     "mcp_server.server",
     "mcp_server.tools_read",
     "mcp_server.tools_write",  # propose-слой: тянет mcp_server.propose (переехал из bot/) — обязан

@@ -2,7 +2,7 @@
 
 Импорт этого модуля РОНЯЕТ процесс, если в READ-слой просочилась мутация (assert И4) — это зерно
 инварианта изоляции, тот же паттерн, что защищает `ANALYSIS_TOOLS` в `agent/tools/schemas.py`.
-`agent.tools.schemas` bot-free (гард `tests/test_hermes_isolation.py` / `test_headless_bootstrap.py`),
+`llm.schemas` bot-free (гард `tests/test_hermes_isolation.py` / `test_headless_bootstrap.py`),
 поэтому импорт `MUTATION_TOOLS` не нарушает развязку headless-контура.
 
 PLAN/WRITE импортируется и регистрируется только при ``HERMES_WRITE_ENABLED=true``. Каждый такой
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from agent.tools.schemas import MUTATION_TOOLS
+from llm.schemas import MUTATION_TOOLS
 from core.config import settings
 from core.guards import require_no_mutations, require_registered_surface
 from mcp_server.tools_read import READ_MCP_TOOLS, READ_TOOL_FUNCS

@@ -119,16 +119,6 @@ def test_money_ops_mirror_ads_resolve():
     )
 
 
-def test_destructive_ops_are_the_single_source():
-    """Литерала необратимых удалений в кнопочном слое больше нет — только импорт из `confirm.risk`.
-
-    Раньше набор жил в `bot/main.py`, и второй потребитель (классификатор) неизбежно завёл бы свою
-    копию: два списка на один вопрос — тот же класс дефекта, что обещание вложения без файла."""
-    src = (ROOT / "bot" / "main.py").read_text(encoding="utf-8")
-    assert "_DESTRUCTIVE_OPS = frozenset" not in src, "в bot/main.py снова свой литерал удалений"
-    assert '"remove_asset_link"' not in src, "имена операций удаления снова перечислены в bot/main"
-
-
 # ─────────────────────────── классификация ───────────────────────────
 
 

@@ -220,7 +220,7 @@ def test_attach_audience_in_supported_operations():
 
 
 def test_attach_audience_schema_validates_and_rejects():
-    from agent.tools.schemas import AttachAudience
+    from llm.schemas import AttachAudience
 
     ok = AttachAudience(campaign="X", audience_resource_names=[f"  {_UL}  ", _AUD])
     assert ok.audience_resource_names == [_UL, _AUD]  # обрезаны пробелы

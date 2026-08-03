@@ -1886,7 +1886,7 @@ def _outcome_prompt(item: DueOutcome, result: dict) -> str:
 async def _outcome_agent_note(item: DueOutcome, result: dict) -> str:
     """Optional phrasing only; deterministic report remains complete when the LLM is unavailable."""
     try:
-        from agent.router import chat
+        from llm.router import chat
 
         message = await chat(
             [

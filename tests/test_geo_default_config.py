@@ -55,7 +55,7 @@ def test_unknown_country_locale_falls_back_to_ru():
 
 
 def test_schema_default_factory_reads_config():
-    from agent.tools.schemas import SetGeoLocation, SetGeoProximity
+    from llm.schemas import SetGeoLocation, SetGeoProximity
 
     with geo_env("UG", "en"):
         g = SetGeoLocation(campaign="X", locations=["Kampala"])
@@ -66,7 +66,7 @@ def test_schema_default_factory_reads_config():
 
 def test_create_campaign_schema_geo_default_from_config():
     # гео-поля создающих схем берут конфиг-дефолт через default_factory (не литерал «UA»)
-    from agent.tools.schemas import CreateGdnCampaign, CreateSearchCampaign
+    from llm.schemas import CreateGdnCampaign, CreateSearchCampaign
 
     for model in (CreateGdnCampaign, CreateSearchCampaign):
         cc = model.model_fields["geo_country_code"].default_factory
@@ -89,7 +89,7 @@ def test_call_and_price_asset_schemas_read_config():
     """D7: у CallAsset страна и у PriceAsset язык — из конфига, а не литералы «UA»/«uk». Литерал
     материализовался в model_dump() → env-фолбэк в ads/service.py становился мёртвым кодом, и
     украинский код номера уезжал в кампанию любой страны."""
-    from agent.tools.schemas import AddCallAsset, AddPriceAsset, PriceOfferingItem
+    from llm.schemas import AddCallAsset, AddPriceAsset, PriceOfferingItem
 
     for model, field in ((AddCallAsset, "country_code"), (AddPriceAsset, "language_code")):
         assert model.model_fields[field].default_factory is not None  # factory, не литерал
@@ -109,7 +109,7 @@ def test_call_asset_without_country_fails_closed():
     import pytest
     from pydantic import ValidationError
 
-    from agent.tools.schemas import AddCallAsset
+    from llm.schemas import AddCallAsset
 
     with geo_env("", "ru"):
         with pytest.raises(ValidationError):

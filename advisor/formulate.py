@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import re
 
-from agent.router import chat
+from llm.router import chat
 
 _DIGITS_RE = re.compile(r"\d+")
 

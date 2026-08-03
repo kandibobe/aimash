@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import ads.service
 import mcp_server.tools_write as tools_write
-from agent.tools.schemas import LaunchCampaign, MUTATION_TOOLS
+from llm.schemas import LaunchCampaign, MUTATION_TOOLS
 from mcp_server.trusted_transport import TrustedTurn, trusted_turn_scope
 
 

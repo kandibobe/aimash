@@ -1,9 +1,9 @@
 """#8 Evals — regression-guard системных промптов-КОНТРАКТОВ (Фаза B.1).
 
 Дыра, которую закрывает: смена промпта проходит незамеченной, а модель отдельно меняется по
-A/B (`scripts/ab_test_models.py`). Значит поведение может «уехать» из-под обоих сразу — правка
+A/B-проверками моделей. Значит поведение может «уехать» из-под обоих сразу — правка
 текста + смена модели, и никто не сверял. Тест фиксирует SHA-256 промптов, несущих ГАРАНТИЮ:
-read-only, fact-guard (числа только из данных аудита/инструментов), контур исполнителя. Тихий
+read-only и fact-guard (числа только из данных аудита/инструментов). Тихий
 дрейф → красный тест; осознанная правка → обнови хэш и бампни PROMPT_EPOCH записью-обоснованием.
 
 Зеркалим дисциплину `SCORE_MODEL_EPOCH` (`audit/thresholds.py:172`): не «тест ради теста», а
@@ -14,10 +14,9 @@ read-only, fact-guard (числа только из данных аудита/и
 ОБЛАСТЬ — осознанно узкая. Каждый замороженный промпт = точка обслуживания; широкий снапшот
 приучает жать «обновить хэш» не глядя (ровно то, от чего предостерегает комментарий эпох в
 audit/thresholds.py). Замораживаем ТОЛЬКО контракты безопасности/поведения:
-  • agent.loop.SYSTEM — системный промпт исполнителя (агентский цикл, tool-calling).
-  • agent.loop._ANALYST_SYSTEM[ru|en] — ЖЁСТКИЕ ПРАВИЛА: числа только из данных, «ничего не
+  • analysis.agent._ANALYST_SYSTEM[ru|en] — ЖЁСТКИЕ ПРАВИЛА: числа только из данных, «ничего не
     меняю» (read-only). Живой сегодня путь — его открывает run_scope в run_analysis_agent.
-  • agent.loop._ANALYST_QA_SYSTEM[ru|en] — те же правила в Q&A-режиме.
+  • analysis.agent._ANALYST_QA_SYSTEM[ru|en] — те же правила в Q&A-режиме.
 
 НЕ замораживаем и почему (это НЕ пробел, а граница):
   • adcopy._REPAIR_SYSTEM / _COVERAGE_SYSTEM — их «безопасность» (headline ≤30, description ≤90)
@@ -37,34 +36,32 @@ from __future__ import annotations
 
 import hashlib
 
-from agent import loop
+from analysis import agent
 
 # Эпоха промптов-контрактов. Бампается ВМЕСТЕ с обновлением снапшота ниже при осознанной правке —
 # в дифф-ревью это маркер «промпт-контракт сменился намеренно», как SCORE_MODEL_EPOCH. Комментами
 # ниже ведём changelog смысла (значение int само по себе ничего не считает — важна история «зачем»).
-# Эпоха 1 (2026-07-24): первичный снапшот — SYSTEM исполнителя + аналитик и Q&A (ru+en).
-PROMPT_EPOCH: int = 1
+# Эпоха 2 (2026-08-03): legacy executor удалён; остаются аналитик и Q&A (ru+en).
+PROMPT_EPOCH: int = 2
 
 
 def _guarded() -> dict[str, str]:
     """label → рантайм-значение промпта. Python-комменты между конкатенациями строк в исходнике
     в значение НЕ входят — хэшируем то, что реально уходит в модель, а не оформление файла."""
     return {
-        "agent.loop.SYSTEM": loop.SYSTEM,
-        "agent.loop._ANALYST_SYSTEM[ru]": loop._ANALYST_SYSTEM["ru"],
-        "agent.loop._ANALYST_SYSTEM[en]": loop._ANALYST_SYSTEM["en"],
-        "agent.loop._ANALYST_QA_SYSTEM[ru]": loop._ANALYST_QA_SYSTEM["ru"],
-        "agent.loop._ANALYST_QA_SYSTEM[en]": loop._ANALYST_QA_SYSTEM["en"],
+        "analysis.agent._ANALYST_SYSTEM[ru]": agent._ANALYST_SYSTEM["ru"],
+        "analysis.agent._ANALYST_SYSTEM[en]": agent._ANALYST_SYSTEM["en"],
+        "analysis.agent._ANALYST_QA_SYSTEM[ru]": agent._ANALYST_QA_SYSTEM["ru"],
+        "analysis.agent._ANALYST_QA_SYSTEM[en]": agent._ANALYST_QA_SYSTEM["en"],
     }
 
 
 # Пины SHA-256(utf-8). Обновлять ТОЛЬКО осознанно — вместе с бампом PROMPT_EPOCH и записью выше.
 _PINNED: dict[str, str] = {
-    "agent.loop.SYSTEM": "80aedd727f1691b928cae59a9eac5f83b5ff3425fb2fb467941174fe42dd3861",
-    "agent.loop._ANALYST_SYSTEM[ru]": "c50172c935e3750afee402e9d585eb1599bc3e7800b2c3ad3711dc04dd01bbb6",
-    "agent.loop._ANALYST_SYSTEM[en]": "20f9a9beb77e6e73cb3b44e34851be9551cddc5578f2fa0ad2be767ace4843ed",
-    "agent.loop._ANALYST_QA_SYSTEM[ru]": "51d55c32efcb87927a032d624a7cbcdd8408bd2016ace3a098ec050976381cd5",
-    "agent.loop._ANALYST_QA_SYSTEM[en]": "c82765e2e5cde5598ff4894d0f587231bc8b38f23731bfaa657d9ef2a82f1001",
+    "analysis.agent._ANALYST_SYSTEM[ru]": "c50172c935e3750afee402e9d585eb1599bc3e7800b2c3ad3711dc04dd01bbb6",
+    "analysis.agent._ANALYST_SYSTEM[en]": "20f9a9beb77e6e73cb3b44e34851be9551cddc5578f2fa0ad2be767ace4843ed",
+    "analysis.agent._ANALYST_QA_SYSTEM[ru]": "51d55c32efcb87927a032d624a7cbcdd8408bd2016ace3a098ec050976381cd5",
+    "analysis.agent._ANALYST_QA_SYSTEM[en]": "c82765e2e5cde5598ff4894d0f587231bc8b38f23731bfaa657d9ef2a82f1001",
 }
 
 

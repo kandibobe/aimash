@@ -970,7 +970,7 @@ def test_analyze_account_delegates_heavy_audit_and_returns_compact_digest(monkey
     monkeypatch.setattr(tr, "_account_period", fake_account_period)
     monkeypatch.setattr(tr, "gather_audit", fake_audit)
     monkeypatch.setattr(tr, "audit_payload", fake_payload)
-    monkeypatch.setattr("agent.loop.run_analysis_agent", fake_agent)
+    monkeypatch.setattr("analysis.agent.run_analysis_agent", fake_agent)
 
     with _read_allowed():
         env = asyncio.run(

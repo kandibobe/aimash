@@ -18,7 +18,7 @@ from pydantic import ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ads.resolve import currency_mismatch, detect_currency_token  # noqa: E402
-from agent.tools.schemas import (  # noqa: E402
+from llm.schemas import (  # noqa: E402
     AddPriceAsset,
     AddPromotion,
     PriceOfferingItem,

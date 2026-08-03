@@ -11,7 +11,7 @@ from pydantic import ValidationError
 import ads.client as ads_client_module
 import ads.mutations as mutations
 from ads.client import DRAFT_ACCOUNT_ID
-from agent.tools.schemas import CreateAppCampaign, MUTATION_TOOLS, SCHEMAS
+from llm.schemas import CreateAppCampaign, MUTATION_TOOLS, SCHEMAS
 from conftest import FakeConfirmStore, FakeProposal
 from mcp_server.tools_write import ACTION_TOOL_FUNCS
 

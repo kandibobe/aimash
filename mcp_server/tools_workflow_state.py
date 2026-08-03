@@ -16,7 +16,7 @@ from typing import Any, Awaitable, Callable, Literal
 
 from adcopy.session import CurationSession, SessionStore
 from adcopy.validate import validate
-from agent.tools.schemas import CreateSearchCampaign
+from llm.schemas import CreateSearchCampaign
 from ads.client import build_client_async, ensure_read_allowed
 from ads.geo import country_name_for_geo_id
 from ads.keyword_plan import generate_keyword_ideas

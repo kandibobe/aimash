@@ -78,7 +78,7 @@ def collect_slugs() -> list[tuple[str, str]]:
         for key, value in _ENV_ASSIGN_RE.findall(text):
             out.append((f".env.example:{key}", value))
 
-    from agent import router
+    from llm import router
 
     for slug in router.AB_CANDIDATES:
         out.append(("agent/router.py:AB_CANDIDATES", slug))

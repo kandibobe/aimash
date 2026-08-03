@@ -869,7 +869,7 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "🟡 No data on this account for the selected period (impressions/clicks/cost = 0).\n"
         "Check the period dates or pick a working account: /account · /accounts.",
     },
-    # 2.6: обрезка батча ключей до лимита схемы (n = agent.tools.schemas.ADD_KEYWORDS_MAX).
+    # 2.6: обрезка батча ключей до лимита схемы (n = llm.schemas.ADD_KEYWORDS_MAX).
     "kw_add_truncated": {
         "ru": "Оставил первые {n} ключей (лимит одного добавления).",
         "en": "Kept the first {n} keywords (single-batch limit).",

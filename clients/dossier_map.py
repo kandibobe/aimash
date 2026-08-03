@@ -22,7 +22,7 @@ import json
 import re
 from dataclasses import dataclass, field
 
-from agent.router import chat
+from llm.router import chat
 from clients.dossier_schema import DossierExtract
 from core.config import settings
 from core.llm_budget import LLMBudgetError, LLMBudgetExceededError, consume, snapshot

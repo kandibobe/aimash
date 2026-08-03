@@ -447,7 +447,7 @@ def test_export_workbook_has_negatives_sheet():
 
 # ── Регистрация read-tool ─────────────────────────────────────────────────────────
 def test_keyword_research_tool_registered():
-    from agent.tools.schemas import READ_TOOLS, SCHEMAS, TOOLS, KeywordResearch
+    from llm.schemas import READ_TOOLS, SCHEMAS, TOOLS, KeywordResearch
 
     assert "keyword_research" in READ_TOOLS
     assert SCHEMAS["keyword_research"] is KeywordResearch
@@ -455,7 +455,7 @@ def test_keyword_research_tool_registered():
 
 
 def test_keyword_research_schema_normalizes_and_validates_url():
-    from agent.tools.schemas import KeywordResearch
+    from llm.schemas import KeywordResearch
 
     k = KeywordResearch(seeds=["  цветы ", "", "  "], url=None, language="ru")
     assert k.seeds == ["цветы"]  # обрезка + выброс пустых

@@ -13,7 +13,7 @@ from typing import Any, Awaitable, Callable
 
 from pydantic import BaseModel, ValidationError
 
-from agent.tools.schemas import (
+from llm.schemas import (
     MUTATION_TOOLS,
     SCHEMAS,
     AddCallAsset,

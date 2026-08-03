@@ -1,6 +1,6 @@
 """#8 Evals (Фаза B.2) — golden-set валидационного контракта денежного пути.
 
-Прогоняет `tests/fixtures/gate_scenarios.jsonl` через БОЕВУЮ Pydantic-схему `agent.tools.schemas.SCHEMAS`
+Прогоняет `tests/fixtures/gate_scenarios.jsonl` через БОЕВУЮ Pydantic-схему `llm.schemas.SCHEMAS`
 — ту же, что видит confirm-гейт в проде (и что зовёт `scripts/ab_test_models.py:164`). ОФЛАЙН,
 детерминированно, без сети и LLM: тест ловит регрессию КОД-гарантий, а не точность модели.
 
@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from agent.tools.schemas import SCHEMAS
+from llm.schemas import SCHEMAS
 
 _CORPUS = Path(__file__).parent / "fixtures" / "gate_scenarios.jsonl"
 

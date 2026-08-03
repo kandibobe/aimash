@@ -1,14 +1,14 @@
 """Дом процесса планировщика: `python -m scheduler`.
 
-Зачем отдельный процесс. До сих пор единственный старт APScheduler жил внутри aiogram-петли
-(`bot/main.py`), поэтому при архивации кнопочного слоя (SPEC.md §5.3) умирали ВСЕ джобы разом —
+Зачем отдельный процесс. Исторически старт APScheduler жил внутри aiogram-петли, поэтому при
+удалении кнопочного слоя умирали ВСЕ джобы разом —
 включая `reconcile_stale_executing`, который поднимает зависшие мутации в `needs_review`. Это
 денежный путь, а не дайджесты: черновик, застрявший в `executing`, без этой джобы остаётся так
 навсегда и никого не уведомляет. Топология (три процесса) даёт планировщику собственный дом:
 «БД + тонкий Bot-клиент для отправки».
 
 Что здесь ЕСТЬ и чего НЕТ. Есть: БД, ads-слой через общий `app/bootstrap.py`, APScheduler, тонкий
-`aiogram.Bot` только для отправки, heartbeat для честного HEALTHCHECK. Нет: Dispatcher, хендлеров,
+минимальный HTTP-клиент Bot API только для отправки, heartbeat для честного HEALTHCHECK. Нет: Dispatcher, хендлеров,
 middleware, порта клавиатур `scheduler/delivery.py`. Последнее — не забывчивость: кнопки живут в
 архивируемом слое, и здесь их взять неоткуда. Следствие описано в самом порту — дайджесты уходят
 текстом (цифры самоценны), а thr-tune молчит целиком (его сообщение целиком — предложение, принять
@@ -37,8 +37,6 @@ import asyncio
 import signal
 import sys
 
-from aiogram import Bot
-
 from app.bootstrap import bootstrap_ads_layer
 from core.config import settings
 from core.logging import log, setup_logging
@@ -47,6 +45,7 @@ from db.session import (
     dispose_engine,
     release_single_instance_lock,
 )
+from scheduler.transport import TelegramBot
 
 _ROLE = "scheduler"
 
@@ -75,7 +74,7 @@ async def main() -> int:
         log.error("захват lock роли `scheduler` не удался: %s — выхожу", type(e).__name__)
         return 4
 
-    bot: Bot | None = None
+    bot: TelegramBot | None = None
     sched = None
     hb_task: asyncio.Task | None = None
     try:
@@ -96,7 +95,7 @@ async def main() -> int:
         from core.heartbeat import heartbeat_loop
         from scheduler.service import register_user_report_schedules, setup_scheduler
 
-        bot = Bot(token)
+        bot = TelegramBot(token)
         sched = setup_scheduler(bot)
         try:
             await register_user_report_schedules(sched, bot)
@@ -135,7 +134,7 @@ async def main() -> int:
         await dispose_engine()
         if bot is not None:
             try:
-                await bot.session.close()
+                await bot.close()
             except Exception as e:  # noqa: BLE001
                 log.warning("закрытие сессии Telegram: %s", type(e).__name__)
         log.info("планировщик остановлен (ресурсы освобождены).")

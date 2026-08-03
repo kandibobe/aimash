@@ -29,8 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Пакеты, которым Telegram-слой не положен. `agent/` тут же: его цикл заменяется Hermes, но пока он
-# жив — тащить в него `bot/` значит утащить бота в MCP-процесс через `agent.tools.schemas`.
+# Пакеты, которым legacy Telegram-слой не положен.
 BOT_FREE_PACKAGES = (
     "scheduler",
     "advisor",
@@ -45,17 +44,13 @@ BOT_FREE_PACKAGES = (
     "audit",
     "db",
     "app",
-    "agent",
+    "analysis",
+    "llm",
 )
 
 
-# Два РАЗНЫХ запрета, и путать их нельзя. `bot/` — архивируемый кнопочный слой, исключений нет
-# ни одного. `aiogram` — библиотека транспорта, и планировщику она положена по топологии («БД +
-# тонкий Bot-клиент для отправки»): вложение недельного дайджеста без `InputFile` не собрать, а
-# сам `Bot` кто-то обязан создать. Поэтому ровно два файла вправе её импортировать, и они вынесены
-# сюда списком, а не «ну там же scheduler» — чтобы следующий aiogram-импорт в фоновом контуре
-# пришлось ДОБАВИТЬ осознанно.
-AIOGRAM_ALLOWED = frozenset({"scheduler/transport.py", "scheduler/__main__.py"})
+# После v3 cleanup исключений нет: scheduler использует локальный httpx-транспорт Bot API.
+AIOGRAM_ALLOWED: frozenset[str] = frozenset()
 
 
 def _forbidden_imports(path: Path, *, aiogram_ok: bool) -> list[tuple[int, str]]:
@@ -103,6 +98,15 @@ def test_aiogram_allowlist_is_not_stale() -> None:
             f"{rel} освобождён от запрета aiogram, но не от запрета `bot/` — "
             "исключение сделано для транспорта, а не для кнопочного слоя"
         )
+
+
+def test_legacy_packages_and_dependency_are_absent() -> None:
+    assert not (REPO_ROOT / "bot").exists()
+    assert not (REPO_ROOT / "agent").exists()
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    constraints = (REPO_ROOT / "constraints.txt").read_text(encoding="utf-8")
+    assert "aiogram" not in pyproject.lower()
+    assert "aiogram" not in constraints.lower()
 
 
 def test_compose_v3_has_no_legacy_bot_service() -> None:

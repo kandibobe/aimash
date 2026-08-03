@@ -1,4 +1,4 @@
-"""Рантайм-переключатель модели ИИ (/model): выбор активной модели в agent.router.
+"""Рантайм-переключатель модели ИИ (/model): выбор активной модели в llm.router.
 
 Чистые юнит-тесты — без сети: проверяем только логику выбора модели (override > роль-дефолт).
 """
@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent import router
+from llm import router
 
 
 @pytest.fixture(autouse=True)

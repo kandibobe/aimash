@@ -37,7 +37,7 @@ from _operator_turn import operator_turn  # noqa: E402
 from ads.assets import clear_pending_media, save_pending_media  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID, build_client, ensure_allowed  # noqa: E402
 from ads.service import execute_confirmed  # noqa: E402
-from agent.tools.schemas import SCHEMAS  # noqa: E402
+from llm.schemas import SCHEMAS  # noqa: E402
 from confirm.store import ConfirmStore, list_recent_audit  # noqa: E402
 from core.config import settings  # noqa: E402
 from db.session import init_db  # noqa: E402

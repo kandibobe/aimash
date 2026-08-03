@@ -12,7 +12,7 @@ def test_plan_surface_is_exact_and_cannot_execute():
 
 
 def test_write_registry_is_split_into_actions_and_approval_execution():
-    from agent.tools.schemas import MUTATION_TOOLS
+    from llm.schemas import MUTATION_TOOLS
 
     assert ACTION_MCP_TOOLS.isdisjoint(EXECUTE_MCP_TOOLS)
     assert WRITE_MCP_TOOLS == ACTION_MCP_TOOLS | EXECUTE_MCP_TOOLS

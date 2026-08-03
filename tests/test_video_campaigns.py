@@ -277,14 +277,14 @@ def test_video_ops_in_supported_operations():
 
 
 def test_video_ops_in_mutation_tools():
-    from agent.tools.schemas import MUTATION_TOOLS
+    from llm.schemas import MUTATION_TOOLS
 
     assert "create_demand_gen_campaign" in MUTATION_TOOLS
     assert "create_video_campaign" in MUTATION_TOOLS
 
 
 def test_dg_schema_validates_and_rejects():
-    from agent.tools.schemas import CreateDemandGenCampaign
+    from llm.schemas import CreateDemandGenCampaign
 
     ok = CreateDemandGenCampaign(**_VALID)
     assert ok.goal == "clicks" and ok.logo_media_id is None  # дефолты
@@ -303,7 +303,7 @@ def test_dg_schema_validates_and_rejects():
 
 
 def test_video_schema_validates():
-    from agent.tools.schemas import CreateVideoCampaign
+    from llm.schemas import CreateVideoCampaign
 
     ok = CreateVideoCampaign(**_VALID, geo_locations=["Кения"])
     assert ok.geo_locations == ["Кения"]

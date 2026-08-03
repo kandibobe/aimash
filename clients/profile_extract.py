@@ -17,7 +17,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from agent.router import chat
+from llm.router import chat
 from core.llm_budget import LLMBudgetError
 
 

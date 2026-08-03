@@ -357,7 +357,7 @@ def check_kill_rule(report, thr: dict, ctx: _Ctx) -> list[Finding]:
     return out
 
 
-# Типы соответствия, которые принимает мутация add_negative_keywords (agent.tools.schemas.MatchType —
+# Типы соответствия, которые принимает мутация add_negative_keywords (llm.schemas.MatchType —
 # НИЖНИЙ регистр). GAQL отдаёт ENUM-имя ('BROAD'), поэтому нормализуем ЗДЕСЬ, а не в bot-слое: сырой
 # 'BROAD' в evidence уронил бы валидацию схемы на one-tap «➖ В минус-слова» — кнопка молча стала бы
 # «совет устарел». Незнакомое значение → None (bot подставит свой дефолт), а не мусор в мутацию.

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 
-from agent.router import chat
+from llm.router import chat
 from core.config import settings
 from core.llm_budget import LLMBudgetError
 

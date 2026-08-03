@@ -60,7 +60,7 @@ def test_asset_len_cyrillic_is_one():
 
 # ── схемы ───────────────────────────────────────────────────────────────────────────
 def test_sitelink_schema_validates():
-    from agent.tools.schemas import AddSitelinks
+    from llm.schemas import AddSitelinks
 
     ok = AddSitelinks(
         campaign="X",
@@ -81,7 +81,7 @@ def test_sitelink_schema_validates():
 
 
 def test_callouts_schema_dedup_and_len():
-    from agent.tools.schemas import AddCallouts
+    from llm.schemas import AddCallouts
 
     ok = AddCallouts(campaign="X", callouts=[" Доставка ", "доставка", "Гарантия"])
     # trim + dedup (casefold): «Доставка»/«доставка» → одно
@@ -91,7 +91,7 @@ def test_callouts_schema_dedup_and_len():
 
 
 def test_snippets_schema_header_and_values():
-    from agent.tools.schemas import AddStructuredSnippets
+    from llm.schemas import AddStructuredSnippets
 
     ok = AddStructuredSnippets(campaign="X", header="Brands", values=["A", "B", "C"])
     assert ok.header == "Brands"
@@ -102,7 +102,7 @@ def test_snippets_schema_header_and_values():
 
 
 def test_remove_asset_link_schema_requires_campaign_assets_rn():
-    from agent.tools.schemas import RemoveAssetLink
+    from llm.schemas import RemoveAssetLink
 
     ok = RemoveAssetLink(link_resource_names=["customers/1/campaignAssets/5~SITELINK"])
     assert ok.link_resource_names
@@ -430,7 +430,7 @@ def test_asset_ops_in_supported_operations():
 
 # ── семейство 3: схемы ────────────────────────────────────────────────────────────
 def test_call_asset_schema():
-    from agent.tools.schemas import AddCallAsset
+    from llm.schemas import AddCallAsset
 
     ok = AddCallAsset(campaign="X", phone_number="+380 (44) 123-45-67", country_code="ua")
     assert ok.country_code == "UA"
@@ -441,7 +441,7 @@ def test_call_asset_schema():
 
 
 def test_promotion_schema_exactly_one_discount():
-    from agent.tools.schemas import AddPromotion
+    from llm.schemas import AddPromotion
 
     ok = AddPromotion(
         campaign="X", promotion_target="Лето", final_url="https://s.ua", percent_off=20
@@ -467,7 +467,7 @@ def test_promotion_schema_exactly_one_discount():
 
 
 def test_price_schema_offering_bounds():
-    from agent.tools.schemas import AddPriceAsset
+    from llm.schemas import AddPriceAsset
 
     offs = [
         {

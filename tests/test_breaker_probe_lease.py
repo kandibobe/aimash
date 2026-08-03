@@ -358,7 +358,7 @@ async def test_open_llm_circuit_degrades_to_fallback_model(monkeypatch):
     ронял бы парсинг целиком — при живой модели B. Добавить цепь в `_is_retryable_llm` нельзя (тот же
     предикат — условие ретрая tenacity), поэтому решение принимается в ветке деградации, и гард
     стоит здесь."""
-    from agent import router as R
+    from llm import router as R
 
     used: list[str] = []
 

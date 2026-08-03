@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from agent.loop import _assistant_message_dict, run_analysis_agent
+from analysis.agent import _assistant_message_dict, run_analysis_agent
 from audit.factguard import collect_numbers, narrative_facts_preserved
 
 FACTS = {
@@ -106,7 +106,7 @@ def test_factguard_allows_year_tokens():
 
 # ── S4 / GR9: инструменты аналитика — read-only, без выбора аккаунта ─────────────────────
 def test_analysis_tools_no_mutation_no_account():
-    from agent.tools.schemas import ANALYSIS_TOOL_NAMES, ANALYSIS_TOOLS, MUTATION_TOOLS
+    from llm.schemas import ANALYSIS_TOOL_NAMES, ANALYSIS_TOOLS, MUTATION_TOOLS
 
     assert ANALYSIS_TOOL_NAMES.isdisjoint(MUTATION_TOOLS)  # S4: ноль мутаций в цикле
     for t in ANALYSIS_TOOLS:
@@ -138,7 +138,7 @@ async def test_multiturn_drills_then_narrates(monkeypatch):
         content="Кампания «Brand-RU» слила 8900 USD при бюджете 300 USD и 0 конверсий. Приоритет: пауза."
     )
     chat_fn, state = _scripted_chat([resp0, resp1])
-    monkeypatch.setattr("agent.loop.chat", chat_fn)
+    monkeypatch.setattr("analysis.agent.chat", chat_fn)
 
     out = await run_analysis_agent(FACTS, chat_id=1, lang="ru", drill=drill)
     assert out is not None and "Brand-RU" in out
@@ -150,14 +150,14 @@ async def test_multiturn_drills_then_narrates(monkeypatch):
 async def test_narrative_with_fabricated_number_is_rejected(monkeypatch):
     resp = _FakeMsg(content="Аккаунт потерял 777777 USD — полная катастрофа.")  # нет в фактах
     chat_fn, _ = _scripted_chat([resp])
-    monkeypatch.setattr("agent.loop.chat", chat_fn)
+    monkeypatch.setattr("analysis.agent.chat", chat_fn)
     assert await run_analysis_agent(FACTS, chat_id=1, lang="ru", drill=None) is None
 
 
 async def test_no_drill_single_shot(monkeypatch):
     resp = _FakeMsg(content="Здоровье 62 из 100, под риском 8900 USD. Приоритет: пауза Brand-RU.")
     chat_fn, state = _scripted_chat([resp])
-    monkeypatch.setattr("agent.loop.chat", chat_fn)
+    monkeypatch.setattr("analysis.agent.chat", chat_fn)
     out = await run_analysis_agent(FACTS, chat_id=1, lang="ru", drill=None)
     assert out and "62" in out
     assert state["turns"][0]["tools_present"] is False  # без drill → без инструментов
@@ -167,7 +167,7 @@ async def test_network_error_falls_back_to_none(monkeypatch):
     async def boom(*a, **k):
         raise RuntimeError("openrouter down")
 
-    monkeypatch.setattr("agent.loop.chat", boom)
+    monkeypatch.setattr("analysis.agent.chat", boom)
     assert await run_analysis_agent(FACTS, chat_id=1, drill=None) is None
 
 
@@ -181,7 +181,7 @@ async def test_budget_exceeded_skips_narrative(monkeypatch):
         raise AssertionError("chat не должен вызываться при исчерпанном бюджете")
 
     monkeypatch.setattr("core.llm_budget.consume", _raise)
-    monkeypatch.setattr("agent.loop.chat", _chat_never)
+    monkeypatch.setattr("analysis.agent.chat", _chat_never)
     assert await run_analysis_agent(FACTS, chat_id=1, drill=None) is None
 
 
@@ -194,7 +194,7 @@ async def test_cost_cap_from_chat_skips_narrative(monkeypatch):
     async def _over_cap(*a, **k):
         raise llm_budget.LLMCostCapExceededError(10.5, 10.0)
 
-    monkeypatch.setattr("agent.loop.chat", _over_cap)
+    monkeypatch.setattr("analysis.agent.chat", _over_cap)
     assert await run_analysis_agent(FACTS, chat_id=1, drill=None) is None
 
 
@@ -209,7 +209,7 @@ async def test_unknown_tool_from_model_is_not_executed(monkeypatch):
     resp0 = _FakeMsg(tool_calls=[_FakeToolCall("c1", "remove_campaign", "{}")])
     resp1 = _FakeMsg(content="Всё разобрано, под риском 8900 USD. Приоритет: пауза.")
     chat_fn, _ = _scripted_chat([resp0, resp1])
-    monkeypatch.setattr("agent.loop.chat", chat_fn)
+    monkeypatch.setattr("analysis.agent.chat", chat_fn)
 
     out = await run_analysis_agent(FACTS, chat_id=1, lang="ru", drill=drill)
     assert out is not None  # цикл не упал
@@ -233,11 +233,11 @@ def _capturing_chat(response):
 
 async def test_qa_uses_qa_prompt_and_embeds_question(monkeypatch):
     """question=... → используется Q&A-системный промпт (не обзорный) и вопрос попадает в сид."""
-    from agent.loop import _ANALYST_QA_SYSTEM, _ANALYST_SYSTEM
+    from analysis.agent import _ANALYST_QA_SYSTEM, _ANALYST_SYSTEM
 
     resp = _FakeMsg(content="Под риском 8900 USD в кампании Brand-RU — это спенд без конверсий.")
     chat_fn, seen = _capturing_chat(resp)
-    monkeypatch.setattr("agent.loop.chat", chat_fn)
+    monkeypatch.setattr("analysis.agent.chat", chat_fn)
 
     q = "Почему у меня так много слитых денег?"
     out = await run_analysis_agent(FACTS, chat_id=1, lang="ru", drill=None, question=q)
@@ -252,7 +252,7 @@ async def test_qa_factguard_still_rejects_fabricated(monkeypatch):
     """Fact-guard действует и в Q&A: выдуманное число → None (не показываем непроверенный ответ)."""
     resp = _FakeMsg(content="На самом деле ты потерял 500000 USD, всё пропало.")  # нет в фактах
     chat_fn, _ = _capturing_chat(resp)
-    monkeypatch.setattr("agent.loop.chat", chat_fn)
+    monkeypatch.setattr("analysis.agent.chat", chat_fn)
     out = await run_analysis_agent(
         FACTS, chat_id=1, lang="ru", drill=None, question="Сколько слито?"
     )
@@ -261,11 +261,11 @@ async def test_qa_factguard_still_rejects_fabricated(monkeypatch):
 
 async def test_qa_blank_question_is_overview_mode(monkeypatch):
     """Пустой/пробельный question ⇒ обычный обзорный режим (не падаем, промпт обзорный)."""
-    from agent.loop import _ANALYST_SYSTEM
+    from analysis.agent import _ANALYST_SYSTEM
 
     resp = _FakeMsg(content="Здоровье 62 из 100, под риском 8900 USD. Приоритет: пауза Brand-RU.")
     chat_fn, seen = _capturing_chat(resp)
-    monkeypatch.setattr("agent.loop.chat", chat_fn)
+    monkeypatch.setattr("analysis.agent.chat", chat_fn)
     out = await run_analysis_agent(FACTS, chat_id=1, lang="ru", drill=None, question="   ")
     assert out is not None
     assert seen["system"] == _ANALYST_SYSTEM["ru"]  # blank → обзорный, не Q&A

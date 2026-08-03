@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from adcopy.validate import LIMITS
-from agent.router import chat
+from llm.router import chat
 
 # kind в UI — "h"/"d"; внутри маппим в имя типа adcopy.validate.
 _KIND_NAME = {

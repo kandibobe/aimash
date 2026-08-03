@@ -163,19 +163,6 @@ def test_redact_text_scrubs_openrouter_key_by_shape():
     assert key not in out and L.REDACTED in out
 
 
-def test_err_text_redacts_bare_developer_token(monkeypatch):
-    """bot.ux.err_text (текст ошибки в Telegram) не утекает developer_token, даже без 'token='."""
-    from bot.ux import err_text
-    from core.config import settings
-
-    token = "Zz99Yy88Xx77Ww66Vv55Uu"  # gitleaks:allow
-    monkeypatch.setattr(
-        settings, "google_ads_developer_token", type(settings.google_ads_developer_token)(token)
-    )
-    msg = err_text(RuntimeError(f"google.auth refused: {token} not authorized"))  # bare-токен
-    assert token not in msg and L.REDACTED in msg
-
-
 def test_known_secret_value_redacted_via_filter(monkeypatch):
     # Секрет, который НЕ подходит под паттерны (короткое «обычное» слово), но известен из settings.
     from core.config import settings

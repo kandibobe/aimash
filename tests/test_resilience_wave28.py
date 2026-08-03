@@ -208,8 +208,8 @@ def test_weekly_digest_truncates_by_lines_not_raw_slice():
 
 @pytest.mark.parametrize("limit", [30, 60])
 def test_split_by_lines_keeps_tags_intact(limit: int):
-    from bot import ux
+    from core.texts import split_by_lines
 
     html = "<b>Заголовок</b>\n<code>1</code> ошибка\n<i>деталь</i>"
-    for chunk in ux.split_by_lines(html, limit):
+    for chunk in split_by_lines(html, limit):
         assert chunk.count("<") == chunk.count(">")

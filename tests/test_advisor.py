@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import ast
-import json
 import pathlib
 import sys
 from contextlib import contextmanager
@@ -198,27 +197,6 @@ def test_magnitude_falls_back_to_entity_cost_when_at_risk_is_zero():
     assert rules.rank_recommendations([rec])[0].priority > 0.5
 
 
-def test_audit_does_not_rank_or_suppress():
-    """/audit — ДИАГНОСТИКА, а не советы: он показывает находки в порядке движка (деньги-под-риском)
-    и НЕ зовёт rank_recommendations. Иначе suppress (много 👎/🙈) спрятал бы строку, которая всё
-    равно штрафует score — клиент увидел бы «score 62, waste −18» без единого объяснения откуда −18
-    (money-floor не спасает: у ~18 из 27 чеков at_risk = 0 по построению).
-
-    AST-гард по bot/main.py: ни импорта, ни вызова rank_recommendations в файле нет."""
-    src = pathlib.Path(__file__).resolve().parents[1] / "bot" / "main.py"
-    tree = ast.parse(src.read_text(encoding="utf-8"), filename="main.py")
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("advisor"):
-            for a in node.names:
-                assert a.name != "rank_recommendations", (
-                    "bot/main.py импортирует rank_recommendations"
-                )
-        elif isinstance(node, ast.Call):
-            fn = node.func
-            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
-            assert name != "rank_recommendations", "bot/main.py вызывает rank_recommendations"
-
-
 def test_advise_findings_are_subset_of_audit():
     """ГАРД КЛАССА. /advise строит аудит БЕЗ ctx-сигналов (только отчёт — лишних чтений API не
     делаем), /audit — с ними. Значит совет может лишь МОЛЧАТЬ там, где аудит говорит; сказать ДРУГОЕ
@@ -335,31 +313,13 @@ def test_audit_card_recs_stay_aligned_with_findings():
 
 # ── analyze_account — read-only tool + loop → advise_intent ─────────────────────────
 def test_analyze_account_is_read_only_tool():
-    from agent.tools.schemas import MUTATION_TOOLS, READ_TOOLS, SCHEMAS, TOOLS
+    from llm.schemas import MUTATION_TOOLS, READ_TOOLS, SCHEMAS, TOOLS
 
     assert "analyze_account" in READ_TOOLS
     assert "analyze_account" not in MUTATION_TOOLS
     assert "analyze_account" in SCHEMAS
     names = {t["function"]["name"] for t in TOOLS}
     assert "analyze_account" in names
-
-
-async def test_loop_analyze_account_returns_advise_intent():
-    import agent.loop as L
-
-    tc = SimpleNamespace(
-        function=SimpleNamespace(
-            name="analyze_account", arguments=json.dumps({"topic": "optimize"})
-        )
-    )
-
-    async def _fake_chat(messages, **kwargs):
-        return SimpleNamespace(tool_calls=[tc], content="")
-
-    with patched(L, "chat", _fake_chat):
-        out = await L.handle_command("что улучшить?", chat_id=7)
-    assert out["type"] == "advise_intent"
-    assert out["brief"]["topic"] == "optimize"
 
 
 # ── Слой A/B: build_recommendations НЕ создаёт proposal; фидбек — только своя таблица ──

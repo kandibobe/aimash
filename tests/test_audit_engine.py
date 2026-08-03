@@ -733,7 +733,7 @@ def test_evidence_match_type_matches_mutation_schema():
     Гард на дрейф: _MATCH_TYPES в движке обязан совпадать со схемой мутации."""
     from typing import get_args
 
-    from agent.tools.schemas import MatchType
+    from llm.schemas import MatchType
     from audit.engine import _MATCH_TYPES, _norm_match_type
 
     assert _MATCH_TYPES == set(get_args(MatchType))

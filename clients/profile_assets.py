@@ -4,7 +4,7 @@
 несут ФАКТЫ (телефон, цены, скидка) — их НЕЛЬЗЯ выдумывать (golden rule «реальные данные»). Строим
 строго из структурированного профиля клиента; если нужных данных нет — бросаем ValueError с понятной
 причиной, и вызывающий пропускает семейство (ничего не создаём). Итоговые params валидируем теми же
-Pydantic-схемами, что и ручной ввод (agent.tools.schemas), — гарантия SDK-совместимости и лимитов.
+Pydantic-схемами, что и ручной ввод (llm.schemas), — гарантия SDK-совместимости и лимитов.
 """
 
 from __future__ import annotations
@@ -94,7 +94,7 @@ def _parse_price(raw: Any) -> tuple[float | None, str | None]:
 def build_call_asset(profile: dict, *, country_code: str | None = None) -> dict:
     """Call-ассет из телефона профиля. Нет телефона → ValueError (не выдумываем номер).
     country_code=None → страна из конфига деплоя (D7), а не «UA» литералом."""
-    from agent.tools.schemas import AddCallAsset
+    from llm.schemas import AddCallAsset
 
     phone = _first_phone(profile)
     if not phone:
@@ -120,7 +120,7 @@ def build_price_asset(
     """Price-ассет из услуг профиля с ЧИСЛОВОЙ ценой (≥3, единая валюта). Меньше 3 распарсенных
     оферов → ValueError (не добираем выдуманными ценами). language_code=None → язык из конфига
     деплоя (D7), а не «uk» литералом."""
-    from agent.tools.schemas import AddPriceAsset, PriceOfferingItem
+    from llm.schemas import AddPriceAsset, PriceOfferingItem
 
     if not final_url:
         raise ValueError("нет final_url — прайс-ассет требует посадочную у каждого офера")
@@ -180,7 +180,7 @@ def _promo_target(text: str, pct_match: re.Match) -> str:
 def build_promotion_asset(profile: dict, *, final_url: str) -> dict:
     """Promotion-ассет ТОЛЬКО при ЯВНОЙ скидке в профиле (ключевое слово скидки + число %). Объект
     акции — реальный текст профиля. Нет явной скидки/процента → ValueError (не выдумываем акцию)."""
-    from agent.tools.schemas import AddPromotion
+    from llm.schemas import AddPromotion
 
     if not final_url:
         raise ValueError("нет final_url — promotion-ассет требует посадочную")

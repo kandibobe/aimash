@@ -4,7 +4,7 @@
 Здесь проверяются:
 
   • **И4 (зерно)** — construction-time assert в `mcp_server.server`: READ-инструменты физически не
-    пересекаются с мутационными (`agent.tools.schemas.MUTATION_TOOLS`). Импорт роняет процесс, если
+    пересекаются с мутационными (`llm.schemas.MUTATION_TOOLS`). Импорт роняет процесс, если
     мутация просочилась в read-фазу. Тот же паттерн S4, что защищает `ANALYSIS_TOOLS`.
   • **read-lock на границе MCP** — параметризованно по ВСЕМ обёрткам: инструмент на аккаунте вне
     allow-list отказывает ДО первого обращения наружу (все ридеры застаблены взрывом), отдаёт
@@ -64,7 +64,7 @@ def test_i4_seed_read_tools_disjoint_from_mutations():
     # и весь MCP-процесс) падает здесь, а не «тихо открывает мутацию» в read-фазе.
     import mcp_server.server  # noqa: F401  — импорт ради живого assert И4
 
-    from agent.tools.schemas import MUTATION_TOOLS
+    from llm.schemas import MUTATION_TOOLS
     from mcp_server.tools_read import READ_MCP_TOOLS
 
     assert READ_MCP_TOOLS, "реестр READ-инструментов пуст"

@@ -24,7 +24,7 @@ RUN useradd --create-home --uid 10001 aimash
 WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /app /app
-# Entrypoint применяет миграции (alembic upgrade head) перед стартом бота. chmod до USER (root).
+# Entrypoint передаёт управление выбранному compose-процессу. chmod до USER (root).
 RUN chmod +x /app/docker-entrypoint.sh
 # Маркер версии. `.dockerignore` исключает `.git`, поэтому внутри контейнера коммит узнать
 # НЕЧЕМ — `docker exec … git rev-parse` не работает не по недосмотру, а по построению. Без
@@ -37,8 +37,8 @@ LABEL org.opencontainers.image.revision="${GIT_SHA}" \
       org.opencontainers.image.title="aimash-core" \
       org.opencontainers.image.source="https://github.com/kandibobe/aimash"
 USER aimash
-# B9: healthcheck по СВЕЖЕСТИ heartbeat (живость event-loop бота), а не только импорт модулей —
-# раньше зависший polling / крэш-луп оставался «healthy». Бот пишет heartbeat каждые 10с; протух
+# B9: healthcheck по СВЕЖЕСТИ heartbeat (живость event-loop сервиса), а не только импорт модулей.
+# Scheduler пишет heartbeat каждые 10с; протух
 # (>60с) ⇒ unhealthy ⇒ оркестратор перезапускает. start-period покрывает первый запуск.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD ["python", "scripts/healthcheck.py"]

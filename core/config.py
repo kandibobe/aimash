@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     openrouter_key_hash: str = ""
     # имена llm_* (не model_*) — иначе шадоуят метод BaseModel.model_copy()
     # Разделение «что за что» (дефолты; ручной выбор оператора через /model бьёт их — см.
-    # agent.router.effective_model: override > роль-дефолт):
+    # llm.router.effective_model: override > роль-дефолт):
     #   parsing — разбор команд (function calling, денежный путь): дёшево и точно, ошибку
     #             ловит confirm-гейт + код-валидация → дорогая модель тут не нужна.
     #   copy    — генерация RSA-текстов: качество РУССКОГО важнее цены → сильная модель.
@@ -74,18 +74,18 @@ class Settings(BaseSettings):
     llm_extract: str = ""
     llm_dossier: str = ""
     # Пресеты для рантайм-переключателя /model (CSV slug'ов OpenRouter). Пусто => дефолт в
-    # agent.router._DEFAULT_CHOICES (tool-use-capable модели). Своя модель — через /model в боте.
+    # llm.router._DEFAULT_CHOICES (tool-use-capable модели). Своя модель — через /model в боте.
     model_choices: str = ""
     # Потолок генерации по ролям (явный max_tokens — экономия бюджета БЕЗ потери качества:
     # без него OpenRouter резервирует полный max-output против дневного бюджета; см.
-    # agent.router.ROLE_MAX_TOKENS). Парсинг → крошечный tool-call; копирайт → короткий JSON.
+    # llm.router.ROLE_MAX_TOKENS). Парсинг → крошечный tool-call; копирайт → короткий JSON.
     llm_max_tokens_parsing: int = 1024
     llm_max_tokens_copy: int = 2048
     # Потолок смысловых keyword-задач: фильтр релевантности на 120 ключей отдаёт JSON крупнее
     # parsing-1024 (объект {ключ: bool}), поэтому берём copy-уровень.
     llm_max_tokens_keywords: int = 2048
     # P3: потолок нарратива аналитика (короткий человеческий разбор аудита; без него OpenRouter
-    # резервирует полный max-output против дневного бюджета — см. agent.router.ROLE_MAX_TOKENS).
+    # резервирует полный max-output против дневного бюджета — см. llm.router.ROLE_MAX_TOKENS).
     llm_max_tokens_analyst: int = 1536
     # §20 досье. R13 (мина, найденная при планировании): clients/profile_extract.py звал chat()
     # БЕЗ max_tokens → упирался в потолок роли (2048) и JSON обрезался МОЛЧА (_extract_json_object
@@ -472,7 +472,7 @@ class Settings(BaseSettings):
 
     @property
     def model_choice_list(self) -> list[str]:
-        """Пресеты моделей для /model (из env MODEL_CHOICES). Пусто => дефолт в agent.router."""
+        """Пресеты моделей для /model (из env MODEL_CHOICES). Пусто => дефолт в llm.router."""
         return [m.strip() for m in self.model_choices.split(",") if m.strip()]
 
     @property

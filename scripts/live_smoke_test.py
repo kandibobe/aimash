@@ -32,7 +32,7 @@ from _operator_turn import operator_turn  # noqa: E402
 from ads.client import DRAFT_ACCOUNT_ID, build_client, ensure_allowed  # noqa: E402
 from ads.read import account_currency, account_stats, list_campaigns  # noqa: E402
 from ads.service import attach_freshness, execute_confirmed, read_state  # noqa: E402
-from agent.tools.schemas import SCHEMAS  # noqa: E402
+from llm.schemas import SCHEMAS  # noqa: E402
 from confirm.store import ConfirmStore, list_recent_audit  # noqa: E402
 from db.session import init_db  # noqa: E402
 

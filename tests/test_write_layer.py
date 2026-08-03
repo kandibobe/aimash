@@ -12,7 +12,6 @@ SQLite (см. tests/conftest.py). Проверяем:
 
 from __future__ import annotations
 
-import json
 import sys
 import uuid
 from contextlib import contextmanager
@@ -1817,19 +1816,6 @@ def test_set_geo_proximity_via_sdk_replaces_and_maps_address():
     assert prox.address.postal_code is None  # не передан → не выставляется
 
 
-async def test_set_geo_location_supported_as_proposal():
-    """set_geo_location поддержан → агент предлагает черновик с кнопками (не отклоняет)."""
-    import agent.loop as L
-
-    fake = _fake_chat(
-        "set_geo_location",
-        {"campaign": "X", "locations": ["Украина", "Киев"], "country_code": "UA"},
-    )
-    with patched(L, "chat", fake):
-        res = await L.handle_command("таргет на Украину и Киев в кампании X", chat_id=1)
-    assert res["type"] == "proposal" and res["operation"] == "set_geo_location"
-
-
 # ── apply_set_bidding_strategy (§3): ДЕНЬГИ → оба гейта + user_initiated ──────────
 async def test_apply_set_bidding_strategy_happy_path():
     called = {}
@@ -2047,43 +2033,6 @@ def test_set_bidding_strategy_via_sdk_mask_is_leaf_for_all_strategies_real_proto
         assert all(p.startswith(oneof + ".") for p in paths), (strategy, paths)
 
 
-async def test_set_bidding_strategy_supported_as_proposal():
-    import agent.loop as L
-
-    fake = _fake_chat(
-        "set_bidding_strategy",
-        {"campaign": "X", "strategy": "maximize_conversions", "target_cpa": 5.0},
-    )
-    with patched(L, "chat", fake):
-        res = await L.handle_command(
-            "стратегия максимум конверсий target CPA 5 в кампании X", chat_id=1
-        )
-    assert res["type"] == "proposal" and res["operation"] == "set_bidding_strategy"
-
-
-async def test_update_campaign_supported_as_proposal():
-    """§3 «изменение» кампании: «переименуй X в Y» → черновик update_campaign с кнопками."""
-    import agent.loop as L
-
-    fake = _fake_chat("update_campaign", {"campaign": "Старое имя", "new_name": "Новое имя"})
-    with patched(L, "chat", fake):
-        res = await L.handle_command("переименуй кампанию «Старое имя» в «Новое имя»", chat_id=1)
-    assert res["type"] == "proposal" and res["operation"] == "update_campaign"
-
-
-async def test_remove_negative_keywords_supported_as_proposal():
-    """§3 «минус-слова»: «убери минус-слово X из кампании Y» → черновик remove_negative_keywords."""
-    import agent.loop as L
-
-    fake = _fake_chat(
-        "remove_negative_keywords",
-        {"campaign": "X", "keywords": ["бесплатно"], "match_type": "broad"},
-    )
-    with patched(L, "chat", fake):
-        res = await L.handle_command("убери минус-слово «бесплатно» из кампании X", chat_id=1)
-    assert res["type"] == "proposal" and res["operation"] == "remove_negative_keywords"
-
-
 # ── Валидатор длины ключевых слов (golden rule #4: код, кириллица = 1) ───────────
 def test_assert_keyword_ok_counts_cyrillic_as_one():
     assert mut._assert_keyword_ok("  цветы  ") == "цветы"
@@ -2112,70 +2061,7 @@ def test_compute_new_micros_modes():
     assert compute_new_micros(1_000_000, "increase_by_amount", 2, currency="USD") == 3_000_000
 
 
-# ── Capability-guard на уровне agent.loop: отказ ДО показа кнопок ────────────────
-class _FakeFunc:
-    def __init__(self, name, arguments):
-        self.name = name
-        self.arguments = arguments
-
-
-class _FakeCall:
-    def __init__(self, name, arguments):
-        self.function = _FakeFunc(name, arguments)
-
-
-class _FakeMsg:
-    def __init__(self, tool_calls=None, content=None):
-        self.tool_calls = tool_calls
-        self.content = content
-
-
-def _fake_chat(name, arguments):
-    async def _chat(messages, role=None, tools=None):
-        return _FakeMsg(tool_calls=[_FakeCall(name, json.dumps(arguments))])
-
-    return _chat
-
-
-async def test_set_geo_proximity_now_supported_as_proposal():
-    """A-geo активирован: set_geo_proximity со структурным адресом → черновик с кнопками."""
-    import agent.loop as L
-
-    fake = _fake_chat(
-        "set_geo_proximity",
-        {"campaign": "X", "city_name": "Киев", "country_code": "UA", "radius_km": 5},
-    )
-    with patched(L, "chat", fake):
-        res = await L.handle_command("таргет в радиусе 5 км от Киева", chat_id=1)
-    assert res["type"] == "proposal"  # geo поддержан → НЕ отклоняется
-    assert res["operation"] == "set_geo_proximity"
-
-
-async def test_capability_guard_declines_unsupported_mutation(monkeypatch):
-    """Capability-guard (механизм): объявленную в TOOLS, но НЕ в SUPPORTED_OPERATIONS мутацию
-    агент отклоняет ДО кнопок. Симулируем «отложенную» операцию, временно убрав update_bid
-    из SUPPORTED (loop импортирует SUPPORTED_OPERATIONS лениво → monkeypatch виден)."""
-    import agent.loop as L
-    import ads.service as svc
-
-    monkeypatch.setattr(svc, "SUPPORTED_OPERATIONS", svc.SUPPORTED_OPERATIONS - {"update_bid"})
-    fake = _fake_chat("update_bid", {"campaign": "X", "mode": "set_to", "value": 1.5})
-    with patched(L, "chat", fake):
-        res = await L.handle_command("ставка 1.5 в кампании X", chat_id=1)
-    assert res["type"] == "text"  # НЕ proposal → кнопок не будет
-    assert "не поддерживается" in res["text"]
-
-
-async def test_capability_guard_allows_supported_bid_as_proposal():
-    import agent.loop as L
-
-    fake = _fake_chat("update_bid", {"campaign": "X", "mode": "set_to", "value": 1.5})
-    with patched(L, "chat", fake):
-        res = await L.handle_command("ставку до 1.5 в кампании X", chat_id=1)
-    assert res["type"] == "proposal"
-    assert res["operation"] == "update_bid"
-
-
+# ── Capability-guard / defense-in-depth на уровне execute_confirmed ──────────────
 # ── Capability-guard / defense-in-depth на уровне execute_confirmed ──────────────
 async def test_execute_confirmed_rejects_unsupported_op():
     """Defense-in-depth: операцию вне SUPPORTED_OPERATIONS execute_confirmed отвергает даже при

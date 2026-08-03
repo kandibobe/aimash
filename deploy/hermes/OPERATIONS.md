@@ -768,6 +768,11 @@ context7) описывают `MCPServer` из `mcp.server.mcpserver` — **та�
 
 ## 13. Архивация `bot/`+`agent/` — одноразовая гейтированная процедура (после V1, до/вместе с WRITE)
 
+> **Статус 2026-08-03: завершено.** Предрелизный backup создан, `v3.0.0-stable` поставлен до
+> очистки. `bot/` и `agent/` удалены; живые `router`/schemas перенесены в `llm/`, read-only
+> audit narrative — в `analysis/`; scheduler использует собственный `httpx` Bot API transport.
+> Текст ниже сохранён как исторический cutover-чеклист и не описывает текущее дерево.
+
 > **Зачем гейт, а не `rm`.** Сегодня удаление `bot/` рвёт ДВЕ живые вещи: (1) READ-путь Hermes идёт
 > `docker exec -i aimash-bot python -m mcp_server` внутри контейнера бота ([config.yaml:213-220](config.yaml#L213-L220),
 > сопряжение — §5); (2) сбор всей тест-сессии — [`tests/conftest.py:52`](../../tests/conftest.py#L52)
@@ -789,7 +794,7 @@ context7) описывают `MCPServer` из `mcp.server.mcpserver` — **та�
    Оба импортируют только `adcopy`/`ads`/`core` — изолируются чисто. Обновить импорт у потребителей:
    [`mcp_server/server.py:13`](../../mcp_server/server.py#L13) (READ-путь!), `clients/profile_assets.py`,
    `scripts/*` (`ab_test_models.py`, `live_smoke_*`), ~42 теста, `agent/loop.py`. Потребители `router.chat`
-   — 10 модулей `adcopy`/`keywords`/`clients`/`advisor` (grep `from agent.router import`).
+   — 10 модулей `adcopy`/`keywords`/`clients`/`advisor` (grep `from llm.router import`).
 2. **Переключить READ-транспорт** с `docker exec -i aimash-bot …` на durable compose-сервис `mcp`
    ([docker-compose.yml:154](../../docker-compose.yml#L154), `profiles: ["mcp"]`, `docker run --rm`) — ему
    контейнер бота не нужен. Правка — блок `mcp_servers.aimash` в `~/.hermes/config.yaml` на VPS (§6 «Смена

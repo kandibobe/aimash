@@ -102,7 +102,7 @@ def test_both_budget_stops_share_base_class() -> None:
 async def test_router_chat_gated_by_cost_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     """BZ-4: agent/router.chat — единая точка всех LLM-вызовов — отказывает ДО построения клиента
     и ДО fallback-ветки (отказ бюджета — не транзиентный сбой, резервной моделью не лечится)."""
-    from agent import router
+    from llm import router
 
     monkeypatch.setattr(settings, "llm_daily_cost_cap_usd", 10.0)
     _mock_spent(monkeypatch, 10.0)

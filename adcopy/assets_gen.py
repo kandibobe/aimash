@@ -20,7 +20,7 @@ from adcopy.validate import (
     asset_len_ok,
     assert_asset_len,
 )
-from agent.router import chat
+from llm.router import chat
 from core.config import settings
 
 # Семейства, для которых поддержана автогенерация текста (из темы/сайта).

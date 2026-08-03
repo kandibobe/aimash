@@ -153,7 +153,7 @@ def _find_dupes(items: list[str]) -> list[str]:
 MAX_AMOUNT_MICROS = MONEY_MAX_MICROS
 # MAX_RADIUS_KM (proximity, лимит Google Ads) — тоже из core.limits; re-export для apply_* и тестов.
 
-# Лимиты состава RSA — единый источник в adcopy.validate; зеркалят agent.tools.schemas.CreateRsa
+# Лимиты состава RSA — единый источник в adcopy.validate; зеркалят llm.schemas.CreateRsa
 # (два независимых гейта: схема + SDK). Длину каждого элемента считает КОД (golden rule #4).
 
 
@@ -1352,7 +1352,7 @@ def _detach_audience_via_sdk(client, customer_id, campaign_id, audience_resource
 
 
 # ── §3-assets: текстовые расширения (sitelinks/callouts/structured snippets) ─────────
-# Валидация состава/длины В КОДЕ ДО claim (зеркалит agent.tools.schemas — два независимых гейта).
+# Валидация состава/длины В КОДЕ ДО claim (зеркалит llm.schemas — два независимых гейта).
 def _validate_sitelinks(sitelinks: list[dict]) -> None:
     if not 1 <= len(sitelinks) <= 20:
         raise ValueError("sitelinks: 1–20 ссылок")

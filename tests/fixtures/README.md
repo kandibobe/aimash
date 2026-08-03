@@ -2,7 +2,7 @@
 
 ## `gate_scenarios.jsonl` — golden-set валидационного контракта денежного пути
 
-Каждая строка — сценарий `{fn, args}` против **боевой** Pydantic-схемы (`agent.tools.schemas.SCHEMAS`,
+Каждая строка — сценарий `{fn, args}` против **боевой** Pydantic-схемы (`llm.schemas.SCHEMAS`,
 той же, что видит confirm-гейт в проде), с ожидаемым исходом:
 
 - `expect: "accept"` — схема принимает; `expect_args` (опц.) — подмножество полей, которые КОД обязан

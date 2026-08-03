@@ -1,5 +1,5 @@
 """Офлайн-тесты наблюдаемости затрат LLM: core.usage (накопитель токенов/стоимости),
-texts.fmt_balance (рендер бюджета) и agent.openrouter_account.AccountStatus.balance.
+texts.fmt_balance (рендер бюджета) и llm.openrouter_account.AccountStatus.balance.
 
 Сети нет: usage-объект эмулируем (SDK-pydantic кладёт cost/cached_tokens в .model_extra),
 fetch_account не вызываем. Проверяем главное: cost/кэш достаются из доп-полей, агрегация по
@@ -14,7 +14,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import core.usage as U  # noqa: E402
-from agent.openrouter_account import AccountStatus  # noqa: E402
+from llm.openrouter_account import AccountStatus  # noqa: E402
 from core import texts  # noqa: E402
 
 
@@ -88,7 +88,7 @@ def test_balance_none_when_credits_unavailable():
 
 def test_num_rejects_non_finite():
     # stdlib json парсит литералы NaN/Infinity → отбрасываем в None, чтобы бюджет не показал «$inf»
-    from agent.openrouter_account import _num
+    from llm.openrouter_account import _num
 
     assert _num(float("nan")) is None
     assert _num(float("inf")) is None

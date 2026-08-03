@@ -1,89 +1,102 @@
-"""Тонкий Telegram-транспорт планировщика — единственное место в фоновом контуре, где aiogram
-разрешён.
+"""Minimal Telegram Bot API transport for background scheduler delivery.
 
-Почему модуль вообще есть. Джобы шлют не только текст: недельный дайджест уходит коротким
-сообщением ПЛЮС .txt-вложением с деталями. Текст отправляется дак-тайпингом (`bot.send_message`) и
-никакого импорта не требует, а вложение — требует: `bot.send_document` принимает `InputFile`, и
-собрать его без aiogram нельзя (голая строка пути трактуется как file_id/URL). Раньше эту функцию
-джоба брала из `bot/ux.py` — то есть тащила за собой ВЕСЬ кнопочный слой ради одной обёртки над
-временным файлом (SPEC.md §5.3, мина C4).
-
-Почему это не дыра в развязке. Топология (три процесса) даёт планировщику «БД + тонкий Bot-клиент
-для отправки» — Telegram-транспорт ему положен по определению, архивируется же `bot/` (кнопки, FSM,
-хендлеры), а не факт умения отправить сообщение. Граница проходит по `bot/`, и она здесь целая:
-модуль не импортирует ни одного имени из `bot/`. Гард `tests/test_scheduler_decoupled.py` держит обе
-части раздельно — запрет `bot/` без исключений, запрет aiogram с этим единственным.
-
-BZ-3 (2026-07-30): сюда же переехала отправка ТЕКСТА — `send_bot_message` с ретраем на флуд-лимите
-(порт `bot/ux.py::answer_with_flood_retry` на `bot.send_message`). Раньше каждая джоба слала
-`bot.send_message` напрямую: первый же TelegramRetryAfter превращался в «недоставлено» — терпимо
-для аномалий (повтор через 6 ч), фатально для error-алертов и .xlsx-курьера (state='failed'
-навсегда). Прямые `.send_message`/`.send_document` вне этого модуля запрещены AST-гардом
-`tests/test_transport_retry.py` — новая точка отправки получает ретрай по построению, а не по
-памяти автора.
-
-`bot/ux.py` реэкспортирует `send_bot_document` — вызывающие в боте не менялись.
+The scheduler needs outbound messages and documents, not aiogram's dispatcher,
+FSM, handlers, or model layer.  Keeping this adapter on ``httpx`` lets the
+Hermes runtime remain independent from the removed legacy bot architecture.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import tempfile
+from pathlib import Path
+from typing import Any, Awaitable, Callable
 
-from aiogram.exceptions import TelegramRetryAfter
-from aiogram.types import FSInputFile
+import httpx
 
-_RETRY_AFTER_MAX_ATTEMPTS = 3  # как bot/ux.py: флуд пережидаем дважды, третью неудачу отдаём наружу
+_RETRY_AFTER_MAX_ATTEMPTS = 3
 
 
-async def _with_flood_retry(send):
-    """Пережить TelegramRetryAfter (flood control): подождать retry_after и повторить, до
-    _RETRY_AFTER_MAX_ATTEMPTS попыток. Прочие исключения — сразу наружу (блокировка чата/сеть
-    ожиданием не лечатся, per-recipient решение остаётся за вызывающим). `send` — zero-arg
-    фабрика корутины: каждой попытке нужна СВЕЖАЯ (повторный await исчерпанной — RuntimeError)."""
+class TelegramRetryAfter(RuntimeError):
+    """Telegram Bot API 429 response with a server-provided retry delay."""
+
+    def __init__(self, retry_after: float, message: str = "flood control") -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class TelegramBot:
+    """Small async client exposing only the scheduler's required Bot API calls."""
+
+    def __init__(self, token: str, *, client: httpx.AsyncClient | None = None) -> None:
+        self._base_url = f"https://api.telegram.org/bot{token}"
+        self._client = client or httpx.AsyncClient(timeout=30.0)
+
+    async def _request(self, method: str, **kwargs: Any) -> dict[str, Any]:
+        response = await self._client.post(f"{self._base_url}/{method}", **kwargs)
+        payload = response.json()
+        if response.status_code == 429:
+            delay = float(payload.get("parameters", {}).get("retry_after", 1.0))
+            raise TelegramRetryAfter(delay, str(payload.get("description", "flood control")))
+        response.raise_for_status()
+        if not payload.get("ok"):
+            raise RuntimeError("Telegram Bot API rejected the request")
+        return payload
+
+    async def send_message(self, chat_id: int, text: str, **kwargs: object) -> None:
+        data: dict[str, object] = {"chat_id": chat_id, "text": text}
+        for key, value in kwargs.items():
+            if value is None:
+                continue
+            if key == "reply_markup" and not isinstance(value, str):
+                dump_json = getattr(value, "model_dump_json", None)
+                value = dump_json(exclude_none=True) if callable(dump_json) else json.dumps(value)
+            data[key] = value
+        await self._request("sendMessage", data=data)
+
+    async def send_document(self, chat_id: int, path: str, *, filename: str) -> None:
+        with Path(path).open("rb") as stream:
+            await self._request(
+                "sendDocument",
+                data={"chat_id": chat_id},
+                files={"document": (filename, stream, "application/octet-stream")},
+            )
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+
+async def _with_flood_retry(send: Callable[[], Awaitable[Any]]) -> Any:
     for attempt in range(_RETRY_AFTER_MAX_ATTEMPTS):
         try:
             return await send()
-        except TelegramRetryAfter as e:
+        except TelegramRetryAfter as exc:
             if attempt == _RETRY_AFTER_MAX_ATTEMPTS - 1:
                 raise
-            await asyncio.sleep(float(getattr(e, "retry_after", 1.0)) + 0.1)
-    return None  # недостижимо (return или raise выше)
+            await asyncio.sleep(exc.retry_after + 0.1)
+    return None
 
 
-async def send_bot_message(bot: object, chat_id: int, text: str, **kw: object) -> None:
-    """Отправить текст с флуд-ретраем — единственная дорога `send_message` фонового контура (BZ-3).
-    `kw` — прозрачный проброс (parse_mode, reply_markup): транспорт — слой доставки, содержимое и
-    формат — забота вызывающего."""
-    await _with_flood_retry(lambda: bot.send_message(chat_id, text, **kw))  # type: ignore[attr-defined]
+async def send_bot_message(bot: object, chat_id: int, text: str, **kwargs: object) -> None:
+    await _with_flood_retry(lambda: bot.send_message(chat_id, text, **kwargs))  # type: ignore[attr-defined]
 
 
 async def send_bot_file(bot: object, chat_id: int, *, path: str, filename: str) -> None:
-    """Отправить УЖЕ СУЩЕСТВУЮЩИЙ файл с диска. Жизненным циклом файла НЕ владеет.
-
-    Разделение намеренное: у .txt-дайджеста файл существует ровно ради отправки и умирает здесь же,
-    а .xlsx-вложение черновика курьер собирает сам (openpyxl вне event loop) и сам же удаляет —
-    отдать его удаление транспорту значило бы, что при исключении на отправке владелец не знает,
-    остался файл или нет. Кто создал, тот и удаляет; транспорт умеет ровно один трюк — завернуть
-    путь в `FSInputFile`, потому что голая строка трактуется Telegram как file_id/URL."""
     await _with_flood_retry(
-        lambda: bot.send_document(chat_id, FSInputFile(path, filename=filename))  # type: ignore[attr-defined]
+        lambda: bot.send_document(chat_id, path, filename=filename)  # type: ignore[attr-defined]
     )
 
 
 async def send_bot_document(bot: object, chat_id: int, *, text: str, filename: str) -> None:
-    """Отправить ТЕКСТ .txt-вложением из SCHEDULER-контекста (нет message, только bot). Аналог
-    send_text_document для плановых джоб (еженедельный дайджест). Временный файл — в finally.
-    Вызывающий сам ловит исключения per-recipient (один недоступный чат не валит рассылку)."""
     fd, path = tempfile.mkstemp(suffix=".txt", prefix="aimash_digest_")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(text)
         await send_bot_file(bot, chat_id, path=path, filename=filename)
     finally:
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass

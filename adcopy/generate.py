@@ -22,7 +22,7 @@ from adcopy.validate import (
     tok_match,
     validate,
 )
-from agent.router import chat
+from llm.router import chat
 from core.config import settings
 
 # Считает КОД (adcopy.validate) — здесь только псевдонимы для обратной совместимости импортов.

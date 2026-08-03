@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from adcopy.validate import ASSET_LIMITS  # noqa: E402
 from ads.mutations import GDN_BUSINESS_NAME_MAX, _validate_gdn_inputs  # noqa: E402
-from agent.tools.schemas import CreateGdnCampaign, CreateVideoCampaign  # noqa: E402
+from llm.schemas import CreateGdnCampaign, CreateVideoCampaign  # noqa: E402
 
 CJK_NAME = "株式会社サンプル商事株式会社サンプル"  # 18 символов, ширина 36 > 25
 CYR_NAME = "Ромашка Цветы Доставка 24"  # 25 символов, ширина 25 — влезает

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import ads.service
 import mcp_server.tools_write as tools_write
-from agent.tools.schemas import PauseCampaign, UpdateBudget
+from llm.schemas import PauseCampaign, UpdateBudget
 from confirm.store import ConfirmStore
 from core.context import reset_context, set_context
 from core.provenance import human_turn

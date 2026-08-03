@@ -680,7 +680,7 @@ async def analyze_account(
             "findings_count": len(findings),
         }
 
-        from agent.loop import run_analysis_agent
+        from analysis.agent import run_analysis_agent
 
         summary = await run_analysis_agent(
             facts,
@@ -1258,7 +1258,7 @@ async def list_negative_shared_sets(
 
 # Реестр: имя инструмента → функция. server.py регистрирует по нему в FastMCP и проверяет И4
 # (READ_MCP_TOOLS ∩ MUTATION_TOOLS == ∅). Имена подобраны заведомо непересекающимися с 40
-# мутационными (agent.tools.schemas.MUTATION_TOOLS).
+# мутационными (llm.schemas.MUTATION_TOOLS).
 READ_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "list_accounts": list_accounts,
     "execute_google_ads_query": execute_google_ads_query,

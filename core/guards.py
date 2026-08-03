@@ -36,7 +36,7 @@ def require_no_mutations(
 
     Args:
         names: имена инструментов слоя, который обязан быть read-only.
-        mutation_names: `agent.tools.schemas.MUTATION_TOOLS`.
+        mutation_names: `llm.schemas.MUTATION_TOOLS`.
         rule: код инварианта для сообщения («И4», «S4») — чтобы падение искалось по спеке.
         subject: чей это набор, человеко-читаемо.
 
@@ -48,7 +48,7 @@ def require_no_mutations(
         return
     raise RuntimeError(
         f"{rule} нарушен: {subject} пересекается с мутационными инструментами "
-        f"(agent.tools.schemas.MUTATION_TOOLS): {sorted(overlap)}. "
+        f"(llm.schemas.MUTATION_TOOLS): {sorted(overlap)}. "
         "Read-слой не смеет содержать мутации — это денежный путь."
     )
 

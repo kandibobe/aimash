@@ -487,7 +487,7 @@ def test_create_search_in_supported_operations():
 
 # ── Схема CreateSearchCampaign ───────────────────────────────────────────────────
 def test_search_schema_validates_and_rejects():
-    from agent.tools.schemas import CreateSearchCampaign
+    from llm.schemas import CreateSearchCampaign
 
     ok = CreateSearchCampaign(
         campaign_name="Цветы",
@@ -518,7 +518,7 @@ def test_search_schema_validates_and_rejects():
 
 
 def _schema_mixed(keywords: list[str], mts: list[str]):
-    from agent.tools.schemas import CreateSearchCampaign
+    from llm.schemas import CreateSearchCampaign
 
     return CreateSearchCampaign(
         campaign_name="Цветы",
@@ -549,7 +549,7 @@ def test_schema_mixed_match_types_still_rejects_length_mismatch():
 
 
 def test_schema_without_match_types_dedups_by_text():
-    from agent.tools.schemas import CreateSearchCampaign
+    from llm.schemas import CreateSearchCampaign
 
     m = CreateSearchCampaign(
         campaign_name="Цветы",

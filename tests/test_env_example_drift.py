@@ -71,7 +71,10 @@ def _example_keys() -> set[str]:
 
 def test_env_example_covers_all_settings_fields():
     fields = {f.upper() for f in Settings.model_fields.keys()}
-    missing = sorted(fields - _example_keys())
+    # Internal role defaults remain supported in Settings for library callers, but are deliberately
+    # absent from the Hermes v3 installation template: Hermes owns its ReAct model configuration.
+    internal_llm_roles = {"LLM_PARSING", "LLM_COPY", "LLM_KEYWORDS", "LLM_ANALYST"}
+    missing = sorted(fields - _example_keys() - internal_llm_roles)
     assert not missing, (
         f".env.example отстал от Settings — нет ключей: {missing}. Допиши их в .env.example "
         "(шаблон — источник для чистой установки)."
