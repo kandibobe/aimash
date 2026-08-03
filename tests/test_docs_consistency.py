@@ -17,7 +17,9 @@ from pathlib import Path
 import pytest
 
 from mcp_server.tools_meta import META_TOOL_FUNCS
+from mcp_server.tools_plan import PLAN_STATE_TOOL_FUNCS
 from mcp_server.tools_read import READ_TOOL_FUNCS
+from mcp_server.tools_write import ACTION_TOOL_FUNCS, EXECUTE_TOOL_FUNCS
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,10 +28,16 @@ _ROOT = Path(__file__).resolve().parents[1]
 # числом aimash случайное, и обход репозитория целиком краснел бы на правде.
 _READ_COUNT_DOCS = (
     "README.md",
+    "docs/MCP_TOOLS.md",
     "CHANGELOG.md",
     "mcp_server/__init__.py",
     "deploy/hermes/README.md",
     "deploy/hermes/OPERATIONS.md",
+)
+
+_TOTAL_SURFACE_DOCS = (
+    "README.md",
+    "docs/MCP_TOOLS.md",
 )
 
 # Канонические формы: «15 READ-инструментов», «15 READ ✅». Форма обязана быть узкой — рядом живёт
@@ -70,3 +78,26 @@ def test_docs_read_tool_count_matches_registry(rel):
         f"{expected} инструментов ({', '.join(sorted(READ_TOOL_FUNCS))}). Реестр — истина, "
         f"дока — производное: поправь число на {expected}."
     )
+
+
+@pytest.mark.parametrize("rel", _TOTAL_SURFACE_DOCS)
+def test_docs_total_tool_count_matches_registry(rel):
+    """Главные registry-документы называют полный live write surface и не дрейфуют от кода."""
+    expected = (
+        len(READ_TOOL_FUNCS)
+        + len(META_TOOL_FUNCS)
+        + len(PLAN_STATE_TOOL_FUNCS)
+        + len(ACTION_TOOL_FUNCS)
+        + len(EXECUTE_TOOL_FUNCS)
+    )
+    text = (_ROOT / rel).read_text(encoding="utf-8")
+    found = [int(value) for value in re.findall(r"\*\*(\d+) инструмент(?:а|ов)\*\*", text)]
+    assert found, f"{rel} не называет полный MCP registry в форме «**N инструментов**»"
+    assert set(found) == {expected}, f"{rel}: полный registry {found}, код требует {expected}"
+
+
+def test_mcp_tools_doc_action_count_matches_registry():
+    """Публичный каталог ACTION names синхронизирован с authoritative ACTION_TOOL_FUNCS."""
+    text = (_ROOT / "docs" / "MCP_TOOLS.md").read_text(encoding="utf-8")
+    found = [int(value) for value in re.findall(r"## (\d+) ACTION tools", text)]
+    assert found == [len(ACTION_TOOL_FUNCS)]

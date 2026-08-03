@@ -5,9 +5,9 @@ MCP-сервер `aimash` (пакет `mcp_server/`) всегда отдаёт 2
 `HERMES_WRITE_ENABLED=true` он добавляет 55 agent-first PLAN/state + 1 WRITE через HMAC trusted Telegram transport;
 при false модуль WRITE физически не импортируется.
 
-**Где что написано:** нормативный канон — три исходных DOCX заказчика; их текстовое зеркало — `ТЗ.md`,
-а производный implementation profile и границы автономии — [`/SPEC.md`](../../SPEC.md). Этот файл —
-только про установку.
+**Где что написано:** нормативный канон — три исходных DOCX заказчика; их текстовое зеркало —
+[`/ТЗ.md`](../../ТЗ.md). Implementation profile и границы автономии определяются живым кодом,
+конфигурацией и runbooks. Этот файл — только про установку.
 
 **Топология v3.** Telegram принимает Hermes gateway. Aimash предоставляет отдельные контейнеры
 `scheduler` и MCP; legacy aiogram poller отсутствует. Hermes запускает MCP через

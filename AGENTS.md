@@ -5,9 +5,9 @@
 Единственный договорный канон образуют три оригинальных `.docx` заказчика в корне репозитория:
 `Aimash_Technical_Specification.docx`, `Aimash_Flow_Google_Search_4.docx` и
 `Информация о клиентах_1.docx`. [`ТЗ.md`](ТЗ.md) — их проверяемое текстовое зеркало для поиска и diff.
-[`SPEC.md`](SPEC.md) и сгенерированные unified-артефакты — производные implementation notes: при любом
-расхождении исправляются они, а не оригиналы. Runbooks, security/API references и migration docs также
-подчинены трём исходным DOCX.
+Сгенерированные unified-артефакты и implementation notes — производные материалы: при любом
+расхождении исправляются они, а не оригиналы. Runbooks, security/API references и migration docs
+также подчинены трём исходным DOCX.
 
 ## Целевой контур
 

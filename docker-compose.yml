@@ -24,7 +24,7 @@ x-aimash-build: &aimash-build
 x-default-logging: &default-logging
   driver: json-file
   options:
-    max-size: "10m"
+    max-size: "50m"
     max-file: "3"
 
 services:

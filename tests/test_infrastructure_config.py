@@ -32,7 +32,7 @@ def test_compose_has_bounded_production_runtime_defaults() -> None:
         assert service["mem_limit"]
         assert service["logging"] == {
             "driver": "json-file",
-            "options": {"max-size": "10m", "max-file": "3"},
+            "options": {"max-size": "50m", "max-file": "3"},
         }
 
     assert services["postgres"]["healthcheck"]["test"][0] == "CMD-SHELL"

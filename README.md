@@ -1,126 +1,202 @@
-# Aimash — Hermes-агент для Google Ads
+# HERMES 3.0 | Agile Agent Architecture for Google Ads
 
-Aimash — приватный Telegram-агент владельца и доверенных сотрудников агентства. Hermes понимает
-свободный запрос, выбирает инструменты, читает Google Ads, исследует, анализирует и выполняет действия.
-Python-код — узкий typed gateway к Google Ads со Structured JSON errors, Self-Healing,
-`validate_only`, лимитами и повторной API-проверкой.
+> Private, safety-gated AI agent for operating Google Ads through Telegram, FastMCP and PostgreSQL.
 
-## Источник истины
+![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+![FastMCP](https://img.shields.io/badge/FastMCP-MCP%20SDK-6A5ACD)
+![License](https://img.shields.io/badge/License-Private-red)
 
-Договорный продуктовый канон — три оригинальных документа заказчика:
-[`Aimash_Technical_Specification.docx`](Aimash_Technical_Specification.docx),
-[`Aimash_Flow_Google_Search_4.docx`](Aimash_Flow_Google_Search_4.docx) и
-[`Информация о клиентах_1.docx`](Информация%20о%20клиентах_1.docx).
-[`ТЗ.md`](ТЗ.md) — их проверяемое текстовое зеркало. [`SPEC.md`](SPEC.md) фиксирует утверждённую
-архитектурную редакцию v3.0; исходные DOCX сохранены как исторический договорный baseline.
+HERMES 3.0 принимает свободный запрос в Telegram, самостоятельно выбирает typed-инструменты,
+читает и анализирует Google Ads, готовит единый план изменений и передаёт денежные мутации через
+детерминированный confirm/CAS-контур. Модель отвечает за рассуждение и порядок действий; Python-код —
+за identity, policy, freshness, account ceiling, audit и проверяемое исполнение.
 
-## Целевой UX
+> **Release status:** репозиторий готовится к `v3.0.0`. Наличие этой документации само по себе не
+> подтверждает production cutover, успешный backup или создание тега.
 
-- Менеджер пишет обычным русским или английским текстом.
-- Hermes сам решает, что прочитать и в какой последовательности вызвать primitive tools.
-- Жёсткого восьмиэкранного wizard и обязательной покнопочной RSA-курации в целевом UX нет.
-- Чтение, аудит, отчёты, исследования, выбор tools и подготовка пакета выполняются автономно.
-- Оперативные изменения по прямой команде выполняются сразу через typed Function Calling.
-- Критические глобальные бюджетные изменения backend переводит в отдельный подтверждаемый шаг.
-- Ошибка инструмента возвращает Hermes JSON с причиной и следующим действием для самостоятельного retry.
+## Why Hermes 3.0?
 
-`aimash_trusted_transport` — тонкий Telegram transport для actor/chat context, файлов и критических
-budget approvals; бизнес-логику и выбор следующего tool держит Hermes.
+Классический Telegram-бот строит диалог как заранее заданный граф: aiogram FSM диктует следующий
+экран, а LangGraph требует заранее моделировать узлы и переходы. Для агентского управления рекламой
+это создаёт хрупкий второй оркестратор: новый сценарий требует новых state/edge, даже когда Hermes уже
+умеет понять намерение и выбрать tool.
 
-## Текущий production
+В HERMES 3.0 production-оркестрация перенесена в легковесный ReAct-контур Hermes Gateway:
 
-| Контур | Назначение |
-|---|---|
-| `@Google_Hermes_AI_Manager_bot` | Целевой agent-first интерфейс Hermes |
-| `mcp_server/` | 25 READ-инструментов + 1 META + 57 agent-first PLAN/state + 1 WRITE |
-| `scheduler/` | Отчёты, алерты, delivery и фоновые задания |
+- пользователь формулирует цель естественным языком;
+- Hermes выбирает инструменты, порядок анализа и размер пакета;
+- FastMCP предоставляет узкие typed primitives вместо доступа модели к Google Ads SDK;
+- критические границы остаются в детерминированном коде, а не в prompt или графе агента.
 
-Hermes MCP запускается отдельным ephemeral-контейнером `aimash-mcp`; scheduler и миграции также
-отделены от Telegram gateway. Точная эксплуатационная процедура —
+Legacy aiogram-код может временно оставаться в репозитории до подтверждённого cutover, но не является
+целевой архитектурой HERMES 3.0.
+
+## Key Features
+
+### Bias for Action
+
+Hermes не заставляет оператора копировать ID или проходить wizard, если объект можно однозначно
+разрешить из контекста. Связанные изменения объединяются в один proposal и одну карточку
+подтверждения; неоднозначный выбор возвращается оператору компактно.
+
+### Self-Healing GAQL
+
+READ-инструменты возвращают структурированный envelope: стабильный `error_code`, безопасное описание
+ошибки и recovery hint. ReAct-контур может исправить GAQL, сузить период или повторить чтение, не
+получая сырой exception и не обходя account/read policy.
+
+### Trusted Transport & CAS Mutations
+
+Telegram actor/chat/reply context поступает из trusted transport, а не из аргументов модели.
+Proposal привязан к полному diff и проходит одноразовый compare-and-swap переход. Повторный callback,
+устаревшая карточка, чужой actor, drift состояния или неверный account приводят к fail-closed отказу.
+Сообщение «выполнено» формируется только после audit-row и post-verify.
+
+### Continuous Learning
+
+Для поддерживаемых применённых изменений сохраняется outcome context. Read-only Outcome Checker через
+настраиваемое окно (по умолчанию 7 дней) сравнивает метрики до/после, вычисляет verdict кодом и
+доставляет результат оператору. Фоновая задача не выполняет Google Ads mutations.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Telegram["Telegram<br/>trusted operators"] --> Gateway["Hermes Gateway<br/>ReAct loop"]
+    Gateway --> MCP["FastMCP Tools<br/>typed READ / PLAN / ACTION"]
+
+    MCP <-->|"proposal state + audit"| CAS["PostgreSQL<br/>CAS proposals"]
+    CAS -->|"confirmed -> executing"| Execute["execute_confirmed<br/>policy + freshness + account lock"]
+    Execute -->|"typed mutation"| Ads["Google Ads API"]
+    Ads -->|"post-verify"| Execute
+    Execute -->|"applied / failed"| CAS
+
+    MCP -->|"read-only GAQL"| Ads
+    Scheduler["APScheduler<br/>Outcome Checker"] -->|"claim due outcome"| CAS
+    Scheduler -->|"read metrics after 7 days"| Ads
+    Scheduler -->|"result"| Telegram
+```
+
+### MCP surface
+
+Текущий проверяемый registry содержит **84 инструмента**:
+
+| Surface | Count | Responsibility |
+|---|---:|---|
+| READ | 25 | Google Ads reads, audits, reports and discovery |
+| META | 1 | Trusted bridge capability discovery |
+| PLAN/state | 15 | Proposal, workflow and memory state |
+| Actions | 42 | Прямые agent-first action names; mutation либо исполняется по policy, либо готовит proposal |
+| Approval execute | 1 | `execute_confirmed` — единственная точка исполнения подтверждённого proposal |
+
+Итого: **25 READ-инструментов + 1 META + 57 agent-first PLAN/action/state + 1 approval execute**.
+Фактический FastMCP registry сверяется на точное равенство при старте.
+
+## Safety Model
+
+- Telegram allowlist fail-closed: пустой список не открывает доступ никому.
+- Любая неизвестная операция считается требующей подтверждения.
+- Budget/bid принимаются только из текущего доверенного человеческого хода.
+- Confirmation — одноразовый CAS, привязанный к actor, chat, message и полному diff.
+- Freshness, account ceiling, kill switch, typed validation и quota не обходятся моделью.
+- Hermes не вызывает Google Ads SDK напрямую; SDK доступен только typed Python execution layer.
+- Секреты не попадают в prompt, Telegram, логи или Git.
+
+Каноническая классификация операций находится в [`confirm/policy.py`](confirm/policy.py).
+
+## Quick Start
+
+### Requirements
+
+- Docker Engine with Docker Compose v2;
+- Git;
+- учётные данные Google Ads и Telegram/Hermes для полноценного runtime;
+- минимум два сильных пароля для PostgreSQL ролей.
+
+### Start the core services
+
+```bash
+git clone <repository-url> aimash
+cd aimash
+cp .env.example .env
+# Заполните POSTGRES_PASSWORD, POSTGRES_RO_PASSWORD и остальные обязательные credentials.
+docker compose config --quiet
+docker compose up -d --build
+docker compose ps
+```
+
+Команда поднимает PostgreSQL, применяет Alembic migrations, запускает scheduler и локальный backup
+sidecar. Hermes Gateway работает на host и запускает ephemeral MCP-процесс по stdio; его установка и
+проверка описаны в [`deploy/hermes/README.md`](deploy/hermes/README.md) и
 [`deploy/hermes/OPERATIONS.md`](deploy/hermes/OPERATIONS.md).
 
-## Граница автономии
+Для локальной проверки Python-контура:
 
-Hermes делает сам:
-
-- понимание задачи и контекста;
-- выбор tools, модели, скилов и порядка анализа;
-- web/research, диагностику, кластеризацию, формулировку рекомендаций;
-- подготовку отчётов, рекламных текстов, профилей и черновиков;
-- память, cron, delegation и повторное использование workflow.
-
-Код делает детерминированно:
-
-- typed validation, деньги, проценты, billing units и RSA 30/90/15;
-- account ceiling, allowlist, provenance, freshness, kill-switch и quota;
-- `validate_only`, лимиты и structured recovery hints на mutation boundary;
-- Google Ads SDK mutation, audit и post-verify;
-- доверенную доставку файлов и привязку входящих Telegram media.
-
-Классификация операций находится в [`confirm/policy.py`](confirm/policy.py). Неизвестная операция
-fail-closed считается требующей подтверждения.
-
-## Локальный запуск
-
-```powershell
+```bash
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+source .venv/bin/activate
 pip install -e ".[dev]"
-Copy-Item .env.example .env
-python -m pytest -q
-python -m mcp_server
+python -m pytest
 ```
 
-Hermes-конфиг, установка gateway, production env и OAuth-проверки описаны в
-[`deploy/hermes/README.md`](deploy/hermes/README.md) и
-[`deploy/hermes/OPERATIONS.md`](deploy/hermes/OPERATIONS.md). Шаблон переменных — [`.env.example`](.env.example).
+На Windows активируйте окружение командой `.venv\Scripts\Activate.ps1`.
 
-Живая проверка новой App mutation выполняется только явным запуском оператора на allowlisted Draft:
+## Release Backup
 
-```powershell
-python scripts/live_smoke_app.py --app-id com.example.real
+После коммита релизного состояния запустите:
+
+```bash
+bash scripts/create_release_backup.sh
 ```
 
-Скрипт проходит production confirm/audit path, перечитывает `PAUSED` App campaign из API и не запускается
-автоматически тестами. Для Apple используйте `--store apple_app_store` и числовой App ID.
+Скрипт проверяет контейнер PostgreSQL, создаёт custom-format dump схемы и данных, валидирует его через
+`pg_restore --list`, затем атомарно пишет `backups/release_v3.0.0_YYYYMMDD.tar.gz`. Архив получает
+права `0600` и может содержать production data и локальные секреты: храните его зашифрованным и вне
+основного сервера. Скрипт только печатает команды tag/push — он не выполняет их автоматически.
 
-## Runtime guarantees
-
-- Разработка и UAT мутаций — только Draft `7753643025`.
-- Пустой Telegram allowlist и пустой mutation allowlist блокируют доступ.
-- Оперативные mutation-команды исполняются из текущего пользовательского запроса без legacy wizard.
-- Критический глобальный бюджетный diff исполняется после отдельного approval.
-- Секреты не попадают в prompt, Telegram, логи или git.
-- `skills.inline_shell: false` сохраняется.
-- «Выполнено» строится из audit-row и API-readback, а не из уверенного текста модели.
-
-Подробности: [`deploy/hermes/RISK_REGISTER.md`](deploy/hermes/RISK_REGISTER.md),
-[`deploy/hermes/OPERATIONS.md`](deploy/hermes/OPERATIONS.md) и разделы 15–17 текстового зеркала
-[`SPEC.md`](SPEC.md).
-
-## Структура
+## Repository Layout
 
 ```text
-ads/             Google Ads read/mutations/service/freshness
-confirm/         policy, proposal, CAS, audit
-mcp_server/      typed Hermes tools и trusted envelopes
-reports/         Telegram/XLSX/Google Sheets
-keywords/        Planner, relevance, clustering, negatives, export
-adcopy/          RSA generation + deterministic validation
-clients/         account-scoped profiles and crawl
-scheduler/       background jobs and delivery
-deploy/hermes/   gateway config, plugin, operations
+ads/             Google Ads readers, typed mutations and freshness gates
+confirm/         policy, proposal lifecycle, CAS and audit
+mcp_server/      FastMCP registry, trusted transport and structured envelopes
+clients/         account-scoped profiles, crawl and Aimash Memory
+reports/         XLSX, PDF, Google Sheets and Telegram-ready reports
+scheduler/       read/notify/cleanup jobs and Outcome Checker
+deploy/hermes/   gateway configuration, SOUL, runbooks and operations
+scripts/         verification, migration and release utilities
 ```
 
-## Живые документы Hermes
+## Contract and Documentation
 
+Единственный договорный канон — три оригинальных документа заказчика:
+
+- [`Aimash_Technical_Specification.docx`](Aimash_Technical_Specification.docx)
+- [`Aimash_Flow_Google_Search_4.docx`](Aimash_Flow_Google_Search_4.docx)
+- [`Информация о клиентах_1.docx`](Информация%20о%20клиентах_1.docx)
+
+[`ТЗ.md`](ТЗ.md) — их проверяемое текстовое зеркало. Engineering-документы и runbooks — производные
+implementation notes и при расхождении исправляются по исходным DOCX.
+
+Живые эксплуатационные документы:
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — Trusted Transport, proposal CAS и Outcome Checker.
+- [`docs/MCP_TOOLS.md`](docs/MCP_TOOLS.md) — проверяемый registry 84 FastMCP tools.
+- [`docs/MEMORY_AND_SOUL.md`](docs/MEMORY_AND_SOUL.md) — Aimash Memory, crawler и правила SOUL.
+- [`docs/CLIENT_HANDOFF_RUNBOOK.md`](docs/CLIENT_HANDOFF_RUNBOOK.md) — передача VPS, secrets и production readiness.
 - [`deploy/hermes/README.md`](deploy/hermes/README.md) — установка и топология.
-- [`deploy/hermes/OPERATIONS.md`](deploy/hermes/OPERATIONS.md) — эксплуатация, deploy и verification.
+- [`deploy/hermes/OPERATIONS.md`](deploy/hermes/OPERATIONS.md) — deploy и runtime verification.
 - [`deploy/hermes/SAFE_RESTART.md`](deploy/hermes/SAFE_RESTART.md) — безопасный restart.
-- [`deploy/hermes/host-a/RUNBOOK.md`](deploy/hermes/host-a/RUNBOOK.md) — runbook текущего host.
-- [`deploy/hermes/SOUL.md`](deploy/hermes/SOUL.md) — системные инструкции агента.
-- [`deploy/hermes/DRIFT_AUDIT.md`](deploy/hermes/DRIFT_AUDIT.md) — контроль дрейфа поверхности.
+- [`deploy/hermes/host-a/RUNBOOK.md`](deploy/hermes/host-a/RUNBOOK.md) — host runbook.
+- [`deploy/hermes/SOUL.md`](deploy/hermes/SOUL.md) — системные инструкции и Bias for Action.
+- [`deploy/hermes/DRIFT_AUDIT.md`](deploy/hermes/DRIFT_AUDIT.md) — контроль дрейфа tool surface.
 - [`deploy/hermes/RISK_REGISTER.md`](deploy/hermes/RISK_REGISTER.md) — открытые риски.
 - [`deploy/hermes/OPEN_DECISIONS.md`](deploy/hermes/OPEN_DECISIONS.md) — операционные решения.
-- [`deploy/hermes/skills/ad-master/ad-master-agent/SKILL.md`](deploy/hermes/skills/ad-master/ad-master-agent/SKILL.md) — канонический skill аудита и исследования.
-- [`deploy/hermes/skills/ad-master/google-ads-worker/SKILL.md`](deploy/hermes/skills/ad-master/google-ads-worker/SKILL.md) — канонический Google Ads skill.
+- [`deploy/hermes/skills/ad-master/ad-master-agent/SKILL.md`](deploy/hermes/skills/ad-master/ad-master-agent/SKILL.md) — skill аудита и исследования.
+- [`deploy/hermes/skills/ad-master/google-ads-worker/SKILL.md`](deploy/hermes/skills/ad-master/google-ads-worker/SKILL.md) — Google Ads worker skill.
+
+## License
+
+Private project. No open-source license has been granted. Do not copy, redistribute or deploy outside
+the authorized environment without the owner's written permission.

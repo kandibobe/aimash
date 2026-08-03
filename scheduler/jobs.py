@@ -1996,8 +1996,9 @@ async def run_outcome_checker(bot=None, *, now: datetime | None = None) -> dict[
                     )
             finally:
                 reset_context(tok)
-        if due:
-            log.info("scheduler outcome checker: %s", counts)
+        # Пишем heartbeat каждого планового запуска, включая честный no-op без due rows. Иначе
+        # сисадмин не может отличить «успешно отработал, задач нет» от «cron вообще не запустился».
+        log.info("scheduler outcome checker: %s", counts)
         return counts
 
 

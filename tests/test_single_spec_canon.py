@@ -12,11 +12,11 @@ ORIGINALS = (
 )
 
 
-def test_spec_identifies_only_the_three_original_docx_as_canon():
-    spec = (ROOT / "SPEC.md").read_text(encoding="utf-8")
-    assert all(name in spec for name in ORIGINALS)
-    assert "ненормативная инженерная интерпретация" in spec
-    assert "Aimash_Unified_Technical_Specification_ACCEPTED.docx" not in spec
+def test_tz_mirror_identifies_only_the_three_original_docx_as_canon():
+    tz = (ROOT / "ТЗ.md").read_text(encoding="utf-8")
+    assert all(name in tz for name in ORIGINALS)
+    assert "ТЕКСТОВОЕ ЗЕРКАЛО ДОГОВОРНОГО КАНОНА" in tz
+    assert "Aimash_Unified_Technical_Specification_ACCEPTED.docx" not in tz
 
 
 def test_developer_entrypoints_reference_the_original_contract_set():
@@ -24,7 +24,7 @@ def test_developer_entrypoints_reference_the_original_contract_set():
     for name in ("AGENTS.md", "CLAUDE.md", "README.md"):
         text = (ROOT / name).read_text(encoding="utf-8")
         assert all(original in text for original in ORIGINALS), name
-        assert "SPEC.md" in text, name
+        assert "ТЗ.md" in text, name
         assert "Aimash_Unified_Technical_Specification_ACCEPTED.docx" not in text, name
         assert not any(old in text for old in obsolete), name
 

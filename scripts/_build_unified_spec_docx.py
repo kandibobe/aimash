@@ -13,7 +13,7 @@ from docx.shared import Cm, Pt, RGBColor
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "SPEC.md"
+SOURCE = ROOT / "ТЗ.md"
 OUTPUT = ROOT / "artifacts" / "Aimash_Unified_Technical_Specification_DRAFT.docx"
 
 NAVY = "12233F"

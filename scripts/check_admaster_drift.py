@@ -95,7 +95,6 @@ def main(argv: list[str] | None = None) -> int:
     ]
     doc_files = [
         root / "README.md",
-        root / "SPEC.md",
         root / "deploy/hermes/README.md",
         root / "deploy/hermes/OPERATIONS.md",
     ]

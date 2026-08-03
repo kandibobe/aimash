@@ -208,6 +208,21 @@ async def test_daily_checker_sends_and_completes_only_after_delivery(monkeypatch
     assert events == ["send:12345", "complete:outcome-1"]
 
 
+async def test_daily_checker_logs_successful_noop(monkeypatch, caplog):
+    class EmptyStore:
+        async def claim_due_outcomes(self, **kwargs):
+            return []
+
+    monkeypatch.setattr(jobs, "ConfirmStore", EmptyStore)
+    with caplog.at_level("INFO", logger="aimash"):
+        result = await jobs.run_outcome_checker(
+            object(), now=datetime(2026, 8, 3, 10, tzinfo=timezone.utc)
+        )
+
+    assert result == {"claimed": 0, "delivered": 0, "retrying": 0, "failed": 0}
+    assert "scheduler outcome checker" in caplog.text
+
+
 def test_outcome_prompt_is_compact_and_schedule_is_daily(monkeypatch):
     item = DueOutcome(
         confirmation_id="outcome-1",
