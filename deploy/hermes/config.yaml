@@ -186,20 +186,12 @@ provider_routing:
 
 mcp_servers:
   aimash:
-    command: docker
+    # Wrapper serializes the one named artifact container and removes it only after the previous
+    # stdio owner is gone. This lets automatic reconnect recover from an orphan without racing the
+    # active gateway connection.
+    command: /bin/sh
     args:
-      - compose
-      - --project-directory
-      - /opt/aimash
-      - --profile
-      - mcp
-      - run
-      - --rm
-      - --no-deps
-      - -T
-      - --name
-      - aimash-mcp
-      - mcp
+      - /opt/aimash/scripts/run_hermes_mcp.sh
     timeout: 120
     connect_timeout: 30
     tools:

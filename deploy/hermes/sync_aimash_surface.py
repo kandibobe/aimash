@@ -101,21 +101,8 @@ TOOL_LOOP_GUARDRAILS = {
         "idempotent_no_progress": 3,
     },
 }
-AIMASH_MCP_COMMAND = "docker"
-AIMASH_MCP_ARGS = (
-    "compose",
-    "--project-directory",
-    "/opt/aimash",
-    "--profile",
-    "mcp",
-    "run",
-    "--rm",
-    "--no-deps",
-    "-T",
-    "--name",
-    "aimash-mcp",
-    "mcp",
-)
+AIMASH_MCP_COMMAND = "/bin/sh"
+AIMASH_MCP_ARGS = ("/opt/aimash/scripts/run_hermes_mcp.sh",)
 
 
 def reconcile_trusted_operator_policy(config: dict[str, Any]) -> dict[str, Any]:

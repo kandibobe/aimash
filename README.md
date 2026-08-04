@@ -84,7 +84,7 @@ flowchart LR
 
 | Surface | Count | Responsibility |
 |---|---:|---|
-| READ | 25 | Google Ads reads, audits, reports and discovery |
+| READ | 26 | Google Ads reads, audits, reports and discovery |
 | META | 1 | Trusted bridge capability discovery |
 | PLAN/state | 15 | Proposal, workflow and memory state |
 | Actions | 42 | Прямые agent-first action names; mutation либо исполняется по policy, либо готовит proposal |

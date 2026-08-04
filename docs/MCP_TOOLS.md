@@ -9,7 +9,7 @@ Python registries в [`mcp_server/`](../mcp_server/), а не ручной сп�
 
 | Surface | Registry | Count |
 |---|---|---:|
-| READ | `READ_TOOL_FUNCS` | 25 |
+| READ | `READ_TOOL_FUNCS` | 26 |
 | META | `META_TOOL_FUNCS` | 1 |
 | PLAN & STATE | `PLAN_STATE_TOOL_FUNCS` | 15 |
 | ACTION | `ACTION_TOOL_FUNCS` | 42 |
@@ -167,6 +167,6 @@ parts = {
     "EXECUTE": len(EXECUTE_TOOL_FUNCS),
 }
 print(parts)
-assert parts == {"READ": 25, "META": 1, "PLAN_STATE": 15, "ACTIONS": 42, "EXECUTE": 1}
+assert parts == {"READ": 26, "META": 1, "PLAN_STATE": 15, "ACTIONS": 42, "EXECUTE": 1}
 PY
 ```

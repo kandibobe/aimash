@@ -94,6 +94,20 @@ def test_enable_pins_current_transport_plugin_and_aimash_include():
     }
 
 
+def test_mcp_runner_recovers_only_an_orphaned_named_container():
+    config = yaml.safe_load((ROOT / "deploy/hermes/config.yaml").read_text(encoding="utf-8"))
+    runner = (ROOT / "scripts/run_hermes_mcp.sh").read_text(encoding="utf-8")
+
+    assert config["mcp_servers"]["aimash"]["command"] == "/bin/sh"
+    assert config["mcp_servers"]["aimash"]["args"] == ["/opt/aimash/scripts/run_hermes_mcp.sh"]
+    lock = runner.index("flock -n 9")
+    inspect = runner.index("docker inspect aimash-mcp")
+    remove = runner.index("docker rm -f aimash-mcp")
+    start = runner.index("--name aimash-mcp mcp")
+    assert lock < inspect < remove < start
+    assert "docker compose down" not in runner
+
+
 def test_disable_removes_plugin_and_keeps_read_manifest():
     cfg = _config()
     cfg["plugins"] = {
