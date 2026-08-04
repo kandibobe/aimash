@@ -28,12 +28,15 @@ TTL — тоже в CAS, а не в фоновой джобе (Волна 1.2). 
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
 from sqlalchemy import CursorResult, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
 from core.config import settings
@@ -53,6 +56,21 @@ _OUTCOME_OPERATIONS = frozenset({"update_budget", "add_keywords"})
 
 class PendingProposalExists(RuntimeError):
     """The database rejected a second pending proposal for the same human turn."""
+
+
+def proposal_idempotency_key(
+    *, chat_id: int, message_id: int, operation: str, json_args: dict
+) -> str:
+    """Return the stable identity of one trusted tool call."""
+
+    payload = json.dumps(
+        [int(chat_id), int(message_id), str(operation), json_args],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _cap_result(result: object) -> object:
@@ -257,6 +275,31 @@ class DueOutcome:
     attempts: int
 
 
+@dataclass(frozen=True, slots=True)
+class SavedProposal:
+    """Proposal row returned by an idempotent create-or-get operation."""
+
+    confirmation_id: str
+    operation: str
+    customer_id: str
+    params: dict
+    summary: str
+    status: str
+    reused: bool = False
+
+
+def _saved_proposal(row: Proposal, *, reused: bool) -> SavedProposal:
+    return SavedProposal(
+        confirmation_id=row.confirmation_id,
+        operation=row.operation,
+        customer_id=row.customer_id,
+        params=row.params,
+        summary=row.summary,
+        status=row.status,
+        reused=reused,
+    )
+
+
 class ConfirmStore:
     """confirm_store на SQLAlchemy. Все методы async (apply_* их await-ят)."""
 
@@ -272,7 +315,9 @@ class ConfirmStore:
         user_initiated: bool = False,
         attachment_state: str | None = None,
         risk_tier: str | None = None,
-    ) -> None:
+        source_message_id: int | None = None,
+        idempotency_args: dict | None = None,
+    ) -> SavedProposal:
         """Создать черновик (pending). Провенанс хода — `origin_human_turn`/`author_user_id`/`run_id`
         — стор берёт САМ из `core.provenance`, и параметра для него нет намеренно (Волна 1.4).
 
@@ -293,43 +338,135 @@ class ConfirmStore:
         MCP-инструмент, cron-джоба или self-improvement-форк. Второй бит подделать нечем: поднять
         его может только вход в `human_turn(...)`, а его открывает единственное место — доверенный
         слой Telegram (`bot.main.WhitelistMiddleware`), уже установивший, что апдейт пришёл от
-        живого человека из whitelist в private-чате. Денежные `apply_*` требуют ОБА бита."""
-        prov = get_provenance()
-        async with Session() as s:
-            s.add(
-                Proposal(
-                    confirmation_id=confirmation_id,
-                    operation=operation,
-                    customer_id=customer_id,
-                    summary=summary,
-                    params=params,
-                    chat_id=chat_id,
-                    user_initiated=user_initiated,
-                    origin_human_turn=prov.human_turn,
-                    author_user_id=prov.actor_user_id,
-                    run_id=prov.run_id[:16],  # 8 hex; срез — страховка от чужого длинного id
-                    attachment_state=attachment_state,
-                    risk_tier=risk_tier,
-                    status="pending",
-                )
+        живого человека из whitelist в private-чате. Денежные `apply_*` требуют ОБА бита.
+
+        `source_message_id` и исходные `idempotency_args` задаются только trusted transport path.
+        Они хешируются до добавления volatile `_freshness`, поэтому replay того же tool call делает
+        `ON CONFLICT DO NOTHING` и возвращает исходный Proposal вместо новой строки."""
+        if (source_message_id is None) != (idempotency_args is None):
+            raise ValueError("source_message_id and idempotency_args must be provided together")
+        idempotency_key = (
+            proposal_idempotency_key(
+                chat_id=chat_id,
+                message_id=source_message_id,
+                operation=operation,
+                json_args=idempotency_args,
             )
+            if source_message_id is not None and idempotency_args is not None
+            else None
+        )
+        prov = get_provenance()
+        values = {
+            "confirmation_id": confirmation_id,
+            "operation": operation,
+            "customer_id": customer_id,
+            "summary": summary,
+            "params": params,
+            "chat_id": chat_id,
+            "idempotency_key": idempotency_key,
+            "user_initiated": user_initiated,
+            "origin_human_turn": prov.human_turn,
+            "author_user_id": prov.actor_user_id,
+            "run_id": prov.run_id[:16],
+            "attachment_state": attachment_state,
+            "risk_tier": risk_tier,
+            "status": "pending",
+            "outcome_attempts": 0,
+        }
+        async with Session() as s:
+            if idempotency_key is not None:
+                dialect = s.get_bind().dialect.name
+                if dialect == "postgresql":
+                    statement = postgresql_insert(Proposal).values(**values)
+                elif dialect == "sqlite":
+                    statement = sqlite_insert(Proposal).values(**values)
+                else:
+                    statement = None
+                if statement is not None:
+                    statement = statement.on_conflict_do_nothing(
+                        index_elements=["idempotency_key"]
+                    ).returning(Proposal.id)
+                    try:
+                        inserted_id = (await s.execute(statement)).scalar_one_or_none()
+                    except IntegrityError:
+                        await s.rollback()
+                        existing = (
+                            await s.execute(
+                                select(Proposal).where(Proposal.idempotency_key == idempotency_key)
+                            )
+                        ).scalar_one_or_none()
+                        if existing is not None:
+                            return _saved_proposal(existing, reused=True)
+                        run_id = prov.run_id[:16]
+                        existing_id = None
+                        if run_id != "-":
+                            existing_id = (
+                                await s.execute(
+                                    select(Proposal.id).where(
+                                        Proposal.run_id == run_id,
+                                        Proposal.status == "pending",
+                                    )
+                                )
+                            ).scalar_one_or_none()
+                        if existing_id is not None:
+                            raise PendingProposalExists(run_id) from None
+                        raise
+                    else:
+                        if inserted_id is not None:
+                            await s.commit()
+                            return SavedProposal(
+                                confirmation_id=confirmation_id,
+                                operation=operation,
+                                customer_id=customer_id,
+                                params=params,
+                                summary=summary,
+                                status="pending",
+                            )
+                        existing = (
+                            await s.execute(
+                                select(Proposal).where(Proposal.idempotency_key == idempotency_key)
+                            )
+                        ).scalar_one_or_none()
+                        if existing is None:
+                            raise RuntimeError(
+                                "idempotency conflict did not expose the existing proposal"
+                            )
+                        return _saved_proposal(existing, reused=True)
+
+            s.add(Proposal(**values))
             try:
                 await s.commit()
             except IntegrityError:
                 await s.rollback()
-                run_id = prov.run_id[:16]
-                existing = None
-                if run_id != "-":
+                if idempotency_key is not None:
                     existing = (
+                        await s.execute(
+                            select(Proposal).where(Proposal.idempotency_key == idempotency_key)
+                        )
+                    ).scalar_one_or_none()
+                    if existing is not None:
+                        return _saved_proposal(existing, reused=True)
+                run_id = prov.run_id[:16]
+                existing_id = None
+                if run_id != "-":
+                    existing_id = (
                         await s.execute(
                             select(Proposal.id).where(
                                 Proposal.run_id == run_id, Proposal.status == "pending"
                             )
                         )
                     ).scalar_one_or_none()
-                if existing is not None:
+                if existing_id is not None:
                     raise PendingProposalExists(run_id) from None
                 raise
+        return SavedProposal(
+            confirmation_id=confirmation_id,
+            operation=operation,
+            customer_id=customer_id,
+            params=params,
+            summary=summary,
+            status="pending",
+        )
 
     async def count_run_proposals(self, run_id: str) -> int:
         """Сколько proposal-строк любого статуса создано в ходе ``run_id``.

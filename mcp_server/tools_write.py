@@ -1,8 +1,8 @@
-"""Typed Bias-for-Action tools for Hermes.
+"""Typed Bias-for-Action proposal tools for Hermes.
 
-Each call resolves live state, validates a minimal typed input and executes the operation in the
-current trusted human turn. A critical global budget change returns one ``APPROVAL_REQUIRED``
-response; every other typed action continues through CAS, audit and post-verify immediately.
+Each call autonomously resolves live state and validates a minimal typed input, then returns one
+exact Proposal. Google Ads remains unchanged until a separate trusted reply/button calls the sole
+``execute_confirmed`` entrypoint.
 """
 
 from __future__ import annotations
@@ -59,7 +59,6 @@ from llm.schemas import (
     UpdateCampaign,
     UpdateKeywordBid,
 )
-from confirm.policy import requires_confirmation
 from confirm.reverse import ROLLBACKABLE_OPS, reverse_spec
 from confirm.risk import TIERS, risk_tier
 from confirm.store import ConfirmStore
@@ -114,19 +113,18 @@ async def _propose(
     account: str,
     **fields: Any,
 ) -> dict[str, Any]:
-    """Собрать аттестованное действие и довести его до результата.
+    """Собрать и сохранить аттестованный Proposal без выполнения мутации.
 
-    ЛЮБОЙ отказ — редактированный `refused()`-конверт: сырой str(e) наружу не идёт. Успех —
-    Операционные изменения исполняются сразу из доверенного human-turn. Критический глобальный
-    бюджет возвращает один ``APPROVAL_REQUIRED`` с неизменяемым preview.
+    ЛЮБОЙ отказ — редактированный `refused()`-конверт: сырой str(e) наружу не идёт. Успех всегда
+    возвращает один ``APPROVAL_REQUIRED``. Human-turn разрешает подготовку Proposal, но не является
+    подтверждением его выполнения.
 
     Порядок гейтов fail-closed и значим:
       1) валидация входа моделью (диапазоны/режимы/валюта — КОД, не доверие);
       2) провенанс: денежный черновик только человеческим ходом (правило 3);
       3) контекст хода: черновику нужен чат доставки/подтверждения (fail-closed);
-      4) не более одного pending-черновика на ход (счёт из хранилища по run-корреляции);
-      5) сборка+сохранение черновика;
-      6) policy-ветка: APPROVAL_REQUIRED либо атомарный CAS и execute с post-verify.
+      4) атомарная idempotent-вставка: replay возвращает существующий Proposal;
+      5) возврат карточки; execute возможен только отдельным trusted reply/button.
     """
     lang = i18n.current_lang()
     try:
@@ -141,8 +139,6 @@ async def _propose(
     if chat_id is None:
         return refused(i18n.t("propose_no_turn_context", lang), error_code="refused")
     store = ConfirmStore()
-    if await store.count_run_pending_proposals(prov.run_id) >= 1:
-        return refused(i18n.t("propose_draft_limit", lang), error_code="refused")
     cid = uuid.uuid4().hex
     try:
         from mcp_server.trusted_transport import TrustedTransportError, get_trusted_turn
@@ -154,82 +150,56 @@ async def _propose(
             trusted_turn = None
             trusted_user_text = ""
 
+        model_args = model.model_dump(exclude_none=True)
+        idempotency_args = {"account": str(account), **model_args}
+
         built = await build_proposal(
             store=store,
             operation=operation,
-            params=model.model_dump(exclude_none=True),
+            params=model_args,
             cid=cid,
             chat_id=chat_id,
             customer_id=str(account),
             user_text=trusted_user_text if prov.human_turn else "",
             lang=lang,
             user_initiated=prov.human_turn,
+            source_message_id=trusted_turn.message_id if trusted_turn is not None else None,
+            idempotency_args=idempotency_args if trusted_turn is not None else None,
         )
     except ProposalRefused as e:
         return refused(e.text, error_code="refused")
     except Exception as e:  # noqa: BLE001
         log.warning("mcp propose tool failed: %s", type(e).__name__)
         return refused(redact_error(e), error_code=classify_error(e))
-    if requires_confirmation(built.operation, built.params):
-        env = proposed(
-            confirmation_id=built.cid,
-            operation=built.operation,
-            customer_id=built.customer_id,
-            preview=built.display,
-        )
-        message = "Изменение ожидает одного подтверждения всей карточки."
+    env = proposed(
+        confirmation_id=built.cid,
+        operation=built.operation,
+        customer_id=built.customer_id,
+        preview=built.display,
+    )
+    proposal_status = getattr(built, "status", "pending")
+    if proposal_status != "pending":
         return {
             **env,
-            "status": "approval_required",
-            "ok": False,
-            "error": message,
-            "error_code": "approval_required",
-            "error_type": "APPROVAL_REQUIRED",
-            "message": message,
-            "suggested_action": "Покажи пользователю preview и запроси одно подтверждение всего изменения.",
-        }
-
-    try:
-        actor_user_id = (
-            trusted_turn.actor_user_id if trusted_turn is not None else prov.actor_user_id
-        )
-        actor_username = trusted_turn.actor_username if trusted_turn is not None else None
-        confirmed = await store.confirm(
-            built.cid,
-            chat_id=chat_id,
-            actor_user_id=actor_user_id,
-            actor_username=actor_username,
-        )
-        if not confirmed:
-            raise PermissionError("direct execution CAS rejected the proposal")
-
-        from ads.service import execute_confirmed as apply_confirmed
-        from core.texts import fmt_mutation_result
-
-        result = await apply_confirmed(store, built.cid)
-        return {
-            "ok": True,
-            "status": "executed",
-            "operation": built.operation,
-            "customer_id": built.customer_id,
-            "confirmation_id": built.cid,
+            "status": "already_exists",
+            "proposal_status": proposal_status,
+            "reused": True,
             "preview": built.display,
-            "summary": fmt_mutation_result(built.operation, result, lang),
-            "result": result,
-            "error": None,
-            "error_code": None,
-            "error_type": None,
-            "message": None,
+            "message": "Повторный вызов: возвращён ранее созданный Proposal.",
             "suggested_action": None,
         }
-    except Exception as e:  # noqa: BLE001
-        log.warning("direct mutation failed op=%s: %s", built.operation, type(e).__name__)
-        return {
-            **_execution_failure(e, error_code=classify_error(e)),
-            "operation": built.operation,
-            "customer_id": built.customer_id,
-            "confirmation_id": built.cid,
-        }
+    message = "Изменение ожидает одного подтверждения всей карточки."
+    return {
+        **env,
+        "status": "approval_required",
+        "ok": False,
+        "error": message,
+        "error_code": "approval_required",
+        "error_type": "APPROVAL_REQUIRED",
+        "message": message,
+        "reused": bool(getattr(built, "reused", False)),
+        "suggested_action": "Покажи пользователю preview и запроси одно подтверждение всего изменения.",
+    }
 
 
 # ── Бюджет и ставки ──
@@ -1146,14 +1116,21 @@ async def propose_composite_change(
     if chat_id is None:
         return refused(i18n.t("propose_no_turn_context", lang), error_code="refused")
     store = ConfirmStore()
-    if await store.count_run_pending_proposals(prov.run_id) >= 1:
-        return refused(i18n.t("propose_draft_limit", lang), error_code="refused")
 
     try:
         try:
-            trusted_user_text = get_trusted_turn().message_text or ""
+            trusted_turn = get_trusted_turn()
+            trusted_user_text = trusted_turn.message_text or ""
         except TrustedTransportError:
+            trusted_turn = None
             trusted_user_text = ""
+        idempotency_args = {
+            "account": str(account),
+            "operations": [
+                {"operation": operation, "params": model.model_dump(exclude_none=True)}
+                for operation, model in normalized
+            ],
+        }
         children: list[dict[str, Any]] = []
         previews: list[str] = []
         tiers: list[str] = []
@@ -1180,7 +1157,7 @@ async def propose_composite_change(
         cid = uuid.uuid4().hex
         summary = "Пакет изменений:\n\n" + "\n\n".join(previews)
         max_tier = max(tiers, key=TIERS.index)
-        await store.save_proposal(
+        saved = await store.save_proposal(
             confirmation_id=cid,
             operation="composite",
             customer_id=str(account),
@@ -1189,7 +1166,11 @@ async def propose_composite_change(
             chat_id=chat_id,
             user_initiated=prov.human_turn,
             risk_tier=max_tier,
+            source_message_id=trusted_turn.message_id if trusted_turn is not None else None,
+            idempotency_args=idempotency_args if trusted_turn is not None else None,
         )
+        cid = saved.confirmation_id
+        summary = saved.summary
     except ProposalRefused as e:
         return refused(e.text, error_code="refused")
     except Exception as e:  # noqa: BLE001

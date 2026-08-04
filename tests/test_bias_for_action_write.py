@@ -9,6 +9,7 @@ from llm.schemas import PauseCampaign, UpdateBudget
 from confirm.store import ConfirmStore
 from core.context import reset_context, set_context
 from core.provenance import human_turn
+from mcp_server.trusted_transport import TrustedTurn, trusted_turn_scope
 
 
 class _Store:
@@ -59,9 +60,8 @@ async def _run(
             display="attested before → after",
         )
 
-    async def _execute(received_store, confirmation_id):
-        assert received_store is store
-        return {"applied": True, "confirmation_id": confirmation_id}
+    async def _execute(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("proposal must not execute before a separate approval")
 
     monkeypatch.setattr(tools_write, "ConfirmStore", lambda: store)
     monkeypatch.setattr(tools_write, "build_proposal", _build)
@@ -112,7 +112,7 @@ async def test_proposal_is_persisted_without_claiming_or_applying(monkeypatch):
             display="ENABLED → PAUSED",
         )
 
-    async def _execute(_store, _confirmation_id):
+    async def _execute(*args, **kwargs):  # noqa: ARG001
         raise AssertionError("proposal must not execute before a separate approval")
 
     monkeypatch.setattr(tools_write, "build_proposal", _build)
@@ -149,6 +149,83 @@ async def test_small_budget_change_requires_separate_approval(monkeypatch):
     assert result["status"] == "approval_required"
     assert result["error_type"] == "APPROVAL_REQUIRED"
     assert store.confirmed == []
+
+
+async def test_replayed_trusted_action_returns_one_pending_proposal(monkeypatch):
+    async def _build(**kwargs):
+        params = {"campaign": "Replay Search"}
+        saved = await kwargs["store"].save_proposal(
+            confirmation_id=kwargs["cid"],
+            operation="pause_campaign",
+            customer_id=kwargs["customer_id"],
+            params=params,
+            summary="ENABLED → PAUSED",
+            chat_id=kwargs["chat_id"],
+            user_initiated=True,
+            risk_tier="L1",
+            source_message_id=kwargs["source_message_id"],
+            idempotency_args=kwargs["idempotency_args"],
+        )
+        return SimpleNamespace(
+            cid=saved.confirmation_id,
+            operation=saved.operation,
+            customer_id=saved.customer_id,
+            params=saved.params,
+            display=saved.summary,
+            status=saved.status,
+            reused=saved.reused,
+        )
+
+    async def _execute(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("replayed action must not execute")
+
+    turn = TrustedTurn(
+        actor_user_id=42,
+        actor_chat_id=9002,
+        actor_username="owner",
+        chat_type="private",
+        thread_id=None,
+        message_id=818,
+        language_code="ru",
+        reply_to_message_id=None,
+        reply_to_is_own_message=False,
+        reply_confirmation_id=None,
+        reply_to_text=None,
+        issued_at=1,
+        expires_at=2,
+        message_text="останови Replay Search",
+    )
+    monkeypatch.setattr(tools_write, "build_proposal", _build)
+    monkeypatch.setattr(ads.service, "execute_confirmed", _execute)
+
+    results = []
+    for _ in range(2):
+        token = set_context(request_id="replay-action", chat_id=9002)
+        try:
+            with (
+                human_turn(actor_user_id=42, run_id="replay-action"),
+                trusted_turn_scope(turn),
+            ):
+                results.append(
+                    await tools_write._propose(
+                        "pause_campaign",
+                        PauseCampaign,
+                        account="7753643025",
+                        campaign="Replay Search",
+                    )
+                )
+        finally:
+            reset_context(token)
+
+    assert [result["status"] for result in results] == [
+        "approval_required",
+        "approval_required",
+    ]
+    assert results[0]["confirmation_id"] == results[1]["confirmation_id"]
+    assert results[0]["reused"] is False
+    assert results[1]["reused"] is True
+    row = await ConfirmStore().get_confirmed(results[0]["confirmation_id"])
+    assert row is not None and row.status == "pending"
 
 
 async def test_critical_global_budget_returns_structured_approval(monkeypatch):

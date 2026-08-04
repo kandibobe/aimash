@@ -132,6 +132,7 @@ class Proposal(Base):
         Index("ix_proposals_status_created_at", "status", "created_at"),
         Index("ix_proposals_chat_status", "chat_id", "status"),
         Index("ix_proposals_outcome_due", "outcome_state", "outcome_due_at"),
+        Index("ux_proposals_idempotency_key", "idempotency_key", unique=True),
         Index(
             "ux_proposals_pending_run_id",
             "run_id",
@@ -152,6 +153,9 @@ class Proposal(Base):
     summary: Mapped[str] = mapped_column(Text, nullable=False)  # «было → станет»
     params: Mapped[dict] = mapped_column(JSON, nullable=False)
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Stable identity of one trusted tool call.  NULL is retained for historical rows and direct
+    # maintenance scripts which have no trusted inbound Telegram message.
+    idempotency_key: Mapped[str | None] = mapped_column(Text)
     # fail-closed: True ставит ТОЛЬКО доверенный вход (Telegram-команда человека). Любой
     # автоматический создатель (scheduler/anomaly), забывший флаг, получит False → бюджет/ставка
     # будут заблокированы гейтом (golden rule #3). Дефолт True был бы fail-open.

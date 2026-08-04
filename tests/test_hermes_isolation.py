@@ -593,17 +593,31 @@ def test_private_profile_external_content_does_not_phase_lock_tools(monkeypatch)
 
 
 def test_i8_at_most_one_pending_proposal_per_turn():
-    """И8: не более одного pending proposal на ассистентский ход. Энфорсмент — счётчик pending в нашем
-    MCP-слое (на прогон/тред), не надежда на ограничения модели."""
+    """И8: DB uniqueness, not a SELECT-before-INSERT pre-check, owns proposal races."""
     import inspect
 
+    from db.models import Proposal
     from mcp_server.tools_write import ACTION_TOOL_FUNCS, _propose, propose_composite_change
 
+    pending_index = next(
+        index for index in Proposal.__table__.indexes if index.name == "ux_proposals_pending_run_id"
+    )
+    idempotency_index = next(
+        index
+        for index in Proposal.__table__.indexes
+        if index.name == "ux_proposals_idempotency_key"
+    )
+    assert pending_index.unique is True
+    assert idempotency_index.unique is True
+
     source = inspect.getsource(_propose)
-    assert source.index("count_run_pending_proposals") < source.index("build_proposal")
+    assert "count_run_pending_proposals" not in source
+    assert "source_message_id=" in source
+    assert "idempotency_args=" in source
+    assert "store.confirm(" not in source
     ordinary = list(ACTION_TOOL_FUNCS.values())
     assert all("_propose(" in inspect.getsource(fn) for fn in ordinary)
     composite_source = inspect.getsource(propose_composite_change)
-    assert composite_source.index("count_run_pending_proposals") < composite_source.index(
-        "store.save_proposal"
-    )
+    assert "count_run_pending_proposals" not in composite_source
+    assert "source_message_id=" in composite_source
+    assert "idempotency_args=" in composite_source

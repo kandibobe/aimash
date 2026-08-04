@@ -82,6 +82,8 @@ class BuiltProposal:
     customer_id: str
     params: dict  # с аттестацией свежести: `_freshness` всегда, `_before` — только при успехе
     display: str  # баннер аккаунта + «было → станет» (+ предупреждение о внешнем контенте)
+    status: str = "pending"
+    reused: bool = False
 
 
 def account_label(cid: str) -> str:
@@ -123,6 +125,8 @@ async def build_proposal(
     user_text: str = "",
     lang: str = "ru",
     user_initiated: bool = False,
+    source_message_id: int | None = None,
+    idempotency_args: dict | None = None,
 ) -> BuiltProposal:
     """Собрать и СОХРАНИТЬ черновик мутации; вернуть готовый к показу текст. Транспорта не знает.
 
@@ -235,7 +239,7 @@ async def build_proposal(
         # Денежное предложение при внешнем контенте — усиленное предупреждение В СВОДКЕ (и в audit).
         display = i18n.t("external_context_money_warn", lang) + "\n\n" + display
     try:
-        await store.save_proposal(
+        saved = await store.save_proposal(
             confirmation_id=cid,
             operation=operation,
             customer_id=customer_id,  # штамп аккаунта мутации (authoritative для execute_confirmed)
@@ -245,13 +249,25 @@ async def build_proposal(
             user_initiated=user_initiated,
             attachment_state="pending" if (spec is not None or chart is not None) else None,
             risk_tier=tier,
+            source_message_id=source_message_id,
+            idempotency_args=idempotency_args,
         )
     except PendingProposalExists:
         raise ProposalRefused(i18n.t("propose_draft_limit", lang)) from None
+    if saved is None:  # Compatibility with capture/test stores which intentionally do not persist.
+        return BuiltProposal(
+            cid=cid,
+            operation=operation,
+            customer_id=customer_id,
+            params=params,
+            display=display,
+        )
     return BuiltProposal(
-        cid=cid,
-        operation=operation,
-        customer_id=customer_id,
-        params=params,
-        display=display,
+        cid=saved.confirmation_id,
+        operation=saved.operation,
+        customer_id=saved.customer_id,
+        params=saved.params,
+        display=saved.summary,
+        status=saved.status,
+        reused=saved.reused,
     )

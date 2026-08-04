@@ -28,7 +28,6 @@ from confirm.store import ConfirmStore
 from core import i18n, texts
 from campaigns.wizard import build_create_params, public_state
 from campaigns.wizard_store import CampaignDraftStore
-from core.provenance import get_provenance
 from core.resilience import run_ads_read_call
 from db import sheets_registry
 from keywords.cluster import cluster_keywords, rank_clusters, suggest_negative_keywords
@@ -36,7 +35,7 @@ from keywords.export import write_keywords_xlsx
 from keywords.filter import filter_relevance
 from keywords.seeds import generate_seed_keywords
 from mcp_server.artifacts import artifact_path, publish_artifact, remove_artifact
-from mcp_server.envelope import ok, proposed, refused
+from mcp_server.envelope import ok, proposed
 from mcp_server.trusted_transport import get_trusted_turn
 from reports.sheets import (
     parse_spreadsheet_id,
@@ -881,10 +880,7 @@ async def _profile_proposal(
     after: dict[str, Any],
 ) -> dict[str, Any]:
     turn = get_trusted_turn()
-    provenance = get_provenance()
     store = ConfirmStore()
-    if await store.count_run_pending_proposals(provenance.run_id) >= 1:
-        return refused(i18n.t("propose_draft_limit"), error_code="refused")
     confirmation_id = uuid.uuid4().hex
     summary = texts.fmt_client_diff(
         before,
@@ -893,7 +889,7 @@ async def _profile_proposal(
         operation=operation,
         lang=turn.language_code,
     )
-    await store.save_proposal(
+    saved = await store.save_proposal(
         confirmation_id=confirmation_id,
         operation=operation,
         customer_id=str(account),
@@ -901,12 +897,14 @@ async def _profile_proposal(
         summary=summary,
         chat_id=turn.actor_chat_id,
         user_initiated=True,
+        source_message_id=turn.message_id,
+        idempotency_args={"account": str(account), "params": params},
     )
     return proposed(
-        confirmation_id=confirmation_id,
-        operation=operation,
-        customer_id=str(account),
-        preview=summary,
+        confirmation_id=saved.confirmation_id,
+        operation=saved.operation,
+        customer_id=saved.customer_id,
+        preview=saved.summary,
         unchanged_label="Профиль клиента",
     )
 

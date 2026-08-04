@@ -450,14 +450,16 @@ async def test_profile_save_stops_at_pending_confirmation(monkeypatch):
     saved = {}
 
     class _Store:
-        async def count_run_pending_proposals(self, run_id):
-            return 0
-
         async def save_proposal(self, **kwargs):
             saved.update(kwargs)
+            return SimpleNamespace(
+                confirmation_id=kwargs["confirmation_id"],
+                operation=kwargs["operation"],
+                customer_id=kwargs["customer_id"],
+                summary=kwargs["summary"],
+            )
 
     monkeypatch.setattr(ws, "ConfirmStore", _Store)
-    monkeypatch.setattr(ws, "get_provenance", lambda: SimpleNamespace(run_id="profile-turn"))
 
     with trusted_turn_scope(_turn()):
         result = await ws._profile_proposal(
@@ -472,6 +474,8 @@ async def test_profile_save_stops_at_pending_confirmation(monkeypatch):
     assert result["operation"] == "profile_save"
     assert result["preview"]
     assert saved["operation"] == "profile_save"
+    assert saved["source_message_id"] == _turn().message_id
+    assert saved["idempotency_args"]["account"] == DRAFT_ACCOUNT_ID
 
 
 async def _async_value(value):
