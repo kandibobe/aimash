@@ -190,6 +190,7 @@ implementation notes и при расхождении исправляются �
 - [`deploy/hermes/README.md`](deploy/hermes/README.md) — установка и топология.
 - [`deploy/hermes/OPERATIONS.md`](deploy/hermes/OPERATIONS.md) — deploy и runtime verification.
 - [`deploy/hermes/SAFE_RESTART.md`](deploy/hermes/SAFE_RESTART.md) — безопасный restart.
+- [`deploy/hermes/PILOT_ROLLBACK.md`](deploy/hermes/PILOT_ROLLBACK.md) — границы capability pilot и rollback.
 - [`deploy/hermes/host-a/RUNBOOK.md`](deploy/hermes/host-a/RUNBOOK.md) — host runbook.
 - [`deploy/hermes/SOUL.md`](deploy/hermes/SOUL.md) — системные инструкции и Bias for Action.
 - [`deploy/hermes/skills/ad-master/creative-director/SKILL.md`](deploy/hermes/skills/ad-master/creative-director/SKILL.md) — creative-director workflow Hermes.
