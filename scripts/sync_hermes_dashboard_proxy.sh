@@ -31,10 +31,17 @@ if [ -f "$TARGET" ]; then
     cp -a "$TARGET" "$BACKUP"
 fi
 install -m 0644 "$SOURCE" "$TARGET"
-if systemctl restart "$SERVICE" \
-    && curl --fail --silent --show-error --max-time 10 http://127.0.0.1:9120/api/status >/dev/null; then
-    echo "dashboard proxy isolation applied; rollback=$BACKUP"
-    exit 0
+if systemctl restart "$SERVICE"; then
+    ATTEMPT=1
+    while [ "$ATTEMPT" -le 10 ]; do
+        if curl --fail --silent --show-error --max-time 2 \
+            http://127.0.0.1:9120/api/status >/dev/null 2>&1; then
+            echo "dashboard proxy isolation applied; rollback=$BACKUP"
+            exit 0
+        fi
+        sleep 1
+        ATTEMPT=$((ATTEMPT + 1))
+    done
 fi
 
 echo "dashboard proxy verification failed; restoring previous config" >&2
