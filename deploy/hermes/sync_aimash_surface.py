@@ -205,6 +205,7 @@ def reconcile_trusted_operator_policy(config: dict[str, Any]) -> dict[str, Any]:
     telegram = platforms.setdefault("telegram", {}) if isinstance(platforms, dict) else None
     if not isinstance(telegram, dict):
         raise RuntimeError("live Hermes config: gateway.platforms.telegram must be a mapping")
+    telegram["gateway_restart_notification"] = False
     extra = telegram.setdefault("extra", {})
     if not isinstance(extra, dict):
         raise RuntimeError("live Hermes config: gateway.platforms.telegram.extra must be a mapping")

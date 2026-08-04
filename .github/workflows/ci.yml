@@ -195,6 +195,11 @@ jobs:
             DEPLOY_STAGE="Hermes surface sync"
             /usr/local/lib/hermes-agent/venv/bin/python \
               deploy/hermes/sync_aimash_surface.py
+            # Dashboard users may inspect the MCP config but must not start a second production
+            # stdio client. The proxy blocks only POST /api/mcp/servers/aimash/test and keeps the
+            # dashboard, Telegram gateway and their lifecycles separate.
+            DEPLOY_STAGE="Hermes dashboard MCP isolation"
+            /bin/sh scripts/sync_hermes_dashboard_proxy.sh --apply
             # Cron state is host-owned and survives Git deploys. Reconcile only explicitly managed
             # jobs; the script backs up jobs.json before its first edit and leaves unrelated jobs
             # untouched. This also resumes the read-only P0 watchdog when policy requires it.

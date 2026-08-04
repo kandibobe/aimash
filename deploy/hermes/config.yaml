@@ -158,6 +158,9 @@ security:
 gateway:
   platforms:
     telegram:
+      # Startup notices race Telegram's temporary degraded send path. Operational health is
+      # reported by aimash-ops-watch after verification instead of this best-effort greeting.
+      gateway_restart_notification: false
       allow_from:
         - '787132457'
         - '1674890775'
