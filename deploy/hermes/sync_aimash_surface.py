@@ -59,20 +59,33 @@ AUXILIARY_POLICY = {
     "memory_query_rewrite": {"provider": "openai-codex", "model": "gpt-5.4"},
     "curator": {"provider": "openai-codex", "model": "gpt-5.6-sol"},
 }
-CANONICAL_SKILLS = ("ad-master-agent", "google-ads-worker", "creative-director")
+CANONICAL_SKILLS = (
+    "operational-coordinator",
+    "google-ads-worker",
+    "ad-master-agent",
+    "creative-director",
+    "paid-social-advisor",
+)
+RUNTIME_SKILL_ROLES = {
+    "operational-coordinator": "forum operations and triage",
+    "google-ads-worker": "Google Ads execution",
+    "ad-master-agent": "delegated deep Google Ads analysis",
+    "creative-director": "Google Ads creative intent",
+    "paid-social-advisor": "Meta and TikTok advisory",
+}
 TELEGRAM_GROUP_TOPICS = (
     {
         "chat_id": "-1004443550627",
         "topics": (
-            {"name": "general", "thread_id": 1, "skill": "ad-master-agent"},
+            {"name": "general", "thread_id": 1, "skill": "operational-coordinator"},
             {"name": "google-ads", "thread_id": 153, "skill": "google-ads-worker"},
-            {"name": "meta-ads", "thread_id": 154, "skill": "ad-master-agent"},
-            {"name": "tiktok-ads", "thread_id": 155, "skill": "ad-master-agent"},
-            {"name": "approvals-and-audits", "thread_id": 156, "skill": "ad-master-agent"},
-            {"name": "development", "thread_id": 1992, "skill": "ad-master-agent"},
-            {"name": "files", "thread_id": 2135, "skill": "ad-master-agent"},
-            {"name": "alerts", "thread_id": 2163, "skill": "ad-master-agent"},
-            {"name": "tasks", "thread_id": 2164, "skill": "ad-master-agent"},
+            {"name": "meta-ads", "thread_id": 154, "skill": "paid-social-advisor"},
+            {"name": "tiktok-ads", "thread_id": 155, "skill": "paid-social-advisor"},
+            {"name": "approvals-and-audits", "thread_id": 156, "skill": "operational-coordinator"},
+            {"name": "development", "thread_id": 1992, "skill": "operational-coordinator"},
+            {"name": "files", "thread_id": 2135, "skill": "operational-coordinator"},
+            {"name": "alerts", "thread_id": 2163, "skill": "operational-coordinator"},
+            {"name": "tasks", "thread_id": 2164, "skill": "operational-coordinator"},
         ),
     },
 )
@@ -140,6 +153,7 @@ AIMASH_MCP_ARGS = ("/opt/aimash/scripts/run_hermes_mcp.sh",)
 
 def reconcile_trusted_operator_policy(config: dict[str, Any]) -> dict[str, Any]:
     """Pin the owner-approved private-team tool, memory, delegation and skill policy."""
+    _validate_runtime_skill_policy()
     config["model"] = {
         "provider": PRIMARY_PROVIDER,
         "default": PRIMARY_MODEL,
@@ -231,6 +245,17 @@ def reconcile_trusted_operator_policy(config: dict[str, Any]) -> dict[str, Any]:
         "subagent_auto_approve": True,
     }
     return config
+
+
+def _validate_runtime_skill_policy() -> None:
+    """Fail deployment if a Telegram topic could select an undeployed skill."""
+    canonical = set(CANONICAL_SKILLS)
+    if canonical != set(RUNTIME_SKILL_ROLES):
+        raise RuntimeError("runtime skill roles must describe every canonical skill exactly once")
+    mapped = [topic["skill"] for group in TELEGRAM_GROUP_TOPICS for topic in group["topics"]]
+    unknown = sorted(set(mapped) - canonical)
+    if unknown:
+        raise RuntimeError(f"Telegram topic references undeployed skills: {', '.join(unknown)}")
 
 
 def sanitize_pinned_config(config: dict[str, Any]) -> dict[str, Any]:

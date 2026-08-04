@@ -28,5 +28,5 @@ artifact; при `artifact_status=not_published` честно сообщи data 
 Если пользователь
 просит выгрузить слова, ключи, семантику или полный список keywords, используй
 `export_keyword_report`: он формирует построчный `.xlsx` без top-N ограничения. Artifact bridge
-доставит файл в исходный Telegram topic. Числа, валюты, сущности и итог применения бери из structured
+доставит файл в архивный Telegram topic `Files` с описанием, датой, размером и хешем. Числа, валюты, сущности и итог применения бери из structured
 tool results.

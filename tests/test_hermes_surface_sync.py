@@ -52,9 +52,11 @@ def test_surface_sync_model_policy_matches_repository_config():
     assert config["tools"]["tool_search"] == SYNC.TOOL_SEARCH_POLICY
     assert config["kanban"] == SYNC.KANBAN_SAFE_POLICY
     assert SYNC.CANONICAL_SKILLS == (
-        "ad-master-agent",
+        "operational-coordinator",
         "google-ads-worker",
+        "ad-master-agent",
         "creative-director",
+        "paid-social-advisor",
     )
 
 
@@ -66,6 +68,9 @@ def test_soul_routes_bounded_reads_directly_and_heavy_analysis_to_delegation():
     assert "multi-period or multi-account" in soul
     assert "keyword research" in soul
     assert "Model selection is internal" in soul
+    assert "Topic Boundaries" in soul
+    assert "paid-social-advisor" in soul
+    assert "operational-coordinator" in soul
 
 
 def test_soul_scopes_dynamic_buttons_to_the_supported_transport():

@@ -167,7 +167,7 @@ gateway:
       require_mention: false
       guest_mode: false
       extra:
-        group_topics: '[{"chat_id":"-1004443550627","topics":[{"name":"general","thread_id":1,"skill":"ad-master-agent"},{"name":"google-ads","thread_id":153,"skill":"google-ads-worker"},{"name":"meta-ads","thread_id":154,"skill":"ad-master-agent"},{"name":"tiktok-ads","thread_id":155,"skill":"ad-master-agent"},{"name":"approvals-and-audits","thread_id":156,"skill":"ad-master-agent"},{"name":"development","thread_id":1992,"skill":"ad-master-agent"},{"name":"files","thread_id":2135,"skill":"ad-master-agent"},{"name":"alerts","thread_id":2163,"skill":"ad-master-agent"},{"name":"tasks","thread_id":2164,"skill":"ad-master-agent"}]}]'
+        group_topics: '[{"chat_id":"-1004443550627","topics":[{"name":"general","thread_id":1,"skill":"operational-coordinator"},{"name":"google-ads","thread_id":153,"skill":"google-ads-worker"},{"name":"meta-ads","thread_id":154,"skill":"paid-social-advisor"},{"name":"tiktok-ads","thread_id":155,"skill":"paid-social-advisor"},{"name":"approvals-and-audits","thread_id":156,"skill":"operational-coordinator"},{"name":"development","thread_id":1992,"skill":"operational-coordinator"},{"name":"files","thread_id":2135,"skill":"operational-coordinator"},{"name":"alerts","thread_id":2163,"skill":"operational-coordinator"},{"name":"tasks","thread_id":2164,"skill":"operational-coordinator"}]}]'
 
 onboarding:
   seen:

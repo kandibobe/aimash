@@ -33,10 +33,12 @@ recommended_fix: string
 1. `runtime_registry.yaml` vs `deploy/hermes/config.yaml`
 2. `runtime_registry.yaml` vs `/root/.hermes/cron/jobs.json`
 3. `cron_registry.yaml` vs `/root/.hermes/cron/jobs.json`
-4. `runtime_registry.yaml` vs key skills:
+4. `runtime_registry.yaml` vs deployed skills:
+   - `/root/.hermes/skills/ad-master/operational-coordinator/SKILL.md`
+   - `/root/.hermes/skills/ad-master/google-ads-worker/SKILL.md`
    - `/root/.hermes/skills/ad-master/ad-master-agent/SKILL.md`
-   - `/root/.hermes/skills/ad-master/aimash-development/SKILL.md`
-   - `/root/.hermes/skills/ad-master/ad-master-cron-ops/SKILL.md`
+   - `/root/.hermes/skills/ad-master/creative-director/SKILL.md`
+   - `/root/.hermes/skills/ad-master/paid-social-advisor/SKILL.md`
 5. runtime statements in docs:
    - `README.md`
    - `ТЗ.md`

@@ -63,9 +63,6 @@ known_conflicts:
   - file: /root/.hermes/cron/jobs.json
     lines: '11-12, 60-61, 102-103, 142-143, 190-191'
     issue: Live cron jobs still pinned to gpt-5.4.
-  - file: /root/.hermes/skills/ad-master/ad-master-agent/SKILL.md
-    lines: '11-12'
-    issue: Live stale skill states gpt-5.4 in present tense; surface sync will replace it with the repository skill.
-  - file: /root/.hermes/skills/ad-master/aimash-development/SKILL.md
-    lines: '149-157'
-    issue: Skill cron matrix still states gpt-5.4 as current.
+  - file: /root/.hermes/skills/ad-master/
+    lines: all SKILL.md files
+    issue: The live skill directory must contain exactly the canonical skills copied by sync_aimash_surface.py; topic selection and skill role must match its tested policy.
