@@ -65,6 +65,26 @@ def _safe_filename(value: str) -> str:
     return (name or "artifact")[:120]
 
 
+def _description_for(filename: str, media_type: str) -> str:
+    """Return a concise, truthful archive label without inspecting untrusted file contents."""
+    name = filename.lower()
+    if name.startswith("aimash_mcc_report_"):
+        return "Сводный XLSX-отчёт по аккаунтам MCC и их показателям."
+    if name.startswith("aimash_report_"):
+        return "Подробный XLSX-отчёт Google Ads по одному аккаунту."
+    if name.startswith("aimash_keywords_"):
+        return "Построчная XLSX-выгрузка ключевых слов и их показателей."
+    if name.startswith("aimash_monthly_report_"):
+        return "Ежемесячный PDF-отчёт Google Ads: результаты, риски и план."
+    if media_type == "application/pdf":
+        return "PDF-документ, сформированный Aimash."
+    if media_type == "text/csv":
+        return "CSV-выгрузка, сформированная Aimash."
+    if media_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+        return "XLSX-таблица, сформированная Aimash."
+    return "Файл, сформированный Aimash."
+
+
 def publish_artifact(path: str | Path, *, filename: str, media_type: str) -> dict[str, Any]:
     """Return a signed artifact descriptor; reject paths outside ``ARTIFACT_DIR`` fail-closed."""
     if media_type not in _ALLOWED_MIME:
@@ -77,13 +97,15 @@ def publish_artifact(path: str | Path, *, filename: str, media_type: str) -> dic
     if size <= 0 or size > ARTIFACT_MAX_BYTES:
         raise ValueError("размер артефакта вне допустимого диапазона")
     digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    safe_filename = _safe_filename(filename)
     payload = {
         "v": ARTIFACT_VERSION,
         "iat": int(time.time()),
         "exp": int(time.time()) + ARTIFACT_TTL_S,
         "container": "aimash-mcp",
         "path": str(target),
-        "filename": _safe_filename(filename),
+        "filename": safe_filename,
+        "description": _description_for(safe_filename, media_type),
         "media_type": media_type,
         "size": size,
         "sha256": digest,
@@ -97,6 +119,7 @@ def publish_artifact(path: str | Path, *, filename: str, media_type: str) -> dic
     return {
         "artifact_id": payload["nonce"],
         "filename": payload["filename"],
+        "description": payload["description"],
         "media_type": media_type,
         "size": size,
         "sha256": digest,

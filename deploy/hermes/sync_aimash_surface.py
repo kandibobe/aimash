@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -59,6 +60,26 @@ AUXILIARY_POLICY = {
     "curator": {"provider": "openai-codex", "model": "gpt-5.6-sol"},
 }
 CANONICAL_SKILLS = ("ad-master-agent", "google-ads-worker", "creative-director")
+TELEGRAM_GROUP_TOPICS = (
+    {
+        "chat_id": "-1004443550627",
+        "topics": (
+            {"name": "general", "thread_id": 1, "skill": "ad-master-agent"},
+            {"name": "google-ads", "thread_id": 153, "skill": "google-ads-worker"},
+            {"name": "meta-ads", "thread_id": 154, "skill": "ad-master-agent"},
+            {"name": "tiktok-ads", "thread_id": 155, "skill": "ad-master-agent"},
+            {"name": "approvals-and-audits", "thread_id": 156, "skill": "ad-master-agent"},
+            {"name": "development", "thread_id": 1992, "skill": "ad-master-agent"},
+            {"name": "files", "thread_id": 2135, "skill": "ad-master-agent"},
+            {"name": "alerts", "thread_id": 2163, "skill": "ad-master-agent"},
+            {"name": "tasks", "thread_id": 2164, "skill": "ad-master-agent"},
+        ),
+    },
+)
+ARTIFACT_ARCHIVE_ENV = {
+    "AIMASH_ARTIFACT_ARCHIVE_CHAT_ID": "-1004443550627",
+    "AIMASH_ARTIFACT_ARCHIVE_THREAD_ID": "2135",
+}
 RETIRED_SKILLS = (
     "ad-master-tools",
     "admaster-confirm-model",
@@ -164,6 +185,16 @@ def reconcile_trusted_operator_policy(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(platform_disabled, dict):
         raise RuntimeError("live Hermes config: skills.platform_disabled must be a mapping")
     platform_disabled["telegram"] = list(TELEGRAM_DISABLED_SKILLS)
+
+    gateway = config.setdefault("gateway", {})
+    platforms = gateway.setdefault("platforms", {}) if isinstance(gateway, dict) else None
+    telegram = platforms.setdefault("telegram", {}) if isinstance(platforms, dict) else None
+    if not isinstance(telegram, dict):
+        raise RuntimeError("live Hermes config: gateway.platforms.telegram must be a mapping")
+    extra = telegram.setdefault("extra", {})
+    if not isinstance(extra, dict):
+        raise RuntimeError("live Hermes config: gateway.platforms.telegram.extra must be a mapping")
+    extra["group_topics"] = json.dumps(TELEGRAM_GROUP_TOPICS, ensure_ascii=False)
 
     approvals = config.setdefault("approvals", {})
     if not isinstance(approvals, dict):
@@ -285,6 +316,35 @@ def _env_value(path: Path, name: str) -> str:
                 value = value[1:-1]
             return value
     return ""
+
+
+def _set_env_values(path: Path, values: dict[str, str]) -> None:
+    """Atomically update only checked, non-secret operator settings."""
+    lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+    pending = dict(values)
+    output: list[str] = []
+    for line in lines:
+        match = re.match(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)=", line)
+        key = match.group(2) if match else None
+        if key in pending:
+            output.append(f"{match.group(1)}{key}={pending.pop(key)}")
+        else:
+            output.append(line)
+    output.extend(f"{key}={value}" for key, value in pending.items())
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, raw_tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    tmp = Path(raw_tmp)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("\n".join(output) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 def reconcile_config(config: dict[str, Any], *, enabled: bool, tools: list[str]) -> dict[str, Any]:
@@ -438,6 +498,7 @@ def main() -> int:
             raise RuntimeError("Hermes trusted transport key is absent or shorter than 32 bytes")
         if hashlib.sha256(host_key.encode()).hexdigest() != manifest.get("key_sha256"):
             raise RuntimeError("Hermes and Aimash trusted transport keys do not match")
+    _set_env_values(args.hermes_env, ARTIFACT_ARCHIVE_ENV)
 
     config = yaml.safe_load(args.config.read_text(encoding="utf-8"))
     if not isinstance(config, dict):

@@ -22,6 +22,7 @@ def test_artifact_is_signed_bounded_and_contains_no_secret(monkeypatch, tmp_path
     assert result["filename"] == "report.xlsx"
     assert result["size"] == len(b"xlsx-bytes")
     assert result["marker"].startswith(artifacts.ARTIFACT_MARKER)
+    assert result["description"] == "XLSX-таблица, сформированная Aimash."
     assert "k" * 32 not in result["token"]
 
 

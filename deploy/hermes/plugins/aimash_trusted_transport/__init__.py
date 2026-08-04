@@ -160,9 +160,11 @@ class _Artifact:
     container: str
     path: str
     filename: str
+    description: str
     media_type: str
     size: int
     sha256: str
+    created_at: int
     expires_at: int
 
 
@@ -407,9 +409,12 @@ def _verify_artifact_token(token: str, *, now: int | None = None) -> _Artifact:
         container="aimash-mcp",
         path=path,
         filename=filename,
+        description=_optional_text(payload.get("description"), limit=400)
+        or "Файл, сформированный Aimash.",
         media_type=media_type,
         size=size,
         sha256=digest,
+        created_at=issued_at,
         expires_at=expires_at,
     )
 
@@ -572,6 +577,11 @@ async def _deliver_pending_artifacts(
                 route_message_id = matches[0][2]
     if not tokens:
         return
+    archive_chat_id = _as_int(os.getenv("AIMASH_ARTIFACT_ARCHIVE_CHAT_ID"))
+    archive_thread_id = _as_int(os.getenv("AIMASH_ARTIFACT_ARCHIVE_THREAD_ID"), positive=True)
+    if archive_chat_id is None or archive_thread_id is None:
+        log.error("Aimash artifact archive is not configured; preserving current-topic delivery")
+        archive_chat_id, archive_thread_id = parsed_chat, _as_int(thread_id, positive=True)
     from telegram import InputFile
 
     retry_tokens: list[str] = []
@@ -583,11 +593,17 @@ async def _deliver_pending_artifacts(
                 target = Path(tmp) / artifact.filename
                 await asyncio.to_thread(_copy_artifact, artifact, target)
                 kwargs = {
-                    "chat_id": _normalize_telegram_chat_id(chat_id),
-                    "caption": f"📎 {artifact.filename}",
+                    "chat_id": _normalize_telegram_chat_id(archive_chat_id),
+                    "caption": (
+                        f"📎 {artifact.filename}\n"
+                        f"{artifact.description}\n"
+                        f"Создан: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(artifact.created_at))}\n"
+                        f"Размер: {artifact.size:,} bytes · SHA-256: {artifact.sha256[:12]}…\n"
+                        f"Источник: чат {parsed_chat}, топик {thread_id or 'General'}"
+                    ),
                 }
-                if thread_id is not None:
-                    kwargs["message_thread_id"] = int(thread_id)
+                if archive_thread_id is not None:
+                    kwargs["message_thread_id"] = archive_thread_id
                 with target.open("rb") as stream:
                     media = InputFile(stream, filename=artifact.filename)
                     if artifact.media_type.startswith("image/"):
