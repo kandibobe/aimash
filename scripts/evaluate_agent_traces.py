@@ -25,8 +25,23 @@ def main() -> int:
     if not isinstance(scenario_rows, list) or not isinstance(trace_rows, list):
         raise SystemExit("scenario and trace files must contain JSON arrays")
 
-    scenarios = {s.id: s for s in (Scenario.from_dict(row) for row in scenario_rows)}
-    traces = {str(row.get("scenario_id", "")): row for row in trace_rows}
+    parsed = [Scenario.from_dict(row) for row in scenario_rows]
+    if len({scenario.id for scenario in parsed}) != len(parsed):
+        raise SystemExit("scenario ids must be unique")
+    scenarios = {scenario.id: scenario for scenario in parsed}
+    traces: dict[str, dict] = {}
+    for row in trace_rows:
+        if not isinstance(row, dict):
+            raise SystemExit("every trace must be a JSON object")
+        scenario_id = str(row.get("scenario_id", "")).strip()
+        if not scenario_id:
+            raise SystemExit("every trace must have scenario_id")
+        if scenario_id in traces:
+            raise SystemExit(f"duplicate trace scenario_id: {scenario_id}")
+        traces[scenario_id] = row
+    unknown = sorted(set(traces) - set(scenarios))
+    if unknown:
+        raise SystemExit(f"unknown trace scenario_id: {','.join(unknown)}")
     results = []
     for scenario_id, scenario in scenarios.items():
         trace = traces.get(scenario_id)

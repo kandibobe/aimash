@@ -2,7 +2,7 @@
 
 READ-пилот пивота Aimash → Hermes. Hermes-агент отвечает в Telegram и через
 MCP-сервер `aimash` (пакет `mcp_server/`) всегда отдаёт 26 READ-инструментов + 1 META. При явном
-`HERMES_WRITE_ENABLED=true` он добавляет 55 agent-first PLAN/state + 1 WRITE через HMAC trusted Telegram transport;
+`HERMES_WRITE_ENABLED=true` он добавляет 58 agent-first PLAN/state/action + 1 approval execute через HMAC trusted Telegram transport;
 при false модуль WRITE физически не импортируется.
 
 **Где что написано:** нормативный канон — три исходных DOCX заказчика; их текстовое зеркало —
@@ -18,7 +18,7 @@ MCP-сервер `aimash` (пакет `mcp_server/`) всегда отдаёт 2
 слот №1 системного промпта, эталон `~/.hermes/SOUL.md`), `hermes.env.example` (шаблон `~/.hermes/.env`),
 `lint_config.py` (конфиг-линт К10 — **неизвестные ключи Hermes игнорирует молча**), `host-a/` (эталон
 живого хоста + RUNBOOK), `RISK_REGISTER.md`, `plugins/aimash_probe` (проб доверенного канала метаданных
-гейта).
+гейта), `PILOT_ROLLBACK.md` (границы capability pilot и проверяемый откат).
 
 **Этот файл — только установка (RB-0…RB-3).** День-2 эксплуатация (что применяется вживую vs требует
 restart, редеплой↔MCP-reconnect, логи, обновление/откат, бэкап, kill-switch, траблшутинг) — в

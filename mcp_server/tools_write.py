@@ -1414,7 +1414,17 @@ PROPOSE_TOOL_FUNCS = ACTION_TOOL_FUNCS
 EXECUTE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "execute_confirmed": execute_confirmed,
 }
-PLAN_WRITE_TOOL_FUNCS = {**ACTION_TOOL_FUNCS, **EXECUTE_TOOL_FUNCS}
+# Composite is an orchestration primitive, not a 43rd Google Ads mutation. Keep the
+# 42 direct ACTION names exactly equal to ``MUTATION_TOOLS`` while exposing one public,
+# action-oriented batch entrypoint that still creates a single pending proposal.
+COMPOSITE_TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
+    "composite_change": propose_composite_change,
+}
+PLAN_WRITE_TOOL_FUNCS = {
+    **ACTION_TOOL_FUNCS,
+    **COMPOSITE_TOOL_FUNCS,
+    **EXECUTE_TOOL_FUNCS,
+}
 
 ACTION_MCP_TOOLS: frozenset[str] = frozenset(ACTION_TOOL_FUNCS)
 PROPOSE_MCP_TOOLS = ACTION_MCP_TOOLS
@@ -1422,6 +1432,7 @@ PROPOSE_MCP_TOOLS = ACTION_MCP_TOOLS
 # PLAN-only server imports PROPOSE_TOOL_FUNCS. The trusted live server uses
 # PLAN_WRITE_TOOL_FUNCS and obtains actor/reply identity outside model arguments.
 EXECUTE_MCP_TOOLS: frozenset[str] = frozenset(EXECUTE_TOOL_FUNCS)
+COMPOSITE_MCP_TOOLS: frozenset[str] = frozenset(COMPOSITE_TOOL_FUNCS)
 PLAN_WRITE_MCP_TOOLS: frozenset[str] = frozenset(PLAN_WRITE_TOOL_FUNCS)
 # Backward-compatible names for guards and internal callers.
 WRITE_TOOL_FUNCS = PLAN_WRITE_TOOL_FUNCS

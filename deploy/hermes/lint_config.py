@@ -226,6 +226,8 @@ _ATTESTED: dict[str, Attested] = {
     "auxiliary.title_generation": Attested("hermes_cli/config.py", '"title_generation": {'),
     "auxiliary.memory_query_rewrite": Attested("hermes_cli/config.py", '"memory_query_rewrite": {'),
     "auxiliary.curator": Attested("hermes_cli/config.py", '"curator": {'),
+    "tools.tool_search": Attested("hermes_cli/config.py:2933-2951", '"tool_search": {'),
+    "kanban": Attested("hermes_cli/config.py:2853-2906", '"kanban": {'),
     "dashboard.basic_auth": Attested("hermes_cli/config.py", '"basic_auth": {'),
     "onboarding.seen": Attested("hermes_cli/config.py", '"seen": {'),
 }
@@ -254,6 +256,8 @@ _ATTESTED_SUBTREES = frozenset(
         "auxiliary.curator",
         "auxiliary.compression",
         "delegation",
+        "tools.tool_search",
+        "kanban",
         "tool_loop_guardrails.hard_stop_after",
     }
 )
@@ -614,6 +618,14 @@ def check_vps_trusted_operator_policy(cfg: dict, rep: Report) -> None:
         "sessions.retention_days": 30,
         "sessions.vacuum_after_prune": True,
         "sessions.min_interval_hours": 24,
+        "tools.tool_search.enabled": "auto",
+        "tools.tool_search.threshold_pct": 5,
+        "tools.tool_search.search_default_limit": 5,
+        "tools.tool_search.max_search_limit": 20,
+        "kanban.dispatch_in_gateway": False,
+        "kanban.auto_decompose": False,
+        "kanban.max_in_progress": 2,
+        "kanban.max_in_progress_per_profile": 1,
     }
     for path, want in expected.items():
         value = _get(cfg, path)

@@ -200,6 +200,27 @@ async def test_machine_turn_cannot_start_an_action(monkeypatch):
     assert called is False
 
 
+async def test_machine_turn_cannot_start_composite_change(monkeypatch):
+    called = False
+
+    async def _build(**kwargs):  # noqa: ARG001
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(tools_write, "build_proposal", _build)
+    result = await tools_write.propose_composite_change(
+        account="7753643025",
+        operations=[
+            {"operation": "pause_campaign", "params": {"campaign": "Search"}},
+            {"operation": "pause_campaign", "params": {"campaign": "Brand"}},
+        ],
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "refused"
+    assert called is False
+
+
 async def test_invalid_action_arguments_return_self_healing_json(monkeypatch):
     monkeypatch.setattr(
         tools_write,

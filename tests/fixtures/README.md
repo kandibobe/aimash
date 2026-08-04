@@ -43,6 +43,23 @@ period >400) → сценарий `reject` позеленел на приёме 
 NL-команда) и разная стоимость прогона. `command` в accept-строках — задел на будущую сшивку, офлайн-тест
 его не использует.
 
+## `agent_benchmark_scenarios.json` — redacted Hermes trace contracts
+
+Это второй слой: он проверяет уже выполненный Hermes-ход по именам фактически вызванных MCP tools,
+terminal state и отдельно доказуемым transport/audit признакам. Корпус использует текущие публичные
+имена (`analyze_account`, `execute_google_ads_query`, `composite_change`), а не удалённые legacy
+`get_stats` / `run_gaql` / `propose_action`.
+
+Два последних сценария — точные Telegram UAT:
+
+1. Draft account audit без изменений и без confirmation;
+2. «рыбалка», Украина, Draft, XLSX — без Ads mutation, причём `artifact_delivered=true` обязателен.
+
+Для подтверждённого изменения одного наличия `execute_confirmed` недостаточно: trace обязан показать
+его перед `get_account_changes`, ровно одно trusted confirmation и `readback_verified=true`.
+Поля `artifact_delivered` и `readback_verified` выставляются только transport/audit кодом или ручным
+приёмочным протоколом, не из текста ответа модели.
+
 ### Как расширять
 
 Нашёлся новый класс ошибки парсинга/валидации (реальный или в ревью) → добавь строку с `expect:"reject"`

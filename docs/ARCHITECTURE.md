@@ -70,8 +70,8 @@ OAuth credentials остаются вне Hermes Gateway.
 - `tools_plan.py` публикует durable state: просмотр/отмена proposal, incidents, decisions, artifacts
   и memory workflows. `profile_change`, `profile_clear` и `start_client_crawl` создают proposal на
   изменение Aimash Memory, но не Google Ads mutation;
-- `tools_write.py` публикует 42 ACTION tools. Каждый ACTION валидирует typed payload и вызывает общий
-  proposal builder;
+- `tools_write.py` публикует 42 ACTION tools и отдельный `composite_change`. Каждый ACTION валидирует
+  typed payload; composite объединяет 2–10 rollbackable операций в один parent proposal;
 - [`mcp_server/propose.py`](../mcp_server/propose.py) снимает текущий state, строит точный
   `before -> after` preview и сохраняет строку через `ConfirmStore.save_proposal()`;
 - новая строка всегда получает `status="pending"`. PostgreSQL partial unique index допускает не

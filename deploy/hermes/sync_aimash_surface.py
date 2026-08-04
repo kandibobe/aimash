@@ -101,6 +101,18 @@ TOOL_LOOP_GUARDRAILS = {
         "idempotent_no_progress": 3,
     },
 }
+TOOL_SEARCH_POLICY = {
+    "enabled": "auto",
+    "threshold_pct": 5,
+    "search_default_limit": 5,
+    "max_search_limit": 20,
+}
+KANBAN_SAFE_POLICY = {
+    "dispatch_in_gateway": False,
+    "auto_decompose": False,
+    "max_in_progress": 2,
+    "max_in_progress_per_profile": 1,
+}
 AIMASH_MCP_COMMAND = "/bin/sh"
 AIMASH_MCP_ARGS = ("/opt/aimash/scripts/run_hermes_mcp.sh",)
 
@@ -164,6 +176,13 @@ def reconcile_trusted_operator_policy(config: dict[str, Any]) -> dict[str, Any]:
         "hard_stop_enabled": TOOL_LOOP_GUARDRAILS["hard_stop_enabled"],
         "hard_stop_after": dict(TOOL_LOOP_GUARDRAILS["hard_stop_after"]),
     }
+    tools = config.setdefault("tools", {})
+    if not isinstance(tools, dict):
+        raise RuntimeError("live Hermes config: tools must be a mapping")
+    tools["tool_search"] = dict(TOOL_SEARCH_POLICY)
+    # The production profile is not a Kanban worker. Keep the dispatcher off until a separately
+    # installed READ-only profile has passed the golden trace corpus.
+    config["kanban"] = dict(KANBAN_SAFE_POLICY)
     platform_toolsets = config.setdefault("platform_toolsets", {})
     if not isinstance(platform_toolsets, dict):
         raise RuntimeError("live Hermes config: platform_toolsets must be a mapping")

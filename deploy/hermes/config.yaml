@@ -184,6 +184,24 @@ provider_routing:
   require_parameters: true
   data_collection: deny
 
+# Progressive disclosure is supported by the pinned v0.19.0 runtime. Keep it explicit so an
+# upstream default change cannot silently expose all MCP schemas on every turn. Rollback: set
+# enabled=off; no MCP registry or money-path code changes are required.
+tools:
+  tool_search:
+    enabled: auto
+    threshold_pct: 5
+    search_default_limit: 5
+    max_search_limit: 20
+
+# Kanban remains installed but its dispatcher is fail-closed until isolated READ-only profiles have
+# passed the golden trace corpus. Enabling the CLI toolset alone must not start autonomous workers.
+kanban:
+  dispatch_in_gateway: false
+  auto_decompose: false
+  max_in_progress: 2
+  max_in_progress_per_profile: 1
+
 mcp_servers:
   aimash:
     # Wrapper serializes the one named artifact container and removes it only after the previous
@@ -276,6 +294,9 @@ mcp_servers:
         - add_promotion
         - add_price_asset
         - remove_asset_link
+        # One bounded package of 2-10 rollbackable operations. This creates one pending proposal;
+        # execution still requires the normal trusted reply -> execute_confirmed CAS path.
+        - composite_change
         - profile_change
         - profile_clear
         - list_pending_proposals

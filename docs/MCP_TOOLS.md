@@ -1,6 +1,7 @@
 # HERMES 3.0 MCP Tool Registry
 
-FastMCP server публикует строго проверяемую поверхность из **85 инструментов**. Источник истины —
+FastMCP server публикует строго проверяемую базовую поверхность из **86 инструментов**.
+При `RESEARCH_ARCHIVE_ENABLED=true` к ней добавляются два research archive tools, и фактический total равен **88**. Источник истины —
 Python registries в [`mcp_server/`](../mcp_server/), а не ручной список: при старте
 `require_registered_surface()` сравнивает фактически зарегистрированные имена с ожидаемым набором и
 останавливает процесс при drift.
@@ -13,11 +14,13 @@ Python registries в [`mcp_server/`](../mcp_server/), а не ручной сп�
 | META | `META_TOOL_FUNCS` | 1 |
 | PLAN & STATE | `PLAN_STATE_TOOL_FUNCS` | 15 |
 | ACTION | `ACTION_TOOL_FUNCS` | 42 |
+| Composite proposal | `COMPOSITE_TOOL_FUNCS` | 1 |
 | Approval execution | `EXECUTE_TOOL_FUNCS` | 1 |
-| **Total** | exact union | **84** |
+| **Total** | exact union | **86** |
+| Optional research archive | `RESEARCH_TOOL_FUNCS` | **+2** |
 
-В составе поверхности — **26 READ-инструментов**, 1 META, 15 PLAN & STATE, 42 ACTION и один
-`execute_confirmed`.
+В составе поверхности — **26 READ-инструментов**, 1 META, 15 PLAN & STATE, 42 ACTION, один
+`composite_change` и один `execute_confirmed`.
 
 ```python
 expected = (
@@ -25,9 +28,11 @@ expected = (
     | META_MCP_TOOLS
     | PLAN_STATE_MCP_TOOLS
     | ACTION_MCP_TOOLS
+    | COMPOSITE_MCP_TOOLS
     | EXECUTE_MCP_TOOLS
 )
-assert len(expected) == 85
+assert len(expected) == 86
+# settings.research_archive_enabled -> len(expected | RESEARCH_MCP_TOOLS) == 88
 ```
 
 ## READ — статистика, аудит и подготовка
@@ -105,6 +110,10 @@ ACTION tools имеют прямые agent-first имена. Внутренни�
 | Ads & assets | 9 | `create_rsa`, `add_sitelinks`, `add_callouts`, `add_structured_snippets`, `attach_image_asset`, `add_call_asset`, `add_promotion`, `add_price_asset`, `remove_asset_link` |
 | **Total** | **42** | Exact equality with `MUTATION_TOOLS` is test-guarded |
 
+`composite_change` не является 43-й mutation: он принимает 2–10 rollbackable ACTION operations,
+снимает их `before` state и сохраняет ровно один parent proposal. Исполнение остаётся только через
+trusted reply и `execute_confirmed`; частично выполненный пакет проходит компенсацию и post-verify.
+
 ## `execute_confirmed`
 
 `execute_confirmed` — единственная approval execution entrypoint. У инструмента нет model-supplied
@@ -133,7 +142,7 @@ verified reply
 
 ## MEMORY — cross-cutting surface
 
-MEMORY не добавляет инструменты сверх 84; это функциональная группа внутри READ и PLAN & STATE.
+MEMORY не добавляет инструменты сверх 86; это функциональная группа внутри READ и PLAN & STATE.
 
 | Операция | Surface | Mutation semantics |
 |---|---|---|
@@ -157,16 +166,17 @@ python - <<'PY'
 from mcp_server.tools_meta import META_TOOL_FUNCS
 from mcp_server.tools_plan import PLAN_STATE_TOOL_FUNCS
 from mcp_server.tools_read import READ_TOOL_FUNCS
-from mcp_server.tools_write import ACTION_TOOL_FUNCS, EXECUTE_TOOL_FUNCS
+from mcp_server.tools_write import ACTION_TOOL_FUNCS, COMPOSITE_TOOL_FUNCS, EXECUTE_TOOL_FUNCS
 
 parts = {
     "READ": len(READ_TOOL_FUNCS),
     "META": len(META_TOOL_FUNCS),
     "PLAN_STATE": len(PLAN_STATE_TOOL_FUNCS),
     "ACTIONS": len(ACTION_TOOL_FUNCS),
+    "COMPOSITE": len(COMPOSITE_TOOL_FUNCS),
     "EXECUTE": len(EXECUTE_TOOL_FUNCS),
 }
 print(parts)
-assert parts == {"READ": 26, "META": 1, "PLAN_STATE": 15, "ACTIONS": 42, "EXECUTE": 1}
+assert parts == {"READ": 26, "META": 1, "PLAN_STATE": 15, "ACTIONS": 42, "COMPOSITE": 1, "EXECUTE": 1}
 PY
 ```

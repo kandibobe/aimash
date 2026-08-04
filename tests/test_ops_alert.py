@@ -37,6 +37,10 @@ def _snapshot(
         "backup_timer": "active",
         "disk_percent": 40.0,
         "conflict_marker": "",
+        "hermes_cron": {
+            "478eac21bfe6": "scheduled",
+            "5db43f3b3d5d": "scheduled",
+        },
     }
 
 
@@ -64,6 +68,53 @@ def test_compare_reports_gateway_down_disk_backup_and_409():
     assert "backup.timer неактивен" in text
     assert "96.0%" in text
     assert "409 Conflict" in text
+
+
+def test_compare_reports_p0_cron_failure_and_recovery():
+    old = _snapshot()
+    broken = _snapshot()
+    broken["hermes_cron"]["5db43f3b3d5d"] = "paused"
+    text = "\n".join(event.text for event in ops.compare(old, broken))
+    assert "Hermes P0 cron Daily Budget Check: paused" in text
+
+    recovered = _snapshot()
+    text = "\n".join(event.text for event in ops.compare(broken, recovered))
+    assert "Hermes P0 cron Daily Budget Check восстановлен" in text
+
+
+def test_p0_cron_snapshot_does_not_capture_prompts_or_destinations(tmp_path):
+    jobs = tmp_path / "jobs.json"
+    jobs.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "478eac21bfe6",
+                        "enabled": True,
+                        "last_status": "ok",
+                        "prompt": "client secret context",
+                        "deliver": {"chat_id": "sensitive"},
+                    },
+                    {"id": "5db43f3b3d5d", "enabled": False},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert ops._hermes_cron_state(jobs) == {
+        "478eac21bfe6": "scheduled",
+        "5db43f3b3d5d": "paused",
+    }
+
+
+def test_p0_cron_watchlist_matches_registry():
+    import yaml
+
+    registry = yaml.safe_load(
+        (ROOT / "deploy/hermes/cron_registry.yaml").read_text(encoding="utf-8")
+    )
+    expected = {job["job_id"] for job in registry["jobs"] if job["criticality"] == "P0"}
+    assert set(ops.CRITICAL_HERMES_CRON_JOBS) == expected
 
 
 def test_send_telegram_targets_explicit_topic_without_leaking_token(monkeypatch):

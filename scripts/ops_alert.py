@@ -32,7 +32,14 @@ ENV_FILES = (
     Path("/root/.hermes/.env"),
 )
 STATE_PATH = Path("/var/lib/aimash-ops-watch/state.json")
+HERMES_CRON_JOBS_PATH = Path("/root/.hermes/cron/jobs.json")
 CONTAINERS = ("aimash-scheduler", "aimash-pg", "aimash-backup")
+# Deliberately duplicated from cron_registry.yaml: the host watcher must run on system Python without
+# PyYAML. A contract test keeps this tiny emergency allow-list synchronized with the registry.
+CRITICAL_HERMES_CRON_JOBS = {
+    "478eac21bfe6": "Hourly Watchdog",
+    "5db43f3b3d5d": "Daily Budget Check",
+}
 _CHAT_ID_RE = re.compile(r"-?[1-9][0-9]{4,19}")
 _SEVERITY_RANK = {"info": 0, "success": 0, "warning": 1, "critical": 2}
 
@@ -226,6 +233,28 @@ def _recent_conflict_marker(run: Callable[..., str] = _run) -> str:
     return hashlib.sha256("\n".join(chunks).encode("utf-8")).hexdigest()
 
 
+def _hermes_cron_state(path: Path = HERMES_CRON_JOBS_PATH) -> dict[str, str]:
+    """Return only P0 job health; never include prompts, delivery targets or other user data."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        rows = payload.get("jobs", payload) if isinstance(payload, dict) else payload
+        jobs = {str(row.get("id")): row for row in rows if isinstance(row, dict)}
+    except (OSError, TypeError, ValueError):
+        return {job_id: "unavailable" for job_id in CRITICAL_HERMES_CRON_JOBS}
+    states: dict[str, str] = {}
+    for job_id in CRITICAL_HERMES_CRON_JOBS:
+        job = jobs.get(job_id)
+        if job is None:
+            states[job_id] = "missing"
+        elif not bool(job.get("enabled", True)) or job.get("state") == "paused":
+            states[job_id] = "paused"
+        elif job.get("last_status") == "error" or job.get("state") == "error":
+            states[job_id] = "error"
+        else:
+            states[job_id] = "scheduled"
+    return states
+
+
 def collect_snapshot(run: Callable[..., str] = _run) -> dict[str, Any]:
     containers = {name: _container_state(name, run) for name in CONTAINERS}
     try:
@@ -265,6 +294,7 @@ def collect_snapshot(run: Callable[..., str] = _run) -> dict[str, Any]:
         "backup_timer": backup_timer,
         "disk_percent": disk_percent,
         "conflict_marker": _recent_conflict_marker(run),
+        "hermes_cron": _hermes_cron_state(),
     }
 
 
@@ -339,6 +369,16 @@ def compare(previous: dict[str, Any], current: dict[str, Any]) -> list[Event]:
         events.append(
             Event("critical", "🚫 Обнаружен Telegram 409 Conflict — вероятен второй poller")
         )
+
+    old_cron = previous.get("hermes_cron") or {}
+    new_cron = current.get("hermes_cron") or {}
+    for job_id, name in CRITICAL_HERMES_CRON_JOBS.items():
+        old_state = old_cron.get(job_id)
+        new_state = new_cron.get(job_id)
+        if new_state in {"missing", "paused", "error"} and old_state != new_state:
+            events.append(Event("critical", f"🔴 Hermes P0 cron {name}: {new_state}"))
+        elif old_state in {"missing", "paused", "error"} and new_state == "scheduled":
+            events.append(Event("success", f"🟢 Hermes P0 cron {name} восстановлен"))
     return events
 
 

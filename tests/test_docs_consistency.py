@@ -19,7 +19,7 @@ import pytest
 from mcp_server.tools_meta import META_TOOL_FUNCS
 from mcp_server.tools_plan import PLAN_STATE_TOOL_FUNCS
 from mcp_server.tools_read import READ_TOOL_FUNCS
-from mcp_server.tools_write import ACTION_TOOL_FUNCS, EXECUTE_TOOL_FUNCS
+from mcp_server.tools_write import ACTION_TOOL_FUNCS, COMPOSITE_TOOL_FUNCS, EXECUTE_TOOL_FUNCS
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -88,6 +88,7 @@ def test_docs_total_tool_count_matches_registry(rel):
         + len(META_TOOL_FUNCS)
         + len(PLAN_STATE_TOOL_FUNCS)
         + len(ACTION_TOOL_FUNCS)
+        + len(COMPOSITE_TOOL_FUNCS)
         + len(EXECUTE_TOOL_FUNCS)
     )
     text = (_ROOT / rel).read_text(encoding="utf-8")

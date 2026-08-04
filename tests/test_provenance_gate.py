@@ -20,6 +20,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import os
 import pathlib
 import sys
 import uuid
@@ -210,12 +211,32 @@ def test_human_turn_call_sites_are_allow_listed():
         "mcp_server/trusted_transport.py",
         "scripts/_operator_turn.py",
     }
-    skip = ("tests", "migrations", ".git", "__pycache__", "deploy", "docs", "venv")
+    skip_dirs = {
+        "tests",
+        "migrations",
+        ".git",
+        "__pycache__",
+        "deploy",
+        "docs",
+        "venv",
+        ".venv",
+        ".agents",
+        ".claude",
+        ".codex",
+        ".hypothesis",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+    }
     found: set[str] = set()
-    for py in root.rglob("*.py"):
+    project_python: list[pathlib.Path] = []
+    for current, dirs, files in os.walk(root):
+        dirs[:] = [name for name in dirs if name not in skip_dirs]
+        project_python.extend(
+            pathlib.Path(current) / name for name in files if name.endswith(".py")
+        )
+    for py in project_python:
         rel = py.relative_to(root).as_posix()
-        if rel.startswith(skip):
-            continue
         try:
             tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
         except SyntaxError:  # чужой/битый файл в дереве не должен ронять мета-гард

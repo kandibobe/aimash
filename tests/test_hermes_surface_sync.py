@@ -49,6 +49,8 @@ def test_surface_sync_model_policy_matches_repository_config():
     assert config["platform_toolsets"]["telegram"] == list(SYNC.TELEGRAM_TOOLSETS)
     assert config["skills"]["platform_disabled"]["telegram"] == list(SYNC.TELEGRAM_DISABLED_SKILLS)
     assert config["tool_loop_guardrails"] == SYNC.TOOL_LOOP_GUARDRAILS
+    assert config["tools"]["tool_search"] == SYNC.TOOL_SEARCH_POLICY
+    assert config["kanban"] == SYNC.KANBAN_SAFE_POLICY
     assert SYNC.CANONICAL_SKILLS == (
         "ad-master-agent",
         "google-ads-worker",
@@ -186,6 +188,8 @@ def test_trusted_operator_policy_is_pinned_without_touching_host_secrets():
     }
     assert got["approvals"] == {"mode": "manual", "cron_mode": "deny"}
     assert got["tool_loop_guardrails"] == SYNC.TOOL_LOOP_GUARDRAILS
+    assert got["tools"]["tool_search"] == SYNC.TOOL_SEARCH_POLICY
+    assert got["kanban"] == SYNC.KANBAN_SAFE_POLICY
     assert got["platform_toolsets"]["telegram"] == list(SYNC.TELEGRAM_TOOLSETS)
     assert "session_search" not in got["platform_toolsets"]["telegram"]
     assert not {

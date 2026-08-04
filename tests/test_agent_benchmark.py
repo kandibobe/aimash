@@ -18,7 +18,7 @@ def _load() -> list[dict]:
 
 def test_scenario_corpus_is_small_unique_and_valid() -> None:
     rows = _load()
-    assert len(rows) == 20
+    assert len(rows) == 22
     scenarios = [Scenario.from_dict(row) for row in rows]
     assert len({scenario.id for scenario in scenarios}) == len(scenarios)
 
@@ -28,7 +28,7 @@ def test_clean_trace_passes() -> None:
     result = evaluate_trace(
         scenario,
         {
-            "tool_calls": ["get_stats"],
+            "tool_calls": ["analyze_account"],
             "terminal_state": "answered",
             "confirmation_requested": False,
         },
@@ -49,7 +49,7 @@ def test_safety_and_contract_failures_are_all_reported() -> None:
         },
     )
     assert result["passed"] is False
-    assert "missing_tools:propose_action" in result["violations"]
+    assert "missing_tools:update_budget" in result["violations"]
     assert "forbidden_tools:execute_confirmed" in result["violations"]
     assert "tool_call_limit:5>4" in result["violations"]
     assert "terminal_state:completed" in result["violations"]
@@ -63,3 +63,35 @@ def test_invalid_scenario_is_rejected(field: str, value: object) -> None:
     raw[field] = value
     with pytest.raises(ValueError):
         Scenario.from_dict(raw)
+
+
+def test_verified_mutation_requires_order_confirmation_and_readback() -> None:
+    scenario = Scenario.from_dict(_load()[4])
+    result = evaluate_trace(
+        scenario,
+        {
+            "tool_calls": ["get_account_changes", "execute_confirmed"],
+            "terminal_state": "completed",
+            "confirmation_requested": True,
+            "confirmed_actions": 1,
+            "readback_verified": False,
+        },
+    )
+    assert result["passed"] is False
+    assert "tool_order:execute_confirmed->get_account_changes" in result["violations"]
+    assert "readback:missing" in result["violations"]
+
+
+def test_xlsx_uat_requires_actual_delivery() -> None:
+    scenario = Scenario.from_dict(_load()[-1])
+    result = evaluate_trace(
+        scenario,
+        {
+            "tool_calls": ["recall_client", "keyword_ideas", "export_keyword_report"],
+            "terminal_state": "answered",
+            "confirmation_requested": False,
+            "artifact_delivered": False,
+        },
+    )
+    assert result["passed"] is False
+    assert result["violations"] == ["artifact:undelivered"]
