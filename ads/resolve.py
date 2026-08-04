@@ -43,6 +43,7 @@ class AdGroupRef:
     # иначе Google отвергает создание. Дефолты пустые: прочие вызовы (pause/bid) поля игнорируют.
     ad_group_type: str = ""
     channel_type: str = ""
+    campaign_name: str = ""
 
     def accepts_rsa(self) -> bool:
         """True, если в эту группу можно добавить Responsive Search Ad (Search-стандарт)."""
@@ -50,6 +51,22 @@ class AdGroupRef:
             self.channel_type.upper() == "SEARCH"
             and self.ad_group_type.upper() == "SEARCH_STANDARD"
         )
+
+
+class InvalidAdGroupTarget(ValueError):
+    """Live Google Ads hierarchy does not match a model-supplied mutation target."""
+
+
+@dataclass(frozen=True)
+class AdGroupTargetSet:
+    """Canonical immutable identity for one campaign and its selected live ad groups."""
+
+    campaign_id: str
+    ad_groups: tuple[AdGroupRef, ...]
+
+    @property
+    def ad_group_ids(self) -> tuple[str, ...]:
+        return tuple(group.id for group in self.ad_groups)
 
 
 @dataclass
@@ -238,7 +255,7 @@ def find_ad_groups(
     # bid/add_keywords могли бы адресовать мёртвую сущность (имена Google переиспользует).
     q = (
         "SELECT ad_group.id, ad_group.name, ad_group.status, ad_group.cpc_bid_micros, "
-        "ad_group.resource_name, ad_group.type, campaign.id, "
+        "ad_group.resource_name, ad_group.type, campaign.id, campaign.name, "
         "campaign.advertising_channel_type FROM ad_group "
         f"WHERE campaign.name = '{safe}' AND campaign.status != 'REMOVED' "
         "AND ad_group.status != 'REMOVED' ORDER BY ad_group.id"
@@ -260,9 +277,246 @@ def find_ad_groups(
                     getattr(row.campaign, "advertising_channel_type", None), "name", ""
                 )
                 or "",
+                campaign_name=str(campaign_name),
             )
         )
     return out
+
+
+def find_ad_group_by_id(
+    client: GoogleAdsClient, customer_id: str, ad_group_id: str
+) -> AdGroupRef | None:
+    """Resolve one live ad group by ID inside exactly one allowed customer account.
+
+    The returned campaign ID/name come from the same Google Ads row as the ad group. Callers must
+    compare them with their intended campaign before persisting a mutation proposal.
+    """
+    ensure_allowed(customer_id)
+    target = str(ad_group_id).strip()
+    if not target.isdigit():
+        raise ValueError("ad_group_id должен содержать только цифры")
+    target = str(int(target))
+    ga = client.get_service("GoogleAdsService")
+    q = (
+        "SELECT ad_group.id, ad_group.name, ad_group.status, ad_group.cpc_bid_micros, "
+        "ad_group.resource_name, ad_group.type, campaign.id, campaign.name, "
+        "campaign.advertising_channel_type FROM ad_group "
+        f"WHERE ad_group.id = {target} AND campaign.status != 'REMOVED' "
+        "AND ad_group.status != 'REMOVED' LIMIT 1"
+    )
+    for row in ga.search(customer_id=str(customer_id), query=q):
+        return AdGroupRef(
+            id=str(row.ad_group.id),
+            resource_name=row.ad_group.resource_name,
+            name=row.ad_group.name,
+            status=row.ad_group.status.name,
+            cpc_bid_micros=row.ad_group.cpc_bid_micros,
+            campaign_id=str(row.campaign.id),
+            ad_group_type=getattr(getattr(row.ad_group, "type_", None), "name", "") or "",
+            channel_type=getattr(
+                getattr(row.campaign, "advertising_channel_type", None), "name", ""
+            )
+            or "",
+            campaign_name=str(row.campaign.name),
+        )
+    return None
+
+
+def find_campaign_ids_by_name(
+    client: GoogleAdsClient, customer_id: str, campaign_name: str
+) -> list[str]:
+    """Return every live campaign ID with this exact name inside one allowed account."""
+    ensure_allowed(customer_id)
+    campaign_name = str(campaign_name).strip()
+    if not campaign_name:
+        return []
+    ga = client.get_service("GoogleAdsService")
+    safe = gaql_escape(campaign_name)
+    q = (
+        "SELECT campaign.id FROM campaign "
+        f"WHERE campaign.name = '{safe}' AND campaign.status != 'REMOVED' "
+        "ORDER BY campaign.id"
+    )
+    out: list[str] = []
+    for row in ga.search(customer_id=str(customer_id), query=q):
+        campaign_id = str(row.campaign.id)
+        if campaign_id not in out:
+            out.append(campaign_id)
+    return out
+
+
+def validate_campaign_target(
+    client: GoogleAdsClient,
+    customer_id: str,
+    campaign_name: str,
+    *,
+    campaign_id: str | None = None,
+) -> str:
+    """Resolve one exact live campaign and optionally compare its immutable stored identity."""
+    campaign_name = str(campaign_name).strip()
+    if not campaign_name:
+        raise InvalidAdGroupTarget("campaign обязателен для проверки таргета")
+    campaign_ids = find_campaign_ids_by_name(client, customer_id, campaign_name)
+    if not campaign_ids:
+        raise InvalidAdGroupTarget(
+            f"кампания «{campaign_name}» не найдена в customer_id {customer_id}"
+        )
+    if len(campaign_ids) != 1:
+        raise InvalidAdGroupTarget(
+            f"имя кампании «{campaign_name}» неоднозначно в customer_id {customer_id}: "
+            f"найдено campaign_id: {', '.join(campaign_ids)}"
+        )
+    live_campaign_id = campaign_ids[0]
+    expected_campaign_id = str(campaign_id or "").strip()
+    if expected_campaign_id:
+        if not expected_campaign_id.isdigit():
+            raise InvalidAdGroupTarget("сохранённый campaign_id некорректен; создай новый Proposal")
+        expected_campaign_id = str(int(expected_campaign_id))
+        if live_campaign_id != expected_campaign_id:
+            raise InvalidAdGroupTarget(
+                f"цель изменилась после Proposal: кампания «{campaign_name}» теперь имеет "
+                f"campaign_id {live_campaign_id}, ожидался {expected_campaign_id}; "
+                "создай новый Proposal"
+            )
+    return live_campaign_id
+
+
+def validate_ad_group_targets(
+    client: GoogleAdsClient,
+    customer_id: str,
+    campaign_name: str,
+    ad_group_name: str | None = None,
+    *,
+    campaign_id: str | None = None,
+    ad_group_ids: list[str] | tuple[str, ...] | None = None,
+) -> AdGroupTargetSet:
+    """Resolve a named campaign/group scope and optionally compare a stored identity snapshot."""
+    campaign_name = str(campaign_name).strip()
+    ad_group_name = str(ad_group_name or "").strip()
+    if not campaign_name:
+        raise InvalidAdGroupTarget("campaign обязателен для проверки таргета")
+
+    ad_groups = find_ad_groups(client, customer_id, campaign_name)
+    if not ad_groups:
+        raise InvalidAdGroupTarget(
+            f"в кампании «{campaign_name}» customer_id {customer_id} нет доступных групп объявлений"
+        )
+    live_campaign_ids = sorted({group.campaign_id for group in ad_groups})
+    if len(live_campaign_ids) != 1:
+        raise InvalidAdGroupTarget(
+            f"имя кампании «{campaign_name}» неоднозначно в customer_id {customer_id}: "
+            f"найдено campaign_id: {', '.join(live_campaign_ids)}"
+        )
+    live_campaign_id = live_campaign_ids[0]
+
+    expected_campaign_id = str(campaign_id or "").strip()
+    if expected_campaign_id:
+        if not expected_campaign_id.isdigit():
+            raise InvalidAdGroupTarget("сохранённый campaign_id некорректен; создай новый Proposal")
+        expected_campaign_id = str(int(expected_campaign_id))
+        if live_campaign_id != expected_campaign_id:
+            raise InvalidAdGroupTarget(
+                f"цель изменилась после Proposal: кампания «{campaign_name}» теперь имеет "
+                f"campaign_id {live_campaign_id}, ожидался {expected_campaign_id}; "
+                "создай новый Proposal"
+            )
+
+    selected = [group for group in ad_groups if not ad_group_name or group.name == ad_group_name]
+    if not selected:
+        raise InvalidAdGroupTarget(
+            f"группа «{ad_group_name}» не найдена в кампании «{campaign_name}» "
+            f"customer_id {customer_id}"
+        )
+    if ad_group_name and len(selected) != 1:
+        raise InvalidAdGroupTarget(
+            f"имя группы «{ad_group_name}» неоднозначно в кампании «{campaign_name}»"
+        )
+    selected.sort(key=lambda group: int(group.id))
+    live_ad_group_ids = [group.id for group in selected]
+
+    if ad_group_ids is not None:
+        if not isinstance(ad_group_ids, (list, tuple)) or not all(
+            isinstance(value, str) and value.isdigit() for value in ad_group_ids
+        ):
+            raise InvalidAdGroupTarget(
+                "сохранённый набор ad_group_ids некорректен; создай новый Proposal"
+            )
+        raw_ad_group_ids = list(ad_group_ids)
+        expected_ad_group_ids = sorted((str(int(value)) for value in raw_ad_group_ids), key=int)
+        if raw_ad_group_ids != expected_ad_group_ids or len(expected_ad_group_ids) != len(
+            set(expected_ad_group_ids)
+        ):
+            raise InvalidAdGroupTarget(
+                "сохранённый набор ad_group_ids неканоничен; создай новый Proposal"
+            )
+        if live_ad_group_ids != expected_ad_group_ids:
+            raise InvalidAdGroupTarget(
+                "набор групп изменился после Proposal: "
+                f"сейчас [{', '.join(live_ad_group_ids)}], "
+                f"ожидался [{', '.join(expected_ad_group_ids)}]; создай новый Proposal"
+            )
+
+    return AdGroupTargetSet(campaign_id=live_campaign_id, ad_groups=tuple(selected))
+
+
+def validate_ad_group_target(
+    client: GoogleAdsClient,
+    customer_id: str,
+    campaign_name: str,
+    ad_group_id: str,
+    *,
+    campaign_id: str | None = None,
+    require_rsa: bool = False,
+) -> AdGroupRef:
+    """Resolve and prove customer → campaign → ad-group ownership before a write.
+
+    ``campaign_id`` is authoritative when supplied. Older callers that only carry a campaign name
+    are accepted only when that exact live name resolves to one campaign, then its immutable ID is
+    compared with the parent ID returned in the same row as the ad group.
+    """
+    campaign_name = str(campaign_name).strip()
+    if not campaign_name:
+        raise InvalidAdGroupTarget("campaign обязателен для проверки таргета")
+
+    target = find_ad_group_by_id(client, customer_id, ad_group_id)
+    if target is None:
+        raise InvalidAdGroupTarget(
+            f"ad_group_id {ad_group_id} не найден в customer_id {customer_id}; "
+            "перечитай доступные группы и повтори запрос"
+        )
+
+    expected_campaign_id = str(campaign_id or "").strip()
+    if expected_campaign_id:
+        if not expected_campaign_id.isdigit():
+            raise InvalidAdGroupTarget("campaign_id должен содержать только цифры")
+        expected_campaign_id = str(int(expected_campaign_id))
+    else:
+        campaign_ids = find_campaign_ids_by_name(client, customer_id, campaign_name)
+        if not campaign_ids:
+            raise InvalidAdGroupTarget(
+                f"кампания «{campaign_name}» не найдена в customer_id {customer_id}"
+            )
+        if len(campaign_ids) != 1:
+            raise InvalidAdGroupTarget(
+                f"имя кампании «{campaign_name}» неоднозначно в customer_id {customer_id}: "
+                f"найдено campaign_id: {', '.join(campaign_ids)}; "
+                "перечитай кампании и передай точный campaign_id"
+            )
+        expected_campaign_id = campaign_ids[0]
+
+    if target.campaign_id != expected_campaign_id or target.campaign_name != campaign_name:
+        raise InvalidAdGroupTarget(
+            f"ad_group_id {ad_group_id} принадлежит кампании «{target.campaign_name}» "
+            f"(campaign_id {target.campaign_id}), а не «{campaign_name}» "
+            f"(campaign_id {expected_campaign_id})"
+        )
+    if require_rsa and not target.accepts_rsa():
+        raise InvalidAdGroupTarget(
+            f"ad_group_id {ad_group_id} несовместим с RSA: "
+            f"campaign channel={target.channel_type or 'UNKNOWN'}, "
+            f"ad_group type={target.ad_group_type or 'UNKNOWN'}"
+        )
+    return target
 
 
 def find_ad_group_by_name(

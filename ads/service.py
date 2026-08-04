@@ -18,6 +18,8 @@ from ads.client import DRAFT_ACCOUNT_ID, build_client_async, ensure_allowed
 # читать и гейт A внутри ads.mutations, а импортировать оттуда ads.service нельзя (цикл). Имена
 # ре-экспортируются этим модулем: вызывающие (bot.main, scripts/*, тесты) не менялись.
 from ads.freshness import (
+    TARGET_AD_GROUP_IDS_KEY,
+    TARGET_CAMPAIGN_ID_KEY,
     Snapshot,
     SnapshotKind,
     FreshnessMissing,
@@ -767,27 +769,27 @@ async def _apply_confirmed(store, confirmation_id: str) -> dict:
         )
 
     if op == "add_keywords":
-        # Ключи добавляются в группы кампании; params['ad_group'] (опц.) СУЖАЕТ адрес до одной группы.
-        # Без сужения ключ ложится во ВСЕ группы кампании — это ровно та каннибализация, которую сам
-        # же аудит и флажит. Имя группы не совпало → ОТКАЗ (fail-closed), а не веер по всем группам.
-        ad_groups = await asyncio.to_thread(
-            resolve.find_ad_groups, client, customer_id, params["campaign"]
-        )
-        if not ad_groups:
+        # Identity snapshot не даёт name reuse или изменению fan-out незаметно подменить цель после
+        # карточки. Legacy Proposal без immutable IDs недоказуем — его нужно пересоздать.
+        stored_campaign_id = params.get(TARGET_CAMPAIGN_ID_KEY)
+        stored_ad_group_ids = params.get(TARGET_AD_GROUP_IDS_KEY)
+        if not stored_campaign_id or stored_ad_group_ids is None:
             raise ValueError(
-                f"в кампании '{params['campaign']}' нет групп объявлений (или кампания не найдена)"
+                "legacy add_keywords Proposal не содержит снимок target identity; создай новый Proposal"
             )
-        want = str(params.get("ad_group") or "").strip()
-        if want:
-            ad_groups = [ag for ag in ad_groups if str(ag.name) == want]
-            if not ad_groups:
-                raise ValueError(
-                    f"в кампании '{params['campaign']}' нет группы объявлений '{want}'"
-                )
+        targets = await asyncio.to_thread(
+            resolve.validate_ad_group_targets,
+            client,
+            customer_id,
+            params["campaign"],
+            str(params.get("ad_group") or "").strip() or None,
+            campaign_id=stored_campaign_id,
+            ad_group_ids=stored_ad_group_ids,
+        )
         return await mutations.apply_add_keywords(
             customer_id=customer_id,
-            campaign_id=ad_groups[0].campaign_id,
-            ad_group_ids=[ag.id for ag in ad_groups],
+            campaign_id=targets.campaign_id,
+            ad_group_ids=list(targets.ad_group_ids),
             keywords=params["keywords"],
             match_type=params["match_type"],
             confirmation_id=confirmation_id,
@@ -815,28 +817,45 @@ async def _apply_confirmed(store, confirmation_id: str) -> dict:
         )
 
     if op == "add_negative_keywords":
-        ref = await asyncio.to_thread(
-            resolve.find_campaign_by_name, client, customer_id, params["campaign"]
-        )
-        if ref is None:
-            raise ValueError(f"кампания '{params['campaign']}' не найдена")
-        # 3.2б: params['ad_group'] (опц.) СУЖАЕТ уровень до одной группы (негативный
-        # ad_group_criterion). Имя группы не совпало → ОТКАЗ (fail-closed) ДО claim,
-        # а не тихий откат на уровень кампании — это разные последствия, не деталь.
+        # Тот же identity snapshot для campaign-level и ad-group-level negatives. Проверка идёт до
+        # claim; удаление/пересоздание сущности под тем же именем блокируется.
+        stored_campaign_id = params.get(TARGET_CAMPAIGN_ID_KEY)
+        if not stored_campaign_id:
+            raise ValueError(
+                "legacy add_negative_keywords Proposal не содержит снимок target identity; "
+                "создай новый Proposal"
+            )
         ad_group_id = None
         want = str(params.get("ad_group") or "").strip()
         if want:
-            ag = await asyncio.to_thread(
-                resolve.find_ad_group_by_name, client, customer_id, params["campaign"], want
-            )
-            if ag is None:
+            stored_ad_group_ids = params.get(TARGET_AD_GROUP_IDS_KEY)
+            if stored_ad_group_ids is None:
                 raise ValueError(
-                    f"в кампании '{params['campaign']}' нет группы объявлений '{want}'"
+                    "legacy add_negative_keywords Proposal не содержит ad_group identity; "
+                    "создай новый Proposal"
                 )
-            ad_group_id = ag.id
+            targets = await asyncio.to_thread(
+                resolve.validate_ad_group_targets,
+                client,
+                customer_id,
+                params["campaign"],
+                want,
+                campaign_id=stored_campaign_id,
+                ad_group_ids=stored_ad_group_ids,
+            )
+            campaign_id = targets.campaign_id
+            ad_group_id = targets.ad_group_ids[0]
+        else:
+            campaign_id = await asyncio.to_thread(
+                resolve.validate_campaign_target,
+                client,
+                customer_id,
+                params["campaign"],
+                campaign_id=stored_campaign_id,
+            )
         return await mutations.apply_add_negative_keywords(
             customer_id=customer_id,
-            campaign_id=ref.id,
+            campaign_id=campaign_id,
             keywords=params["keywords"],
             match_type=params["match_type"],
             confirmation_id=confirmation_id,
@@ -1285,8 +1304,19 @@ async def _apply_confirmed(store, confirmation_id: str) -> dict:
                     await asyncio.to_thread(clear_pending_media, mid)
 
     if op == "create_rsa":
-        # Группа уже зарезолвлена в курации (ad_group_id в params) → доп. резолв не нужен.
-        # Замок аккаунта и валидацию набора держит сам apply_create_rsa.
+        # Defense-in-depth для legacy Proposal и TOCTOU: повторно доказываем customer → campaign →
+        # ad_group до одноразового claim внутри apply_create_rsa. Любой READ-сбой блокирует мутацию.
+        target = await asyncio.to_thread(
+            resolve.validate_ad_group_target,
+            client,
+            customer_id,
+            params["campaign"],
+            params["ad_group_id"],
+            campaign_id=params.get("campaign_id"),
+            require_rsa=True,
+        )
+        params["ad_group_id"] = target.id
+        params["campaign_id"] = target.campaign_id
         return await mutations.apply_create_rsa(
             customer_id=customer_id,
             ad_group_id=params["ad_group_id"],

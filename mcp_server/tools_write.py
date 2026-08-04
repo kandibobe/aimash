@@ -671,6 +671,7 @@ async def propose_create_rsa(
     final_url: str,
     headlines: list[str],
     descriptions: list[str],
+    campaign_id: str | None = None,
     path1: str | None = None,
     path2: str | None = None,
 ) -> dict[str, Any]:
@@ -682,6 +683,7 @@ async def propose_create_rsa(
         CreateRsa,
         account=account,
         campaign=campaign,
+        campaign_id=campaign_id,
         ad_group_id=ad_group_id,
         final_url=final_url,
         headlines=headlines,

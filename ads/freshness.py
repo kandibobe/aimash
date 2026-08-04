@@ -210,12 +210,20 @@ class Snapshot:
     reason: str = ""
 
 
-# Снимок и его аттестация. Пара служебная и ХОД-СПЕЦИФИЧНАЯ: она описывает состояние аккаунта в
-# момент показа ЭТОЙ карточки. Любой путь, который переиспользует params позже (шаблон, повтор из
-# /recent, клон), обязан её снять — иначе новый черновик унаследует чужое «прочитано» и проедет гейт
-# без единого чтения. Это ровно тот класс дыр, который гейт и закрывает, поэтому снятие вынесено
-# в общий хелпер, а не повторяется списками ключей по местам.
-ATTESTATION_KEYS: frozenset[str] = frozenset({"_before", "_freshness"})
+# Снимок и его аттестация. Служебные ключи ХОД-СПЕЦИФИЧНЫ: они описывают состояние аккаунта и
+# immutable identity цели в момент показа ЭТОЙ карточки. Любой путь, который переиспользует params
+# позже (шаблон, повтор из /recent, клон), обязан их снять — иначе новый черновик унаследует чужое
+# «прочитано» или target snapshot.
+#
+# Target-ключи модель передать не может (`extra="forbid"`); их добавляет только live resolver до
+# сохранения Proposal. Держим их в том же реестре, чтобы history/replay не подал внутренние поля
+# обратно в строгую Pydantic-схему и всегда получил новый live snapshot. Снятие вынесено в общий
+# реестр, а не повторяется списками ключей по местам.
+TARGET_CAMPAIGN_ID_KEY = "_target_campaign_id"
+TARGET_AD_GROUP_IDS_KEY = "_target_ad_group_ids"
+ATTESTATION_KEYS: frozenset[str] = frozenset(
+    {"_before", "_freshness", TARGET_CAMPAIGN_ID_KEY, TARGET_AD_GROUP_IDS_KEY}
+)
 
 
 def attach_freshness(params: dict, snap: Snapshot) -> dict:
@@ -235,7 +243,7 @@ def attach_freshness(params: dict, snap: Snapshot) -> dict:
 
 
 def strip_attestation(params: dict) -> dict:
-    """params без снимка и аттестации свежести — для переиспользования в ДРУГОМ ходе."""
+    """params без freshness/target attestation — для переиспользования в ДРУГОМ ходе."""
     return {k: v for k, v in (params or {}).items() if k not in ATTESTATION_KEYS}
 
 

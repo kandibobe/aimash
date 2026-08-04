@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from adcopy.validate import (
     ASSET_LIMITS,
@@ -164,6 +164,12 @@ READ_TOOLS = {"get_stats", "generate_rsa", "keyword_research", "clone_campaign",
 ABSOLUTE_MONEY_MODES = ("set_to", "increase_by_amount", "decrease_by_amount")
 
 
+class ToolArgs(BaseModel):
+    """Fail-closed base for every model-facing tool argument schema."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
 def _assert_mode_currency(mode: str | None, currency: str | None) -> None:
     """Связка mode↔currency (golden rule #4): абсолютная сумма (set_to/increase_by_amount/
     decrease_by_amount) НЕ может нести currency='percent' — иначе процент умножился бы на 1e6 как
@@ -196,7 +202,7 @@ def _value_sane(v: float, mode: str | None) -> float:
     return v
 
 
-class UpdateBudget(BaseModel):
+class UpdateBudget(ToolArgs):
     campaign: str
     # §5: направление несёт mode, а НЕ знак value (value всегда >0). Без decrease_* модель на «снизь
     # бюджет на 20%» выбирала increase_by_percent → карточка «100 → 120 (+20%)», т.е. ровно наоборот.
@@ -223,7 +229,7 @@ class UpdateBudget(BaseModel):
         return self
 
 
-class UpdateBid(BaseModel):
+class UpdateBid(ToolArgs):
     # campaign обязателен: ставка живёт на уровне ad group, нужно знать какой кампании.
     # Отсутствие кампании => ValidationError в loop ДО кнопок (а не raise после «да»).
     campaign: str
@@ -242,7 +248,7 @@ class UpdateBid(BaseModel):
         return self
 
 
-class UpdateKeywordBid(BaseModel):
+class UpdateKeywordBid(ToolArgs):
     """Ставка CPC на уровне КЛЮЧА (ad_group_criterion.cpc_bid_micros), а не всей группы.
 
     Точечный инструмент под /bids: поднимаем ровно тот ключ, что недобирает позицию, не двигая
@@ -275,12 +281,12 @@ class UpdateKeywordBid(BaseModel):
         return self
 
 
-class AddKeywords(BaseModel):
+class AddKeywords(ToolArgs):
     """Позитивные ключи в кампанию. ad_group (опц., Ф4 «сбор урожая», 2026-07-14) СУЖАЕТ адрес до
     одной группы: по умолчанию ключ ложится во ВСЕ группы кампании, а это своими руками делает ту
     самую каннибализацию (один ключ в нескольких группах конкурирует сам с собой), которую флажит
-    check_keyword_cannibalization. Группы нет в кампании → отказ в execute_confirmed, не тихий
-    веер по всем группам."""
+    check_keyword_cannibalization. Группы нет в кампании → live-отказ до сохранения Proposal,
+    не тихий веер по всем группам."""
 
     campaign: str  # обязателен: ключи добавляются в группы этой кампании
     ad_group: str | None = None  # опц.: только эта группа (иначе — все группы кампании)
@@ -293,7 +299,7 @@ class AddKeywords(BaseModel):
         return normalize_keywords(v)
 
 
-class RemoveKeywords(BaseModel):
+class RemoveKeywords(ToolArgs):
     campaign: str  # обязателен: ключи удаляются из групп этой кампании (по тексту+типу)
     keywords: list[str] = Field(min_length=1, max_length=ADD_KEYWORDS_MAX)
     match_type: MatchType
@@ -304,11 +310,11 @@ class RemoveKeywords(BaseModel):
         return normalize_keywords(v)
 
 
-class AddNegativeKeywords(BaseModel):
+class AddNegativeKeywords(ToolArgs):
     """Минус-слова кампании. ad_group (опц., 3.2б 2026-07-17, зеркало Ф4 в AddKeywords) СУЖАЕТ
     уровень до одной группы: минус-слово ляжет негативным AdGroupCriterion этой группы, а не
-    CampaignCriterion. Группы нет в кампании → отказ в execute_confirmed (fail-closed), не тихий
-    откат на уровень кампании."""
+    CampaignCriterion. Группы нет в кампании → live-отказ до сохранения Proposal (fail-closed),
+    не тихий откат на уровень кампании."""
 
     # campaign обязателен: минус-слова добавляются на уровне кампании (или её группы — ad_group).
     campaign: str
@@ -322,7 +328,7 @@ class AddNegativeKeywords(BaseModel):
         return normalize_keywords(v)
 
 
-class RemoveNegativeKeywords(BaseModel):
+class RemoveNegativeKeywords(ToolArgs):
     # Симметрично AddNegativeKeywords: снять минус-слова кампании по тексту+типу.
     campaign: str
     keywords: list[str] = Field(min_length=1, max_length=ADD_KEYWORDS_MAX)
@@ -334,7 +340,7 @@ class RemoveNegativeKeywords(BaseModel):
         return normalize_keywords(v)
 
 
-class AddNegativesToSharedSet(BaseModel):
+class AddNegativesToSharedSet(ToolArgs):
     """3.2б (2026-07-17): минус-слова в ОБЩИЙ СПИСОК аккаунта (NEGATIVE_KEYWORDS shared set), а не
     в кампанию. Списка с таким именем нет → он будет СОЗДАН (создание — внутри apply ПОСЛЕ claim;
     дифф подтверждения говорит об этом явно). Сам по себе список ни на что не действует, пока не
@@ -351,7 +357,7 @@ class AddNegativesToSharedSet(BaseModel):
         return normalize_keywords(v)
 
 
-class AttachSharedSet(BaseModel):
+class AttachSharedSet(ToolArgs):
     """3.2б: привязать СУЩЕСТВУЮЩИЙ общий список минус-слов к кампании (CampaignSharedSet).
     Списка с таким именем нет → отказ в execute_confirmed (fail-closed), НЕ автосоздание: пустой
     список, привязанный молча, «работал бы в никуда» — создание/наполнение только явной
@@ -361,28 +367,28 @@ class AttachSharedSet(BaseModel):
     shared_set: str = Field(min_length=1, max_length=255)
 
 
-class PauseCampaign(BaseModel):
+class PauseCampaign(ToolArgs):
     campaign: str
 
 
-class ResumeCampaign(BaseModel):
+class ResumeCampaign(ToolArgs):
     campaign: str
 
 
-class LaunchCampaign(BaseModel):
+class LaunchCampaign(ToolArgs):
     # §19.8/§11 «Запустить»: включить кампанию ПОЛНОСТЬЮ (кампания + группы + объявления).
     # Отдельная от resume_campaign, которая включает лишь кампанию (см. ads.mutations).
     campaign: str
 
 
-class UpdateCampaign(BaseModel):
+class UpdateCampaign(ToolArgs):
     # §3 «изменение» кампании: переименование. campaign — текущее имя, new_name — новое.
     # Диапазон длины дублирует валидатор мутации (defense-in-depth: не доверяем модели).
     campaign: str
     new_name: str = Field(min_length=1, max_length=255)
 
 
-class SetCampaignNetwork(BaseModel):
+class SetCampaignNetwork(ToolArgs):
     """Сети кампании (§19.3): вкл/выкл ПОИСКОВЫХ ПАРТНЁРОВ на существующей кампании.
     Дефолт проекта — партнёры ВЫКЛ (включение только явной командой менеджера). КМС и
     ограниченную target_partner_search_network этот инструмент НЕ трогает (код)."""
@@ -391,7 +397,7 @@ class SetCampaignNetwork(BaseModel):
     search_partners: bool  # True = включить поисковых партнёров, False = выключить
 
 
-class SetCampaignDisplayNetwork(BaseModel):
+class SetCampaignDisplayNetwork(ToolArgs):
     """G12: КМС (контекстно-медийная сеть) на ПОИСКОВОЙ кампании — баннеры съедают поисковый бюджет.
     Отдельная операция, а НЕ второй флаг у set_campaign_network: у тумблера партнёров своя кнопка,
     свой откат и свой текст карточки; расширение его схемы поменяло бы смысл уже подтверждённых
@@ -401,7 +407,7 @@ class SetCampaignDisplayNetwork(BaseModel):
     display_network: bool  # True = включить КМС, False = выключить (дефолт для Search-кампаний)
 
 
-class SetCampaignGeoTargetType(BaseModel):
+class SetCampaignGeoTargetType(ToolArgs):
     """G11: кого считать «в регионе». PRESENCE — только физически находящиеся в целевых регионах;
     PRESENCE_OR_INTEREST (Google-дефолт) — плюс «интересующиеся» регионом, т.е. клики людей вне
     его. Для локального бизнеса дефолт молча жжёт бюджет. SEARCH_INTEREST в allow-list НЕ пускаем:
@@ -411,18 +417,18 @@ class SetCampaignGeoTargetType(BaseModel):
     geo_target_type: Literal["PRESENCE", "PRESENCE_OR_INTEREST"]
 
 
-class PauseAdGroup(BaseModel):
+class PauseAdGroup(ToolArgs):
     # Пауза/возобновление НА УРОВНЕ ГРУППЫ (§16 AdGroupService): группу ищем по имени внутри кампании.
     campaign: str  # имя кампании, в которой искать группу
     ad_group: str  # имя группы объявлений
 
 
-class ResumeAdGroup(BaseModel):
+class ResumeAdGroup(ToolArgs):
     campaign: str
     ad_group: str
 
 
-class PauseAd(BaseModel):
+class PauseAd(ToolArgs):
     """C6 (§16 AdGroupAdService): пауза ОТДЕЛЬНОГО объявления. ad — числовой id объявления или
     фрагмент его первого заголовка (несколько совпадений → код попросит уточнить id)."""
 
@@ -431,32 +437,32 @@ class PauseAd(BaseModel):
     ad: str = Field(min_length=1, max_length=200)
 
 
-class ResumeAd(BaseModel):
+class ResumeAd(ToolArgs):
     campaign: str
     ad_group: str
     ad: str = Field(min_length=1, max_length=200)
 
 
-class RemoveAd(BaseModel):
+class RemoveAd(ToolArgs):
     # Необратимое удаление объявления — в UI двойное подтверждение (_DESTRUCTIVE_OPS).
     campaign: str
     ad_group: str
     ad: str = Field(min_length=1, max_length=200)
 
 
-class RemoveCampaign(BaseModel):
+class RemoveCampaign(ToolArgs):
     # §3 удаление кампании (необратимо, status→REMOVED). Двойное подтверждение — в UI (bot).
     # Замок аккаунта — на исполнении (ensure_allowed). campaign — имя кампании.
     campaign: str
 
 
-class RemoveAdGroup(BaseModel):
+class RemoveAdGroup(ToolArgs):
     # Удаление группы объявлений внутри кампании (необратимо). Группу ищем по имени в кампании.
     campaign: str
     ad_group: str
 
 
-class SetGeoProximity(BaseModel):
+class SetGeoProximity(ToolArgs):
     """Радиус-таргетинг кампании (proximity). Адрес — СТРУКТУРНЫЙ (city_name + country_code),
     Google сам геокодит точку — клиентский геокодинг не нужен. country_code — из запроса
     (опц. env-дом-дефолт), НЕ захардкожен; пусто = без страны-биаса."""
@@ -479,7 +485,7 @@ class SetGeoProximity(BaseModel):
         return v
 
 
-class SetGeoLocation(BaseModel):
+class SetGeoLocation(ToolArgs):
     """Гео-таргетинг кампании по стране/городу/региону через geoTargetConstants (§3). Модель даёт
     НАЗВАНИЯ локаций РОВНО ИЗ ЗАПРОСА пользователя (напр. ['Германия', 'Берлин']) — своих стран не
     добавляет; КОД резолвит их в geoTargetConstant и заменяет весь географический таргетинг кампании
@@ -513,7 +519,7 @@ class SetGeoLocation(BaseModel):
         return v
 
 
-class SetBiddingStrategy(BaseModel):
+class SetBiddingStrategy(ToolArgs):
     """Смена стратегии назначения ставок кампании (§3). Деньги (управляет расходом) → как бюджет/
     ставка, применяется ТОЛЬКО прямой командой пользователя (user_initiated). Поддержаны стандартные
     (не портфельные) стратегии. target_cpa — в валюте аккаунта; target_roas — доля (4.0 = 400%)."""
@@ -541,7 +547,7 @@ class SetBiddingStrategy(BaseModel):
         return v
 
 
-class AttachAudience(BaseModel):
+class AttachAudience(ToolArgs):
     """Прикрепить существующие аудитории (user_list/audience) к кампании (§3). Минтуется ботом после
     выбора из списка (resource_name из ads.read.list_audiences), не из LLM напрямую. Не деньги →
     user_initiated не требуется (как гео/ключи)."""
@@ -561,7 +567,7 @@ class AttachAudience(BaseModel):
         return out
 
 
-class DetachAudience(BaseModel):
+class DetachAudience(ToolArgs):
     """Открепить ранее прикреплённые аудитории от кампании (§3). Обратная к AttachAudience;
     минтуется ботом (resource_name из ads.read.list_audiences). Не деньги → user_initiated не нужен."""
 
@@ -580,7 +586,7 @@ class DetachAudience(BaseModel):
         return out
 
 
-class GetStats(BaseModel):
+class GetStats(ToolArgs):
     """C5: период — либо последние period_days, либо ЯВНЫЙ диапазон date_from/date_to (ISO,
     когда пользователь сам назвал даты), либо period_text — фраза периода КАК В ТЕКСТЕ
     («вчера», «за прошлую неделю», «июнь», «с 1 по 15 июня»): модель не знает «сегодня» и не
@@ -605,7 +611,7 @@ class GetStats(BaseModel):
             raise ValueError("дата должна быть в ISO-формате ГГГГ-ММ-ДД") from e
 
 
-class AnalyzeAccount(BaseModel):
+class AnalyzeAccount(ToolArgs):
     """Read-намерение: проанализировать аккаунт и дать РЕКОМЕНДАЦИИ (advisory). Модель лишь роутит
     намерение — контент рекомендаций генерит advisor/ (КОД + advisory-LLM), а любое действие по
     совету идёт ОТДЕЛЬНОЙ командой через confirm-гейт. Ничего не меняет в аккаунте (в READ_TOOLS)."""
@@ -615,7 +621,7 @@ class AnalyzeAccount(BaseModel):
     topic: Literal["optimize", "keywords", "rsa", "structure", "all"] = "all"
 
 
-class KeywordResearch(BaseModel):
+class KeywordResearch(ToolArgs):
     """Read-tool: подбор ключевых слов (advisory). Модель заполняет сиды и/или URL; объём/
     конкуренцию и кластеризацию считает КОД (ничего в аккаунте не меняется).
 
@@ -664,7 +670,7 @@ def _assert_rsa_len(items: list[str], kind: str) -> list[str]:
     return items
 
 
-class GenerateRsa(BaseModel):
+class GenerateRsa(ToolArgs):
     """Read-tool: попросить сгенерировать тексты RSA. Применение — отдельно, через курацию
     и confirm-гейт (create_rsa). Кампания/группа/URL уточняются визардом, если не заданы."""
 
@@ -680,7 +686,7 @@ class GenerateRsa(BaseModel):
     n_descriptions: int = Field(default=4, ge=2, le=4)
 
 
-class CloneCampaign(BaseModel):
+class CloneCampaign(ToolArgs):
     """Read-намерение (§2A): «сделай кампанию N с настройками как в кампании X». Модель лишь
     заполняет new_name + source_campaign (+ опц. оверрайды); живое чтение исходной кампании и
     сборку черновика create_search_campaign делает бот (confirm-гейт обязателен). НЕ мутация —
@@ -700,12 +706,13 @@ class CloneCampaign(BaseModel):
         return v
 
 
-class CreateRsa(BaseModel):
+class CreateRsa(ToolArgs):
     """Финальные параметры создания RSA (минтуются ботом после курации, не из LLM напрямую).
     Минимумы/максимумы и длину считает КОД — зеркалит ads.mutations (defense-in-depth)."""
 
-    ad_group_id: str
+    ad_group_id: str = Field(pattern=r"^\d+$")
     campaign: str
+    campaign_id: str | None = Field(default=None, pattern=r"^\d+$")
     final_url: str
     headlines: list[str] = Field(min_length=RSA_MIN_HEADLINES, max_length=RSA_MAX_HEADLINES)
     descriptions: list[str] = Field(
@@ -739,7 +746,7 @@ class CreateRsa(BaseModel):
         return v
 
 
-class CreateGdnCampaign(BaseModel):
+class CreateGdnCampaign(ToolArgs):
     """Финальные параметры GDN-кампании из фото (минтуется ботом после визарда, не из LLM).
     Длину/составы считает КОД — зеркалит ads.mutations._validate_gdn_inputs (defense-in-depth).
     Бинарь фото НЕ здесь: media_id ссылается на временно сохранённые подготовленные изображения."""
@@ -801,7 +808,7 @@ class CreateGdnCampaign(BaseModel):
         return v
 
 
-class _MediaVideoCampaignBase(BaseModel):
+class _MediaVideoCampaignBase(ToolArgs):
     """Общая форма §11-кампаний из видео (Demand Gen / Video). Минтуется ботом после визарда, не из
     LLM. Длины/составы считает КОД — зеркалит ads.mutations._validate_video_campaign_inputs
     (defense-in-depth). Бинарь логотипа НЕ здесь — logo_media_id ссылается на временное хранилище."""
@@ -880,7 +887,7 @@ class CreateVideoCampaign(_MediaVideoCampaignBase):
     сужает КОД (≤70, ads.mutations.VIDEO_DESCRIPTION_MAX)."""
 
 
-class CreateAppCampaign(BaseModel):
+class CreateAppCampaign(ToolArgs):
     """§11: Universal App Campaign / App campaign из подготовленных изображений и YouTube-видео.
 
     Бинарные изображения остаются во временном trusted-хранилище; в proposal лежат только media_id.
@@ -948,7 +955,7 @@ class CreateAppCampaign(BaseModel):
         return self
 
 
-class CreateSearchCampaign(BaseModel):
+class CreateSearchCampaign(ToolArgs):
     """Финальные параметры поисковой (Search) кампании (§3). Минтуется ботом после визарда
     (/newsearch: генерация RSA), не из LLM напрямую. Длину/составы считает КОД — зеркалит
     ads.mutations._validate_search_inputs (defense-in-depth). Ключевые слова — опциональны."""
@@ -1076,7 +1083,7 @@ class CreateSearchCampaign(BaseModel):
 
 
 # ── §3-assets: текстовые расширения (sitelinks/callouts/structured snippets) ─────────
-class Sitelink(BaseModel):
+class Sitelink(ToolArgs):
     """Один sitelink: текст-ссылка (≤25) + final_url + опц. два описания (≤35). description2
     нельзя без description1. Длину считает КОД (кириллица=1)."""
 
@@ -1111,12 +1118,12 @@ class Sitelink(BaseModel):
         return self
 
 
-class AddSitelinks(BaseModel):
+class AddSitelinks(ToolArgs):
     campaign: str
     sitelinks: list[Sitelink] = Field(min_length=1, max_length=20)
 
 
-class AddCallouts(BaseModel):
+class AddCallouts(ToolArgs):
     campaign: str
     callouts: list[str] = Field(min_length=1, max_length=20)  # каждый ≤25, trim+dedup
 
@@ -1140,7 +1147,7 @@ class AddCallouts(BaseModel):
         return out
 
 
-class AddStructuredSnippets(BaseModel):
+class AddStructuredSnippets(ToolArgs):
     campaign: str
     header: str  # из канонического англ. списка (иначе HEADER_NOT_FOUND)
     values: list[str] = Field(min_length=3, max_length=10)  # каждое ≤25
@@ -1166,7 +1173,7 @@ class AddStructuredSnippets(BaseModel):
         return out
 
 
-class AttachImageAsset(BaseModel):
+class AttachImageAsset(ToolArgs):
     """Прикрепить изображение-ассет к кампании (§3-assets, семейство 2). Минтуется ботом после
     приёма фото (как GDN): бинарь НЕ здесь — media_id ссылается на временно сохранённое
     подготовленное изображение. Hermes получает media_id только от trusted ingest_media и создаёт
@@ -1184,7 +1191,7 @@ class AttachImageAsset(BaseModel):
         return v
 
 
-class RemoveAssetLink(BaseModel):
+class RemoveAssetLink(ToolArgs):
     """Удаление СВЯЗИ ассета с кампанией (campaign_asset), НЕ самого ассета. resource_names — из
     list_campaign_assets (должны содержать /campaignAssets/)."""
 
@@ -1200,7 +1207,7 @@ class RemoveAssetLink(BaseModel):
 
 
 # ── §3-assets семейство 3: Call / Promotion / Price (LLM-заполняемые, за confirm-гейтом) ──
-class AddCallAsset(BaseModel):
+class AddCallAsset(ToolArgs):
     """Телефон-расширение (CallAsset). country_code — ISO alpha-2 страны НОМЕРА; phone_number —
     сырой номер. Конверс-трекинг звонков в MVP не подключаем (по умолчанию аккаунтное)."""
 
@@ -1235,7 +1242,7 @@ class AddCallAsset(BaseModel):
         return v
 
 
-class AddPromotion(BaseModel):
+class AddPromotion(ToolArgs):
     """Промо-расширение (PromotionAsset). РОВНО одна скидка: percent_off (1–100%) ИЛИ
     money_off_units (+currency). final_url — посадочная (ставится на сам Asset). Длину
     promotion_target считает КОД."""
@@ -1271,7 +1278,7 @@ class AddPromotion(BaseModel):
         return self
 
 
-class PriceOfferingItem(BaseModel):
+class PriceOfferingItem(ToolArgs):
     header: str = Field(min_length=1)  # ≤25 (asset_len)
     description: str = Field(min_length=1)  # ≤25
     price_units: float = Field(gt=0, le=MONEY_MAX_UNITS)  # в валюте прайса
@@ -1298,7 +1305,7 @@ class PriceOfferingItem(BaseModel):
         return v
 
 
-class AddPriceAsset(BaseModel):
+class AddPriceAsset(ToolArgs):
     """Прайс-расширение (PriceAsset): 3–8 оферов (header≤25, description≤25, цена, URL). Валюта
     общая на все оферы. type_/unit — из канонического enum (lower-case)."""
 
@@ -1671,22 +1678,22 @@ TOOLS: list[dict] = [
 # НИКОГДА не мёржится в TOOLS (парс-путь денег). Аккаунт ЗАЛОЧЕН на проаудированный customer_id —
 # у схем НЕТ поля account (GR9: цель читает bot-слой, модель её не выбирает). Инвариант S4: набор
 # НЕ пересекается с MUTATION_TOOLS (ноль пути к деньгам из нарратив-цикла, GR6/GR8) — assert ниже.
-class GetCampaignDetailArgs(BaseModel):
+class GetCampaignDetailArgs(ToolArgs):
     """get_campaign_detail (read-only): имя кампании из аудита для чтения деталей."""
 
     campaign: str = Field(min_length=1, description="Точное имя кампании из данных аудита")
 
 
-class GetSearchTermsArgs(BaseModel):
+class GetSearchTermsArgs(ToolArgs):
     """get_search_terms (read-only): без параметров — топ поисковых запросов аккаунта по расходу."""
 
 
-class GetCompetitorsArgs(BaseModel):
+class GetCompetitorsArgs(ToolArgs):
     """get_competitors (read-only): без параметров — последний загруженный срез «Статистики
     аукционов» (домены соперников и доли показов из /competitors)."""
 
 
-class GetBidLandscapeArgs(BaseModel):
+class GetBidLandscapeArgs(ToolArgs):
     """get_bid_landscape (read-only): без параметров — топ ключей по расходу со ставкой, оценками
     Google (сколько нужно для верха страницы) и долями верхних позиций."""
 

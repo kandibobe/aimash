@@ -30,7 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ads.client import DRAFT_ACCOUNT_ID, ensure_allowed
-from ads.freshness import attach_freshness
+from ads.freshness import TARGET_AD_GROUP_IDS_KEY, TARGET_CAMPAIGN_ID_KEY, attach_freshness
 from ads.resolve import (
     MONEY_OPS,
     DecreaseBelowZero,
@@ -71,6 +71,79 @@ class ProposalRefused(Exception):
     def __init__(self, text: str) -> None:
         super().__init__(text)
         self.text = text
+
+
+class InvalidProposalTarget(ValueError):
+    """A model-supplied entity target failed live account/campaign ownership checks."""
+
+
+async def _validate_live_target(operation: str, params: dict, customer_id: str) -> None:
+    """Resolve child targets from Google Ads before any proposal row can be persisted."""
+    if operation not in {"create_rsa", "add_keywords", "add_negative_keywords"}:
+        return
+
+    from ads import resolve
+    from ads.client import build_client_async
+
+    customer_id = normalize_customer_id(customer_id)
+    if not customer_id:
+        raise InvalidProposalTarget("customer_id должен содержать цифры")
+    ensure_allowed(customer_id)
+    campaign = str(params.get("campaign") or "").strip()
+    if not campaign:
+        raise InvalidProposalTarget("campaign обязателен для проверки таргета")
+    client = await build_client_async(customer_id)
+
+    if operation == "create_rsa":
+        ad_group_id = str(params.get("ad_group_id") or "").strip()
+        if not ad_group_id:
+            raise InvalidProposalTarget("ad_group_id обязателен для создания RSA")
+        try:
+            target = await run_ads_read_call(
+                resolve.validate_ad_group_target,
+                client,
+                customer_id,
+                campaign,
+                ad_group_id,
+                campaign_id=params.get("campaign_id"),
+                require_rsa=True,
+                label="proposal_target.create_rsa",
+                account=customer_id,
+            )
+        except resolve.InvalidAdGroupTarget as exc:
+            raise InvalidProposalTarget(str(exc)) from None
+        # Proposal всегда несёт проверенные immutable ID, даже если legacy caller прислал только имя.
+        params["ad_group_id"] = target.id
+        params["campaign_id"] = target.campaign_id
+        return
+
+    ad_group = str(params.get("ad_group") or "").strip()
+    try:
+        if operation == "add_negative_keywords" and not ad_group:
+            campaign_id = await run_ads_read_call(
+                resolve.validate_campaign_target,
+                client,
+                customer_id,
+                campaign,
+                label="proposal_target.add_negative_keywords",
+                account=customer_id,
+            )
+            params[TARGET_CAMPAIGN_ID_KEY] = campaign_id
+            return
+
+        targets = await run_ads_read_call(
+            resolve.validate_ad_group_targets,
+            client,
+            customer_id,
+            campaign,
+            ad_group or None,
+            label=f"proposal_target.{operation}",
+            account=customer_id,
+        )
+    except resolve.InvalidAdGroupTarget as exc:
+        raise InvalidProposalTarget(str(exc)) from None
+    params[TARGET_CAMPAIGN_ID_KEY] = targets.campaign_id
+    params[TARGET_AD_GROUP_IDS_KEY] = list(targets.ad_group_ids)
 
 
 @dataclass(slots=True)
@@ -153,6 +226,10 @@ async def build_proposal(
             raise ProposalRefused(
                 i18n.t("mutation_account_read_only", lang, acct=account_label(customer_id))
             ) from None
+    # P0: child-target существует и принадлежит этому customer/campaign ДО сохранения Proposal.
+    # Ошибка/недоступность live READ всегда блокирует путь; model-supplied ID не считается фактом.
+    await _validate_live_target(operation, params, customer_id)
+
     # §5: читаем ТЕКУЩЕЕ значение (бюджет/ставку/статус) ДО показа → реальный diff «было → станет»
     # и снимок-база для оптимистичной сверки при исполнении (TOCTOU). Волна 1.1: берём Snapshot, а не
     # голый dict — исполнению нужна не только сама база, но и КЛАССИФИКАЦИЯ («не прочитали» ≠ «нечего

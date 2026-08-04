@@ -246,10 +246,30 @@ def test_create_rsa_in_supported_operations():
 
 async def test_execute_confirmed_routes_create_rsa():
     captured = {}
+    validated = {}
 
     async def fake_apply(**kwargs):
         captured.update(kwargs)
         return {"applied": True}
+
+    def fake_validate(
+        client,
+        customer_id,
+        campaign,
+        ad_group_id,
+        *,
+        campaign_id=None,
+        require_rsa=False,
+    ):
+        validated.update(
+            client=client,
+            customer_id=customer_id,
+            campaign=campaign,
+            ad_group_id=ad_group_id,
+            campaign_id=campaign_id,
+            require_rsa=require_rsa,
+        )
+        return SimpleNamespace(id="42", campaign_id="777")
 
     cp = SimpleNamespace(
         operation="create_rsa",
@@ -272,6 +292,7 @@ async def test_execute_confirmed_routes_create_rsa():
 
     with (
         patched(svc, "build_client_async", _fake_client_async),
+        patched(svc.resolve, "validate_ad_group_target", fake_validate),
         patched(mut, "apply_create_rsa", fake_apply),
         allowed_ids(DRAFT_ACCOUNT_ID),  # 2A: повторный ensure_allowed на исполнении
     ):
@@ -279,6 +300,14 @@ async def test_execute_confirmed_routes_create_rsa():
     assert res["applied"] is True
     assert captured["ad_group_id"] == "42" and captured["headlines"] == _H3
     assert captured["customer_id"] == DRAFT_ACCOUNT_ID
+    assert validated == {
+        "client": captured["ads_client"],
+        "customer_id": DRAFT_ACCOUNT_ID,
+        "campaign": "X",
+        "ad_group_id": "42",
+        "campaign_id": None,
+        "require_rsa": True,
+    }
 
 
 # ── B2: перевод «operation not allowed for the given context» → понятный ValueError ──
