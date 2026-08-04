@@ -9,6 +9,7 @@ import hmac
 import json
 from datetime import datetime, timezone
 import sys
+import tempfile
 import types
 import uuid
 import time
@@ -18,6 +19,7 @@ from types import SimpleNamespace
 from pydantic import SecretStr
 
 from core.config import settings
+from mcp_server import tools_workflows
 from mcp_server.trusted_transport import verify_turn_token
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,12 +44,17 @@ def _load(monkeypatch, env: dict[str, str]):
     monkeypatch.setitem(sys.modules, "gateway.session_context", session_context)
     monkeypatch.setitem(sys.modules, "telegram", telegram)
     monkeypatch.setenv("AIMASH_TRUST_HMAC_KEY", KEY)
+    monkeypatch.setenv("AIMASH_ARTIFACT_ARCHIVE_CHAT_ID", "-999")
+    monkeypatch.setenv("AIMASH_ARTIFACT_ARCHIVE_THREAD_ID", "2135")
     monkeypatch.setattr(settings, "aimash_trust_hmac_key", SecretStr(KEY))
     spec = importlib.util.spec_from_file_location(f"aimash_transport_{uuid.uuid4().hex}", PLUGIN)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    module._ARTIFACT_DELIVERY_LEDGER = (
+        Path(tempfile.gettempdir()) / f"aimash-artifact-ledger-{uuid.uuid4().hex}.jsonl"
+    )
     return module
 
 
@@ -672,6 +679,21 @@ def test_signed_artifact_is_queued_for_exact_topic_and_hidden_from_model(monkeyp
     assert plugin._pending_artifacts[(-202, "7", 303)] == [token]
     assert token not in transformed
     assert "report.xlsx" in transformed
+    assert '"delivery_status": "pending_telegram_confirmation"' in transformed
+    assert '"delivery_destination": "files"' in transformed
+    assert '"delivery_claim_allowed": false' in transformed
+
+
+def test_artifact_tool_descriptions_separate_creation_from_telegram_delivery():
+    for tool in (
+        tools_workflows.build_report,
+        tools_workflows.build_mcc_report,
+        tools_workflows.export_keyword_report,
+    ):
+        description = tool.__doc__ or ""
+        assert "files" in description
+        assert "Telegram" in description
+        assert "not" in description
 
 
 async def test_verified_artifact_is_requeued_after_transient_delivery_failure(monkeypatch):
@@ -701,6 +723,29 @@ async def test_verified_artifact_is_requeued_after_transient_delivery_failure(mo
     assert scheduled == [(-202, "7", 303)]
 
 
+async def test_missing_files_destination_keeps_artifact_queued(monkeypatch):
+    plugin = _load(monkeypatch, _env())
+    token = _artifact_token()
+    plugin._pending_artifacts[(-202, "7", 303)] = [token]
+    monkeypatch.delenv("AIMASH_ARTIFACT_ARCHIVE_CHAT_ID")
+    monkeypatch.delenv("AIMASH_ARTIFACT_ARCHIVE_THREAD_ID")
+    scheduled = []
+    monkeypatch.setattr(
+        plugin,
+        "_schedule_artifact_retry",
+        lambda adapter, chat_id, metadata, key: scheduled.append(key),
+    )
+
+    await plugin._deliver_pending_artifacts(
+        SimpleNamespace(_bot=SimpleNamespace()),
+        "-202",
+        {"thread_id": "7", "reply_to_message_id": "303"},
+    )
+
+    assert plugin._pending_artifacts[(-202, "7", 303)] == [token]
+    assert scheduled == [(-202, "7", 303)]
+
+
 async def test_artifact_background_retry_recovers_without_new_message(monkeypatch):
     plugin = _load(monkeypatch, _env())
     token = _artifact_token()
@@ -718,6 +763,7 @@ async def test_artifact_background_retry_recovers_without_new_message(monkeypatc
     class _Bot:
         async def send_document(self, **kwargs):
             sent.append(kwargs)
+            return SimpleNamespace(message_id=700)
 
     monkeypatch.setattr(plugin, "_copy_artifact", flaky_copy)
     monkeypatch.setattr(plugin, "_remove_container_artifact", lambda artifact: None)
@@ -737,6 +783,37 @@ async def test_artifact_background_retry_recovers_without_new_message(monkeypatc
     assert plugin._pending_artifacts.get((-202, "7", 303)) in (None, [])
 
 
+async def test_telegram_response_without_message_id_is_not_counted_as_delivery(monkeypatch):
+    plugin = _load(monkeypatch, _env())
+    token = _artifact_token()
+    plugin._pending_artifacts[(-202, "7", 303)] = [token]
+
+    def copy(artifact, target):
+        target.write_bytes(b"xlsx")
+
+    class _Bot:
+        async def send_document(self, **kwargs):
+            return None
+
+    scheduled = []
+    monkeypatch.setattr(plugin, "_copy_artifact", copy)
+    monkeypatch.setattr(
+        plugin,
+        "_schedule_artifact_retry",
+        lambda adapter, chat_id, metadata, key: scheduled.append(key),
+    )
+
+    await plugin._deliver_pending_artifacts(
+        SimpleNamespace(_bot=_Bot()),
+        "-202",
+        {"thread_id": "7", "reply_to_message_id": "303"},
+    )
+
+    assert plugin._pending_artifacts[(-202, "7", 303)] == [token]
+    assert scheduled == [(-202, "7", 303)]
+    assert not plugin._ARTIFACT_DELIVERY_LEDGER.exists()
+
+
 async def test_concurrent_background_response_delivers_only_its_own_artifact(monkeypatch):
     plugin = _load(monkeypatch, _env())
     first = _artifact_token(content=b"first")
@@ -751,6 +828,7 @@ async def test_concurrent_background_response_delivers_only_its_own_artifact(mon
     class _Bot:
         async def send_document(self, **kwargs):
             sent.append(kwargs["document"].filename)
+            return SimpleNamespace(message_id=701)
 
     monkeypatch.setattr(plugin, "_copy_artifact", copy)
     monkeypatch.setattr(plugin, "_remove_container_artifact", lambda artifact: None)
@@ -765,6 +843,83 @@ async def test_concurrent_background_response_delivers_only_its_own_artifact(mon
     assert sent == ["report.xlsx"]
     assert plugin._pending_artifacts[(-202, "7", 303)] == [first]
     assert (-202, "7", 909) not in plugin._pending_artifacts
+
+
+async def test_artifact_delivery_ledger_proves_telegram_acceptance_without_token(
+    monkeypatch, tmp_path
+):
+    plugin = _load(monkeypatch, _env())
+    token = _artifact_token()
+    plugin._pending_artifacts[(-202, "7", 303)] = [token]
+    plugin._ARTIFACT_DELIVERY_LEDGER = tmp_path / "delivery.jsonl"
+
+    def copy(artifact, target):
+        target.write_bytes(b"xlsx")
+
+    class _Bot:
+        async def send_document(self, **kwargs):
+            assert kwargs["chat_id"] == -999
+            assert kwargs["message_thread_id"] == 2135
+            assert kwargs["caption"].startswith("✅ Файл доставлен в files")
+            return SimpleNamespace(message_id=702)
+
+    monkeypatch.setattr(plugin, "_copy_artifact", copy)
+    monkeypatch.setattr(plugin, "_remove_container_artifact", lambda artifact: None)
+
+    await plugin._deliver_pending_artifacts(
+        SimpleNamespace(_bot=_Bot()),
+        "-202",
+        {"thread_id": "7", "reply_to_message_id": "303"},
+    )
+
+    record = json.loads(plugin._ARTIFACT_DELIVERY_LEDGER.read_text(encoding="utf-8"))
+    assert record == {
+        "delivered_at": record["delivered_at"],
+        "destination_chat_id": -999,
+        "destination_thread_id": 2135,
+        "filename": "report.xlsx",
+        "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "sha256": hashlib.sha256(b"xlsx").hexdigest(),
+        "size": 4,
+        "source_chat_id": -202,
+        "source_message_id": 303,
+        "source_thread_id": "7",
+        "status": "delivered",
+        "telegram_message_id": 702,
+    }
+    assert token not in plugin._ARTIFACT_DELIVERY_LEDGER.read_text(encoding="utf-8")
+
+
+async def test_cleanup_failure_after_telegram_message_id_does_not_duplicate_file(
+    monkeypatch, tmp_path
+):
+    plugin = _load(monkeypatch, _env())
+    token = _artifact_token()
+    plugin._pending_artifacts[(-202, "7", 303)] = [token]
+    plugin._ARTIFACT_DELIVERY_LEDGER = tmp_path / "delivery.jsonl"
+
+    def copy(artifact, target):
+        target.write_bytes(b"xlsx")
+
+    def cleanup_fails(artifact):
+        raise TimeoutError("docker cleanup timeout")
+
+    class _Bot:
+        async def send_document(self, **kwargs):
+            return SimpleNamespace(message_id=703)
+
+    monkeypatch.setattr(plugin, "_copy_artifact", copy)
+    monkeypatch.setattr(plugin, "_remove_container_artifact", cleanup_fails)
+
+    await plugin._deliver_pending_artifacts(
+        SimpleNamespace(_bot=_Bot()),
+        "-202",
+        {"thread_id": "7", "reply_to_message_id": "303"},
+    )
+
+    assert (-202, "7", 303) not in plugin._pending_artifacts
+    record = json.loads(plugin._ARTIFACT_DELIVERY_LEDGER.read_text(encoding="utf-8"))
+    assert record["telegram_message_id"] == 703
 
 
 def test_missing_button_bridge_falls_back_to_semantic_reply(monkeypatch):

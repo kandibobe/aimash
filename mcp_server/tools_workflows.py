@@ -53,7 +53,11 @@ async def build_report(
     campaign_id: str | None = None,
     language: Literal["ru", "en"] = "ru",
 ) -> dict[str, Any]:
-    """Build a deep account report and deliver the resulting .xlsx to the current Telegram topic."""
+    """Build an account XLSX and queue it for verified delivery to Telegram topic ``files``.
+
+    The tool result proves creation only. Trusted transport reports delivery after Telegram returns
+    a message id; callers must not claim that the file was delivered from this result alone.
+    """
     from mcp_server.artifacts import artifact_path, publish_artifact, remove_artifact
     from mcp_server.tools_read import _period
 
@@ -109,7 +113,10 @@ async def build_mcc_report(
     period_preset: Literal["7", "14", "30", "90", "MTD", "LM"] | None = None,
     language: Literal["ru", "en"] = "ru",
 ) -> dict[str, Any]:
-    """Build one verified MCC summary workbook and deliver it to the current Telegram task."""
+    """Build one MCC workbook and queue it for verified delivery to Telegram topic ``files``.
+
+    ``artifact_status=published`` means the signed file was created, not that Telegram accepted it.
+    """
     from ads.client import ensure_manager_allowed
     from ads.read import account_timezone
     from core.config import settings
@@ -193,7 +200,8 @@ async def export_keyword_report(
 
     Use for "выгрузи слова", "все ключи", semantic exports and "export
     keywords". ``build_report`` is an account overview and is not the complete
-    keyword-list export.
+    keyword-list export. The signed workbook is queued for verified delivery to Telegram topic
+    ``files``; this tool result proves creation, not Telegram acceptance.
     """
     from mcp_server.artifacts import artifact_path, publish_artifact, remove_artifact
     from mcp_server.tools_read import _period
