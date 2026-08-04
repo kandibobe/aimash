@@ -1,0 +1,22 @@
+{
+	admin off
+}
+
+:9120 {
+	bind 127.0.0.1
+
+	# The production gateway is the sole owner of the named aimash-mcp stdio container.
+	# Dashboard probes otherwise start a second MCP client, which is rejected by the lock and then
+	# self-probes forever. Keep configuration/list pages available while blocking only the live probe.
+	@aimash_mcp_probe {
+		method POST
+		path /api/mcp/servers/aimash/test
+	}
+	header @aimash_mcp_probe Content-Type application/json
+	respond @aimash_mcp_probe `{"detail":"Production aimash MCP is owned by the Telegram gateway; use gateway health checks."}` 423
+
+	reverse_proxy 127.0.0.1:9119 {
+		header_up Host localhost
+		header_up Origin http://localhost:9119
+	}
+}

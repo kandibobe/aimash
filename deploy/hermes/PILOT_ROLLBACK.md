@@ -4,7 +4,8 @@ This rollout keeps every new autonomous surface fail-closed by default.
 
 ## What changes automatically
 
-- `tools.tool_search` is explicit and uses `enabled: auto` with a 5% threshold. It only changes how
+- `tools.tool_search` is explicit and remains `enabled: off` after the supervised OFF scenarios
+  missed required tool/order checks and OFF-02 artifact delivery. It may change only how
   already-allowed MCP schemas are disclosed; it cannot discover a tool outside the session allowlist.
 - Kanban remains installed for CLI inspection, but `kanban.dispatch_in_gateway: false` and
   `kanban.auto_decompose: false` prevent the production gateway from spawning workers.
@@ -30,10 +31,11 @@ goal or add a `goal_judge` policy. It stays behind a separate Telegram acceptanc
 ## Tool Search A/B gate
 
 Run the same 22 golden Telegram scenarios twice: first with `tools.tool_search.enabled: off`, then
-with `enabled: auto`. Keep `auto` only if it has no additional safety violations, no lost required
+with a temporary host-local `enabled: auto`. Keep `auto` only if it has no additional safety violations, no lost required
 tool/order/readback/artifact checks, and does not reduce the passed-scenario count. Compare median tool
 calls, latency and model cost separately; a cheaper run is not accepted when delivery or readback is
-missing. Store both raw trace sets so the decision can be reproduced.
+missing. Store both raw trace sets so the decision can be reproduced. Restore `off` after the test;
+only a later reviewed commit may make `auto` the deploy-time default.
 
 ## Fast feature rollback
 
@@ -42,7 +44,7 @@ No repository rollback is needed to disable progressive disclosure:
 ```yaml
 tools:
   tool_search:
-    enabled: off
+    enabled: "off"
 ```
 
 Kanban rollback is its safe repository state:

@@ -27,6 +27,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -173,6 +174,12 @@ _events: dict[tuple[str, int, int], _Inbound] = {}
 _pending_artifacts: dict[tuple[int, str | None, int], list[str]] = {}
 _artifact_retry_tasks: dict[tuple[int, str | None, int], asyncio.Task] = {}
 _ARTIFACT_RETRY_DELAYS_S = (1, 3, 10, 30, 60)
+_ARTIFACT_DELIVERY_LEDGER = Path(
+    os.getenv(
+        "AIMASH_ARTIFACT_DELIVERY_LEDGER",
+        "~/.hermes/logs/aimash_artifact_delivery.jsonl",
+    )
+).expanduser()
 _button_bridge_ready: bool | None = None
 
 
@@ -491,7 +498,16 @@ def _transform_tool_result(*args, **kwargs):
         return None
     try:
         parsed = json.loads(result) if isinstance(result, str) else result
-        return json.dumps(_strip_artifact_secrets(parsed), ensure_ascii=False)
+        clean = _strip_artifact_secrets(parsed)
+        if isinstance(clean, dict) and isinstance(clean.get("artifact"), dict):
+            clean["artifact"].update(
+                {
+                    "delivery_status": "pending_telegram_confirmation",
+                    "delivery_destination": "files",
+                    "delivery_claim_allowed": False,
+                }
+            )
+        return json.dumps(clean, ensure_ascii=False)
     except Exception:  # noqa: BLE001 - fail-open hook; original result remains available
         return None
 
@@ -519,6 +535,41 @@ def _remove_container_artifact(artifact: _Artifact) -> None:
         stderr=subprocess.DEVNULL,
         timeout=10,
     )
+
+
+def _record_artifact_delivery(
+    artifact: _Artifact,
+    *,
+    source_chat_id: int,
+    source_thread_id: str | None,
+    source_message_id: int,
+    destination_chat_id: int,
+    destination_thread_id: int,
+    telegram_message_id: int,
+) -> None:
+    """Append proof of Telegram acceptance without persisting transport tokens or file content."""
+    record = {
+        "status": "delivered",
+        "delivered_at": datetime.now(timezone.utc).isoformat(),
+        "source_chat_id": source_chat_id,
+        "source_thread_id": source_thread_id,
+        "source_message_id": source_message_id,
+        "destination_chat_id": destination_chat_id,
+        "destination_thread_id": destination_thread_id,
+        "telegram_message_id": telegram_message_id,
+        "filename": artifact.filename,
+        "media_type": artifact.media_type,
+        "size": artifact.size,
+        "sha256": artifact.sha256,
+    }
+    path = _ARTIFACT_DELIVERY_LEDGER
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    line = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    with _lock, path.open("a", encoding="utf-8") as stream:
+        stream.write(line + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    path.chmod(0o600)
 
 
 async def _artifact_retry_worker(adapter, chat_id, metadata, key) -> None:
@@ -580,13 +631,22 @@ async def _deliver_pending_artifacts(
     archive_chat_id = _as_int(os.getenv("AIMASH_ARTIFACT_ARCHIVE_CHAT_ID"))
     archive_thread_id = _as_int(os.getenv("AIMASH_ARTIFACT_ARCHIVE_THREAD_ID"), positive=True)
     if archive_chat_id is None or archive_thread_id is None:
-        log.error("Aimash artifact archive is not configured; preserving current-topic delivery")
-        archive_chat_id, archive_thread_id = parsed_chat, _as_int(thread_id, positive=True)
+        log.error("Aimash artifact archive is not configured; delivery remains queued")
+        retry_key = (parsed_chat, thread_id, route_message_id)
+        with _lock:
+            queued = _pending_artifacts.setdefault(retry_key, [])
+            _pending_artifacts[retry_key] = tokens + [
+                token for token in queued if token not in tokens
+            ]
+        if schedule_retry:
+            _schedule_artifact_retry(adapter, chat_id, metadata, retry_key)
+        return
     from telegram import InputFile
 
     retry_tokens: list[str] = []
     for token in tokens:
         artifact = None
+        telegram_message_id = None
         try:
             artifact = _verify_artifact_token(token)
             with tempfile.TemporaryDirectory(prefix="aimash_artifact_") as tmp:
@@ -595,6 +655,7 @@ async def _deliver_pending_artifacts(
                 kwargs = {
                     "chat_id": _normalize_telegram_chat_id(archive_chat_id),
                     "caption": (
+                        "✅ Файл доставлен в files\n"
                         f"📎 {artifact.filename}\n"
                         f"{artifact.description}\n"
                         f"Создан: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(artifact.created_at))}\n"
@@ -607,12 +668,16 @@ async def _deliver_pending_artifacts(
                 with target.open("rb") as stream:
                     media = InputFile(stream, filename=artifact.filename)
                     if artifact.media_type.startswith("image/"):
-                        await adapter._bot.send_photo(photo=media, **kwargs)
+                        sent_message = await adapter._bot.send_photo(photo=media, **kwargs)
                     elif artifact.media_type == "video/mp4":
-                        await adapter._bot.send_video(video=media, **kwargs)
+                        sent_message = await adapter._bot.send_video(video=media, **kwargs)
                     else:
-                        await adapter._bot.send_document(document=media, **kwargs)
-            await asyncio.to_thread(_remove_container_artifact, artifact)
+                        sent_message = await adapter._bot.send_document(document=media, **kwargs)
+                telegram_message_id = _as_int(
+                    getattr(sent_message, "message_id", None), positive=True
+                )
+                if telegram_message_id is None:
+                    raise ValueError("Telegram accepted artifact without a message id")
         except Exception as exc:  # noqa: BLE001 - text response survives failed attachment
             log.warning("Aimash artifact delivery failed: %s", type(exc).__name__)
             # A verified artifact remains in the container until Telegram accepts it. Preserve its
@@ -620,6 +685,41 @@ async def _deliver_pending_artifacts(
             # failures instead of turning "queued" into a silent permanent loss.
             if artifact is not None:
                 retry_tokens.append(token)
+            continue
+
+        # Telegram has returned a concrete message id. Nothing below may requeue the token: a
+        # cleanup or ledger failure after this point must not duplicate an already accepted file.
+        try:
+            await asyncio.to_thread(_remove_container_artifact, artifact)
+        except Exception as cleanup_exc:  # noqa: BLE001 - accepted delivery remains authoritative
+            log.error(
+                "Aimash artifact cleanup failed after Telegram acceptance: %s",
+                type(cleanup_exc).__name__,
+            )
+        try:
+            await asyncio.to_thread(
+                _record_artifact_delivery,
+                artifact,
+                source_chat_id=parsed_chat,
+                source_thread_id=thread_id,
+                source_message_id=route_message_id,
+                destination_chat_id=archive_chat_id,
+                destination_thread_id=archive_thread_id,
+                telegram_message_id=telegram_message_id,
+            )
+        except Exception as ledger_exc:  # noqa: BLE001 - never duplicate an accepted document
+            log.error(
+                "Aimash artifact delivery ledger failed after Telegram acceptance: %s",
+                type(ledger_exc).__name__,
+            )
+        log.info(
+            "Aimash artifact delivered: chat=%s thread=%s message_id=%s filename=%s sha256=%s",
+            archive_chat_id,
+            archive_thread_id,
+            telegram_message_id,
+            artifact.filename,
+            artifact.sha256,
+        )
     if retry_tokens:
         retry_key = (parsed_chat, thread_id, route_message_id)
         with _lock:

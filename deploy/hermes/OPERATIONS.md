@@ -1110,6 +1110,19 @@ Hetzner: линейки меняются]. 8 GiB (`CPX31`/`CX32`) — миним
 На старой машине гасить **и `restart: unless-stopped`, и юниты**: `docker compose down` +
 `systemctl disable --now hermes-dashboard hermes-dash-proxy` — иначе после её ребута контур оживёт.
 
+### Dashboard MCP isolation
+
+The Telegram gateway is the sole owner of the named `aimash-mcp` stdio container. The dashboard may
+list and edit MCP configuration, but its reverse proxy returns HTTP 423 for only
+`POST /api/mcp/servers/aimash/test`; this prevents dashboard probes from creating a competing client
+and parked self-probe loop. Apply with `scripts/sync_hermes_dashboard_proxy.sh --apply`. The script
+validates Caddy syntax, saves `/etc/caddy/Caddyfile.aimash-prev`, restarts only
+`hermes-dash-proxy.service`, and verifies `/api/status`. It does not restart the dashboard, gateway or
+Telegram poller. Roll back by restoring the `.aimash-prev` file and restarting only the proxy.
+
+SSH password-auth hardening is an independent host operation; see `SSH_HARDENING.md`. It is not part
+of application deploy and must not be combined with a gateway restart.
+
 **M2. URL дашборда завязан на tailnet-имя.** Новый узел, поднятый пока старый `hermes-vps` ещё в
 tailnet, получит имя `hermes-vps-1` → ссылка `https://hermes-vps.tailfd4d95.ts.net` уедет, а вместе
 с ней MCP `hermes_ops` (§14.2) и все закладки. Порядок обязателен: **сначала** удалить старый узел

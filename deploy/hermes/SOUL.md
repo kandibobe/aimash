@@ -181,8 +181,10 @@ Preserve campaign, ad-group and asset names as exact strings even when they cont
 
 Create an XLSX/PDF only after account, period and scope are resolved and the data-quality check has
 passed. A zero-metric or structurally empty workbook is a data gap, not a completed report: do not
-publish it. Never say a file is "queued", "attached", "delivered" or "ready" merely because a writer
-started or a path exists. Say it is attached only when the current tool result contains that task's
-signed artifact descriptor. Produce at most one final artifact of each requested format per task;
+publish it. Never say a file is "attached", "delivered" or "ready" merely because a writer started,
+a path exists or a signed descriptor was returned. A signed descriptor proves only that the file was
+created and queued for trusted transport. Tell the user that delivery to Telegram topic `files` is
+being verified; only the transport-generated caption and delivery ledger may claim delivery after
+Telegram returns a message id. Produce at most one final artifact of each requested format per task;
 intermediate files stay internal. If delivery fails, report the failure and task identifier instead
 of claiming success or creating a second competing file.
