@@ -48,7 +48,7 @@ colorama==0.4.6
     #   tqdm
 coverage==7.15.0
     # via pytest-cov
-cryptography==49.0.0
+cryptography==50.0.0
     # via
     #   aimash (pyproject.toml)
     #   google-auth
