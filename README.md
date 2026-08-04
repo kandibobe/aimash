@@ -199,6 +199,8 @@ implementation notes и при расхождении исправляются �
 - [`deploy/hermes/OPEN_DECISIONS.md`](deploy/hermes/OPEN_DECISIONS.md) — операционные решения.
 - [`deploy/hermes/skills/ad-master/ad-master-agent/SKILL.md`](deploy/hermes/skills/ad-master/ad-master-agent/SKILL.md) — skill аудита и исследования.
 - [`deploy/hermes/skills/ad-master/google-ads-worker/SKILL.md`](deploy/hermes/skills/ad-master/google-ads-worker/SKILL.md) — Google Ads worker skill.
+- [`deploy/hermes/skills/ad-master/operational-coordinator/SKILL.md`](deploy/hermes/skills/ad-master/operational-coordinator/SKILL.md) — routing General, Tasks, Alerts, Development, Files и Approvals & Audit.
+- [`deploy/hermes/skills/ad-master/paid-social-advisor/SKILL.md`](deploy/hermes/skills/ad-master/paid-social-advisor/SKILL.md) — advisory workflow для Meta Ads и TikTok Ads.
 - [`deploy/hermes/skills/ad-master/creative-director/SKILL.md`](deploy/hermes/skills/ad-master/creative-director/SKILL.md) — подготовка и валидация RSA-креативов.
 
 ## License
