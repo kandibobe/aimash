@@ -136,7 +136,7 @@ TOOL_LOOP_GUARDRAILS = {
     },
 }
 TOOL_SEARCH_POLICY = {
-    "enabled": "auto",
+    "enabled": "off",
     "threshold_pct": 5,
     "search_default_limit": 5,
     "max_search_limit": 20,

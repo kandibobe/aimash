@@ -184,7 +184,7 @@ provider_routing:
 # enabled=off; no MCP registry or money-path code changes are required.
 tools:
   tool_search:
-    enabled: auto
+    enabled: "off"
     threshold_pct: 5
     search_default_limit: 5
     max_search_limit: 20
