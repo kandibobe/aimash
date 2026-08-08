@@ -80,18 +80,18 @@ flowchart LR
 
 ### MCP surface
 
-Текущий проверяемый registry содержит **86 инструментов**:
+Текущий проверяемый registry содержит **87 инструментов**:
 
 | Surface | Count | Responsibility |
 |---|---:|---|
-| READ | 26 | Google Ads reads, audits, reports and discovery |
+| READ | 27 | Google Ads reads, audits, reports and discovery |
 | META | 1 | Trusted bridge capability discovery |
 | PLAN/state | 15 | Proposal, workflow and memory state |
 | Actions | 42 | Прямые agent-first action names; mutation либо исполняется по policy, либо готовит proposal |
 | Composite proposal | 1 | `composite_change` — один пакет, один diff и одно подтверждение |
 | Approval execute | 1 | `execute_confirmed` — единственная точка исполнения подтверждённого proposal |
 
-Итого: **26 READ-инструментов + 1 META + 58 agent-first PLAN/action/state + 1 approval execute**.
+Итого: **27 READ-инструментов + 1 META + 58 agent-first PLAN/action/state + 1 approval execute**.
 Фактический FastMCP registry сверяется на точное равенство при старте.
 
 ## Safety Model

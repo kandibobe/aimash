@@ -231,6 +231,7 @@ mcp_servers:
         - keyword_ideas
         # Технические/локальные reads, которые нельзя выразить одним GAQL.
         - get_quota
+        - check_budget_pacing
         - recall_client
         # §8 MCC: сводка по всем дочерним + глубокий разбор. Список обязан совпадать с
         # READ_TOOL_FUNCS РОВНО (require_registered_surface сверяет на равенство, не на вхождение):

@@ -35,6 +35,12 @@ class PacingResult:
     ceiling_breached: bool
 
 
+@dataclass(frozen=True)
+class ActiveBudgetPlan:
+    plan_uid: str
+    spec: BudgetPlanInput
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -290,6 +296,36 @@ def _plan_input(row: BudgetPlan) -> BudgetPlanInput:
         source=row.source,
         created_by=row.created_by,
     )
+
+
+async def find_active_budget_plan(
+    customer_id: str,
+    *,
+    scope_type: str,
+    scope_id: str,
+    as_of: date,
+) -> ActiveBudgetPlan | None:
+    """Read the newest active plan covering ``as_of`` for one exact account/campaign scope."""
+    iso_date = as_of.isoformat()
+    async with Session() as session:
+        row = (
+            await session.execute(
+                select(BudgetPlan)
+                .where(
+                    BudgetPlan.customer_id == str(customer_id),
+                    BudgetPlan.scope_type == str(scope_type),
+                    BudgetPlan.scope_id == str(scope_id),
+                    BudgetPlan.period_start <= iso_date,
+                    BudgetPlan.period_end >= iso_date,
+                    BudgetPlan.active.is_(True),
+                )
+                .order_by(BudgetPlan.version.desc(), BudgetPlan.updated_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    if row is None:
+        return None
+    return ActiveBudgetPlan(plan_uid=row.plan_uid, spec=_plan_input(row))
 
 
 async def evaluate_and_record_pacing(

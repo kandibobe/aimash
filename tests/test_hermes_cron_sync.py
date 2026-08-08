@@ -133,7 +133,15 @@ def test_cron_prompts_cover_requested_review_cycles_without_automatic_actions():
     assert "не создавай proposal" in prompts["shadow_daily"]
     assert all(
         marker in prompts["daily_budget"]
-        for marker in ("месячный медиаплан", "расход mtd", "месячный план не задан")
+        for marker in (
+            "месячный медиаплан",
+            "расход mtd",
+            "месячный план не задан",
+            "check_budget_pacing",
+            "минимум 5 завершённых дней",
+            "cron не создаёт proposal",
+            "trusted human turn",
+        )
     )
 
 

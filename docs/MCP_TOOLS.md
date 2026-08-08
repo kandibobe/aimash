@@ -1,7 +1,7 @@
 # HERMES 3.0 MCP Tool Registry
 
-FastMCP server публикует строго проверяемую базовую поверхность из **86 инструментов**.
-При `RESEARCH_ARCHIVE_ENABLED=true` к ней добавляются два research archive tools, и фактический total равен **88**. Источник истины —
+FastMCP server публикует строго проверяемую базовую поверхность из **87 инструментов**.
+При `RESEARCH_ARCHIVE_ENABLED=true` к ней добавляются два research archive tools, и фактический total равен **89**. Источник истины —
 Python registries в [`mcp_server/`](../mcp_server/), а не ручной список: при старте
 `require_registered_surface()` сравнивает фактически зарегистрированные имена с ожидаемым набором и
 останавливает процесс при drift.
@@ -10,16 +10,16 @@ Python registries в [`mcp_server/`](../mcp_server/), а не ручной сп�
 
 | Surface | Registry | Count |
 |---|---|---:|
-| READ | `READ_TOOL_FUNCS` | 26 |
+| READ | `READ_TOOL_FUNCS` | 27 |
 | META | `META_TOOL_FUNCS` | 1 |
 | PLAN & STATE | `PLAN_STATE_TOOL_FUNCS` | 15 |
 | ACTION | `ACTION_TOOL_FUNCS` | 42 |
 | Composite proposal | `COMPOSITE_TOOL_FUNCS` | 1 |
 | Approval execution | `EXECUTE_TOOL_FUNCS` | 1 |
-| **Total** | exact union | **86** |
+| **Total** | exact union | **87** |
 | Optional research archive | `RESEARCH_TOOL_FUNCS` | **+2** |
 
-В составе поверхности — **26 READ-инструментов**, 1 META, 15 PLAN & STATE, 42 ACTION, один
+В составе поверхности — **27 READ-инструментов**, 1 META, 15 PLAN & STATE, 42 ACTION, один
 `composite_change` и один `execute_confirmed`.
 
 ```python
@@ -31,8 +31,8 @@ expected = (
     | COMPOSITE_MCP_TOOLS
     | EXECUTE_MCP_TOOLS
 )
-assert len(expected) == 86
-# settings.research_archive_enabled -> len(expected | RESEARCH_MCP_TOOLS) == 88
+assert len(expected) == 87
+# settings.research_archive_enabled -> len(expected | RESEARCH_MCP_TOOLS) == 89
 ```
 
 ## READ — статистика, аудит и подготовка
@@ -42,7 +42,7 @@ proposal и не вызывают Google Ads mutate methods.
 
 | Группа | Tools | Назначение |
 |---|---|---|
-| Accounts & MCC | `list_accounts`, `get_mcc_summary`, `get_mcc_deep`, `build_mcc_report`, `get_quota` | Discovery, агрегаты MCC, единый XLSX, quota |
+| Accounts & MCC | `list_accounts`, `get_mcc_summary`, `get_mcc_deep`, `build_mcc_report`, `get_quota`, `check_budget_pacing` | Discovery, агрегаты MCC, единый XLSX, quota и READ-only pacing |
 | GAQL & changes | `execute_google_ads_query`, `get_account_changes`, `get_change_history` | Typed GAQL и история изменений |
 | Audit & analysis | `get_account_audit`, `analyze_account` | Детерминированные проверки и аналитический пакет |
 | Aimash Memory reads | `recall_client`, `get_client_card`, `list_client_facts_structured`, `get_crawl_status`, `list_site_pages` | Account-scoped профиль, досье, crawl state |
@@ -142,7 +142,7 @@ verified reply
 
 ## MEMORY — cross-cutting surface
 
-MEMORY не добавляет инструменты сверх 86; это функциональная группа внутри READ и PLAN & STATE.
+MEMORY не добавляет инструменты сверх 87; это функциональная группа внутри READ и PLAN & STATE.
 
 | Операция | Surface | Mutation semantics |
 |---|---|---|

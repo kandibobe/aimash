@@ -140,8 +140,8 @@ hermes doctor --fix                  # health self-check с авто-фиксо�
 
 **Кавеат `mcp test`:** доки подтверждают, что он тестирует **коннект**, но не сказано, что печатает список/счётчик
 инструментов [Likely]. Чтобы позитивно убедиться, что поверхность жива — сравнить `Tools discovered`
-с `mcp_server.server.expected_tool_names()` (базово 86: 26 READ-инструментов + 1 META + 15 PLAN/state +
-42 ACTION + 1 composite + 1 WRITE; 88 при `RESEARCH_ARCHIVE_ENABLED=true`), затем в чате спросить агента
+с `mcp_server.server.expected_tool_names()` (базово 87: 27 READ-инструментов + 1 META + 15 PLAN/state +
+42 ACTION + 1 composite + 1 WRITE; 89 при `RESEARCH_ARCHIVE_ENABLED=true`), затем в чате спросить агента
 «какие MCP-инструменты доступны», либо смотреть стартовый баннер в `gateway.log`. MCP-инструменты регистрируются с
 префиксом `mcp_<server>_<tool>`.
 

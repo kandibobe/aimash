@@ -10,8 +10,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import re
 import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from google.ads.googleads.errors import GoogleAdsException
@@ -49,6 +53,7 @@ from ads.resolve import (  # единый GAQL-эскейп для literal-WHERE
 from ads.validation import assert_keyword_ok, dedup_keyword_pairs, normalize_keywords
 from core.ads_errors import (  # единый источник имён кодов ошибок Google Ads
     error_code_names,
+    humanize_google_ads_error,
     partial_failure_errors,
 )
 from core.config import settings  # B1-4: пороги blast-radius (живой settings, не снимок)
@@ -77,6 +82,185 @@ from core.resilience import (  # таймаут+ретрай на самом SDK
 # Длину/форму ключевых слов считает КОД (golden rule #4) — единый источник в ads.validation.
 # Алиас сохранён для обратной совместимости (тесты/вызовы mutations._assert_keyword_ok).
 _assert_keyword_ok = assert_keyword_ok
+
+
+class PreflightRejected(ValueError):
+    """Google Ads rejected a validate-only request; no Proposal was persisted."""
+
+    def __init__(self, message: str, *, error_codes: set[str] | None = None) -> None:
+        super().__init__(message)
+        self.error_codes = frozenset(error_codes or ())
+
+
+@dataclass(slots=True)
+class BuiltSdkMutation:
+    """One canonical SDK request shared by validate-only and confirmed execution."""
+
+    operation: str
+    service: object
+    method_name: str
+    request: object
+    payload_hash: str
+    op_count: int
+    metadata: list[tuple[str, str]]
+
+    def send(self):
+        return getattr(self.service, self.method_name)(request=self.request)
+
+
+def _mutation_payload_hash(operation: str, customer_id: str, payload: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        {"operation": operation, "customer_id": str(customer_id), "payload": payload},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def build_sdk_mutation(
+    client: object,
+    operation: str,
+    customer_id: str,
+    params: dict[str, Any],
+    *,
+    validate_only: bool,
+) -> BuiltSdkMutation:
+    """Build the exact Google Ads request used by preflight and later execution.
+
+    Only operations that have a proposal-time preflight are accepted. Entity IDs must already
+    be resolved against the live account; names supplied by the model never reach this boundary.
+    """
+    customer_id = str(customer_id)
+    if operation == "add_keywords":
+        ad_group_ids = [str(value) for value in params.get("ad_group_ids") or ()]
+        if not ad_group_ids:
+            raise ValueError("нет проверенных групп объявлений для preflight ключевых слов")
+        keywords = normalize_keywords(list(params.get("keywords") or ()))
+        match_type = str(params.get("match_type") or "").lower()
+        if match_type not in {"broad", "phrase", "exact"}:
+            raise ValueError("match_type должен быть broad, phrase или exact")
+
+        ad_group_service = client.get_service("AdGroupService")
+        service = client.get_service("AdGroupCriterionService")
+        match_enum = getattr(client.enums.KeywordMatchTypeEnum, match_type.upper())
+        enabled = client.enums.AdGroupCriterionStatusEnum.ENABLED
+        operations = []
+        metadata: list[tuple[str, str]] = []
+        for ad_group_id in ad_group_ids:
+            resource_name = ad_group_service.ad_group_path(customer_id, ad_group_id)
+            for text in keywords:
+                sdk_operation = client.get_type("AdGroupCriterionOperation")
+                sdk_operation.create.ad_group = resource_name
+                sdk_operation.create.status = enabled
+                sdk_operation.create.keyword.text = text
+                sdk_operation.create.keyword.match_type = match_enum
+                operations.append(sdk_operation)
+                metadata.append((ad_group_id, text))
+        request = client.get_type("MutateAdGroupCriteriaRequest")
+        request.customer_id = customer_id
+        request.operations.extend(operations)
+        request.partial_failure = not validate_only
+        request.validate_only = bool(validate_only)
+        logical_payload = {
+            "ad_group_ids": ad_group_ids,
+            "keywords": keywords,
+            "match_type": match_type,
+        }
+        return BuiltSdkMutation(
+            operation=operation,
+            service=service,
+            method_name="mutate_ad_group_criteria",
+            request=request,
+            payload_hash=_mutation_payload_hash(operation, customer_id, logical_payload),
+            op_count=len(operations),
+            metadata=metadata,
+        )
+
+    if operation == "create_rsa":
+        ad_group_id = str(params.get("ad_group_id") or "")
+        if not ad_group_id:
+            raise ValueError("не указана проверенная группа объявлений для preflight RSA")
+        headlines = [str(value) for value in params.get("headlines") or ()]
+        descriptions = [str(value) for value in params.get("descriptions") or ()]
+        final_url = str(params.get("final_url") or "")
+        path1 = params.get("path1")
+        path2 = params.get("path2")
+        _validate_rsa_inputs(headlines, descriptions, final_url, path1, path2)
+
+        ad_group_service = client.get_service("AdGroupService")
+        service = client.get_service("AdGroupAdService")
+        sdk_operation = client.get_type("AdGroupAdOperation")
+        ad_group_ad = sdk_operation.create
+        ad_group_ad.ad_group = ad_group_service.ad_group_path(customer_id, ad_group_id)
+        ad_group_ad.status = client.enums.AdGroupAdStatusEnum.PAUSED
+        ad_group_ad.ad.final_urls.append(final_url)
+        rsa = ad_group_ad.ad.responsive_search_ad
+        for text in headlines:
+            asset = client.get_type("AdTextAsset")
+            asset.text = text
+            rsa.headlines.append(asset)
+        for text in descriptions:
+            asset = client.get_type("AdTextAsset")
+            asset.text = text
+            rsa.descriptions.append(asset)
+        if path1:
+            rsa.path1 = str(path1)
+            if path2:
+                rsa.path2 = str(path2)
+        request = client.get_type("MutateAdGroupAdsRequest")
+        request.customer_id = customer_id
+        request.operations.extend([sdk_operation])
+        request.validate_only = bool(validate_only)
+        logical_payload = {
+            "ad_group_id": ad_group_id,
+            "headlines": headlines,
+            "descriptions": descriptions,
+            "final_url": final_url,
+            "path1": path1,
+            "path2": path2,
+            "status": "PAUSED",
+        }
+        return BuiltSdkMutation(
+            operation=operation,
+            service=service,
+            method_name="mutate_ad_group_ads",
+            request=request,
+            payload_hash=_mutation_payload_hash(operation, customer_id, logical_payload),
+            op_count=1,
+            metadata=[],
+        )
+
+    raise ValueError(f"preflight builder не поддерживает операцию: {operation}")
+
+
+async def preflight_mutation(
+    client: object,
+    operation: str,
+    customer_id: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Run a no-write Google Ads validation and return a persistable attestation."""
+    built = build_sdk_mutation(
+        client,
+        operation,
+        customer_id,
+        params,
+        validate_only=True,
+    )
+    try:
+        await run_ads_call(built.send, op_count=built.op_count)
+    except GoogleAdsException as exc:
+        raise PreflightRejected(
+            humanize_google_ads_error(exc),
+            error_codes=error_code_names(exc),
+        ) from None
+    return {
+        "preflight_status": "passed",
+        "payload_hash": built.payload_hash,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "api_version": settings.google_ads_api_version,
+    }
 
 
 def mutation_error_hint(exc: BaseException) -> dict[str, Any]:
@@ -2283,30 +2467,21 @@ def _add_keywords_via_sdk(
     Все отклонены ⇒ ValueError (честный failed — не применено ничего). Скоуп partial_failure
     осознанно узкий: только пользовательские батчи ключей/минус-слов; remove_* (резолвят
     существующие) и ассет-батчи остаются whole-batch (fail loud)."""
-    ag_svc = client.get_service("AdGroupService")
-    svc = client.get_service("AdGroupCriterionService")
-    mt = getattr(client.enums.KeywordMatchTypeEnum, str(match_type).upper())
-    enabled = client.enums.AdGroupCriterionStatusEnum.ENABLED
-    ops = []
-    meta: list[tuple[str, str]] = []  # meta[i] = (ad_group_id, text) операции i — атрибуция отказов
-    for ad_group_id in ad_group_ids:
-        ag_rn = ag_svc.ad_group_path(str(customer_id), str(ad_group_id))
-        for text in keywords:
-            op = client.get_type("AdGroupCriterionOperation")
-            op.create.ad_group = ag_rn
-            op.create.status = enabled
-            op.create.keyword.text = text
-            op.create.keyword.match_type = mt
-            ops.append(op)
-            meta.append((str(ad_group_id), str(text)))
-    req = client.get_type("MutateAdGroupCriteriaRequest")
-    req.customer_id = str(customer_id)
-    req.operations.extend(ops)
-    req.partial_failure = True
-    resp = svc.mutate_ad_group_criteria(request=req)
+    built = build_sdk_mutation(
+        client,
+        "add_keywords",
+        customer_id,
+        {
+            "ad_group_ids": ad_group_ids,
+            "keywords": keywords,
+            "match_type": match_type,
+        },
+        validate_only=False,
+    )
+    resp = built.send()
     # При partial_failure сервер отдаёт results с ПУСТЫМ resource_name на отклонённых позициях.
     created = [r.resource_name for r in resp.results if getattr(r, "resource_name", "")]
-    rejected = _rejected_from_partial_failure(client, resp, meta, key="keyword")
+    rejected = _rejected_from_partial_failure(client, resp, built.metadata, key="keyword")
     if rejected and not created:
         reasons = "; ".join(r["reason"] for r in rejected[:3])
         raise ValueError(f"Google Ads отклонил все ключи ({len(rejected)}): {reasons}")
@@ -2821,28 +2996,22 @@ def _create_rsa_via_sdk(
     ВАЖНО (v24): final_urls живёт на .ad (не на responsive_search_ad), обязателен ≥1; каждый
     заголовок/описание — отдельный AdTextAsset.text; статус PAUSED зашит в КОДЕ (golden rule:
     безопасность — модель не решает; объявление не показывается до ручного включения)."""
-    ag_svc = client.get_service("AdGroupService")
-    svc = client.get_service("AdGroupAdService")
-    op = client.get_type("AdGroupAdOperation")
-    aga = op.create
-    aga.ad_group = ag_svc.ad_group_path(str(customer_id), str(ad_group_id))
-    aga.status = client.enums.AdGroupAdStatusEnum.PAUSED  # 0 расхода: создаём на паузе
-    aga.ad.final_urls.append(str(final_url))  # обязателен ≥1; поле на .ad
-    rsa = aga.ad.responsive_search_ad
-    for text in headlines:
-        asset = client.get_type("AdTextAsset")
-        asset.text = text
-        rsa.headlines.append(asset)
-    for text in descriptions:
-        asset = client.get_type("AdTextAsset")
-        asset.text = text
-        rsa.descriptions.append(asset)
-    if path1:
-        rsa.path1 = path1
-        if path2:  # path2 допустим только при заданном path1 (прото v24)
-            rsa.path2 = path2
+    built = build_sdk_mutation(
+        client,
+        "create_rsa",
+        customer_id,
+        {
+            "ad_group_id": ad_group_id,
+            "headlines": headlines,
+            "descriptions": descriptions,
+            "final_url": final_url,
+            "path1": path1,
+            "path2": path2,
+        },
+        validate_only=False,
+    )
     try:
-        resp = svc.mutate_ad_group_ads(customer_id=str(customer_id), operations=[op])
+        resp = built.send()
     except GoogleAdsException as ex:
         # B2: если группа НЕ Search-стандартная (DSA/Display/Video/PMax), Google отвергает создание
         # RSA как «The operation is not allowed for the given context». Обычно отсекается ещё в

@@ -52,8 +52,8 @@ def test_live_write_surface_includes_owned_proposal_state(monkeypatch):
     assert {"profile_change", "profile_clear"} <= expected
     assert not {name for name in expected if name.startswith("propose_")}
     assert (
-        len(expected) == 86
-    )  # 26 READ + 1 META + 15 state + 42 actions + 1 composite + 1 approval execute
+        len(expected) == 87
+    )  # 27 READ + 1 META + 15 state + 42 actions + 1 composite + 1 approval execute
     assert (
         not {
             "curation_start",

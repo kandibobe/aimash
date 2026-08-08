@@ -18,6 +18,19 @@ import mcp_server.propose as propose
 import mcp_server.tools_write as tools_write
 
 
+@pytest.fixture(autouse=True)
+def _stub_preflight_for_target_only_tests(monkeypatch):
+    async def _passed(*args, **kwargs):  # noqa: ARG001
+        return {
+            "preflight_status": "passed",
+            "payload_hash": "0" * 64,
+            "checked_at": "2026-08-08T00:00:00+00:00",
+            "api_version": "v25",
+        }
+
+    monkeypatch.setattr("ads.mutations.preflight_mutation", _passed)
+
+
 @contextmanager
 def _allowed_ids(value: str):
     previous = settings.google_ads_allowed_customer_ids
@@ -539,6 +552,9 @@ async def test_validated_target_can_reach_proposal_save(monkeypatch):
     assert store.saved is not None
     assert store.saved["params"]["ad_group_id"] == "42"
     assert store.saved["params"]["campaign_id"] == "123"
+    assert store.saved["params"]["_preflight"]["preflight_status"] == "passed"
+    assert "✅ Google Ads preflight пройден" in store.saved["summary"]
+    assert "гарантированно" not in store.saved["summary"].casefold()
 
 
 async def test_execute_rechecks_legacy_rsa_target_before_mutation(monkeypatch):

@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable
 
 from pydantic import BaseModel, ValidationError
 
+from ads.mutations import PreflightRejected
 from llm.schemas import (
     MUTATION_TOOLS,
     SCHEMAS,
@@ -166,6 +167,19 @@ async def _propose(
             source_message_id=trusted_turn.message_id if trusted_turn is not None else None,
             idempotency_args=idempotency_args if trusted_turn is not None else None,
         )
+    except PreflightRejected as e:
+        message = redact_error(e)
+        env = refused(message, error_code="refused")
+        return {
+            **env,
+            "error_type": "GOOGLE_ADS_PREFLIGHT_REJECTED",
+            "message": message,
+            "suggested_action": (
+                "Исправь тексты или параметры по ошибке Google Ads и повтори тот же инструмент; "
+                "Proposal ещё не создан."
+            ),
+            "google_ads_error_codes": sorted(e.error_codes),
+        }
     except ProposalRefused as e:
         return refused(e.text, error_code="refused")
     except Exception as e:  # noqa: BLE001

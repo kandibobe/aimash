@@ -77,10 +77,10 @@ class InvalidProposalTarget(ValueError):
     """A model-supplied entity target failed live account/campaign ownership checks."""
 
 
-async def _validate_live_target(operation: str, params: dict, customer_id: str) -> None:
+async def _validate_live_target(operation: str, params: dict, customer_id: str) -> object | None:
     """Resolve child targets from Google Ads before any proposal row can be persisted."""
     if operation not in {"create_rsa", "add_keywords", "add_negative_keywords"}:
-        return
+        return None
 
     from ads import resolve
     from ads.client import build_client_async
@@ -115,7 +115,7 @@ async def _validate_live_target(operation: str, params: dict, customer_id: str) 
         # Proposal всегда несёт проверенные immutable ID, даже если legacy caller прислал только имя.
         params["ad_group_id"] = target.id
         params["campaign_id"] = target.campaign_id
-        return
+        return client
 
     ad_group = str(params.get("ad_group") or "").strip()
     try:
@@ -129,7 +129,7 @@ async def _validate_live_target(operation: str, params: dict, customer_id: str) 
                 account=customer_id,
             )
             params[TARGET_CAMPAIGN_ID_KEY] = campaign_id
-            return
+            return client
 
         targets = await run_ads_read_call(
             resolve.validate_ad_group_targets,
@@ -144,6 +144,7 @@ async def _validate_live_target(operation: str, params: dict, customer_id: str) 
         raise InvalidProposalTarget(str(exc)) from None
     params[TARGET_CAMPAIGN_ID_KEY] = targets.campaign_id
     params[TARGET_AD_GROUP_IDS_KEY] = list(targets.ad_group_ids)
+    return client
 
 
 @dataclass(slots=True)
@@ -228,7 +229,22 @@ async def build_proposal(
             ) from None
     # P0: child-target существует и принадлежит этому customer/campaign ДО сохранения Proposal.
     # Ошибка/недоступность live READ всегда блокирует путь; model-supplied ID не считается фактом.
-    await _validate_live_target(operation, params, customer_id)
+    target_client = await _validate_live_target(operation, params, customer_id)
+    if operation in {"create_rsa", "add_keywords"}:
+        # Google Ads validate-only runs before the audit/proposal insert. The persisted attestation
+        # binds the exact resolved payload to this check; it is evidence of validation, not an
+        # execution confirmation and not a promise that later state cannot change.
+        from ads.mutations import preflight_mutation
+
+        preflight_params = dict(params)
+        if operation == "add_keywords":
+            preflight_params["ad_group_ids"] = list(params[TARGET_AD_GROUP_IDS_KEY])
+        params["_preflight"] = await preflight_mutation(
+            target_client,
+            operation,
+            customer_id,
+            preflight_params,
+        )
 
     # §5: читаем ТЕКУЩЕЕ значение (бюджет/ставку/статус) ДО показа → реальный diff «было → станет»
     # и снимок-база для оптимистичной сверки при исполнении (TOCTOU). Волна 1.1: берём Snapshot, а не
@@ -291,6 +307,8 @@ async def build_proposal(
             else "Не удалось безопасно показать полную сводку изменения. Ничего не изменено."
         )
         raise ProposalRefused(text)
+    if params.get("_preflight", {}).get("preflight_status") == "passed":
+        display += "\n\n✅ Google Ads preflight пройден"
     # Волна 5: тир риска — ЧТО показать, а не нужен ли человек (`confirm/risk.py`). Считается из тех
     # же (operation, params), из которых курьер вложений пересчитает его через минуту, — второго
     # места, где решение принимается, нет. На L3 карточка несёт блок «последствия», а числа в нём

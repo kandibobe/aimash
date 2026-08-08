@@ -344,7 +344,7 @@ def _rsa_sdk_client(raise_exc):
     op = SimpleNamespace(create=SimpleNamespace(ad=ad, ad_group="", status=None))
 
     class _AGAd:
-        def mutate_ad_group_ads(self, customer_id, operations):
+        def mutate_ad_group_ads(self, request):
             raise raise_exc
 
     class _AG:
@@ -358,7 +358,11 @@ def _rsa_sdk_client(raise_exc):
             return _AGAd() if name == "AdGroupAdService" else _AG()
 
         def get_type(self, name):
-            return op if name == "AdGroupAdOperation" else SimpleNamespace(text="")
+            if name == "AdGroupAdOperation":
+                return op
+            if name == "MutateAdGroupAdsRequest":
+                return SimpleNamespace(customer_id="", operations=[], validate_only=False)
+            return SimpleNamespace(text="")
 
     return _Client()
 
