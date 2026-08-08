@@ -25,6 +25,12 @@ agent:
     - yuanbao
     - tts
   reasoning_effort: medium
+  # Cron jobs select distinct models so the effective effort can be resolved per model.
+  # gpt-5.4 stays on the global medium default; deep cron uses the same high-effort Sol lane
+  # as delegated audits, while cheap repetitive cron uses Mini with low reasoning.
+  reasoning_overrides:
+    gpt-5.4-mini: low
+    gpt-5.6-sol: high
 
 browser:
   cloud_provider: local

@@ -1,4 +1,4 @@
-version: 2
+version: 3
 last_verified_at: '2026-08-01T00:00:00Z'
 owner: kandibobe
 purpose: Canonical runtime registry for AdMaster/Hermes. This file is the single source of truth for present-tense runtime/model/provider policy. Any conflicting docs/skills must either reference this file or explicitly mark themselves as historical or pinned exceptions.
@@ -16,14 +16,15 @@ primary_runtime:
     - Live VPS was measured before this apply on 2026-08-01 as openai-codex/gpt-5.6-terra; changing this registry alone does not restart or mutate the gateway.
 
 pinned_exceptions:
-  - scope: cron_legacy_jobs
+  - scope: cron_task_lanes
     provider: openai-codex
-    model: gpt-5.4
-    status: pinned_exception
-    source_of_truth: /root/.hermes/cron/jobs.json
+    model: per_job_in_cron_registry
+    status: canonical_policy_requires_live_readback
+    source_of_truth: deploy/hermes/cron_registry.yaml
     notes:
-      - Live cron jobs are still pinned to gpt-5.4 at time of verification.
-      - This is an operational exception, not the canonical present-tense runtime for chat.
+      - Repetitive bounded jobs use gpt-5.4-mini/low; ordinary risk checks keep gpt-5.4/medium.
+      - Shadow synthesis keeps gpt-5.6-terra/medium; weekly and monthly audits use gpt-5.6-sol/high.
+      - A deployment is current only after sync_hermes_cron.py --apply and post-apply readback succeed.
 routing_lanes:
   dialogue_and_analysis:
     provider: openai-codex
@@ -52,7 +53,7 @@ routing_lanes:
 
 policy_rules:
   - Docs and skills must not state a present-tense runtime different from primary_runtime unless labelled as pinned_exception or historical_context.
-  - Cron jobs may pin older models temporarily, but must be listed under pinned_exceptions or cron_registry.yaml.
+  - Cron model and reasoning lanes must be declared in cron_registry.yaml and synchronized through sync_hermes_cron.py.
   - "Dashboard model selections are not a policy source: sync_aimash_surface.py pins main, delegation, auxiliary and fallback settings on deploy."
   - Memory should store only high-level routing facts, not full policy prose.
 

@@ -179,7 +179,8 @@ def test_trusted_operator_policy_is_pinned_without_touching_host_secrets():
     assert got["agent"]["max_turns"] == 20
     assert got["agent"]["restart_drain_timeout"] == 180
     assert got["agent"]["reasoning_effort"] == "medium"
-    assert "reasoning_overrides" not in got["agent"]
+    assert got["agent"]["reasoning_overrides"] == SYNC.REASONING_OVERRIDES
+    assert "external/model" not in got["agent"]["reasoning_overrides"]
     assert got["agent"]["disabled_toolsets"] == list(SYNC.TRUSTED_OPERATOR_DISABLED_TOOLSETS)
     assert got["memory"] == {"memory_enabled": True, "user_profile_enabled": True}
     assert got["compression"] == SYNC.COMPRESSION_POLICY

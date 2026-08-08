@@ -21,7 +21,8 @@ jobs:
     criticality: P0
     purpose: Detect spend/conversion/account anomalies during operator hours.
     provider: openai-codex
-    model: gpt-5.4
+    model: gpt-5.4-mini
+    reasoning_effort: low
     expected_state: scheduled
     actual_state: scheduled
     schedule: '0 9-17 * * *'
@@ -38,6 +39,7 @@ jobs:
     purpose: Daily multi-account operator digest.
     provider: openai-codex
     model: gpt-5.4
+    reasoning_effort: medium
     expected_state: scheduled
     actual_state: scheduled
     schedule: '0 9 * * *'
@@ -50,7 +52,8 @@ jobs:
     criticality: P1
     purpose: Evaluate recommendation quality in dry-run/shadow mode.
     provider: openai-codex
-    model: gpt-5.4
+    model: gpt-5.6-terra
+    reasoning_effort: medium
     expected_state: scheduled
     actual_state: scheduled
     schedule: '30 18 * * *'
@@ -68,7 +71,8 @@ jobs:
     criticality: P2
     purpose: Context compression / memory fallback maintenance.
     provider: openai-codex
-    model: gpt-5.4
+    model: gpt-5.4-mini
+    reasoning_effort: low
     expected_state: scheduled
     actual_state: scheduled
     schedule: '10 18 * * *'
@@ -84,7 +88,8 @@ jobs:
     criticality: P2
     purpose: Notify about completed Hermes sessions.
     provider: openai-codex
-    model: gpt-5.4
+    model: gpt-5.4-mini
+    reasoning_effort: low
     expected_state: scheduled
     actual_state: scheduled
     enabled_expected: true
@@ -95,7 +100,8 @@ jobs:
     criticality: P1
     purpose: Full weekly WoW account audit and prioritized advisory review.
     provider: openai-codex
-    model: gpt-5.4
+    model: gpt-5.6-sol
+    reasoning_effort: high
     expected_state: scheduled
     actual_state: scheduled
     schedule: '0 10 * * 5'
@@ -108,7 +114,8 @@ jobs:
     criticality: P2
     purpose: Full monthly strategic account audit and client-report review.
     provider: openai-codex
-    model: gpt-5.4
+    model: gpt-5.6-sol
+    reasoning_effort: high
     expected_state: scheduled
     actual_state: scheduled
     schedule: '0 11 1 * *'
@@ -122,6 +129,7 @@ jobs:
     purpose: Detect operational/config/account drift.
     provider: openai-codex
     model: gpt-5.4
+    reasoning_effort: medium
     expected_state: scheduled
     actual_state: scheduled
     schedule: '50 17 * * *'
@@ -135,6 +143,7 @@ jobs:
     purpose: Detect end-of-day budget cap violations / spend safety issues.
     provider: openai-codex
     model: gpt-5.4
+    reasoning_effort: medium
     expected_state: scheduled
     actual_state: scheduled
     schedule: '30 17 * * *'
@@ -148,7 +157,8 @@ jobs:
     criticality: P2
     purpose: Repository housekeeping sync.
     provider: openai-codex
-    model: gpt-5.4
+    model: gpt-5.4-mini
+    reasoning_effort: low
     expected_state: scheduled
     actual_state: scheduled
     enabled_expected: true

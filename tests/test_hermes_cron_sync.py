@@ -5,7 +5,8 @@ from pathlib import Path
 
 import yaml
 
-from scripts.sync_hermes_cron import build_plan
+from scripts.sync_hermes_cron import apply_plan, build_plan
+from scripts.update_hermes_cron_job import update_inference
 
 
 def _registry() -> Path:
@@ -50,6 +51,30 @@ def test_cron_policy_is_advisory_only_and_evening_jobs_are_ordered():
     assert jobs["a0cff93f3a2b"]["depends_on"] == ["5db43f3b3d5d", "b44861829e51"]
     assert jobs["031080f7bfac"]["schedule"] == "30 18 * * *"
     assert "a0cff93f3a2b" in jobs["031080f7bfac"]["depends_on"]
+
+
+def test_cron_cost_lanes_preserve_quality_for_complex_and_risk_jobs():
+    registry = yaml.safe_load(_registry().read_text(encoding="utf-8"))
+    jobs = {job["job_id"]: job for job in registry["jobs"]}
+
+    assert (jobs["478eac21bfe6"]["model"], jobs["478eac21bfe6"]["reasoning_effort"]) == (
+        "gpt-5.4-mini",
+        "low",
+    )
+    assert (jobs["a0cff93f3a2b"]["model"], jobs["a0cff93f3a2b"]["reasoning_effort"]) == (
+        "gpt-5.4-mini",
+        "low",
+    )
+    for job_id in ("5db43f3b3d5d", "b44861829e51"):
+        assert (jobs[job_id]["model"], jobs[job_id]["reasoning_effort"]) == (
+            "gpt-5.4",
+            "medium",
+        )
+    for job_id in ("e4f1b2ae179d", "2a402a32e5ec"):
+        assert (jobs[job_id]["model"], jobs[job_id]["reasoning_effort"]) == (
+            "gpt-5.6-sol",
+            "high",
+        )
 
 
 def test_cron_prompts_cover_requested_review_cycles_without_automatic_actions():
@@ -124,6 +149,8 @@ def test_cron_sync_is_scoped_and_detects_schedule_prompt_and_resume(tmp_path):
                     {
                         "job_id": "managed",
                         "name": "New name",
+                        "provider": "openai-codex",
+                        "model": "gpt-5.4-mini",
                         "schedule": "30 17 * * *",
                         "prompt_file": "cron_prompts/one.md",
                         "auto_resume": True,
@@ -147,6 +174,8 @@ def test_cron_sync_is_scoped_and_detects_schedule_prompt_and_resume(tmp_path):
                         "name": "Old name",
                         "prompt": "old prompt",
                         "enabled": False,
+                        "provider": "openai-codex",
+                        "model": "gpt-5.4",
                         "schedule": {"expr": "0 18 * * *"},
                     },
                     {"id": "unrelated", "name": "Keep me", "enabled": True},
@@ -162,8 +191,78 @@ def test_cron_sync_is_scoped_and_detects_schedule_prompt_and_resume(tmp_path):
             "changes": {
                 "schedule": "30 17 * * *",
                 "name": "New name",
+                "provider": "openai-codex",
+                "model": "gpt-5.4-mini",
                 "prompt": "new prompt",
             },
             "resume": True,
         }
+    ]
+
+
+def test_cron_apply_uses_locked_hermes_api_for_provider_and_model(tmp_path, monkeypatch):
+    jobs = tmp_path / "jobs.json"
+    jobs.write_text('{"jobs": []}', encoding="utf-8")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "scripts.sync_hermes_cron.subprocess.run",
+        lambda cmd, check: calls.append(cmd),
+    )
+
+    backup = apply_plan(
+        [
+            {
+                "job_id": "managed",
+                "changes": {
+                    "provider": "openai-codex",
+                    "model": "gpt-5.4-mini",
+                },
+                "resume": False,
+            }
+        ],
+        jobs,
+        "hermes",
+        "hermes-python",
+        Path("scripts/update_hermes_cron_job.py"),
+    )
+
+    assert backup is not None and backup.is_file()
+    assert calls == [
+        [
+            "hermes-python",
+            str(Path("scripts/update_hermes_cron_job.py")),
+            "--job-id",
+            "managed",
+            "--provider",
+            "openai-codex",
+            "--model",
+            "gpt-5.4-mini",
+        ]
+    ]
+
+
+def test_locked_cron_updater_changes_both_inference_axes():
+    calls: list[tuple[str, dict]] = []
+
+    def fake_update(job_id, updates):
+        calls.append((job_id, updates))
+        return {"id": job_id, **updates}
+
+    updated = update_inference(
+        "managed",
+        " openai-codex ",
+        " gpt-5.4-mini ",
+        updater=fake_update,
+    )
+
+    assert updated == {
+        "id": "managed",
+        "provider": "openai-codex",
+        "model": "gpt-5.4-mini",
+    }
+    assert calls == [
+        (
+            "managed",
+            {"provider": "openai-codex", "model": "gpt-5.4-mini"},
+        )
     ]

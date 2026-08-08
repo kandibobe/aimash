@@ -65,6 +65,19 @@ def build_plan(registry: Path, jobs_path: Path) -> list[dict]:
         name = str(desired.get("name", "")).strip()
         if name and name != str(current.get("name", "")).strip():
             changes["name"] = name
+        provider = str(desired.get("provider", "")).strip()
+        model = str(desired.get("model", "")).strip()
+        inference_changed = (
+            provider
+            and model
+            and (
+                provider != str(current.get("provider", "")).strip()
+                or model != str(current.get("model", "")).strip()
+            )
+        )
+        if inference_changed:
+            changes["provider"] = provider
+            changes["model"] = model
         prompt = _prompt(registry, desired)
         if prompt is not None and prompt != str(current.get("prompt", "")).strip():
             changes["prompt"] = prompt
@@ -81,7 +94,13 @@ def build_plan(registry: Path, jobs_path: Path) -> list[dict]:
     return plan
 
 
-def apply_plan(plan: list[dict], jobs_path: Path, hermes: str) -> Path | None:
+def apply_plan(
+    plan: list[dict],
+    jobs_path: Path,
+    hermes: str,
+    hermes_python: str,
+    inference_updater: Path,
+) -> Path | None:
     if not plan:
         return None
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -89,12 +108,32 @@ def apply_plan(plan: list[dict], jobs_path: Path, hermes: str) -> Path | None:
     shutil.copy2(jobs_path, backup)
     for item in plan:
         changes = item["changes"]
-        if changes:
+        cli_changes = {
+            key: changes[key] for key in ("schedule", "name", "prompt") if key in changes
+        }
+        if cli_changes:
             cmd = [hermes, "cron", "edit", item["job_id"]]
-            for key in ("schedule", "name", "prompt"):
-                if key in changes:
-                    cmd.extend([f"--{key}", changes[key]])
+            for key, value in cli_changes.items():
+                cmd.extend([f"--{key}", value])
             subprocess.run(cmd, check=True)
+        if "provider" in changes or "model" in changes:
+            if not changes.get("provider") or not changes.get("model"):
+                raise ValueError(
+                    f"provider and model must change together for job {item['job_id']}"
+                )
+            subprocess.run(
+                [
+                    hermes_python,
+                    str(inference_updater),
+                    "--job-id",
+                    item["job_id"],
+                    "--provider",
+                    changes["provider"],
+                    "--model",
+                    changes["model"],
+                ],
+                check=True,
+            )
         if item["resume"]:
             subprocess.run([hermes, "cron", "resume", item["job_id"]], check=True)
     return backup
@@ -112,6 +151,10 @@ def main() -> int:
     )
     parser.add_argument("--hermes-home", type=Path, default=Path.home() / ".hermes")
     parser.add_argument("--hermes-bin", default="hermes")
+    parser.add_argument(
+        "--hermes-python",
+        default="/usr/local/lib/hermes-agent/venv/bin/python",
+    )
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
     jobs_path = args.hermes_home / "cron/jobs.json"
@@ -131,7 +174,13 @@ def main() -> int:
         )
     )
     if args.apply:
-        backup = apply_plan(plan, jobs_path.resolve(), args.hermes_bin)
+        backup = apply_plan(
+            plan,
+            jobs_path.resolve(),
+            args.hermes_bin,
+            args.hermes_python,
+            root / "scripts/update_hermes_cron_job.py",
+        )
         if backup:
             print(json.dumps({"backup": str(backup)}, ensure_ascii=False))
     return 0

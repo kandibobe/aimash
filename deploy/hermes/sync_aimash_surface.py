@@ -26,6 +26,10 @@ PLUGIN_NAME = "aimash_trusted_transport"
 PRIMARY_PROVIDER = "openai-codex"
 PRIMARY_MODEL = "gpt-5.6-terra"
 PRIMARY_REASONING_EFFORT = "medium"
+REASONING_OVERRIDES = {
+    "gpt-5.4-mini": "low",
+    "gpt-5.6-sol": "high",
+}
 PRIMARY_MAX_TURNS = 20
 DELEGATION_MODEL = "gpt-5.6-sol"
 DELEGATION_REASONING_EFFORT = "high"
@@ -164,8 +168,8 @@ def reconcile_trusted_operator_policy(config: dict[str, Any]) -> dict[str, Any]:
     agent["max_turns"] = PRIMARY_MAX_TURNS
     agent["restart_drain_timeout"] = RESTART_DRAIN_TIMEOUT
     agent["reasoning_effort"] = PRIMARY_REASONING_EFFORT
-    # Model-specific overrides from an older OpenRouter setup must not survive the Codex-only policy.
-    agent.pop("reasoning_overrides", None)
+    # Replace stale provider overrides with the exact Codex-only cost/quality lanes.
+    agent["reasoning_overrides"] = dict(REASONING_OVERRIDES)
     agent["disabled_toolsets"] = list(TRUSTED_OPERATOR_DISABLED_TOOLSETS)
 
     memory = config.setdefault("memory", {})
